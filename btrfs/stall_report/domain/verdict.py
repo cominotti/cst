@@ -115,7 +115,7 @@ def fuse_lines(res: AnalyseResult) -> list[str]:
     ]
 
 
-def busy_lines(res: AnalyseResult, meta: MetaRecord) -> list[str]:
+def busy_lines(res: AnalyseResult) -> list[str]:
     """Storage waits that kept being scheduled (daemon v6+), and, for records
     of older daemons, 'hung' alerts in the fsync path that may have been one."""
     out = []
@@ -220,7 +220,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             out.append(f"Memory pressure {pct['mem_some_pct']:.1f}%: see the memory line.")
         if written < 50 * 2**20 and pct["cpu_some_pct"] < 2:
             out.append("Little activity recorded: check that the window really covers the workload.")
-        return out + fuse_lines(res) + busy_lines(res, meta) + maint_lines(res)
+        return out + fuse_lines(res) + busy_lines(res) + maint_lines(res)
     if psi_stall:
         out.append(
             f"IO wait: tasks waited on IO {pct['io_some_pct']:.1f}% of the time (every non-idle task at "
@@ -257,7 +257,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             out.append(HINTS[main])
     if meta.get("stacks") is False:
         out.append("Caveat: the daemon could not read kernel stacks, so attribution is coarse (wchan only).")
-    out += fuse_lines(res) + busy_lines(res, meta) + maint_lines(res)
+    out += fuse_lines(res) + busy_lines(res) + maint_lines(res)
     if res["episodes"]:
         w = res["episodes"][0]
         out.append(

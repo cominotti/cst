@@ -94,11 +94,8 @@ def main(argv: Sequence[str]) -> int:
             return 0
         if cmd == "apply":
             state, msg, changed = apply(home)
-            print(
-                f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}"
-                if state != "no-app"
-                else f"{'kept:':<10} {msg}"
-            )
+            where = f"~/{FLAGS_REL}: " if state != "no-app" else ""
+            print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
             if changed:
                 print("           Takes effect when Chrome starts again (quit all its windows first).")
             return 0

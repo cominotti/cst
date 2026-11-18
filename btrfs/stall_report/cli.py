@@ -106,14 +106,8 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
     eps = res["episodes"]
     limit = 50 if verbose else 6
     print()
-    print(
-        f"episodes {len(eps)}"
-        + (
-            " (worst first" + (f", showing {limit}" if len(eps) > limit else "") + ")"
-            if eps
-            else " (no stall episode recorded)"
-        )
-    )
+    showing = f", showing {limit}" if len(eps) > limit else ""
+    print(f"episodes {len(eps)}" + (f" (worst first{showing})" if eps else " (no stall episode recorded)"))
     for ep in eps[:limit]:
         pk = ep["peak"]
         print(

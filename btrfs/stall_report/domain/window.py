@@ -115,11 +115,14 @@ def summarise(
         "dirty_bytes": 0,
         "writeback_bytes": 0,
     }
-    vmd = {
-        k: 0
-        for k in vm_keys
-        if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold", "nr_dirty_background_threshold")
-    }
+    vmd = dict.fromkeys(
+        (
+            k
+            for k in vm_keys
+            if k not in ("nr_dirty", "nr_writeback", "nr_dirty_threshold", "nr_dirty_background_threshold")
+        ),
+        0,
+    )
     fs: dict[str, FsTotals]
     disks: dict[str, DiskTotals]
     cg: dict[str, CgroupTotals]
