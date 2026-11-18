@@ -2557,6 +2557,97 @@ echo E2E-OK
         listed = as_tester_bash(self.SYSTEMD_CONTAINER, "bash /opt/cst-rw/btrfs/cst-pending-alerts --list").stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
 
+    def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
+        """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
+        checkout's docker-gc, under a name of its own; a stub docker.service when the container has
+        none, for its BindsTo=), with a last-used.json of a newer docker-gc ("v": 99): the recorder exits
+        65 before any docker call, and RestartPreventExitStatus= keeps systemd from starting it again
+        after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
+        names the format once, and the file is byte for byte as it was. Control: the same unit ending
+        with exit 1 is restarted."""
+        shipped = docker_exec(
+            self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
+        ).stdout
+        self.assertEqual(shipped.count("\nExecStart="), 1, "the shipped recorder has one ExecStart= line")
+        unit = "e2e-gc-recorder.service"
+        path = f"/run/systemd/system/{unit}"
+
+        def derived(exec_start: str) -> str:
+            return "".join(
+                f"ExecStart={exec_start}\n" if line.startswith("ExecStart=") else line
+                for line in shipped.splitlines(keepends=True)
+            )
+
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            s=/var/tmp/e2e-gc-recorder
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            rm -f {path}
+            if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
+            if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
+            if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
+            rm -rf "$s"
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"cat >{path}"],
+            input_text=derived("/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"),
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            s=/var/tmp/e2e-gc-recorder
+            rm -rf "$s"; mkdir -p "$s"
+            diag() {{ systemctl status --no-pager {unit} >&2 || true; journalctl -q --no-pager -u {unit} -n 30 >&2 || true; }}
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            if [ -e /var/lib/docker-gc ]; then mv /var/lib/docker-gc "$s/state-aside"; fi
+            if ! systemctl cat docker.service >/dev/null 2>&1; then
+                printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >/run/systemd/system/docker.service
+                touch "$s/made-docker"
+            fi
+            install -d -m 0755 /var/lib/docker-gc
+            touch "$s/made-state"   # the cleanup removes this folder only then
+            printf '{{"since": 1, "images": {{}}, "heartbeat": 2, "v": 99}}' >/var/lib/docker-gc/last-used.json
+            cp /var/lib/docker-gc/last-used.json "$s/before"
+            systemctl daemon-reload
+            start="$(date +%s)"
+            systemctl start {unit} || {{ diag; exit 1; }}
+            sleep 14   # past RestartSec=10: a restart would have happened by now
+            [ "$(show ActiveState)" = failed ] || {{ echo "state: $(show ActiveState)" >&2; diag; exit 1; }}
+            [ "$(show NRestarts)" = 0 ] || {{ echo "restarted $(show NRestarts) time(s)" >&2; diag; exit 1; }}
+            [ "$(show ExecMainStatus)" = 65 ] || {{ echo "exit status $(show ExecMainStatus)" >&2; diag; exit 1; }}
+            cmp "$s/before" /var/lib/docker-gc/last-used.json
+            journalctl --sync 2>/dev/null || true
+            n="$(journalctl -q --no-pager -o cat -u {unit} --since "@$start" | grep -cF 'last-used.json is format 99 of the docker-gc-state' || true)"
+            [ "$n" = 1 ] || {{ echo "the format line was logged $n time(s)" >&2; diag; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Control: the restart policy is in force; only exit 65 is exempt from it.
+        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=derived("/bin/sh -c 'exit 1'"))
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            systemctl daemon-reload
+            systemctl start {unit}
+            sleep 14
+            n="$(systemctl show -p NRestarts --value {unit})"
+            systemctl stop {unit} || true
+            [ "$n" -ge 1 ] || {{ echo "an exit 1 was not restarted (NRestarts=$n)" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
         """In a container with /.dockerenv (no override), cst vm's commands that change the
         host refuse before sudo, with the host command to type (cst is not on PATH there:

@@ -9,12 +9,14 @@ from typing import Literal
 from btrfs.docker_gc.domain import (
     HEARTBEAT_SECONDS,
     MIN_UPTIME,
+    NEWER_STATE_EXIT,
     NOT_RECORDED,
     DockerEvent,
     GcPlan,
     GcSettings,
     GcState,
     ImageDrop,
+    NewerState,
     PlanInputs,
     RunSummary,
     event_image,
@@ -125,7 +127,8 @@ class DockerGc:
         self.docker, self.state, self.host, self.console, self.clock = docker, state, host, console, clock
 
     def execute(self, command: GcCommand, *, dry: bool = False) -> int:
-        """Run one command; its exit status. A docker error is one journal line and exit 1."""
+        """Run one command; its exit status. A docker error is one journal line and exit 1; a state file of
+        a newer docker-gc one line and NEWER_STATE_EXIT."""
         try:
             if command == "record":
                 return self.record()
@@ -135,6 +138,9 @@ class DockerGc:
                 self.run(dry=dry)
             else:
                 self.status()
+        except NewerState as e:
+            self.console.log(3, str(e))
+            return NEWER_STATE_EXIT
         except RuntimeError as e:
             self.console.log(3, str(e))
             return 1

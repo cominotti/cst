@@ -11,6 +11,9 @@ BindsTo=docker.service
 ExecStart=/usr/local/sbin/docker-gc record
 Restart=on-failure
 RestartSec=10
+# 65: a record of a newer docker-gc (after going back to an older CST). Restarting would only read the
+# same file again every 10 s; the unit stays failed instead, which cst doctor lists.
+RestartPreventExitStatus=65
 Nice=10
 # Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so
 # no capability), `systemctl is-active` and writes in /var/lib/docker-gc (its

@@ -22,6 +22,14 @@ class NewerState(RuntimeError):
     """A state file of a newer docker-gc: nothing is recorded or removed with it, and it is left as it is."""
 
 
+# The exit status of a command that met a NewerState. docker-gc-recorder.service names it in
+# RestartPreventExitStatus=: the recorder then stays failed (cst doctor lists it) instead of being
+# started again every 10 s to read the same file. Not 1 (any other error), not 2 (usage); record
+# passes on the status `docker events` ends with (the docker CLI uses 1 for its errors).
+# 65: EX_DATAERR of sysexits.h.
+NEWER_STATE_EXIT = 65
+
+
 def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
     """The format of a state file as read ("v"; none: 0, an older docker-gc wrote it), None when it is not one
     docker-gc wrote. Raises NewerState for a newer format than fmt's."""

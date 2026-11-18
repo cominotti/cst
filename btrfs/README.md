@@ -1486,12 +1486,15 @@ Because of this:
 - The record and `last-run.json` carry their format in `"v"` (none: format 0,
   from before the field; still read). One written by a newer docker-gc (after
   you went back to an older CST) is left as it is: `record`, `run` and
-  `status` stop with exit 1 and a journal line that names the format, `... is
+  `status` stop with exit 65 and a journal line that names the format, `... is
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
-  nothing is removed by a record they do not understand. The recorder, which
-  systemd restarts every 10 s, logs that line again each time; images are held
-  back meanwhile, as with any recorder that is not running. Install the
-  docker-gc of that CST again (`cst btrfs docker-gc enable` in that checkout).
+  nothing is removed by a record they do not understand. systemd does not
+  restart the recorder for exit 65 (`RestartPreventExitStatus=`; any other
+  failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  failed, which `cst doctor` lists, and images are held back meanwhile, as
+  with any recorder that is not running. Install the docker-gc of that CST
+  again (`cst btrfs docker-gc enable` in that checkout), which starts the
+  recorder again.
 - Right before removing an image, it checks again that nothing started using it.
 
 **When the weekly run does not happen.** The run is skipped in the first 10
