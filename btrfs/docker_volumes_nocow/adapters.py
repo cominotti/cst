@@ -287,10 +287,7 @@ class NocowStateFiles:
                 rec = json.load(f)
         except OSError, ValueError:
             return None
-        if not isinstance(rec, dict):
-            return None
-        found = {str(k): v for k, v in rec.items()}
-        return found if is_stored_postponed(found) else None
+        return rec if is_stored_postponed(rec) else None
 
     def write_postponed(self, record: PostponedRecord) -> None:
         os.makedirs(os.path.dirname(self.paths.postponed), exist_ok=True)

@@ -40,8 +40,6 @@ from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSetting
 from cst_core.domain.values import MINUTE
 from cst_core.ports import ClockPort
 
-COMMANDS: tuple[GcCommand, ...] = tuple(GcCommand)
-
 RESOLVE_TIMEOUT = 30  # seconds for the image inspect behind one event
 RESOLVED_FOR = MINUTE  # seconds a reference -> ID answer is reused
 RESOLVED_MAX = 2000  # answers kept before the cache starts over
@@ -239,7 +237,7 @@ class DockerGc:
         if self.state.load_state().images.get(img.id, 0) > plan_at - MINUTE:
             return "used meanwhile"
         for t in img.tags:
-            if self.docker.image_id(t, timeout=600) != img.id:
+            if self.docker.image_id(t, timeout=10 * MINUTE) != img.id:
                 continue  # re-pulled or retagged meanwhile: that tag is not ours
             r = self.docker.remove_image(t)
             if r.returncode != 0:

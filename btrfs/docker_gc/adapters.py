@@ -38,6 +38,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
+from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
@@ -158,7 +159,7 @@ class DockerCli:
     def __init__(self, runner: CommandRunnerPort) -> None:
         self._runner = runner
 
-    def run(self, *args: str, timeout: int = 600, check: bool = True) -> CommandResult:
+    def run(self, *args: str, timeout: int = 10 * MINUTE, check: bool = True) -> CommandResult:
         """docker ARGS. No answer within timeout, or a failure with check: RuntimeError.
         A docker that cannot be started raises (as subprocess.run did)."""
         r = self._runner.run(["docker", *args], timeout=timeout, stdin="inherit")
@@ -191,7 +192,7 @@ class DockerCli:
 
     def is_up(self) -> bool:
         try:
-            r = self.run("info", "--format", "{{.ID}}", check=False, timeout=60)
+            r = self.run("info", "--format", "{{.ID}}", check=False, timeout=MINUTE)
         except FileNotFoundError:
             return False  # docker is not installed
         if r.returncode == 0:

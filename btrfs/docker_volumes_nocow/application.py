@@ -21,8 +21,6 @@ from btrfs.docker_volumes_nocow.domain import (
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
 from cst_core.ports import ClockPort
 
-COMMANDS: tuple[NocowCommand, ...] = tuple(NocowCommand)
-
 
 class DockerVolumesNocow:
     """docker-volumes-nocow's commands over its ports."""
