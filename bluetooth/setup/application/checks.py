@@ -63,6 +63,10 @@ class Checks(Survey):
         self.le_audio_check()
         self.adapter_check()
         self.bap_check()
+        if not self.headset:
+            self.section("headset")
+            self.item("skip", "headset", self.no_headset())
+            return
         self.bearer_check(self.bt_info())
         self.headset_check()
 
@@ -86,7 +90,7 @@ class Checks(Survey):
                     f"{self.lw_active or 'not running'} (LDAC_RATE={rate}): {prog} apply; logs: journalctl --user -u {unit}",
                 )
         elif self.lw_active == "active":
-            self.check_warn(unit, f"running although LDAC_RATE is empty: {prog} apply stops and removes it")
+            self.check_warn(unit, f"running although {self.lw_off_why()}: {prog} apply stops and removes it")
         if self.lw_want or self.lw_ours_present():
             self.lw_failure_check()
 
@@ -253,7 +257,8 @@ class Checks(Survey):
             or self.legacy
             or self.lw_change
             or self.le_change
-            or self.wp_state not in ("ok", "adopt")
+            or self.device_save
+            or self.wp_state not in ("ok", "adopt", "none")
             or self.le_state == "conflict"
         ):
             self.out(f"Some files or services differ from what apply sets up: {self.c.prog} plan\n")

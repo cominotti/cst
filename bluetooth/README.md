@@ -7,8 +7,10 @@ of the CST folder. You run it as `cst bluetooth <command>`
 (how to set up `cst`: [../README.md](../README.md#the-cst-command));
 `bash bluetooth-setup.sh <command>` from the repository folder does the same.
 It is written for one machine, the workstation **sophia**, and one headset,
-the **JBL Live Beam 4** (address `0A:1B:2C:3D:4E:5F`), which can play over
-classic Bluetooth (A2DP, here with the LDAC codec) and over LE Audio (LC3).
+the **JBL Live Beam 4**, which can play over classic Bluetooth (A2DP, here
+with the LDAC codec) and over LE Audio (LC3). CST names no headset: you set
+yours as `DEVICE` (see [section 4](#4-commands-options-and-settings),
+"The headset").
 LE Audio is kept **off in PipeWire by default**: see
 [LE Audio: off by default](#le-audio-off-by-default).
 
@@ -218,7 +220,7 @@ reads, also works in a toolbox).
 
 | Option | For | Meaning |
 |---|---|---|
-| `--device MAC` | all | The headset's address (`bluetoothctl devices` lists them). |
+| `--device MAC` | all | The headset's address (`bluetoothctl devices` lists them), for this run only; without it, `DEVICE` in the settings. |
 | `--ldac-quality Q` | plan, apply, status | `auto` (adaptive, the default), `hq` (990 kbps), `sq` (660), `mq` (330). |
 | `--bearer B` | plan, apply | Preferred transport: `le`, `bredr` or `last-used`. Only for connections the PC starts (`bluetoothctl connect`, GNOME); a headset that reconnects by itself chooses on its own. |
 | `--le-audio on\|off` | plan, apply, status | LE Audio in PipeWire for this run only (see [LE Audio: off by default](#le-audio-off-by-default)). To keep it, use `cst bluetooth le-audio on\|off`. |
@@ -240,6 +242,29 @@ until then a record whose restarts were made is only ignored. A file that
 cannot be read counts as no record, and the next one written replaces it.
 A service that does not run owes nothing: it reads the new files when it
 starts.
+
+**The headset.** CST ships no headset address: `DEVICE` is empty in
+[`bluetooth.conf`](bluetooth.conf). Put yours into
+`~/.config/cst/bluetooth.conf` (`DEVICE=AA:BB:CC:DD:EE:FF`;
+`bluetoothctl devices` lists the paired ones), or pass `--device`. Without
+one, `plan`, `apply`, `status` and `revert` still handle what needs no
+headset (`main.conf`, the LE Audio drop-in, the restarts) and skip the
+headset's parts, each with a `skip` line that says how to set one: its
+WirePlumber LDAC rule, the preferred bearer (`BEARER` is left alone), the
+LDAC rate watcher (it needs a headset, so `LDAC_RATE=48000` alone keeps it
+off) and the headset's live checks. A `DEVICE` that is not a MAC address
+stops every command (exit 2).
+
+An older CST set one headset by default in `bluetooth.conf`. A machine set up
+with it has CST's LDAC rule for that headset
+(`wireplumber.conf.d/50-bluez-<MAC>.conf`) and no `DEVICE` line in its own
+file. So when your file has no `DEVICE` line at all, the headset of CST's one
+LDAC rule there is used (`plan` shows "from CST's LDAC rule" and a `set` line
+for it, exit 10), and `apply` saves it as `DEVICE` in your file, the other
+lines kept. A rule CST did not write (no CST marker), a `.bak` copy, a name
+with the address in lower case (CST always writes capitals), and the case of
+several rules (then none is taken; the `skip` line lists them) name no
+headset. An empty `DEVICE=` in your file means "no headset" and is kept.
 
 **Settings.** The defaults are in [`bluetooth.conf`](bluetooth.conf) in this
 folder (`DEVICE`, `LDAC_QUALITY`, `BEARER`, `LE_AUDIO`, `LDAC_RATE`). To change them for your user,
@@ -301,7 +326,9 @@ and `plan` no longer shows it (restart it by hand:
   comments (with the marker `# managed-by: bluetooth-setup.sh (CST)`) and
   restarts nothing, because WirePlumber does not read comments.
 - The old script's very first rule name, `50-jbl-live-beam-4.conf`, is
-  removed when found (that does restart WirePlumber, as the old script did).
+  removed when found and a headset is set, whose rule replaces it (that does
+  restart WirePlumber, as the old script did). With no headset it is left
+  alone: nothing would take its place.
 - Backups: the old script's `main.conf.bak-YYYYmmdd-HHMMSS` files use the
   same names as this module's, and `revert` reads them (see below).
 - The old `--check` is now `plan`, `--revert` is `revert`; the other options
@@ -327,7 +354,7 @@ only because of the comment renewal).
 | `preferred bearer` (a warning only) | With LE Audio off: the headset prefers LE, so a connection the PC starts would carry no audio. Fix: `cst bluetooth apply --bearer bredr`. |
 | `headset` | A warning when it is on a `bap-*` profile although LE Audio is off (restart WirePlumber). Profile, the LDAC rule as WirePlumber loaded it, the codec, quality and sample rate of the output node. "not in PipeWire now" = the headset is not connected. A rule or quality that differs means: reconnect the headset. |
 | `LDAC sample rate` (a warning only) | LDAC runs above 48 kHz (96000 Hz): the headset set the stream up by itself. See [section 7](#7-ldac-sample-rate-the-optional-watcher). With the watcher active, it should be gone within seconds; if it stays, the watcher gave up (its log says why). |
-| `cst-bt-ldac48.service` | Only with `LDAC_RATE=48000`: the watcher should be active. A warning when it is not (run `apply`; its log: `journalctl --user -u cst-bt-ldac48.service`), or when it still runs although `LDAC_RATE` is empty. |
+| `cst-bt-ldac48.service` | Only with `LDAC_RATE=48000`: the watcher should be active. A warning when it is not (run `apply`; its log: `journalctl --user -u cst-bt-ldac48.service`), or when it still runs although `LDAC_RATE` is empty or no headset is set. |
 | `LDAC rate watcher` (a warning only) | Its last attempt, as its log shows it, was `failed: ...`: the time, the reason and the line before it, and how to turn the watcher off. `plan` shows the same line. |
 
 ## 7. LDAC sample rate: the optional watcher
@@ -353,7 +380,8 @@ for this headset.
 The headset closes its stream and the PC sets it up again, at 48000 Hz. The
 Bluetooth link stays up: this is a new stream on the same connection, not a
 reconnection. You hear about one second of silence. Tested on sophia on
-2026-10-20: `pactl set-card-profile bluez_card.0A_1B_2C_3D_4E_5F a2dp-sink-sbc`,
+2026-10-20: `pactl set-card-profile bluez_card.<ID> a2dp-sink-sbc` (`<ID>`: the
+headset's address with `_` for `:`),
 about 3 seconds, then `... a2dp-sink`, turned "LDAC 96000 Hz" into "LDAC
 48000 Hz".
 
@@ -450,7 +478,7 @@ To see what it would do without switching anything, run it by hand with
 `--dry-run`:
 
 ```
-python3 -I ~/.local/lib/cst/bt-ldac-watch --device 0A:1B:2C:3D:4E:5F --dry-run
+python3 -I ~/.local/lib/cst/bt-ldac-watch --device AA:BB:CC:DD:EE:FF --dry-run   # your headset's address
 ```
 
 **Turn it off.** Make `LDAC_RATE` empty again (or remove the line from
@@ -480,14 +508,19 @@ cst bluetooth revert
   two lines change: anything else you changed since stays. Without a backup,
   `main.conf` is not touched. (The old script restored its newest backup as
   a whole file instead.) A new backup is taken first.
-- The WirePlumber rule is removed, if CST or the old script wrote it.
+- The WirePlumber rule is removed, if CST or the old script wrote it (with
+  no headset set, there is none to remove: `revert --device MAC` removes
+  that headset's rule). When that rule is the only place that names the
+  headset (an older CST's default, before any `apply` saved it), `revert`
+  first saves it as `DEVICE` in your file, as `apply` would.
 - The LE Audio file `90-cst-le-audio-off.conf` is removed, if CST wrote it:
   after `revert`, PipeWire offers LE Audio again (a later `apply` with
   `LE_AUDIO=off` writes it again).
 - The LDAC rate watcher is stopped, disabled and removed, if it is installed
   (a later `apply` with `LDAC_RATE=48000` installs it again).
 - Restarts as for `apply`: Bluetooth only after you say yes.
-- Kept: the backups (also the rule's `.bak`), `~/.config/cst/bluetooth.conf`,
+- Kept: the backups (also the rule's `.bak`), `~/.config/cst/bluetooth.conf`
+  (also a `DEVICE` line `apply` saved there from an older CST's rule),
   and the headset's preferred bearer. A restart `revert` did not make stays
   owed (section 4), until the service restarts; delete
   `~/.local/state/cst/bluetooth-restart-pending.json` to forget it.
@@ -509,7 +542,7 @@ found read-only on sophia on 2026-10-20:
 The note's "pre-existing" files (`10-bluez-lc3.conf`, `50-bluetooth.conf`,
 `51-usb-audio-no-suspend.conf`) are not on this host either. The folder
 `~/.config/wireplumber/wireplumber.conf.d/` holds this module's rule and
-`50-bluez-0A_1B_2C_3D_4E_5F.conf.bak`, the old script's backup of its earlier
+`50-bluez-<ID>.conf.bak`, the old script's backup of its earlier
 rule with `ldac.quality = "hq"`. WirePlumber reads only `*.conf` files, so
 the `.bak` has no effect; a later `apply` that changes the rule's settings
 replaces it with a backup of the current rule.

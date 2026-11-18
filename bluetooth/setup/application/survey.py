@@ -8,7 +8,7 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import re
 
@@ -36,10 +36,13 @@ from bluetooth.setup.domain import (
     Exit,
     Options,
     Paths,
+    OLD_WP_MARKER,
     bap_state,
     bearer_matches,
     item,
+    no_headset_note,
     read_settings_output,
+    rule_device,
     senders_of,
     home_tilde,
     wp_label,
@@ -77,6 +80,29 @@ def read_bluetooth_settings(
     return read_settings_output(shown), tuple(set_keys(user)), said
 
 
+def is_cst_rule(files: SetupFilesPort, path: str) -> bool:
+    """The LDAC rule at path carries the marker of CST or of apply-le-audio.sh (its writers)."""
+    return files.contains(path, MARKER, quiet=True) or files.contains(path, OLD_WP_MARKER, quiet=True)
+
+
+def rule_headsets(files: SetupFilesPort, wp_dir: str) -> list[str]:
+    """The headsets of the LDAC rules CST (or apply-le-audio.sh) wrote in wp_dir: its
+    50-bluez-<ID>.conf files with one of their markers. Another program's file of that name, a .bak
+    copy and a name that is not an address do not count."""
+    try:
+        names = files.list_dir(wp_dir)
+    except OSError:
+        return []
+    found: list[str] = []
+    for name in names:
+        device, path = rule_device(name), f"{wp_dir}/{name}"
+        if device is None or not files.is_file(path):
+            continue
+        if is_cst_rule(files, path):
+            found.append(device)
+    return found
+
+
 class StepFailed(Exception):
     """A command that must succeed failed (set -e): the run stops with its exit status."""
 
@@ -105,10 +131,27 @@ class Survey:
 
     def __init__(self, opts: Options, cfg: Config, paths: Paths, m: SetupMachine) -> None:
         self.o = opts
-        self.c = cfg
         self.p = paths
         self.m = m
-        self.wp_conf = paths.wp_conf(cfg.device_id)
+        # The headset: --device, DEVICE in the settings, else (the user's file has no DEVICE line) the
+        # one LDAC rule CST wrote. CST set a default headset until 2026-11, so a machine set up with it
+        # has that rule and no DEVICE line: its headset is used, and apply (or revert) saves it.
+        self.device_save = False
+        self.device_rules: tuple[str, ...] = ()
+        if not cfg.device and "DEVICE" not in cfg.user_keys:
+            rules = rule_headsets(m.files, paths.wp_dir)
+            if len(rules) == 1:
+                cfg = replace(
+                    cfg,
+                    device=rules[0],
+                    device_from=f"from CST's LDAC rule; apply saves it as DEVICE in {self.tilde(paths.user_settings)}",
+                )
+                self.device_save = True
+            elif len(rules) > 1:
+                self.device_rules = tuple(rules)
+        self.c = cfg
+        self.headset = bool(cfg.device)  # none: its parts are skipped and say how to set one
+        self.wp_conf = paths.wp_conf(cfg.device_id) if self.headset else ""
         self.le_on_hint = f"{cfg.prog} le-audio on"
         self.le_off_hint = f"{cfg.prog} le-audio off"
         self.tmp = ""  # main.conf as apply would write it (a mktemp file)
@@ -214,6 +257,13 @@ class Survey:
 
     def user_sets(self, key: str) -> bool:
         return key in self.c.user_keys
+
+    def no_headset(self) -> str:
+        return no_headset_note(self.device_rules, self.tilde(self.p.user_settings))
+
+    def wp_title(self) -> str:
+        """The rule as the WirePlumber section of apply and revert names it."""
+        return self.wp_conf or "no LDAC rule (no headset)"
 
     # ---- the restarts still owed -----------------------------------------------------------
     def unit_invocation(self, unit: str, *, user: bool) -> str:
@@ -339,11 +389,17 @@ class Survey:
             raise self.die(f"could not process {mc} (rc=1)") from e
         f.write_user_file(tmp, new, 0o600)
         self.mc_changed = changed
-        self.wp_state = self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality))
-        self.legacy = f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
+        # No headset: no rule.
+        self.wp_state = (
+            self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality)) if self.headset else "none"
+        )
+        # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
+        self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
         self.le_plan()
         self.bearer_state = "none"
-        if self.c.bearer:
+        if self.c.bearer and not self.headset:
+            self.bearer_state = "noheadset"
+        elif self.c.bearer:
             if not f.which("bluetoothctl") and not self.m.container:
                 self.bearer_state = "unknown"
             else:
@@ -384,7 +440,7 @@ class Survey:
     def lw_plan(self) -> None:
         """The LDAC rate watcher: its files, whether it is enabled and active, whether apply changes it."""
         f = self.m.files
-        self.lw_want = bool(self.c.ldac_rate)
+        self.lw_want = bool(self.c.ldac_rate) and self.headset  # the watcher is for one headset
         self.lw_unit_st = self.file_state(
             self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
@@ -408,6 +464,11 @@ class Survey:
             self.lw_change = not done
         else:
             self.lw_change = self.lw_ours_present()
+
+    def lw_off_why(self) -> str:
+        """Why apply keeps the watcher off: LDAC_RATE is empty, or no headset is set for it."""
+        rate = self.c.ldac_rate
+        return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
         return self.lw_unit_st in ("ok", "change") or self.lw_prog_st in ("ok", "change")
@@ -435,7 +496,18 @@ class Survey:
                 self.item("update", label, f"{shown} -> {ISO_UUID} (ISO socket)")
             else:
                 self.item("update", label, f"{shown} -> true")
-        self.item(wp_word(self.wp_state), wp_label(self.wp_conf), wp_note(self.wp_state, self.c.quality, self.c.device))
+        if self.device_save:
+            self.item(
+                "set",
+                self.tilde(self.p.user_settings),
+                f"DEVICE={self.c.device}: the headset of CST's LDAC rule (CST no longer ships a default headset)",
+            )
+        if self.headset:
+            self.item(
+                wp_word(self.wp_state), wp_label(self.wp_conf), wp_note(self.wp_state, self.c.quality, self.c.device)
+            )
+        else:
+            self.item("skip", "the headset's LDAC rule", self.no_headset())
         if self.legacy:
             self.item("remove", wp_label(self.p.legacy_wp_conf), "older name of the same rule (apply-le-audio.sh)")
         self.le_report()
@@ -446,6 +518,7 @@ class Survey:
             "ok": ("ok", f"already {b}"),
             "set": ("set", f"-> {b} (only for connections the PC starts)"),
             "unpaired": ("skip", f"{dev} is not paired: apply leaves it"),
+            "noheadset": ("skip", f"BEARER={b} is for a headset, and none is set: apply leaves it"),
             "unknown": ("?", "bluetoothctl not found"),
         }
         if self.bearer_state in notes:
@@ -503,12 +576,11 @@ class Survey:
         svc = f"{LDAC_UNIT} (your session)"
         rate = self.c.ldac_rate
         if not self.lw_want:
+            why = self.lw_off_why()
             if self.lw_ours_present():
-                self.item(
-                    "remove",
-                    "LDAC rate watcher",
-                    f"LDAC_RATE is empty: apply stops and removes {LDAC_UNIT} and its program",
-                )
+                self.item("remove", "LDAC rate watcher", f"{why}: apply stops and removes {LDAC_UNIT} and its program")
+            elif rate:
+                self.item("skip", "LDAC rate watcher", f"off: {why}")
             else:
                 self.item("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)")
             if self.lw_unit_st == "conflict":
@@ -580,7 +652,7 @@ class Survey:
     def header(self) -> None:
         c = self.c
         self.out(
-            f"Headset {c.device} ({c.device_from}), LDAC quality {c.quality}, LE Audio {c.le_audio} ({c.le_from}); host /etc in {self.p.etc}\n"
+            f"Headset {c.device or 'none'} ({c.device_from}), LDAC quality {c.quality}, LE Audio {c.le_audio} ({c.le_from}); host /etc in {self.p.etc}\n"
         )
 
     def diff(self, old: str, new_text: str | None = None, new_path: str = "") -> None:
@@ -645,7 +717,8 @@ class Survey:
             or self.legacy
             or self.lw_change
             or self.le_change
-            or self.wp_state != "ok"
+            or self.device_save
+            or self.wp_state not in ("ok", "none")
             or self.bearer_state == "set"
             or self.le_state == "adopt"
         ):

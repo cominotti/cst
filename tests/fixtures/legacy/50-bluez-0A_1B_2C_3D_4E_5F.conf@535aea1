@@ -1,0 +1,16 @@
+# managed-by: bluetooth-setup.sh (CST): change the settings with `cst bluetooth apply`, not in this file.
+# Headset 0A:1B:2C:3D:4E:5F: LDAC quality "auto" when it is connected over A2DP.
+# "auto" = adaptive bitrate (990, 660 or 330 kbps, lower when the radio loses
+# packets); a fixed "hq" (990 kbps) made the JBL Live Beam 4 stall and play in bursts.
+# LE Audio (BAP/LC3) comes from BlueZ (Experimental/KernelExperimental in
+# /etc/bluetooth/main.conf); the bap-* profiles show up when the headset connects over LE.
+monitor.bluez.rules = [
+  {
+    matches = [ { device.name = "bluez_card.0A_1B_2C_3D_4E_5F" } ]
+    actions = {
+      update-props = {
+        bluez5.a2dp.ldac.quality = "auto"
+      }
+    }
+  }
+]

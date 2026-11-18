@@ -295,20 +295,46 @@ def resolve(
         return bad(f"LE Audio must be on or off (got '{le}'; LE_AUDIO in the settings or --le-audio)")
     if quality not in QUALITIES:
         return bad(f"the LDAC quality must be auto, hq, sq or mq (got '{quality}')")
-    if not MAC_RE.fullmatch(device):
+    # No headset at all is fine (CST ships none): the run skips its parts (see the Survey).
+    if device and not MAC_RE.fullmatch(device):
         return bad(
             f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got '{device}'; set DEVICE in {paths.user_settings} or use --device)"
         )
     return Config(
         prog=prog,
         device=device.upper(),
-        device_from="--device" if opts.device else "settings",
+        device_from=("--device" if opts.device else "settings") if device else "no DEVICE set",
         quality=quality,
         bearer=bearer,
         ldac_rate=rate,
         le_audio=le,
         le_from=le_from,
         user_keys=tuple(user_keys),
+    )
+
+
+# A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf, in capitals
+# (as every version wrote it: Config.device is upper case).
+RULE_NAME: Final = re.compile(r"50-bluez-((?:[0-9A-F]{2}_){5}[0-9A-F]{2})\.conf")
+
+
+def rule_device(name: str) -> str | None:
+    """The headset a rule's file name is for (AA:BB:...), or None (another name, a .bak copy, an
+    address in lower case, which is not CST's name for it)."""
+    m = RULE_NAME.fullmatch(name)
+    return m.group(1).replace("_", ":") if m else None
+
+
+def no_headset_note(rules: Sequence[str], settings: str) -> str:
+    """What the parts of a headset say when none is set (settings: the user's file, as shown)."""
+    if rules:
+        return (
+            f"no headset set, and CST has LDAC rules for several ({' '.join(rules)}): "
+            f"set DEVICE=<one of them> in {settings}, or use --device MAC"
+        )
+    return (
+        f"no headset set: set DEVICE=AA:BB:CC:DD:EE:FF in {settings} "
+        "(bluetoothctl devices lists the paired ones), or use --device MAC"
     )
 
 

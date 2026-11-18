@@ -4,8 +4,8 @@
 # bluetooth-setup.sh  (the `bluetooth` module of CST: run it as `cst bluetooth ...`)
 #
 # Bluetooth audio of this workstation: LE Audio (BAP/LC3) in BlueZ, and an
-# adaptive LDAC quality for the headset (by default the JBL Live Beam 4) when
-# it is connected over A2DP. LE Audio is kept OFF in PipeWire by default
+# adaptive LDAC quality for the headset (DEVICE in the settings) when it is
+# connected over A2DP. LE Audio is kept OFF in PipeWire by default
 # (LE_AUDIO=off): BlueZ stays ready for it, PipeWire offers only A2DP and HFP. Replaces the standalone apply-le-audio.sh; what
 # that script wrote is recognised and adopted, without any restart. The
 # rationale is in bluetooth/README.md.
@@ -64,7 +64,8 @@
 #   help
 #
 # Options of plan and apply:
-#   --device MAC           the headset (default: DEVICE in the settings)
+#   --device MAC           the headset (default: DEVICE in the settings; none
+#                          set: the headset's parts are skipped)
 #   --ldac-quality Q       auto (adaptive, the default) | hq | sq | mq
 #   --bearer B             preferred transport: le | bredr | last-used (only
 #                          for connections the PC starts)
@@ -82,6 +83,12 @@
 #
 # Settings: bluetooth/bluetooth.conf in CST (the defaults), then
 # ~/.config/cst/bluetooth.conf (yours, wins); the options win over both.
+# CST sets no headset: put DEVICE=<its MAC> in your file. Without one, plan,
+# apply, status and revert skip the headset's LDAC rule, preferred bearer,
+# LDAC rate watcher and checks. When your file has no DEVICE line and CST's
+# LDAC rule for one headset is there (an older CST set that headset by
+# default), that headset is used, and apply (or revert, before it removes
+# the rule) saves it as DEVICE in your file.
 # Not as root: apply and revert run as your user (with sudo they switch back
 # to the user who called sudo, so no file in your home is owned by root).
 
