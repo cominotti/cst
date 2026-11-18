@@ -15,9 +15,9 @@ from bluetooth.domain import (
     classify_other_fragments,
     parse_pending,
     render_pending,
-    snapshot,
     still_pending,
 )
+from bluetooth.domain.watch import snapshot
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.ports import CommandRunnerPort

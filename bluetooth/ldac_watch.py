@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The LDAC rate watcher's loop (bt-ldac-watch): it listens to `pactl
 subscribe`, looks at the headset, and bounces the card's profile LDAC ->
-SBC -> LDAC when the rules in bluetooth.domain say so. The program
+SBC -> LDAC when the rules in bluetooth.domain.watch say so. The program
 bluetooth/bt-ldac-watch only hands its arguments to main().
 """
 
@@ -19,7 +19,8 @@ from types import FrameType
 from typing import IO, Any, Final, Protocol
 
 from bluetooth.adapters import Live
-from bluetooth.domain import decide, device_id, profiles, relevant, snapshot, Tracker
+from bluetooth.domain import device_id
+from bluetooth.domain.watch import decide, profiles, relevant, snapshot, Tracker
 from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.journal import log
 

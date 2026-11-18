@@ -24,7 +24,8 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-from bluetooth import domain as bt_domain, ldac_watch
+from bluetooth import ldac_watch
+from bluetooth.domain import watch as bt_watch
 from bluetooth.tests.test_bluetooth import MAC, WATCH, HelperModule, load_helper, shell_functions
 
 DEV = "0A_1B_2C_3D_4E_5F"
@@ -122,7 +123,7 @@ class ParseTest(unittest.TestCase):
         self.h: HelperModule = load_helper()
 
     def test_snapshot(self) -> None:
-        s = bt_domain.snapshot(DEV, pw_dump())
+        s = bt_watch.snapshot(DEV, pw_dump())
         self.assertEqual(
             s,
             {
@@ -135,20 +136,20 @@ class ParseTest(unittest.TestCase):
                 "mic": False,
             },
         )
-        self.assertTrue(bt_domain.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
-        self.assertIsNone(bt_domain.snapshot("00_00", pw_dump())["card"])
+        self.assertTrue(bt_watch.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
+        self.assertIsNone(bt_watch.snapshot("00_00", pw_dump())["card"])
 
     def test_suspended_node_rate_from_enumformat(self) -> None:
-        self.assertEqual(bt_domain.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
+        self.assertEqual(bt_watch.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
         objs = pw_dump()
         objs[1]["info"]["params"] = {}
-        self.assertIsNone(bt_domain.snapshot(DEV, objs)["rate"])
+        self.assertIsNone(bt_watch.snapshot(DEV, objs)["rate"])
 
     def test_helper_reads_the_same_rate(self) -> None:
         for objs in (pw_dump(), pw_dump(rate=48000, suspended=True)):
             pw = self.h.pw_state(DEV, objs)
             assert pw is not None
-            self.assertEqual(pw[4], str(bt_domain.snapshot(DEV, objs)["rate"]))
+            self.assertEqual(pw[4], str(bt_watch.snapshot(DEV, objs)["rate"]))
 
     def test_snapshot_cli(self) -> None:
         r = subprocess.run(
@@ -176,8 +177,8 @@ class ParseTest(unittest.TestCase):
             profile: str = "a2dp-sink",
             mic_state: str = "suspended",
         ) -> str:
-            return bt_domain.decide(
-                bt_domain.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
+            return bt_watch.decide(
+                bt_watch.snapshot(DEV, pw_dump(rate=rate, codec=codec, profile=profile, mic_state=mic_state)),
                 48000,
             )[0]
 
@@ -187,14 +188,14 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(d(codec="sbc", rate=44100), "none")
         self.assertEqual(d(mic_state="running"), "skip")
         self.assertEqual(d(profile="headset-head-unit"), "skip")
-        self.assertEqual(bt_domain.decide(bt_domain.snapshot("00_00", pw_dump()), 48000)[0], "none")
-        self.assertEqual(bt_domain.decide(None, 48000)[0], "none")
+        self.assertEqual(bt_watch.decide(bt_watch.snapshot("00_00", pw_dump()), 48000)[0], "none")
+        self.assertEqual(bt_watch.decide(None, 48000)[0], "none")
         # The reason names the codec in use.
-        sbc = bt_domain.snapshot(DEV, pw_dump(rate=44100, codec="sbc"))
-        self.assertEqual(bt_domain.decide(sbc, 48000), ("none", "codec sbc"))
+        sbc = bt_watch.snapshot(DEV, pw_dump(rate=44100, codec="sbc"))
+        self.assertEqual(bt_watch.decide(sbc, 48000), ("none", "codec sbc"))
 
     def test_relevant_events(self) -> None:
-        rel = bt_domain.relevant
+        rel = bt_watch.relevant
         known = {500, 600, 601}
         self.assertTrue(rel("Event 'new' on card #900\n", known))
         self.assertTrue(rel("Event 'remove' on sink #12\n", known))
@@ -207,7 +208,7 @@ class ParseTest(unittest.TestCase):
         self.assertFalse(rel("garbage\n", known))
 
     def test_profiles(self) -> None:
-        p = bt_domain.profiles
+        p = bt_watch.profiles
         self.assertEqual(p(DEV, cards()), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         self.assertEqual(p(DEV, cards(lang_names=True)), ("a2dp-sink", "a2dp-sink", "a2dp-sink-sbc"))
         # No SBC: another A2DP codec does the same job.
@@ -221,7 +222,7 @@ class ParseTest(unittest.TestCase):
 
 class TrackerTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.t = bt_domain.Tracker(48000, settle=5, cooldown=600)
+        self.t = bt_watch.Tracker(48000, settle=5, cooldown=600)
 
     def snap(
         self,
@@ -234,7 +235,7 @@ class TrackerTest(unittest.TestCase):
         suspended: bool = False,
     ) -> dict[str, Any]:
         return dict(
-            bt_domain.snapshot(
+            bt_watch.snapshot(
                 DEV,
                 pw_dump(
                     rate=rate,
@@ -341,7 +342,7 @@ class TrackerTest(unittest.TestCase):
         self.t.own_node(self.snap(out=700, rate=48000))
         self.t.result(True)
         objs = [o for o in pw_dump() if "bluez_output" not in str(o)]
-        self.assertEqual(self.t.observe(bt_domain.snapshot(DEV, objs), 10)[0], "none")
+        self.assertEqual(self.t.observe(bt_watch.snapshot(DEV, objs), 10)[0], "none")
         self.assertEqual(self.t.observe(self.snap(out=710), 12)[0], "done")
         self.assertEqual(self.t.observe(self.snap(out=710), 1000)[0], "done")
 
@@ -390,7 +391,7 @@ class FakeLive:
         if self._snap_fn is not None:
             return self._snap_fn()
         codec = "ldac" if self.active == "a2dp-sink" else "sbc"
-        return bt_domain.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
+        return bt_watch.snapshot(DEV, pw_dump(rate=self.rate, codec=codec, profile=self.active, out=self.out))
 
     def cards(self) -> list[dict[str, Any]]:
         return cards(active=self.active)
@@ -428,7 +429,7 @@ class BounceTest(unittest.TestCase):
     def watcher(self, live: FakeLive, dry: bool = False) -> ldac_watch.Watcher:
         w = ldac_watch.Watcher(DEV, 48000, dry_run=dry)
         w.live = live
-        w.tracker = bt_domain.Tracker(48000, settle=0, cooldown=600)
+        w.tracker = bt_watch.Tracker(48000, settle=0, cooldown=600)
         return w
 
     def test_bounce_fixes_the_rate(self) -> None:

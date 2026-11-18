@@ -506,7 +506,8 @@ replaces it with a backup of the current rule.
 | File | What it is |
 |---|---|
 | `../bluetooth-setup.sh` | The module: commands, sudo calls, restarts, checks. |
-| `domain.py` | Pure domain model: `main.conf` [General] rules, WirePlumber/systemd rendering and state classification, settings parsing/merging, journal failure parsing, and live state JSON parsing; for the watcher, what it sees in `pw-dump` (`snapshot`, `decide`), the `pactl` events and profiles that matter, and the one-attempt-per-connection rule (`Tracker`). No I/O or subprocesses. |
+| `domain/__init__.py` | Pure domain model: `main.conf` [General] rules, WirePlumber/systemd rendering and state classification, settings parsing/merging, journal failure parsing, and live state JSON parsing. No I/O or subprocesses. |
+| `domain/watch.py` | The watcher's rules, pure as well: what it sees in `pw-dump` (`snapshot`, `decide`), the `pactl` events and profiles that matter, and the one-attempt-per-connection rule (`Tracker`). |
 | `ports.py` | Ports (`Protocol` interfaces): `BluetoothHostPort` for files, WirePlumber resolution, stdin, and the record of restarts still owed; `LiveAudioPort` for live PipeWire/PulseAudio state and profile switching. |
 | `adapters.py` | Local host adapter reading config files, writing the record of restarts still owed (atomically, `write_atomic`), scanning WirePlumber `.conf` directories, and resolving `bluez5.roles` through `libwireplumber`; `Live`, the watcher's `LiveAudioPort` over `pw-dump` and `pactl`. |
 | `ldac_watch.py` | The watcher's loop and command line: it listens to `pactl subscribe`, looks at the headset through `LiveAudioPort`, bounces the profile (LDAC, SBC, LDAC) when `Tracker` says so, and defers a stop signal until a bounce is done. |
