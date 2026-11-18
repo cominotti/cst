@@ -8,7 +8,6 @@ bash: to the journal (passed on), nowhere (2>/dev/null) or into its output (2>&1
 """
 
 from collections.abc import Sequence
-import contextlib
 from dataclasses import dataclass, field
 import os
 import stat
@@ -378,8 +377,7 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
                 and scrub.clean_finish
                 and not mixed_profiles(m.out(["btrfs", "filesystem", "usage", "-b", mnt]))
             ):
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(marker)
+                _remove(marker)
                 log(
                     5,
                     f"btrfs {uuid}: RAID1 restored (clean scrub started {scrub.started} after the degraded boot), "
@@ -388,6 +386,17 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
                 )
                 return []
     return [marker_problem(uuid, since_h, state)]
+
+
+def _remove(p: str) -> None:
+    """As rm -f: a missing file is no error, another failure is said on stderr and the run goes on
+    (/var forced read-only must not keep the alert about it from going out)."""
+    try:
+        os.unlink(p)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        sys.stderr.write(f"{TAG}: cannot remove {p}: {e.strerror}\n")
 
 
 def _rewrite(p: str, text: str) -> None:
@@ -420,8 +429,7 @@ def kernel_log(m: Probe, ours: Sequence[str]) -> list[str]:
     if klog is None:
         # journalctl refuses --since together with --cursor-file, so the first run (or a run after a
         # bad cursor) looks back 65 min and then records a cursor.
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(cursor)
+        _remove(cursor)
         r = m.run([*base, "--since", "-65min"], "merge")
         klog = output(r.stdout)
         if r.returncode != 0:

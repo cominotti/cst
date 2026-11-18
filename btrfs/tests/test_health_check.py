@@ -700,6 +700,41 @@ class HealthCheckTest(unittest.TestCase):
         )  # fmt: skip
         self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-new\n")
 
+    def unwritable(self, rel: str) -> None:
+        """The folder at rel made read-only (as /var forced read-only after a btrfs error), for this test."""
+        os.chmod(self.path(rel), 0o555)
+        self.addCleanup(os.chmod, self.path(rel), 0o755)
+
+    def test_a_cursor_it_cannot_remove_still_alerts(self) -> None:
+        # /var forced read-only: journalctl cannot write its new cursor (exit 1), the old one cannot be
+        # removed, and the run must still alert (as bash's rm -f, which only said so).
+        cursor = self.write("var/lib/btrfs-health-check/kernel.cursor", "s=old\n")
+        self.machine["cursor_rc"] = 1
+        self.fs["options"] = "ro,noatime"
+        self.unwritable("var/lib/btrfs-health-check")
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual([a[:4] for a in self.alerts()], [["-u", "critical", "-a", TAG]])
+        self.assertIn("mounted READ-ONLY", self.alerts()[0][-1])
+        if os.geteuid() != 0:  # root removes it anyway
+            self.assertIn(f"{TAG}: cannot remove {cursor}: Permission denied\n", r.stderr)
+
+    def test_a_marker_it_cannot_remove_still_alerts_the_rest(self) -> None:
+        since = self.now - 5 * 86400
+        marker = self.write(
+            f"var/lib/btrfs-degraded-boot/degraded-{UUID}",
+            f"since={since}\nsince_human=x\ncomplete_since={since + 60}\n",
+        )
+        self.fs["scrub"] = self.scrub(since + 3600)
+        self.fs["options"] = "ro,noatime"
+        self.unwritable("var/lib/btrfs-degraded-boot")
+        r = self.run_check()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(len(self.alerts()), 1, r.stderr)
+        self.assertIn("mounted READ-ONLY", self.alerts()[0][-1])
+        if os.geteuid() != 0:
+            self.assertIn(f"{TAG}: cannot remove {marker}: Permission denied\n", r.stderr)
+
     # ---- snapshots and the NAS backup ---------------------------------------------------------------------------
 
     def snapshots(self, last_ok: int) -> None:
