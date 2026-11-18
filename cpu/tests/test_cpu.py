@@ -195,7 +195,7 @@ class VmPinCpuFeaturesTest(unittest.TestCase):
         self.assertEqual(
             self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", []), self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23")
         )
-        self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", "".split())), [])
+        self.assertEqual(self.features(self.m.pinned(SAMPLE_DOMAIN_XML, 12, "12-23", [])), [])
 
     def test_conf_knob_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
