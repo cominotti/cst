@@ -354,13 +354,43 @@ journal_named() {
 # file: apply, a second apply, then le-audio on, on again and off. Each run ends with
 # the live checks, which fail in this container (no adapter, bluetoothd not
 # running): exit 1 with that error only.
-BT_SECOND_APPLY_SCRIPT = r"""
+# The helpers of test_80 and test_101, which run `cst bluetooth` as tester: TEST names the test
+# in the CI log; bt runs this checkout's cst bluetooth.
+BT_STEPS = r"""
+bt() { /opt/cst-rw/cst bluetooth "$@"; }
+show() { sed "s/^/$TEST $1: /" <<<"$2" >&2; }   # the CI log
+verify_failed_only() {   # verify_failed_only LABEL RC OUT: the live checks failed, nothing else
+    if [[ "$2" != 1 ]] || ! grep -qF "ERROR: verification found problems (see above)." <<<"$3" \
+        || ! grep -qF "no Bluetooth adapter in org.bluez" <<<"$3"; then
+        echo "$TEST $1: exit $2, not only the live checks failing" >&2
+        return 1
+    fi
+}
+# step LABEL ARGS...: bt ARGS into $out, shown in the CI log, ending with only the live checks failing.
+step() {
+    local rc=0
+    out="$(bt "${@:2}" 2>&1)" || rc=$?
+    show "$1" "$out"
+    verify_failed_only "$1" "$rc" "$out"
+}
+no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change (every verb it uses)
+    if grep -E '^(adopted|backup|enabled|reconnect|removed|restart|restarted|restored|set|started|written): ' <<<"$2"; then
+        echo "$TEST $1 changed something" >&2
+        return 1
+    fi
+}
+"""
+
+
+BT_SECOND_APPLY_SCRIPT = (
+    BT_STEPS
+    + r"""
 set -E
+TEST=test_80
 trap 'echo "test_80 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 export LC_ALL=C
 H=/home/tester
 mac=00:11:22:33:44:55
-bt() { /opt/cst-rw/cst bluetooth "$@"; }
 wp="$H/.config/wireplumber/wireplumber.conf.d"
 rule="$wp/50-bluez-00_11_22_33_44_55.conf"
 le="$wp/90-cst-le-audio-off.conf"
@@ -380,29 +410,8 @@ same() {   # same LABEL BEFORE
     printf 'test_80 %s changed files:\nbefore:\n%s\nafter:\n%s\n' "$1" "$2" "$(files)" >&2
     return 1
 }
-show() { sed "s/^/test_80 $1: /" <<<"$2" >&2; }   # the CI log
-verify_failed_only() {   # verify_failed_only LABEL RC OUT: the live checks failed, nothing else
-    if [[ "$2" != 1 ]] || ! grep -qF "ERROR: verification found problems (see above)." <<<"$3" \
-        || ! grep -qF "no Bluetooth adapter in org.bluez" <<<"$3"; then
-        echo "test_80 $1: exit $2, not only the live checks failing" >&2
-        return 1
-    fi
-}
 roles() { python3 -I /opt/cst-rw/bluetooth/bt-helper wp-roles | cut -d'|' -f1; }
 wp_pid() { systemctl --user show -p MainPID --value wireplumber.service; }
-# step LABEL ARGS...: bt ARGS into $out, shown in the CI log, ending with only the live checks failing.
-step() {
-    local rc=0
-    out="$(bt "${@:2}" 2>&1)" || rc=$?
-    show "$1" "$out"
-    verify_failed_only "$1" "$rc" "$out"
-}
-no_writes() {   # no_writes LABEL OUT: apply's report has no line of a change (every verb it uses)
-    if grep -E '^(adopted|backup|enabled|reconnect|removed|restart|restarted|restored|set|started|written): ' <<<"$2"; then
-        echo "test_80 $1 changed something" >&2
-        return 1
-    fi
-}
 systemctl --user is-active wireplumber.service
 
 owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
@@ -495,6 +504,7 @@ grep -qxF "LE_AUDIO=off" "$conf"
 bt plan >/dev/null 2>&1   # exit 0: nothing to do
 echo E2E-OK
 """
+)
 
 
 # test_103: docker-gc run --dry-run of the program at argv[1] with its settings file at argv[2], against
@@ -531,6 +541,116 @@ sys.stdout.write(r.stdout)
 sys.stderr.write(r.stderr)
 sys.exit(r.returncode)
 """
+
+
+# test_101: run as tester once the test has written main.conf. First the machine as main's CST
+# (535aea1) left it when it set the headset by default: its LDAC rule (the vendored fixture, for an
+# invented headset) and a settings file without DEVICE. Then a machine with no headset at all.
+BT_HEADSET_SCRIPT = (
+    BT_STEPS
+    + r"""
+set -E
+TEST=test_101
+trap 'echo "test_101 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+export LC_ALL=C
+H=/home/tester
+mac=0A:1B:2C:3D:4E:5F
+wp="$H/.config/wireplumber/wireplumber.conf.d"
+rule="$wp/50-bluez-0A_1B_2C_3D_4E_5F.conf"
+conf="$H/.config/cst/bluetooth.conf"
+sum() { if [[ -e "$1" ]]; then echo "$(stat -c '%i %Y' "$1") $(sha256sum <"$1")"; else echo absent; fi; }
+rules() { find "$wp" -maxdepth 1 -name '50-bluez-*' 2>/dev/null | sort; }
+
+# 1. What main's install left.
+mkdir -p "$wp" "$(dirname "$conf")"
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$rule"
+printf '# CST bluetooth settings (override bluetooth/bluetooth.conf in the repo)\nLE_AUDIO=off\n' >"$conf"
+settings="$(cat "$conf")"
+c0="$(sum "$conf")"; r0="$(sum "$rule")"
+
+# 2. plan: the headset of the rule, which apply would save as DEVICE; plan writes nothing.
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show plan "$out"
+[[ "$rc" == 10 ]]
+grep -qF "Headset $mac (from CST's LDAC rule; apply saves it as DEVICE in ~/.config/cst/bluetooth.conf)" <<<"$out"
+grep -qE "^  set +~/.config/cst/bluetooth.conf +DEVICE=$mac: the headset of CST's LDAC rule" <<<"$out"
+grep -qE "^  ok +wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf +up to date" <<<"$out"
+[[ "$(sum "$conf")" == "$c0" && "$(sum "$rule")" == "$r0" ]]
+
+# 3. apply --no-restart (bluetoothd does not run here; WirePlumber's restart stays owed):
+# DEVICE saved (the other lines kept), the rule as it was.
+step apply apply --yes --no-restart
+grep -qxF "written:   ~/.config/cst/bluetooth.conf: DEVICE=$mac" <<<"$out"
+grep -qxF "unchanged: $rule" <<<"$out"
+[[ "$(cat "$conf")" == "$settings"$'\n'"DEVICE=$mac" ]]
+[[ "$(sum "$rule")" == "$r0" ]]
+c1="$(sum "$conf")"
+# apply: only the owed WirePlumber restart.
+wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+step "apply after --no-restart" apply --yes
+grep -qxF "$wp_restart_line" <<<"$out"
+no_writes "apply after --no-restart" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+
+# 4. A second apply changes nothing; plan has nothing to do, the headset now from the settings.
+step "second apply" apply --yes
+no_writes "second apply" "$out"
+[[ "$(sum "$conf")" == "$c1" && "$(sum "$rule")" == "$r0" ]]
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan after apply" "$out"
+[[ "$rc" == 0 ]]
+grep -qF "Headset $mac (settings)" <<<"$out"
+
+# 5. revert removes the rule; the saved DEVICE stays (it is your setting now).
+out="$(bt revert --yes --no-restart 2>&1)"
+show revert "$out"
+grep -qxF "removed:   $rule" <<<"$out"
+[[ -z "$(rules)" ]]
+grep -qxF "DEVICE=$mac" "$conf"
+
+# 5b. Before any apply saved it, the rule is the only place that names the headset: revert saves it as
+# DEVICE first, then removes the rule.
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$rule"
+printf '%s\n' "$settings" >"$conf"
+out="$(bt revert --yes --no-restart 2>&1)"
+show "revert before apply" "$out"
+saved="$(grep -nxF "written:   ~/.config/cst/bluetooth.conf: DEVICE=$mac" <<<"$out" | cut -d: -f1)"
+gone="$(grep -nxF "removed:   $rule" <<<"$out" | cut -d: -f1)"
+[[ -n "$saved" && -n "$gone" && "$saved" -lt "$gone" ]]
+[[ "$(cat "$conf")" == "$settings"$'\n'"DEVICE=$mac" && -z "$(rules)" ]]
+
+# 6. No headset at all: plan, apply and a second apply skip its parts and write nothing for one;
+# the old script's first rule name, which only a headset's rule replaces, stays.
+rm -f "$conf"
+legacy="$wp/50-jbl-live-beam-4.conf"
+cp /opt/cst-rw/tests/fixtures/legacy/50-bluez-0A_1B_2C_3D_4E_5F.conf@535aea1 "$legacy"
+l0="$(sum "$legacy")"
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan, no headset" "$out"
+[[ "$rc" == 10 ]]   # main.conf and the LE Audio drop-in, which need no headset
+grep -qF "Headset none (no DEVICE set)" <<<"$out"
+grep -qE "^  skip +the headset's LDAC rule +no headset set: set DEVICE=AA:BB:CC:DD:EE:FF in ~/.config/cst/bluetooth.conf" <<<"$out"
+step "apply, no headset" apply --yes --no-restart
+grep -qF "skipped:   no headset set: " <<<"$out"
+grep -qE "^  skip +headset +no headset set: " <<<"$out"
+grep -qxF "Experimental = true" /etc/bluetooth/main.conf
+[[ -f "$wp/90-cst-le-audio-off.conf" && ! -e "$conf" && -z "$(rules)" ]]
+step "apply after --no-restart, no headset" apply --yes
+grep -qxF "$wp_restart_line" <<<"$out"
+no_writes "apply after --no-restart, no headset" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+step "second apply, no headset" apply --yes
+no_writes "second apply, no headset" "$out"
+[[ ! -e "$conf" && -z "$(rules)" && "$(sum "$legacy")" == "$l0" ]]
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan after apply, no headset" "$out"
+[[ "$rc" == 0 ]]
+out="$(bt revert --yes --no-restart 2>&1)"
+show "revert, no headset" "$out"
+grep -qF "unchanged: no headset set: " <<<"$out"
+[[ "$(sum "$legacy")" == "$l0" ]]
+rm -f "$legacy"
+echo E2E-OK
+"""
+)
 
 
 class Tier1SystemdE2ETest(unittest.TestCase):
@@ -2786,6 +2906,35 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             "LDAC_RATE=48000\\nLE_AUDIO=off\\n' >/home/tester/.config/cst/bluetooth.conf",
         )
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one(self) -> None:
+        """CST ships no headset (DEVICE in bluetooth/bluetooth.conf is empty). The upgrade from
+        main's install (535aea1), as tester with the real user manager and WirePlumber: its LDAC
+        rule for the headset it set by default (tests/fixtures/legacy, an invented address: main
+        wrote this text for it) and a settings file without DEVICE. plan names that headset and
+        that apply saves it, and writes nothing; apply --no-restart saves DEVICE (the other lines
+        kept) and leaves the rule, apply then makes only the owed WirePlumber restart (bluetoothd
+        does not run here, as in test_80); a second apply changes nothing and plan has nothing to
+        do; revert removes the rule and keeps DEVICE. A revert before any apply saved DEVICE saves
+        it first, then removes the rule. Then no headset at all: plan, apply and a second apply skip
+        the headset's LDAC rule and checks, write main.conf and the LE Audio drop-in, and no
+        headset's rule or setting, and the old script's first rule name (only a headset's rule
+        replaces it) stays; revert says there is no rule to remove."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -f /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-bluez-0A_1B_2C_3D_4E_5F.conf "
+            "/home/tester/.config/wireplumber/wireplumber.conf.d/50-jbl-live-beam-4.conf",
+            check=False,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            "mkdir -p /etc/bluetooth && printf '[General]\\n# Name = BlueZ\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_HEADSET_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
     def test_96_bluetooth_as_root_drops_the_test_overrides(self) -> None:
