@@ -38,12 +38,14 @@ from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
+from cst_core.domain.values import Json
 from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
 from vm import application as vm_application, wiring as vm_wiring
+from vm.application import backup as vm_application_backup
 from vm.cli import backup as vm_cli_backup, nocow as vm_cli_nocow, status as vm_cli_status, tune as vm_cli_tune
 
 sys.dont_write_bytecode = True
@@ -78,6 +80,12 @@ class FakeCommands:
             f.write(text)
             f.flush()
             return self.fake("define", f.name, timeout=60, detach=None)
+
+    def package_versions(self) -> dict[str, str]:
+        raise AssertionError("tune reads no package version")
+
+    def booted_deployment(self) -> dict[str, Json] | None:
+        raise AssertionError("tune reads no deployment")
 
 
 class _NoCommands:
@@ -1500,7 +1508,7 @@ class BtrfsReflinkTest(unittest.TestCase):
         r = subprocess.run(["cp", "--reflink=always", src, plain], check=False, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "btrfs cloned NOCOW -> COW: the negative control failed")
         dest = os.path.join(self.tmp, "backup", "img.qcow2")
-        vm_cli_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
+        vm_adapters_backup.copy(vm_wiring.vm_settings({}), src, dest, "reflink", True)
         self.assertTrue(vm_adapters_images.nocow(dest))
         with open(src, "rb") as a, open(dest, "rb") as b:
             self.assertEqual(a.read(), b.read())
@@ -1976,7 +1984,7 @@ class PatchVmTest(unittest.TestCase):
             return (0, "shut off\n", "") if a[0] == "domstate" else (0, "win\n", "")
 
         with no_real_commands(), patch_vm("virsh", _virsh), self.assertRaisesRegex(Refused, "managed save"):
-            vm_cli_backup.check_shut_off("win")
+            vm_application_backup.check_shut_off(vm_wiring.vm_commands(), "win")
 
 
 class DetachedTest(unittest.TestCase):

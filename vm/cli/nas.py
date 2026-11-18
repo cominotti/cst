@@ -31,14 +31,13 @@ from vm.adapters.backup import (
     notify,
     on_signal,
     qcow2_backing_file,
-    check_backup_start,
     read_index,
     signals_held,
     tree_sizes,
     utc_now,
     write_index,
 )
-from vm.cli.backup import check_shut_off
+from vm.application.backup import check_backup_start, check_shut_off
 from vm.domain.backup import ResticSummary
 from vm.domain import (
     VmSettings,
@@ -231,7 +230,7 @@ def nas_sources(cfg: VmSettings, vm: str, parts: DomainParts, notes: list[str]) 
 
 
 def cmd_backup_nas(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool) -> int:
-    check_backup_start(cfg, "backup --nas")
+    check_backup_start(cfg, wiring.backup_store(cfg), "backup --nas", root=wiring.running_as_root())
     if "," in vm or not vm.strip():
         raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
     nas = nas_settings(cfg)
@@ -242,7 +241,7 @@ def cmd_backup_nas(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool) ->
             f"snapshot) or a shut-off one. Resume it or shut it down first"
         )
     if state == "shut off":
-        check_shut_off(vm)
+        check_shut_off(wiring.vm_commands(), vm)
     for sig in STOP_SIGNALS:
         signal.signal(sig, on_signal)
     with VmLock(vm, cfg.paths.run_dir):
@@ -379,7 +378,7 @@ def nas_run(cfg: VmSettings, vm: str, keep: str | None, quiesce: bool, nas: Mapp
                     )
         if not live:
             try:
-                check_shut_off(vm)
+                check_shut_off(wiring.vm_commands(), vm)
             except Refused as e:
                 wiring.restic().run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800)
                 raise Refused(

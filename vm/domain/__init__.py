@@ -300,18 +300,6 @@ def domain_parts(xml_text: str) -> DomainParts:
     )
 
 
-def index_entry(manifest: Mapping[str, object], path: str) -> dict[str, object]:
-    return {
-        "vm": manifest["vm"],
-        "timestamp": manifest["timestamp"],
-        "epoch": manifest["epoch"],
-        "path": path,
-        "mode": manifest["mode"],
-        "versions": manifest["versions"],
-        "deployment": manifest["deployment"],
-    }
-
-
 def stored(dest_dir: str, src: str) -> str:
     """Where a source path is kept inside the backup: its absolute path
     under files/, so names never collide and restoring is one cp each."""

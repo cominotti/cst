@@ -2,24 +2,28 @@
 """The backups' files and the run of a backup: the index, the fingerprints and sizes of what
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import datetime
 import json
 import os
+import shutil
 import signal
 import struct
 import sys
 import time
 from types import FrameType
-from typing import Any, TextIO
+from typing import TextIO
 
 from cst_core.adapters import nocow as inode_attrs
-from cst_core.adapters.files import ensure_dir, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.domain.errors import Refused
-from vm.adapters import INDEX_FORMAT, NAME, RUNNER
+from cst_core.domain.text import first_line
+from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
+from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
+from vm.domain.backup import Fingerprint, IndexEntry
 
 
 def utc_now(override: str | None = None) -> tuple[float, str]:
@@ -39,7 +43,7 @@ def qcow2_backing_file(path: str) -> bool:
     return len(head) == 16 and head[:4] == b"QFI\xfb" and struct.unpack(">Q", head[8:16])[0] != 0
 
 
-def fingerprint(path: str) -> tuple[Any, ...]:
+def fingerprint(path: str) -> Fingerprint:
     """What changes when something writes to a file or a folder tree, or when
     libvirt relabels it on start (ctime): compared before and after the copy."""
 
@@ -78,7 +82,7 @@ def tree_sizes(path: str) -> tuple[int, int]:
     return st.st_blocks * 512, st.st_size
 
 
-def read_index(cfg: VmSettings) -> list[dict[str, Any]]:
+def read_index(cfg: VmSettings) -> list[IndexEntry]:
     """The backups in the index ([] when there is none or it cannot be read). Refused for an index of a
     newer cst vm ("version" above INDEX_FORMAT's): listing it could mislead, and writing it back would
     lose what this one does not know. The index is cfg.paths.index."""
@@ -101,15 +105,7 @@ def read_index(cfg: VmSettings) -> list[dict[str, Any]]:
     ]
 
 
-def check_backup_start(s: VmSettings, what: str) -> None:
-    """Before a backup copies anything: root (or the tests' override), and an index this cst vm can
-    record it in (read_index refuses one of a newer cst vm)."""
-    if os.geteuid() != 0 and not s.nonroot_ok:
-        raise Refused(f"{what} needs root: run it as `cst vm {what}` (it calls sudo by itself)")
-    read_index(s)
-
-
-def write_index(entries: Sequence[Mapping[str, Any]], path: str) -> None:
+def write_index(entries: Sequence[IndexEntry], path: str) -> None:
     """Atomically (temporary file + rename), mode 0644, folder 0755; durable
     (the file and the folder fsynced): a lost index hides a finished backup."""
     d = os.path.dirname(path)
@@ -127,6 +123,84 @@ def precreate_nocow(dest: str) -> None:
         inode_attrs.set_nocow(dest)
     except OSError:
         pass
+
+
+def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
+    """Copy src (a file or a folder) to dest with cp -a. Disks (big) follow
+    the mode; the small parts (UEFI variables, TPM state) are plain copies."""
+    os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+    if not big:
+        flags = ["--reflink=never"] if mode == "full" else []
+    elif mode == "reflink":
+        flags = ["--reflink=always"]  # cp allows --reflink only with --sparse=auto
+        if os.path.isfile(src) and nocow(src):
+            precreate_nocow(dest)
+    else:
+        # --sparse=auto keeps the source's holes only. --sparse=always also turns
+        # every run of zero blocks inside the data into a hole: a 92 GiB image
+        # became 1.05 million extents (the source had 0.6 million), and the guest
+        # writing into those holes allocates new extents even on a NOCOW file.
+        flags = ["--reflink=never", "--sparse=auto"]
+    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * 3600)
+    if rc != 0:
+        raise Refused(
+            f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}"
+            + (
+                f"\nReflink copies need the backup folder on the same btrfs filesystem as the "
+                f"disks. Use real copies instead: {cfg.prog} backup VM --full"
+                if big and mode == "reflink"
+                else ""
+            )
+        )
+
+
+class BackupFiles(LocalFileSystemAdapter):
+    """BackupStorePort on this machine: the paths of cfg, the functions of this module (and the
+    path tests of cst_core's LocalFileSystemAdapter: os.path.isfile, isdir, exists, lexists)."""
+
+    def __init__(self, cfg: VmSettings) -> None:
+        self.cfg = cfg
+
+    def realpath(self, path: str) -> str:
+        return os.path.realpath(path)
+
+    def has_backing_file(self, path: str) -> bool:
+        return qcow2_backing_file(path)
+
+    def sizes(self, path: str) -> tuple[int, int]:
+        return tree_sizes(path)
+
+    def fingerprint(self, path: str) -> Fingerprint:
+        return fingerprint(path)
+
+    def free_space(self, path: str) -> tuple[str, int]:
+        probe = path
+        while not os.path.exists(probe):
+            probe = os.path.dirname(probe)
+        st = os.statvfs(probe)
+        return probe, st.f_bavail * st.f_frsize
+
+    def make_backup_folder(self, backup_dir: str, vm_dir: str, dest_dir: str) -> None:
+        for d in (backup_dir, vm_dir):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)
+        os.mkdir(dest_dir, 0o700)
+
+    def copy(self, src: str, dest: str, mode: str, *, big: bool) -> None:
+        copy(self.cfg, src, dest, mode, big)
+
+    def write_private(self, path: str, text: str) -> None:
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(text)
+
+    def remove_tree(self, path: str) -> None:
+        shutil.rmtree(path, ignore_errors=True)
+
+    def read_index(self) -> list[IndexEntry]:
+        return read_index(self.cfg)
+
+    def write_index(self, entries: Sequence[IndexEntry]) -> None:
+        write_index(entries, self.cfg.paths.index)
 
 
 class Stop(Exception):
@@ -250,7 +324,7 @@ class VmLock:
             self.fd = None
 
 
-def describe_entry(e: Mapping[str, Any]) -> str:
+def describe_entry(e: IndexEntry) -> str:
     dep = e.get("deployment") or {}
     qemu = next(
         (

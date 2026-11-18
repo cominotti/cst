@@ -132,6 +132,12 @@ class VmCommands:
         finally:
             os.unlink(tmp)
 
+    def package_versions(self) -> dict[str, str]:
+        return package_versions()
+
+    def booted_deployment(self) -> dict[str, Json] | None:
+        return booted_deployment()
+
 
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
@@ -161,6 +167,11 @@ def run_on_terminal(cmd: Sequence[str]) -> int:
 def virsh(*args: str, timeout: int = 60, detach: bool | None = None) -> tuple[int, str, str]:
     """virsh -c URI ARGS through VmCommands' virsh adapter, with run()'s answers."""
     return COMMANDS_OF_VM.virsh(args, timeout, detach=detach)
+
+
+def effective_root() -> bool:
+    """This process runs as root (its effective uid is 0)."""
+    return os.geteuid() == 0
 
 
 def read_conf(path: str, *, nas_conf: str, bash_sourced: bool = False) -> dict[str, str]:

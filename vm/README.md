@@ -1046,8 +1046,12 @@ The Python code inside `vm/` (standard library only at run time):
   `VmSettings` (`vm/domain`: its `VmPaths`, `CST_PROG`, the test overrides
   `CST_VM_*`, which move each path for the tests only, and the snapshot and
   merge timeouts). `cst doctor` builds the same settings for its VM checks.
-- `vm/application.py`: the use cases that change the machine in several
-  steps, typed against the ports of `vm/ports.py`: `backup-timer on` and
+- `vm/application/`: the use cases that change the machine in several
+  steps, typed against the ports of `vm/ports.py`. `backup.py`: the local
+  backup (`backup_local`) and the checks every backup makes first, over
+  `VmCommandsPort`, `BackupStorePort` (the backups' files and the index,
+  `vm/adapters/backup.py`'s `BackupFiles`), cst_core's `ClockPort` and a
+  `ProgressPort` (the lines it prints as it goes). `__init__.py`: `backup-timer on` and
   `off` (`TimerFilesPort`: the timer's files through the installer and the
   links that say which timer is on, its adapter `vm/adapters/timer.py`'s
   `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,

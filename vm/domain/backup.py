@@ -68,6 +68,19 @@ class ResticSummary(TypedDict, total=False):
     data_added: int
 
 
+def index_entry(manifest: Manifest, path: str) -> IndexEntry:
+    """The index entry of a local copy, from its manifest."""
+    return {
+        "vm": manifest["vm"],
+        "timestamp": manifest["timestamp"],
+        "epoch": manifest["epoch"],
+        "path": path,
+        "mode": manifest["mode"],
+        "versions": manifest["versions"],
+        "deployment": manifest["deployment"],
+    }
+
+
 def utc_stamp(seconds: float) -> str:
     """The UTC stamp of a backup's name (20261108T010640Z)."""
     return datetime.datetime.fromtimestamp(seconds, datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
