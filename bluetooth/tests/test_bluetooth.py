@@ -497,7 +497,7 @@ class LiveParsingTest(unittest.TestCase):
         self.assertEqual(self.m.card_state(dev, cards, srcs, [{"source": 3}]), ("headset-head-unit", True, False))
         card = self.m.card_state(dev, cards, srcs, [{"source": 7}])
         assert card is not None
-        self.assertEqual(card[2], True)
+        self.assertIs(card[2], True)
         self.assertIsNone(self.m.card_state("00_00", cards, srcs, []))
 
     def test_pw_state(self) -> None:
