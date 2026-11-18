@@ -7,32 +7,39 @@ from dataclasses import replace
 from typing import Literal
 
 from btrfs.docker_gc.domain import (
+    BAD_SETTINGS_EXIT,
     HEARTBEAT_SECONDS,
     MIN_UPTIME,
     NEWER_STATE_EXIT,
     NOT_RECORDED,
+    UnknownProtection,
     DockerEvent,
+    GcPaths,
     GcPlan,
     GcSettings,
     GcState,
     ImageDrop,
     NewerState,
     PlanInputs,
+    Protection,
     RunSummary,
     event_image,
     heartbeat_fresh,
     last_run_line,
     plan_gc,
     plan_lines,
+    protection_line,
     recorded_line,
     recorder_down_too_long,
+    render_settings_file,
+    resolve_protection,
     run_log_line,
 )
-from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcStatePort
+from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSettingsPort, GcStatePort
 from cst_core.ports import ClockPort
 
-type GcCommand = Literal["record", "run", "cleanup-now", "status"]
-COMMANDS: tuple[GcCommand, ...] = ("record", "run", "cleanup-now", "status")
+type GcCommand = Literal["record", "run", "cleanup-now", "status", "settings"]
+COMMANDS: tuple[GcCommand, ...] = ("record", "run", "cleanup-now", "status", "settings")
 
 RESOLVE_TIMEOUT = 30  # seconds for the image inspect behind one event
 RESOLVED_FOR = 60  # seconds a reference -> ID answer is reused
@@ -122,16 +129,35 @@ class DockerGc:
         host: GcHostPort,
         console: ConsolePort,
         clock: ClockPort,
+        config: GcSettingsPort,
+        paths: GcPaths,
+        protect_env: str | None = None,
     ) -> None:
         self.settings = settings
         self.docker, self.state, self.host, self.console, self.clock = docker, state, host, console, clock
+        self.config, self.paths, self.protect_env = config, paths, protect_env
+        self.protection = Protection((), "not read yet")
 
-    def execute(self, command: GcCommand, *, dry: bool = False) -> int:
+    def read_protection(self) -> None:
+        """The protected registries (resolve_protection) into the settings; raises UnknownProtection."""
+        self.protection = resolve_protection(
+            self.paths,
+            env=self.protect_env,
+            file_text=self.config.read_settings(),
+            installed=self.config.installed_sources(),
+        )
+        self.settings = replace(self.settings, protected=self.protection.prefixes)
+
+    def execute(self, command: GcCommand, *, dry: bool = False, write: bool = False) -> int:
         """Run one command; its exit status. A docker error is one journal line and exit 1; a state file of
-        a newer docker-gc one line and NEWER_STATE_EXIT."""
+        a newer docker-gc one line and NEWER_STATE_EXIT; protected registries it cannot tell (UnknownProtection)
+        one line and BAD_SETTINGS_EXIT, before anything else (the recorder needs no settings)."""
         try:
             if command == "record":
                 return self.record()
+            self.read_protection()
+            if command == "settings":
+                return self.settings_file(write=write)
             if command == "cleanup-now":
                 return self.cleanup_now()
             if command == "run":
@@ -141,6 +167,10 @@ class DockerGc:
         except NewerState as e:
             self.console.log(3, str(e))
             return NEWER_STATE_EXIT
+        except UnknownProtection as e:
+            for line in str(e).splitlines():
+                self.console.log(3, line)
+            return BAD_SETTINGS_EXIT
         except RuntimeError as e:
             self.console.log(3, str(e))
             return 1
@@ -303,15 +333,39 @@ class DockerGc:
             return 0
         if prot and self.console.ask(
             f"Also remove the {len(prot)} image(s) marked [protected registry]? "
-            f"Re-pulling them needs the private tunnel. [y/N] "
+            f"Pulling them again needs that registry. [y/N] "
         ):
             p = replace(p, images=p.images + prot)
         failed = self.apply(p)
         self.console.say(f"Done; failures: {failed}. Now: {dict(self.docker.disk_usage())}")
         return 0
 
+    def settings_file(self, *, write: bool) -> int:
+        """`docker-gc settings [--write]`: the protected registries and where they come from. While the
+        settings file is missing: the dry run says what --write would put there (exit 10), --write
+        writes it (what is protected now, so nothing changes; `cst btrfs docker-gc enable` runs it
+        before it installs a new docker-gc). With the file there, --write changes nothing."""
+        p, path = self.protection, self.paths.settings_file
+        self.console.say(protection_line(p))
+        if p.to_write is None:
+            if write:
+                self.console.say(f"unchanged: {path}")
+            return 0
+        value = f"DOCKER_GC_PROTECT={','.join(p.to_write)}"
+        if not write:
+            self.console.say(f"would write: {path} ({value})")
+            return 10
+        try:
+            self.config.write_settings(render_settings_file(p.to_write))
+        except OSError as e:
+            self.console.error(f"cannot write {path}: {e.strerror}")
+            return 1
+        self.console.say(f"written:   {path} ({value})")
+        return 0
+
     def status(self) -> None:
-        """The tracking state, the last run, and what a weekly run would remove now."""
+        """The protected registries, the tracking state, the last run, and what a weekly run would remove now."""
+        self.console.say(protection_line(self.protection))
         if self.state.state_exists():
             st = self.state.load_state()
             self.console.say(recorded_line(st, self.settings, recorder_ok=self.recorder_alive(st)))

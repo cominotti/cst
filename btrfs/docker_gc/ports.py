@@ -100,6 +100,23 @@ class GcStatePort(Protocol):
         ...
 
 
+class GcSettingsPort(Protocol):
+    """The settings file (GcPaths.settings_file) and the installed docker-gc (GcPaths.installed)."""
+
+    def read_settings(self) -> str | None:
+        """The settings file's text; None when it is missing. One it cannot read raises UnknownProtection."""
+        ...
+
+    def installed_sources(self) -> tuple[str, ...] | None:
+        """The Python sources of the installed docker-gc that hold its built-in protected registries
+        (none when it cannot read them); None when no docker-gc is installed."""
+        ...
+
+    def write_settings(self, text: str) -> None:
+        """Write the settings file (root, 0644), atomically."""
+        ...
+
+
 class GcHostPort(Protocol):
     """The machine around docker: its uptime and the recorder's unit."""
 

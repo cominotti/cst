@@ -49,7 +49,8 @@ LICENSE_EXEMPT: Final[dict[str, str]] = {
     "btrfs/tests/fixtures/steam/*.vdf": "Steam's own library files, as Steam writes them, for the parser under test",
     "tests/fixtures/legacy/*": (
         "captured data: programs of an older commit (named after the @), copied byte for byte, that tier 1 "
-        "installs as the previous version (tests/e2e/README.md, Mixed-version tests)"
+        "installs as the previous version (tests/e2e/README.md, Mixed-version tests), except that a personal or "
+        "private value in one is replaced by an invented one"
     ),
     "doctor/tests/fixtures/db-booted.txt": (
         "captured `rpm-ostree db list` output, copied whole into a fake package database"

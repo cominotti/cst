@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from datetime import UTC, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +30,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
 RECORDER_UNIT = os.path.join(os.path.dirname(HERE), "units", "docker-gc-recorder.service")
 DAY = 86400
 NEWER_STATE_EXIT = 65  # a state file of a newer docker-gc: the recorder unit does not restart on it
+PROTECTED = "registry.example.com"  # an invented registry: what the settings file of these tests protects
 
 FAKE_DOCKER = r"""#!@PYTHON@ -I
 import json, os, sys, time
@@ -221,6 +223,11 @@ class Program:
             with open(path, "w") as f:
                 f.write(text.replace("@PYTHON@", sys.executable))
             os.chmod(path, 0o755)
+        self.conf = os.path.join(self.tmp, "etc", "docker-gc.conf")
+        os.mkdir(os.path.dirname(self.conf))
+        self.installed = os.path.join(self.tmp, "no-installed-docker-gc")
+        with open(self.conf, "w") as f:
+            f.write(f"DOCKER_GC_PROTECT={PROTECTED}\n")
         self.docker_state = os.path.join(self.tmp, "docker.json")
         self.log = os.path.join(self.tmp, "calls.log")
         self.now = time.time()
@@ -257,6 +264,9 @@ class Program:
             "HOME": self.tmp,
             "DOCKER_GC_STATE": self.state,
             "DOCKER_GC_RUNTIME": self.runtime,
+            # The settings file (registry.example.com protected) and no installed docker-gc: never the machine's.
+            "DOCKER_GC_CONF": self.conf,
+            "DOCKER_GC_INSTALLED": self.installed,
             "FAKE_DOCKER_STATE": self.docker_state,
             "FAKE_DOCKER_LOG": self.log,
             "FAKE_SYSTEMCTL_RC": str(self.systemctl_rc),
@@ -322,6 +332,7 @@ class StatusTest(unittest.TestCase):
         removal = datetime.fromtimestamp(self.since + 14 * DAY).strftime("%F")
         self.assertEqual(
             out,
+            f"protected registries: {PROTECTED} (DOCKER_GC_PROTECT in {self.p.conf})\n"
             f"image use recorded since {since.strftime('%F %T')} (1 image(s) seen); timed image removal "
             f"possible from {removal}; recorder ok\n"
             "last run: never\n"
@@ -379,6 +390,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual((rc, err), (0, ""))
         self.assertEqual(
             out,
+            f"protected registries: {PROTECTED} (DOCKER_GC_PROTECT in {self.p.conf})\n"
             "image use not recorded yet (recorder not started)\nlast run: never\ndocker is not running; nothing to do\n",
         )
         self.assertFalse(os.path.exists(self.p.state), "status writes no state")
@@ -459,6 +471,87 @@ class StatusTest(unittest.TestCase):
         self.assertEqual((rc, out), (1, ""))
         self.assertEqual(err, "cleanup-now asks for confirmation: run it in a terminal.\n")
         self.assertFalse(os.path.exists(self.p.runtime), "no lock taken")
+
+
+# main's (654bbda) btrfs/docker_gc/domain.py, its built-in registry replaced by PROTECTED: the one file
+# of the docker-gc it installed that holds what it protects.
+LEGACY_DOMAIN = os.path.join(
+    os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "legacy", "btrfs-docker_gc-domain.py@654bbda"
+)
+
+
+class SettingsUpgradeTest(unittest.TestCase):
+    """The protected registries move from the program into /etc/cst/docker-gc.conf. While the file is
+    missing, the registries the installed docker-gc protected (main's, built in) stay protected;
+    `settings --write` (what `cst btrfs docker-gc enable` runs before it installs) keeps them in the
+    file. The program as a process, the installed docker-gc a zipapp as main installed it."""
+
+    def setUp(self) -> None:
+        self.p = Program(self)
+        self.p.recorded(OLD + 30 * DAY, {sha("8"): self.p.now - DAY}, self.p.now)
+        os.remove(self.p.conf)
+        self.p.installed = os.path.join(self.p.tmp, "installed-docker-gc")
+        with open(LEGACY_DOMAIN, "rb") as f:
+            domain = f.read()
+        with zipfile.ZipFile(self.p.installed, "w") as z:
+            z.writestr("__main__.py", "raise SystemExit('a stand-in for main\\'s docker-gc')\n")
+            z.writestr("btrfs/__init__.py", "")
+            z.writestr("btrfs/docker_gc/__init__.py", "")
+            z.writestr("btrfs/docker_gc/domain.py", domain)
+
+    def test_the_registry_of_an_older_docker_gc_stays_protected_and_moves_into_the_file(self) -> None:
+        source = f"built into the installed {self.p.installed}, while {self.p.conf} is missing"
+        rc, out, err = self.p.run("settings")
+        self.assertEqual((rc, err), (10, ""))
+        self.assertEqual(
+            out.splitlines(),
+            [
+                f"protected registries: {PROTECTED} ({source} ('cst btrfs docker-gc enable' writes them there))",
+                f"would write: {self.p.conf} (DOCKER_GC_PROTECT={PROTECTED})",
+            ],
+        )
+        self.assertFalse(os.path.exists(self.p.conf), "the dry run wrote the file")
+        # Meanwhile (this checkout's status, run --dry-run, cleanup-now) its images are held back.
+        rc, out, _ = self.p.run("run", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("held back: 1 image(s) (protected registry: cleanup-now only)", out)
+        rc, out, err = self.p.run("settings", "--write")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn(f"written:   {self.p.conf} (DOCKER_GC_PROTECT={PROTECTED})", out)
+        self.assertEqual(os.stat(self.p.conf).st_mode & 0o777, 0o644)
+        with open(self.p.conf) as f:
+            text = f.read()
+        self.assertTrue(text.endswith(f"\nDOCKER_GC_PROTECT={PROTECTED}\n"), text)
+        # From the file now, also once a docker-gc without a built-in registry is installed.
+        os.remove(self.p.installed)
+        rc, out, _ = self.p.run("settings", "--write")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out.splitlines(),
+            [f"protected registries: {PROTECTED} (DOCKER_GC_PROTECT in {self.p.conf})", f"unchanged: {self.p.conf}"],
+        )
+        with open(self.p.conf) as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(self.p.run("settings")[0], 0)
+
+    def test_an_installed_docker_gc_it_cannot_read_stops_every_run(self) -> None:
+        with open(self.p.installed, "w") as f:
+            f.write("print('not a docker-gc of CST')\n")
+        for args in (("status",), ("run", "--dry-run"), ("run",), ("settings", "--write")):
+            rc, out, _ = self.p.run(*args)
+            self.assertEqual(rc, 78, args)
+            self.assertIn(f"{self.p.conf} is missing, and the installed {self.p.installed} does not show", out)
+        self.assertFalse(os.path.exists(self.p.conf))
+        self.assertFalse([c for c in self.p.calls() if c[:1] != ["info"] and "rm" in c], "it removed something")
+
+    def test_a_settings_file_it_cannot_read_stops_every_run(self) -> None:
+        with open(self.p.conf, "w") as f:
+            f.write("DOCKER_GC_PROTCT=registry.example.com\n")
+        rc, out, _ = self.p.run("run")
+        self.assertEqual(rc, 78)
+        self.assertIn(f"<3>docker-gc: {self.p.conf} line 1: DOCKER_GC_PROTCT: unknown setting", out)
+        self.assertIn(f"<3>docker-gc: nothing is removed until {self.p.conf} is fixed", out)
+        self.assertEqual(self.p.calls(), [], "it asked docker before it knew what is protected")
 
 
 class RecordTest(unittest.TestCase):

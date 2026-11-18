@@ -2769,6 +2769,102 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.assertEqual(len(roles), 1, r.stdout)
         self.assertNotIn("could not be read", roles[0], r.stdout)
 
+    def test_102_docker_gc_enable_keeps_the_registry_of_mains_install(self) -> None:
+        """docker-gc's protected registries move from the program into /etc/cst/docker-gc.conf.
+        The upgrade from main's install (654bbda): /usr/local/sbin/docker-gc a zipapp whose
+        btrfs/docker_gc/domain.py is main's (tests/fixtures/legacy; its built-in registry replaced by
+        an invented one), no settings file. This checkout's `docker-gc settings` shows that registry
+        as built into the installed program and that it would write the file (exit 10), and writes
+        nothing; `cst btrfs docker-gc enable` writes the file with it (root, 0644) before it installs
+        the new program, whose `settings` then reads it from the file (exit 0); a second `enable`
+        leaves the file; `disable --purge` keeps it; `enable` after the purge reads it again and
+        leaves it. No Docker in this container: a stub docker.service (not started) when there is
+        none, so the recorder is not started."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            """
+            s=/var/tmp/e2e-gc-upgrade
+            SUDO_USER=tester /opt/cst-rw/cst btrfs docker-gc disable --purge >/dev/null 2>&1 || true
+            rm -f /etc/cst/docker-gc.conf
+            if [ -e "$s/made-docker" ]; then rm -f /run/systemd/system/docker.service; fi
+            rm -rf "$s"
+            systemctl daemon-reload
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_102 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            s=/var/tmp/e2e-gc-upgrade
+            bin=/usr/local/sbin/docker-gc
+            conf=/etc/cst/docker-gc.conf
+            reg=registry.example.com
+            cst() { SUDO_USER=tester /opt/cst-rw/cst "$@"; }
+            show() { sed "s/^/test_102 $1: /" <<<"$2" >&2; }   # the CI log
+            sum() { echo "$(stat -c '%i %Y %a %U' "$1") $(sha256sum <"$1")"; }
+            line_of() { grep -nxF "$1" <<<"$2" | cut -d: -f1; }
+            rm -rf "$s"; mkdir -p "$s"
+            [[ ! -e "$bin" && ! -e "$conf" ]] || { echo "a docker-gc or its settings are already there" >&2; exit 1; }
+            if ! systemctl cat docker.service >/dev/null 2>&1; then
+                printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' >/run/systemd/system/docker.service
+                touch "$s/made-docker"
+                systemctl daemon-reload
+            fi
+
+            # 1. main's install: its zipapp, with main's domain.py.
+            python3 -I -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[2], "w"); z.writestr("__main__.py", "raise SystemExit(1)\n"); z.write(sys.argv[1], "btrfs/docker_gc/domain.py"); z.close()' \
+                "/opt/cst-rw/tests/fixtures/legacy/btrfs-docker_gc-domain.py@654bbda" "$bin"
+            chmod 0755 "$bin"
+
+            # 2. The dry run: the registry built into the installed program; nothing written.
+            rc=0; out="$(python3 -I -B /opt/cst-rw/btrfs/docker-gc settings)" || rc=$?
+            show settings "$out"
+            [[ "$rc" == 10 ]]
+            grep -qF "protected registries: $reg (built into the installed $bin, while $conf is missing" <<<"$out"
+            grep -qxF "would write: $conf (DOCKER_GC_PROTECT=$reg)" <<<"$out"
+            [[ ! -e "$conf" ]]
+
+            # 3. enable: the file first, then the new program.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show enable "$out"; exit 1; }
+            show enable "$out"
+            first="$(line_of "written:   $conf (DOCKER_GC_PROTECT=$reg)" "$out")"
+            prog="$(line_of "written:   $bin" "$out")"
+            [[ -n "$first" && -n "$prog" && "$first" -lt "$prog" ]]
+            [[ "$(stat -c '%a %U' "$conf")" == "644 root" ]]
+            [[ "$(tail -n 1 "$conf")" == "DOCKER_GC_PROTECT=$reg" ]]
+            rc=0; out="$("$bin" settings)" || rc=$?
+            show "installed settings" "$out"
+            [[ "$rc" == 0 ]]
+            grep -qxF "protected registries: $reg (DOCKER_GC_PROTECT in $conf)" <<<"$out"
+            c1="$(sum "$conf")"
+
+            # 4. A second enable leaves the file.
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "second enable" "$out"; exit 1; }
+            show "second enable" "$out"
+            grep -qxF "unchanged: $conf" <<<"$out"
+            if grep -q '^written:' <<<"$out"; then echo "the second enable wrote a file" >&2; exit 1; fi
+            [[ "$(sum "$conf")" == "$c1" ]]
+
+            # 5. disable --purge keeps the settings; enable afterwards reads them again.
+            out="$(cst btrfs docker-gc disable --purge 2>&1)" || { show purge "$out"; exit 1; }
+            show purge "$out"
+            grep -qxF "kept:      $conf (the settings: which registries are protected)" <<<"$out"
+            [[ ! -e "$bin" && "$(sum "$conf")" == "$c1" ]]
+            out="$(cst btrfs docker-gc enable 2>&1)" || { show "enable after purge" "$out"; exit 1; }
+            show "enable after purge" "$out"
+            grep -qxF "unchanged: $conf" <<<"$out"
+            grep -qxF "written:   $bin" <<<"$out"
+            [[ "$(sum "$conf")" == "$c1" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own

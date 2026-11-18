@@ -1447,7 +1447,8 @@ cst btrfs docker-gc disable         # stop it; --purge also removes its files (1
 `timer enabled, recorder active`; `timer disabled` after `disable`, `timer not
 installed` when the unit is not there), since when image use is recorded,
 the date from which timed image removal is possible, the last run, and then the
-list. `run --dry-run` shows only the list, ends with `(dry run: nothing
+list; the program's own part starts with the protected registries and where
+they come from (11.4). `run --dry-run` shows only the list, ends with `(dry run: nothing
 removed)`, and also works in the first 10 minutes after boot. Both only read,
 so they end quietly when their reader goes away (`cst btrfs docker-gc status |
 head -3`).
@@ -1470,7 +1471,7 @@ Some Docker words:
 |---|---|---|
 | Containers | **ephemeral** and stopped for **7+ days**. Ephemeral = a name Docker generated itself (like `eager_turing`) or a Testcontainers label, and no restart policy. | containers with your own name; compose, k3d, kind, devcontainer containers; running containers |
 | Volumes | **anonymous** (no name) and used by no remaining container | **named** volumes, never |
-| Images | used by no container and **not used for 14+ days** | images from the protected registry `registry.example.com` (pulling them again needs the private tunnel) |
+| Images | used by no container and **not used for 14+ days** | images of a **protected registry** (`DOCKER_GC_PROTECT`, 11.4; none by default): only `cleanup-now` removes them, after a second question |
 | Build cache | unused for **14+ days** | |
 
 A removal that fails, and a failed `docker builder prune`, is logged (journal
@@ -1521,7 +1522,7 @@ error and exit 1: the unit then shows as failed instead of a skipped week.
 A one-off cleanup of the existing backlog. It does not wait for the recorder's
 14 days: every unused image that was not seen in use in the last 14 days is a
 candidate. It lists the containers, volumes and images first and asks once
-(`[y/N]`). Protected registry images are asked **separately**, in a second
+(`[y/N]`). Images of a protected registry (11.4) are asked **separately**, in a second
 question. It also removes build cache unused for 14+ days (this is not in the
 list). It needs a terminal.
 
@@ -1536,7 +1537,9 @@ list). It needs a terminal.
   record) and `last-run.json`;
 - the run lock `/run/docker-gc/run.lock` (one run at a time, shared by the
   weekly run, `run` and `cleanup-now`; in RAM, gone at the next boot, so
-  `run --dry-run` and `cleanup-now` add nothing to `/var/lib/docker-gc`).
+  `run --dry-run` and `cleanup-now` add nothing to `/var/lib/docker-gc`);
+- the settings `/etc/cst/docker-gc.conf` (root, 0644), only when it is
+  missing (11.4).
 
 Both services run sandboxed: no capabilities, the whole file system read-only
 except `/var/lib/docker-gc` (`ProtectSystem=strict` with
@@ -1570,10 +1573,52 @@ recorded state, so `enable` later goes on with the same record of image use.
 `disable --purge` does the same and then removes everything `enable` added:
 the program, the three unit files and `/var/lib/docker-gc`. The recorded
 image use is lost with it, so after a later `enable` the 14 days start again.
-A second `disable --purge` changes nothing.
+It keeps `/etc/cst/docker-gc.conf` (`kept: ...`): your settings, which a
+later `enable` reads again; remove it by hand if you do not want them. A
+second `disable --purge` changes nothing.
 
 ```
 cst btrfs docker-gc disable --purge
+```
+
+### 11.4 Protected registries: `/etc/cst/docker-gc.conf`
+
+A weekly run never removes the images of a protected registry; `cleanup-now`
+lists them marked `[protected registry]` and removes them only after a second
+question. Use it for a registry you cannot easily pull from again (a
+private one behind a tunnel, a slow mirror). The list is
+`DOCKER_GC_PROTECT` in `/etc/cst/docker-gc.conf`: registries, separated by
+commas, each a host (with a port if it has one) and optionally the start of a
+repository path:
+
+```
+DOCKER_GC_PROTECT=registry.example.com,ghcr.io/team
+```
+
+Empty (the default) protects no registry: images in use, or used in the last
+14 days, are kept anyway. The file is read strictly: a line that is not
+`KEY=VALUE`, an unknown key or a value that is not a list of registries
+makes every run, `status` and `cleanup-now` stop with exit 78 and one line
+per problem, before they ask Docker anything (nothing is guessed, nothing is
+removed). The recorder does not read it. `DOCKER_GC_PROTECT` in docker-gc's
+environment (a drop-in of the unit) wins over the file.
+
+**Upgrade from an older CST.** Older versions had one registry built into the
+program and no file. While the file is missing, docker-gc reads the
+registries the **installed** `/usr/local/sbin/docker-gc` protects from its
+own Python source (it never runs it), and protects those: `status`, `run
+--dry-run` and `cleanup-now` from a newer checkout keep them protected
+before `enable` runs. `enable` first runs `docker-gc settings --write`,
+which writes the file with that list when it is missing (and changes
+nothing when it is there), and only then installs the new program, which has
+no registry built in. With no docker-gc installed the file gets an empty list.
+When the installed program is not one it knows, it refuses (exit 78) and asks
+you to write the file yourself. To see the list and where it comes from
+without changing anything (exit 10: `enable` would write the file), from the
+top of the CST folder:
+
+```
+python3 -I -B btrfs/docker-gc settings
 ```
 
 ---
@@ -2065,7 +2110,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`), with every problem's text; no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |
-| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the host (uptime, the recorder's unit), the terminal and journal. `application.py`: the use cases (`DockerGc`: record, plan, apply with the last checks before an image is removed, run, cleanup-now, status) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
+| `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the protected registries (the strict reader of the settings file, the built-in list read from an installed docker-gc's source, `resolve_protection`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the settings file and the installed program, the host (uptime, the recorder's unit), the terminal and journal. `application.py`: the use cases (`DockerGc`: record, plan, apply with the last checks before an image is removed, run, cleanup-now, status, settings) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), the settings file and the sources of the installed zipapp or script (`GcSettingsFile`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `DOCKER_GC_CONF`, `DOCKER_GC_INSTALLED`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | `domain.py`: the paths (`NocowPaths`), what a scan of a volume found, whether a copy matches its original (entries, bytes, SELinux labels), how a dockerd names its data root, docker.service's states, the record of postponed boots; no I/O. `ports.py`: the volume trees, the helper's state files, the Docker daemons, its output. `application.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark` and `status`. `adapters.py`: their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the flag, attempts and postponed files, SELinux labels, the journal lines and btrfs-notify. `wiring.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`, read when the program runs) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and the records it writes, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`, `settle_kinds`), the episode being recorded (`Episode`), and the loop's rules on the values it read: the longest commit of a probe, what opens and closes an episode, when a D-state task is reported and the words of each report, which kernel log lines count, the alert queue text; no I/O. `adapters/`: `proc.py`, reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines, the log folder and the `Writer` thread of the log files; `monitor.py`, the daemon (`Monitor`: its state across samples and the sampling loop, the PSI trigger, `/dev/kmsg`, the alert hand-off). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain/`, no I/O: `records.py`, the record formats and what the analysis returns; `categories.py`, the wait categories and hints and classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift); `window.py`, `summarise()`: one window's coverage, totals, categories, episodes and events, and the open episode; `verdict.py`, the verdict lines and number formats. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, `analyse()` (the records by kind, `summarise()` with the clock, then below when asked), below and the container names. `cli.py`: the text report, the arguments and `main()`. |

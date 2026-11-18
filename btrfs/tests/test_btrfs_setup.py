@@ -24,6 +24,7 @@ import sys
 import tempfile
 from typing import TypedDict
 import unittest
+import zipfile
 
 sys.dont_write_bytecode = True
 
@@ -252,7 +253,7 @@ disable_timers x.service
         real installer, every file it writes or removes staged under $T/stage."""
         return [
             STAGED_INSTALLER,
-            'DOCKER_GC_STATE="$T/docker-gc-state"',
+            DOCKER_GC_STAGED,
             shell_function(SETUP, "docker_gc_files"),
             shell_function(SETUP, "docker_gc"),
         ]
@@ -485,6 +486,15 @@ _cst_installer_as() {{
 """
 
 
+# docker-gc's settings file and installed program, staged (never the machine's /etc/cst, /usr/local/sbin).
+DOCKER_GC_STAGED = (
+    'DOCKER_GC_STATE="$T/docker-gc-state"; DOCKER_GC_CONF="$T/stage/etc/cst/docker-gc.conf"; '
+    'DOCKER_GC_BIN="$T/stage/usr/local/sbin/docker-gc"'
+)
+# main's (654bbda) btrfs/docker_gc/domain.py, its built-in registry replaced by an invented one.
+LEGACY_GC_DOMAIN = os.path.join(REPO, "tests", "fixtures", "legacy", "btrfs-docker_gc-domain.py@654bbda")
+
+
 def manifest_dests(*components: str) -> list[str]:
     """The manifest's destinations of these components (root ones: no ~/ entries among them)."""
     return sorted(e.dest for e in INSTALL_MANIFEST if e.component in components)
@@ -514,6 +524,7 @@ class ComponentInstallTest(unittest.TestCase):
                 'ALERTS_DIR="$T/alerts"; OLD_ALERTS_DIR="$T/old-alerts"; USER_UNIT_DIR=/etc/systemd/user',
                 "PENDING_UNIT=cst-pending-alerts.service; OLD_PENDING_UNIT=f44-pending-alerts.service",
                 'OLD_PENDING_READER="$T/f44-pending-alerts"',
+                DOCKER_GC_STAGED,
                 *(
                     shell_function(SETUP, f)
                     for f in (
@@ -565,9 +576,36 @@ class ComponentInstallTest(unittest.TestCase):
 
     def test_docker_gc_enable_writes_btrfs_docker_gc(self) -> None:
         r = self.run_bash("docker_gc enable")
-        self.assertEqual(self.staged(), manifest_dests("btrfs:docker-gc"))
+        # And its settings, first: no docker-gc was installed, so no registry is protected.
+        self.assertEqual(self.staged(), sorted([*manifest_dests("btrfs:docker-gc"), "/etc/cst/docker-gc.conf"]))
         self.assertIn("docker-gc enabled", r.stdout)
         self.assertEqual(self.record()["components"], {"btrfs:docker-gc": "done"})
+        conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
+        self.assertIn(f"written:   {conf} (DOCKER_GC_PROTECT=)", r.stdout)
+        with open(conf) as f:
+            self.assertTrue(f.read().endswith("\nDOCKER_GC_PROTECT=\n"))
+        r = self.run_bash("docker_gc enable")
+        self.assertIn(f"unchanged: {conf}", r.stdout)
+
+    def test_docker_gc_enable_keeps_the_registry_of_the_installed_docker_gc(self) -> None:
+        # The upgrade: main's docker-gc (a zipapp with a registry built in) is installed and there
+        # is no settings file. enable writes that registry into it before the new program replaces it.
+        prog = os.path.join(self.stage, "usr/local/sbin/docker-gc")
+        os.makedirs(os.path.dirname(prog))
+        with zipfile.ZipFile(prog, "w") as z, open(LEGACY_GC_DOMAIN, "rb") as f:
+            z.writestr("__main__.py", "")
+            z.writestr("btrfs/docker_gc/domain.py", f.read())
+        r = self.run_bash("docker_gc enable")
+        conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
+        self.assertIn(f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", r.stdout)
+        self.assertLess(r.stdout.index(conf), r.stdout.index(f"written:   {prog}"), "the program was replaced first")
+        with open(conf) as f:
+            self.assertTrue(f.read().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
+        # A purge keeps the settings.
+        r = self.run_bash("docker_gc disable --purge")
+        self.assertIn(f"kept:      {conf} (the settings: which registries are protected)", r.stdout)
+        self.assertTrue(os.path.exists(conf))
+        self.assertFalse(os.path.exists(prog))
 
     def test_a_step_that_fails_after_the_install_leaves_the_component_pending(self) -> None:
         # systemctl enable fails (set -e stops docker_gc there): the files are written and listed,
@@ -594,7 +632,9 @@ class ComponentInstallTest(unittest.TestCase):
 
     def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
         # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
-        script = "\n".join([STAGED_INSTALLER, "cst_component_units() { return 1; }", "docker_gc disable"])
+        script = "\n".join(
+            [STAGED_INSTALLER, DOCKER_GC_STAGED, "cst_component_units() { return 1; }", "docker_gc disable"]
+        )
         r = subprocess.run(
             [
                 "bash",
