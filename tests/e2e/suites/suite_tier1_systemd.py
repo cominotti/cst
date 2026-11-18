@@ -2452,9 +2452,12 @@ for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs
     if [ -e "$p" ] || [ -L "$p" ]; then mkdir -p "$s/aside$(dirname "$p")"; mv "$p" "$s/aside$p"; fi
 done
 [ -d /var/lib/cst-alerts ] || touch "$s/made-alerts"
+[ -d /var/lib/cst-alerts/pending ] || touch "$s/made-pending"
+[ -e /var/lib/cst-alerts/.lock ] || touch "$s/made-lock"
 ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-before" || true
 id cste2ebulk >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /var/tmp/cst-e2e-bulk-home cste2ebulk
 install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
+[ -d /etc/btrfs-setup ] || touch "$s/made-etc"
 mkdir -p /etc/btrfs-setup
 systemctl daemon-reload
 # boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
@@ -2487,13 +2490,19 @@ if [ -e "$s/made-unit" ]; then rm -f /etc/systemd/system/btrfs-bulk-boot.service
 rm -rf /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk
 if [ -e "$s/made-alerts" ]; then
     rm -rf /var/lib/cst-alerts
-elif [ -d /var/lib/cst-alerts/pending ]; then
-    ls -1 /var/lib/cst-alerts/pending | sort | comm -13 "$s/pending-before" - |
-        while read -r n; do rm -f "/var/lib/cst-alerts/pending/$n"; done
+else
+    if [ -e "$s/made-pending" ]; then
+        rm -rf /var/lib/cst-alerts/pending
+    elif [ -d /var/lib/cst-alerts/pending ]; then
+        ls -1 /var/lib/cst-alerts/pending | sort | comm -13 "$s/pending-before" - |
+            while read -r n; do rm -f "/var/lib/cst-alerts/pending/$n"; done
+    fi
+    if [ -e "$s/made-lock" ]; then rm -f /var/lib/cst-alerts/.lock; fi
 fi
 for p in /etc/btrfs-setup/bulk.conf /etc/btrfs-setup/bulk-at-boot /var/lib/btrfs-bulk /usr/local/sbin/btrfs-notify; do
     if [ -e "$s/aside$p" ] || [ -L "$s/aside$p" ]; then mv "$s/aside$p" "$p"; fi
 done
+if [ -e "$s/made-etc" ]; then rmdir /etc/btrfs-setup 2>/dev/null || true; fi
 userdel cste2ebulk 2>/dev/null || true
 rm -rf /var/tmp/cst-e2e-bulk-home "$s"
 systemctl daemon-reload
