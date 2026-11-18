@@ -1474,6 +1474,11 @@ to clean it). If the PC was off on Monday, the missed run starts right after the
 next boot, and is then usually skipped for these reasons. So **a missed week is
 normally not caught up**; the next run is the following Monday.
 
+"Not running" means that nothing answers on Docker's socket (or docker is not
+installed). When `docker info` fails for any other reason (permission denied,
+an SELinux denial), the run, `run --dry-run` and `status` print docker's
+error and exit 1: the unit then shows as failed instead of a skipped week.
+
 ### 11.2 `cleanup-now`
 
 A one-off cleanup of the existing backlog. It does not wait for the recorder's
