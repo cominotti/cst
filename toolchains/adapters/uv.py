@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.program import run_idle, run_idle_result
-from toolchains.domain.uv import UV_LOCK_TIMED_OUT, UV_LOCK_WAIT, UV_TIMEOUT
+from toolchains.domain.uv import UV_LOCK_TIMED_OUT, UV_LOCK_WAIT, UV_TIMEOUT, UvCacheKind
 
 
 def uv_env() -> dict[str, str]:
@@ -95,12 +95,12 @@ class UvTool:
             [uv, "cache", "prune", "--cache-dir", cache, "--no-progress"], self.home, uv_env(), timeout
         )
 
-    def cache_kind(self, path: str) -> str:
+    def cache_kind(self, path: str) -> UvCacheKind:
         try:
             st = os.lstat(os.path.realpath(path))
         except FileNotFoundError:
-            return "missing"
-        return "folder" if stat.S_ISDIR(st.st_mode) else "other"
+            return UvCacheKind.MISSING
+        return UvCacheKind.FOLDER if stat.S_ISDIR(st.st_mode) else UvCacheKind.OTHER
 
     def is_dir(self, path: str) -> bool:
         return os.path.isdir(path)

@@ -12,6 +12,7 @@ import os
 from typing import TYPE_CHECKING
 
 from cst_core.domain.errors import Refused
+from cst_core.domain.files import OwnedState
 from cst_core.domain.units import masked_refusal
 from toolchains.domain.auto import AUTO_UNITS, label
 from toolchains.domain.common import (
@@ -117,10 +118,10 @@ class AutoTimer:
                 err=True,
             )
         st = self.files.auto_states()
-        masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == "masked"]
+        masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
         if why := masked_refusal(masked, user=True):
             raise Refused(why + "; nothing was written")
-        conflicts = [k for k, v in st.items() if v == "conflict"]
+        conflicts = [k for k, v in st.items() if v == OwnedState.CONFLICT]
         if conflicts:
             raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
         changed = False
@@ -154,19 +155,19 @@ class AutoTimer:
         st = self.files.auto_states()
         # Both timers are stopped, checked, before anything is removed (see
         # UserUnitsPort); remove_stale stops the earlier one first.
-        if st[TIMER] in ("ok", "change"):
+        if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE):
             self.units.disable_timer(TIMER)
-        elif st[TIMER] == "missing":
+        elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
         rc = 0 if self.remove_stale() else 1
         removed = False
         for name in AUTO_UNITS:
-            if st[name] in ("ok", "change"):
+            if st[name] in (OwnedState.OK, OwnedState.CHANGE):
                 self.files.remove(os.path.join(home, UNIT_DIR_REL, name))
                 self.out.say(f"removed:   {label(name)}")
                 removed = True
-            elif st[name] in ("conflict", "masked"):
-                why = "masked with systemctl --user mask" if st[name] == "masked" else "not written by CST"
+            elif st[name] in (OwnedState.CONFLICT, OwnedState.MASKED):
+                why = "masked with systemctl --user mask" if st[name] == OwnedState.MASKED else "not written by CST"
                 self.out.say(f"left alone: {label(name)} ({why})", 4, err=True)
         # `disable` removes the link that enables the timer. One left pointing
         # at nothing (also left by the earlier unchecked `auto off`) goes too.
@@ -178,10 +179,10 @@ class AutoTimer:
         if removed and self.units.reload_failed():
             rc = 1
         for rel in self.files.auto_copies():
-            if st[rel] in ("ok", "change"):
+            if st[rel] in (OwnedState.OK, OwnedState.CHANGE):
                 self.files.remove(os.path.join(home, rel))
                 self.out.say(f"removed:   ~/{rel}")
-            elif st[rel] == "conflict":
+            elif st[rel] == OwnedState.CONFLICT:
                 self.out.say(f"left alone: ~/{rel} (not written by CST)", 4, err=True)
         self.files.forget_auto_files()
         self.files.remove_if_empty(os.path.join(home, LIB_REL))  # bluetooth keeps its watcher there

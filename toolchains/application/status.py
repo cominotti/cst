@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from toolchains.domain.auto import label
 from toolchains.domain.common import ConfigError, tilde
+from toolchains.domain.config import ConfigView
 from toolchains.domain.prune import PLANNED, SPECS, last_run_text
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ class ToolchainsStatus:
         for line in self.tools.rust_toolchains():
             say(f"  {line}")
         say(f"== toolchain settings ({self.prog} config)")
-        for st, shown, note in self.config.lines("status", settings):
+        for st, shown, note in self.config.lines(ConfigView.STATUS, settings):
             say(f"  {st:<8} {shown:<24} {note}")
         for line in self.tools.sccache():
             say(f"  {line}")

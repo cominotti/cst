@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from cst_core.domain.values import Json
     from cst_core.ports import CommandResult
-    from cst_core.domain.files import UnitFileState
+    from cst_core.domain.files import UnitFileState, WholeFileState
     from toolchains.domain.auto import TimerFacts
     from toolchains.domain.build import CargoCache, Folder, Workspaces
     from toolchains.domain.config import WrapperValues
-    from toolchains.domain.prune import RunRecord
+    from toolchains.domain.prune import RunRecord, SavedRun
+    from toolchains.domain.uv import UvCacheKind
 
 # (folders, leftovers of an interrupted run, other entries with why they are left alone)
 type Scan = tuple[list[Folder], list[Folder], list[tuple[str, str]]]
@@ -116,7 +116,7 @@ class UvPort(Protocol):
         """`uv cache prune` on CACHE at idle priority, stopped after TIMEOUT seconds."""
         ...
 
-    def cache_kind(self, path: str) -> str:
+    def cache_kind(self, path: str) -> UvCacheKind:
         """What is at PATH (followed through links): 'missing', 'folder' or 'other'."""
         ...
 
@@ -134,7 +134,7 @@ class UvPort(Protocol):
 class RunStatePort(Protocol):
     """The summaries of the last run of each target (~/.local/state/cst)."""
 
-    def read(self, tid: str) -> Mapping[str, Json] | None: ...
+    def read(self, tid: str) -> SavedRun | None: ...
 
     def write(self, tid: str, record: RunRecord) -> None:
         """Saved; a failure is said, not raised (the run itself went through)."""
@@ -284,7 +284,7 @@ class HomeFilesPort(Protocol):
         source is not next to this program (the timer's copy has none)."""
         ...
 
-    def wrapper_state(self, text: str) -> str:
+    def wrapper_state(self, text: str) -> WholeFileState:
         """ok | change | missing | conflict of the installed wrapper against TEXT."""
         ...
 

@@ -15,7 +15,7 @@ from cst_core.domain.errors import Refused, Usage
 from cst_core.ports import WriteFailed
 from toolchains import wiring
 from toolchains.cli import auto, config, prune, status
-from toolchains.domain.common import NAME, USAGE, ConfigError, parse_args
+from toolchains.domain.common import NAME, USAGE, ConfigError, ToolchainsAction, ToolchainsCommand, parse_args
 
 
 def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts | None = None) -> int:
@@ -28,7 +28,7 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2
     wiring.set_output_mode(a["cmd"], a["action"])
-    if a["cmd"] == "help":
+    if a["cmd"] == ToolchainsCommand.HELP:
         print(doc)
         return 0
     if wiring.run_by_root():
@@ -40,17 +40,17 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
     s = wiring.session(a["home"], entry_file, parts)
     cmd, action = a["cmd"], a["action"]
     try:
-        if cmd == "status":
+        if cmd == ToolchainsCommand.STATUS:
             status.cmd_status(s, a["brief"])
             return 0
         assert action is not None
-        if cmd == "config":
+        if cmd == ToolchainsCommand.CONFIG:
             return config.cmd_config(s, action, lean=a["lean"], sccache=a["sccache"])
-        if cmd == "prune" and action == "plan":
-            return prune.cmd_prune(s, "plan", a["targets"])
-        if cmd == "prune":
-            return s.lock.run(lambda: prune.cmd_prune(s, "apply", a["targets"]))
-        if action == "on":
+        if cmd == ToolchainsCommand.PRUNE and action == ToolchainsAction.PLAN:
+            return prune.cmd_prune(s, ToolchainsAction.PLAN, a["targets"])
+        if cmd == ToolchainsCommand.PRUNE:
+            return s.lock.run(lambda: prune.cmd_prune(s, ToolchainsAction.APPLY, a["targets"]))
+        if action == ToolchainsAction.ON:
             return s.lock.run(lambda: auto.cmd_auto_on(s, unless_off=a["unless_off"]), busy_refused=True)
         return s.lock.run(lambda: auto.cmd_auto_off(s), busy_refused=True)
     except Usage as e:

@@ -12,19 +12,23 @@ import json
 import os
 from typing import TYPE_CHECKING
 
+from cst_core.domain.files import OwnedState
 from cst_core.ports import WriteFailed
 from toolchains.domain.build import HASH_VAR, ROOT_REL
-from toolchains.domain.common import CONF_REL, ConfigError, NAME, tilde
+from toolchains.domain.common import CONF_REL, ConfigError, NAME, ToolchainsAction, tilde
 from toolchains.domain.config import (
-    BY_HAND,
     CANNOT_READ,
     CARGO_CFG_REL,
     CARGO_HAS_BUILD,
     CARGO_HAS_BUILD_DIR,
+    ConfigLine,
+    ConfigMark,
+    ConfigView,
     LEAN_REBUILD,
     LeanState,
     SCCACHE_REBUILD,
     SccacheState,
+    ToolSettingState,
     UV_CFG_REL,
     UV_HAS_LINK_MODE,
     UV_HAS_TABLE,
@@ -83,11 +87,11 @@ class ToolConfig:
     out: RunOutputPort
     settings: Callable[[], Settings]
 
-    def items(self) -> list[tuple[str, str, str, str]]:
+    def items(self) -> list[tuple[str, str, ToolSettingState, str]]:
         """[(name, path, state, text to append)]; state: set | by-hand | write |
         unreadable."""
         home = self.home
-        out: list[tuple[str, str, str, str]] = []
+        out: list[tuple[str, str, ToolSettingState, str]] = []
         # (name, file, "our setting is there", "the table is there, set by hand", what apply appends)
         for name, rel, ours, by_hand, append in (
             ("cargo", CARGO_CFG_REL, CARGO_HAS_BUILD_DIR, CARGO_HAS_BUILD, cargo_text(home)),
@@ -96,13 +100,13 @@ class ToolConfig:
             path = os.path.join(home, rel)
             text = self.files.read_settings(path)
             if text is None:
-                st = "unreadable"
+                st = ToolSettingState.UNREADABLE
             elif ours.search(text):
-                st = "set"
+                st = ToolSettingState.SET
             elif by_hand.search(text):
-                st = "by-hand"
+                st = ToolSettingState.BY_HAND
             else:
-                st = "write"
+                st = ToolSettingState.WRITE
             out.append((name, path, st, append))
         return out
 
@@ -111,43 +115,53 @@ class ToolConfig:
         path = os.path.join(self.home, CARGO_CFG_REL)
         return lean_state(path, self.files.read_settings(path))
 
-    def lean_lines(self, verb: str, settings: Settings | None, lean: bool | None) -> list[tuple[str, str, str]]:
+    def lean_lines(self, verb: ConfigView, settings: Settings | None, lean: bool | None) -> list[ConfigLine]:
         home = self.home
         st = self.lean_state()
         shown = tilde(st["path"], home)
         want, why = lean_wanted(settings, lean)
         if st["error"]:
-            return [("?", shown, f"lean debug info: the file {st['error']}")]
+            return [(ConfigMark.UNKNOWN, shown, f"lean debug info: the file {st['error']}")]
         if not want:
             if not st["add"] and not st["conflicts"]:
-                return [("on", shown, f"lean debug info is set ({why} does not remove it: delete the lines by hand)")]
+                return [
+                    (
+                        ConfigMark.ON,
+                        shown,
+                        f"lean debug info is set ({why} does not remove it: delete the lines by hand)",
+                    )
+                ]
             return [
                 (
-                    "off",
+                    ConfigMark.OFF,
                     shown,
                     "lean debug info: off (opt-in; RUST_LEAN_DEBUGINFO=yes in ~/"
                     + CONF_REL
                     + f", or config apply --lean-debuginfo); {LEAN_REBUILD}",
                 )
             ]
-        out: list[tuple[str, str, str]] = [("keep", shown, c) for c in st["conflicts"]]
+        out: list[ConfigLine] = [(ConfigMark.KEEP, shown, c) for c in st["conflicts"]]
         if not st["add"]:
             if not st["conflicts"]:
-                out.append(("ok", shown, f"lean debug info set ({why})"))
+                out.append((ConfigMark.OK, shown, f"lean debug info set ({why})"))
             return out
         what = "; ".join(b.replace("\n", " ").strip() for _, b in st["add"])
         if st["append"]:
             out.append(
                 (
-                    "write",
+                    ConfigMark.WRITE,
                     shown,
                     f"lean debug info ({why}): {what}; {LEAN_REBUILD}"
-                    + ("" if verb == "plan" else f" (missing: {self.prog} config apply)"),
+                    + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
                 )
             )
         else:
             out.append(
-                (BY_HAND, shown, f"lean debug info ({why}): the file already has these tables: add yourself: {what}")
+                (
+                    ConfigMark.BY_HAND,
+                    shown,
+                    f"lean debug info ({why}): the file already has these tables: add yourself: {what}",
+                )
             )
         return out
 
@@ -181,29 +195,29 @@ class ToolConfig:
         )
         return 0
 
-    def wrapper_lines(self, verb: str, text: str | None, values: WrapperValues) -> list[tuple[str, str, str]]:
+    def wrapper_lines(self, verb: ConfigView, text: str | None, values: WrapperValues) -> list[ConfigLine]:
         home = self.home
         shown = tilde(wrapper_path(home), home)
         if text is None:
             return [
                 (
-                    "?",
+                    ConfigMark.UNKNOWN,
                     shown,
                     f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
                     f"run {self.prog} config apply from CST",
                 )
             ]
         st = self.files.wrapper_state(text)
-        if st == "ok":
-            return [("ok", shown, f"sccache wrapper up to date ({values})")]
-        if st == "conflict":
-            return [("keep", shown, "not CST's file: left alone, so CST writes no rustc-wrapper line")]
+        if st == OwnedState.OK:
+            return [(ConfigMark.OK, shown, f"sccache wrapper up to date ({values})")]
+        if st == OwnedState.CONFLICT:
+            return [(ConfigMark.KEEP, shown, "not CST's file: left alone, so CST writes no rustc-wrapper line")]
         return [
             (
-                "write",
+                ConfigMark.WRITE,
                 shown,
-                f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; {values})"
-                + ("" if verb == "plan" else f" (fix: {self.prog} config apply)"),
+                f"sccache wrapper ({'missing' if st == OwnedState.MISSING else 'outdated'}; {values})"
+                + ("" if verb == ConfigView.PLAN else f" (fix: {self.prog} config apply)"),
             )
         ]
 
@@ -212,7 +226,7 @@ class ToolConfig:
         path = os.path.join(self.home, CARGO_CFG_REL)
         return sccache_state(path, self.files.read_settings(path), wrapper_path(self.home))
 
-    def sccache_lines(self, verb: str, settings: Settings | None, flag: bool | None) -> list[tuple[str, str, str]]:
+    def sccache_lines(self, verb: ConfigView, settings: Settings | None, flag: bool | None) -> list[ConfigLine]:
         home = self.home
         st = self.sccache_state()
         shown = tilde(st["path"], home)
@@ -220,7 +234,7 @@ class ToolConfig:
         values = wrapper_values(settings)
         off = f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); {SCCACHE_REBUILD}"
         if st["error"]:
-            return [("?", shown, f"sccache: the file {st['error']}")]
+            return [(ConfigMark.UNKNOWN, shown, f"sccache: the file {st['error']}")]
         foreign = st["value"] is not None and not st["ours"]
         yours = f"rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is"
         if flag is False:
@@ -228,7 +242,7 @@ class ToolConfig:
                 if st["remove"]:
                     return [
                         (
-                            "remove",
+                            ConfigMark.REMOVE,
                             shown,
                             f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
                             f"~/{WRAPPER_REL} stays (unused, harmless)",
@@ -236,43 +250,47 @@ class ToolConfig:
                     ]
                 return [
                     (
-                        BY_HAND,
+                        ConfigMark.BY_HAND,
                         shown,
                         f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
                     )
                 ]
-            return [("keep", shown, f"sccache ({why}): {yours}")] if foreign else [("off", shown, "sccache: off")]
+            return (
+                [(ConfigMark.KEEP, shown, f"sccache ({why}): {yours}")]
+                if foreign
+                else [(ConfigMark.OFF, shown, "sccache: off")]
+            )
         text = self.files.wrapper_text(values)
         if not want:
             if st["ours"]:
                 out = [
                     (
-                        "on",
+                        ConfigMark.ON,
                         shown,
                         f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
                         f"{self.prog} config apply --no-sccache does)",
                     )
                 ]
-                return out + [ln for ln in self.wrapper_lines(verb, text, values) if ln[0] != "ok"]
-            return [("off", shown, off + (f"; {yours}" if foreign else ""))]
+                return out + [ln for ln in self.wrapper_lines(verb, text, values) if ln[0] != ConfigMark.OK]
+            return [(ConfigMark.OFF, shown, off + (f"; {yours}" if foreign else ""))]
         if foreign:
-            return [("keep", shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
+            return [(ConfigMark.KEEP, shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
         out = self.wrapper_lines(verb, text, values)
         if st["ours"]:
-            out.append(("ok", shown, f"sccache: rustc-wrapper set ({why})"))
+            out.append((ConfigMark.OK, shown, f"sccache: rustc-wrapper set ({why})"))
         elif st["add"]:
             out.append(
                 (
-                    "write",
+                    ConfigMark.WRITE,
                     shown,
                     f'sccache ({why}): [build] rustc-wrapper = "~/{WRAPPER_REL}"; {SCCACHE_REBUILD}'
-                    + ("" if verb == "plan" else f" (missing: {self.prog} config apply)"),
+                    + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
                 )
             )
         else:
             out.append(
                 (
-                    BY_HAND,
+                    ConfigMark.BY_HAND,
                     shown,
                     f"sccache ({why}): CST cannot add the key safely here: put "
                     f'rustc-wrapper = "{wrapper_path(home)}" into [build] yourself',
@@ -292,7 +310,7 @@ class ToolConfig:
                 err=True,
             )
             return 1
-        if self.files.wrapper_state(text) == "conflict":
+        if self.files.wrapper_state(text) == OwnedState.CONFLICT:
             self.out.say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
             return 1
         try:
@@ -364,69 +382,73 @@ class ToolConfig:
 
     def lines(
         self,
-        verb: str,
+        verb: ConfigView,
         settings: Settings | None = None,
         lean: bool | None = None,
         sccache: bool | None = None,
-    ) -> list[tuple[str, str, str]]:
+    ) -> list[ConfigLine]:
         """The plan or status lines of the settings (lean, sccache: the explicit
         flags)."""
         home = self.home
-        out: list[tuple[str, str, str]] = []
+        out: list[ConfigLine] = []
         for name, path, st, _ in self.items():
             shown = tilde(path, home)
             if name == "cargo":
-                if st == "set":
-                    if self.files.build_dir_is_csts():
-                        out.append(("ok", shown, "build-dir = CST's line (rust:build prunes that folder)"))
-                    else:
+                match st:
+                    case ToolSettingState.SET:
+                        if self.files.build_dir_is_csts():
+                            out.append((ConfigMark.OK, shown, "build-dir = CST's line (rust:build prunes that folder)"))
+                        else:
+                            out.append(
+                                (
+                                    ConfigMark.KEEP,
+                                    shown,
+                                    "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
+                                )
+                            )
+                    case ToolSettingState.BY_HAND:
                         out.append(
                             (
-                                "keep",
+                                ConfigMark.BY_HAND,
                                 shown,
-                                "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
+                                f'has a [build] table: add build-dir = "{home}/{ROOT_REL}/{HASH_VAR}" there yourself',
                             )
                         )
-                elif st == "by-hand":
-                    out.append(
-                        (
-                            BY_HAND,
-                            shown,
-                            f'has a [build] table: add build-dir = "{home}/{ROOT_REL}/{HASH_VAR}" there yourself',
+                    case ToolSettingState.WRITE:
+                        out.append(
+                            (
+                                ConfigMark.WRITE,
+                                shown,
+                                f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
+                                + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
+                            )
                         )
-                    )
-                elif st == "write":
-                    out.append(
-                        (
-                            "write",
-                            shown,
-                            f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
-                            + ("" if verb == "plan" else f" (missing: {self.prog} config apply)"),
-                        )
-                    )
-                else:
-                    out.append(("?", shown, CANNOT_READ))
+                    case _:
+                        out.append((ConfigMark.UNKNOWN, shown, CANNOT_READ))
             else:
-                if st == "set":
-                    out.append(("ok", shown, "link-mode already set"))
-                elif st == "by-hand":
-                    out.append((BY_HAND, shown, 'has tables: add link-mode = "clone" at its top yourself'))
-                elif st == "write":
-                    out.append(
-                        (
-                            "write",
-                            shown,
-                            'link-mode = "clone" (hardlinks cannot cross subvolumes)'
-                            + ("" if verb == "plan" else f" (missing: {self.prog} config apply)"),
+                match st:
+                    case ToolSettingState.SET:
+                        out.append((ConfigMark.OK, shown, "link-mode already set"))
+                    case ToolSettingState.BY_HAND:
+                        out.append(
+                            (ConfigMark.BY_HAND, shown, 'has tables: add link-mode = "clone" at its top yourself')
                         )
-                    )
-                else:
-                    out.append(("?", shown, CANNOT_READ))
+                    case ToolSettingState.WRITE:
+                        out.append(
+                            (
+                                ConfigMark.WRITE,
+                                shown,
+                                'link-mode = "clone" (hardlinks cannot cross subvolumes)'
+                                + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
+                            )
+                        )
+                    case _:
+                        out.append((ConfigMark.UNKNOWN, shown, CANNOT_READ))
         out += self.lean_lines(verb, settings, lean)
         out += self.sccache_lines(verb, settings, sccache)
         return out
 
-    def run(self, action: str, lean: bool | None = None, sccache: bool | None = None) -> int:
+    def run(self, action: ToolchainsAction, lean: bool | None = None, sccache: bool | None = None) -> int:
         home = self.home
         settings: Settings | None
         try:
@@ -436,28 +458,28 @@ class ToolConfig:
             off = [w for w, flag in (("lean debug info", lean), ("sccache", sccache)) if flag is None]
             if off:
                 self.out.say(f"note: BAD SETTINGS ({e}): {' and '.join(off)} treated as off", 4, err=True)
-        if action == "plan":
-            lines = self.lines("plan", settings, lean, sccache)
+        if action == ToolchainsAction.PLAN:
+            lines = self.lines(ConfigView.PLAN, settings, lean, sccache)
             for st, shown, note in lines:
                 self.out.say(f"  {st:<8} {shown:<24} {note}")
-            if any(st in ("write", "remove") for st, _, _ in lines):
+            if any(st in (ConfigMark.WRITE, ConfigMark.REMOVE) for st, _, _ in lines):
                 flags = {True: " --lean-debuginfo", False: " --no-lean-debuginfo"}.get(lean, "")
                 flags += {True: " --sccache", False: " --no-sccache"}.get(sccache, "")
                 self.out.say(f"Apply with: {self.prog} config apply" + flags)
             return 0
         rc = 0
         for name, path, st, text in self.items():
-            if st == "unreadable":
+            if st == ToolSettingState.UNREADABLE:
                 self.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
                 rc = 1
-            elif name == "cargo" and st == "set":
+            elif name == "cargo" and st == ToolSettingState.SET:
                 self.out.say(f"kept:      {path} (build-dir already set)")
-            elif name == "cargo" and st == "by-hand":
+            elif name == "cargo" and st == ToolSettingState.BY_HAND:
                 self.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
                 self.out.say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
-            elif name == "uv" and st == "set":
+            elif name == "uv" and st == ToolSettingState.SET:
                 self.out.say(f"kept:      {path} (link-mode already set)")
-            elif name == "uv" and st == "by-hand":
+            elif name == "uv" and st == ToolSettingState.BY_HAND:
                 self.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
             else:
                 err = self.files.append(path, text)

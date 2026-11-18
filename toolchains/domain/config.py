@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import tomllib
+from enum import StrEnum
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
@@ -22,9 +23,46 @@ from toolchains.domain.build import HASH_VAR, ROOT_REL
 from toolchains.domain.common import parses_as, plain
 
 
-# The words of the plan and status lines that name what CST could not do.
+# The note of a plan or status line whose file CST cannot read.
 CANNOT_READ = "cannot be read"
-BY_HAND = "BY HAND"
+
+
+class ConfigMark(StrEnum):
+    """The first column of a plan or status line of config: what apply does or did
+    (UNKNOWN and BY_HAND: what CST could not do)."""
+
+    OK = "ok"
+    KEEP = "keep"
+    WRITE = "write"
+    REMOVE = "remove"
+    ON = "on"
+    OFF = "off"
+    UNKNOWN = "?"
+    BY_HAND = "BY HAND"
+
+
+# One plan or status line of config: (mark, the file as shown, the note).
+type ConfigLine = tuple[ConfigMark, str, str]
+
+
+class ConfigView(StrEnum):
+    """The command that shows config's lines: config plan or status."""
+
+    PLAN = "plan"
+    STATUS = "status"
+
+
+class ToolSettingState(StrEnum):
+    """One tool's setting (cargo's build-dir, uv's link-mode) in its file: CST's line is
+    there, the table is there set by hand, apply writes the line, or the file cannot be
+    read."""
+
+    SET = "set"
+    BY_HAND = "by-hand"
+    WRITE = "write"
+    UNREADABLE = "unreadable"
+
+
 # Exactly what `cst btrfs snapshots setup` always wrote (same lines, same
 # comments, same rules): a setting already there is never changed.
 CARGO_CFG_REL = ".cargo/config.toml"

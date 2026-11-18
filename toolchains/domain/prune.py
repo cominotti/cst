@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict, TypeIs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
@@ -177,6 +177,28 @@ class UvRun(TypedDict):
 type RunRecord = RustRun | UvRun
 
 
+class SavedRun(TypedDict):
+    """A run summary as it is read back: any JSON object (RustRun or UvRun as this
+    version writes them; an older one may lack keys). The values are as the file holds
+    them: status checks each one it shows (json_number)."""
+
+    time: Json
+    deleted: NotRequired[Json]
+    freed: NotRequired[Json]
+    total: NotRequired[Json]
+    folders: NotRequired[Json]
+    busy: NotRequired[Json]
+    failed: NotRequired[Json]
+    trimmed: NotRequired[Json]
+    trim_freed: NotRequired[Json]
+    removed: NotRequired[Json]
+
+
+def is_saved_run(data: object) -> TypeIs[SavedRun]:
+    """DATA (what json.load gave) is a run summary: a JSON object; its keys are not checked."""
+    return isinstance(data, dict)
+
+
 def json_number(value: Json) -> float:
     """A number of a saved run summary (a bool counts, as it did); TypeError for another
     value, as the arithmetic on it raised."""
@@ -185,7 +207,7 @@ def json_number(value: Json) -> float:
     raise TypeError(f"not a number: {value!r}")
 
 
-def rust_last_run(s: Mapping[str, Json]) -> str:
+def rust_last_run(s: SavedRun) -> str:
     """One line of status from rust:build's saved summary (an older one may lack keys)."""
     extra = f", {s['busy']} busy" if s.get("busy") else ""
     extra += f", {s['failed']} failed" if s.get("failed") else ""
@@ -200,7 +222,7 @@ def rust_last_run(s: Mapping[str, Json]) -> str:
     )
 
 
-def last_run_text(tid: str, s: Mapping[str, Json]) -> str:
+def last_run_text(tid: str, s: SavedRun) -> str:
     """One line of status from target TID's saved summary; KeyError for an id of no target here."""
     if tid == RUST_BUILD.id:
         return rust_last_run(s)
@@ -209,7 +231,7 @@ def last_run_text(tid: str, s: Mapping[str, Json]) -> str:
     raise KeyError(tid)
 
 
-def uv_last_run(s: Mapping[str, Json]) -> str:
+def uv_last_run(s: SavedRun) -> str:
     """One line of status from python:uv's saved summary."""
     return (
         f"{when(json_number(s['time']))}, removed {s.get('removed', 0)} file(s) ({gib(json_number(s.get('freed', 0)))})"

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
     from toolchains.application.prune import Target
     from toolchains.domain.build import CargoProc
+    from toolchains.domain.common import ToolchainsAction, ToolchainsCommand
     from toolchains.domain.prune import Settings
     from toolchains.ports import (
         BuildTreePort,
@@ -97,7 +98,7 @@ def systemctl_program() -> str | None:
     return os.environ.get("CST_TOOLCHAINS_SYSTEMCTL") or None
 
 
-def set_output_mode(cmd: str, action: str | None) -> None:
+def set_output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None) -> None:
     """SIGPIPE at its default for a command that only reads (see adapters.program.output_mode)."""
     output_mode(cmd, action)
 
