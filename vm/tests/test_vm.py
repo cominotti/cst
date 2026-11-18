@@ -1726,7 +1726,7 @@ class PackageTest(unittest.TestCase):
         with (
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-            mock.patch.object(vm_adapters, "restore_default_signals", lambda: helped.append(True)),
+            mock.patch.object(vm_adapters, "restore_default_signals", side_effect=lambda: helped.append(True)),
         ):
             self.assertEqual(vm_cli.main(["help"], doc="DOC", entry_file=TOOL), 0)
         self.assertEqual((out.getvalue(), helped), ("DOC\n", [True]))
@@ -1739,7 +1739,7 @@ class PackageTest(unittest.TestCase):
             patch_vm("read_index", lambda cfg: []),
             mock.patch("sys.stdout", out),
             # In-process: SIGPIPE at its default would stay so for the rest of the test run.
-            mock.patch.object(vm_adapters, "restore_default_signals", lambda: restored.append(True)),
+            mock.patch.object(vm_adapters, "restore_default_signals", side_effect=lambda: restored.append(True)),
         ):
             self.assertEqual(vm_cli.main(["list", "win"], doc="DOC", entry_file=TOOL), 0)
         self.assertIn("no VM backups of win", out.getvalue())
@@ -1926,8 +1926,9 @@ class TimerUseCaseTest(unittest.TestCase):
         ]
         for states, ready, words in cases:
             timers = FakeTimers(states, [])
+            systemd = FakeSystemd(timers)
             with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
-                vm_application.timer_on(timers, FakeSystemd(timers), "win", ready, lambda s: None)
+                vm_application.timer_on(timers, systemd, "win", ready, lambda s: None)
             self.assertEqual(timers.done, [])
 
     def test_a_failed_start_leaves_the_record_pending(self) -> None:
@@ -1936,8 +1937,9 @@ class TimerUseCaseTest(unittest.TestCase):
             ("reload", "^systemctl daemon-reload: Access denied$", ["write /p"]),
         ):
             timers = FakeTimers({"/p": "missing"}, [])
+            systemd = FakeSystemd(timers, fail)
             with self.subTest(fail=fail), self.assertRaisesRegex(Refused, words):
-                vm_application.timer_on(timers, FakeSystemd(timers, fail), "win", lambda: None, lambda s: None)
+                vm_application.timer_on(timers, systemd, "win", lambda: None, lambda s: None)
             self.assertEqual(timers.done, done)
 
     def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
@@ -1958,8 +1960,9 @@ class TimerUseCaseTest(unittest.TestCase):
 
     def test_off_refuses_when_the_timer_stays_on(self) -> None:
         timers = FakeTimers({"/p": "ok"}, [self.unit])
+        systemd = FakeSystemd(timers, "off")
         with self.assertRaisesRegex(Refused, f"^systemctl disable --now {self.unit}: denied$"):
-            vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
+            vm_application.timer_off(timers, systemd, "win", lambda s: None)
         self.assertEqual(timers.done, [])
         timers = FakeTimers({"/p": "ok"}, [])  # off already: the failure does not matter
         vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
@@ -1975,8 +1978,9 @@ class TimerUseCaseTest(unittest.TestCase):
         st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
         timers = FakeTimers({}, [])
+        systemd = FakeSystemd(timers)
         with self.assertRaises(Refused):
-            vm_application.timer_status(timers, FakeSystemd(timers), "bad name")
+            vm_application.timer_status(timers, systemd, "bad name")
 
 
 class PatchVmTest(unittest.TestCase):
