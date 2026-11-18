@@ -212,7 +212,10 @@ class InstallServiceRecordTest(unittest.TestCase):
         req = InstallRequest(values={"UUID": "u"})
         list(self.svc.install([self.a, self.t], req))
         lines = list(self.svc.remove([self.svc.placement(e, req) for e in (self.a, self.t)]))
-        self.assertEqual(lines, ["removed:   /usr/local/sbin/a", "removed:   /etc/t"])
+        # In the reverse of the order given (the manifest's, which install writes in): what is written
+        # later may use what came before (a front that runs a program written before it, a unit that
+        # runs a program), so it goes first.
+        self.assertEqual(lines, ["removed:   /etc/t", "removed:   /usr/local/sbin/a"])
         self.assertEqual(self.target.files, {})
         self.assertEqual(self.record.doc(), EMPTY_RECORD)
         # No record at all (an install from before it): the manifest's files go all the same.
