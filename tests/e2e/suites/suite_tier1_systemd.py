@@ -4582,6 +4582,82 @@ echo test_108-ok
         ).stdout
         self.assertIn("test_108-ok", out)
 
+    def test_109_btrfs_snapshot_runtime_installed_runs_as_root(self) -> None:
+        """btrfs-snapshot and btrfs-snapshot-runtime as install writes them (the runtime a zipapp in
+        /usr/local/sbin, next to the bash front), run as real root, as tier 2's test_03, test_03a and
+        test_08 run them on btrfs: the front hands each command to the runtime of its folder and the
+        runtime runs the engine of its folder under the lock it hands on (convert-planned --lock-held);
+        what can be checked without btrfs: configure, not set up, nas off, purge without a snapshot
+        folder, hourly up to the free-space reading, a usage error, a lock another process holds, and
+        the installer writing the runtime first and removing it last."""
+        d = "/var/tmp/e2e-snapshot-runtime"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = "btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -rf {d} /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
+            f"if [ -e {d}.conf ]; then mv -f {d}.conf {conf}; else rm -f {conf}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+d={d} conf={conf}
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
+install -d -m 0755 "$d" /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d.conf"; fi
+written="$({inst} install {files})"
+printf '%s\n' "$written"
+w_rt="$(grep -n 'btrfs-snapshot-runtime$' <<<"$written" | cut -d: -f1)"
+w_front="$(grep -n 'sbin/btrfs-snapshot$' <<<"$written" | cut -d: -f1)"
+[ -n "$w_rt" ] && [ -n "$w_front" ] && [ "$w_rt" -lt "$w_front" ]
+S=/usr/local/sbin/btrfs-snapshot
+[ "$(head -c 2 /usr/local/sbin/btrfs-snapshot-runtime)" = "#!" ]
+printf '%s\n' "NAS_RESTIC_HOST=e2e" >"$conf"
+rc=0; "$S" configure >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ ! -s "$d/out" ]
+printf '%s\n' "HOME_MOUNT=/home" "NAS_RESTIC_HOST=e2e" >"$conf"
+rc=0; "$S" list >"$d/out" 2>"$d/err" || rc=$?
+[ "$rc" = 1 ] && [ ! -s "$d/out" ]
+grep -qxF "not set up; run 'cst btrfs snapshots setup'" "$d/err"
+printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_ENABLED=0" "NAS_RESTIC_HOST=e2e" >"$conf"
+rc=0; "$S" nas >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 0 ]
+grep -qxF "<6>btrfs-snapshot: NAS backup not enabled" "$d/out"
+rc=0; "$S" purge >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 0 ]
+grep -qxF "No snapshot directory: nothing to delete." "$d/out"
+[ "$(stat -c %a /run/btrfs-snapshot.lock)" = 644 ]
+# hourly: the engine's step under the lock handed on, then the free space (no btrfs here).
+rc=0; "$S" hourly >"$d/out" 2>"$d/err" || rc=$?
+cat "$d/out" "$d/err"
+[ "$rc" = 1 ]
+grep -qxF "<3>btrfs-snapshot: cannot read free space" "$d/out"
+! grep -q "convert-planned" "$d/out" "$d/err"
+rc=0; "$S" prune --x >"$d/out" 2>"$d/err" || rc=$?
+[ "$rc" = 2 ]
+grep -qxF "usage: btrfs-snapshot prune [--dry-run] [--allow-mass-delete]" "$d/err"
+# Another process holds the lock: hourly skips.
+flock /run/btrfs-snapshot.lock sleep 5 &
+holder=$!
+sleep 1
+rc=0; "$S" hourly >"$d/out" 2>&1 || rc=$?
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+[ "$rc" = 0 ]
+grep -qxF "<5>btrfs-snapshot: another conversion/snapshot run is active; skipped" "$d/out"
+removed="$({inst} remove {files})"
+printf '%s\n' "$removed"
+r_rt="$(grep -n 'btrfs-snapshot-runtime$' <<<"$removed" | cut -d: -f1)"
+r_front="$(grep -n 'sbin/btrfs-snapshot$' <<<"$removed" | cut -d: -f1)"
+[ -n "$r_rt" ] && [ -n "$r_front" ] && [ "$r_front" -lt "$r_rt" ]
+echo test_109-ok
+""",
+        ).stdout
+        self.assertIn("test_109-ok", out)
+
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and
         cst-pending-alerts as install writes them (zipapps from installer.py payload). The health
