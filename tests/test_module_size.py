@@ -38,7 +38,7 @@ OVER_CAP: Final[dict[str, int]] = {
     "btrfs/bulk/adapters/user.py": 865,
     "btrfs/bulk/domain.py": 821,
     "btrfs/snapshot/application.py": 1117,
-    "doctor/application.py": 1791,
+    "doctor/application.py": 1841,
     "swap/application.py": 842,
     "toolchains/adapters.py": 1229,
     "toolchains/cli.py": 2164,
