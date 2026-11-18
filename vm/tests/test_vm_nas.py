@@ -956,8 +956,8 @@ class SharedRepositoryTest(Nas):
         # btrfs-snapshot's fake machine (btrfs/tests/snapshot_fakes.py): the whole bash program
         # runs there. cst-vm reads the same settings, password and restic cache below its root.
         home = RuntimeTest()
+        self.addCleanup(home.doCleanups)  # also when setUp stops halfway
         home.setUp()
-        self.addCleanup(home.doCleanups)
         home.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_RESTIC_HOST="sophia")
         self.env.update(
             CST_VM_NAS_CONF=home.path("etc/btrfs-setup/snapshots.conf"),

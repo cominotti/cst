@@ -1761,7 +1761,11 @@ class SnapshotSeamTest(BulkBase):
             f.write(f'printf "%s %s\\n" "$1" "${{CST_SNAPSHOT_ROOT-unset}}" >>{log}\n')
         host = Host(self.paths, self.wiring.tree, lambda: fake)
         bulk = os.path.join(self.home, "Bulk")
-        with mock.patch.dict(os.environ, {"CST_SNAPSHOT_ROOT": os.path.join(self.tmp, "elsewhere"), "KEPT": "1"}):
+        # The run gets this process's environment: a clean one (no BASH_ENV; SHLVL set, so the bash
+        # it starts with the runner's socket as stdin reads no ~/.bashrc).
+        clean = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "SHLVL": "1"}
+        seam = {"CST_SNAPSHOT_ROOT": os.path.join(self.tmp, "elsewhere"), "KEPT": "1"}
+        with mock.patch.dict(os.environ, {**clean, **seam}, clear=True):
             self.assertEqual(host.busy_paths([bulk], self.home), set())
             host.convert_bulk_dir(bulk)
         with open(log, encoding="utf-8") as f:

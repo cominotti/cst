@@ -21,16 +21,12 @@ import signal
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import RuntimeTest, read
+from btrfs.tests.snapshot_fakes import RuntimeTest, log, read
 
 ALIAS = "btrfs-setup-nas"
 REPO_ID = "ab" * 32
 SNAP = "home.20261118T0905"
 DAY = 86400
-
-
-def log(level: int, text: str) -> str:
-    return f"<{level}>btrfs-snapshot: {text}"
 
 
 class Base(RuntimeTest):
@@ -99,7 +95,7 @@ class GateTest(Base):
     def test_not_enabled(self) -> None:
         self.conf(NAS_ENABLED="0")
         self.assertEqual(self.nas(), (0, [log(6, "NAS backup not enabled")], ""))
-        self.assertEqual([c for c in self.calls() if c[0] != "hostname"], [])
+        self.assertEqual(self.calls_but_hostname(), [])
 
     def test_restic_not_installed_yet(self) -> None:
         os.remove(os.path.join(self.bin, "restic"))
@@ -285,12 +281,19 @@ class BackupTest(Base):
         self.write(self.state_file("nas-repo-id"), old + "\n")
         for name in ("nas-done-home", "nas-summary", "nas-last-prune", "nas-last-check", "nas-check-failures"):
             self.write(self.state_file(name), f"{SNAP} {old}\n" if name == "nas-done-home" else "1\n")
+        # Pruned and checked just now, in the old repository: only forgetting it makes both due.
+        self.days_ago("nas-last-prune", 0)
+        self.days_ago("nas-last-check", 0)
+        # The record of a source this run does not back up goes too.
+        self.write(self.state_file("nas-done-Workspace"), f"Workspace.20261118T0905 {old}\n")
         rc, lines, _ = self.nas()
         self.assertEqual(
             lines[0], log(5, "NAS: another repository than last time (id cdcdcdcd -> abababab); its records start over")
         )
         self.assertIn(self.backup_args(), self.restic_calls())
         self.assertIn("--prune", self.restic_calls()[4])
+        self.assertIn("check", self.restic_commands())
+        self.assertFalse(os.path.exists(self.state_file("nas-done-Workspace")))
         self.assertEqual(self.read_state("nas-done-home"), f"{SNAP} {REPO_ID}\n")
         self.assertFalse(os.path.exists(self.state_file("nas-check-failures")))
 
@@ -509,6 +512,8 @@ class LeftoverMountTest(Base):
             if any(c[0] == "mount" for c in self.calls()):
                 break
             time.sleep(0.05)
+        else:
+            self.fail("the run never reached its mount")
         p.send_signal(signal.SIGTERM)
         p.communicate(timeout=60)
         self.assertEqual(p.returncode, 143)
@@ -528,6 +533,8 @@ class LeftoverMountTest(Base):
                     if any(c[0] == "mount" for c in self.calls()):
                         break
                     time.sleep(0.05)
+                else:
+                    self.fail("the run never reached its mount")
                 p.send_signal(sig)
                 p.communicate(timeout=60)
                 self.assertEqual(p.returncode, 143)

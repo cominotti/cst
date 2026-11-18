@@ -34,6 +34,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -234,6 +235,8 @@ if name == "umount":
     save()
     sys.exit(0)
 if name == "cp":
+    if not all(inside(a) for a in args if a.startswith("/")):
+        sys.exit(99)
     if m.get("cp_err"):
         sys.stderr.write(m["cp_err"])
         sys.exit(m.get("cp_rc", 1))
@@ -282,6 +285,11 @@ if name == "restic":
     answer(r, cmd)
 sys.exit("fake: not faked: %s %s" % (name, args))
 """
+
+
+def log(level: int, text: str) -> str:
+    """A journal line of btrfs-snapshot (its <level> prefix)."""
+    return f"<{level}>btrfs-snapshot: {text}"
 
 
 def read(path: str) -> str:
@@ -447,9 +455,16 @@ class RuntimeTest(unittest.TestCase):
             cwd=self.tmp,
             umask=UMASK,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        self.addCleanup(p.kill)
+        self.addCleanup(self.end_prog, p)
         return p
+
+    def end_prog(self, p: subprocess.Popen[str]) -> None:
+        """Kills what is left of a started run, the fakes it started too, and reaps it."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
 
     def forget_calls(self) -> None:
         for p in (self.calls_file, self.calls_file + ".env"):
@@ -481,6 +496,13 @@ class RuntimeTest(unittest.TestCase):
         found: list[list[object]] = [json.loads(ln) for ln in lines]
         return [c for c in found if name is None or c[0] == name]
 
+    def calls_but_hostname(self) -> list[list[object]]:
+        """The calls of the fakes besides hostname -s, which every start runs (NAS_RESTIC_HOST's default)."""
+        return [c for c in self.calls() if c[0] != "hostname"]
+
+    def lines(self, text: str) -> list[str]:
+        return text.splitlines()
+
     def core_calls(self) -> list[list[object]]:
         return [c[1:] for c in self.calls("btrfs-snapshot-core")]
 
@@ -493,10 +515,6 @@ class RuntimeTest(unittest.TestCase):
 
     def read_state(self, name: str) -> str:
         return read(self.state_file(name))
-
-    def home_source(self) -> str:
-        """The --source argument of /home with POLICY."""
-        return f"home={self.top}/home"
 
     def common(self, cmd: str) -> list[str]:
         """The arguments every snapshot/prune/finish call of the core starts with."""

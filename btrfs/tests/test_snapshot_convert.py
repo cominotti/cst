@@ -23,16 +23,12 @@ import stat
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import RuntimeTest, read
+from btrfs.tests.snapshot_fakes import RuntimeTest, log, read
 
 PLAN = "etc/btrfs-setup/convert-plan"
 BOOT_FLAG = "etc/btrfs-setup/convert-at-boot"
 FIRST = "Converting planned directories (busy ones wait for the next boot)..."
 BOOT_FIRST = "btrfs-snapshot: converting the directories the desktop session kept busy..."
-
-
-def log(level: int, text: str) -> str:
-    return f"<{level}>btrfs-snapshot: {text}"
 
 
 class Base(RuntimeTest):
@@ -65,9 +61,6 @@ class Base(RuntimeTest):
         self.assertEqual(read(os.path.join(path, "file")), "data\n")
         self.assertEqual(read(os.path.join(path, "sub", "inner")), "inner\n")
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o750)
-
-    def lines(self, text: str) -> list[str]:
-        return text.splitlines()
 
 
 class PlannedLeftTest(Base):
@@ -322,6 +315,16 @@ class ConvertTest(Base):
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(read(os.path.join(ws, "file")), "data\nlate")
 
+    def test_an_entry_created_during_the_clone_discards_it(self) -> None:
+        ws = self.tree("Workspace")
+        self.plan(f"copy {ws}")
+        self.machine(cp_write=os.path.join(ws, "new"))
+        r = self.run_prog("convert")
+        self.assertIn(log(3, f"convert: {ws}: entry count differs (5 vs 4); left unchanged"), self.lines(r.stdout))
+        self.assertFalse(self.is_subvol(ws))
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(read(os.path.join(ws, "new")), "late")
+
     def test_a_process_that_starts_using_it_during_the_clone_discards_it(self) -> None:
         ws = self.tree("Workspace")
         self.plan(f"copy {ws}")
@@ -357,7 +360,7 @@ class ConvertBootTest(Base):
         self.plan(f"copy {self.tree('Workspace')}")
         r = self.run_prog("convert-boot")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        self.assertEqual([c for c in self.calls() if c[0] != "hostname"], [])
+        self.assertEqual(self.calls_but_hostname(), [])
 
     def test_converts_and_leaves_the_old_tree_to_the_hourly_run(self) -> None:
         ws = self.tree("Workspace")

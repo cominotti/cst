@@ -118,8 +118,10 @@ class SetupHandsNoSeamTest(unittest.TestCase):
                 [
                     'SRC="$1"; . "$1/setup-snapshots.bash"',
                     'SNAP_RUNTIME="$T/btrfs-snapshot"; PROG=cst-btrfs-test',
-                    # What snap_disable does besides the purge (units, mounts) is not this test's.
-                    "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }",
+                    # What snap_disable does besides the purge (units, mounts, the btrbk configs of an
+                    # older version in the host's /etc/btrbk) is not this test's, and stays off the host.
+                    "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }; cst_remove() { :; }",
+                    """grep() { [[ " $* " == *" /etc/btrbk/"* ]] && return 1; command grep "$@"; }""",
                     'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"',
                     "export CST_SNAPSHOT_ROOT=/elsewhere",
                     body,
@@ -133,7 +135,7 @@ class SetupHandsNoSeamTest(unittest.TestCase):
                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": d},
                 stdin=subprocess.DEVNULL,
             )
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
             with open(os.path.join(d, "seen"), encoding="utf-8") as f:
                 return f.read().splitlines()
 

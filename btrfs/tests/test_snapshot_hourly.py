@@ -17,16 +17,11 @@ import shutil
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import GIB, USAGE, RuntimeTest
+from btrfs.tests.snapshot_fakes import GIB, USAGE, RuntimeTest, log
 
-TAG = "<{}>btrfs-snapshot: "
 HOME_POLICY = "72h 7d 4w 3m"
 WS_POLICY = "48h 7d"
 PODMAN = ["--caches-skip", "home=u/.local/share/containers"]
-
-
-def log(level: int, text: str) -> str:
-    return TAG.format(level) + text
 
 
 class Base(RuntimeTest):
@@ -44,13 +39,6 @@ class Base(RuntimeTest):
 
     def alert(self, urgency: str, title: str, body: str) -> list[object]:
         return ["-u", urgency, "-a", "btrfs-snapshot", title, body]
-
-    def lines(self, text: str) -> list[str]:
-        return text.splitlines()
-
-    def calls_but_hostname(self) -> list[list[object]]:
-        """The calls of the fakes besides hostname -s, which every start runs (NAS_RESTIC_HOST's default)."""
-        return [c for c in self.calls() if c[0] != "hostname"]
 
     def recent(self, name: str) -> None:
         """STATE/name holds an epoch of the last two minutes."""
@@ -472,7 +460,11 @@ class AlertStampTest(Base):
         self.assertEqual(out.splitlines()[0], line)
         out, sent = self.paused_run()
         self.assertEqual((out.splitlines()[0], sent), (line, []))
+        # Still within the day: the journal line only.
         stamp = self.state_file("alerted-paused")
+        os.utime(stamp, (time.time() - 86400 + 120, time.time() - 86400 + 120))
+        out, sent = self.paused_run()
+        self.assertEqual((out.splitlines()[0], sent), (line, []))
         os.utime(stamp, (time.time() - 86401, time.time() - 86401))
         _, sent = self.paused_run()
         self.assertEqual(len(sent), 1)
@@ -619,6 +611,11 @@ class WaitingTest(Base):
         self.write(self.state_file("drop-pending"), old + "\n")
         lines, sent = self.wait_run("pending-since")
         self.assertEqual(lines, [log(5, "old trees still being deleted (1); no snapshot this hour")])
+        self.assertEqual(sent, [])
+        # Waiting for almost a day: still no alert.
+        t = time.time() - 86400 + 120
+        os.utime(self.state_file("pending-since"), (t, t))
+        _, sent = self.wait_run("pending-since")
         self.assertEqual(sent, [])
         self.a_day_ago("pending-since")
         _, sent = self.wait_run("pending-since")
