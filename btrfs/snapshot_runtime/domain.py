@@ -50,13 +50,42 @@ class GuardError(StrEnum):
     NOT_A_NUMBER = "not-a-number"
 
 
+def _wrap(n: int) -> int:
+    """n as bash's 64-bit integer arithmetic gives it (it wraps around)."""
+    n &= (1 << 64) - 1
+    return n - (1 << 64) if n >= 1 << 63 else n
+
+
+def _based(base: int, digits: str) -> int:
+    """BASE#DIGITS as bash reads it: base 2 to 64; digits 0-9, then a-z, A-Z, @ and _ (a-z and A-Z
+    alike up to base 36); a digit not below the base is an error."""
+    if not 2 <= base <= 64:
+        raise ValueError("invalid arithmetic base")
+    n = 0
+    for c in digits:
+        if c.isdigit():
+            d = int(c)
+        elif c.islower():
+            d = ord(c) - ord("a") + 10
+        elif c.isupper():
+            d = ord(c) - ord("A") + (10 if base <= 36 else 36)
+        else:
+            d = 62 if c == "@" else 63
+        if d >= base:
+            raise ValueError("value too great for base")
+        n = n * base + d
+    return _wrap(n)
+
+
 class _Arith:
     """The part of bash arithmetic a setting can hold: integer constants (decimal, a leading 0
-    octal, 0x hexadecimal), unary + and -, * / %, + -, parentheses, blanks. A name is an unset
-    variable (NOT_A_NUMBER); anything else, or a division by 0, is an error (BAD_NUMBER)."""
+    octal, 0x hexadecimal, BASE#DIGITS), unary + and -, ** (right to left, below unary -: -2**2 is 4),
+    * / %, + -, parentheses, blanks. A name is an unset variable (NOT_A_NUMBER): the file is read as
+    data, a name is no value; anything else, a division by 0 or a negative exponent is an error
+    (BAD_NUMBER)."""
 
     def __init__(self, text: str) -> None:
-        self.tokens = re.findall(r"\s*([0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)
+        self.tokens = re.findall(r"\s*(\*\*|[0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)
         self.pos = 0
 
     def peek(self) -> str:
@@ -72,22 +101,32 @@ class _Arith:
         while self.peek() in ("+", "-"):
             op = self.take()
             m = self.term()
-            n = n + m if op == "+" else n - m
+            n = _wrap(n + m if op == "+" else n - m)
         return n
 
     def term(self) -> int:
-        n = self.unary()
+        n = self.power()
         while self.peek() in ("*", "/", "%"):
             op = self.take()
-            m = self.unary()
+            m = self.power()
             if op == "*":
-                n *= m
+                n = _wrap(n * m)
             elif m == 0:
                 raise ValueError("division by 0")
             else:
                 q = bash_div(n, m)
                 n = q if op == "/" else n - q * m
         return n
+
+    def power(self) -> int:
+        n = self.unary()
+        if self.peek() != "**":
+            return n
+        self.take()
+        e = self.power()
+        if e < 0:
+            raise ValueError("exponent less than 0")
+        return _wrap(pow(n, e, 1 << 64))
 
     def unary(self) -> int:
         if self.peek() in ("+", "-"):
@@ -105,6 +144,8 @@ class _Arith:
             raise LookupError(tok)
         if re.fullmatch(r"0[xX][0-9a-fA-F]*", tok):
             return int(tok[2:] or "0", 16)
+        if m := re.fullmatch(r"([0-9]+)#([0-9A-Za-z@_]+)", tok):
+            return _based(int(m.group(1)), m.group(2))
         n = bash_int(tok)
         if n is None:
             raise ValueError(tok)

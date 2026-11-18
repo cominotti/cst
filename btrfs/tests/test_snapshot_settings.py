@@ -123,6 +123,10 @@ class GuardNumberTest(unittest.TestCase):
         values = ["250", " 250 ", "\t250", "0250", "0", "", "-5", "+7", "0x10", "0X1f", "08", "09", "abc", "x y", "2.5"]
         values += ["250GiB", "${X}", "'250'", "007", "999999999", "1+1", "250+0", "(250)", "2*125", "500/2", "7%3"]
         values += ["1/0", "-(-250)", "250 +", "(250", "1 2", "0x", "250+abc", "- 5"]
+        # Powers and BASE#DIGITS, which bash reads too (before, the runtime gave an error: with
+        # EMERGENCY_AT_OR_BELOW_GIB='2#10010110' the emergency purge never started).
+        values += ["2**7", "2 ** 7", "-2**2", "2**3**2", "3*2**3", "2**-1", "0**0", "2#10010110", "8#377", "10#250"]
+        values += ["16#fF", "36#Zz", "37#Aa", "64#@_", "1#0", "65#1", "2#2", "2#", "#1", "2#1#1", "2**63", "7**30"]
         for value in values:
             for free in (0, 7, 8, 16, 168, 249, 250, 251, 2**40):
                 with self.subTest(value=value, free=free):
