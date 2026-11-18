@@ -66,10 +66,10 @@ _ITEM_OPTIONAL: KeyTypes = {
     "undo": (bool,),
     "finishing": (bool,),
 }
-_PART_REQUIRED: KeyTypes = {k: (str,) for k in ("name", "kind", "src", "dst", "new", "old")}
+_PART_REQUIRED: KeyTypes = dict.fromkeys(("name", "kind", "src", "dst", "new", "old"), (str,))
 _PART_OPTIONAL: KeyTypes = {"mode": (str,), "bytes": (int,), "sample": (str,)}
 _STEAM_REQUIRED: KeyTypes = {
-    **{k: (str,) for k in ("kind", "appid", "src_lib", "dst_lib", "size", "contentid", "phase")},
+    **dict.fromkeys(("kind", "appid", "src_lib", "dst_lib", "size", "contentid", "phase"), (str,)),
     "stamp": (int,),
     "parts": (list,),
 }
