@@ -2511,7 +2511,12 @@ clock guards still apply.
   checked again (same UUID, still owned, still due, not pinned meanwhile).
   Deletions go one by one.
 - Only one run at a time: the lock file `/run/btrfs-snapshot.lock` is shared
-  by the hourly run, the conversions, `prune` and `purge`.
+  by the hourly run, the conversions, `prune` and `purge`. Everything a run
+  starts holds it too: if the run is killed while a child still works (the
+  core deleting, a clone), the next run waits for that child to end.
+  `btrfs-snapshot convert-planned --lock-held FD` (internal: the first step
+  of the hourly run, for a caller that holds the lock and hands it on as fd
+  FD) refuses to convert anything unless FD is that lock and it is held.
 - Exit codes: 0 ok, 1 error, 2 wrong usage, 3 another run holds the lock,
   4 a safety rule blocked a creation or deletion.
 - For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` run as a

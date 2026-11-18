@@ -17,13 +17,15 @@ clone differing (cp copies all).
 Run with: invowk cmd test module btrfs.tests.test_snapshot_convert
 """
 
+import fcntl
 import os
 import re
 import stat
+import subprocess
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import RuntimeTest, log, read
+from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
 
 PLAN = "etc/btrfs-setup/convert-plan"
 BOOT_FLAG = "etc/btrfs-setup/convert-at-boot"
@@ -468,6 +470,79 @@ class ConvertBootTest(Base):
         # 8 attempts: the give-up, without bash's "value too great for base".
         self.assertTrue(r.stdout.startswith(log(4, "Subvolume conversion at boot gave up: ")), r.stdout)
         self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+
+
+class EngineStepTest(Base):
+    """convert-planned --lock-held FD: the first step of hourly (the planned conversions, the old
+    trees) for the Python runtime, which holds the lock and hands it on as fd FD. Refused unless FD
+    is that lock and it is held; no hostname call and no settings warnings (the caller gave them)."""
+
+    def step(self, fd: int | None, *, locked: bool = True, other: bool = False) -> subprocess.CompletedProcess[str]:
+        path = os.path.join(self.tmp, "other-lock") if other else self.path("run/btrfs-snapshot.lock")
+        with open(path, "a", encoding="utf-8") as f:
+            if locked:
+                fcntl.flock(f, fcntl.LOCK_EX)
+            n = f.fileno() if fd is None else fd
+            return subprocess.run(
+                ["bash", SCRIPT, "convert-planned", "--lock-held", str(n)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=self.env,
+                cwd=self.tmp,
+                pass_fds=(f.fileno(),),
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+            )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ws = self.tree("Workspace")
+        self.plan(f"copy {self.ws}")
+        old = self.tree("x.pre-subvol-20261101T000000")
+        self.write(self.state_file("drop-pending"), old + "\n")
+        self.conf("touch ./ran\n")
+
+    def test_runs_with_the_lock_handed_on(self) -> None:
+        r = self.step(None)
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr),
+            (
+                0,
+                [
+                    log(5, f"convert: {self.ws}: now a subvolume, old tree removed"),
+                    log(5, "planned dirs: 1 done, 0 left for later (in use or failed)"),
+                ],
+                "",
+            ),
+        )
+        self.assert_converted(self.ws)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(self.calls("hostname"), [])
+
+    def test_refused_when_nobody_holds_the_lock(self) -> None:
+        lock = self.path("run/btrfs-snapshot.lock")
+        for name, run in (
+            ("open, not locked", lambda: self.step(None, locked=False)),
+            ("another file, locked", lambda: self.step(None, other=True)),
+            ("an fd that is not open", lambda: self.step(63)),
+        ):
+            with self.subTest(name):
+                r = run()
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertTrue(r.stdout.endswith(" is not a held " + lock + "; nothing converted\n"), r.stdout)
+                self.assertFalse(self.is_subvol(self.ws))
+                self.assertEqual(self.calls("btrfs"), [])
+                self.assertTrue(os.path.exists(self.state_file("drop-pending")))
+
+    def test_usage(self) -> None:
+        for args in ((), ("--lock-held",), ("9",), ("--lock-held", "9", "x")):
+            with self.subTest(args):
+                r = self.run_prog("convert-planned", *args)
+                self.assertEqual(
+                    (r.returncode, r.stdout, r.stderr),
+                    (2, "", "usage: btrfs-snapshot convert-planned --lock-held FD\n"),
+                )
 
 
 class ConvertOneTest(Base):

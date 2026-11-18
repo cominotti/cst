@@ -47,6 +47,9 @@
 #                           (btrfs-bulk: a plain ~/Bulk folder).
 #   btrfs-snapshot configure     no-op, kept for compatibility (it wrote the
 #                           btrbk configs of earlier versions).
+#   btrfs-snapshot convert-planned --lock-held FD  (internal) the first step of
+#                           hourly, for a caller that holds the lock and hands
+#                           it on as fd FD; refused when FD is not that lock.
 #
 # Settings: /etc/btrfs-setup/snapshots.conf. State: /var/lib/btrfs-snapshot.
 #
@@ -71,6 +74,10 @@
 
 set -Euo pipefail
 
+# convert-planned --lock-held FD (the hourly run's first step, run by the Python
+# runtime under its lock): no word of the start that the caller already gave.
+ENGINE_STEP=0
+[[ "${1:-}" == convert-planned ]] && ENGINE_STEP=1
 R="${CST_SNAPSHOT_ROOT:-}"
 (( EUID == 0 )) && R=""     # the test seam never moves a run as root
 CONF="${R}/etc/btrfs-setup/snapshots.conf"
@@ -247,7 +254,7 @@ read_settings() {
         if (( rc == 0 )); then
             # Only a plain assignment gets here: eval gives the value as bash reads it and runs nothing.
             [[ "${SETTINGS}" == *" ${CONF_KEY} "* ]] && eval "${CONF_ASSIGN}"
-        elif (( rc == 1 )); then
+        elif (( rc == 1 && ! ENGINE_STEP )); then
             text="${line#"${line%%[![:space:]]*}"}"
             text="${text%"${text##*[![:space:]]}"}"
             echo "<4>btrfs-snapshot: $1 line ${n}: ${text}: ${CONF_WHY}; ignored" >&2
@@ -260,7 +267,7 @@ env_home="${HOME_DIR}"
 [[ -r "${CONF}" ]] && read_settings "${CONF}"
 [[ -n "${env_home}" ]] && HOME_DIR="${env_home}"   # explicit environment wins (dry runs)
 SNAPDIR="${TOP}/${SNAP_DIR_NAME}"
-[[ -n "${NAS_RESTIC_HOST}" ]] || NAS_RESTIC_HOST="$(hostname -s)"
+(( ENGINE_STEP )) || [[ -n "${NAS_RESTIC_HOST}" ]] || NAS_RESTIC_HOST="$(hostname -s)"
 
 mkdir -p "${STATE}"
 log() { echo "<$1>btrfs-snapshot: $2"; }
@@ -1480,6 +1487,31 @@ busy() {
     return 0
 }
 
+# lock_held FD: true if fd FD of this process is the lock file and the lock is
+# held (a second open of the file cannot take it): the caller's lock, handed on.
+lock_held() {
+    local fd="$1" mine theirs
+    [[ "${fd}" =~ ^[0-9]{1,4}$ && -e "/proc/self/fd/${fd}" ]] || return 1
+    mine="$(stat -L -c '%d:%i' "/proc/self/fd/${fd}" 2>/dev/null)" || return 1
+    theirs="$(stat -c '%d:%i' "${LOCK}" 2>/dev/null)" || return 1
+    [[ "${mine}" == "${theirs}" ]] || return 1
+    # The lock itself: our own open of the file must not get it.
+    ! ( flock -n 7 ) 7>"${LOCK}" 2>/dev/null
+}
+
+# `convert-planned --lock-held FD`: the hourly run's first step (the planned
+# conversions and the old trees), for the Python runtime, which holds the lock
+# and hands it on as fd FD. Refused (exit 2, nothing converted) unless FD is
+# that lock, held: it never converts unlocked.
+convert_planned_held() {
+    if [[ "${1:-}" != --lock-held || -z "${2:-}" || $# -ne 2 ]]; then
+        echo "usage: btrfs-snapshot convert-planned --lock-held FD" >&2; exit 2
+    fi
+    lock_held "$2" || { log 3 "convert-planned: fd $2 is not a held ${LOCK}; nothing converted"; exit 2; }
+    convert_planned
+    drop_pending
+}
+
 # `convert-one PATH`: convert_one for a single directory outside the plan.
 convert_single() {
     local path="${1:?}"
@@ -1500,6 +1532,7 @@ case "${1:-}" in
     purge) lock -x; purge ;;
     configure) configure ;;
     planned-left) planned_left ;;
+    convert-planned) shift; convert_planned_held "$@" ;;
     busy) shift; busy "$@" ;;
     convert-one)
         [[ -n "${2:-}" ]] || { echo "usage: btrfs-snapshot convert-one PATH" >&2; exit 2; }
