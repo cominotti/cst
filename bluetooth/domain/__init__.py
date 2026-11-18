@@ -5,12 +5,13 @@ The rules of the LDAC rate watcher (bt-ldac-watch) are in bluetooth.domain.watch
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from enum import StrEnum
 import json
 import posixpath
 import re
 from typing import Final, TypedDict
 
-from cst_core.domain.files import effective_lines
+from cst_core.domain.files import OwnedState, effective_lines
 from cst_core.domain.text import SettingsProblem, parse_shell_assignments
 from cst_core.domain.values import Json
 
@@ -241,20 +242,20 @@ def effective(text: str) -> list[str]:
     return [line.rstrip() for line in effective_lines(text)]
 
 
-def wp_state(existing: str | None, rendered: str) -> str:
+def wp_state(existing: str | None, rendered: str) -> OwnedState:
     """ok (equal), adopt (only comments differ: apply renews them, no
     restart), change (ours or the old script's, settings differ), conflict
     (a file nobody of ours wrote, with other settings: apply refuses),
     missing (EXISTING is None)."""
     if existing is None:
-        return "missing"
+        return OwnedState.MISSING
     if existing == rendered:
-        return "ok"
+        return OwnedState.OK
     if effective(existing) == effective(rendered):
-        return "adopt"
+        return OwnedState.ADOPT
     if MARKER in existing or any(m in existing for m in OLD_MARKERS):
-        return "change"
-    return "conflict"
+        return OwnedState.CHANGE
+    return OwnedState.CONFLICT
 
 
 # ---- the LDAC rate watcher's user unit ------------------------------------------------------
@@ -286,13 +287,13 @@ WantedBy=default.target
 """
 
 
-def unit_state(existing: str | None, rendered: str) -> str:
+def unit_state(existing: str | None, rendered: str) -> OwnedState:
     """ok, change (ours, differs), conflict (not ours), missing."""
     if existing is None:
-        return "missing"
+        return OwnedState.MISSING
     if existing == rendered:
-        return "ok"
-    return "change" if MARKER in existing else "conflict"
+        return OwnedState.OK
+    return OwnedState.CHANGE if MARKER in existing else OwnedState.CONFLICT
 
 
 # ---- LE Audio off: the WirePlumber drop-in --------------------------------------------------
@@ -359,13 +360,26 @@ def classify_other_fragments(
     return out
 
 
-def roles_state(value: str | None) -> str:
+class RolesState(StrEnum):
+    """What bluez5.roles gives BlueZ (bt-helper wp-roles prints it before the |)."""
+
+    CLASSIC = "classic"  # only the classic roles (A2DP, HFP)
+    LE = "le"  # the LE Audio roles too
+    DEFAULT = "default"  # not set: PipeWire's own default, which has the LE Audio roles
+
+
+def roles_state(value: str | None) -> RolesState:
     """classic | le | default for the effective bluez5.roles VALUE (None =
     not set: PipeWire's own default, which has the LE Audio roles)."""
     if value is None:
-        return "default"
+        return RolesState.DEFAULT
     roles = re.findall(r"\w+", value, flags=re.ASCII)
-    return "le" if any(r.startswith("bap_") for r in roles) else "classic"
+    return RolesState.LE if any(r.startswith("bap_") for r in roles) else RolesState.CLASSIC
+
+
+def parse_roles_state(word: str) -> RolesState | None:
+    """The RolesState bt-helper wp-roles printed, or None for any other word."""
+    return next((state for state in RolesState if state == word), None)
 
 
 # ---- settings -------------------------------------------------------------------------------

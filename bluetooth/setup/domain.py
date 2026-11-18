@@ -9,11 +9,13 @@ bluetooth.domain.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import os.path
 import re
-from typing import Final, Literal
+from typing import Final
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from cst_core.domain.dispatch import HELP_WORDS
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).
@@ -45,16 +47,70 @@ _ALLOWED: Final = frozenset(
         ("le-audio", "--no-restart"),
     }
 )
-COMMANDS: Final = ("plan", "apply", "status", "revert", "le-audio")
 
-type Command = Literal["plan", "apply", "status", "revert", "le-audio"]
+
+class BluetoothCommand(StrEnum):
+    """The commands of `cst bluetooth`, in the order its usage lists them."""
+
+    PLAN = "plan"
+    APPLY = "apply"
+    STATUS = "status"
+    REVERT = "revert"
+    LE_AUDIO = "le-audio"
+
+
+COMMANDS: Final = tuple(c.value for c in BluetoothCommand)
+
+
+class WpState(StrEnum):
+    """The headset's LDAC rule in the plan: bt-helper's state of the file (OwnedState's words), or none (no headset)."""
+
+    OK = "ok"
+    ADOPT = "adopt"
+    CHANGE = "change"
+    MISSING = "missing"
+    CONFLICT = "conflict"
+    NONE = "none"
+
+
+class LeState(StrEnum):
+    """The LE Audio drop-in in the plan: with LE Audio off, bt-helper's state of the file (OwnedState's
+    words); with it on, absent, remove (CST's: apply removes it) or conflict."""
+
+    OK = "ok"
+    ADOPT = "adopt"
+    CHANGE = "change"
+    MISSING = "missing"
+    CONFLICT = "conflict"
+    ABSENT = "absent"
+    REMOVE = "remove"
+
+
+class BearerState(StrEnum):
+    """The preferred bearer in the plan."""
+
+    NONE = "none"  # no BEARER set
+    NOHEADSET = "noheadset"
+    UNKNOWN = "unknown"  # bluetoothctl not found
+    UNPAIRED = "unpaired"
+    OK = "ok"  # already the one set
+    SET = "set"  # apply sets it
+
+
+class BapState(StrEnum):
+    """PipeWire's BAP LC3 endpoint, by the last BAPSink event of the running bluetoothd."""
+
+    REGISTERED = "registered"
+    UNREGISTERED = "unregistered"
+    NO_RECORD = "no-record"
+    UNKNOWN = "unknown"  # no bluetoothd or WirePlumber found
 
 
 @dataclass(frozen=True, slots=True)
 class Options:
     """The command line of one run."""
 
-    cmd: str
+    cmd: BluetoothCommand
     args: tuple[str, ...]  # the command and its words, as given (for the messages and the re-runs)
     device: str = ""
     quality: str = ""
@@ -77,24 +133,25 @@ class Exit:
     err: str = ""
 
 
-def allowed(cmd: str, opt: str) -> bool:
+def allowed(cmd: BluetoothCommand, opt: str) -> bool:
     """Whether the command takes the option."""
     if opt == "--device":
-        return cmd != "le-audio"
+        return cmd != BluetoothCommand.LE_AUDIO
     return (cmd, opt) in _ALLOWED
 
 
 def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | Exit:
     """The options, or the help (usage: its text) or a usage error, as bluetooth-setup.sh read them."""
-    cmd = argv[0] if argv and argv[0] else "help"  # ${1:-help}: an empty word is help too
+    word0 = argv[0] if argv and argv[0] else "help"  # ${1:-help}: an empty word is help too
     rest = list(argv[1:])
-    words = (cmd, *rest)
-    if cmd in ("help", "-h", "--help"):
+    words = (word0, *rest)
+    if word0 in HELP_WORDS:
         return Exit(0, out=usage)
-    if cmd not in COMMANDS:
-        return Exit(2, err=f"Unknown command: {cmd}\n{usage}")
+    if word0 not in COMMANDS:
+        return Exit(2, err=f"Unknown command: {word0}\n{usage}")
+    cmd = BluetoothCommand(word0)
     le_set = ""
-    if cmd == "le-audio" and rest and not rest[0].startswith("--"):
+    if cmd == BluetoothCommand.LE_AUDIO and rest and not rest[0].startswith("--"):
         le_set = rest.pop(0)
         if le_set not in ("on", "off"):
             return Exit(2, err=f"{prog} le-audio: say on or off (got '{le_set}')\n")
@@ -138,9 +195,9 @@ def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | 
 def changes_machine(opts: Options) -> bool:
     """The commands that must run on the host (revert --check and le-audio alone only read)."""
     return (
-        opts.cmd == "apply"
-        or (opts.cmd == "revert" and not opts.check)
-        or (opts.cmd == "le-audio" and bool(opts.le_set))
+        opts.cmd == BluetoothCommand.APPLY
+        or (opts.cmd == BluetoothCommand.REVERT and not opts.check)
+        or (opts.cmd == BluetoothCommand.LE_AUDIO and bool(opts.le_set))
     )
 
 
@@ -402,11 +459,11 @@ def senders_of(bus_list: str, pid: str) -> list[str]:
 BAP_EVENT: Final = re.compile(r"Endpoint (un)?registered:.*MediaEndpointLE/BAPSink/lc3")
 
 
-def bap_state(journal: str, senders: Sequence[str]) -> str:
+def bap_state(journal: str, senders: Sequence[str]) -> BapState:
     """registered | unregistered | no-record: the last BAPSink event of one of the senders."""
     events = [line for line in journal.split("\n") if BAP_EVENT.search(line)]
     mine = [e for e in events if any(f"sender={s} " in e for s in senders)]
     last = mine[-1] if mine else ""
     if last.startswith("Endpoint registered:"):
-        return "registered"
-    return "no-record" if not last else "unregistered"
+        return BapState.REGISTERED
+    return BapState.NO_RECORD if not last else BapState.UNREGISTERED

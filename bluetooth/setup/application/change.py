@@ -23,8 +23,19 @@ from bluetooth.domain import (
 )
 from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed, is_cst_rule
-from bluetooth.setup.domain import A2DP_SINK_UUID, bearer_matches, changes_machine, matches_a_line
+from bluetooth.setup.domain import (
+    A2DP_SINK_UUID,
+    BapState,
+    BearerState,
+    BluetoothCommand,
+    LeState,
+    WpState,
+    bearer_matches,
+    changes_machine,
+    matches_a_line,
+)
 from cst_core.domain.errors import Refused, shell_exit_status
+from cst_core.domain.files import OwnedState
 
 SPACE = r"[ \t\n\r\f\v]"
 
@@ -43,7 +54,7 @@ class Change(Checks):
         """The command; a stop says why on stderr: its exit status, or the run again of le-audio."""
         prog = self.c.prog
         # apply and revert name the backup and the undo when a command stops them (the ERR trap of old).
-        changing = self.o.cmd == "apply" or (self.o.cmd == "revert" and not self.o.check)
+        changing = self.o.cmd == BluetoothCommand.APPLY or (self.o.cmd == BluetoothCommand.REVERT and not self.o.check)
         commands = {"plan": self.plan, "status": self.status, "apply": self.apply, "revert": self.revert}
         try:
             self.need_tmp()  # every command made it first (TMP="$(mktemp)"), before the ERR trap
@@ -108,7 +119,7 @@ class Change(Checks):
         """The rule, as the user, atomically; one with other settings is kept as .bak first."""
         f = self.m.files
         f.make_dirs(self.p.wp_dir)
-        if self.wp_state == "change":
+        if self.wp_state == WpState.CHANGE:
             f.copy(self.wp_conf, self.wp_conf + ".bak")
             self.out(f"backup:    {self.wp_conf}.bak\n")
         f.write_user_file(self.wp_conf, render_wp(self.c.device, self.c.quality), 0o644)
@@ -134,7 +145,7 @@ class Change(Checks):
             )
             return False
         self.m.clock.sleep(1)  # let the old WirePlumber unregister before checking
-        if not self.le_off_active() and not self.wait_for(15, lambda: self.bap_endpoint_state() == "registered"):
+        if not self.le_off_active() and not self.wait_for(15, lambda: self.bap_endpoint_state() == BapState.REGISTERED):
             self.err("WARNING: WirePlumber did not register the BAP endpoint within 15 s\n")
         self.restore_a2dp()
         return True
@@ -249,16 +260,16 @@ class Change(Checks):
     def refuse_conflicts(self) -> None:
         """apply stops at a file of CST's name that CST did not write."""
         p, c = self.p, self.c
-        if self.wp_state == "conflict":
+        if self.wp_state == WpState.CONFLICT:
             raise self.die(
                 f"{self.wp_conf} was not written by CST or apply-le-audio.sh: move it away, then run apply again."
             )
-        if c.le_audio == "off" and self.le_state == "conflict":
+        if c.le_audio == "off" and self.le_state == LeState.CONFLICT:
             raise self.die(f"{p.le_conf} was not written by CST: move it away, then run apply again.")
         if self.lw_want:
-            if self.lw_unit_st == "conflict":
+            if self.lw_unit_st == OwnedState.CONFLICT:
                 raise self.die(f"{p.lw_unit_file} was not written by CST: move it away, then run apply again.")
-            if self.lw_prog_st == "conflict":
+            if self.lw_prog_st == OwnedState.CONFLICT:
                 raise self.die(f"{p.lw_prog} was not written by CST: move it away, then run apply again.")
 
     def run_restarts(self) -> bool:
@@ -270,7 +281,9 @@ class Change(Checks):
             if rc == 1:
                 # Cancelled: the files are written; the watcher does not need the restarts.
                 self.apply_watcher()
-                pending = "the restarts above" + (", the preferred bearer" if self.bearer_state == "set" else "")
+                pending = "the restarts above" + (
+                    ", the preferred bearer" if self.bearer_state == BearerState.SET else ""
+                )
                 self.out(f"\nNot done yet: {pending} and the checks.\nAfter restarting, run: {c.prog} apply\n")
                 return False
             if rc != 0:
@@ -294,37 +307,41 @@ class Change(Checks):
         if self.legacy:
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
-        if self.wp_state == "ok":
-            self.out(f"unchanged: {self.wp_conf}\n")
-        elif self.wp_state == "none":
-            self.out(f"skipped:   {self.no_headset()}\n")
-        elif self.wp_state == "adopt":
-            self.write_wp()
-            self.out(f"adopted:   {self.wp_conf} (comments renewed, settings unchanged: no restart)\n")
-        else:
-            self.write_wp()
-            self.out(f"written:   {self.wp_conf} (LDAC {c.quality})\n")
+        match self.wp_state:
+            case WpState.OK:
+                self.out(f"unchanged: {self.wp_conf}\n")
+            case WpState.NONE:
+                self.out(f"skipped:   {self.no_headset()}\n")
+            case WpState.ADOPT:
+                self.write_wp()
+                self.out(f"adopted:   {self.wp_conf} (comments renewed, settings unchanged: no restart)\n")
+            case _:
+                self.write_wp()
+                self.out(f"written:   {self.wp_conf} (LDAC {c.quality})\n")
         self.apply_le()
 
     def apply_bearer(self) -> None:
         """The preferred bearer, when apply sets one."""
         c = self.c
-        if self.bearer_state == "set":
-            self.out("== preferred bearer\n")
-            cmd = ["bluetoothctl", "bearer", c.device, c.bearer]
-            if self.m.bt_timeout > 0:
-                cmd = ["timeout", str(self.m.bt_timeout), *cmd]
-            said = self.run(cmd, output="merge").stdout.rstrip("\n")
-            if bearer_matches(self.bt_info(), c.bearer):
-                self.out(
-                    f"set:       PreferredBearer = {c.bearer} (for connections the PC starts; disconnect and reconnect)\n"
-                )
-            else:
-                self.err(f"WARNING: could not set the bearer: {said or 'no output'}\n")
-        elif self.bearer_state == "unpaired":
-            self.err(f"WARNING: {c.device} is not paired; bearer not changed\n")
-        elif self.bearer_state == "noheadset":
-            self.err(f"WARNING: BEARER={c.bearer} is for a headset, and none is set; bearer not changed\n")
+        match self.bearer_state:
+            case BearerState.SET:
+                self.out("== preferred bearer\n")
+                cmd = ["bluetoothctl", "bearer", c.device, c.bearer]
+                if self.m.bt_timeout > 0:
+                    cmd = ["timeout", str(self.m.bt_timeout), *cmd]
+                said = self.run(cmd, output="merge").stdout.rstrip("\n")
+                if bearer_matches(self.bt_info(), c.bearer):
+                    self.out(
+                        f"set:       PreferredBearer = {c.bearer} (for connections the PC starts; disconnect and reconnect)\n"
+                    )
+                else:
+                    self.err(f"WARNING: could not set the bearer: {said or 'no output'}\n")
+            case BearerState.UNPAIRED:
+                self.err(f"WARNING: {c.device} is not paired; bearer not changed\n")
+            case BearerState.NOHEADSET:
+                self.err(f"WARNING: BEARER={c.bearer} is for a headset, and none is set; bearer not changed\n")
+            case _:
+                pass
 
     def done(self) -> None:
         """apply's last lines, after checks that all passed."""
@@ -349,22 +366,26 @@ class Change(Checks):
         le, f = self.p.le_conf, self.m.files
         self.out(f"== LE Audio: {le}\n")
         if self.c.le_audio == "off":
-            if self.le_state == "ok":
+            if self.le_state == LeState.OK:
                 self.out("unchanged: LE Audio off\n")
                 return
             f.make_dirs(self.p.wp_dir)
             f.write_user_file(le, render_le_off(), 0o644)
-            if self.le_state == "adopt":
+            if self.le_state == LeState.ADOPT:
                 self.out(f"adopted:   {le} (comments renewed, no restart)\n")
             else:
                 self.out(f"written:   {le} (LE Audio off: PipeWire offers only A2DP and HFP)\n")
-        elif self.le_state == "remove":
-            f.remove_file(le)
-            self.out(f"removed:   {le} (LE Audio on)\n")
-        elif self.le_state == "absent":
-            self.out("unchanged: LE Audio on (no drop-in)\n")
-        elif self.le_state == "conflict":
-            self.err(f"WARNING: {le} was not written by CST: left alone (it may keep LE Audio off)\n")
+            return
+        match self.le_state:
+            case LeState.REMOVE:
+                f.remove_file(le)
+                self.out(f"removed:   {le} (LE Audio on)\n")
+            case LeState.ABSENT:
+                self.out("unchanged: LE Audio on (no drop-in)\n")
+            case LeState.CONFLICT:
+                self.err(f"WARNING: {le} was not written by CST: left alone (it may keep LE Audio off)\n")
+            case _:
+                pass
 
     def apply_watcher(self) -> None:
         self.out(f"== LDAC rate watcher: {LDAC_UNIT}\n")
@@ -376,13 +397,13 @@ class Change(Checks):
     def lw_install(self) -> None:
         """The watcher's program and unit (through the installer, as the user), enabled and started."""
         p, unit, changed = self.p, LDAC_UNIT, False
-        if self.lw_prog_st != "ok":
+        if self.lw_prog_st != OwnedState.OK:
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
             r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch")
             if r.returncode != 0:
                 raise StepFailed(shell_exit_status(r.returncode))
             changed = True
-        if self.lw_unit_st != "ok":
+        if self.lw_unit_st != OwnedState.OK:
             said = self.checked(
                 ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
                 input_text=render_unit(self.c.device, self.c.ldac_rate),
@@ -411,20 +432,20 @@ class Change(Checks):
         p, unit = self.p, LDAC_UNIT
         if not self.lw_ours_present():
             self.out("unchanged: not installed\n")
-            if self.lw_unit_st == "conflict":
+            if self.lw_unit_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {p.lw_unit_file} was not written by CST: left alone\n")
-            if self.lw_prog_st == "conflict":
+            if self.lw_prog_st == OwnedState.CONFLICT:
                 self.err(f"WARNING: {p.lw_prog} was not written by CST: left alone\n")
             return
         if self.o.check:
             self.out(f"would stop, disable and remove {unit} and {p.lw_prog}\n")
             return
-        if self.lw_unit_st in ("ok", "change"):
+        if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
             self.out(self.run(["systemctl", "--user", "disable", "--now", unit], output="stdout").stdout)
             self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
             self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
             self.must(["systemctl", "--user", "daemon-reload"])
-        if self.lw_prog_st in ("ok", "change"):
+        if self.lw_prog_st in (OwnedState.OK, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))
             self.out(f"removed:   {p.lw_prog}\n")

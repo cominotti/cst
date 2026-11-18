@@ -5,6 +5,7 @@ one-attempt-per-connection rule (Tracker). No I/O.
 """
 
 from collections.abc import Iterable, Sequence
+from enum import StrEnum
 import re
 from typing import Final, TypedDict
 
@@ -17,6 +18,17 @@ SETTLE: Final[float] = 5.0
 COOLDOWN: Final[float] = 600.0
 RELAPSE: Final[float] = 300.0  # wrong rate again this soon after a fix: the fix did not hold
 MAX_TRIES: Final[int] = 2  # attempts per connection, whatever happens
+
+
+class WatchVerdict(StrEnum):
+    """What decide() and Tracker.observe() say to do (see Tracker)."""
+
+    NONE = "none"
+    SKIP = "skip"
+    WAIT = "wait"
+    ACT = "act"
+    DONE = "done"
+    COOLDOWN = "cooldown"
 
 
 class Snapshot(TypedDict):
@@ -83,22 +95,22 @@ def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
     return snap
 
 
-def decide(snap: Snapshot | None, rate: int) -> tuple[str, str]:
+def decide(snap: Snapshot | None, rate: int) -> tuple[WatchVerdict, str]:
     """(what, why) for one snapshot: what is "none" (nothing wrong),
     "skip" (wrong rate, but not now) or "act" (wrong rate, may be fixed)."""
     if snap is None or snap["card"] is None:
-        return "none", "headset not in PipeWire"
+        return WatchVerdict.NONE, "headset not in PipeWire"
     if snap["codec"] != "ldac":
-        return "none", f"codec {snap['codec'] or 'none'}"
+        return WatchVerdict.NONE, f"codec {snap['codec'] or 'none'}"
     if snap["rate"] is None:
-        return "none", "LDAC, rate unknown"
+        return WatchVerdict.NONE, "LDAC, rate unknown"
     if snap["rate"] == rate:
-        return "none", f"LDAC at {rate} Hz"
+        return WatchVerdict.NONE, f"LDAC at {rate} Hz"
     if not str(snap["profile"] or "").startswith("a2dp-sink"):
-        return "skip", f"LDAC at {snap['rate']} Hz, but the card profile is {snap['profile']}"
+        return WatchVerdict.SKIP, f"LDAC at {snap['rate']} Hz, but the card profile is {snap['profile']}"
     if snap["mic"]:
-        return "skip", f"LDAC at {snap['rate']} Hz, but the headset's microphone is in use"
-    return "act", f"LDAC at {snap['rate']} Hz (want {rate})"
+        return WatchVerdict.SKIP, f"LDAC at {snap['rate']} Hz, but the headset's microphone is in use"
+    return WatchVerdict.ACT, f"LDAC at {snap['rate']} Hz (want {rate})"
 
 
 class Tracker:
@@ -136,7 +148,7 @@ class Tracker:
         self.fixed = None
         self.since = None
 
-    def observe(self, snap: Snapshot | None, now: float) -> tuple[str, str | float]:
+    def observe(self, snap: Snapshot | None, now: float) -> tuple[WatchVerdict, str | float]:
         """Evaluate a PipeWire snapshot at monotonic timestamp `now`."""
         card: int | None = snap["card"] if snap else None
         out: int | None = snap["out"] if snap else None
@@ -151,7 +163,7 @@ class Tracker:
             self.since = None
         self.card, self.out = card, out
         what, why = decide(snap, self.rate)
-        if what != "act":
+        if what != WatchVerdict.ACT:
             self.since = None
             return what, why
         assert snap is not None
@@ -161,18 +173,21 @@ class Tracker:
             # would not hold either and would only repeat the dropout.
             self.failed = f"the headset went back to {snap['rate']} Hz by itself {now - self.fixed:.0f} s after the fix"
         if self.failed:
-            return "done", f"{self.failed}: given up until it connects again"
+            return WatchVerdict.DONE, f"{self.failed}: given up until it connects again"
         if self.tries >= MAX_TRIES:
-            return "done", f"{self.tries} attempts on this connection already: given up until it connects again"
+            return (
+                WatchVerdict.DONE,
+                f"{self.tries} attempts on this connection already: given up until it connects again",
+            )
         if self.tried:
-            return "done", "already tried once on this connection"
+            return WatchVerdict.DONE, "already tried once on this connection"
         if self.last is not None and now - self.last < self.cooldown:
-            return "cooldown", self.cooldown - (now - self.last)
+            return WatchVerdict.COOLDOWN, self.cooldown - (now - self.last)
         if self.since is None:
             self.since = now
         if now - self.since < self.settle:
-            return "wait", self.settle - (now - self.since)
-        return "act", why
+            return WatchVerdict.WAIT, self.settle - (now - self.since)
+        return WatchVerdict.ACT, why
 
     def attempted(self, now: float) -> None:
         """Record that a bounce attempt started at monotonic timestamp `now`."""
@@ -194,7 +209,25 @@ class Tracker:
             self.failed = "an attempt failed on this connection"
 
 
-EVENT: Final[re.Pattern[str]] = re.compile(r"^Event '(new|change|remove)' on (card|sink|source) #(\d+)\s*$")
+class PactlEvent(StrEnum):
+    """The event of a `pactl subscribe` line."""
+
+    NEW = "new"
+    CHANGE = "change"
+    REMOVE = "remove"
+
+
+class PactlFacility(StrEnum):
+    """The kind of object a `pactl subscribe` line is about (those the watcher reads)."""
+
+    CARD = "card"
+    SINK = "sink"
+    SOURCE = "source"
+
+
+EVENT: Final[re.Pattern[str]] = re.compile(
+    rf"^Event '({'|'.join(PactlEvent)})' on ({'|'.join(PactlFacility)}) #(\d+)\s*$"
+)
 
 
 def relevant(line: str, known: set[int]) -> bool:
@@ -204,8 +237,8 @@ def relevant(line: str, known: set[int]) -> bool:
     m = EVENT.match(line.strip())
     if not m:
         return False
-    event, kind, idx = m.group(1), m.group(2), int(m.group(3))
-    if event in ("new", "remove") and kind in ("card", "sink"):
+    event, kind, idx = PactlEvent(m.group(1)), PactlFacility(m.group(2)), int(m.group(3))
+    if event in (PactlEvent.NEW, PactlEvent.REMOVE) and kind in (PactlFacility.CARD, PactlFacility.SINK):
         return True
     return idx in known
 
