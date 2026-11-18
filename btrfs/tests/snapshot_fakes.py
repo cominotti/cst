@@ -12,8 +12,9 @@ neither is not found (127): nothing reaches the real machine or the network.
 
 The fakes answer from a description of the machine (machine.json) and write
 down every call (calls, one JSON list per line: the command and its
-arguments; restic's also with its RESTIC_* variables, sftp's with its
-input). btrfs-snapshot-core is an argv recorder: its command line is the
+arguments; sftp's also with its input, restic's with its RESTIC_* variables
+and the pin file as it was).
+btrfs-snapshot-core is an argv recorder: its command line is the
 contract between the two programs, and its answers (exit status, output) come
 from the description. stat answers 256 (a subvolume's root inode) for the
 folders the fake btrfs created or the test marked, and passes every other call
@@ -57,6 +58,16 @@ FAKES: Final = (
     "hostname",
     "sftp",
     "restic",
+)
+# Runs its arguments with SIGINT and SIGHUP at their defaults (the same process: exec).
+SIGNALS_AT_DEFAULT: Final = (
+    "/usr/bin/python3",
+    "-I",
+    "-c",
+    "import os, signal, sys\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n"
+    "    signal.signal(s, signal.SIG_DFL)\n"
+    "os.execvp(sys.argv[1], sys.argv[1:])",
 )
 # The real tools the program may run; everything else is not found.
 REAL_TOOLS: Final = (
@@ -125,6 +136,8 @@ if name == "stat":
 rec = [name] + args
 if name == "restic":
     rec.append({k: v for k, v in sorted(os.environ.items()) if k.startswith("RESTIC_")})
+    pin = os.environ["CST_SNAPSHOT_ROOT"] + "/run/btrfs-snapshot/pinned"
+    rec.append(open(pin).read() if os.path.exists(pin) else None)
 if name == "sftp":
     rec.append(sys.stdin.read())
 with open(os.environ["FAKE_CALLS"], "a") as f:
@@ -145,10 +158,14 @@ def inside(p):
     return os.path.realpath(p).startswith(scratch + "/")
 
 def answer(table, key):
-    # An entry {"rc": .., "out": .., "err": ..} of table[key] (a queue of them, or one).
+    # An entry {"rc": .., "out": .., "err": .., "sleep": seconds} of table[key] (a queue of them, or one).
     a = take(key, {}, table)
     sys.stdout.write(a.get("out", ""))
     sys.stderr.write(a.get("err", ""))
+    sys.stdout.flush()
+    if a.get("sleep"):
+        import time
+        time.sleep(a["sleep"])
     sys.exit(a.get("rc", 0))
 
 if name == "btrfs":
@@ -245,7 +262,8 @@ if name == "restic":
         print(json.dumps({"version": 2, "id": m.get("repo_id", "ab" * 32), "chunker_polynomial": "1"}, indent=2))
         sys.exit(0)
     if cmd == "features" and "features" not in r:
-        print("Feature flags:\nTYPE    FEATURE\nalpha   device-id-for-hardlinks   store deviceID only for hardlinks")
+        print("Name                     Type   Default  Description\n"
+              "device-id-for-hardlinks  alpha  false    store deviceID only for hardlinks")
         sys.exit(0)
     if cmd == "snapshots" and "snapshots" not in r:
         print("[]")
@@ -402,9 +420,13 @@ class RuntimeTest(unittest.TestCase):
         )
 
     def start_prog(self, *args: str) -> subprocess.Popen[str]:
-        """The program started in the background (the caller waits for it)."""
+        """The program started in the background (the caller waits for it, or signals it).
+
+        Started as systemd starts a service: SIGINT and SIGHUP at their defaults, also when
+        the test runner was started with them ignored (a background job), which a child
+        inherits and bash cannot trap."""
         p = subprocess.Popen(
-            ["bash", SCRIPT, *args],
+            [*SIGNALS_AT_DEFAULT, "bash", SCRIPT, *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

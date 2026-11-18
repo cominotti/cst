@@ -40,7 +40,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Usage
-from btrfs.tests.test_snapshot_runtime import shell_function
+from btrfs.tests.snapshot_fakes import RuntimeTest
 from vm import domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup
 from vm import wiring as vm_wiring
@@ -953,72 +953,37 @@ class SharedRepositoryTest(Nas):
     """cst-vm's NAS backup and the /home NAS backup of btrfs/btrfs-snapshot share one restic repository."""
 
     def test_both_backups_give_restic_the_same_repository_password_and_cache(self) -> None:
+        # btrfs-snapshot's fake machine (btrfs/tests/snapshot_fakes.py): the whole bash program
+        # runs there. cst-vm reads the same settings, password and restic cache below its root.
+        home = RuntimeTest()
+        home.setUp()
+        self.addCleanup(home.doCleanups)
+        home.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_RESTIC_HOST="sophia")
+        self.env.update(
+            CST_VM_NAS_CONF=home.path("etc/btrfs-setup/snapshots.conf"),
+            CST_VM_RESTIC_PASSWORD=home.write("etc/btrfs-setup/restic-password", "pw\n"),
+            CST_VM_RESTIC_CACHE=home.path("var/cache/btrfs-snapshot-restic"),
+        )
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         vm_calls = self.restic_calls()
         vm_env = vm_calls[1]["env"]
-        os.remove(os.path.join(self.fix, "restic.log"))
-        # btrfs-snapshot's nas and nas_maintain, run for real with the same
-        # settings and the same fake restic; the steps around them are stubs
-        # (nas_pin failing ends the backup part after `restic unlock`).
-        script = "\n".join(
-            [
-                "set -Euo pipefail",
-                'log() { echo "<$1>btrfs-snapshot: $2"; }',
-                'nas_stale_alert() { echo "stale: $*"; }',
-                "alert() { :; }; clear_alert() { :; }; nas_summary() { :; }",
-                "nas_unmount() { return 0; }; nas_reachable() { return 0; }; nas_pin() { return 1; }",
-                "due() { return 1; }",
-                "time_left() { echo $(( NAS_DEADLINE - $(date +%s) )); }",
-                *(
-                    shell_function(SNAPSHOT_RUNTIME, name)
-                    for name in (
-                        "duration_s",
-                        "restic_run",
-                        "nas_repo_ready",
-                        "nas_repo_records",
-                        "nas",
-                        "nas_maintain",
-                    )
-                ),
-                'RESTIC_RUN_ENV=(); NAS_REPO_ID=""',
-                'NAS_ENABLED=1 NAS_PATH="$1" RESTIC_PASSWORD="$2" RESTIC_CACHE="$3" NAS_SSH_ALIAS="$4"',
-                'STATE="$5" NAS_LOCK="$5/nas.lock" NAS_TIMEOUT=6h NAS_RESTIC_HOST=sophia',
-                "NAS_KEEP_DAILY=14 NAS_KEEP_WEEKLY=8 NAS_KEEP_MONTHLY=12 NAS_USER=u NAS_HOST=h NAS_PORT=22",
-                "NAS_PRUNE_EVERY_DAYS=7 NAS_CHECK_EVERY_DAYS=30 NAS_CHECK_SUBSET=5%",
-                "nas",
-                "NAS_DEADLINE=$(( $(date +%s) + 3600 ))",
-                "nas_maintain",
-            ]
-        )
-        state = os.path.join(self.tmp, "snapshot-state")
-        os.makedirs(state)
-        b = subprocess.run(
-            [
-                "bash",
-                "-c",
-                script,
-                "_",
-                "/volume1/restic",
-                self.password,
-                os.path.join(self.tmp, "cache"),
-                vm_domain.NAS_SSH_ALIAS,
-                state,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=self.env,
-            stdin=subprocess.DEVNULL,
-            timeout=60,
-        )
+        home.machine(latest={"home": os.path.join(home.snapdir, "home.20261118T0905")})
+        b = home.run_prog("nas")
         self.assertEqual(b.returncode, 0, b.stdout + b.stderr)
-        home_calls = self.restic_calls()
-        self.assertEqual([c["args"][0] for c in home_calls], ["cat", "unlock", "forget"], b.stdout + b.stderr)
-        for call in home_calls:
-            self.assertEqual(call["env"], vm_env, call["args"])
+        home_calls = [(c[1:-2], c[-2]) for c in home.calls("restic")]
+        self.assertEqual(
+            [args[0] for args, _ in home_calls],
+            ["cat", "unlock", "features", "backup", "forget", "check", "snapshots"],
+            b.stdout + b.stderr,
+        )
+        for args, env in home_calls:
+            # Only its own feature flag (backup) and output copy (check) come on top.
+            assert isinstance(env, dict)
+            own = {k: v for k, v in env.items() if k not in ("RESTIC_FEATURES", "RESTIC_CAPTURE")}
+            self.assertEqual(own, vm_env, args)
         # Each forgets only its own tag: the VM backups are never in the /home job's groups.
-        forget = home_calls[2]["args"]
+        forget = home_calls[4][0]
         self.assertEqual(forget[forget.index("--tag") + 1], "btrfs-setup")
         vm_forget = next(c["args"] for c in vm_calls if c["args"][0] == "forget")
         self.assertEqual(vm_forget[vm_forget.index("--tag") + 1], "cst-vm,vm:win")
