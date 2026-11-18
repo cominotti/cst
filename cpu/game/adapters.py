@@ -512,8 +512,7 @@ class GameProfile:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
         a second record to game.state and make 'off' restore the profile's own value. A game.intended
         of a newer CST is not read (its records may mean something else): said in the journal."""
-        text = read_text(self.paths.intended) or ""
-        newer = newer_intended(self.paths.intended, text)
+        text, newer = self._intended()
         if newer is not None:
             self.log(4, f"drift not repaired: {newer}")
             return
@@ -557,24 +556,29 @@ class GameProfile:
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
 
+    def _problem_lines(self) -> list[str]:
+        """The settings file's problem lines, one message each (none when it has none)."""
+        return describe_problems(self.paths.conf, self.problems).split("\n") if self.problems else []
+
+    def _log_problems(self, prio: int, what: str, suffix: str = "") -> None:
+        """The problem lines in the journal, then what the profile did not do."""
+        for line in self._problem_lines():
+            self.log(prio, line)
+        self.log(prio, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works{suffix})")
+
     def refuse(self, what: str) -> None:
         """The settings file's problem lines in the journal, and what the profile did not do."""
-        for line in describe_problems(self.paths.conf, self.problems).split("\n"):
-            self.log(3, line)
-        self.log(3, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works)")
+        self._log_problems(3, what)
 
     def warn_once(self, what: str) -> None:
         """The watchdog's word on the settings file's problem lines: logged at the first tick that meets
         them (and again when they or the word change, or after a tick found the file fixed), then quiet
         until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
-        text = describe_problems(self.paths.conf, self.problems)
-        said = f"{what}\n{text}"  # another word on the same lines is said too
+        said = "\n".join([what, *self._problem_lines()])  # another word on the same lines is said too
         mark = self.paths.settings_warned
         if read_text(mark) == said:
             return
-        for line in text.split("\n"):
-            self.log(4, line)
-        self.log(4, f"{what}: a line of {self.paths.conf} sets nothing (fix it; 'off' still works; said once per boot)")
+        self._log_problems(4, what, "; said once per boot")
         with contextlib.suppress(OSError):
             write_atomic(mark, said, mode=0o644, durable=False, relabel=False)
 
@@ -585,7 +589,7 @@ class GameProfile:
         on = os.path.exists(p.state)
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
-        for line in describe_problems(p.conf, self.problems).split("\n") if self.problems else ():
+        for line in self._problem_lines():
             self.say(
                 f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
             )
@@ -601,9 +605,9 @@ class GameProfile:
             if on:
                 self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
         if on:
-            intended_text = read_text(p.intended) or ""
+            intended_text, newer = self._intended()
             files = [(p.state, self._state_text(), False)]
-            if newer_intended(p.intended, intended_text) is None:  # a newer format's lines are not judged
+            if newer is None:  # a newer format's lines are not judged
                 files.append((p.intended, intended_text, True))
             for path, text, intended in files:
                 for number, line in unreadable_lines(text, intended=intended):
@@ -620,10 +624,14 @@ class GameProfile:
         p = self.paths
         if not os.path.exists(p.intended):
             return drift_lines(None, manual=os.path.exists(p.manual))
-        text = read_text(p.intended) or ""
-        newer = newer_intended(p.intended, text)
-        drifts = [] if newer is not None else self.drift(text)
+        text, newer = self._intended()
+        drifts = self.drift(text) if newer is None else None
         return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer)
+
+    def _intended(self) -> tuple[str, str | None]:
+        """game.intended's text, and why it cannot be compared (None: it can)."""
+        text = read_text(self.paths.intended) or ""
+        return text, newer_intended(self.paths.intended, text)
 
     def _slice_line(self, unit: str) -> None:
         cpus, weight, io = (self.prop("sys", unit, n) for n in ("AllowedCPUs", "CPUWeight", "IOWeight"))
