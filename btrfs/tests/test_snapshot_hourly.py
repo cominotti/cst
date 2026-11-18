@@ -433,6 +433,39 @@ class HourlyTest(Base):
         self.assertEqual(self.calls_but_hostname(), [])
 
 
+class LockLifetimeTest(Base):
+    """The lock of a run (fd 9 on /run/btrfs-snapshot.lock) is inherited by everything the run
+    starts: when the run itself is killed, a child still working (here btrfs-snapshot-core, in the
+    middle of its snapshot) keeps the lock, and a second run waits for it to end (DESIGN 8.1: the
+    port must keep that)."""
+
+    def test_a_killed_run_with_a_child_still_working_keeps_the_lock(self) -> None:
+        self.core(snapshot=[{"sleep": 4}, {}])
+        p = self.start_prog("hourly")
+        for _ in range(200):
+            if self.core_calls():
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never reached btrfs-snapshot-core")
+        p.kill()  # the run's own process only: its child keeps working
+        p.wait(timeout=30)
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(
+            (r.returncode, r.stdout), (0, log(5, "another conversion/snapshot run is active; skipped") + "\n")
+        )
+        self.assertEqual(self.core_calls(), [])
+        # Once the child has ended, the next run goes ahead.
+        for _ in range(200):
+            r = self.run_prog("hourly")
+            if self.core_calls():
+                break
+            time.sleep(0.1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+
+
 class BlockedTest(Base):
     """Exit 4 of the core: a safety check blocked a creation or deletion."""
 
