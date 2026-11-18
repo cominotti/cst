@@ -82,7 +82,6 @@ def execute_cli(
     cmd = args[0] if args and args[0] else "help"  # bash's ${1:-help}: an empty word is help too
     rest = args[1:] if args else []
     orig_args = [cmd, *rest]
-    want_root = False
 
     match parse_swap_command(cmd):
         case SwapCommand.HELP:
@@ -90,9 +89,8 @@ def execute_cli(
             return 0
         case (SwapCommand.PLAN | SwapCommand.STATUS) as command:
             first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
-            if first == "--root":
-                want_root = True
-            elif first:
+            want_root = first == "--root"
+            if first and not want_root:
                 print(f"{cmd}: unknown argument '{first}' (only --root)", file=stderr)
                 return 2
         case SwapCommand.APPLY as command:

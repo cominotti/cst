@@ -323,10 +323,7 @@ class SwapReports:
                 state_note(f_state, spec.name, env.prog, verb),
             )
         )
-        tier_change = c_state in (OwnedState.MISSING, OwnedState.CHANGE) or f_state in (
-            OwnedState.MISSING,
-            OwnedState.CHANGE,
-        )
+        tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
 
     def _partition_items(self, spec: SwapHardwareSpec, swaps_text: str, *, tier_change: bool) -> list[PlanItem]:

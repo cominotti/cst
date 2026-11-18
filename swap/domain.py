@@ -81,7 +81,7 @@ def parse_swap_command(word: str) -> SwapCommand | None:
     """The command a word on the command line names, or None for an unknown one."""
     if word in _HELP_ALIASES:
         return SwapCommand.HELP
-    return next((command for command in SwapCommand if command.value == word), None)
+    return SwapCommand(word) if word in SwapCommand else None
 
 
 def partuuid_path(partuuid: str) -> str:
