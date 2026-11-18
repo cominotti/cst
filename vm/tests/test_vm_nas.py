@@ -664,7 +664,7 @@ class LiveBackupTest(Nas):
 
     def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        entries = [e for e in vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index}))]
+        entries = list(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index})))
         self.assertEqual(entries[0]["mode"], "nas")
 
 

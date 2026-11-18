@@ -1653,7 +1653,7 @@ class PackageTest(unittest.TestCase):
         }
         moved = vm_wiring.vm_paths({var: f"/t/{field}" for field, var in variables.items()})
         self.assertEqual({f: getattr(moved, f) for f in variables}, {f: f"/t/{f}" for f in variables})
-        machine = vm_wiring.vm_paths({var: "" for var in variables.values()})  # empty: the machine's path
+        machine = vm_wiring.vm_paths(dict.fromkeys(variables.values(), ""))  # empty: the machine's path
         self.assertEqual(
             (machine.backup_dir, machine.index, machine.vm_conf, machine.unit_dir, machine.sbin_copy),
             (
