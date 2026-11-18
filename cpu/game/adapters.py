@@ -289,9 +289,11 @@ class GameProfile:
         cg = glob.escape(self.user_cg())
         found: list[str] = []
         for pattern in ("*.slice", "app.slice/run-*.scope", "app.slice/run-*.service"):
-            for d in sorted(glob.glob(f"{cg}/{pattern}"), key=locale.strxfrm):
-                if os.path.isdir(d) and escaped_unit(os.path.basename(d)) is not None:
-                    found.append(d)
+            found.extend(
+                d
+                for d in sorted(glob.glob(f"{cg}/{pattern}"), key=locale.strxfrm)
+                if os.path.isdir(d) and escaped_unit(os.path.basename(d)) is not None
+            )
         return found
 
     def gamemode_in(self, folder: str) -> bool:
