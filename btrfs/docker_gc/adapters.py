@@ -33,7 +33,7 @@ from btrfs.docker_gc.domain import (
     ts,
 )
 from btrfs.docker_gc.ports import EventSink
-from cst_core.adapters.files import read_text, write_atomic
+from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
@@ -357,7 +357,7 @@ class GcSettingsFile:
             return ()
 
     def write_settings(self, text: str) -> None:
-        write_atomic(self.paths.settings_file, text, mode=0o644, owner="root")
+        write_atomic(self.paths.settings_file, text, mode=0o644, owner=FileOwner.ROOT)
 
 
 def gc_log(prio: int, msg: str) -> None:

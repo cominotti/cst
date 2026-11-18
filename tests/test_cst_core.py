@@ -27,11 +27,20 @@ from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
 from cst_core import wiring as core_wiring
-from cst_core.domain.contracts import first_line_version, state_format, version_of
+from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.application.dispatch import CstDispatcher, ModuleRouter, RouteSettings
-from cst_core.domain.dispatch import MODULES, ROUTING, Routed, format_cst_usage, route_command, script_help
+from cst_core.domain.dispatch import (
+    MODULES,
+    ROUTING,
+    Privilege,
+    RouteAction,
+    Routed,
+    format_cst_usage,
+    route_command,
+    script_help,
+)
 from cst_core.domain.files import MarkedLineSpec, effective_lines, inspect_managed_file
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import (
@@ -1125,26 +1134,30 @@ class ModuleRouterTest(unittest.TestCase):
     def test_route_command(self) -> None:
         vm = ROUTING["vm"]
         self.assertEqual(route_command(vm, "help", [], "p").action, "help")
-        self.assertEqual(route_command(vm, "nope", [], "p"), Routed("unknown", message="Unknown command: nope"))
+        self.assertEqual(
+            route_command(vm, "nope", [], "p"), Routed(RouteAction.UNKNOWN, message="Unknown command: nope")
+        )
         self.assertEqual(
             route_command(vm, "tune", ["x"], "cst vm"),
-            Routed("usage", message="Usage: cst vm tune plan|apply [VM] [--guest-has-virtio]"),
+            Routed(RouteAction.USAGE, message="Usage: cst vm tune plan|apply [VM] [--guest-has-virtio]"),
         )
         for args, privilege in (
-            (["list"], "read"),
-            (["tune", "plan"], "read"),
-            (["tune", "apply"], "root"),
-            (["nocow", "plan"], "read"),
-            (["nocow", "plan", "w", "--root"], "root"),
-            (["nocow", "apply", "--root"], "user"),
-            (["backup-timer", "status"], "read"),
-            (["backup-timer", "off"], "root"),
-            (["backup"], "root"),
+            (["list"], Privilege.READ),
+            (["tune", "plan"], Privilege.READ),
+            (["tune", "apply"], Privilege.ROOT),
+            (["nocow", "plan"], Privilege.READ),
+            (["nocow", "plan", "w", "--root"], Privilege.ROOT),
+            (["nocow", "apply", "--root"], Privilege.USER),
+            (["backup-timer", "status"], Privilege.READ),
+            (["backup-timer", "off"], Privilege.ROOT),
+            (["backup"], Privilege.ROOT),
         ):
             with self.subTest(args=args):
-                self.assertEqual(route_command(vm, args[0], args[1:], "p"), Routed("run", privilege))
+                self.assertEqual(route_command(vm, args[0], args[1:], "p"), Routed(RouteAction.RUN, privilege))
         for cmd in ("status", "prune", "auto", "config"):
-            self.assertEqual(route_command(ROUTING["toolchains"], cmd, ["x"], "p"), Routed("run", "as-user"))
+            self.assertEqual(
+                route_command(ROUTING["toolchains"], cmd, ["x"], "p"), Routed(RouteAction.RUN, Privilege.AS_USER)
+            )
         self.assertEqual(route_command(ROUTING["toolchains"], "list", [], "p").action, "unknown")
 
     def test_script_help_is_what_the_header_sed_printed(self) -> None:
@@ -1375,8 +1388,8 @@ class CoreWiringTest(unittest.TestCase):
 class StateContractsTest(unittest.TestCase):
     """cst_core/domain/contracts.py: every shared state format, and the programs that use its paths."""
 
-    KEYS: Final = ("alert-spool", "stall-records", "stall-queue", "bulk-journal", "docker-gc-state", "docker-gc-last-run",
-            "vm-index", "install-record", "game-state", "game-intended")  # fmt: skip
+    KEYS: Final = (StateFormatKey.ALERT_SPOOL, StateFormatKey.STALL_RECORDS, StateFormatKey.STALL_QUEUE, StateFormatKey.BULK_JOURNAL, StateFormatKey.DOCKER_GC_STATE, StateFormatKey.DOCKER_GC_LAST_RUN,
+            StateFormatKey.VM_INDEX, StateFormatKey.INSTALL_RECORD, StateFormatKey.GAME_STATE, StateFormatKey.GAME_INTENDED)  # fmt: skip
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
         for key in self.KEYS:
@@ -1406,7 +1419,7 @@ class StateContractsTest(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIsNone(first_line_version(text, "cst-game-intended"))
-        self.assertEqual(state_format("game-intended").version, 1)
+        self.assertEqual(state_format(StateFormatKey.GAME_INTENDED).version, 1)
 
     def test_a_version_is_a_whole_number_and_none_is_version_0(self) -> None:
         self.assertEqual(
@@ -1416,7 +1429,7 @@ class StateContractsTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertIsNone(version_of(bad, "v"))
         self.assertEqual(
-            state_format("vm-index").newer_text("/x.json", 2),
+            state_format(StateFormatKey.VM_INDEX).newer_text("/x.json", 2),
             "/x.json is format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST",
         )
 
@@ -1429,17 +1442,18 @@ class StateContractsTest(unittest.TestCase):
         from cst_core.domain.record import ROOT_RECORD
         from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX
 
-        self.assertEqual(GcPaths().last_used, state_format("docker-gc-state").path)
-        self.assertEqual(GcPaths().last_run, state_format("docker-gc-last-run").path)
-        self.assertEqual(BulkPaths().state, state_format("bulk-journal").folder)
+        self.assertEqual(GcPaths().last_used, state_format(StateFormatKey.DOCKER_GC_STATE).path)
+        self.assertEqual(GcPaths().last_run, state_format(StateFormatKey.DOCKER_GC_LAST_RUN).path)
+        self.assertEqual(BulkPaths().state, state_format(StateFormatKey.BULK_JOURNAL).folder)
         self.assertEqual(
-            (VERSION, LOG_DIR), (state_format("stall-records").version, state_format("stall-records").folder)
+            (VERSION, LOG_DIR),
+            (state_format(StateFormatKey.STALL_RECORDS).version, state_format(StateFormatKey.STALL_RECORDS).folder),
         )
-        self.assertEqual(GAME_STATE, state_format("game-state").path)
-        self.assertEqual(GAME_INTENDED, state_format("game-intended").path)
-        self.assertEqual(ALERT_PENDING, state_format("alert-spool").folder)
-        self.assertEqual(VM_INDEX, state_format("vm-index").path)
-        self.assertEqual(ROOT_RECORD, state_format("install-record").path)
+        self.assertEqual(GAME_STATE, state_format(StateFormatKey.GAME_STATE).path)
+        self.assertEqual(GAME_INTENDED, state_format(StateFormatKey.GAME_INTENDED).path)
+        self.assertEqual(ALERT_PENDING, state_format(StateFormatKey.ALERT_SPOOL).folder)
+        self.assertEqual(VM_INDEX, state_format(StateFormatKey.VM_INDEX).path)
+        self.assertEqual(ROOT_RECORD, state_format(StateFormatKey.INSTALL_RECORD).path)
 
     def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:
         from btrfs.bulk.domain import BulkPaths

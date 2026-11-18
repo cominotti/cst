@@ -18,7 +18,7 @@ from typing import TypedDict
 import os
 import re
 
-from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.values import format_bytes_gib_mib
 
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
@@ -502,7 +502,7 @@ class BulkPaths:
     convert_plan: str = "/etc/btrfs-setup/convert-plan"
     snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
     notify: str = NOTIFY_PROGRAM
-    state: str = state_format("bulk-journal").folder
+    state: str = state_format(StateFormatKey.BULK_JOURNAL).folder
     attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
     lock: str = "/run/btrfs-snapshot.lock"  # shared with btrfs-snapshot
 

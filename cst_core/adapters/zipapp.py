@@ -14,7 +14,7 @@ from pathlib import Path
 import zipfile
 
 from cst_core.domain.imports import top_level_packages
-from cst_core.domain.install import InstallEntry
+from cst_core.domain.install import ArtifactKind, InstallEntry
 
 _ZIP_FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 _ZIPAPP_SHEBANG = b"#!/usr/bin/python3 -I\n"
@@ -93,6 +93,6 @@ def build_python_zipapp(repo_root: str | os.PathLike[str], src_rel: str) -> byte
 
 def entry_payload(repo_root: str | os.PathLike[str], entry: InstallEntry) -> bytes:
     """The bytes `install` writes for a non-template entry: a zipapp, or the file as it is."""
-    if entry.kind == "python-entry":
+    if entry.kind == ArtifactKind.PYTHON_ENTRY:
         return build_python_zipapp(repo_root, entry.src)
     return (Path(repo_root) / entry.src).read_bytes()

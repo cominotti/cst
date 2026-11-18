@@ -18,24 +18,27 @@ tests that run them.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import posixpath
 import re
-from typing import Final, Literal, get_args
+from typing import Final
 
 from cst_core.domain.install import manifest_by_src
 
-type _FormatKey = Literal[
-    "alert-spool",
-    "stall-records",
-    "stall-queue",
-    "bulk-journal",
-    "docker-gc-state",
-    "docker-gc-last-run",
-    "vm-index",
-    "install-record",
-    "game-state",
-    "game-intended",
-]
+
+class StateFormatKey(StrEnum):
+    """The key of each registered state format (the first column of the table below)."""
+
+    ALERT_SPOOL = "alert-spool"
+    STALL_RECORDS = "stall-records"
+    STALL_QUEUE = "stall-queue"
+    BULK_JOURNAL = "bulk-journal"
+    DOCKER_GC_STATE = "docker-gc-state"
+    DOCKER_GC_LAST_RUN = "docker-gc-last-run"
+    VM_INDEX = "vm-index"
+    INSTALL_RECORD = "install-record"
+    GAME_STATE = "game-state"
+    GAME_INTENDED = "game-intended"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +159,7 @@ def _parse(table: str) -> tuple[StateFormat, ...]:
 
 
 _FORMATS: Final[Mapping[str, StateFormat]] = {f.key: f for f in _parse(_TABLE)}
-if sorted(_FORMATS) != sorted(get_args(_FormatKey.__value__)):
+if sorted(_FORMATS) != sorted(StateFormatKey):
     raise ValueError("the state table and its keys differ")
 
 
@@ -164,6 +167,6 @@ if sorted(_FORMATS) != sorted(get_args(_FormatKey.__value__)):
 NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
 
 
-def state_format(key: _FormatKey) -> StateFormat:
+def state_format(key: StateFormatKey) -> StateFormat:
     """The registered format of key."""
     return _FORMATS[key]

@@ -18,12 +18,18 @@ class DomainValidationError(ValueError):
 MIB: Final = 1 << 20
 GIB: Final = 1 << 30
 
+# Durations in seconds.
+MINUTE: Final = 60
+HOUR: Final = 60 * MINUTE
+DAY: Final = 24 * HOUR
+WEEK: Final = 7 * DAY
+
 _DURATION_UNITS: Final[dict[str, int]] = {
     "s": 1,
-    "m": 60,
-    "h": 3600,
-    "d": 86400,
-    "w": 604800,
+    "m": MINUTE,
+    "h": HOUR,
+    "d": DAY,
+    "w": WEEK,
 }
 
 _SIZE_UNITS: Final[dict[str, int]] = {

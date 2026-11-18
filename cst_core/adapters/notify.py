@@ -13,28 +13,41 @@ too is the journal line all that is left.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 import errno
 import hashlib
 import os
 import posixpath
 import re
 import time
-from typing import Literal
 
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.ports import CommandRunnerPort
 
-_SPOOL = state_format("alert-spool")
+_SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
 
-type Urgency = Literal["low", "normal", "critical"]
-# sent: btrfs-notify showed or kept it; kept: CST kept it in its place; lost: only the journal has it.
-type _Outcome = Literal["sent", "kept", "lost"]
+
+class Urgency(StrEnum):
+    """An alert's urgency, as btrfs-notify -u takes it."""
+
+    LOW = "low"
+    NORMAL = "normal"
+    CRITICAL = "critical"
+
+
+class _Outcome(StrEnum):
+    """What became of an alert."""
+
+    SENT = "sent"  # btrfs-notify showed or kept it
+    KEPT = "kept"  # CST kept it in its place
+    LOST = "lost"  # only the journal has it
+
 
 # As btrfs-notify bounds what it shows and keeps.
 _MAX_APP, _MAX_TITLE, _MAX_BODY = 40, 200, 4000
@@ -44,7 +57,7 @@ def _bounded(urgency: Urgency, app: str, title: str, body: str) -> tuple[str, st
     """urgency, app, title and body as btrfs-notify normalizes them before it shows or keeps an alert."""
     app = re.sub(r"[^A-Za-z0-9._-]", "_", app)[:_MAX_APP] or "btrfs"
     title = re.sub(r"[\n\r\t]", " ", title)[:_MAX_TITLE] or f"{app} alert"
-    return ("critical" if urgency == "critical" else "normal"), app, title, body[:_MAX_BODY]
+    return (Urgency.CRITICAL if urgency == Urgency.CRITICAL else Urgency.NORMAL), app, title, body[:_MAX_BODY]
 
 
 def _pending_name(app: str, title: str) -> str:
@@ -111,7 +124,7 @@ class Notifier:
         """Show the alert (or have btrfs-notify keep it); when that fails, keep it here and say so."""
         r = self.runner.run([self.program, "-u", urgency, "-a", app, title, body], timeout=_TIMEOUT, new_session=True)
         if r.fault is None and r.returncode == 0:
-            return "sent"
+            return _Outcome.SENT
         if r.fault == "missing":
             why = f"{self.program} is not installed"
         elif r.fault == "timeout":
@@ -125,6 +138,6 @@ class Notifier:
             path = _keep_alert(self.pending, urgency, app, title, body)
         except (OSError, ValueError) as e:  # ValueError: a folder that is no plain path, a title no file holds
             say(3, f"alert not delivered ({why}) and not kept ({e}): {title}; it is only in this journal")
-            return "lost"
+            return _Outcome.LOST
         say(3, f"alert not delivered ({why}): {title}; kept in {path} (cst doctor shows it)")
-        return "kept"
+        return _Outcome.KEPT

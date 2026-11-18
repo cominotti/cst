@@ -67,6 +67,7 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 
 import argparse
 from collections.abc import Iterable, Sequence
+from enum import StrEnum
 import sys
 from typing import NoReturn
 
@@ -98,6 +99,23 @@ class _UsageError(Exception):
     pass
 
 
+class InstallerCommand(StrEnum):
+    """The installer's commands (its first argument), in the order its usage lists them."""
+
+    INSTALL = "install"
+    PLAN = "plan"
+    CHECK = "check"
+    TEXT = "text"
+    TEXT_PLAN = "text-plan"
+    PAYLOAD = "payload"
+    DESTS = "dests"
+    SRCS = "srcs"
+    REMOVE = "remove"
+    REMOVE_TEXT = "remove-text"
+    MARK = "mark"
+    HELP = "help"
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         """Raise instead of printing the usage and exiting."""
@@ -108,28 +126,15 @@ def _parser() -> _Parser:
     p = _Parser(prog=NAME, add_help=False)
     p.add_argument(
         "command",
-        choices=[
-            "install",
-            "plan",
-            "check",
-            "text",
-            "text-plan",
-            "payload",
-            "dests",
-            "srcs",
-            "remove",
-            "remove-text",
-            "mark",
-            "help",
-        ],
+        choices=[c.value for c in InstallerCommand],
     )
     p.add_argument("args", nargs="*")
     p.add_argument("--home")
     p.add_argument("--root", default="")
     p.add_argument("--set", action="append", default=[], dest="values")
     p.add_argument("--module")
-    p.add_argument("--kind", choices=["python-entry", "shell", "unit", "data"])
-    p.add_argument("--owner", choices=["root", "user"])
+    p.add_argument("--kind", choices=[k.value for k in ArtifactKind])
+    p.add_argument("--owner", choices=[o.value for o in Owner])
     p.add_argument("--component")
     return p
 
@@ -173,7 +178,7 @@ def _entries(
 def _own() -> tuple[Owner, str, bool]:
     """Who this process writes as: root (root's record) or a user (their record, in their home)."""
     as_root, home = wiring.installer_identity()
-    return ("root" if as_root else "user"), home, as_root
+    return (Owner.ROOT if as_root else Owner.USER), home, as_root
 
 
 def _text_place(dest: str, mode: int, component: str | None, a: argparse.Namespace, *, recorded: bool) -> Placement:
@@ -200,9 +205,9 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     mode = OctalMode.parse(a.args[1]).bits
     # Generated text as root goes to a root destination; as a user (cst_install_text DEST MODE USER), to theirs.
     place = _text_place(a.args[0], mode, a.component, a, recorded=a.component is not None)
-    as_root = place.owner == "root"
+    as_root = place.owner == Owner.ROOT
     data = sys.stdin.buffer.read()
-    if a.command == "text":
+    if a.command == InstallerCommand.TEXT:
         written = service.put(place, data, as_root=as_root)
         return f"{'written:  ' if written else 'unchanged:'} {place.path}"
     current = service.is_current(place.path, data, mode, place.owner, as_root=as_root)
@@ -215,7 +220,7 @@ def _mark(service: InstallService, a: argparse.Namespace) -> int:
         raise _UsageError("mark --component C done")
     owner = next(e.owner for e in INSTALL_MANIFEST if e.component == a.component)
     _, home, as_root = _own()
-    if owner == "user" and as_root and not a.root:
+    if owner == Owner.USER and as_root and not a.root:
         raise InstallRefused(f"{a.component}: belongs to the user; mark it as the user, not as root")
     service.mark(record_file(owner, a.home or home, a.root), a.component)
     return 0
@@ -224,7 +229,7 @@ def _mark(service: InstallService, a: argparse.Namespace) -> int:
 def _listing(command: str, entries: Sequence[InstallEntry], home: str | None) -> int:
     """dests or srcs: one line per entry."""
     for e in entries:
-        if command == "srcs":
+        if command == InstallerCommand.SRCS:
             print(e.src)
         else:
             print(expand_dest(e.dest, home) if e.dest.startswith("~") and home else e.dest)
@@ -241,14 +246,14 @@ def _stream(lines: Iterable[str]) -> int:
 def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[InstallEntry]) -> int:
     """install, remove, plan or check of manifest entries."""
     req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=_own()[2])
-    if a.command == "remove":
-        if any(e.owner == "user" for e in entries) and req.as_root and not req.root:
+    if a.command == InstallerCommand.REMOVE:
+        if any(e.owner == Owner.USER for e in entries) and req.as_root and not req.root:
             raise InstallRefused("files of the user are removed as the user (cst_remove_as USER), not as root")
         return _stream(service.remove([service.placement(e, req) for e in entries]))
-    if a.command == "install":
+    if a.command == InstallerCommand.INSTALL:
         return _stream(service.install(entries, req))
     lines, todo = service.plan(entries, req)
-    if a.command == "plan":
+    if a.command == InstallerCommand.PLAN:
         print("\n".join(lines))
         return 0
     return 0 if todo == 0 else 1
@@ -256,19 +261,19 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
 
 def _command(service: InstallService, a: argparse.Namespace) -> int:
     """One command of the parsed command line; its exit status."""
-    if a.command in ("text", "text-plan"):
+    if a.command in (InstallerCommand.TEXT, InstallerCommand.TEXT_PLAN):
         print(_text(service, a))
         return 0
-    if a.command == "mark":
+    if a.command == InstallerCommand.MARK:
         return _mark(service, a)
-    if a.command == "remove-text":
+    if a.command == InstallerCommand.REMOVE_TEXT:
         if not a.args:
             raise _UsageError("remove-text DEST...")
         return _stream(service.remove([_text_place(d, 0, None, a, recorded=True) for d in a.args]))
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
-    if a.command in ("dests", "srcs"):
+    if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)
-    if a.command == "payload":
+    if a.command == InstallerCommand.PAYLOAD:
         if len(entries) != 1:
             raise _UsageError("payload SRC (one file)")
         sys.stdout.buffer.write(service.desired(entries[0], _values(a.values)))
@@ -283,7 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     wiring.start_installer()
     try:
         a = _parser().parse_intermixed_args(list(sys.argv[1:] if argv is None else argv))
-        if a.command == "help":
+        if a.command == InstallerCommand.HELP:
             print(__doc__)
             return 0
         service = wiring.install_service()

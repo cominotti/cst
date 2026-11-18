@@ -27,9 +27,10 @@ from unittest import mock
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
-from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Owner
 from cst_core.domain.record import (
     EMPTY_RECORD,
+    ComponentState,
     InstallRecord,
     RecordedFile,
     RecordFormatError,
@@ -44,7 +45,7 @@ from tests.test_install import INSTALLER, SYSTEM_PYTHON, MemoryTarget, entry
 
 
 def _f(sha: str = "aa", component: str = "m:t", commit: str = "c1") -> RecordedFile:
-    return RecordedFile("m/a", component, "data", sha, 0o644, "root", None, commit, "t")
+    return RecordedFile("m/a", component, "data", sha, 0o644, Owner.ROOT, None, commit, "t")
 
 
 class _MemoryRecord:
@@ -75,7 +76,7 @@ class _MemoryRecord:
 
 class RecordDomainTest(unittest.TestCase):
     def test_render_and_parse_give_back_the_same_record(self) -> None:
-        rec = InstallRecord({"/etc/a": _f(), "/etc/t": _f("bb")}, {"m:t": "done"})
+        rec = InstallRecord({"/etc/a": _f(), "/etc/t": _f("bb")}, {"m:t": ComponentState.DONE})
         self.assertEqual(parse_record(render_record(rec)), rec)
         doc = json.loads(render_record(rec))
         self.assertEqual(doc["format"], 1)
@@ -83,7 +84,7 @@ class RecordDomainTest(unittest.TestCase):
         self.assertEqual(doc["files"]["/etc/a"]["cst"], {"commit": "c1", "tree": "t"})
 
     def test_values_round_trip(self) -> None:
-        f = RecordedFile("m/t.in", "m:t", "data", "cc", 0o644, "root", {"UUID": "u-1"}, "c", "t")
+        f = RecordedFile("m/t.in", "m:t", "data", "cc", 0o644, Owner.ROOT, {"UUID": "u-1"}, "c", "t")
         self.assertEqual(
             parse_record(render_record(InstallRecord({"/etc/t": f}, {}))).files["/etc/t"].values, {"UUID": "u-1"}
         )
@@ -108,7 +109,7 @@ class RecordDomainTest(unittest.TestCase):
             self.assertFalse(cm.exception.newer)
 
     def test_a_write_or_a_new_file_makes_the_component_pending_a_file_found_as_recorded_does_not(self) -> None:
-        rec = InstallRecord({"/etc/a": _f()}, {"m:t": "done"})
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.DONE})
         # Found as recorded, even from another commit: the state stays.
         self.assertEqual(with_files(rec, {"/etc/a": (_f(commit="c2"), False)}).components, {"m:t": "done"})
         self.assertEqual(with_files(rec, {"/etc/a": (_f(commit="c2"), False)}).files["/etc/a"].commit, "c2")
@@ -119,8 +120,8 @@ class RecordDomainTest(unittest.TestCase):
 
     def test_marked_and_without_files(self) -> None:
         rec = with_files(EMPTY_RECORD, {"/etc/a": (_f(), True), "/etc/b": (_f(component="m:u"), True)})
-        self.assertEqual(with_state(rec, "m:t", "done").components, {"m:t": "done", "m:u": "pending"})
-        self.assertEqual(with_state(rec, "m:none", "done"), rec, "a component with no file is not added")
+        self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done", "m:u": "pending"})
+        self.assertEqual(with_state(rec, "m:none", ComponentState.DONE), rec, "a component with no file is not added")
         left = without_files(rec, ["/etc/a"])
         self.assertEqual((sorted(left.files), left.components), (["/etc/b"], {"m:u": "pending"}))
 
@@ -130,10 +131,10 @@ class InstallServiceRecordTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.payloads = {"m/a": b"A\n", "m/t.in": b"uuid=@UUID@\n", "m/u": b"U\n", "m/s.service": b"[Unit]\n"}
-        self.a = entry("m/a", "/usr/local/sbin/a", mode=0o755, kind="shell")
+        self.a = entry("m/a", "/usr/local/sbin/a", mode=0o755, kind=ArtifactKind.SHELL)
         self.t = entry("m/t.in", "/etc/t")
-        self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind="unit")
-        self.u = entry("m/u", "~/.config/u", owner="user")
+        self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind=ArtifactKind.UNIT)
+        self.u = entry("m/u", "~/.config/u", owner=Owner.USER)
         self.target = MemoryTarget()
         self.record = _MemoryRecord()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src], record=self.record, commit="c0ffee")
@@ -188,7 +189,7 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.assertEqual(list(self.record.texts), [path])
         # The record lists the destination as installed, not where the stage put it.
         self.assertEqual(list(self.record.doc(path).files), ["/home/tester/.config/u"])
-        self.assertEqual(record_file("root", None, "/stage"), "/stage/var/lib/cst/installed.json")
+        self.assertEqual(record_file(Owner.ROOT, None, "/stage"), "/stage/var/lib/cst/installed.json")
 
     def test_programs_are_written_before_units(self) -> None:
         lines = list(self.svc.install([self.s, self.a], InstallRequest()))
@@ -224,7 +225,7 @@ class InstallServiceRecordTest(unittest.TestCase):
 
     def test_put_and_forget_for_a_module_that_checks_its_files_itself(self) -> None:
         place = Placement(
-            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", "root", 0o644
+            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", Owner.ROOT, 0o644
         )
         self.assertTrue(self.svc.put(place, b"[Unit]\n", as_root=False))
         self.assertFalse(self.svc.put(place, b"[Unit]\n", as_root=False))
@@ -237,7 +238,7 @@ class InstallServiceRecordTest(unittest.TestCase):
         # put writes one file of a module that may have changed other things before it (swap
         # apply edits crypttab first): "nothing was changed" would be wrong there.
         place = Placement(
-            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", "root", 0o644
+            "/t/u.service", "/etc/systemd/system/u.service", self.ROOT, "m:t", None, "text", Owner.ROOT, 0o644
         )
         self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
         with self.assertRaises(InstallRefused) as cm:
@@ -277,11 +278,11 @@ class VerifyBeforeReplaceTest(unittest.TestCase):
             "m/d.conf": b"[Service]\n",
             "m/t@.service": b"[Service]\n",
         }
-        self.p = entry("m/p", "/usr/local/sbin/p", mode=0o755, kind="shell")
-        self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind="unit")
-        self.t = entry("m/s.timer", "/etc/systemd/system/s.timer", kind="unit")
-        self.d = entry("m/d.conf", "/etc/systemd/system/x.service.d/d.conf", kind="unit")
-        self.tpl = entry("m/t@.service", "/etc/systemd/system/t@.service", kind="unit")
+        self.p = entry("m/p", "/usr/local/sbin/p", mode=0o755, kind=ArtifactKind.SHELL)
+        self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind=ArtifactKind.UNIT)
+        self.t = entry("m/s.timer", "/etc/systemd/system/s.timer", kind=ArtifactKind.UNIT)
+        self.d = entry("m/d.conf", "/etc/systemd/system/x.service.d/d.conf", kind=ArtifactKind.UNIT)
+        self.tpl = entry("m/t@.service", "/etc/systemd/system/t@.service", kind=ArtifactKind.UNIT)
         self.target = MemoryTarget()
 
     def svc(self, verdict: UnitVerdict) -> tuple[InstallService, _Verifier]:
@@ -397,7 +398,7 @@ class JsonRecordTest(unittest.TestCase):
 
     def test_a_mark_with_nothing_listed_writes_no_record(self) -> None:
         # An empty record would hide the installs from before it from cst doctor.
-        self.assertFalse(self.port.update(self.path, lambda rec: with_state(rec, "m:t", "done")))
+        self.assertFalse(self.port.update(self.path, lambda rec: with_state(rec, "m:t", ComponentState.DONE)))
         self.assertFalse(os.path.exists(self.path))
 
     def test_two_installs_at_once_lose_nothing(self) -> None:

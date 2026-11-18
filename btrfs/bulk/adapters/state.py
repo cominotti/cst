@@ -27,11 +27,11 @@ from btrfs.bulk.domain import (
 )
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
-JOURNAL = state_format("bulk-journal")
+JOURNAL = state_format(StateFormatKey.BULK_JOURNAL)
 
 
 def bulk_user(conf: str) -> str | None:

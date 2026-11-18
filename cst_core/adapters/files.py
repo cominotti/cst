@@ -13,6 +13,7 @@ Two text readers decode on purpose in two ways; do not merge them:
 
 from collections.abc import Callable
 import contextlib
+from enum import StrEnum
 import errno
 import locale
 import os
@@ -24,7 +25,7 @@ import sys
 import tempfile
 from typing import Literal, overload
 
-from cst_core.domain.files import OwnedState, UnitFileState, owned_file_state
+from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import first_line
 from cst_core.domain.units import MASK_TARGET
@@ -102,7 +103,7 @@ def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
 
 def owned_file_state_at(
     path: str, wanted: bytes | None, is_ours: Callable[[bytes], bool], *, owner: Owner
-) -> OwnedState:
+) -> WholeFileState:
     """State of the file CST writes whole at `path` (an installed program, a unit) against `wanted`.
 
     ok: exactly wanted; change: is_ours(its bytes) but different; conflict:
@@ -119,9 +120,9 @@ def owned_file_state_at(
         with open(path, "rb") as fh:
             data = fh.read()
     except FileNotFoundError:
-        return "missing"
+        return OwnedState.MISSING
     except OSError:
-        return "conflict"
+        return OwnedState.CONFLICT
     return owned_file_state(data, is_link=is_link, wanted=wanted, ours=is_ours(data), owner=owner)
 
 
@@ -140,7 +141,7 @@ def unit_file_state_at(
     the link rule. Only for unit destinations: a program linked to /dev/null is
     not a mask."""
     if is_masked_unit(path):
-        return "masked"
+        return OwnedState.MASKED
     return owned_file_state_at(path, wanted, is_ours, owner=owner)
 
 
@@ -216,7 +217,7 @@ class LocalFileSystemAdapter:
 
     def write_atomic(self, dest: str, content: str, mode: int = 0o644) -> None:
         """Write content to dest atomically via a temporary file in the target directory."""
-        write_atomic(dest, content, mode=mode, owner="root")  # str: UTF-8 with surrogateescape
+        write_atomic(dest, content, mode=mode, owner=FileOwner.ROOT)  # str: UTF-8 with surrogateescape
 
     def write_text_direct(self, path: str, content: str) -> None:
         """Write content directly in place (for sysfs/procfs pseudo-files)."""
@@ -259,7 +260,11 @@ class LocalFileSystemAdapter:
             raise
 
 
-type FileOwner = Literal["caller", "root"]
+class FileOwner(StrEnum):
+    """Who owns a file write_atomic writes: the caller as it is, or root (0:0 when running as root)."""
+
+    CALLER = "caller"
+    ROOT = "root"
 
 
 def _umask() -> int:
@@ -320,7 +325,7 @@ def write_atomic(
     *,
     mode: int | Literal["umask"],
     durable: bool | Literal["file"] = True,
-    owner: FileOwner = "caller",
+    owner: FileOwner = FileOwner.CALLER,
     relabel: bool = True,
 ) -> None:
     """Replace the file at path with data, atomically: path holds the old or the new file, never a part.
@@ -353,7 +358,7 @@ def write_atomic(
     try:
         try:
             os.fchmod(fd, bits)
-            if owner == "root" and os.geteuid() == 0:
+            if owner == FileOwner.ROOT and os.geteuid() == 0:
                 os.fchown(fd, 0, 0)
             view = memoryview(content)
             while view:
@@ -406,4 +411,4 @@ class CounterFile:
 
 def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:
     """The installer's write: write_atomic, durable, owned by root as root (and relabelled)."""
-    write_atomic(dest, content, mode=mode, owner="root")
+    write_atomic(dest, content, mode=mode, owner=FileOwner.ROOT)

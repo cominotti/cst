@@ -4,7 +4,8 @@ routing table of the modules whose setup script is a shim (vm, toolchains)."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal
+from enum import StrEnum
+from typing import Final
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +130,23 @@ def format_cst_usage(present_modules: Mapping[str, bool]) -> str:
 #   root     on the host; as a user, the script runs again through sudo
 #   as-user  the caller's own files: as root (sudo, or `cst status`), the
 #            script runs again as SUDO_USER through runuser
-type _Privilege = Literal["read", "user", "root", "as-user"]
+class Privilege(StrEnum):
+    """How a routed command runs (the privileges above)."""
+
+    READ = "read"
+    USER = "user"
+    ROOT = "root"
+    AS_USER = "as-user"
+
+
+class RouteAction(StrEnum):
+    """What to do with a command line (Routed.action)."""
+
+    HELP = "help"
+    USAGE = "usage"
+    UNKNOWN = "unknown"
+    RUN = "run"
+
 
 # What the help options of every module are.
 HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
@@ -139,7 +156,7 @@ HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
 class _Route:
     """How one command runs. root_with: an argument after the command that makes it a root command."""
 
-    privilege: _Privilege
+    privilege: Privilege
     root_with: str = ""
 
 
@@ -170,9 +187,9 @@ class ModuleRouting:
     user_unset: tuple[str, ...] = ()
 
 
-_READ: Final = _Route("read")
-_ROOT: Final = _Route("root")
-_AS_USER: Final = _CommandRoutes(_Route("as-user"))
+_READ: Final = _Route(Privilege.READ)
+_ROOT: Final = _Route(Privilege.ROOT)
+_AS_USER: Final = _CommandRoutes(_Route(Privilege.AS_USER))
 
 ROUTING: Final[Mapping[str, ModuleRouting]] = {
     "vm": ModuleRouting(
@@ -185,7 +202,7 @@ ROUTING: Final[Mapping[str, ModuleRouting]] = {
                 usage="Usage: {prog} tune plan|apply [VM] [--guest-has-virtio]",
             ),
             "nocow": _CommandRoutes(
-                subcommands={"plan": _Route("read", root_with="--root"), "apply": _Route("user")},
+                subcommands={"plan": _Route(Privilege.READ, root_with="--root"), "apply": _Route(Privilege.USER)},
                 usage="Usage: {prog} nocow plan [--root] | nocow apply",
             ),
             "backup-timer": _CommandRoutes(
@@ -209,27 +226,27 @@ ROUTING: Final[Mapping[str, ModuleRouting]] = {
 class Routed:
     """What to do with a command line: help (exit 0), a usage error (message, exit 2), or run with privilege."""
 
-    action: Literal["help", "usage", "unknown", "run"]
-    privilege: _Privilege = "read"
+    action: RouteAction
+    privilege: Privilege = Privilege.READ
     message: str = ""
 
 
 def route_command(routing: ModuleRouting, cmd: str, rest: Sequence[str], prog: str) -> Routed:
     """Where cmd (an empty one is help) and its arguments go, as the setup script decided."""
     if cmd in HELP_WORDS:
-        return Routed("help")
+        return Routed(RouteAction.HELP)
     found = routing.commands.get(cmd)
     if found is None:
-        return Routed("unknown", message=f"Unknown command: {cmd}")
+        return Routed(RouteAction.UNKNOWN, message=f"Unknown command: {cmd}")
     route = found.route
     if found.subcommands is not None:
         route = found.subcommands.get(rest[0] if rest else "")
         if route is None:
-            return Routed("usage", message=found.usage.format(prog=prog))
+            return Routed(RouteAction.USAGE, message=found.usage.format(prog=prog))
     assert route is not None, cmd
     if route.root_with and route.root_with in rest:
-        return Routed("run", "root")
-    return Routed("run", route.privilege)
+        return Routed(RouteAction.RUN, Privilege.ROOT)
+    return Routed(RouteAction.RUN, route.privilege)
 
 
 def step_down_argv(user: str, uid: int, home: str, *, unset: Sequence[str], then: Sequence[str]) -> list[str]:

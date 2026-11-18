@@ -8,7 +8,7 @@ import re
 import shlex
 from typing import Final, Literal, TypedDict
 
-from cst_core.domain.files import ManagedState, MarkedLineSpec
+from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
@@ -39,13 +39,13 @@ DEBUG_HELP: Final[dict[str, str]] = {
 }
 
 _STATE_WORDS: Final[dict[ManagedState, str]] = {
-    "ok": "ok",
-    "adopt": "adopt",
-    "duplicate": "dedupe",
-    "missing": "write",
-    "change": "update",
-    "conflict": "CONFLICT",
-    "unreadable": "?",
+    OwnedState.OK: "ok",
+    OwnedState.ADOPT: "adopt",
+    OwnedState.DUPLICATE: "dedupe",
+    OwnedState.MISSING: "write",
+    OwnedState.CHANGE: "update",
+    OwnedState.CONFLICT: "CONFLICT",
+    OwnedState.UNREADABLE: "?",
 }
 
 _SAFE_PARTITION_TYPES: Final[frozenset[str]] = frozenset({"", "swap", "crypto_PLAIN"})
@@ -433,13 +433,13 @@ def describe_state(state: ManagedState) -> str:
 def state_note(state: ManagedState, swap_name: str, prog: str, verb: str) -> str:
     """Human-readable note explaining a managed-line or managed-file state."""
     notes: dict[ManagedState, str] = {
-        "ok": "up to date",
-        "adopt": "up to date; written by an older name: apply only renews the comment",
-        "duplicate": "the same entry twice (the old script ran again?): apply keeps one, no restart",
-        "missing": "missing",
-        "change": "differs from swap/ in CST",
-        "conflict": f"an unmarked {swap_name} entry exists: apply refuses; remove it by hand",
-        "unreadable": f"needs root to read: on the host, {prog} {verb} --root",
+        OwnedState.OK: "up to date",
+        OwnedState.ADOPT: "up to date; written by an older name: apply only renews the comment",
+        OwnedState.DUPLICATE: "the same entry twice (the old script ran again?): apply keeps one, no restart",
+        OwnedState.MISSING: "missing",
+        OwnedState.CHANGE: "differs from swap/ in CST",
+        OwnedState.CONFLICT: f"an unmarked {swap_name} entry exists: apply refuses; remove it by hand",
+        OwnedState.UNREADABLE: f"needs root to read: on the host, {prog} {verb} --root",
     }
     return notes[state]
 

@@ -16,9 +16,9 @@ import zlib
 
 from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
 from btrfs.stall_report.domain.window import summarise
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 
-LOG_DIR = state_format("stall-records").folder
+LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
 
 
 def parse_time(s: str | None, default: float) -> float:

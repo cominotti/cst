@@ -29,7 +29,7 @@ sys.dont_write_bytecode = True
 from cpu.game import cli as game_cli
 from cpu.game.adapters import GameProfile, load_profile, read_settings, user_name
 from cpu.game.domain import GamePaths, GameSettings, ctl_file, escapes_in_state, expand_cpus, records, game_settings
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 
 USER = "testuser"
@@ -242,8 +242,8 @@ class PureRulesTest(unittest.TestCase):
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
-        self.assertEqual(p.state, state_format("game-state").path)
-        self.assertEqual(p.intended, state_format("game-intended").path)
+        self.assertEqual(p.state, state_format(StateFormatKey.GAME_STATE).path)
+        self.assertEqual(p.intended, state_format(StateFormatKey.GAME_INTENDED).path)
 
     def test_settings_over_the_defaults(self) -> None:
         self.assertEqual(game_settings({}), GameSettings())

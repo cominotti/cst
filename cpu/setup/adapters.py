@@ -24,7 +24,7 @@ from typing import TextIO
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.domain.errors import shell_exit_status
-from cst_core.domain.install import INSTALL_MANIFEST, select_entries
+from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters import holds, read_stripped
 from cpu.game.domain import GAME_DROPIN, cpuset_in
@@ -291,7 +291,7 @@ class CpuSetup:
             raise Halt(1, "install: run through sudo from your user account (needs SUDO_USER)")
         srcs = [
             e.src
-            for kind in ("python-entry", "shell")
+            for kind in (ArtifactKind.PYTHON_ENTRY, ArtifactKind.SHELL)
             for e in select_entries(INSTALL_MANIFEST, component="cpu:core", kind=kind)
         ]
         for f in srcs:

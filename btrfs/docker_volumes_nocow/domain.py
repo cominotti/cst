@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import time
 
-from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 
 MARGIN = 20 * 1024**3  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
@@ -32,7 +32,7 @@ class NocowPaths:
     postponed: str = "/var/lib/docker-volumes-nocow/postponed"
     notify: str = NOTIFY_PROGRAM
     # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
-    alerts: str = state_format("alert-spool").folder
+    alerts: str = state_format(StateFormatKey.ALERT_SPOOL).folder
     proc: str = "/proc"  # where running dockerd processes are looked for
 
 

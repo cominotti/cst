@@ -28,10 +28,10 @@ import re
 import time
 from typing import Final
 
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.text import file_lines, read_fields
 
-_SPOOL: Final = state_format("alert-spool")
+_SPOOL: Final = state_format(StateFormatKey.ALERT_SPOOL)
 
 TAG: Final = "cst-pending-alerts"
 USAGE: Final = "usage: cst-pending-alerts [--list]"

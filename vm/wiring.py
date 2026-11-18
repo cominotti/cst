@@ -9,8 +9,8 @@ Every path can be moved by its CST_VM_* variable, for the tests only
 from collections.abc import Mapping
 import os
 
-from cst_core.adapters.notify import PENDING_ALERTS
-from cst_core.domain.contracts import NOTIFY_PROGRAM, state_format
+from cst_core.adapters.notify import PENDING_ALERTS, Urgency
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
@@ -44,7 +44,7 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
     """The machine's paths, each moved by its CST_VM_* variable when it is set (tests)."""
     rows = (  # (VmPaths field, its variable, the machine's path)
         ("backup_dir", "CST_VM_BACKUP_DIR", "/var/lib/libvirt/cst-backups"),
-        ("index", "CST_VM_INDEX", state_format("vm-index").path),
+        ("index", "CST_VM_INDEX", state_format(StateFormatKey.VM_INDEX).path),
         ("swtpm_dir", "CST_VM_SWTPM_DIR", "/var/lib/libvirt/swtpm"),
         ("vm_conf", "CST_VM_CONF", "/etc/cst/vm.conf"),
         ("cpu_conf", "CST_VM_CPU_CONF", "/etc/cpu-setup/cpu-setup.conf"),
@@ -137,7 +137,7 @@ def nas_backup(cfg: VmSettings) -> NasBackup:
         restic=Restic(run),  # vm.adapters.run: the C locale, cst-vm's words for a missing restic
         signals=StopSignals(),
         lock=lambda vm: VmLock(vm, cfg.paths.run_dir),
-        alert=lambda title, body: notify(cfg, "critical", title, body),
+        alert=lambda title, body: notify(cfg, Urgency.CRITICAL, title, body),
         clock=clock(),
         out=TerminalLines(),
         root=running_as_root(),
@@ -174,7 +174,7 @@ def safe_terminal() -> None:
 
 def failure_alert(cfg: VmSettings, title: str, body: str) -> None:
     """A desktop alert (normal urgency) for a weekly run that failed: nobody reads its terminal."""
-    notify(cfg, "normal", title, body)
+    notify(cfg, Urgency.NORMAL, title, body)
 
 
 def ask(question: str) -> bool:

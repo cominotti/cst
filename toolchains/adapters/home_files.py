@@ -23,8 +23,8 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
-from cst_core.domain.files import OwnedState, UnitFileState
-from cst_core.domain.install import INSTALL_MANIFEST, expand_dest, manifest_by_src
+from cst_core.domain.files import UnitFileState, WholeFileState
+from cst_core.domain.install import INSTALL_MANIFEST, Owner, expand_dest, manifest_by_src
 from cst_core.domain.values import Json
 from toolchains.adapters.program import program_folder
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
@@ -89,11 +89,11 @@ def put_home_file(
     place = Placement(
         path=path,
         dest=path,
-        record=record_file("user", home),
+        record=record_file(Owner.USER, home),
         component=component,
         src=src,
         kind=kind,
-        owner="user",
+        owner=Owner.USER,
         mode=mode,
         values=values,
     )
@@ -151,12 +151,12 @@ def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], entr
 
 def record_done(home: str, component: str, entry_file: str) -> None:
     """component's command finished: home's install record says it is complete."""
-    home_installer(entry_file).mark(record_file("user", home), component)
+    home_installer(entry_file).mark(record_file(Owner.USER, home), component)
 
 
 def forget_home_files(home: str, paths: Sequence[str], entry_file: str) -> None:
     """These files of home were removed: its install record no longer lists them."""
-    home_installer(entry_file).forget(record_file("user", home), paths)
+    home_installer(entry_file).forget(record_file(Owner.USER, home), paths)
 
 
 def defaults_path(entry_file: str) -> str:
@@ -259,21 +259,21 @@ class ToolchainsLock:
             os.close(fd)
 
 
-def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> OwnedState:
+def file_state(path: str, wanted: str | bytes | None, marker: str = MARKER) -> WholeFileState:
     """ok | change (ours: it holds MARKER, and differs) | conflict (not ours) | missing.
 
     Every file here is in the user's home: a symbolic link is judged by what
     it points to (cst_core.domain.install.link_read_through), and a write
     replaces the link itself."""
     want = wanted.encode() if isinstance(wanted, str) else wanted
-    return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner="user")
+    return owned_file_state_at(path, want, lambda data: marker.encode() in data, owner=Owner.USER)
 
 
 def timer_unit_state(path: str, wanted: str) -> UnitFileState:
     """file_state of a unit file `auto on` writes: also "masked" when
     `systemctl --user mask` left a link to /dev/null there (see
     cst_core.adapters.files.unit_file_state_at)."""
-    return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner="user")
+    return unit_file_state_at(path, wanted.encode(), lambda data: MARKER.encode() in data, owner=Owner.USER)
 
 
 def turned_off(home: str) -> bool:

@@ -21,7 +21,7 @@ from cst_core.adapters.files import (
     read_text,
 )
 from cst_core.adapters.runtime import restore_default_signals
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
@@ -50,7 +50,7 @@ from vm.domain import (
 
 NAME = "cst-vm"
 
-INDEX_FORMAT = state_format("vm-index")
+INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 
 # The component of the files backup-timer on installs (the install record lists them under it).
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component

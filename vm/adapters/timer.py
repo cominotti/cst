@@ -10,8 +10,8 @@ from cst_core.adapters.files import is_masked_unit, owned_file_state_at, unit_fi
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
-from cst_core.domain.files import UnitFileState
-from cst_core.domain.install import manifest_by_src
+from cst_core.domain.files import OwnedState, UnitFileState
+from cst_core.domain.install import Owner, manifest_by_src
 from vm.adapters import TIMER_COMPONENT
 from vm.domain import (
     SERVICE,
@@ -85,7 +85,7 @@ def install_timer_files(
             component=TIMER_COMPONENT,
             src=program_entry.src if program else None,
             kind=program_entry.kind if program else "text",
-            owner="root",
+            owner=Owner.ROOT,
             mode=mode,
         )
         if svc.put(place, text, as_root=as_root):
@@ -112,12 +112,12 @@ def timer_file_states(
     when it is masked: CST never writes it."""
     states: dict[str, UnitFileState] = {
         p: (owned_file_state_at if p == paths.sbin_copy else unit_file_state_at)(
-            p, t, functools.partial(is_ours, paths.sbin_copy, p), owner="root"
+            p, t, functools.partial(is_ours, paths.sbin_copy, p), owner=Owner.ROOT
         )
         for p, (t, _) in files.items()
     }
     if is_masked_unit(instance_timer):
-        states[instance_timer] = "masked"
+        states[instance_timer] = OwnedState.MASKED
     return states
 
 

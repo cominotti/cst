@@ -3,13 +3,27 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import re
-from typing import Final, Literal
+from typing import Final
 
 from cst_core.domain.values import DomainValidationError, OctalMode
 
-type Owner = Literal["root", "user"]
-type ArtifactKind = Literal["python-entry", "shell", "unit", "data"]
+
+class Owner(StrEnum):
+    """Whose destination a file is (the manifest's owner and runner columns)."""
+
+    ROOT = "root"
+    USER = "user"
+
+
+class ArtifactKind(StrEnum):
+    """What an installed file is (the manifest's kind column)."""
+
+    PYTHON_ENTRY = "python-entry"
+    SHELL = "shell"
+    UNIT = "unit"
+    DATA = "data"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,13 +50,8 @@ class InstallEntry:
         return self.src.endswith(".in")
 
 
-_OWNERS: Final[Mapping[str, Owner]] = {"root": "root", "user": "user"}
-_KINDS: Final[Mapping[str, ArtifactKind]] = {
-    "python-entry": "python-entry",
-    "shell": "shell",
-    "unit": "unit",
-    "data": "data",
-}
+_OWNERS: Final[Mapping[str, Owner]] = {o.value: o for o in Owner}
+_KINDS: Final[Mapping[str, ArtifactKind]] = {k.value: k for k in ArtifactKind}
 
 
 def parse_manifest(table: str) -> tuple[InstallEntry, ...]:
@@ -219,7 +228,7 @@ def manifest_by_dest() -> Mapping[str, InstallEntry]:
 
 def python_entry_srcs() -> tuple[InstallEntry, ...]:
     """Return all Python helper entries packaged as standalone zipapps."""
-    return tuple(entry for entry in INSTALL_MANIFEST if entry.kind == "python-entry")
+    return tuple(entry for entry in INSTALL_MANIFEST if entry.kind == ArtifactKind.PYTHON_ENTRY)
 
 
 def expand_dest(dest: str, home: str | None) -> str:
@@ -285,7 +294,7 @@ def link_read_through(owner: Owner) -> bool:
     manager's link); otherwise the caller decides as for a file with those
     bytes, and a write replaces the link itself, never what it points to.
     """
-    return owner == "user"
+    return owner == Owner.USER
 
 
 def is_current(found: OnDisk | None, data: bytes, mode: int, owner: Owner, *, as_root: bool) -> bool:
@@ -301,7 +310,7 @@ def is_current(found: OnDisk | None, data: bytes, mode: int, owner: Owner, *, as
         return False
     if (found.data, found.mode) != (data, mode):
         return False
-    return not (as_root and owner == "root" and (found.uid, found.gid) != (0, 0))
+    return not (as_root and owner == Owner.ROOT and (found.uid, found.gid) != (0, 0))
 
 
 def select_entries(

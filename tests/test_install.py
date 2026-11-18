@@ -58,7 +58,7 @@ LEGACY_GC_DOMAIN = os.path.join(REPO, "tests", "fixtures", "legacy", "btrfs-dock
 
 
 def entry(
-    src: str, dest: str, *, mode: int = 0o644, kind: ArtifactKind = "data", owner: Owner = "root"
+    src: str, dest: str, *, mode: int = 0o644, kind: ArtifactKind = ArtifactKind.DATA, owner: Owner = Owner.ROOT
 ) -> InstallEntry:
     return InstallEntry(
         src=src,
@@ -122,19 +122,19 @@ class DomainTest(unittest.TestCase):
     def test_is_current_link_and_owner_rules(self) -> None:
         file_ = OnDisk(b"x", 0o644, 0, 0, False)
         link = OnDisk(b"x", 0o644, 0, 0, True)
-        self.assertTrue(is_current(file_, b"x", 0o644, "root", as_root=True))
-        self.assertFalse(is_current(file_, b"x", 0o600, "root", as_root=True))
-        self.assertFalse(is_current(None, b"x", 0o644, "user", as_root=False))
-        self.assertFalse(is_current(OnDisk(None, 0, -1, -1, True), b"x", 0o644, "user", as_root=False))
+        self.assertTrue(is_current(file_, b"x", 0o644, Owner.ROOT, as_root=True))
+        self.assertFalse(is_current(file_, b"x", 0o600, Owner.ROOT, as_root=True))
+        self.assertFalse(is_current(None, b"x", 0o644, Owner.USER, as_root=False))
+        self.assertFalse(is_current(OnDisk(None, 0, -1, -1, True), b"x", 0o644, Owner.USER, as_root=False))
         # One link rule: replaced at a root destination, read through at a user destination.
-        self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=True))
-        self.assertFalse(is_current(link, b"x", 0o644, "root", as_root=False))
-        self.assertTrue(is_current(link, b"x", 0o644, "user", as_root=False))
+        self.assertFalse(is_current(link, b"x", 0o644, Owner.ROOT, as_root=True))
+        self.assertFalse(is_current(link, b"x", 0o644, Owner.ROOT, as_root=False))
+        self.assertTrue(is_current(link, b"x", 0o644, Owner.USER, as_root=False))
         # As root, a root entry must be owned by 0:0; a staged run as a user cannot check it.
         foreign = OnDisk(b"x", 0o644, 1000, 1000, False)
-        self.assertFalse(is_current(foreign, b"x", 0o644, "root", as_root=True))
-        self.assertTrue(is_current(foreign, b"x", 0o644, "root", as_root=False))
-        self.assertTrue(is_current(foreign, b"x", 0o644, "user", as_root=True))
+        self.assertFalse(is_current(foreign, b"x", 0o644, Owner.ROOT, as_root=True))
+        self.assertTrue(is_current(foreign, b"x", 0o644, Owner.ROOT, as_root=False))
+        self.assertTrue(is_current(foreign, b"x", 0o644, Owner.USER, as_root=True))
 
     def test_expand_dest(self) -> None:
         self.assertEqual(expand_dest("~/.config/x", "/home/u/"), "/home/u/.config/x")
@@ -145,7 +145,7 @@ class DomainTest(unittest.TestCase):
             expand_dest("~/.config/x", None)
 
     def test_select_entries_by_module_and_kind(self) -> None:
-        cpu = select_entries(INSTALL_MANIFEST, module="cpu", kind="python-entry")
+        cpu = select_entries(INSTALL_MANIFEST, module="cpu", kind=ArtifactKind.PYTHON_ENTRY)
         self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-watch", "cpu/game-profile"})
         self.assertTrue(all(e.module == "cpu" for e in select_entries(INSTALL_MANIFEST, module="cpu")))
 
@@ -166,8 +166,16 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(
             parse_manifest(table),
             (
-                InstallEntry("a/b", "/usr/local/bin/b", OctalMode(0o755), "root", "python-entry", "user", "a:x"),
-                InstallEntry("c/d", "~/.x", OctalMode(0o644), "user", "data", "user", "c:y"),
+                InstallEntry(
+                    "a/b",
+                    "/usr/local/bin/b",
+                    OctalMode(0o755),
+                    Owner.ROOT,
+                    ArtifactKind.PYTHON_ENTRY,
+                    Owner.USER,
+                    "a:x",
+                ),
+                InstallEntry("c/d", "~/.x", OctalMode(0o644), Owner.USER, ArtifactKind.DATA, Owner.USER, "c:y"),
             ),
         )
 
@@ -201,7 +209,7 @@ class InstallServiceTest(unittest.TestCase):
         self.payloads = {"m/a": b"A\n", "m/t.in": b"uuid=@UUID@\n", "m/u": b"U\n"}
         self.a = entry("m/a", "/etc/a")
         self.t = entry("m/t.in", "/etc/t")
-        self.u = entry("m/u", "~/.config/u", owner="user")
+        self.u = entry("m/u", "~/.config/u", owner=Owner.USER)
         self.target = MemoryTarget()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src])
 
@@ -421,9 +429,9 @@ class LocalTargetTest(unittest.TestCase):
         link = os.path.join(self.tmp, "link")
         os.symlink(real, link)
         service = InstallService(self.t, lambda _e: b"")
-        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "user"), f"unchanged: {link}")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, Owner.USER), f"unchanged: {link}")
         self.assertTrue(os.path.islink(link))
-        self.assertEqual(service.write_if_changed(link, b"y\n", 0o644, "user"), f"written:   {link}")
+        self.assertEqual(service.write_if_changed(link, b"y\n", 0o644, Owner.USER), f"written:   {link}")
         self.assertFalse(os.path.islink(link), "a write replaces the link, never writes through it")
         self.assertEqual(Path(real).read_bytes(), b"x\n")
 
@@ -434,9 +442,9 @@ class LocalTargetTest(unittest.TestCase):
         link = os.path.join(self.tmp, "link")
         os.symlink(real, link)
         service = InstallService(self.t, lambda _e: b"")
-        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "root"), f"written:   {link}")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, Owner.ROOT), f"written:   {link}")
         self.assertFalse(os.path.islink(link))
-        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, "root"), f"unchanged: {link}")
+        self.assertEqual(service.write_if_changed(link, b"x\n", 0o644, Owner.ROOT), f"unchanged: {link}")
         self.assertEqual(Path(real).read_bytes(), b"x\n")
 
 

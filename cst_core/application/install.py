@@ -24,6 +24,7 @@ import posixpath
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import (
+    ArtifactKind,
     InstallEntry,
     Owner,
     expand_dest,
@@ -94,7 +95,7 @@ def staged(root: str, path: str) -> str:
 
 def record_file(owner: Owner, home: str | None, root: str = "") -> str:
     """The install record of root's files, or of the user's whose home this is (staged under root)."""
-    if owner == "root":
+    if owner == Owner.ROOT:
         return staged(root, ROOT_RECORD)
     if not home:
         raise ValueError("a home folder is needed for the user's install record")
@@ -178,7 +179,7 @@ class InstallService:
 
     def _check(self, entries: Sequence[InstallEntry], req: InstallRequest) -> None:
         for entry in entries:
-            if entry.owner == "user" and req.as_root and not req.root:
+            if entry.owner == Owner.USER and req.as_root and not req.root:
                 raise InstallRefused(
                     f"{entry.src}: belongs to the user; install it as the user (cst_install_as USER), not as root"
                 )
@@ -208,12 +209,14 @@ class InstallService:
             except OSError:
                 continue  # unreadable here: the update below says why, after the files
 
-    def is_current(self, path: str, data: bytes, mode: int, owner: Owner = "root", *, as_root: bool = False) -> bool:
+    def is_current(
+        self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
+    ) -> bool:
         """True when path already holds exactly data with mode (links and owner: domain.install.is_current)."""
         return is_current(self._target.current(path), data, mode, owner, as_root=as_root)
 
     def write_if_changed(
-        self, path: str, data: bytes, mode: int, owner: Owner = "root", *, as_root: bool = False
+        self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
     ) -> str:
         """Write path unless it is current; the report line either way (WriteFailed when it cannot)."""
         if self.is_current(path, data, mode, owner, as_root=as_root):
@@ -231,7 +234,7 @@ class InstallService:
         the last file, and also when a write fails (with the files before it).
         """
         todo = self._prepare(entries, req)
-        todo.sort(key=lambda pd: pd[0].kind == "unit")
+        todo.sort(key=lambda pd: pd[0].kind == ArtifactKind.UNIT)
         # Only a program with a SettingsStep is read here (is_current reads the whole file).
         replaced = [
             p
@@ -281,7 +284,7 @@ class InstallService:
         verified = False
         try:
             for p, data in todo:
-                if p.kind == "unit" and not verified:
+                if p.kind == ArtifactKind.UNIT and not verified:
                     # The programs are in place: the units that change are verified before any is written.
                     verified = True
                     note = self._verify_units(todo, req)
@@ -305,7 +308,7 @@ class InstallService:
         units = {
             posixpath.basename(p.dest): data
             for p, data in todo
-            if p.kind == "unit"
+            if p.kind == ArtifactKind.UNIT
             and not posixpath.dirname(p.dest).endswith(".d")
             and "@." not in posixpath.basename(p.dest)
             and not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root)
@@ -361,7 +364,7 @@ class InstallService:
         self._save([(place, data, written)], {})
         return written
 
-    def mark(self, record: str, component: str, state: ComponentState = "done") -> None:
+    def mark(self, record: str, component: str, state: ComponentState = ComponentState.DONE) -> None:
         """The component's state in the record (done: its setup command finished)."""
         if record:
             self._update(record, lambda rec: with_state(rec, component, state))

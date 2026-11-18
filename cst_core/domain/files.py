@@ -2,6 +2,7 @@
 """Pure domain rules for comparing and updating managed files and marked lines."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 import posixpath
 import re
 from typing import Literal
@@ -9,11 +10,42 @@ from typing import Literal
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import file_lines
 
-type ManagedState = Literal["ok", "adopt", "duplicate", "change", "missing", "conflict", "unreadable"]
-type OwnedState = Literal["ok", "change", "conflict", "missing"]
-# A systemd unit file CST writes whole: an OwnedState, or "masked" (systemctl mask left a link to
-# /dev/null there; cst_core.adapters.files.unit_file_state_at).
-type UnitFileState = OwnedState | Literal["masked"]
+
+class OwnedState(StrEnum):
+    """The state of a file, or a line, CST manages, against what CST wants there.
+
+    ok: exactly what CST wants; adopt: the same settings written another way
+    (CST takes it over); duplicate: the line more than once, all the same;
+    change: CST's, but different; missing; conflict: someone else's;
+    unreadable; masked: `systemctl mask` left a link to /dev/null at a unit
+    file CST writes (cst_core.adapters.files.unit_file_state_at).
+    """
+
+    OK = "ok"
+    ADOPT = "adopt"
+    DUPLICATE = "duplicate"
+    CHANGE = "change"
+    MISSING = "missing"
+    CONFLICT = "conflict"
+    UNREADABLE = "unreadable"
+    MASKED = "masked"
+
+
+# A marked line or a managed file (MarkedLineSpec.inspect, inspect_managed_file).
+type ManagedState = Literal[
+    OwnedState.OK,
+    OwnedState.ADOPT,
+    OwnedState.DUPLICATE,
+    OwnedState.CHANGE,
+    OwnedState.MISSING,
+    OwnedState.CONFLICT,
+    OwnedState.UNREADABLE,
+]
+# A file CST writes whole (owned_file_state, cst_core.adapters.files.owned_file_state_at).
+type WholeFileState = Literal[OwnedState.OK, OwnedState.CHANGE, OwnedState.CONFLICT, OwnedState.MISSING]
+# A systemd unit file CST writes whole: a WholeFileState, or OwnedState.MASKED
+# (cst_core.adapters.files.unit_file_state_at).
+type UnitFileState = WholeFileState | Literal[OwnedState.MASKED]
 
 _UNMARKED_KEY_RE = re.compile(r"^\s*([^\s#]\S*)")
 
@@ -46,9 +78,9 @@ class MarkedLineSpec:
     def inspect(self, content: str | None, *, exists: bool, readable: bool) -> ManagedState:
         """Classify the state of this marked line inside a file's contents."""
         if exists and not readable:
-            return "unreadable"
+            return OwnedState.UNREADABLE
         if not exists or content is None:
-            return "missing"
+            return OwnedState.MISSING
 
         want_payload = self.payload(self.desired_line)
         count = 0
@@ -65,17 +97,17 @@ class MarkedLineSpec:
             else:
                 match = _UNMARKED_KEY_RE.match(line)
                 if match and match.group(1) == self.key:
-                    return "conflict"
+                    return OwnedState.CONFLICT
 
         if count == 0:
-            return "missing"
+            return OwnedState.MISSING
         if count > 1:
-            return "duplicate" if all_same_payload else "change"
+            return OwnedState.DUPLICATE if all_same_payload else OwnedState.CHANGE
         if first == self.desired_line:
-            return "ok"
+            return OwnedState.OK
         if all_same_payload:
-            return "adopt"
-        return "change"
+            return OwnedState.ADOPT
+        return OwnedState.CHANGE
 
     def render_updated(self, existing_content: str) -> str:
         """Return updated file content with the first marked line replaced and duplicates dropped."""
@@ -95,7 +127,7 @@ class MarkedLineSpec:
 
 def owned_file_state(
     content: bytes | None, *, is_link: bool, wanted: bytes | None, ours: bool, owner: Owner
-) -> OwnedState:
+) -> WholeFileState:
     """State of a file CST writes whole (a unit, an installed program) against what it wants there.
 
     content None = no file (for a link read through: no target). ok: exactly
@@ -107,12 +139,12 @@ def owned_file_state(
     link itself.
     """
     if is_link and not link_read_through(owner):
-        return "change"
+        return OwnedState.CHANGE
     if content is None:
-        return "missing"
+        return OwnedState.MISSING
     if wanted is not None and content == wanted:
-        return "ok"
-    return "change" if ours else "conflict"
+        return OwnedState.OK
+    return OwnedState.CHANGE if ours else OwnedState.CONFLICT
 
 
 def effective_lines(content: str) -> list[str]:
@@ -130,16 +162,16 @@ def inspect_managed_file(
 ) -> ManagedState:
     """Compare a managed file on disk with its desired content."""
     if is_symlink:
-        return "change"
+        return OwnedState.CHANGE
     if not exists:
-        return "missing"
+        return OwnedState.MISSING
     if not readable or actual_content is None:
-        return "unreadable"
+        return OwnedState.UNREADABLE
     if actual_content == desired_content:
-        return "ok"
+        return OwnedState.OK
     if effective_lines(desired_content) == effective_lines(actual_content):
-        return "adopt"
-    return "change"
+        return OwnedState.ADOPT
+    return OwnedState.CHANGE
 
 
 def checked_path(path: str) -> str:

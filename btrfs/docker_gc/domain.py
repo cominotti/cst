@@ -11,13 +11,13 @@ from datetime import datetime
 import os
 import re
 
-from cst_core.domain.contracts import StateFormat, state_format, version_of
+from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
 from cst_core.domain.text import describe_problems, parse_shell_assignments
-from cst_core.domain.values import format_bytes_decimal
+from cst_core.domain.values import DAY, format_bytes_decimal
 
 # The recorder's state and the last run's summary (the files of GcPaths).
-STATE_FORMAT: StateFormat = state_format("docker-gc-state")
-LAST_RUN_FORMAT: StateFormat = state_format("docker-gc-last-run")
+STATE_FORMAT: StateFormat = state_format(StateFormatKey.DOCKER_GC_STATE)
+LAST_RUN_FORMAT: StateFormat = state_format(StateFormatKey.DOCKER_GC_LAST_RUN)
 
 
 class NewerState(RuntimeError):
@@ -43,7 +43,6 @@ def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
     return version_of(data, "v")
 
 
-DAY = 86400
 HEARTBEAT_SECONDS = 300
 MIN_UPTIME = 600  # after boot, restart-policy containers are still coming up
 # What a failed `docker info` prints when nothing answers on the daemon's socket:

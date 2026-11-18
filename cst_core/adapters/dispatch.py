@@ -11,7 +11,7 @@ import sys
 from typing import Literal
 
 from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on_host_argv
-from cst_core.domain.errors import shell_exit_status
+from cst_core.domain.errors import ExitStatus, shell_exit_status
 from cst_core.ports import ContainerProbePort
 
 # The signals a bash script waiting for a foreground command leaves to that
@@ -42,7 +42,7 @@ def default_ctrl_c() -> None:
 def _start_failure(argv: Sequence[str], exc: OSError) -> int:
     """Report a command that could not start, as bash does: 127 when it is not found, else 126."""
     print(f"{argv[0]}: {exc.strerror}", file=sys.stderr, flush=True)
-    return 127 if isinstance(exc, FileNotFoundError) else 126
+    return ExitStatus.NOT_FOUND if isinstance(exc, FileNotFoundError) else ExitStatus.CANNOT_RUN
 
 
 class LocalCstDispatchAdapter:

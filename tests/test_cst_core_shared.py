@@ -31,6 +31,7 @@ from cst_core.adapters import runner as core_runner, virsh as core_virsh
 from cst_core.adapters import files as core_files, nocow
 from cst_core.adapters.files import (
     CounterFile,
+    FileOwner,
     ensure_dir,
     is_masked_unit,
     owned_file_state_at,
@@ -41,7 +42,7 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.journal import log
 from cst_core.adapters import notify as core_notify
-from cst_core.adapters.notify import Notifier
+from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.adapters.sd_notify import ServiceNotifier
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import confirm
@@ -49,6 +50,7 @@ from cst_core.domain.errors import Refused, Usage
 from doctor.domain import parse_alert_text
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
+from cst_core.domain.install import Owner
 from cst_core.domain.text import (
     describe_problems,
     first_line,
@@ -119,7 +121,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(format_bytes_gib_mib(1500 * MIB, gib_threshold=10 * GIB, comma=True), "1,500 MiB")
 
     def test_owned_file_state(self) -> None:
-        for owner in ("root", "user"):
+        for owner in (Owner.ROOT, Owner.USER):
             with self.subTest(owner=owner):
                 self.assertEqual(owned_file_state(b"a", is_link=False, wanted=b"a", ours=True, owner=owner), "ok")
                 self.assertEqual(owned_file_state(b"b", is_link=False, wanted=b"a", ours=True, owner=owner), "change")
@@ -129,11 +131,11 @@ class DomainTest(unittest.TestCase):
                 self.assertEqual(owned_file_state(None, is_link=False, wanted=b"a", ours=False, owner=owner), "missing")
                 self.assertEqual(owned_file_state(b"a", is_link=False, wanted=None, ours=True, owner=owner), "change")
         # The installer's link rule: replaced at a root destination, judged by its target at a user one.
-        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="root"), "change")
-        self.assertEqual(owned_file_state(None, is_link=True, wanted=b"a", ours=False, owner="root"), "change")
-        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner="user"), "ok")
-        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=True, owner="user"), "change")
-        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=False, owner="user"), "conflict")
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner=Owner.ROOT), "change")
+        self.assertEqual(owned_file_state(None, is_link=True, wanted=b"a", ours=False, owner=Owner.ROOT), "change")
+        self.assertEqual(owned_file_state(b"a", is_link=True, wanted=b"a", ours=True, owner=Owner.USER), "ok")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=True, owner=Owner.USER), "change")
+        self.assertEqual(owned_file_state(b"b", is_link=True, wanted=b"a", ours=False, owner=Owner.USER), "conflict")
 
     def test_render_unit_layout(self) -> None:
         text = render_unit_file(["# head"], [("Unit", ["Description=x"]), ("Service", ["# why", "Type=oneshot"])])
@@ -259,7 +261,7 @@ class AdaptersTest(unittest.TestCase):
         def mark(data: bytes) -> bool:
             return b"MARK" in data
 
-        for owner in ("root", "user"):
+        for owner in (Owner.ROOT, Owner.USER):
             with self.subTest(owner=owner):
                 self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v1\n", mark, owner=owner), "ok")
                 self.assertEqual(owned_file_state_at(ours, b"#!/x\nMARK v2\n", mark, owner=owner), "change")
@@ -273,12 +275,12 @@ class AdaptersTest(unittest.TestCase):
         os.symlink(self.path("missing"), self.path("dangling"))
         # One link rule with the installer: at a root destination a link is
         # always replaced ("change", whatever it points to); at a user destination its target counts.
-        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="root"), "change")
-        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="root"), "change")
-        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner="user"), "ok")
-        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner="user"), "change")
-        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner="user"), "conflict")
-        self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner="user"), "missing")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner=Owner.ROOT), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner=Owner.ROOT), "change")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v1\n", mark, owner=Owner.USER), "ok")
+        self.assertEqual(owned_file_state_at(link, b"#!/x\nMARK v2\n", mark, owner=Owner.USER), "change")
+        self.assertEqual(owned_file_state_at(self.path("link-theirs"), b"y", mark, owner=Owner.USER), "conflict")
+        self.assertEqual(owned_file_state_at(self.path("dangling"), b"y", mark, owner=Owner.USER), "missing")
 
     def test_unit_file_state_at_sees_a_mask(self) -> None:
         # `systemctl mask` leaves a link to /dev/null; the link rule alone replaced it (root) or
@@ -295,7 +297,7 @@ class AdaptersTest(unittest.TestCase):
         os.symlink(ours, self.path("linked.timer"))
         os.symlink(self.path("missing"), self.path("dangling.timer"))
         empty = self.path("empty.timer", b"")
-        for owner in ("root", "user"):
+        for owner in (Owner.ROOT, Owner.USER):
             with self.subTest(owner=owner):
                 self.assertTrue(is_masked_unit(masked))
                 self.assertTrue(is_masked_unit(chained))
@@ -310,7 +312,7 @@ class AdaptersTest(unittest.TestCase):
                         path,
                     )
         self.assertFalse(is_masked_unit(self.path("missing")))
-        self.assertEqual(unit_file_state_at(self.path("linked.timer"), b"MARK v1\n", mark, owner="root"), "change")
+        self.assertEqual(unit_file_state_at(self.path("linked.timer"), b"MARK v1\n", mark, owner=Owner.ROOT), "change")
 
     def test_journal_line(self) -> None:
         out = io.StringIO()
@@ -635,7 +637,7 @@ class WriteAtomicTest(unittest.TestCase):
                     self.assertEqual(fh.read(), "old")
 
     def test_owner_root_chowns_only_as_root(self) -> None:
-        for owner, euid, calls in (("root", 0, 1), ("caller", 0, 0), ("root", 1000, 0)):
+        for owner, euid, calls in ((FileOwner.ROOT, 0, 1), (FileOwner.CALLER, 0, 0), (FileOwner.ROOT, 1000, 0)):
             with (
                 self.subTest(owner=owner, euid=euid),
                 mock.patch.object(core_files.os, "geteuid", return_value=euid),
@@ -1313,7 +1315,7 @@ class NotifierTest(unittest.TestCase):
     ) -> tuple[str, _NotifyRunner]:
         runner = _NotifyRunner(result)
         notifier = Notifier(runner, "/x/btrfs-notify", self.pending, log=lambda p, m: self.lines.append((p, m)))
-        return notifier.send("critical", app, title, body), runner
+        return notifier.send(Urgency.CRITICAL, app, title, body), runner
 
     def missing(self, title: str = "Disk: problem", *, app: str = "btrfs-bulk", body: str = "the body") -> str:
         """Send with btrfs-notify missing; the file the alert was kept in."""
@@ -1428,7 +1430,7 @@ class NotifierTest(unittest.TestCase):
                 notifier = Notifier(
                     _NotifyRunner(result), "/x/btrfs-notify", pending, log=lambda p, m: self.lines.append((p, m))
                 )
-                self.assertEqual(notifier.send("normal", "cst-vm", title, "body"), "lost")
+                self.assertEqual(notifier.send(Urgency.NORMAL, "cst-vm", title, "body"), "lost")
                 [(prio, msg)] = self.lines
                 self.assertEqual(prio, 3)
                 self.assertTrue(msg.endswith(f"): {title}; it is only in this journal"), msg)

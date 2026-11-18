@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments
@@ -48,7 +48,7 @@ STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
 ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
 ALERT_MAX_FILE = 16384
 ALERT_NAME = re.compile(r"^[0-9a-f]{32}\.alert$")
-ALERT_PENDING = HostPath(state_format("alert-spool").folder)  # btrfs-notify keeps them there
+ALERT_PENDING = HostPath(state_format(StateFormatKey.ALERT_SPOOL).folder)  # btrfs-notify keeps them there
 
 # The machine's own architecture: a bare name installs this one (or noarch).
 ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s390x", "armv7hl", "riscv64", "src"})
@@ -118,9 +118,9 @@ SWAP_DROPIN = HostPath(_BY_SRC["swap/units/machine.slice.d-10-swap-memory-low.co
 FSTAB = HostPath("/etc/fstab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
-GAME_RUN = HostPath(state_format("game-state").folder)
-GAME_STATE = HostPath(state_format("game-state").path)
-GAME_INTENDED = HostPath(state_format("game-intended").path)
+GAME_RUN = HostPath(state_format(StateFormatKey.GAME_STATE).folder)
+GAME_STATE = HostPath(state_format(StateFormatKey.GAME_STATE).path)
+GAME_INTENDED = HostPath(state_format(StateFormatKey.GAME_INTENDED).path)
 GAME_MANUAL = HostPath(f"{GAME_RUN}/manual")
 GAME_DROPIN_DIR = HostPath("/run/systemd/system")
 GAME_DROPIN = "zz-cst-game.conf"
@@ -137,7 +137,7 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 VIRSH_URI = "qemu:///system"
 CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
-VM_INDEX_FORMAT = state_format("vm-index")
+VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)
 
 

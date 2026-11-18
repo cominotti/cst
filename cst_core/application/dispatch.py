@@ -16,6 +16,8 @@ from cst_core.domain.dispatch import (
     MODULES,
     HELP_WORDS,
     ModuleRouting,
+    Privilege,
+    RouteAction,
     Routed,
     format_cst_usage,
     route_command,
@@ -210,18 +212,18 @@ class ModuleRouter:
         return self._follow(cmd, rest, route_command(self._routing, cmd, rest, self._prog))
 
     def _follow(self, cmd: str, rest: Sequence[str], routed: Routed) -> int:
-        if routed.action == "help":
+        if routed.action == RouteAction.HELP:
             self._port.say("out", self._help())
             return 0
-        if routed.action == "unknown":
+        if routed.action == RouteAction.UNKNOWN:
             self._port.say("err", f"{routed.message}\n{self._help()}")
             return 2
-        if routed.action == "usage":
+        if routed.action == RouteAction.USAGE:
             self._port.say("err", f"{routed.message}\n")
             return 2
-        if routed.privilege == "as-user":
+        if routed.privilege == Privilege.AS_USER:
             return self._as_user(cmd, rest)
-        if routed.privilege == "read":
+        if routed.privilege == Privilege.READ:
             return self._read(cmd, rest)
         if self._in_container():
             words = " ".join([cmd, *rest])
@@ -231,7 +233,7 @@ class ModuleRouter:
                 f"In a host terminal: {self._prog} {words}\n",
             )
             return 1
-        if routed.privilege == "root" and self._port.euid() != 0:
+        if routed.privilege == Privilege.ROOT and self._port.euid() != 0:
             # sudo resets the environment: CST_PROG is handed over explicitly (when the caller set it).
             handed = ["env", f"CST_PROG={self._s.cst_prog}"] if self._s.cst_prog else []
             return self._port.exec_replace(["sudo", "--", *handed, self._s.script, cmd, *rest])

@@ -37,7 +37,7 @@ from cst_core.adapters import SystemctlAdapter, nocow as inode_attrs
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
-from cst_core.domain.files import UnitFileState
+from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.values import Json
 from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
@@ -1917,7 +1917,7 @@ class TimerUseCaseTest(unittest.TestCase):
     unit = "cst-vm-backup@win.timer"
 
     def test_on_installs_turns_on_then_records(self) -> None:
-        timers = FakeTimers({"/p": "missing", "/u": "change", "/t": "ok"}, [])
+        timers = FakeTimers({"/p": OwnedState.MISSING, "/u": OwnedState.CHANGE, "/t": OwnedState.OK}, [])
         steps: list[vm_domain.TimerStep] = []
         vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, steps.append)
         self.assertEqual(timers.done, ["write /p", "write /u", "reload", f"on {self.unit}", "complete"])
@@ -1928,9 +1928,9 @@ class TimerUseCaseTest(unittest.TestCase):
             raise Refused("the NAS backup is not set up")
 
         cases: list[tuple[dict[str, UnitFileState], Callable[[], None], str]] = [
-            ({"/p": "conflict"}, lambda: None, "not CST's files"),
-            ({"/p": "ok", "/own": "masked"}, lambda: None, "nothing was changed"),
-            ({"/p": "missing"}, no_nas, "not set up"),
+            ({"/p": OwnedState.CONFLICT}, lambda: None, "not CST's files"),
+            ({"/p": OwnedState.OK, "/own": OwnedState.MASKED}, lambda: None, "nothing was changed"),
+            ({"/p": OwnedState.MISSING}, no_nas, "not set up"),
         ]
         for states, ready, words in cases:
             timers = FakeTimers(states, [])
@@ -1944,14 +1944,14 @@ class TimerUseCaseTest(unittest.TestCase):
             ("on", f"^systemctl enable --now {self.unit}: failed$", ["write /p", "reload"]),
             ("reload", "^systemctl daemon-reload: Access denied$", ["write /p"]),
         ):
-            timers = FakeTimers({"/p": "missing"}, [])
+            timers = FakeTimers({"/p": OwnedState.MISSING}, [])
             systemd = FakeSystemd(timers, fail)
             with self.subTest(fail=fail), self.assertRaisesRegex(Refused, words):
                 vm_application.timer_on(timers, systemd, "win", lambda: None, lambda s: None)
             self.assertEqual(timers.done, done)
 
     def test_off_removes_the_files_when_no_timer_is_left(self) -> None:
-        timers = FakeTimers({"/p": "ok", "/u": "missing", "/own": "masked"}, [self.unit])
+        timers = FakeTimers({"/p": OwnedState.OK, "/u": OwnedState.MISSING, "/own": OwnedState.MASKED}, [self.unit])
         steps: list[vm_domain.TimerStep] = []
         self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", steps.append), [])
         # /u already gone (removed by hand, or an earlier off stopped after its removal): forgotten too,
@@ -1959,32 +1959,32 @@ class TimerUseCaseTest(unittest.TestCase):
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}", "remove /p", "forget /p /u", "reload"])
         self.assertEqual([s.kind for s in steps], ["off", "removed", "left"])
         # The last daemon-reload is best effort: its failure leaves the files removed.
-        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        timers = FakeTimers({"/p": OwnedState.OK}, [self.unit])
         self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers, "reload"), "win", lambda s: None), [])
 
     def test_off_keeps_the_files_for_another_vm(self) -> None:
         other = "cst-vm-backup@other.timer"
-        timers = FakeTimers({"/p": "ok"}, [self.unit, other])
+        timers = FakeTimers({"/p": OwnedState.OK}, [self.unit, other])
         self.assertEqual(vm_application.timer_off(timers, FakeSystemd(timers), "win", lambda s: None), [other])
         self.assertEqual(timers.done, [f"off {self.unit}", f"clean {self.unit}"])
 
     def test_off_refuses_when_the_timer_stays_on(self) -> None:
-        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        timers = FakeTimers({"/p": OwnedState.OK}, [self.unit])
         systemd = FakeSystemd(timers, "off")
         with self.assertRaisesRegex(Refused, f"^systemctl disable --now {self.unit}: denied$"):
             vm_application.timer_off(timers, systemd, "win", lambda s: None)
         self.assertEqual(timers.done, [])
-        timers = FakeTimers({"/p": "ok"}, [])  # off already: the failure does not matter
+        timers = FakeTimers({"/p": OwnedState.OK}, [])  # off already: the failure does not matter
         vm_application.timer_off(timers, FakeSystemd(timers, "off"), "win", lambda s: None)
         self.assertIn("remove /p", timers.done)
 
     def test_status(self) -> None:
-        timers = FakeTimers({"/p": "ok"}, [self.unit])
+        timers = FakeTimers({"/p": OwnedState.OK}, [self.unit])
         st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual(
             (st.unit, st.on, st.files, st.next_run, st.last_result), (self.unit, True, {"/p": "ok"}, "Sat", "success")
         )
-        timers = FakeTimers({"/p": "ok"}, [])
+        timers = FakeTimers({"/p": OwnedState.OK}, [])
         st = vm_application.timer_status(timers, FakeSystemd(timers), "win")
         self.assertEqual((st.on, st.next_run, st.last_result), (False, "", ""))
         timers = FakeTimers({}, [])
@@ -2005,7 +2005,7 @@ class NoRealCommandsTest(unittest.TestCase):
         with open(stub, "w") as f:
             f.write(f"#!/bin/sh\ntouch '{marker}'\n")
         os.chmod(stub, 0o755)
-        timers = FakeTimers({"/p": "ok"}, ["cst-vm-backup@win.timer"])
+        timers = FakeTimers({"/p": OwnedState.OK}, ["cst-vm-backup@win.timer"])
         cfg = vm_wiring.vm_settings({"CST_VM_INDEX": os.path.join(tmp, "vm-backups.json")})
         with (
             mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ.get('PATH', '/usr/bin')}"}),

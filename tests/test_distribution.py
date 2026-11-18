@@ -46,7 +46,9 @@ from cst_core.domain.install import (
     COMPONENTS,
     INSTALL_MANIFEST,
     SETUP_ENTRYPOINTS,
+    ArtifactKind,
     InstallEntry,
+    Owner,
     python_entry_srcs,
 )
 from cst_core.domain.values import OctalMode
@@ -213,7 +215,9 @@ class DistributionGateTest(unittest.TestCase):
     def test_modes_let_the_runner_use_the_file(self) -> None:
         problems = [p for e in INSTALL_MANIFEST for p in mode_problems(e)]
         self.assertEqual(problems, [], "\n".join(problems))
-        bad = InstallEntry("m/x", "/usr/local/bin/x", OctalMode(0o750), "root", "shell", "user", "m:x")
+        bad = InstallEntry(
+            "m/x", "/usr/local/bin/x", OctalMode(0o750), Owner.ROOT, ArtifactKind.SHELL, Owner.USER, "m:x"
+        )
         self.assertTrue(mode_problems(bad))
 
     def test_every_entry_has_a_known_component_and_every_component_a_refresh_command(self) -> None:

@@ -18,7 +18,7 @@ units for what a parser cannot see.
 from collections.abc import Mapping
 import unittest
 
-from cst_core.domain.install import InstallEntry, manifest_by_dest
+from cst_core.domain.install import ArtifactKind, InstallEntry, Owner, manifest_by_dest
 from cst_core.domain.values import OctalMode
 from tests.unit_files import Scope, UnitText, generated_units, manifest_units
 
@@ -127,13 +127,25 @@ class UnitContractTest(unittest.TestCase):
         )
         by_dest = {
             "~/.local/lib/cst/x.conf": InstallEntry(
-                "m/x.conf", "~/.local/lib/cst/x.conf", OctalMode(0o644), "user", "data", "user", "m:x"
+                "m/x.conf",
+                "~/.local/lib/cst/x.conf",
+                OctalMode(0o644),
+                Owner.USER,
+                ArtifactKind.DATA,
+                Owner.USER,
+                "m:x",
             ),
             "~/.local/lib/cst/tool": InstallEntry(
-                "m/tool", "~/.local/lib/cst/tool", OctalMode(0o700), "user", "python-entry", "user", "m:x"
+                "m/tool",
+                "~/.local/lib/cst/tool",
+                OctalMode(0o700),
+                Owner.USER,
+                ArtifactKind.PYTHON_ENTRY,
+                Owner.USER,
+                "m:x",
             ),
             "/usr/local/sbin/data": InstallEntry(
-                "m/data", "/usr/local/sbin/data", OctalMode(0o644), "root", "data", "root", "m:x"
+                "m/data", "/usr/local/sbin/data", OctalMode(0o644), Owner.ROOT, ArtifactKind.DATA, Owner.ROOT, "m:x"
             ),
         }
         user = UnitText("u.service", text, "user", "m")

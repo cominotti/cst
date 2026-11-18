@@ -79,7 +79,7 @@ from btrfs.stall_monitord.adapters.proc import (
 )
 from cst_core.adapters.files import write_atomic
 from cst_core.adapters.sd_notify import ServiceNotifier
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 
 
 class _Started(Protocol):
@@ -573,7 +573,9 @@ class Monitor:
             return
         try:
             # Plain-text queue for /usr/local/sbin/btrfs-notify --queue (the stall-queue format, alert_text).
-            path = os.path.join(self.run_dir, state_format("stall-queue").file_name.replace("*", str(time.time_ns())))
+            path = os.path.join(
+                self.run_dir, state_format(StateFormatKey.STALL_QUEUE).file_name.replace("*", str(time.time_ns()))
+            )
             write_atomic(
                 path, alert_text(level, title, body).encode("utf-8"), mode="umask", durable=False, relabel=False
             )

@@ -19,7 +19,7 @@ import posixpath
 import re
 from typing import Final, Literal
 
-from cst_core.domain.contracts import first_line_version, state_format
+from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format
 from cst_core.domain.text import file_lines, printf_q, printf_q_words
 
 type Manager = Literal["sys", "usr"]
@@ -38,7 +38,7 @@ DOCKER_SCOPES: Final = "docker-*.scope"
 USAGE: Final = "usage: game-profile on|off|tick|state"
 # game.intended's first line names its format (cst_core.domain.contracts): "cst-game-intended 1".
 INTENDED_MAGIC: Final = "cst-game-intended"
-INTENDED_FORMAT: Final = state_format("game-intended")
+INTENDED_FORMAT: Final = state_format(StateFormatKey.GAME_INTENDED)
 
 
 def _in(folder: str, name: str) -> str:
@@ -51,7 +51,7 @@ class GamePaths:
     """Where the profile reads and writes (tests point them into a folder of their own)."""
 
     conf: str = "/etc/cpu-setup/cpu-setup.conf"
-    run: str = posixpath.dirname(state_format("game-state").path)
+    run: str = posixpath.dirname(state_format(StateFormatKey.GAME_STATE).path)
     cgroot: str = "/sys/fs/cgroup"
     # The system manager's runtime unit folder (the MemoryLow drop-ins).
     unit_runtime: str = "/run/systemd/system"
@@ -65,12 +65,12 @@ class GamePaths:
     @property
     def state(self) -> str:
         """game.state: exists exactly while the profile is on (other projects key on that)."""
-        return posixpath.join(self.run, posixpath.basename(state_format("game-state").path))
+        return posixpath.join(self.run, posixpath.basename(state_format(StateFormatKey.GAME_STATE).path))
 
     @property
     def intended(self) -> str:
         """game.intended: what 'on' set, for the drift repair."""
-        return posixpath.join(self.run, posixpath.basename(state_format("game-intended").path))
+        return posixpath.join(self.run, posixpath.basename(state_format(StateFormatKey.GAME_INTENDED).path))
 
     @property
     def manual(self) -> str:

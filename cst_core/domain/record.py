@@ -25,18 +25,24 @@ checkout's commit when it could be read.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 import json
-from typing import Final, Literal
+from typing import Final
 
-from cst_core.domain.contracts import state_format
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.install import Owner
 
-_FORMAT: Final = state_format("install-record").version
-ROOT_RECORD: Final = state_format("install-record").path
+_FORMAT: Final = state_format(StateFormatKey.INSTALL_RECORD).version
+ROOT_RECORD: Final = state_format(StateFormatKey.INSTALL_RECORD).path
 # Relative to the user's home.
 USER_RECORD_REL: Final = ".local/state/cst/installed.json"
 
-type ComponentState = Literal["pending", "done"]
+
+class ComponentState(StrEnum):
+    """A component's state in the record: pending from a write until its setup command marks it done."""
+
+    PENDING = "pending"
+    DONE = "done"
 
 
 class RecordFormatError(ValueError):
@@ -76,8 +82,8 @@ class InstallRecord:
 
 EMPTY_RECORD: Final = InstallRecord({}, {})
 
-_OWNERS: Final[Mapping[str, Owner]] = {"root": "root", "user": "user"}
-_STATES: Final[Mapping[str, ComponentState]] = {"pending": "pending", "done": "done"}
+_OWNERS: Final[Mapping[str, Owner]] = {o.value: o for o in Owner}
+_STATES: Final[Mapping[str, ComponentState]] = {s.value: s for s in ComponentState}
 
 
 def _string(d: Mapping[str, object], key: str) -> str:
@@ -180,7 +186,7 @@ def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]
     for dest, (f, written) in files.items():
         old = out.get(dest)
         if written or old is None or not old.same_install(f):
-            states[f.component] = "pending"
+            states[f.component] = ComponentState.PENDING
         out[dest] = f
     return InstallRecord(out, states)
 

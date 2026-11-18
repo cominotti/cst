@@ -7,7 +7,7 @@ import posixpath
 import re
 
 from cst_core.application.install import InstallService
-from cst_core.domain.files import ManagedState, MarkedLineSpec, inspect_managed_file
+from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human
@@ -193,7 +193,7 @@ class SwapReports:
     def _inspect_marked(self, path: str, spec: MarkedLineSpec) -> ManagedState:
         exists = self._fs.exists(path)
         if exists and not self._fs.is_readable(path):
-            return "unreadable"
+            return OwnedState.UNREADABLE
         content = self._fs.read_text(path) if exists else None
         readable = (not exists) or (content is not None)
         return spec.inspect(content, exists=exists, readable=readable)

@@ -28,6 +28,7 @@ from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
+from cst_core.domain.install import Owner
 from cst_core.ports import CommandFailed, CommandResult, UnitName
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
@@ -1002,7 +1003,7 @@ class SwapApplicationTest(_SwapScratch):
             component="swap:core",
             src="swap/units/machine.slice.d-50-memory-low.conf",
             kind="unit",
-            owner="root",
+            owner=Owner.ROOT,
             mode=0o644,
         )
         _installer().put(place, text.encode(), as_root=False)
