@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import shlex
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
@@ -119,6 +120,64 @@ SCCACHE_STATS = re.compile(
     r"^(Compile requests|Cache hits|Cache misses|Cache size|Max cache size)\s{2,}(\S(?:.*\S)?)[^\S\n]*$",
     re.M,
 )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ScopeFacts:
+    """What `status` can see of why the wrapper did not start a server in its
+    scope (rustc-wrapper's header lists when it cannot). The defaults: none."""
+
+    run_dir_fallback: bool = False  # the socket is in ~/.cache/sccache/run: no usable $XDG_RUNTIME_DIR
+    manager_socket: str = ""  # <the socket's folder>/systemd/private, when that is not a socket
+    start_failed: bool = False  # <socket>.failed is not empty: the wrapper's last start failed
+    missing_programs: tuple[str, ...] = ()  # of systemd-run and flock, those not on the server's PATH
+
+
+def server_place(env_id: str, cgroup_text: str | None, sock: str, facts: ScopeFacts | None = None) -> str:
+    """Where the running sccache server of ENV_ID is, as `status` shows it.
+
+    CGROUP_TEXT is its /proc/PID/cgroup (None: not known). The wrapper starts
+    the server in cst-sccache-<env>.scope; one anywhere else (started by an
+    older wrapper, or by the client in a compile's own scope) runs every
+    compile of that environment under that cgroup's limits, so it is a WARN.
+    Not when FACTS (or the cgroup itself: no user manager above it) show that
+    the wrapper cannot use a scope there: stopping that server would change
+    nothing, so the line says why instead.
+    """
+    facts = facts or ScopeFacts()
+    scope = f"cst-sccache-{env_id}.scope"
+    path = next((ln[3:] for ln in (cgroup_text or "").splitlines() if ln.startswith("0::")), "")
+    if not path:
+        return f"sccache server {env_id}: cgroup unknown (its process could not be read)"
+    shown = re.sub(r"^.*?/user@\d+\.service/", "", path)
+    if path.rsplit("/", 1)[-1] == scope:
+        return f"sccache server {env_id}: in its own scope ({shown})"
+    if not re.search(r"/user@\d+\.service(?:/|$)", path):
+        reason = "the compile that started it ran outside the user manager (an ssh session, docker exec)"
+    elif facts.run_dir_fallback:
+        reason = "no usable $XDG_RUNTIME_DIR, so its socket is in ~/.cache/sccache/run"
+    elif facts.manager_socket:
+        reason = f"no user manager socket at {facts.manager_socket}"
+    elif facts.missing_programs:
+        reason = f"no {' and no '.join(facts.missing_programs)} on the PATH it started with"
+    else:
+        reason = ""
+    if reason:
+        return f"sccache server {env_id}: runs in {shown} (the wrapper could not use a scope here: {reason})"
+    head = (
+        f"sccache server {env_id}: WARN: runs in {shown}, not in {scope}: it and every compile through it "
+        "share that cgroup's limits until it stops"
+    )
+    if facts.start_failed:
+        return (
+            f"{head} (the wrapper's last start of its scope failed, see {shlex.quote(sock + '.failed')}; "
+            "it tries again 10 minutes after that)"
+        )
+    return (
+        f"{head} (the wrapper of `cst toolchains config apply` starts the next one in its scope where "
+        "systemd-run and flock are installed; to stop this one, wherever sccache is installed: "
+        f"SCCACHE_SERVER_UDS={shlex.quote(sock)} sccache --stop-server)"
+    )
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
