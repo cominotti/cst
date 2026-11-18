@@ -120,11 +120,15 @@ The installed Rust toolchains are not a target: `status` only reports them
 
 The planned ones are **not implemented yet**: nothing is deleted there, and
 naming one (`cst toolchains prune plan go:mod`) says so. `status` lists them
-with where they are now. Adding one is a small step: its `TargetSpec` and
-its policy in `domain/prune.py` (`SPECS`, `Settings`), a new class in
+with where they are now. Adding one is a small step: in `domain/prune.py`
+its `TargetSpec` in `SPECS`, its policy as a field of `Settings` (parsed in
+`checked_settings`), its branch in `Settings.policy_text` and
+`last_run_text` and its run record in `RunRecord`; a new class in
 `application/` (the `Target` protocol in `application/prune.py` says which
 methods; `BaseTarget` holds what every target shares) that `target()` in
-`wiring.py` builds, its keys in `toolchains.conf`, and a line in this table.
+`wiring.py` builds; its keys in `toolchains.conf`; and a line in this table.
+`target()`, `policy_text` and `last_run_text` raise KeyError for an id
+they do not know, so a step left out fails at once.
 
 ## 5. Settings
 

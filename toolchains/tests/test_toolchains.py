@@ -256,6 +256,23 @@ class SelectTest(Scratch):
             with self.assertRaisesRegex(Usage, msg, msg=name):
                 self.sel(name)
 
+    def test_an_id_of_no_target_fails_loudly(self) -> None:
+        # A target added to SPECS but not to these is never taken for python:uv.
+        settings = tc_home_files.load_settings(self.home, TOOL)
+        for tid in ("go:build", ""):
+            with self.subTest(tid=tid):
+                with self.assertRaises(KeyError):
+                    tc_wiring.target(self.session(), settings, tid)
+                with self.assertRaises(KeyError):
+                    settings.policy_text(tid)
+                with self.assertRaises(KeyError):
+                    tcd_prune.last_run_text(tid, {"time": NOW, "removed": 1, "freed": 0})
+        self.assertIn("uv cache prune", settings.policy_text("python:uv"))
+        self.assertIn(
+            "removed 1 file(s)", tcd_prune.last_run_text("python:uv", {"time": NOW, "removed": 1, "freed": 0})
+        )
+        self.assertIn("MAX_IDLE", settings.policy_text("rust:build"))
+
     def test_disabled_target(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_ENABLED=no\nPYTHON_UV_ENABLED=no\n")
         self.assertEqual(self.sel(), [])
@@ -300,6 +317,13 @@ class DefaultsTest(Scratch):
             readme = f.read()
         for tid in list(tcd_prune.SPECS) + list(tcd_prune.PLANNED):
             self.assertIn(f"`{tid}`", readme, tid)
+
+    def test_an_empty_entry_file_is_refused(self) -> None:
+        # The old Program.folder() refused an unset entry file; '' would name the cwd's parent.
+        with self.assertRaisesRegex(RuntimeError, "entry_file is empty"):
+            tc_program.program_folder("")
+        with self.assertRaisesRegex(RuntimeError, "entry_file is empty"):
+            tc_home_files.load_settings(self.home, "")
 
     def test_missing_defaults_stop_the_run(self) -> None:
         # A program with no toolchains.conf next to it.

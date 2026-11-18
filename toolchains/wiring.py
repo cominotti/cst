@@ -27,7 +27,7 @@ from toolchains.application.prune import TargetPorts
 from toolchains.application.python_uv import PythonUv
 from toolchains.application.rust_build import RustBuild
 from toolchains.domain.common import NAME
-from toolchains.domain.prune import RUST_BUILD, Limits
+from toolchains.domain.prune import PYTHON_UV, RUST_BUILD, Limits
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -114,7 +114,10 @@ def settings(s: Session) -> Settings:
 
 def target(s: Session, checked: Settings | None, tid: str) -> Target:
     """A new target TID (its clock starts now) with its policy from CHECKED
-    (None: bad settings; only location, check and status_lines work then)."""
+    (None: bad settings; only location, check and status_lines work then).
+    KeyError for an id of no target here (a target in SPECS that nothing builds)."""
     if tid == RUST_BUILD.id:
         return RustBuild(s.home, s.now, checked.rust if checked else None, s.machine, s.limits)
-    return PythonUv(s.home, s.now, checked.uv if checked else None, s.machine, s.limits)
+    if tid == PYTHON_UV.id:
+        return PythonUv(s.home, s.now, checked.uv if checked else None, s.machine, s.limits)
+    raise KeyError(tid)

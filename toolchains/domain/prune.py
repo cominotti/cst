@@ -87,7 +87,12 @@ class Settings:
         return self.where(*(f"{spec.prefix}_{k}" for k in ("ENABLED", *spec.settings)))
 
     def policy_text(self, tid: str) -> str:
-        return self.rust.text() if tid == RUST_BUILD.id else self.uv.text()
+        """Target TID's policy as plan and status show it; KeyError for an id of no target here."""
+        if tid == RUST_BUILD.id:
+            return self.rust.text()
+        if tid == PYTHON_UV.id:
+            return self.uv.text()
+        raise KeyError(tid)
 
 
 def parse_defaults(path: str, text: str | None) -> dict[str, str]:
@@ -195,8 +200,12 @@ def rust_last_run(s: Mapping[str, Json]) -> str:
 
 
 def last_run_text(tid: str, s: Mapping[str, Json]) -> str:
-    """One line of status from target TID's saved summary."""
-    return rust_last_run(s) if tid == RUST_BUILD.id else uv_last_run(s)
+    """One line of status from target TID's saved summary; KeyError for an id of no target here."""
+    if tid == RUST_BUILD.id:
+        return rust_last_run(s)
+    if tid == PYTHON_UV.id:
+        return uv_last_run(s)
+    raise KeyError(tid)
 
 
 def uv_last_run(s: Mapping[str, Json]) -> str:

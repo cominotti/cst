@@ -23,7 +23,8 @@ from toolchains.domain.common import tilde
 
 
 # The commands cst-toolchains runs (each call names its stdin, environment
-# and timeout; output that is not UTF-8 raises, as text=True did).
+# and timeout; bytes of the output that are not UTF-8 become U+FFFD, the
+# runner's default).
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 
@@ -31,7 +32,10 @@ def program_folder(entry_file: str) -> str:
     """The folder that holds the running program (ENTRY_FILE: its entry point's
     __file__; the zipapp's folder when installed): toolchains.conf and
     rustc-wrapper are read next to it (toolchains/ in CST, ~/.local/lib/cst for
-    the timer's copy)."""
+    the timer's copy). RuntimeError for an empty ENTRY_FILE (it would name the
+    parent of the current folder)."""
+    if not entry_file:
+        raise RuntimeError("entry_file is empty: main() passes the running program's __file__")
     return os.path.dirname(program_path(entry_file))
 
 
