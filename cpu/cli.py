@@ -36,13 +36,13 @@ from cpu.domain import (
     CpuWatchOption,
     QuietSample,
     QuietTest,
+    VmPinAction,
     cpu_line,
     pin_plan,
     quiet_args,
     quiet_result,
     quiet_tests,
     quiet_text,
-    VmPinAction,
 )
 
 # The clock and the pause of `cpu-watch quiet` (its tests pass their own).
