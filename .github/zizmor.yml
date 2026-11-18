@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MPL-2.0
 # The exceptions of the workflow audit (`invowk cmd test workflows`, zizmor).
 # Each ignore list names the findings it keeps out of the audit and starts
-# with the reason. An entry is `FILE` (every finding of that audit in the
-# file) or `FILE:LINE` (one finding); zizmor takes the base name of the file.
-# A line entry moves with the file: when a change above it shifts the line,
-# the audit fails and names the new line. tests/test_workflow_audit.py fails
-# on an ignore list without a reason and on `disable` (which would switch an
-# audit off everywhere). See docs/dev-tools.md, "The workflow audit".
+# with the reason; so does a per-audit `config` block. An entry is `FILE`
+# (every finding of that audit in the file) or `FILE:LINE` (one finding);
+# zizmor takes the base name of the file. A line entry moves with the file:
+# when a change above it shifts the line, the audit fails and names the new
+# line. Plain block YAML only (no `[a, b]` lists, anchors or quoted keys):
+# tests/test_workflow_audit.py reads it line by line, and fails on an ignore
+# list or a config block without a reason and on `disable` (which would
+# switch an audit off everywhere). See docs/dev-tools.md, "The workflow audit".
 rules:
   github-env:
     ignore:

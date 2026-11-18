@@ -6,9 +6,13 @@ on .github: the workflows, the composite actions and dependabot.yml. Its
 exceptions live in one reviewed file, .github/zizmor.yml. This test checks
 what zizmor itself cannot:
 
-- every ignore list of .github/zizmor.yml starts with a comment that says
-  why, and no audit is disabled (`disable: true` takes an audit out for
-  every file, and zizmor then counts none of its findings as ignored);
+- every ignore list and every per-audit `config` block of
+  .github/zizmor.yml starts with a comment that says why (a config can
+  weaken an audit as much as an ignore list: a cooldown of 0 days, actions
+  pinned by tag), and no audit is disabled (`disable: true` takes an audit
+  out for every file, and zizmor then counts none of its findings as
+  ignored). The file must be plain block YAML, which this reader follows:
+  no flow style (`ignore: [a, b]`), anchor, alias, tag or quoted key;
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
 - the nightly runs `invowk cmd ci uv-audit`, and that task runs exactly
@@ -54,26 +58,60 @@ INLINE_IGNORE = re.compile(r"zizmor\s*:\s*ignore\b")
 _KEY = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
 
 
+# What the line reader cannot follow: a flow collection, an anchor, an alias or a tag.
+_NOT_BLOCK = ("{", "[", "&", "*", "!")
+# The keys whose contents are an exception, each with its reason first.
+_REASONED = {"ignore": "an ignore list", "config": "a config block"}
+
+
 def config_problems(text: str) -> list[str]:
-    """What is wrong with the text of .github/zizmor.yml, as text lines (empty: all fine)."""
+    """What is wrong with the text of .github/zizmor.yml, as text lines (empty: all fine).
+
+    The file is read line by line, so it must be plain block YAML: every
+    line a comment, an unquoted `key:` or a `- item`, and no flow style,
+    anchor, alias or tag, which could hide a `disable` or an ignore list
+    from this reader.
+    """
     out: list[str] = []
     lines = text.splitlines()
     rule = "?"
     for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        where = f"{CONFIG}:{number}:"
+        if stripped.startswith("- ") or stripped == "-":
+            if stripped[1:].strip().startswith(_NOT_BLOCK):
+                out.append(f"{where} {rule}: {_FLOW}")
+            continue
         key = _KEY.match(line)
-        if key is None or line.lstrip().startswith("#"):
+        if key is None:
+            out.append(
+                f"{where} write plain block YAML here (an unquoted `key:`, a `- item` or a comment): "
+                "the gate cannot read this line"
+            )
             continue
         indent, name, value = len(key.group(1)), key.group(2), key.group(3)
         if indent == 2:
             rule = name
+        if name in _REASONED and value:
+            out.append(
+                f"{where} {rule}: nothing after `{name}:` on its line; the reason comment and the "
+                "entries go on the lines below"
+            )
+        elif value.startswith(_NOT_BLOCK):
+            out.append(f"{where} {rule}: {_FLOW}")
         if name == "disable":
             out.append(
-                f"{CONFIG}:{number}: {rule}: `disable` switches the audit off for every file; "
+                f"{where} {rule}: `disable` switches the audit off for every file; "
                 "ignore the findings one by one instead, each with its reason"
             )
-        elif name == "ignore" and not value and not _starts_with_comment(lines[number:]):
-            out.append(f"{CONFIG}:{number}: {rule}: an ignore list must start with a comment that says why")
+        elif name in _REASONED and not value and not _starts_with_comment(lines[number:]):
+            out.append(f"{where} {rule}: {_REASONED[name]} must start with a comment that says why")
     return out
+
+
+_FLOW = "no flow style, anchor, alias or tag here (`{`, `[`, `&`, `*`, `!`): the gate reads block YAML only"
 
 
 def _starts_with_comment(rest: list[str]) -> bool:
@@ -148,6 +186,7 @@ rules:
       - action.yml:201
   dependabot-cooldown:
     config:
+      # why
       days: 7
 """
 
@@ -177,7 +216,7 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(config_problems(GOOD_CONFIG), [])
 
     def test_an_ignore_list_without_a_reason_fails(self) -> None:
-        bad = GOOD_CONFIG.replace("      # why\n", "")
+        bad = GOOD_CONFIG.replace("      # why\n", "", 1)
         self.assertEqual(
             config_problems(bad),
             [f"{CONFIG}:4: github-env: an ignore list must start with a comment that says why"],
@@ -188,10 +227,54 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(
             config_problems(bad),
             [
-                f"{CONFIG}:11: artipacked: `disable` switches the audit off for every file; "
+                f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
                 "ignore the findings one by one instead, each with its reason"
             ],
         )
+
+    def test_a_config_block_without_a_reason_fails(self) -> None:
+        bad = GOOD_CONFIG.replace("      # why\n      days", "      days")
+        self.assertEqual(
+            config_problems(bad),
+            [f"{CONFIG}:8: dependabot-cooldown: a config block must start with a comment that says why"],
+        )
+
+    def test_only_plain_block_yaml_is_read(self) -> None:
+        after = "{}: nothing after `{}:` on its line; the reason comment and the entries go on the lines below"
+        flow = "{}: no flow style, anchor, alias or tag here (`{{`, `[`, `&`, `*`, `!`): the gate reads block YAML only"
+        plain = (
+            "write plain block YAML here (an unquoted `key:`, a `- item` or a comment): the gate cannot read this line"
+        )
+        for extra, want in (
+            (
+                "  artipacked:\n    ignore: [ci.yml, nightly.yml]\n",
+                [f"{CONFIG}:12: " + after.format("artipacked", "ignore")],
+            ),
+            (
+                "  artipacked:\n    ignore: # why\n      - ci.yml\n",
+                [f"{CONFIG}:12: " + after.format("artipacked", "ignore")],
+            ),
+            ("  artipacked:\n    config: {days: 0}\n", [f"{CONFIG}:12: " + after.format("artipacked", "config")]),
+            ("  artipacked: {disable: true}\n", [f"{CONFIG}:11: " + flow.format("artipacked")]),
+            (
+                "  artipacked: &off\n    disable: true\n",
+                [
+                    f"{CONFIG}:11: " + flow.format("artipacked"),
+                    f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
+                    "ignore the findings one by one instead, each with its reason",
+                ],
+            ),
+            ("  artipacked: *off\n", [f"{CONFIG}:11: " + flow.format("artipacked")]),
+            (
+                "  artipacked:\n    ignore:\n      # why\n      - [ci.yml]\n",
+                [f"{CONFIG}:14: " + flow.format("artipacked")],
+            ),
+            ('  artipacked:\n    "disable": true\n', [f"{CONFIG}:12: {plain}"]),
+            ("  artipacked:\n    <<: *off\n", [f"{CONFIG}:12: {plain}"]),
+            ("---\n", [f"{CONFIG}:11: {plain}"]),
+        ):
+            with self.subTest(extra=extra):
+                self.assertEqual(config_problems(GOOD_CONFIG + extra), want)
 
     def test_inline_ignores_fail(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cst-zizmor-") as tmp:

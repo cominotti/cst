@@ -234,13 +234,16 @@ What the audit asked for when it was turned on:
 **Exceptions** live in `.github/zizmor.yml` only, as `ignore` lists of
 `FILE` (every finding of that audit in that file) or `FILE:LINE` (one
 finding), by the file's base name. Each list starts with a comment that
-says why. A line entry moves with its file: when a change above it shifts
+says why, and so does a per-audit `config` block (it can weaken an audit
+as much as an ignore list: a cooldown of 0 days, actions pinned by tag).
+The file is plain block YAML, which the test reads line by line: no flow
+lists (`ignore: [a, b]`), anchors, aliases, tags or quoted keys. A line entry moves with its file: when a change above it shifts
 the line, the audit fails and names the new line; move the entry. Today:
 the `GITHUB_PATH` write of `setup-invowk` (it checks the binary against
 its pinned SHA-256 first), the style finding `self-repository` (`./...`
 for local actions) and `superfluous-actions` on the release step.
-`tests/test_workflow_audit.py` (a unit test) fails when an ignore list has
-no reason, when an audit is disabled (`disable: true`, which also hides it
+`tests/test_workflow_audit.py` (a unit test) fails when an ignore list or a
+config block has no reason, on a line it cannot read, when an audit is disabled (`disable: true`, which also hides it
 from zizmor's count of ignored findings), on an inline `zizmor: ignore`
 comment in `.github`, and when `check` stops running the task or the task
 runs anything but exactly that command. The words are compared one by one:
