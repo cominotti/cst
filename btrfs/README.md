@@ -562,8 +562,9 @@ which sends it. It starts that service from a helper thread: starting a program
 waits until the program is read from the disk, which during a stall can take
 minutes, and the sampling must not wait for it. Alerts that come while a start
 still waits make one more start after it (the service sends every queued
-alert). A `systemctl` that does not end within 60 s of its start is killed,
-and the helper waits for it to go, so only one runs at a time and none is left
+alert). A `systemctl` that does not end within 60 s once it runs is killed (the
+wait for its exec, in the helper thread, has no limit), and the helper waits
+for it to go, so only one runs at a time and none is left
 behind as a zombie (the unit's `TasksMax=`). A start that fails, or a
 `systemctl` that exits with an error, is logged; the alert stays queued for the
 next start. That folder survives a restart of the monitor, also an automatic

@@ -161,6 +161,7 @@ class Monitor:
         self.log_dir = log_dir
         # systemd's Type=notify: READY=1 once started, WATCHDOG=1 at every pass of the loop (WatchdogSec=).
         self.notifier = notifier if notifier is not None else ServiceNotifier(None)
+        self.ready_sent = False  # READY=1 reached systemd (signs_of_life sends it again until it does)
         self.run_dir = run_dir
         self.duration = duration
         self.topo = Topology()
@@ -598,12 +599,12 @@ class Monitor:
         )
         # The PSI trigger and /dev/kmsg are open and SIGTERM is handled: the unit becomes active now.
         # A READY=1 that could not be sent (systemd's queue full) is sent again at the next passes.
-        ready = self.notifier.ready()
+        self.ready_sent = self.notifier.ready()
         t0 = time.monotonic()
         next_sample = next_probe = t0
         day = time.strftime("%Y-%m-%d")
         while self.running:
-            ready = self.signs_of_life(ready=ready)
+            self.signs_of_life()
             now = time.monotonic()
             if self.duration and now - t0 >= self.duration:
                 break
@@ -653,14 +654,13 @@ class Monitor:
         self.writer.join(timeout=10)
         log("stopped")
 
-    def signs_of_life(self, *, ready: bool) -> bool:
-        """WATCHDOG=1 for this pass of the loop, after the READY=1 when it could not be sent before; True once it was.
+    def signs_of_life(self) -> None:
+        """WATCHDOG=1 for this pass of the loop, after the READY=1 when it could not be sent before.
 
         A pass that never ends (a deadlock, a read stuck for minutes) stops these, and systemd restarts the
         unit after WatchdogSec=: "active" then means "still sampling"."""
-        ready = ready or self.notifier.ready()
+        self.ready_sent = self.ready_sent or self.notifier.ready()
         self.notifier.watchdog()
-        return ready
 
     def stop(self, *_: object) -> None:
         self.running = False

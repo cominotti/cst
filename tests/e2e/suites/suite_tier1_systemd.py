@@ -2654,7 +2654,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             f"systemctl daemon-reload; systemctl reset-failed {unit}",
             check=False,
         )
-        self._stall_daemons(c, w)
+        self._stall_daemons(c, w, old=False)
         shipped = docker_exec(c, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]).stdout
         text = stall_monitor_e2e_unit(
             shipped, f"/usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord", folders="e2e-stall-watchdog"
@@ -2796,21 +2796,25 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def _stall_daemons(self, c: str, w: str) -> None:
-        """This checkout's btrfs-stall-monitord in w/new and main's in w/old (the zipapps each version's
-        installer builds, staged with --root), and NOTIFY_STUB at NOTIFY_STUB_PATH."""
+    def _stall_daemons(self, c: str, w: str, *, old: bool = True) -> None:
+        """This checkout's btrfs-stall-monitord in w/new (the zipapp its installer builds, staged with
+        --root); with old, also main's in w/old and NOTIFY_STUB at NOTIFY_STUB_PATH."""
+        old_steps = f"""
+            old_tree {w}/old-tree
+            /usr/bin/python3 -I -B {w}/old-tree/cst_core/installer.py install --root {w}/old btrfs/btrfs-stall-monitord >/dev/null
+            install -d {os.path.dirname(NOTIFY_STUB_PATH)}
+            """
         exec_bash(
             c,
             STALL_OLD_TREE
             + f"""
             rm -rf {w} && install -d {w}
             /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --root {w}/new btrfs/btrfs-stall-monitord >/dev/null
-            old_tree {w}/old-tree
-            /usr/bin/python3 -I -B {w}/old-tree/cst_core/installer.py install --root {w}/old btrfs/btrfs-stall-monitord >/dev/null
-            install -d {os.path.dirname(NOTIFY_STUB_PATH)}
-            """,
+            """
+            + (old_steps if old else ""),
         )
-        docker_exec(c, ["bash", "-c", f"cat >{NOTIFY_STUB_PATH}"], input_text=NOTIFY_STUB)
+        if old:
+            docker_exec(c, ["bash", "-c", f"cat >{NOTIFY_STUB_PATH}"], input_text=NOTIFY_STUB)
 
     def test_15_toolchains_auto_off_forgets_the_timer_stamp(self) -> None:
         """systemd keeps the last run of a Persistent= timer (for a user timer
