@@ -5,6 +5,7 @@ recorded runs (cpu-watch)."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+import contextlib
 import csv
 import glob
 import json
@@ -312,10 +313,8 @@ def frametimes(path: str) -> list[float]:
                 if "frametime" in low:
                     col = low.index("frametime")
                 continue
-            try:
+            with contextlib.suppress(ValueError, IndexError):
                 out.append(float(row[col]))
-            except ValueError, IndexError:
-                pass
     return out
 
 
