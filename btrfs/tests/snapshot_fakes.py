@@ -13,7 +13,8 @@ neither is not found (127): nothing reaches the real machine or the network.
 The fakes answer from a description of the machine (machine.json) and write
 down every call (calls, one JSON list per line: the command and its
 arguments; sftp's also with its input, restic's with its RESTIC_* variables
-and the pin file as it was).
+and the pin file as it was; calls.env: the variables each call got on top of
+the test's environment). The program runs with a service's umask (0022).
 btrfs-snapshot-core is an argv recorder: its command line is the
 contract between the two programs, and its answers (exit status, output) come
 from the description. stat answers 256 (a subvolume's root inode) for the
@@ -33,6 +34,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from typing import Final
@@ -59,6 +61,8 @@ FAKES: Final = (
     "sftp",
     "restic",
 )
+# The umask of a systemd service (UMask=0022), for the modes of the files the program creates.
+UMASK: Final = 0o022
 # Runs its arguments with SIGINT and SIGHUP at their defaults (the same process: exec).
 SIGNALS_AT_DEFAULT: Final = (
     "/usr/bin/python3",
@@ -142,6 +146,12 @@ if name == "sftp":
     rec.append(sys.stdin.read())
 with open(os.environ["FAKE_CALLS"], "a") as f:
     f.write(json.dumps(rec) + "\n")
+# The variables the program changed or added for this call (bash's own PWD, SHLVL, OLDPWD, _ aside).
+base = json.loads(os.environ["FAKE_BASE_ENV"])
+added = {k: v for k, v in sorted(os.environ.items())
+         if base.get(k) != v and k not in ("FAKE_BASE_ENV", "PWD", "SHLVL", "OLDPWD", "_")}
+with open(os.environ["FAKE_CALLS"] + ".env", "a") as f:
+    f.write(json.dumps([name, added]) + "\n")
 
 def take(key, default=0, table=None):
     # The answer under key: a list is a queue (its first item; the last one stays).
@@ -209,6 +219,7 @@ if name == "mount":
     rc = take("mount_rc")
     if rc == 0:
         m.setdefault("mountpoints", []).append(args[-1])
+        m.setdefault("mount_modes", {})[args[-1]] = "%o" % (os.stat(args[-1]).st_mode & 0o7777)
         save()
     sys.exit(rc)
 if name == "umount":
@@ -343,6 +354,7 @@ class RuntimeTest(unittest.TestCase):
             "LANG": "C.UTF-8",
             "TZ": "UTC",
         }
+        self.env["FAKE_BASE_ENV"] = json.dumps(self.env)
 
     # ---- the machine -------------------------------------------------------------------
     def path(self, rel: str) -> str:
@@ -415,6 +427,7 @@ class RuntimeTest(unittest.TestCase):
             text=True,
             env={**self.env, **(env or {})},
             cwd=self.tmp,
+            umask=UMASK,
             stdin=subprocess.DEVNULL,
             timeout=120,
         )
@@ -432,14 +445,32 @@ class RuntimeTest(unittest.TestCase):
             text=True,
             env=self.env,
             cwd=self.tmp,
+            umask=UMASK,
             stdin=subprocess.DEVNULL,
         )
         self.addCleanup(p.kill)
         return p
 
     def forget_calls(self) -> None:
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(self.calls_file)
+        for p in (self.calls_file, self.calls_file + ".env"):
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+
+    def call_envs(self, name: str | None = None) -> list[dict[str, str]]:
+        """What each call of the fakes (or of one command) got on top of the test's environment."""
+        try:
+            lines = read(self.calls_file + ".env").splitlines()
+        except FileNotFoundError:
+            return []
+        found: list[dict[str, str]] = []
+        for ln in lines:
+            command, env = json.loads(ln)
+            if name is None or command == name:
+                found.append(env)
+        return found
+
+    def mode(self, path: str) -> int:
+        return stat.S_IMODE(os.stat(path if os.path.isabs(path) else self.path(path)).st_mode)
 
     def calls(self, name: str | None = None) -> list[list[object]]:
         """Every call of the fakes (or those of one command), in order."""

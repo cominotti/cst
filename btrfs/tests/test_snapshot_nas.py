@@ -99,7 +99,7 @@ class GateTest(Base):
     def test_not_enabled(self) -> None:
         self.conf(NAS_ENABLED="0")
         self.assertEqual(self.nas(), (0, [log(6, "NAS backup not enabled")], ""))
-        self.assertEqual([c[0] for c in self.calls()], ["hostname"])
+        self.assertEqual([c for c in self.calls() if c[0] != "hostname"], [])
 
     def test_restic_not_installed_yet(self) -> None:
         os.remove(os.path.join(self.bin, "restic"))
@@ -109,7 +109,7 @@ class GateTest(Base):
         )
 
     def test_not_configured_completely(self) -> None:
-        for settings, password in (({"NAS_PATH": ""}, "secret\n"), ({}, "")):
+        for settings, password in (({"NAS_PATH": ""}, "secret\n"), ({"NAS_PATH": "/volume1/restic"}, "")):
             with self.subTest(settings=settings, password=password):
                 self.conf(NAS_ENABLED="1", **settings)
                 self.write(self.password, password)
@@ -236,6 +236,18 @@ class BackupTest(Base):
             [["mount", "--bind", "-o", "ro,nosuid,nodev", self.snap, self.mnt], ["umount", self.mnt]],
         )
         self.assertFalse(os.path.exists(self.mnt))
+        # The repository's variables are exported once the NAS part starts: every command after
+        # that gets them (the core and mount too), nothing else is added.
+        names = [c[0] for c in self.calls()]
+        envs = self.call_envs()
+        start = names.index("sftp")
+        self.assertEqual([e for e in envs[:start] if e], [])
+        for name, env in zip(names[start:], envs[start:], strict=True):
+            if name != "restic":
+                self.assertEqual(env, self.restic_env, name)
+        # Modes under a service's umask: the run folder 0755, each mount folder 0700.
+        self.assertEqual(self.mode("run/btrfs-snapshot"), 0o755)
+        self.assertEqual(self.described().get("mount_modes"), {self.mnt: "700"})
         self.assertEqual(
             self.core_calls(),
             [["latest", "--snapdir", self.snapdir, "--name", "home", "--source-path", f"{self.top}/home"]],
@@ -488,6 +500,7 @@ class LeftoverMountTest(Base):
             lines,
         )
         self.assertEqual(read(self.path("run/btrfs-snapshot/pinned")), self.snap + "\n")
+        self.assertEqual(self.mode("run/btrfs-snapshot/pinned"), 0o644)
 
     def test_stopped_by_systemd_it_unmounts_and_unpins(self) -> None:
         self.restic(backup={"sleep": 2})

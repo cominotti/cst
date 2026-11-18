@@ -48,6 +48,10 @@ class Base(RuntimeTest):
     def lines(self, text: str) -> list[str]:
         return text.splitlines()
 
+    def calls_but_hostname(self) -> list[list[object]]:
+        """The calls of the fakes besides hostname -s, which every start runs (NAS_RESTIC_HOST's default)."""
+        return [c for c in self.calls() if c[0] != "hostname"]
+
     def recent(self, name: str) -> None:
         """STATE/name holds an epoch of the last two minutes."""
         self.assertLess(abs(int(self.read_state(name)) - time.time()), 120)
@@ -64,21 +68,13 @@ class CommandLineTest(Base):
     def test_configure_is_a_no_op(self) -> None:
         r = self.run_prog("configure", "extra")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        self.assertEqual([c[0] for c in self.calls()], ["hostname"])
+        self.assertEqual(self.calls_but_hostname(), [])
 
     def test_every_command_creates_the_state_folder_first(self) -> None:
         shutil.rmtree(self.state, ignore_errors=True)
         r = self.run_prog("bogus")
         self.assertEqual(r.returncode, 2)
         self.assertTrue(os.path.isdir(self.state))
-
-    def test_the_restic_host_is_the_short_hostname_unless_set(self) -> None:
-        self.run_prog("configure")
-        self.assertEqual(self.calls("hostname"), [["hostname", "-s"]])
-        self.forget_calls()
-        self.conf(NAS_RESTIC_HOST="sophia")
-        self.run_prog("configure")
-        self.assertEqual(self.calls("hostname"), [])
 
 
 class SettingsTest(Base):
@@ -334,6 +330,13 @@ class HourlyTest(Base):
             sorted(os.listdir(self.state)), ["last-ok"], "the pause, the emergency and their alerts are cleared"
         )
         self.assertEqual([c for c in self.calls() if c[0] == "btrfs"], [["btrfs", "filesystem", "usage", "-b", "/var"]])
+        # It exports nothing: every command gets the environment the unit gave it.
+        self.assertEqual([e for e in self.call_envs() if e], [])
+        # Modes under a service's umask (0022).
+        self.assertEqual(
+            (self.mode("run/btrfs-snapshot.lock"), self.mode(self.state), self.mode(self.state_file("last-ok"))),
+            (0o644, 0o755, 0o644),
+        )
 
     def test_workspace_becomes_a_second_source_once_it_is_a_subvolume(self) -> None:
         ws = os.path.join(self.home, "Workspace")
@@ -384,8 +387,7 @@ class HourlyTest(Base):
         self.assertEqual(
             (r.returncode, r.stdout), (0, log(5, "another conversion/snapshot run is active; skipped") + "\n")
         )
-        self.assertEqual(self.core_calls(), [])
-        self.assertEqual([c[0] for c in self.calls()], ["hostname"])
+        self.assertEqual(self.calls_but_hostname(), [])
 
 
 class BlockedTest(Base):

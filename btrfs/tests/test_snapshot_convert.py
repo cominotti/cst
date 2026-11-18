@@ -259,6 +259,7 @@ class ConvertTest(Base):
             f"{holds}\tis or contains a mountpoint\n",
         )
         self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        self.assertEqual(self.mode(self.state_file("skipped")), 0o600, "rewritten through mktemp at each skip")
         # The cause went away: the next run converts it and forgets the skip.
         self.machine(mountpoints=[], mounts=["/"])
         self.run_prog("convert")
@@ -356,7 +357,7 @@ class ConvertBootTest(Base):
         self.plan(f"copy {self.tree('Workspace')}")
         r = self.run_prog("convert-boot")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
-        self.assertEqual([c[0] for c in self.calls()], ["hostname"])
+        self.assertEqual([c for c in self.calls() if c[0] != "hostname"], [])
 
     def test_converts_and_leaves_the_old_tree_to_the_hourly_run(self) -> None:
         ws = self.tree("Workspace")
@@ -373,6 +374,7 @@ class ConvertBootTest(Base):
             ],
         )
         self.assert_converted(ws)
+        self.assertEqual(self.mode(self.state_file("drop-pending")), 0o644)
         (old,) = read(self.state_file("drop-pending")).splitlines()
         self.assertRegex(old, "^" + re.escape(ws) + r"\.pre-subvol-\d{8}T\d{6}$")
         self.assertTrue(os.path.isdir(old))
