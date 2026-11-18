@@ -306,8 +306,8 @@ STACKS = {
         "do_swap_page",
         "__handle_mm_fault",
         "handle_mm_fault",
-    ]
-    + PAGE_FAULT,
+        *PAGE_FAULT,
+    ],
     # A page fault reading from the swap disk: block layer innermost, still memory.
     "swap_in_disk": [
         "__schedule",
@@ -318,8 +318,8 @@ STACKS = {
         "swap_read_folio",
         "do_swap_page",
         "handle_mm_fault",
-    ]
-    + PAGE_FAULT,
+        *PAGE_FAULT,
+    ],
     "throttle_direct_reclaim": [
         "__schedule",
         "schedule",
@@ -337,8 +337,14 @@ STACKS = {
         "irqentry_exit_to_user_mode",
     ],
     # Another thread of the same JVM waiting for the memory map lock.
-    "mmap_lock": ["__schedule", "schedule", "rwsem_down_read_slowpath", "down_read_killable", "lock_mm_and_find_vma"]
-    + PAGE_FAULT,
+    "mmap_lock": [
+        "__schedule",
+        "schedule",
+        "rwsem_down_read_slowpath",
+        "down_read_killable",
+        "lock_mm_and_find_vma",
+        *PAGE_FAULT,
+    ],
     # mmap() waiting for the threads faulting in that VMA (same event).
     "vma_write": [
         "__schedule",
@@ -400,8 +406,8 @@ STACKS = {
         "super_cache_scan",
         "do_shrink_slab",
         "shrink_slab",
-    ]
-    + DIRECT_RECLAIM[2:],
+        *DIRECT_RECLAIM[2:],
+    ],
     "fuse": ["__schedule", "schedule", "request_wait_answer", "fuse_simple_request", "fuse_lookup"],
     "fstrim": [
         "__schedule",

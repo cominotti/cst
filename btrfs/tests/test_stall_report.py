@@ -741,8 +741,18 @@ class MalformedLineTest(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as f:
                     f.writelines(line + "\n" for line in [*junk, *(json.dumps(r) for r in good), *junk])
                 p = subprocess.run(
-                    ["/usr/bin/python3", "-I", tool, "--log-dir", logs, "--since", f"@{now - 60:.0f}"]
-                    + ["--until", f"@{now:.0f}", "--no-below"],
+                    [
+                        "/usr/bin/python3",
+                        "-I",
+                        tool,
+                        "--log-dir",
+                        logs,
+                        "--since",
+                        f"@{now - 60:.0f}",
+                        "--until",
+                        f"@{now:.0f}",
+                        "--no-below",
+                    ],
                     check=False,
                     capture_output=True,
                     text=True,
