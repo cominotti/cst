@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The user manager (systemctl --user): checked calls before files are
-removed, daemon-reload, the timer's disable, the manager's PATH.
+removed, daemon-reload, the timer's disable, the manager's PATH (UserUnits; a
+test replaces its systemctl).
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from toolchains.ports import RunOutputPort
+
 from cst_core.adapters.runner import on_host_argv
 from cst_core.domain.errors import Refused
 from toolchains.domain.auto import own_session_env
 from toolchains.domain.common import NAME
-from toolchains.adapters.program import RUNNER, in_container, say
+from toolchains.adapters.program import RUNNER, in_container
 
 
 def systemctl_cmd(*args: str) -> list[str]:
@@ -47,54 +50,61 @@ def systemctl(*args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     return r.stdout.strip()
 
 
-def before_removal(name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
-    """systemctl --user ARGS NAME for a timer, checked, before auto on/off
-    removes any file. When the user manager refuses or cannot be reached,
-    nothing has been removed yet: Refused, and a second run (once the
-    manager answers) can finish the job. Removing the files anyway would
-    leave a timer that keeps running with no file left to show it."""
-    try:
-        return systemctl(*args, name, check=True, ok=ok)
-    except Refused as e:
-        raise Refused(
-            f"{e}; nothing was removed and {name} may still be running: run this again once your user "
-            "manager answers (`systemctl --user status` shows whether it does)"
-        ) from None
+class UserUnits:
+    """The user manager, as auto on, auto off and status use it."""
 
+    def __init__(self, out: RunOutputPort) -> None:
+        self.out = out
 
-def reload_failed() -> bool:
-    """daemon-reload after unit files were removed: True (and an error line)
-    when it failed. The removal is not undone: the timer is already stopped,
-    and the manager forgets the files at its next reload or restart."""
-    try:
-        systemctl("daemon-reload", check=True)
-    except Refused as e:
-        say(
-            f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
-            "manager answers, so that it forgets them",
-            3,
-            err=True,
-        )
-        return True
-    return False
+    def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
+        """See systemctl()."""
+        return systemctl(*args, check=check, ok=ok)
 
+    def before_removal(self, name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
+        """systemctl --user ARGS NAME for a timer, checked, before auto on/off
+        removes any file. When the user manager refuses or cannot be reached,
+        nothing has been removed yet: Refused, and a second run (once the
+        manager answers) can finish the job. Removing the files anyway would
+        leave a timer that keeps running with no file left to show it."""
+        try:
+            return self.systemctl(*args, name, check=True, ok=ok)
+        except Refused as e:
+            raise Refused(
+                f"{e}; nothing was removed and {name} may still be running: run this again once your user "
+                "manager answers (`systemctl --user status` shows whether it does)"
+            ) from None
 
-def disable_timer(name: str) -> None:
-    """`disable --now` a timer, checked (see before_removal), then forget its
-    last run: systemd keeps the stamp of a Persistent= timer
-    (~/.local/share/systemd/timers/stamp-NAME) after the timer is gone.
-    `clean` needs the timer loaded and stopped, so this runs before its file
-    is removed; a failed clean only leaves that empty file behind."""
-    before_removal(name, "disable", "--now")
-    systemctl("clean", "--what=state", name)
+    def reload_failed(self) -> bool:
+        """daemon-reload after unit files were removed: True (and an error line)
+        when it failed. The removal is not undone: the timer is already stopped,
+        and the manager forgets the files at its next reload or restart."""
+        try:
+            self.systemctl("daemon-reload", check=True)
+        except Refused as e:
+            self.out.say(
+                f"{NAME}: {e}; the files are removed anyway: run `systemctl --user daemon-reload` once your user "
+                "manager answers, so that it forgets them",
+                3,
+                err=True,
+            )
+            return True
+        return False
 
+    def disable_timer(self, name: str) -> None:
+        """`disable --now` a timer, checked (see before_removal), then forget its
+        last run: systemd keeps the stamp of a Persistent= timer
+        (~/.local/share/systemd/timers/stamp-NAME) after the timer is gone.
+        `clean` needs the timer loaded and stopped, so this runs before its file
+        is removed; a failed clean only leaves that empty file behind."""
+        self.before_removal(name, "disable", "--now")
+        self.systemctl("clean", "--what=state", name)
 
-def manager_path() -> str | None:
-    """PATH of the user manager (what the service runs with), or None when
-    it cannot be read."""
-    for line in systemctl("show-environment").splitlines():
-        if line.startswith("PATH="):
-            val = line[len("PATH=") :]
-            # systemd quotes a value with special characters ($'...'): not parsed here.
-            return None if val[:1] in ("$", "'", '"') else val
-    return None
+    def manager_path(self) -> str | None:
+        """PATH of the user manager (what the service runs with), or None when
+        it cannot be read."""
+        for line in self.systemctl("show-environment").splitlines():
+            if line.startswith("PATH="):
+                val = line[len("PATH=") :]
+                # systemd quotes a value with special characters ($'...'): not parsed here.
+                return None if val[:1] in ("$", "'", '"') else val
+        return None

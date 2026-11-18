@@ -49,17 +49,17 @@ from toolchains.domain import common as tcd_common
 from toolchains.domain import config as tcd_config
 from toolchains.domain import uv as tcd_uv
 from toolchains.adapters import uv as tc_uv
-from toolchains.cli import prune as tc_prune
+from toolchains.adapters import cargo as tc_cargo
+from toolchains.domain import prune as tcd_prune
 from toolchains.adapters import build_tree as tc_build_tree
 from toolchains.cli import config as tc_config
 from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import processes as tc_processes
-from toolchains.cli import python_uv as tc_python_uv
-from toolchains.cli import rust_build as tc_rust_build
+from cst_core.ports import CommandResult
+from toolchains.application import python_uv as tca_python_uv
 from toolchains.adapters import rustup as tc_rustup
 from toolchains.cli import status as tc_status
-from toolchains.adapters import units as tc_units
-from toolchains.tests.test_prune_rust_build import NOW, Base, H
+from toolchains.tests.test_prune_rust_build import NOW, TOOL, Base, H
 
 FAKE_CARGO = r"""#!/bin/sh
 # A fake cargo: `metadata ... --manifest-path M` answers with a build folder
@@ -218,7 +218,7 @@ class OrphanTest(RulesBase):
         main = self.repo("slow")
         self.folder(key_of(main), 10)
         self.folder("ee/0123456789abcd", 10)
-        self.m.CMD_TIMEOUT = 1
+        self.limits = tcd_prune.Limits(cmd_timeout=1)
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
         self.assertIn("took longer than", out)
@@ -260,7 +260,7 @@ class OrphanTest(RulesBase):
         self.folder("ee/0123456789abcd", 10)
         plan = tcd_build.decide(
             tc_build_tree.scan(self.root, NOW)[0],
-            tc_prune.load_settings(self.home).rust,
+            tc_home_files.load_settings(self.home, TOOL).rust,
             NOW,
             {"ee/0123456789abcd": [(7, "rustc")]},
             {key_of(main): [main]},
@@ -276,7 +276,7 @@ class OrphanTest(RulesBase):
         main = self.repo("real")
         os.makedirs(os.path.join(main, "src"))
         open(os.path.join(main, "src/lib.rs"), "w").close()
-        ws = tc_rust_build.claimed_folders(self.root, self.home)
+        ws = tc_cargo.claimed_folders(self.root, self.home, self.limits)
         if ws.incomplete and ("toolchain" in ws.incomplete or "rustup" in ws.incomplete):
             self.skipTest(ws.incomplete)
         self.assertEqual(ws.incomplete, "")
@@ -540,7 +540,7 @@ class UvBudgetTest(UvBase):
     def test_used_up_budget_starts_nothing(self) -> None:
         os.makedirs(self.cache)
         self.folder("aa/0123456789abcd", 100)  # MAX_IDLE: would be deleted
-        self.m.RUN_BUDGET = 0
+        self.limits = tcd_prune.Limits(run_budget=0)
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0, out)
         self.assertIn("python:uv: skipped: the run's time budget", out)
@@ -553,10 +553,16 @@ class UvBudgetTest(UvBase):
     def test_uv_timeout_follows_the_budget(self) -> None:
         os.makedirs(self.cache)
         seen: list[float] = []
-        t = tc_python_uv.PythonUv(self.home, NOW, tcd_uv.UvPolicy(interval=0))
+        s = self.session()
+        t = tca_python_uv.PythonUv(self.home, NOW, tcd_uv.UvPolicy(interval=0), s.machine, s.limits)
         t.deadline = time.monotonic() + 200
-        t.run_uv = lambda uv, args, timeout: seen.append(timeout) or subprocess.CompletedProcess(args, 0, "", "")
-        self.assertEqual(t.apply(), 0)
+
+        def prune(uv: str, cache: str, timeout: float) -> CommandResult:
+            seen.append(timeout)
+            return CommandResult(0, "", "")
+
+        with mock.patch.object(s.machine.uv, "prune", prune):
+            self.assertEqual(t.apply(), 0)
         self.assertEqual(len(seen), 1)
         self.assertLessEqual(seen[0], 200)
         self.assertGreater(seen[0], 150)
@@ -610,10 +616,11 @@ class ManagerPathTest(UvBase):
         self.assertIn("uv not found on PATH", out)
 
     def test_quoted_value_is_not_parsed(self) -> None:
+        units = self.session().units
         self.manager_env = "PATH=$'/a\\nb'\n"
-        self.assertIsNone(tc_units.manager_path())
+        self.assertIsNone(units.manager_path())
         self.manager_env = "PATH=/x:/y\n"
-        self.assertEqual(tc_units.manager_path(), "/x:/y")
+        self.assertEqual(units.manager_path(), "/x:/y")
 
 
 class RecheckTest(RulesBase):
@@ -629,7 +636,7 @@ class RecheckTest(RulesBase):
         real = tc_processes.proc_users
         done: list[int] = []
 
-        def hooked(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[Any, str]]], int]:
+        def hooked(root: str) -> tuple[dict[str, list[tuple[str, str]]], int]:
             if not done:
                 done.append(1)
                 p = os.path.join(self.root, rel)
@@ -637,9 +644,13 @@ class RecheckTest(RulesBase):
                 with open(p, "wb") as f:
                     f.write(b"x" * 4096)
                 os.utime(p, (NOW - age_h * H, NOW - age_h * H))
-            return real(root, uid)
+            return real(root)
 
-        self.m.proc_users = hooked
+        tree = self.tree()
+        p = mock.patch.object(tree, "open_by", hooked)
+        p.start()
+        self.addCleanup(p.stop)
+        self.tree_for_main = tree
 
     def test_built_after_the_scan_is_kept(self) -> None:
         self.folder("aa/0123456789abcd", 100)  # MAX_IDLE: planned for deletion
@@ -693,7 +704,7 @@ class RecheckTest(RulesBase):
     def test_delete_folder_honours_a_failed_recheck(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         f = tc_build_tree.scan(self.root, NOW)[0][0]
-        result, detail = tc_rust_build.delete_folder(self.root, f, NOW, self.home, {}, lambda: "measured again: x")
+        result, detail = self.tree().delete(self.root, f, NOW, {}, lambda: "measured again: x", None)
         self.assertEqual((result, detail), ("changed", "measured again: x"))
         self.assertTrue(self.present("aa/0123456789abcd"))
 
@@ -719,7 +730,7 @@ class ToolchainReportTest(RulesBase):
         c = self.repo("c")
         with open(os.path.join(c, "rust-toolchain.toml"), "w") as f:
             f.write('[toolchain]\nchannel = "1.80.0"\n')
-        lines = "\n".join(tc_status.toolchain_lines(self.home))
+        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))
         self.assertIn("default:  stable", lines)
         self.assertRegex(lines, r"1\.98\.1 +pinned by ~/Workspace/a/rust-toolchain.toml")
         self.assertRegex(lines, r"nightly-2026-06-01 +pinned by ~/Workspace/b/rust-toolchain")
@@ -747,7 +758,7 @@ class ToolchainReportTest(RulesBase):
         os.makedirs(os.path.join(a, "scripts"))
         with open(os.path.join(a, "scripts/bench.sh"), "w") as f:
             f.write("RUSTUP_TOOLCHAIN=1.99.1 cargo bench   # not 1.95.0.1, not 21.95.0\n")
-        lines = "\n".join(tc_status.toolchain_lines(self.home))
+        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))
         self.assertRegex(lines, r"nightly-2026-06-01 +named in ~/Workspace/lush/Makefile")
         self.assertRegex(lines, r"nightly +named in ~/Workspace/lush/Makefile \(not offered for removal\)")
         self.assertRegex(lines, r"1\.98\.0 +named in ~/Workspace/lush/.github/workflows/ci.yml")
@@ -765,15 +776,16 @@ class ToolchainReportTest(RulesBase):
             files.append(os.path.join(d, f"{i}.sh"))
             with open(files[-1], "w") as f:
                 f.write("cargo +nightly build\n" if i == 2 else "true\n")
-        self.assertEqual(tc_rustup.named_in(files, ["nightly"]), ({"nightly": files[2]}, True))
-        self.m.TOOL_FILES_MAX = 2
-        self.assertEqual(tc_rustup.named_in(files, ["nightly"]), ({}, False))
+        self.assertEqual(
+            tc_rustup.named_in(files, ["nightly"], self.limits.tool_files_max), ({"nightly": files[2]}, True)
+        )
+        self.assertEqual(tc_rustup.named_in(files, ["nightly"], 2), ({}, False))
 
     def test_incomplete_search_offers_no_command(self) -> None:
         rh = os.path.join(self.tmp, "rustup")
         os.environ["RUSTUP_HOME"] = rh
         os.makedirs(os.path.join(rh, "toolchains", "1.95.0-x86_64-unknown-linux-gnu"))
-        lines = "\n".join(tc_status.toolchain_lines(self.home))  # no ~/Workspace: incomplete
+        lines = "\n".join(tc_status.toolchain_lines(self.home, self.limits))  # no ~/Workspace: incomplete
         self.assertIn("no removal command, because the search was incomplete", lines)
         self.assertNotIn("rustup toolchain uninstall", lines)
 
@@ -842,7 +854,7 @@ class LeanDebugInfoTest(RulesBase):
         data = tomllib.loads(text)
         self.assertEqual(data["profile"]["dev"]["debug"], "line-tables-only")
         self.assertIs(data["profile"]["dev"]["package"]["*"]["debug"], False)
-        self.assertEqual(tc_build_tree.resolve_root(self.home), self.root)  # build-dir still read
+        self.assertEqual(tc_build_tree.resolve_root(self.home, "cst toolchains"), self.root)  # build-dir still read
         _rc, out = self.run_main("config", "apply")
         self.assertIn("lean debug info already set", out)
         self.assertEqual(self.cfg(), text)
@@ -971,7 +983,7 @@ class SccacheConfigTest(RulesBase):
         # Right after build-dir, inside [build].
         lines = text.splitlines()
         self.assertTrue(lines[lines.index("[build]") + 3].startswith("rustc-wrapper = "), text)
-        self.assertEqual(tc_build_tree.resolve_root(self.home), self.root)
+        self.assertEqual(tc_build_tree.resolve_root(self.home, "cst toolchains"), self.root)
         st = os.stat(self.wrapper)
         self.assertEqual(stat_mode(st), 0o755)
         with open(self.wrapper) as f:
@@ -1069,11 +1081,11 @@ class SccacheConfigTest(RulesBase):
         # Only the sccache step (config apply would add build-dir's [build] first).
         self.write_cargo_config("[net]\noffline = true\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
         self.assertIn("\n\n# Added by toolchains-setup.sh (CST) for RUST_SCCACHE=yes", self.cfg())
         self.assertEqual(self.data()["build"], {"rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
         self.assertEqual(self.cfg(), "[net]\noffline = true\n")
 
     def test_removal_of_csts_own_build_table_beside_a_subtable(self) -> None:
@@ -1082,19 +1094,19 @@ class SccacheConfigTest(RulesBase):
         original = "[build.foo]\nbar = 1\n"
         self.write_cargo_config(original)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
         self.assertEqual(self.data()["build"], {"foo": {"bar": 1}, "rustc-wrapper": self.wrapper})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
         self.assertEqual(self.cfg(), original)
         self.assertNotIn("Added by", self.cfg())
 
     def test_removal_keeps_a_build_table_with_other_keys(self) -> None:
         self.write_cargo_config("[build]\njobs = 2\n")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, True), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, True), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.sccache_apply(self.home, None, False), 0)
+            self.assertEqual(tc_config.sccache_apply(self.session(), None, False), 0)
         self.assertEqual(self.cfg(), "[build]\njobs = 2\n")
 
     def test_removal_leaves_a_changed_line_alone(self) -> None:
@@ -1122,7 +1134,9 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(self.cfg(), before)
 
     def test_missing_wrapper_source_blocks_the_line(self) -> None:
-        self.m.wrapper_text = lambda values: None
+        p = mock.patch.object(tc_config, "wrapper_text", lambda values, entry_file: None)
+        p.start()
+        self.addCleanup(p.stop)
         before = self.cfg()
         rc, _out = self.run_main("config", "apply", "--sccache")
         self.assertEqual(rc, 1, _out)
@@ -1136,10 +1150,16 @@ class SccacheConfigTest(RulesBase):
         for line in (r"cache_size=\S+ # cst: RUST_SCCACHE_CACHE_SIZE", r"workspace=\S+ # cst: RUST_SCCACHE_WORKSPACE"):
             broken, n = re.subn(rf"(?m)^{line}.*\n", "", source)
             self.assertEqual(n, 1, line)
-            self.m.read_text = lambda path, text=broken: (
-                text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path)
+            p = mock.patch.object(
+                tc_config,
+                "read_text",
+                lambda path, text=broken: (
+                    text if os.path.realpath(path) == os.path.realpath(WRAPPER) else real_read(path)
+                ),
             )
-            self.assertIsNone(tc_config.wrapper_text(tcd_config.WrapperValues()), line)
+            p.start()
+            self.addCleanup(p.stop)
+            self.assertIsNone(tc_config.wrapper_text(tcd_config.WrapperValues(), TOOL), line)
             before = self.cfg()
             rc, _out = self.run_main("config", "apply", "--sccache")
             self.assertEqual(rc, 1, _out)

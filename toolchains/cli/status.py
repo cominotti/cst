@@ -9,31 +9,36 @@ import os
 import tomllib
 
 from toolchains.domain.auto import label
-from toolchains.domain.build import TOOL_FILES_MAX, WORKSPACE_REL, short_toolchain
+from toolchains.domain.build import WORKSPACE_REL, short_toolchain
 from toolchains.domain.common import ConfigError, gib, tilde
-from toolchains.domain.prune import PLANNED
+from typing import TYPE_CHECKING
+
+from toolchains import wiring
 from toolchains.adapters.build_tree import tree_size
-from toolchains.adapters.home_files import old_conf_note, read_state
-from toolchains.adapters.program import PROG, say, where_text
+from toolchains.adapters.cargo import claimed_folders
+from toolchains.adapters.home_files import old_conf_note
+from toolchains.adapters.program import where_text
 from toolchains.adapters.rustup import named_in, pinned_channel, rustup_default, rustup_home
 from toolchains.adapters.sccache import sccache_status_lines
 from toolchains.cli.auto import stale_files, timer_text, unit_states
 from toolchains.cli.config import config_lines
-from toolchains.domain.prune import Settings
-from toolchains.cli.prune import TARGETS, load_settings
-from toolchains.cli.rust_build import claimed_folders
+from toolchains.domain.prune import PLANNED, SPECS, Limits, Settings, last_run_text
+
+if TYPE_CHECKING:
+    from toolchains.wiring import Session
 
 
-def toolchain_lines(home: str) -> list[str]:
+def toolchain_lines(home: str, limits: Limits) -> list[str]:
     """The report of `status`: installed rustup toolchains, their size, and
-    which rust-toolchain files under ~/Workspace pin them."""
+    which rust-toolchain files under ~/Workspace pin them (LIMITS: how many
+    build files it reads at most, and the seconds one git call may take)."""
     rh = rustup_home(home)
     tdir = os.path.join(rh, "toolchains")
     try:
         names = sorted(e.name for e in os.scandir(tdir) if e.is_dir())
     except OSError:
         return [f"{where_text(tdir, home)}: none installed (or not readable)"]
-    ws = claimed_folders(None, home, with_cargo=False)
+    ws = claimed_folders(None, home, limits, with_cargo=False)
     pins: dict[str, list[str]] = {}
     for p in ws.pins:
         ch = pinned_channel(p)
@@ -60,9 +65,9 @@ def toolchain_lines(home: str) -> list[str]:
     ]
     # Files in the home first (a linked worktree elsewhere, e.g. in /tmp, is shown only when it is the only one).
     files = sorted(ws.tool_files, key=lambda p: not (p == home or p.startswith(home + "/")))
-    named, read_all = named_in(files, loose) if loose else ({}, True)
+    named, read_all = named_in(files, loose, limits.tool_files_max) if loose else ({}, True)
     if not read_all:
-        ws.incomplete = ws.incomplete or f"more than {TOOL_FILES_MAX} build files to read"
+        ws.incomplete = ws.incomplete or f"more than {limits.tool_files_max} build files to read"
     for n in names:
         short = short_toolchain(n)
         path = os.path.join(tdir, n)
@@ -109,26 +114,27 @@ def toolchain_lines(home: str) -> list[str]:
     return out
 
 
-def cmd_status(home: str, now: float, brief: bool) -> int:
-    say(f"auto: {timer_text(home)}")
+def cmd_status(s: Session, brief: bool) -> int:
+    home, say = s.home, s.out.say
+    say(f"auto: {timer_text(s)}")
     settings: Settings | None
     try:
-        settings = load_settings(home)
+        settings = wiring.settings(s)
     except ConfigError as e:
         settings = None
         say(f"BAD SETTINGS: {e} (prune and the timer do nothing until it is fixed)")
-    for tid, cls in TARGETS.items():
-        s = read_state(home, tid)
-        last = cls.last_run_text(s) if s else "none recorded"
+    for tid, spec in SPECS.items():
+        saved = s.machine.state.read(tid)
+        last = last_run_text(tid, saved) if saved else "none recorded"
         if brief:
             say(f"{tid}: last prune: {last}")
             continue
-        say(f"== {tid}: {cls.SPEC.what}")
-        t = cls.make(home, now, settings)
-        say(f"  where:    {where_text(t.location(), home)}")
+        say(f"== {tid}: {spec.what}")
+        t = wiring.target(s, settings, tid)
+        say(f"  where:    {s.out.where(t.location())}")
         if settings:
             state = "enabled" if settings.enabled[tid] else "disabled (prune runs it only when named)"
-            say(f"  policy:   {state}; {settings.policy_text(tid)} ({settings.source_of(cls.SPEC)})")
+            say(f"  policy:   {state}; {settings.policy_text(tid)} ({settings.source_of(spec)})")
         else:
             say("  policy:   BAD SETTINGS (see above)")
         say(f"  last prune: {last}")
@@ -138,22 +144,22 @@ def cmd_status(home: str, now: float, brief: bool) -> int:
         return 0
     say("== not implemented yet (nothing pruned there by CST):")
     for tid, (where, how) in PLANNED.items():
-        shown = ", ".join(where_text(os.path.join(home, p.strip()[2:]), home) for p in where.split(","))
+        shown = ", ".join(s.out.where(os.path.join(home, p.strip()[2:])) for p in where.split(","))
         say(f"  {tid:<14} {shown} ({how})")
     say("== rust toolchains (a report: CST never removes one)")
-    for line in toolchain_lines(home):
+    for line in toolchain_lines(home, s.limits):
         say(f"  {line}")
-    say(f"== toolchain settings ({PROG} config)")
-    for st, shown, note in config_lines(home, "status", settings):
+    say(f"== toolchain settings ({s.prog} config)")
+    for st, shown, note in config_lines(s, "status", settings):
         say(f"  {st:<8} {shown:<24} {note}")
     for line in sccache_status_lines(home):
         say(f"  {line}")
-    st = unit_states(home)
+    st = unit_states(home, s.entry_file)
     say("== files of auto on: " + ", ".join(f"{label(k)} {v}" for k, v in st.items()))
     for path, ours in stale_files(home):
         say(
             f"  stale: {tilde(path, home)} (of the earlier `cst btrfs cargo-gc`"
             + ("; auto on or auto off removes it)" if ours else "; not CST's: left alone)")
         )
-    old_conf_note(home)
+    old_conf_note(home, s.out)
     return 0

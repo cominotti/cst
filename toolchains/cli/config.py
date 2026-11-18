@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import TYPE_CHECKING
 import re
 import stat
 import tomllib
@@ -44,9 +45,12 @@ from toolchains.domain.config import (
     same_debug,
 )
 from toolchains.adapters.home_files import append_text, file_state, put_wrapper, read_cfg, wrapper_path, write_cfg
-from toolchains.adapters.program import PROG, Program, say
+from toolchains import wiring
+from toolchains.adapters.program import program_folder
 from toolchains.domain.prune import Settings
-from toolchains.cli.prune import load_settings
+
+if TYPE_CHECKING:
+    from toolchains.wiring import Session
 
 
 def config_items(home: str) -> list[tuple[str, str, str, str]]:
@@ -139,7 +143,8 @@ def lean_wanted(settings: Settings | None, lean: bool | None) -> tuple[bool, str
     return _flag_wanted(settings, lean, "RUST_LEAN_DEBUGINFO", "lean-debuginfo")
 
 
-def lean_lines(home: str, verb: str, settings: Settings | None, lean: bool | None) -> list[tuple[str, str, str]]:
+def lean_lines(s: Session, verb: str, settings: Settings | None, lean: bool | None) -> list[tuple[str, str, str]]:
+    home = s.home
     st = lean_state(home)
     shown = tilde(st["path"], home)
     want, why = lean_wanted(settings, lean)
@@ -169,7 +174,7 @@ def lean_lines(home: str, verb: str, settings: Settings | None, lean: bool | Non
                 "write",
                 shown,
                 f"lean debug info ({why}): {what}; {LEAN_REBUILD}"
-                + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                + ("" if verb == "plan" else f" (missing: {s.prog} config apply)"),
             )
         )
     else:
@@ -179,39 +184,42 @@ def lean_lines(home: str, verb: str, settings: Settings | None, lean: bool | Non
     return out
 
 
-def lean_apply(home: str, settings: Settings | None, lean: bool | None) -> int:
+def lean_apply(s: Session, settings: Settings | None, lean: bool | None) -> int:
+    home = s.home
     want, why = lean_wanted(settings, lean)
     if not want:
         return 0
     st = lean_state(home)
     path = st["path"]
     if st["error"]:
-        say(f"{NAME}: lean debug info: {path} {st['error']}: left as it is", 3, err=True)
+        s.out.say(f"{NAME}: lean debug info: {path} {st['error']}: left as it is", 3, err=True)
         return 1
     for c in st["conflicts"]:
-        say(f"NOTE: lean debug info: {path}: {c}", 5, err=True)
+        s.out.say(f"NOTE: lean debug info: {path}: {c}", 5, err=True)
     if not st["add"]:
         if not st["conflicts"]:
-            say(f"kept:      {path} (lean debug info already set)")
+            s.out.say(f"kept:      {path} (lean debug info already set)")
         return 0
     if not st["append"]:
-        say(f"NOTE: lean debug info: {path} already has these tables: add by hand:", 5, err=True)
+        s.out.say(f"NOTE: lean debug info: {path} already has these tables: add by hand:", 5, err=True)
         for _, block in st["add"]:
             for line in block.splitlines():
-                say(f"      {line}", 5, err=True)
+                s.out.say(f"      {line}", 5, err=True)
         return 0
     err = append_text(path, st["append"])
     if err:
-        say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        s.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
         return 1
-    say(f"written:   {path} (lean debug info, {why}; the next dev build of each workspace compiles everything once)")
+    s.out.say(
+        f"written:   {path} (lean debug info, {why}; the next dev build of each workspace compiles everything once)"
+    )
     return 0
 
 
-def wrapper_text(values: WrapperValues) -> str | None:
+def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
     """The wrapper as installed (the settings written in), or None when its
     source is not next to this program (the timer's copy has none)."""
-    text = read_text(os.path.join(Program.folder(), WRAPPER_NAME))
+    text = read_text(os.path.join(program_folder(entry_file), WRAPPER_NAME))
     if text is None:
         return None
     text, n = SCCACHE_SIZE_LINE.subn(f"cache_size={values.size}", text, count=1)
@@ -328,7 +336,8 @@ def sccache_wanted(settings: Settings | None, flag: bool | None) -> tuple[bool, 
     return _flag_wanted(settings, flag, "RUST_SCCACHE", "sccache")
 
 
-def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues) -> list[tuple[str, str, str]]:
+def wrapper_lines(s: Session, verb: str, text: str | None, values: WrapperValues) -> list[tuple[str, str, str]]:
+    home = s.home
     shown = tilde(wrapper_path(home), home)
     if text is None:
         return [
@@ -336,7 +345,7 @@ def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues)
                 "?",
                 shown,
                 f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
-                f"run {PROG} config apply from CST",
+                f"run {s.prog} config apply from CST",
             )
         ]
     st = wrapper_state(home, text)
@@ -349,12 +358,13 @@ def wrapper_lines(home: str, verb: str, text: str | None, values: WrapperValues)
             "write",
             shown,
             f"sccache wrapper ({'missing' if st == 'missing' else 'outdated'}; {values})"
-            + ("" if verb == "plan" else f" (fix: {PROG} config apply)"),
+            + ("" if verb == "plan" else f" (fix: {s.prog} config apply)"),
         )
     ]
 
 
-def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | None) -> list[tuple[str, str, str]]:
+def sccache_lines(s: Session, verb: str, settings: Settings | None, flag: bool | None) -> list[tuple[str, str, str]]:
+    home = s.home
     st = sccache_state(home)
     shown = tilde(st["path"], home)
     want, why = sccache_wanted(settings, flag)
@@ -383,7 +393,7 @@ def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | 
                 )
             ]
         return [("keep", shown, f"sccache ({why}): {yours}")] if foreign else [("off", shown, "sccache: off")]
-    text = wrapper_text(values)
+    text = wrapper_text(values, s.entry_file)
     if not want:
         if st["ours"]:
             out = [
@@ -391,14 +401,14 @@ def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | 
                     "on",
                     shown,
                     f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
-                    f"{PROG} config apply --no-sccache does)",
+                    f"{s.prog} config apply --no-sccache does)",
                 )
             ]
-            return out + [ln for ln in wrapper_lines(home, verb, text, values) if ln[0] != "ok"]
+            return out + [ln for ln in wrapper_lines(s, verb, text, values) if ln[0] != "ok"]
         return [("off", shown, off + (f"; {yours}" if foreign else ""))]
     if foreign:
         return [("keep", shown, f"sccache ({why}): {yours} (CST never overwrites it)")]
-    out = wrapper_lines(home, verb, text, values)
+    out = wrapper_lines(s, verb, text, values)
     if st["ours"]:
         out.append(("ok", shown, f"sccache: rustc-wrapper set ({why})"))
     elif st["add"]:
@@ -407,7 +417,7 @@ def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | 
                 "write",
                 shown,
                 f'sccache ({why}): [build] rustc-wrapper = "~/{WRAPPER_REL}"; {SCCACHE_REBUILD}'
-                + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                + ("" if verb == "plan" else f" (missing: {s.prog} config apply)"),
             )
         )
     else:
@@ -422,43 +432,45 @@ def sccache_lines(home: str, verb: str, settings: Settings | None, flag: bool | 
     return out
 
 
-def install_wrapper(home: str, values: WrapperValues) -> int:
+def install_wrapper(s: Session, values: WrapperValues) -> int:
     """0 when the wrapper is in place (written or unchanged), else 1."""
-    text = wrapper_text(values)
+    home = s.home
+    text = wrapper_text(values, s.entry_file)
     path = wrapper_path(home)
     if text is None:
-        say(
-            f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {PROG} config apply from CST",
+        s.out.say(
+            f"{NAME}: sccache: {WRAPPER_NAME} is missing next to this program: run {s.prog} config apply from CST",
             3,
             err=True,
         )
         return 1
     if wrapper_state(home, text) == "conflict":
-        say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
+        s.out.say(f"{NAME}: sccache: {path} is not CST's file: left alone", 3, err=True)
         return 1
     try:
-        written = put_wrapper(home, path, text, values.record())
+        written = put_wrapper(home, path, text, values.record(), s.entry_file)
     except WriteFailed as e:
-        say(f"{NAME}: {e}", 3, err=True)
+        s.out.say(f"{NAME}: {e}", 3, err=True)
         return 1
-    say(f"written:   {path} (sccache wrapper, {values})" if written else f"kept:      {path} (sccache wrapper)")
+    s.out.say(f"written:   {path} (sccache wrapper, {values})" if written else f"kept:      {path} (sccache wrapper)")
     return 0
 
 
-def sccache_apply(home: str, settings: Settings | None, flag: bool | None) -> int:
+def sccache_apply(s: Session, settings: Settings | None, flag: bool | None) -> int:
+    home = s.home
     want, why = sccache_wanted(settings, flag)
     st = sccache_state(home)
     path = st["path"]
     if st["error"]:
         if want or flag is False or st["ours"]:
-            say(f"{NAME}: sccache: {path} {st['error']}: left as it is", 3, err=True)
+            s.out.say(f"{NAME}: sccache: {path} {st['error']}: left as it is", 3, err=True)
             return 1
         return 0
     if flag is False:
         if not st["ours"]:
             return 0
         if not st["remove"]:
-            say(
+            s.out.say(
                 f"NOTE: sccache: {path}: CST cannot remove its rustc-wrapper line safely: delete it yourself",
                 5,
                 err=True,
@@ -466,16 +478,16 @@ def sccache_apply(home: str, settings: Settings | None, flag: bool | None) -> in
             return 0
         err = write_cfg(path, st["remove"])
         if err:
-            say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+            s.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
             return 1
-        say(f"removed:   {path} (CST's rustc-wrapper line, {why}; ~/{WRAPPER_REL} stays, unused)")
+        s.out.say(f"removed:   {path} (CST's rustc-wrapper line, {why}; ~/{WRAPPER_REL} stays, unused)")
         return 0
     if not want:
         # The line is there (set earlier): keep its wrapper current, so cargo
         # never names a missing program.
-        return install_wrapper(home, wrapper_values(settings)) if st["ours"] else 0
+        return install_wrapper(s, wrapper_values(settings)) if st["ours"] else 0
     if st["value"] is not None and not st["ours"]:
-        say(
+        s.out.say(
             f"NOTE: sccache: {path}: rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is "
             f"(sccache not set up)",
             5,
@@ -483,25 +495,25 @@ def sccache_apply(home: str, settings: Settings | None, flag: bool | None) -> in
         )
         return 0
     # The wrapper first: the line must never name a missing program.
-    if install_wrapper(home, wrapper_values(settings)):
+    if install_wrapper(s, wrapper_values(settings)):
         return 1
     if st["ours"]:
-        say(f"kept:      {path} (rustc-wrapper already set)")
+        s.out.say(f"kept:      {path} (rustc-wrapper already set)")
         return 0
     if not st["add"]:
-        say(f"NOTE: sccache: {path}: CST cannot add the key safely: put this into [build] by hand:", 5, err=True)
-        say(f"      rustc-wrapper = {json.dumps(wrapper_path(home))}", 5, err=True)
+        s.out.say(f"NOTE: sccache: {path}: CST cannot add the key safely: put this into [build] by hand:", 5, err=True)
+        s.out.say(f"      rustc-wrapper = {json.dumps(wrapper_path(home))}", 5, err=True)
         return 0
     err = write_cfg(path, st["add"])
     if err:
-        say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+        s.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
         return 1
-    say(f"written:   {path} (rustc-wrapper, {why}: rustc goes through sccache where it is on PATH)")
+    s.out.say(f"written:   {path} (rustc-wrapper, {why}: rustc goes through sccache where it is on PATH)")
     return 0
 
 
 def config_lines(
-    home: str,
+    s: Session,
     verb: str,
     settings: Settings | None = None,
     lean: bool | None = None,
@@ -509,6 +521,7 @@ def config_lines(
 ) -> list[tuple[str, str, str]]:
     """The plan or status lines of the settings (lean, sccache: the explicit
     flags)."""
+    home = s.home
     out: list[tuple[str, str, str]] = []
     for name, path, st, _ in config_items(home):
         shown = tilde(path, home)
@@ -538,7 +551,7 @@ def config_lines(
                         "write",
                         shown,
                         f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
-                        + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                        + ("" if verb == "plan" else f" (missing: {s.prog} config apply)"),
                     )
                 )
             else:
@@ -554,56 +567,57 @@ def config_lines(
                         "write",
                         shown,
                         'link-mode = "clone" (hardlinks cannot cross subvolumes)'
-                        + ("" if verb == "plan" else f" (missing: {PROG} config apply)"),
+                        + ("" if verb == "plan" else f" (missing: {s.prog} config apply)"),
                     )
                 )
             else:
                 out.append(("?", shown, "cannot be read"))
-    out += lean_lines(home, verb, settings, lean)
-    out += sccache_lines(home, verb, settings, sccache)
+    out += lean_lines(s, verb, settings, lean)
+    out += sccache_lines(s, verb, settings, sccache)
     return out
 
 
-def cmd_config(home: str, action: str, lean: bool | None = None, sccache: bool | None = None) -> int:
+def cmd_config(s: Session, action: str, lean: bool | None = None, sccache: bool | None = None) -> int:
+    home = s.home
     settings: Settings | None
     try:
-        settings = load_settings(home)
+        settings = wiring.settings(s)
     except ConfigError as e:
         settings = None
         off = [w for w, flag in (("lean debug info", lean), ("sccache", sccache)) if flag is None]
         if off:
-            say(f"note: BAD SETTINGS ({e}): {' and '.join(off)} treated as off", 4, err=True)
+            s.out.say(f"note: BAD SETTINGS ({e}): {' and '.join(off)} treated as off", 4, err=True)
     if action == "plan":
-        lines = config_lines(home, "plan", settings, lean, sccache)
+        lines = config_lines(s, "plan", settings, lean, sccache)
         for st, shown, note in lines:
-            say(f"  {st:<8} {shown:<24} {note}")
+            s.out.say(f"  {st:<8} {shown:<24} {note}")
         if any(st in ("write", "remove") for st, _, _ in lines):
             flags = {True: " --lean-debuginfo", False: " --no-lean-debuginfo"}.get(lean, "")
             flags += {True: " --sccache", False: " --no-sccache"}.get(sccache, "")
-            say(f"Apply with: {PROG} config apply" + flags)
+            s.out.say(f"Apply with: {s.prog} config apply" + flags)
         return 0
     rc = 0
     for name, path, st, text in config_items(home):
         if st == "unreadable":
-            say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
+            s.out.say(f"{NAME}: cannot read {path}: left as it is", 3, err=True)
             rc = 1
         elif name == "cargo" and st == "set":
-            say(f"kept:      {path} (build-dir already set)")
+            s.out.say(f"kept:      {path} (build-dir already set)")
         elif name == "cargo" and st == "by-hand":
-            say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
-            say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
+            s.out.say(f"NOTE: {path} already configures [build]: add there by hand:", 5, err=True)
+            s.out.say(f'      build-dir = "{home}/{ROOT_REL}/{HASH_VAR}"', 5, err=True)
         elif name == "uv" and st == "set":
-            say(f"kept:      {path} (link-mode already set)")
+            s.out.say(f"kept:      {path} (link-mode already set)")
         elif name == "uv" and st == "by-hand":
-            say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
+            s.out.say(f'NOTE: {path} has tables: add link-mode = "clone" at its top by hand', 5, err=True)
         else:
             err = append_text(path, text)
             if err:
                 # For example a ~/.cargo owned by root after a `sudo cargo`:
                 # report it and go on with the other setting.
-                say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
+                s.out.say(f"{NAME}: cannot write {path}: {err}: left as it is", 3, err=True)
                 rc = 1
                 continue
-            say(f"written:   {path}")
-    rc = max(rc, lean_apply(home, settings, lean))
-    return max(rc, sccache_apply(home, settings, sccache))
+            s.out.say(f"written:   {path}")
+    rc = max(rc, lean_apply(s, settings, lean))
+    return max(rc, sccache_apply(s, settings, sccache))

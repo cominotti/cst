@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """What prune knows of every target, no I/O: the registry (TargetSpec,
-SPECS), the checked settings (Settings), the saved summary of a run and its
-status line, the planned targets and the run's time budget.
+SPECS) and the selection of a run's targets, the checked settings
+(Settings), the saved summary of a run and its status line, the planned
+targets and the bounds of a run (Limits).
 """
 
 from __future__ import annotations
@@ -11,10 +12,11 @@ import os
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
+from cst_core.domain.errors import Usage
 from cst_core.domain.values import Json
-from toolchains.domain.build import RustPolicy
+from toolchains.domain.build import CMD_TIMEOUT, TOOL_FILES_MAX, RustPolicy
 from toolchains.domain.common import CONF_REL, ConfigError, OPTIONS, gib, parse_bool, parse_conf, tilde, when
 from toolchains.domain.uv import UV_TIMEOUT, UvPolicy
 
@@ -192,6 +194,11 @@ def rust_last_run(s: Mapping[str, Json]) -> str:
     )
 
 
+def last_run_text(tid: str, s: Mapping[str, Json]) -> str:
+    """One line of status from target TID's saved summary."""
+    return rust_last_run(s) if tid == RUST_BUILD.id else uv_last_run(s)
+
+
 def uv_last_run(s: Mapping[str, Json]) -> str:
     """One line of status from python:uv's saved summary."""
     return (
@@ -218,3 +225,43 @@ PLANNED = {
 # budget (what is left is a leftover that the next run deletes).
 RUN_BUDGET = 25 * 60
 RM_MARGIN = 2 * 60
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Limits:
+    """The bounds of one run: the time budget of `prune apply` (RUN_BUDGET), the
+    seconds one git or cargo call of the workspace search may take (CMD_TIMEOUT)
+    and the build files the toolchains report reads at most (TOOL_FILES_MAX).
+    The program runs with the defaults; tests make them small."""
+
+    run_budget: int = RUN_BUDGET
+    cmd_timeout: int = CMD_TIMEOUT
+    tool_files_max: int = TOOL_FILES_MAX
+
+
+def select_targets(names: Sequence[str], enabled: Mapping[str, bool]) -> list[tuple[str, bool]]:
+    """[(target id, named)]: the named targets (LANG:CACHE or LANG), or,
+    without names, every enabled one. Raises Usage for an unknown or a
+    planned target."""
+    if not names:
+        return [(tid, False) for tid in SPECS if enabled[tid]]
+    out: list[tuple[str, bool]] = []
+    for name in names:
+        if ":" in name:
+            if name in SPECS:
+                found = [name]
+            elif name in PLANNED:
+                raise Usage(f"target {name} is not implemented yet (implemented: {', '.join(SPECS)})")
+            else:
+                raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
+        else:
+            found = [tid for tid in SPECS if tid.split(":")[0] == name]
+            if not found:
+                planned = [t for t in PLANNED if t.split(":")[0] == name]
+                if planned:
+                    raise Usage(f"no target of {name} is implemented yet (planned: {', '.join(planned)})")
+                raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
+        for tid in found:
+            if all(tid != c for c, _ in out):
+                out.append((tid, True))
+    return out

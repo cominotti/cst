@@ -17,12 +17,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+    from toolchains.domain.prune import Limits
+
 from cst_core.domain.values import Json
 from toolchains.domain.build import (
     CACHE_TAG,
     CARGO_ENV,
-    CMD_TIMEOUT,
     CRATE_DEPTH,
+    CargoCache,
     CargoProc,
     CargoQuery,
     ENUM_BUDGET,
@@ -37,8 +39,9 @@ from toolchains.domain.build import (
     Workspaces,
     is_tool_file,
     manifest_arg,
+    prefixes,
 )
-from toolchains.domain.common import to_json
+from toolchains.domain.common import json_items, tilde, to_json
 from toolchains.adapters.program import RUNNER, run_idle
 
 
@@ -165,9 +168,10 @@ def git_common_dir(wt: str) -> str | None:
         return None
 
 
-def git_worktrees(wt: str, deadline: float) -> list[str]:
+def git_worktrees(wt: str, deadline: float, cmd_timeout: float) -> list[str]:
     """The worktree paths `git worktree list --porcelain` names for the
-    repository of WT. Raises Incomplete when git fails."""
+    repository of WT (CMD_TIMEOUT: the most seconds git may take). Raises
+    Incomplete when git fails."""
     git = shutil.which("git")
     if not git:
         raise Incomplete("git not found on PATH")
@@ -177,7 +181,7 @@ def git_worktrees(wt: str, deadline: float) -> list[str]:
             [git, "-C", wt, "worktree", "list", "--porcelain"],
             wt,
             env,
-            max(1, min(CMD_TIMEOUT, deadline - time.monotonic())),
+            max(1, min(cmd_timeout, deadline - time.monotonic())),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Incomplete(f"git worktree list in {wt}: {e}") from None
@@ -199,7 +203,7 @@ def git_worktrees(wt: str, deadline: float) -> list[str]:
     return out
 
 
-def find_worktrees(home: str, deadline: float, ws: Workspaces) -> list[str]:
+def find_worktrees(home: str, deadline: float, ws: Workspaces, cmd_timeout: float) -> list[str]:
     """Every git worktree of the repositories under ~/Workspace (and those
     the repositories list elsewhere)."""
     top = os.path.join(home, WORKSPACE_REL)
@@ -218,7 +222,7 @@ def find_worktrees(home: str, deadline: float, ws: Workspaces) -> list[str]:
         if common:
             groups.setdefault(common, d)
     for _common, d in sorted(groups.items()):
-        for wt in git_worktrees(d, deadline):
+        for wt in git_worktrees(d, deadline, cmd_timeout):
             if os.path.isdir(wt):  # a "prunable" one is gone: nothing to claim
                 roots.add(os.path.realpath(wt))
     return sorted(roots)
@@ -271,7 +275,7 @@ def user_cargo(home: str) -> str:
 
 
 def workspace_metadata(
-    cargo: str, manifest: str, env: Mapping[str, str], deadline: float
+    cargo: str, manifest: str, env: Mapping[str, str], deadline: float, cmd_timeout: float
 ) -> tuple[dict[str, Json] | None, str | None]:
     """cargo metadata of one Cargo.toml: (data, None) or (None, why)."""
     left = deadline - time.monotonic()
@@ -282,10 +286,10 @@ def workspace_metadata(
             [cargo, "metadata", "--offline", "--no-deps", "--format-version", "1", "--manifest-path", manifest],
             os.path.dirname(manifest),
             env,
-            min(CMD_TIMEOUT, left),
+            min(cmd_timeout, left),
         )
     except subprocess.TimeoutExpired:
-        return None, f"cargo metadata took longer than {int(min(CMD_TIMEOUT, left))}s"
+        return None, f"cargo metadata took longer than {int(min(cmd_timeout, left))}s"
     except OSError as e:
         return None, f"cargo metadata: {e.strerror or e}"
     if r.returncode != 0:
@@ -303,3 +307,97 @@ def workspace_metadata(
     except ValueError:
         return None, "cargo metadata: unexpected output"
     return data, None
+
+
+def cargo_users(
+    root: str,
+    home: str,
+    cache: CargoCache,
+    procs: Sequence[CargoProc],
+) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str | None, str]]]:
+    """({folder key: [(pid, comm)]}, [(pid, comm, cwd, why)]): the folders
+    the running cargo processes PROCS build in, and the cargo processes whose
+    folder could not be found out. CACHE (a dict) keeps the answers for one run."""
+    pre = prefixes(root)
+    found: dict[str, list[tuple[str, str]]] = {}
+    unknown: list[tuple[str, str, str | None, str]] = []
+    for p in procs:
+        q = cargo_query(p, home)
+        if isinstance(q, str):
+            unknown.append((p.pid, p.comm, p.cwd, q))
+            continue
+        if q.key not in cache:
+            cache[q.key] = ask_cargo(q.cmd, q.env, q.cwd)
+        bd, why = cache[q.key]
+        if why or bd is None:
+            unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
+            continue
+        for pr in pre:
+            if bd.startswith(pr + "/"):
+                k = "/".join(bd[len(pr) + 1 :].split("/")[:2])
+                lst = found.setdefault(k, [])
+                if (p.pid, p.comm) not in lst:
+                    lst.append((p.pid, p.comm))
+                break
+    return found, unknown
+
+
+def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: bool = True) -> Workspaces:
+    """Workspaces: which folders of ROOT a workspace on disk still claims.
+    WITH_CARGO=False only lists worktrees and rust-toolchain files (status).
+    LIMITS: the seconds one git or cargo call may take."""
+    ws = Workspaces()
+    start = time.monotonic()
+    deadline = start + ENUM_BUDGET
+    pre = prefixes(root) if root else ()
+    try:
+        ws.worktrees = find_worktrees(home, deadline, ws, limits.cmd_timeout)
+        cargo = user_cargo(home) if with_cargo else ""
+        if with_cargo and not cargo:
+            raise Incomplete("no cargo program found to ask")
+        env = metadata_env(home)
+        for wt in ws.worktrees:
+            manifests, pins, tools = find_manifests(wt, deadline)
+            ws.pins += pins
+            ws.tool_files += tools
+            ws.manifests += len(manifests)
+            if not with_cargo:
+                continue
+            covered: set[str] = set()
+            # The shallowest first: a workspace's root answers for its members.
+            for m in sorted(manifests, key=lambda p: (p.count("/"), p)):
+                if m in covered:
+                    continue
+                data, why = workspace_metadata(cargo, m, env, deadline, limits.cmd_timeout)
+                ws.asked += 1
+                if why or data is None:
+                    ws.failures.append((m, why or "unknown"))
+                    continue
+                covered.add(m)
+                for p in json_items(data.get("packages")):
+                    mp = p.get("manifest_path") if isinstance(p, dict) else None
+                    if isinstance(mp, str):
+                        covered.add(os.path.normpath(mp))
+                wr = data.get("workspace_root")
+                if isinstance(wr, str):
+                    covered.add(os.path.join(os.path.normpath(wr), "Cargo.toml"))
+                bd = data.get("build_directory")
+                if not isinstance(bd, str) or not bd:
+                    continue  # a cargo without build-dir support: not in this root
+                bd = os.path.normpath(bd)
+                for pr in pre:
+                    if bd.startswith(pr + "/"):
+                        key = "/".join(bd[len(pr) + 1 :].split("/")[:2])
+                        lst = ws.claimed.setdefault(key, [])
+                        shown = wr if isinstance(wr, str) else os.path.dirname(m)
+                        if shown not in lst:
+                            lst.append(shown)
+                        break
+        if ws.failures:
+            m, why = ws.failures[0]
+            more = f" (and {len(ws.failures) - 1} more)" if len(ws.failures) > 1 else ""
+            raise Incomplete(f"{tilde(m, home)}: {why}{more}")
+    except Incomplete as e:
+        ws.incomplete = str(e)
+    ws.seconds = time.monotonic() - start
+    return ws

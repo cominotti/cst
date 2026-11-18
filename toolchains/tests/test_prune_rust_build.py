@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterator, Sequence
-from typing import Protocol, cast
+from typing import Protocol
 from unittest import mock
 
 # Run directly (python3 -I -B toolchains/tests/test_prune_rust_build.py): the checkout root holds the tests package.
@@ -32,31 +32,20 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
+from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused
-from tests.package_view import PackageView
-from toolchains import cli as tc_cli
+from toolchains import cli as tc_cli, wiring as tc_wiring
+from toolchains.application import rust_build as tca_rust_build
+from toolchains.ports import RunOutputPort
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
-from toolchains.domain import config as tcd_config
-from toolchains.cli import prune as tc_prune
-from toolchains.cli import auto as tc_auto
-from toolchains.cli import config as tc_config
-from toolchains.cli import status as tc_status
-from toolchains.cli import rust_build as tc_rust_build
-from toolchains.cli import python_uv as tc_python_uv
-from toolchains.cli import targets as tc_targets
-from toolchains.domain import auto as tcd_auto
 from toolchains.domain import prune as tcd_prune
-from toolchains.domain import uv as tcd_uv
 from toolchains.adapters import program as tc_program
 from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import build_tree as tc_build_tree
 from toolchains.adapters import processes as tc_processes
 from toolchains.adapters import cargo as tc_cargo
-from toolchains.adapters import uv as tc_uv
-from toolchains.adapters import rustup as tc_rustup
-from toolchains.adapters import sccache as tc_sccache
 from toolchains.adapters import units as tc_units
 
 sys.dont_write_bytecode = True
@@ -71,65 +60,27 @@ H = 3600
 NOW = 2_000_000_000.0  # fixed "now" (2033); every mtime is set relative to it
 
 
-class ToolchainsModule(Protocol):
-    """The names the tests replace through the view (every other name is read from the module
-    that defines it)."""
+class FakeUnits(tc_units.UserUnits):
+    """The user manager of a test: FAKE answers every systemctl call."""
 
-    JOURNAL: bool
-    CMD_TIMEOUT: float
-    TOOL_FILES_MAX: int
-    RUN_BUDGET: float
-    systemctl: Callable[..., str]
-    cargo_procs: Callable[..., list[tcd_build.CargoProc]]
-    proc_users: Callable[..., tuple[dict[str, list[tuple[str, str]]], int]]
-    cargo_users: Callable[..., tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str | None, str]]]]
-    remove_tree: Callable[..., tuple[bool, str]]
-    defaults_path: Callable[[], str]
-    wrapper_text: Callable[[tcd_config.WrapperValues], str | None]
-    read_text: Callable[[str], str | None]
-    restore: Callable[[], object]
+    def __init__(self, out: RunOutputPort, fake: Callable[..., str]) -> None:
+        super().__init__(out)
+        self.fake = fake
+
+    def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
+        return self.fake(*args, check=check, ok=ok)
 
 
-def load() -> ToolchainsModule:
-    """The toolchains package as one namespace (cli, adapters, domain): a
-    name set on it reaches every module that uses it; restore() undoes that.
-    The program is the checkout's cst-toolchains (what main() would be told)."""
-    tc_program.Program.entry_file = TOOL
-    view = PackageView(
-        tc_cli,
-        tc_prune,
-        tc_auto,
-        tc_config,
-        tc_status,
-        tc_rust_build,
-        tc_python_uv,
-        tc_targets,
-        tc_program,
-        tc_home_files,
-        tc_build_tree,
-        tc_processes,
-        tc_cargo,
-        tc_uv,
-        tc_rustup,
-        tc_sccache,
-        tc_units,
-        tcd_auto,
-        tcd_build,
-        tcd_common,
-        tcd_config,
-        tcd_prune,
-        tcd_uv,
-    )
-    # main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run.
-    view.restore_default_signals = lambda: None
-    return cast("ToolchainsModule", cast("object", view))
+def quiet_signals(test: unittest.TestCase) -> None:
+    """main() runs in-process here: SIGPIPE at its default would stay so for the rest of the test run."""
+    p = mock.patch.object(tc_program, "restore_default_signals", lambda: None)
+    p.start()
+    test.addCleanup(p.stop)
 
 
 class Base(unittest.TestCase):
     def setUp(self) -> None:
-        self.m = load()
-        self.addCleanup(self.m.restore)
-        self.m.JOURNAL = False
+        quiet_signals(self)
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
         self.home = os.path.join(self.tmp, "home")
         self.root = os.path.join(self.home, ".cache/cargo-build")
@@ -154,12 +105,13 @@ class Base(unittest.TestCase):
         os.environ["XDG_RUNTIME_DIR"] = os.path.join(self.tmp, "no-runtime-dir")
         self.calls: list[tuple[str, ...]] = []
         self.manager_env = ""
-        self.m.systemctl = self.fake_systemctl
         # No real cargo process of the user may change a test's result:
         # tests that need some set self.cargo_running.
         self.real_cargo_procs = tc_processes.cargo_procs
         self.cargo_running: list[tcd_build.CargoProc] = []
-        self.m.cargo_procs = lambda uid=None: list(self.cargo_running)
+        self.limits = tcd_prune.Limits()
+        # A build tree of the test's own for main (None: the one wiring builds).
+        self.tree_for_main: tc_build_tree.CargoBuildTree | None = None
 
     def tearDown(self) -> None:
         for k, v in self.env.items():
@@ -222,10 +174,31 @@ class Base(unittest.TestCase):
                 os.utime(os.path.join(d, n), (t, t), follow_symlinks=False)
             os.utime(d, (t, t))
 
+    def parts(self) -> tc_wiring.Parts:
+        """The real adapters, but the user manager (fake_systemctl), the cargo
+        processes (cargo_running), the limits and, when set, tree_for_main."""
+        tree = self.tree_for_main
+        return tc_wiring.Parts(
+            limits=self.limits,
+            units=lambda out: FakeUnits(out, self.fake_systemctl),
+            procs=lambda: list(self.cargo_running),
+            tree=None if tree is None else (lambda home, prog, limits, clock: tree),
+            journal=False,
+        )
+
+    def session(self) -> tc_wiring.Session:
+        return tc_wiring.session(self.home, TOOL, self.parts())
+
+    def tree(self) -> tc_build_tree.CargoBuildTree:
+        """A build tree as main builds it (the cargo processes: cargo_running)."""
+        return tc_build_tree.CargoBuildTree(
+            self.home, "cst toolchains", self.limits, SystemClockAdapter(), procs=lambda: list(self.cargo_running)
+        )
+
     def run_main(self, *args: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL)
+            rc = tc_cli.main([*args, "--home", self.home], HELP, TOOL, parts=self.parts())
         return rc, out.getvalue() + err.getvalue()
 
     def present(self, key: str) -> bool:
@@ -276,8 +249,8 @@ class SettingsTest(Base):
             tcd_common.parse_conf("MIN_KEEP=1h\nMAX_IDLE=$IDLE\nMAX_IDEL=1\n", known)
 
     def test_policy_defaults_and_limits(self) -> None:
-        s = tc_prune.load_settings(self.home)
-        rb = tc_rust_build.RustBuild.SPEC
+        s = tc_home_files.load_settings(self.home, TOOL)
+        rb = tca_rust_build.RustBuild.SPEC
         self.assertEqual(s.source_of(rb), "defaults")
         self.assertTrue(s.enabled["rust:build"])
         self.assertEqual(
@@ -287,7 +260,7 @@ class SettingsTest(Base):
             ),
         )
         self.write_conf("MAX_TOTAL=off\nMAX_IDLE=3d\n")
-        s = tc_prune.load_settings(self.home)
+        s = tc_home_files.load_settings(self.home, TOOL)
         pol = s.rust
         self.assertEqual((pol.max_total, pol.max_idle), (0, 72 * H))
         self.assertEqual(s.source_of(rb), "~/.config/cst/toolchains.conf")
@@ -303,13 +276,13 @@ class SettingsTest(Base):
         ):
             self.write_conf(text)
             with self.assertRaises(tcd_common.ConfigError, msg=text):
-                tc_prune.load_settings(self.home)
+                tc_home_files.load_settings(self.home, TOOL)
         # A key without the prefix (the old cargo-gc.conf) and a key of a
         # target that is not implemented are unknown keys.
         for text in ("MAX_IDLE=48h\n", "GO_BUILD_MAX_IDLE=48h\n"):
             self.write_conf_raw(text)
             with self.assertRaisesRegex(tcd_common.ConfigError, "unknown setting", msg=text):
-                tc_prune.load_settings(self.home)
+                tc_home_files.load_settings(self.home, TOOL)
 
     def test_bad_settings_delete_nothing(self) -> None:
         self.folder("aa/0123456789abcd", 100)
@@ -322,7 +295,7 @@ class SettingsTest(Base):
 
 class RootTest(Base):
     def test_cst_template(self) -> None:
-        self.assertEqual(tc_build_tree.resolve_root(self.home), self.root)
+        self.assertEqual(tc_build_tree.resolve_root(self.home, "cst toolchains"), self.root)
 
     def test_other_template_is_refused(self) -> None:
         for text in (
@@ -334,7 +307,7 @@ class RootTest(Base):
         ):
             self.write_cargo_config(text)
             with self.assertRaises(Refused, msg=text):
-                tc_build_tree.resolve_root(self.home)
+                tc_build_tree.resolve_root(self.home, "cst toolchains")
 
     def test_other_template_deletes_nothing(self) -> None:
         self.folder("aa/0123456789abcd", 100)
@@ -347,11 +320,11 @@ class RootTest(Base):
     def test_no_config(self) -> None:
         os.unlink(os.path.join(self.home, ".cargo/config.toml"))
         with self.assertRaises(Refused):
-            tc_build_tree.resolve_root(self.home)
+            tc_build_tree.resolve_root(self.home, "cst toolchains")
 
     def test_missing_root_is_nothing_to_do(self) -> None:
         shutil.rmtree(self.root)
-        self.assertIsNone(tc_build_tree.resolve_root(self.home))
+        self.assertIsNone(tc_build_tree.resolve_root(self.home, "cst toolchains"))
         rc, out = self.run_main("prune", "apply")
         self.assertEqual(rc, 0)
         self.assertIn("nothing to do", out)
@@ -361,7 +334,7 @@ class RootTest(Base):
         os.rename(self.root, real)
         os.symlink(real, self.root)
         with self.assertRaises(Refused):
-            tc_build_tree.resolve_root(self.home)
+            tc_build_tree.resolve_root(self.home, "cst toolchains")
         # A symlink higher up (~/.cache) is refused too.
         os.unlink(self.root)
         cache = os.path.join(self.home, ".cache")
@@ -369,7 +342,7 @@ class RootTest(Base):
         os.symlink(os.path.join(self.tmp, "real-cache"), cache)
         os.makedirs(os.path.join(self.tmp, "real-cache/cargo-build"), exist_ok=True)
         with self.assertRaises(Refused):
-            tc_build_tree.resolve_root(self.home)
+            tc_build_tree.resolve_root(self.home, "cst toolchains")
 
 
 class ScanTest(Base):
@@ -603,15 +576,14 @@ class ApplyTest(Base):
     def test_lock_held_in_this_process_without_proc(self) -> None:
         """The flock alone (no /proc hit) keeps a folder."""
         path = self.folder("aa/0123456789abcd", 100)
-        self.m.proc_users = lambda root, uid=None: ({}, 0)
+        tree = self.tree()
         fd = os.open(os.path.join(path, "debug/.cargo-build-lock"), os.O_RDONLY)
         try:
             # flock locks belong to the open file: a second open in this
             # process conflicts like another process would.
             fcntl.flock(fd, fcntl.LOCK_SH)
-            result, detail = tc_rust_build.delete_folder(
-                self.root, tc_build_tree.scan(self.root, NOW)[0][0], NOW, self.home, {}
-            )
+            with mock.patch.object(tree, "open_by", lambda root: ({}, 0)):
+                result, detail = tree.delete(self.root, tc_build_tree.scan(self.root, NOW)[0][0], NOW, {}, None, None)
         finally:
             os.close(fd)
         self.assertEqual(result, "busy")
@@ -793,7 +765,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         self.folder("aa/0123456789abcd", 100)
         f = tc_build_tree.scan(self.root, NOW)[0][0]
         self.cargo_running = [self.proc(self.answering(f.path))]
-        result, detail = tc_rust_build.delete_folder(self.root, f, NOW, self.home, {})
+        result, detail = self.tree().delete(self.root, f, NOW, {}, None, None)
         self.assertEqual(result, "busy")
         self.assertIn("cargo runs on it", detail)
         self.assertTrue(self.present("aa/0123456789abcd"))
@@ -834,7 +806,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         seen: list[str] = []
 
         def check(
-            root: str, home: str, cache: tcd_build.CargoCache
+            root: str, cache: tcd_build.CargoCache
         ) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str | None, str]]]:
             fd = os.open(lock, os.O_RDONLY)
             try:
@@ -846,8 +818,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
                 os.close(fd)
             return {}, []
 
-        self.m.cargo_users = check
-        result, _ = tc_rust_build.delete_folder(self.root, tc_build_tree.scan(self.root, NOW)[0][0], NOW, self.home, {})
+        tree = self.tree()
+        with mock.patch.object(tree, "cargo_runs", check):
+            result, _ = tree.delete(self.root, tc_build_tree.scan(self.root, NOW)[0][0], NOW, {}, None, None)
         self.assertEqual(result, "deleted")
         self.assertEqual(seen, ["held"])
 
@@ -891,7 +864,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         found: dict[str, list[tuple[str, str]]] = {}
         unknown: list[tuple[str, str, str | None, str]] = []
         for _ in range(3):
-            found, unknown = tc_rust_build.cargo_users(self.root, self.home, cache)
+            found, unknown = self.tree().cargo_runs(self.root, cache)
         self.assertEqual(unknown, [])
         self.assertEqual(found, {"aa/0123456789abcd": [("1", "cargo"), ("2", "cargo")]})
         with open(log) as f:
@@ -950,8 +923,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
             os.makedirs(os.path.join(f.path, "debug"))
             return real(path, timeout)
 
-        self.m.remove_tree = remove_and_rebuild
-        result, detail = tc_rust_build.delete_folder(self.root, f, NOW, self.home, {})
+        tree = self.tree()
+        with mock.patch.object(tree, "remove", remove_and_rebuild):
+            result, detail = tree.delete(self.root, f, NOW, {}, None, None)
         self.assertEqual(result, "deleted")
         self.assertIn("meanwhile", detail)
 

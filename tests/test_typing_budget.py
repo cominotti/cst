@@ -42,7 +42,7 @@ ANY_BUDGETS: Final[dict[str, int]] = {
     "doctor domain": 1,
     "doctor ports": 2,
     "tests tests": 6,
-    "toolchains tests": 2,
+    "toolchains tests": 1,
     "vm adapters": 10,
     "vm cli": 16,
     "vm domain": 8,
@@ -52,7 +52,6 @@ CAST_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests": 1,
     "btrfs tests": 16,
     "tests tests": 4,
-    "toolchains tests": 2,
     "vm tests": 1,
 }
 

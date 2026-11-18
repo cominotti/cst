@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from toolchains.domain.build import TOOL_FILES_MAX, TOOL_FILE_MAX, toolchain_pattern
+from toolchains.domain.build import TOOL_FILE_MAX, toolchain_pattern
 from toolchains.adapters.program import RUNNER
 
 
@@ -63,10 +63,10 @@ def rustup_default(home: str, rh: str) -> str:
     return words[0] if words else ""
 
 
-def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str], bool]:
+def named_in(files: Sequence[str], names: Sequence[str], max_files: int) -> tuple[dict[str, str], bool]:
     """({name: first file that names it}, complete) for NAMES, read from
     FILES (TOOL_FILE_MAX bytes each; unreadable ones skipped). COMPLETE is
-    False when there were more than TOOL_FILES_MAX files to read."""
+    False when there were more than MAX_FILES files to read."""
     pats = {n: (n.encode(), toolchain_pattern(n)) for n in names}
     found: dict[str, str] = {}
     seen: set[str] = set()
@@ -75,7 +75,7 @@ def named_in(files: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str]
             break
         if path in seen:
             continue
-        if len(seen) >= TOOL_FILES_MAX:
+        if len(seen) >= max_files:
             return found, False
         seen.add(path)
         try:
