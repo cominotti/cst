@@ -398,7 +398,7 @@ def awake_since(suspend_journal: str, boot_since: int) -> int:
     short-unix line), or the boot."""
     lines = file_lines(suspend_journal)
     last = awk_int(lines[0]) if len(lines) == 1 else 0
-    return last if last > boot_since else boot_since
+    return max(boot_since, last)
 
 
 def alert_body(problems: Sequence[str]) -> str:
