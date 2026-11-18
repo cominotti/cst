@@ -35,7 +35,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "cst-pending-alerts")
 # How the tests start the program.
-RUN: Final[list[str]] = ["bash", SCRIPT]
+RUN: Final[list[str]] = ["/usr/bin/python3", "-I", "-B", SCRIPT]
 
 USAGE = "usage: cst-pending-alerts [--list]\n"
 SUMMARY_TITLE = "{n} more storage alert(s) while nobody was logged in"

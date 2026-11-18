@@ -1460,7 +1460,7 @@ class NotifierTest(unittest.TestCase):
         home = os.path.join(self.tmp, "home")
         os.mkdir(home)
         listed = subprocess.run(
-            ["bash", os.path.join(REPO, "btrfs", "cst-pending-alerts"), "--list"],
+            ["/usr/bin/python3", "-I", "-B", os.path.join(REPO, "btrfs", "cst-pending-alerts"), "--list"],
             env={**env, "HOME": home, "CST_ALERTS_OWNER": str(os.getuid())},
             capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
         )  # fmt: skip

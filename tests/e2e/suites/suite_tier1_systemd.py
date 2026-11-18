@@ -850,7 +850,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         # Exercise cst-pending-alerts --list and delivered tracking
         listed = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            "bash /opt/cst-rw/btrfs/cst-pending-alerts --list",
+            "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list",
         ).stdout
         self.assertIn("E2E Alert Title", listed)
 
@@ -1751,6 +1751,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
             "/usr/local/bin/btrfs-stall-report": ("--help", 0),
+            "/usr/local/bin/cst-pending-alerts": ("--help", 2),
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
@@ -3344,7 +3345,9 @@ echo E2E-OK
         self.assertIn("~/Bulk: nothing moved at boot", doctor)
         self.assertIn("btrfs-bulk-boot.service", doctor)
         self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
-        listed = as_tester_bash(self.SYSTEMD_CONTAINER, "bash /opt/cst-rw/btrfs/cst-pending-alerts --list").stdout
+        listed = as_tester_bash(
+            self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"
+        ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
 
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
