@@ -18,6 +18,7 @@ from vm.domain import (
     TIMER,
     UNIT_MARKER,
     TimerStep,
+    TimerStepKind,
     VmPaths,
     VmSettings,
     is_cst_vm_program,
@@ -29,7 +30,7 @@ from vm.domain import (
 def is_ours(sbin_copy: str, path: str, data: bytes) -> bool:
     """Whether the file at PATH with these bytes is CST's: a unit with CST's
     marker, or (at sbin_copy) a copy of cst-vm from any CST version."""
-    return UNIT_MARKER.encode() in data or path == sbin_copy and is_cst_vm_program(data)
+    return UNIT_MARKER.encode() in data or (path == sbin_copy and is_cst_vm_program(data))
 
 
 def wants_links(unit_dir: str) -> list[str]:
@@ -89,7 +90,8 @@ def install_timer_files(
             mode=mode,
         )
         if svc.put(place, text, as_root=as_root):
-            report(TimerStep("installed" if states[p] == "missing" else "updated", p))
+            kind = TimerStepKind.INSTALLED if states[p] == OwnedState.MISSING else TimerStepKind.UPDATED
+            report(TimerStep(kind, p))
 
 
 def timer_record_done(paths: VmPaths, entry_file: str) -> None:

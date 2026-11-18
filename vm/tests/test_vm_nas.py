@@ -30,7 +30,7 @@ import sys
 import tempfile
 import termios
 import time
-from typing import Any
+from typing import Any, override
 import unittest
 
 # Run directly (python3 -I -B vm/tests/test_vm_nas.py): the checkout root holds the tests package.
@@ -229,6 +229,7 @@ def read(path: str) -> str:
 
 
 class Nas(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-nas-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -647,7 +648,7 @@ class LiveBackupTest(Nas):
         # The fixture main's readers were shown to read (tests/fixtures/state-formats/vm-index-v1.json).
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "tests", "fixtures", "state-formats", "vm-index-v1.json")) as f:
-            nas = [e for e in json.load(f)["backups"] if e["mode"] == "nas"][0]
+            nas = next(e for e in json.load(f)["backups"] if e["mode"] == "nas")
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
         [real] = [
             e
@@ -664,7 +665,7 @@ class LiveBackupTest(Nas):
 
     def test_a_local_backup_keeps_the_nas_entries(self) -> None:
         self.assertEqual(self.run_tool("backup", "win", "--nas").returncode, 0)
-        entries = [e for e in vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index}))]
+        entries = list(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": self.index})))
         self.assertEqual(entries[0]["mode"], "nas")
 
 
@@ -998,7 +999,7 @@ class ConstantsTest(unittest.TestCase):
             text = f.read()
 
         def shell(name: str) -> str:
-            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.M)
+            m_re = re.search(rf'^{name}="?(?:\$\{{R\}})?([^"\s]+)', text, re.MULTILINE)
             assert m_re is not None
             return m_re.group(1)
 
@@ -1067,7 +1068,7 @@ class TimerTest(Nas):
         ):
             self.assertIn(line + "\n", service)
         # systemd never kills a merge half done: the stop budget covers the merge's own limit.
-        stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.M)
+        stop = re.search(r"^TimeoutStopSec=(\d+)min$", service, re.MULTILINE)
         self.assertTrue(stop, service)
         assert stop is not None
         cfg = vm_wiring.vm_settings(self.env)

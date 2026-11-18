@@ -117,7 +117,7 @@ def needs_mark(d: ImageProbe) -> bool:
     """True when nocow apply would act on the folder (also: unknown state of
     the system folder, or the system folder missing while libvirt is there).
     A symbolic link is never acted on (install -d and chattr would follow it)."""
-    if d.link is not None or os.path.lexists(d.path) and not d.present:
+    if d.link is not None or (os.path.lexists(d.path) and not d.present):
         return False
     if d.scope == "system" and not d.present:
         return os.path.isdir(os.path.dirname(d.path))
@@ -129,7 +129,7 @@ def mark_system_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
     directly as root, else with sudo (say shows each sudo command before it runs).
     Returns an error text or ""."""
     path, q = d.path, shlex.quote(d.path)
-    if os.path.islink(path) or not d.present and os.path.lexists(path):
+    if os.path.islink(path) or (not d.present and os.path.lexists(path)):
         return f"{path}: appeared or is a symbolic link: not touched"
     if os.geteuid() == 0:
         try:

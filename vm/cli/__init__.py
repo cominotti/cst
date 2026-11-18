@@ -17,7 +17,7 @@ from cst_core.domain.text import first_line
 from cst_core.ports import WriteFailed
 from vm import wiring
 from vm.cli import backup, nas, nocow, status, timer, tune
-from vm.domain import VmSettings, parse_args
+from vm.domain import VmCommand, VmSettings, VmSub, parse_args
 from vm.domain.backup import Stop
 
 
@@ -41,33 +41,34 @@ def main(argv: Sequence[str], doc: str, entry_file: str, settings: VmSettings | 
     cmd, vm = a.cmd, a.vm
     try:
         wiring.prepare(cfg, a)
-        if cmd == "help":
+        if cmd == VmCommand.HELP:
             print(doc)
             return 0
-        if cmd == "list":
+        if cmd == VmCommand.LIST:
             status.cmd_list(cfg, vm)
             return 0
-        if cmd == "nocow":
-            return nocow.cmd_nocow_plan(cfg, a.root) if a.sub == "plan" else nocow.cmd_nocow_apply(cfg)
+        if cmd == VmCommand.NOCOW:
+            return nocow.cmd_nocow_plan(cfg, a.root) if a.sub == VmSub.PLAN else nocow.cmd_nocow_apply(cfg)
         vm = vm or wiring.settings_port(cfg).default_vm()
-        if cmd == "status":
-            status.cmd_status(cfg, vm, entry_file)
-        elif cmd == "tune":
-            return tune.cmd_tune(cfg, vm, a.sub == "apply", a.guest_virtio)
-        elif cmd == "backup-timer":
-            timer.cmd_timer(cfg, a.sub or "status", vm, entry_file)
-        elif cmd != "backup":
-            assert_never(cmd)  # every command is handled above
-        else:
-            wiring.safe_terminal()  # a closed terminal or pipe never cuts a backup or its cleanup short
-            if a.nas:
-                nas.cmd_backup_nas(cfg, vm, a.keep, not a.no_quiesce)
-            else:
-                backup.cmd_backup(cfg, vm, a.full)
+        match cmd:
+            case VmCommand.STATUS:
+                status.cmd_status(cfg, vm, entry_file)
+            case VmCommand.TUNE:
+                return tune.cmd_tune(cfg, vm, a.sub == VmSub.APPLY, a.guest_virtio)
+            case VmCommand.BACKUP_TIMER:
+                timer.cmd_timer(cfg, a.sub or VmSub.STATUS, vm, entry_file)
+            case VmCommand.BACKUP:
+                wiring.safe_terminal()  # a closed terminal or pipe never cuts a backup or its cleanup short
+                if a.nas:
+                    nas.cmd_backup_nas(cfg, vm, a.keep, not a.no_quiesce)
+                else:
+                    backup.cmd_backup(cfg, vm, a.full)
+            case _:
+                assert_never(cmd)  # every command is handled above
         return 0
     except (Refused, Stop, WriteFailed) as e:
         print(f"{cfg.prog}: {e}", file=sys.stderr)
-        if cmd == "backup" and a.nas and cfg.under_systemd and "DISK NOT MERGED" not in str(e):
+        if cmd == VmCommand.BACKUP and a.nas and cfg.under_systemd and "DISK NOT MERGED" not in str(e):
             # Started by systemd (the weekly timer): nobody reads the terminal.
             wiring.failure_alert(
                 cfg,

@@ -3,7 +3,7 @@
 
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.errors import Refused
+from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.text import first_line
 from vm import wiring
 from vm.domain import instance, nocow_lines, version_changes, VmSettings
@@ -23,7 +23,7 @@ def cmd_list(cfg: VmSettings, vm: str | None) -> None:
 def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> None:
     commands, store, conf = wiring.vm_commands(), wiring.backup_store(cfg), wiring.settings_port(cfg)
     rc, so, err = commands.virsh(("domstate", vm), 60, detach=None)
-    if rc == 127:
+    if rc == ExitStatus.NOT_FOUND:
         print(f"{vm}: virsh not found (libvirt not installed here)")
     elif rc != 0:
         print(f"{vm}: state not readable ({first_line(err) or f'exit {rc}'})")

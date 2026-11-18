@@ -29,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -38,12 +39,12 @@ from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState, UnitFileState
-from cst_core.domain.values import Json
 from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
 from vm.domain import tune as vm_domain_tune
+from vm.domain.backup import BootedDeployment
 from vm import application as vm_application, wiring as vm_wiring
 from vm.application import backup as vm_application_backup
 from vm.cli import (
@@ -93,7 +94,7 @@ class FakeCommands:
     def detached(self) -> AbstractContextManager[None]:
         raise AssertionError("tune runs nothing detached")
 
-    def booted_deployment(self) -> dict[str, Json] | None:
+    def booted_deployment(self) -> BootedDeployment | None:
         raise AssertionError("tune reads no deployment")
 
 
@@ -180,6 +181,7 @@ exit 1
 
 
 class Scratch(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -428,8 +430,10 @@ class BackupTest(Scratch):
         )
         xml = os.path.join(dest, "domain.xml")
         self.assertEqual(stat.S_IMODE(os.stat(xml).st_mode), 0o600)
-        self.assertIn("s3cret", open(xml).read())
-        man = json.load(open(os.path.join(dest, "manifest.json")))
+        with open(xml) as f:
+            self.assertIn("s3cret", f.read())
+        with open(os.path.join(dest, "manifest.json")) as f:
+            man = json.load(f)
         self.assertEqual((man["vm"], man["uuid"], man["mode"], man["epoch"]), ("win", UUID, "reflink", NOW))
         self.assertEqual([f["kind"] for f in man["files"]], ["disk", "nvram", "tpm"])
         self.assertEqual(man["versions"]["qemu-kvm"], "qemu-kvm-11.1.3-1.fc45.x86_64")
@@ -439,9 +443,11 @@ class BackupTest(Scratch):
         # The index: world-readable, without secrets.
         self.assertEqual(stat.S_IMODE(os.stat(self.index).st_mode), 0o644)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.index)).st_mode), 0o755)
-        text = open(self.index).read()
+        with open(self.index) as f:
+            text = f.read()
         self.assertNotIn("s3cret", text)
-        idx = json.load(open(self.index))["backups"]
+        with open(self.index) as f:
+            idx = json.load(f)["backups"]
         self.assertEqual(len(idx), 1)
         self.assertEqual((idx[0]["path"], idx[0]["epoch"], idx[0]["mode"]), (dest, NOW, "reflink"))
         cps = [c for c in self.calls() if c.startswith("cp ")]
@@ -546,7 +552,8 @@ class BackupTest(Scratch):
             json.dump({"backups": entries}, f)  # no "version": as the first cst vm wrote it
         self.assertEqual(vm_adapters_backup.read_index(vm_wiring.vm_settings({"CST_VM_INDEX": path})), entries)
         self.assertEqual(self.run_tool("backup", "win").returncode, 0)
-        [real] = json.load(open(self.index))["backups"]
+        with open(self.index) as f:
+            [real] = json.load(f)["backups"]
         self.assertEqual(set(real), set(entries[0]))
         self.assertEqual(set(real["deployment"]), set(entries[0]["deployment"]))
 
@@ -566,7 +573,8 @@ class BackupTest(Scratch):
             )
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        paths = [e["path"] for e in json.load(open(self.index))["backups"]]
+        with open(self.index) as f:
+            paths = [e["path"] for e in json.load(f)["backups"]]
         self.assertEqual(paths, [kept, self.dest()])
 
     def test_full_backup_flags(self) -> None:
@@ -576,7 +584,8 @@ class BackupTest(Scratch):
         self.assertTrue(cps[0].startswith("cp --reflink=never --sparse=auto -a -- "), cps)
         self.assertTrue(cps[1].startswith(f"cp --reflink=never -a -- {self.nvram} "), cps)
         self.assertTrue(cps[2].startswith("cp --reflink=never -a -- "), cps)
-        self.assertEqual(json.load(open(os.path.join(self.dest(), "manifest.json")))["mode"], "full")
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            self.assertEqual(json.load(f)["mode"], "full")
 
     def test_refuses_a_running_vm(self) -> None:
         self.state("running")
@@ -625,7 +634,8 @@ class BackupTest(Scratch):
         self.env["LC_ALL"] = "pt_BR.UTF-8"
         r = self.run_tool("backup", "win")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(open(os.path.join(self.fix, "virsh-locale.txt")).read().strip(), "LC_ALL=C")
+        with open(os.path.join(self.fix, "virsh-locale.txt")) as f:
+            self.assertEqual(f.read().strip(), "LC_ALL=C")
 
     def test_vm_started_during_the_copy(self) -> None:
         for state, needle in (
@@ -656,7 +666,8 @@ class BackupTest(Scratch):
         self.assertFalse(os.path.lexists(os.path.join(self.dest(), "files", self.disk.lstrip("/"))))
         self.assertIn(f"disk {self.disk} is a symbolic link", r.stdout)
         self.assertIn(f"{kept} {real}", r.stdout)  # restored to the file it points to
-        man = json.load(open(os.path.join(self.dest(), "manifest.json")))
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
         self.assertEqual(man["files"][0]["source"], real)
 
     def test_missing_tpm_state_is_a_note(self) -> None:
@@ -680,9 +691,9 @@ class BackupTest(Scratch):
         with (
             mock.patch.dict(os.environ, self.env),
             mock.patch.object(os, "statvfs", return_value=fake),
+            self.assertRaises(Refused) as cm,
         ):
-            with self.assertRaises(Refused) as cm:
-                vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
+            vm_cli_backup.cmd_backup(vm_wiring.vm_settings(self.env), "win", True)
         self.assertIn("--full needs", str(cm.exception))
         self.assertIn("allocated size", str(cm.exception))
         self.assertFalse(os.path.exists(self.backups))
@@ -937,7 +948,7 @@ class TuneTransformTest(unittest.TestCase):
             _child(b, "driver").attrib,
             {"name": "qemu", "cache": "none", "io": "native", "discard": "unmap", "detect_zeroes": "unmap"},
         )
-        self.assertEqual(list(b)[0].tag, "driver")
+        self.assertEqual(next(iter(b)).tag, "driver")
         self.assertIn("disk vda: cache writeback -> none", changes)
         self.assertNotIn("disk vda: discard", " ".join(changes))
         self.assertFalse(any(" bus " in c for c in changes))  # virtio-blk stays
@@ -1045,6 +1056,7 @@ class TuneEdgeCaseTest(unittest.TestCase):
 class TuneCommandTest(unittest.TestCase):
     """cmd_tune with a fake virsh (in-process: apply asks on a terminal)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1140,7 +1152,7 @@ class TuneCommandTest(unittest.TestCase):
         self.assertEqual((rc, len(self.defined)), (0, 1))
 
     def test_windows_steps_ask_for_a_full_shutdown(self) -> None:
-        rc, out = self.run_cmd(False, False)
+        _rc, out = self.run_cmd(False, False)
         self.assertIn("shutdown /s /t 0", out)
         self.assertIn("Fast Startup", out)
 
@@ -1192,6 +1204,7 @@ class TuneCommandTest(unittest.TestCase):
 class NocowTest(unittest.TestCase):
     """The probe with fake inode flags (scratch folders are rarely btrfs)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-vm-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1286,12 +1299,12 @@ class NocowTest(unittest.TestCase):
             return real_scandir(p)
 
         with mock.patch.object(os, "scandir", scandir):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("NOCOW mark (+C): not readable as your user (root-only folder): cst-vm nocow plan --root", out)
         self.assertNotIn("still copy-on-write", out)
         self.assertNotIn(": no:", out)
         # Readable listing but unreadable image flags (qemu's 0600 files): reported as unknown.
-        rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+        _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("images whose mark is not readable as your user: win.qcow2", out)
         self.assertNotIn("still copy-on-write", out)
 
@@ -1300,7 +1313,7 @@ class NocowTest(unittest.TestCase):
             return False
 
         with patch_vm("is_btrfs", _not_btrfs):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
         self.assertIn("not on btrfs (NOCOW does not apply)", out)
         self.assertIn("No folder to mark.", out)
         os.rmdir(self.system)
@@ -1314,9 +1327,9 @@ class NocowTest(unittest.TestCase):
             return dict(ALL_ON, VM_NOCOW=False)
 
         with patch_vm("knobs", _knobs_off):
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_plan)
             self.assertIn("VM_NOCOW=no", out)
-            rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
+            _rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
             self.assertIn("nothing to do", out)
 
     def test_apply_marks_user_folders_and_uses_sudo_for_the_system_one(self) -> None:
@@ -1453,12 +1466,11 @@ class NocowTest(unittest.TestCase):
 
     def test_apply_with_nothing_to_do_and_without_a_terminal(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
-        rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
+        _rc, out = self.out(vm_cli_nocow.cmd_nocow_apply)
         self.assertIn("already has the NOCOW mark", out)
         self.flags[self.boxes] = 0
-        with mock.patch("sys.stdin", io.StringIO("")):
-            with self.assertRaises(Refused):
-                self.out(vm_cli_nocow.cmd_nocow_apply)
+        with mock.patch("sys.stdin", io.StringIO("")), self.assertRaises(Refused):
+            self.out(vm_cli_nocow.cmd_nocow_apply)
 
     def test_status_lists_the_folders(self) -> None:
         self.flags[self.system] = self.flags[self.boxes] = inode_attrs.FS_NOCOW_FL
@@ -1473,7 +1485,7 @@ class NocowTest(unittest.TestCase):
             patch_vm("virsh", _virsh),
             patch_vm("read_index", _read_index),
         ):
-            rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
+            _rc, out = self.out(vm_cli_status.cmd_status, "win11-devbox", TOOL)
         self.assertIn("hardware: disks and network card as tune recommends", out)
         self.assertIn("VM image folders (NOCOW):", out)
         self.assertIn(f"  {self.system}  [libvirt qemu:///system: virt-manager, virsh]", out)
@@ -1485,6 +1497,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     a NOCOW image still gets a reflink backup, because the backup pre-creates
     a NOCOW destination; without it, the clone fails (the negative control)."""
 
+    @override
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
         if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):
@@ -1645,7 +1658,7 @@ class PackageTest(unittest.TestCase):
         }
         moved = vm_wiring.vm_paths({var: f"/t/{field}" for field, var in variables.items()})
         self.assertEqual({f: getattr(moved, f) for f in variables}, {f: f"/t/{f}" for f in variables})
-        machine = vm_wiring.vm_paths({var: "" for var in variables.values()})  # empty: the machine's path
+        machine = vm_wiring.vm_paths(dict.fromkeys(variables.values(), ""))  # empty: the machine's path
         self.assertEqual(
             (machine.backup_dir, machine.index, machine.vm_conf, machine.unit_dir, machine.sbin_copy),
             (
@@ -1847,7 +1860,11 @@ class FakeTimers:
         for p, st in states.items():
             if st != "ok":
                 self.done.append(f"write {p}")
-                report(vm_domain.TimerStep("installed" if st == "missing" else "updated", p))
+                report(
+                    vm_domain.TimerStep(
+                        vm_domain.TimerStepKind.INSTALLED if st == "missing" else vm_domain.TimerStepKind.UPDATED, p
+                    )
+                )
 
     def mark_complete(self) -> None:
         self.done.append("complete")
@@ -2013,7 +2030,7 @@ class NoRealCommandsTest(unittest.TestCase):
             no_real_commands(),
             self.assertRaisesRegex(AssertionError, "a test ran a real command"),
         ):
-            vm_cli_timer.cmd_timer(cfg, "status", "win", TOOL, timers=timers)
+            vm_cli_timer.cmd_timer(cfg, vm_domain.VmSub.STATUS, "win", TOOL, timers=timers)
         self.assertFalse(os.path.exists(marker), "the stub systemctl ran")
 
 

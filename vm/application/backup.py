@@ -95,10 +95,10 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         return r
 
     sources: list[tuple[str, bool]] = []
-    for path in parts.disks:
-        if not store.is_file(path):
-            raise Refused(f"{vm}: disk {path} not found")
-        path = real(path, "disk")
+    for disk in parts.disks:
+        if not store.is_file(disk):
+            raise Refused(f"{vm}: disk {disk} not found")
+        path = real(disk, "disk")
         if store.has_backing_file(path):
             raise Refused(
                 f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
@@ -200,7 +200,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         raise
     # Entries whose folder was removed by hand leave the index here.
     entries = [
-        e for e in store.read_index() if e.get("mode") == "nas" or store.is_dir(e["path"]) and e["path"] != dest_dir
+        e for e in store.read_index() if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
     ]
     entries.append(index_entry(manifest, dest_dir))
     entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))

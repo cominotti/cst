@@ -9,9 +9,9 @@ import json
 import os.path
 import re
 
-from cst_core.domain.errors import Refused
+from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.text import first_line
-from cst_core.domain.values import format_bytes_gib_mib
+from cst_core.domain.values import HOUR, format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state
 from vm.application.backup import check_backup_start, check_shut_off, backup_time
@@ -24,6 +24,7 @@ from vm.domain import (
     TAG,
     DomainParts,
     NasRepo,
+    VmOverlayKind,
     VmSettings,
     agent_state,
     disk_label,
@@ -94,8 +95,8 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
     if rc == 0:
         return
     why = {
-        127: "restic is not installed (it comes with the NAS setup; after rpm-ostree, active at the next reboot)",
-        124: "the NAS did not answer within 5 minutes",
+        ExitStatus.NOT_FOUND: "restic is not installed (it comes with the NAS setup; after rpm-ostree, active at the next reboot)",
+        ExitStatus.TIMED_OUT: "the NAS did not answer within 5 minutes",
         10: f"no restic repository at {nas['repo']}",
         11: "the repository is locked (try again later)",
         12: f"{cfg.paths.restic_password} does not open the repository",
@@ -105,13 +106,13 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
 
 def commit_back(
     cfg: VmSettings, p: NasBackup, vm: str, overlaid: Mapping[str, tuple[str, str]]
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[str, VmOverlayKind]]:
     """virsh blockcommit --active --pivot for each overlay (also on a paused
     VM), then a check of the live and the persistent definition, then the
     overlay file removed. Returns (problems, {target: how to recover}); no
     problems: every disk is back on its image."""
     problems: list[str] = []
-    how: dict[str, str] = {}
+    how: dict[str, VmOverlayKind] = {}
     state = domain_state_or_none(p.commands, vm)
     if state not in LIVE_STATES:
         problems.append(
@@ -172,7 +173,7 @@ def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -
     out: dict[str, tuple[str, str]] = {}
     for t, (base, overlay) in specs.items():
         named = [m.get(t) == overlay for m in (live, persistent) if m is not None]
-        if any(named) or not named and p.store.exists(overlay):
+        if any(named) or (not named and p.store.exists(overlay)):
             out[t] = (base, overlay)
     return out
 
@@ -277,7 +278,7 @@ def nas_run(
                 f"{vm}: the running VM's disks differ from its definition (changed since it started): "
                 "restart it, then back up"
             )
-        for _t, (_, overlay) in specs.items():
+        for _, overlay in specs.values():
             if store.lexists(overlay):
                 raise Refused(f"{overlay} already exists: wait a second and run it again")
         agent = agent_state(live_xml)
@@ -317,7 +318,7 @@ def nas_run(
         }
         stage = store.stage(vm, xml_text, manifest_text(manifest))
         paths = [src for src, _ in sources] + [stage]
-        timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * 3600 or 6 * 3600
+        timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or 6 * HOUR
         for src, k in sources:
             a, s = store.sizes(src)
             out.say(
@@ -350,8 +351,8 @@ def nas_run(
                 )  # incomplete (rc 3): not a backup
             why = {
                 3: "some files could not be read",
-                124: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
-                127: "restic not found",
+                ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
+                ExitStatus.NOT_FOUND: "restic not found",
                 11: "the repository stayed locked",
             }.get(rc, f"restic exit {rc}")
             raise Refused(f"restic backup failed: {why}; no backup recorded")
@@ -395,7 +396,7 @@ def nas_run(
     # From here on no signal may cut the cleanup short, and no child may get one.
     with p.signals.ignored():
         problems: list[str] = []
-        how: dict[str, str] = {}
+        how: dict[str, VmOverlayKind] = {}
         with p.commands.detached():
             if live:
                 # What the VM really runs on, not only what take_snapshot saw.
@@ -511,14 +512,18 @@ def take_snapshot(
         # its own session keeps a Ctrl-C or a closed terminal away from it.
         with p.signals.held():
             rc, so, err = p.commands.virsh(args, cfg.snapshot_timeout, detach=True)
-            settled = rc != 124 and rc >= 0  # not a timeout, and virsh not killed by a signal
+            settled = rc != ExitStatus.TIMED_OUT and rc >= 0  # not a timeout, and virsh not killed by a signal
             deadline = p.clock.monotonic() + (0 if settled else cfg.snapshot_settle)
             while True:
                 # The truth is what the VM runs on, also when virsh failed or timed out.
                 cur, _ = blklist(p.commands, vm)
-                for t, (base, overlay) in specs.items():
-                    if (cur.get(t) == overlay) if cur is not None else p.store.exists(overlay):
-                        overlaid[t] = (base, overlay)
+                overlaid.update(
+                    {
+                        t: (base, overlay)
+                        for t, (base, overlay) in specs.items()
+                        if ((cur.get(t) == overlay) if cur is not None else p.store.exists(overlay))
+                    }
+                )
                 if settled or len(overlaid) == len(specs) or p.clock.monotonic() >= deadline:
                     break
                 p.clock.sleep(5)
@@ -594,7 +599,7 @@ def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
             "retention runs again next time"
         )
         return
-    gone = len(re.findall(r"^remove \d+ snapshots?:", so, re.M))
+    gone = len(re.findall(r"^remove \d+ snapshots?:", so, re.MULTILINE))
     p.out.say(
         f"  retention: {weekly} weekly + {monthly} monthly kept, and those tagged {KEEP_TAG}"
         f"{'; older ones forgotten' if gone else ''} (space is freed by the /home NAS job's weekly prune)"

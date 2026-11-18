@@ -3,7 +3,7 @@
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import json
 import os
 import shutil
@@ -11,7 +11,7 @@ import signal
 import struct
 import sys
 from types import FrameType
-from typing import TextIO
+from typing import Self, TextIO
 
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
@@ -19,6 +19,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier, Urgency
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
+from cst_core.domain.values import HOUR
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
@@ -94,7 +95,7 @@ def read_index(cfg: VmSettings) -> list[IndexEntry]:
     return [
         e
         for e in entries or []
-        if isinstance(e, dict) and e.get("vm") and (e.get("path") or e.get("mode") == "nas" and e.get("snapshot"))
+        if isinstance(e, dict) and e.get("vm") and (e.get("path") or (e.get("mode") == "nas" and e.get("snapshot")))
     ]
 
 
@@ -112,10 +113,8 @@ def precreate_nocow(dest: str) -> None:
     """btrfs clones only between files with the same NOCOW flag: an empty
     destination with the flag set, which cp then fills. Best effort."""
     os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    try:
+    with suppress(OSError):
         inode_attrs.set_nocow(dest)
-    except OSError:
-        pass
 
 
 def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
@@ -134,7 +133,7 @@ def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
         # became 1.05 million extents (the source had 0.6 million), and the guest
         # writing into those holes allocates new extents even on a NOCOW file.
         flags = ["--reflink=never", "--sparse=auto"]
-    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * 3600)
+    rc, _, err = run(["cp", *flags, "-a", "--", src, dest], timeout=6 * HOUR)
     if rc != 0:
         raise Refused(
             f"cp {' '.join(flags)} {src}: {first_line(err) or f'exit {rc}'}"
@@ -206,19 +205,15 @@ class BackupFiles(LocalFileSystemAdapter):
         private_dirs(self.cfg.paths.nas_stage, d)
         for name, text in ((DOMAIN_XML, xml_text), (MANIFEST_JSON, manifest)):
             path = os.path.join(d, name)
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(path)
-            except FileNotFoundError:
-                pass
             write_private(path, text)
         return d
 
     def unstage(self, folder: str) -> None:
         for name in (DOMAIN_XML, MANIFEST_JSON):
-            try:
+            with suppress(OSError):
                 os.unlink(os.path.join(folder, name))
-            except OSError:
-                pass
 
     def remove_overlay(self, path: str) -> str | None:
         try:
@@ -230,10 +225,8 @@ class BackupFiles(LocalFileSystemAdapter):
         return None
 
     def drop(self, path: str) -> None:
-        try:
+        with suppress(OSError):
             os.unlink(path)
-        except OSError:
-            pass
 
     def describe(self, entry: IndexEntry) -> str:
         return describe_entry(entry)
@@ -260,7 +253,7 @@ class signals_held:
     stop never kills `virsh snapshot-create-as` while libvirt goes on making
     the snapshot: the run then always knows what the VM runs on."""
 
-    def __enter__(self) -> signals_held:
+    def __enter__(self) -> Self:
         self.old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         return self
 
@@ -321,10 +314,8 @@ def mute() -> None:
     except OSError:
         return
     for n in (1, 2):
-        try:
+        with suppress(OSError):
             os.dup2(fd, n)
-        except OSError:
-            pass
     os.close(fd)
 
 
@@ -364,7 +355,7 @@ class VmLock:
         self.path = os.path.join(run_dir, f"nas-{vm}.lock")
         self.fd: int | None = None
 
-    def __enter__(self) -> VmLock:
+    def __enter__(self) -> Self:
         # 0755 and 0644 exactly, whatever the umask (sudo keeps a user's 077): cst doctor reads the pid.
         ensure_dir(self.run_dir, 0o755)
         fd = take_lock(self.path, wait=False, mode=0o644, nofollow=False)

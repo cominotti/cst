@@ -13,6 +13,7 @@ from cst_core.adapters.notify import PENDING_ALERTS, Urgency
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
+from cst_core.domain.values import HOUR
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.terminal import confirm
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -80,7 +81,7 @@ def vm_settings(env: Mapping[str, str] | None = None) -> VmSettings:
         under_systemd=bool(e.get("INVOCATION_ID")),
         now=e.get("CST_VM_NOW") or None,
         sudo_user=e.get("SUDO_USER") or None,
-        commit_timeout=int(e.get("CST_VM_COMMIT_TIMEOUT") or 4 * 3600),
+        commit_timeout=int(e.get("CST_VM_COMMIT_TIMEOUT") or 4 * HOUR),
         snapshot_timeout=int(e.get("CST_VM_SNAPSHOT_TIMEOUT") or 600),
         snapshot_settle=int(e.get("CST_VM_SNAPSHOT_SETTLE") or 600),
     )
