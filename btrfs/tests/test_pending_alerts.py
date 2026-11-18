@@ -537,6 +537,18 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertFalse(os.path.exists(old))
         self.assertEqual(self.read_record(), f"{a} {find_mtime(self.path(a))} shown 1 {FIRST}\n")
 
+    def test_the_record_is_rewritten_when_it_names_alerts_that_are_gone(self) -> None:
+        # Lines for pending files that btrfs-notify has dropped since are left out. Before the fix, the
+        # rewrite failed (and the alerts just shown came back at the next login) whenever the record's
+        # last name in bash's hash order was such a line: with this many of them, almost always.
+        a = self.alert(1)
+        self.write_record("".join(f"{n:032x}.alert 1700000000.0000000000 shown 1 {FIRST}\n" for n in range(100, 160)))
+        r = self.run_prog()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read_record(), f"{a} {find_mtime(self.path(a))} shown 1 {FIRST}\n")
+        self.assertEqual(self.run_prog().stderr, "")
+        self.assertEqual(len(self.notifications()), 1)
+
     def test_a_record_folder_it_cannot_make_fails_after_showing(self) -> None:
         self.alert(1)
         state = os.path.join(self.tmp, "a-file")
