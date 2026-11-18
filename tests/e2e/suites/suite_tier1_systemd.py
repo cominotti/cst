@@ -2180,7 +2180,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         rule passes `udevadm verify` and the units `systemd-analyze verify`;
         a second install writes nothing and makes no rpm-ostree change, and
         `plan` then has nothing left to do; `status` changes nothing and ends
-        in "verdict: OK"; a typo in a unit (an unknown key in a drop-in of the
+        in "verdict: OK"; without the next deployment's boot entry plan and
+        install refuse and change nothing, status says NO BOOT ENTRY and
+        files-only still runs; a typo in a unit (an unknown key in a drop-in of the
         record unit) stops an install at its `systemd-analyze verify`, before
         any rpm-ostree change; uninstall removes everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
@@ -2279,6 +2281,36 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         )
         self.assertEqual(step(sums), before)
         self.assertEqual([x for x in calls()[n:] if x.startswith(("rpm-ostree initramfs-etc", "udevadm control"))], [])
+
+        # Without the next deployment's boot entry (as when /boot is not
+        # mounted) install cannot find the overlay to compare: plan and
+        # install refuse and change nothing, and status says so. files-only
+        # leaves the initramfs alone and still runs.
+        entry = "/boot/loader/entries/ostree-1-e2e.conf"
+        hint = "in /boot/loader/entries (is /boot mounted?)"
+        with self.subTest("no boot entry for the next deployment"):
+            step(f"mv {entry} {w}/entry.conf")
+            try:
+                n = len(calls())
+                for mode in ("plan", "install"):
+                    r = exec_bash(c, f". {w}/fakes.bash\n/opt/cst-rw/cst btrfs degraded-boot {mode}", check=False)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    out = r.stdout + r.stderr
+                    self.assertIn("ERROR: no boot entry for the next deployment /ostree/deploy/e2e/deploy/", out)
+                    self.assertIn(f" {hint}. Nothing was changed.\n", out)
+                    self.assertNotIn("written:", r.stdout)
+                status = step("/opt/cst-rw/cst btrfs degraded-boot status")
+                self.assertIn(
+                    f"next-boot initramfs overlay: unknown - no boot entry for the next deployment {hint}\n", status
+                )
+                self.assertIn(f"next boot:        NO BOOT ENTRY for the next deployment {hint}\n", status)
+                only = step("/opt/cst-rw/cst btrfs degraded-boot files-only")
+                self.assertNotIn("written:", only)
+                self.assertTrue(only.endswith("--files-only: initramfs overlay not updated\n"), only)
+                self.assertEqual(step(sums), before)
+                self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+            finally:
+                step(f"mv {w}/entry.conf {entry}")
 
         # verify reads a unit's drop-ins with it; an unknown key there is only
         # a warning unless the script passes --recursive-errors=no.

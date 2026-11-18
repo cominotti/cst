@@ -1128,7 +1128,16 @@ own checks:
     given on the kernel command line);
   - Fedora's own rule `64-btrfs.rules` still works the way this part expects.
     If a Fedora update changed it, it stops with `UPSTREAM CHANGED: ...` and
-    changes nothing.
+    changes nothing;
+  - once its files are tracked in the initramfs, the next boot's deployment
+    has its boot entry in `/boot/loader/entries` (there is none when
+    `/boot` is not mounted). Install needs it to find the initramfs overlay
+    the next boot loads and compare it with `/etc`. A first install only
+    adds the files to the initramfs, and `files-only` leaves the initramfs
+    alone, so they need no entry; nor does a deployment that rpm-ostree
+    staged for the next boot, which gets its entry only at shutdown. Without
+    the entry, `status` says `NO BOOT ENTRY` instead of `overlay not
+    found`.
 - It checks the new udev rule with `udevadm verify` before it writes
   anything: a rule that fails leaves nothing written.
 - It writes its files, then checks its units with `systemd-analyze verify`:

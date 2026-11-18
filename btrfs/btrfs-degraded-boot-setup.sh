@@ -61,7 +61,9 @@
 #   * Refuses to run unless the root fs is multi-device btrfs on an rpm-ostree
 #     system with `degraded` in the next-boot rootflags, and unless upstream
 #     64-btrfs.rules (booted and next boot) still has the ID_BTRFS_READY /
-#     SYSTEMD_READY=0 semantics this rule builds on.
+#     SYSTEMD_READY=0 semantics this rule builds on. Once the files are
+#     tracked, install also refuses when the next deployment is not staged and
+#     has no boot entry: it could not find the overlay to compare.
 #   * The generated rule passes `udevadm verify` before anything is written.
 #   * After writing, the udev self-test must show every root fs member ready
 #     (lsblk must list as many as btrfs counts);
@@ -178,10 +180,13 @@ elif what == "summary":
 }
 
 # The boot entry (${BOOT_DIR}/loader/entries/*.conf) whose ostree= is the
-# next deployment. Fails, printing nothing, when there is none.
+# next deployment. Fails, printing nothing, when there is none: no entry at
+# all (as when ${BOOT_DIR} is not mounted) or none for that deployment. A
+# staged deployment has no entry yet (ostree writes it at shutdown).
+# $1: the next deployment's root, when the caller has it (else asked here).
 next_boot_entry() {
     local next entry opts path
-    next="$(realpath "$(ostree_query next-root)")"
+    next="$(realpath "${1:-$(ostree_query next-root)}")" || return 1
     for entry in "${BOOT_DIR}"/loader/entries/*.conf; do
         # No entry at all: the pattern stays as it is (no nullglob); not a file to read.
         [[ -e "${entry}" ]] || continue
@@ -194,7 +199,14 @@ next_boot_entry() {
     return 1
 }
 
+# Where install and status say to look when there is no boot entry.
+boot_entries_hint() {
+    echo "in ${BOOT_DIR}/loader/entries (is ${BOOT_DIR} mounted?)"
+}
+
 # Path of the initramfs-etc overlay the next boot will load, or nothing.
+# Exit status 3, printing nothing: the next deployment is not staged and has
+# no boot entry (next_boot_entry); the callers say so.
 next_overlay() {
     local entry initrds
     if [[ "$(ostree_query next-staged)" == "yes" ]]; then
@@ -208,16 +220,18 @@ if m:
 PY
         return
     fi
-    entry="$(next_boot_entry)" || return 0
+    entry="$(next_boot_entry)" || return 3
     initrds="$(awk '$1 == "initrd" {for (i = 2; i <= NF; i++) print $i}' "${entry}")"
     grep -m1 'initramfs-overlays' <<<"${initrds}" | sed "s|^|${BOOT_DIR}|"
 }
 
 # 0 = the next-boot overlay contains exactly the tracked files with the
-# current /etc content; 1 = differs; 2 = overlay not locatable.
+# current /etc content; 1 = differs; 2 = overlay not locatable; 3 = no boot
+# entry for the next deployment.
 overlay_in_sync() {
-    local ov tmpd f rc=0
-    ov="$(next_overlay)"
+    local ov tmpd f rc=0 ov_rc=0
+    ov="$(next_overlay)" || ov_rc=$?
+    (( ov_rc != 3 )) || return 3
     [[ -n "${ov}" && -r "${ov}" ]] || return 2
     tmpd="$(mktemp -d)"
     (cd "${tmpd}" && { zcat -f "${ov}" | cpio -idm --quiet --no-absolute-filenames; }) || { rm -rf "${tmpd}"; return 2; }
@@ -256,6 +270,15 @@ tracked_sums() {
     done
 }
 
+# Whether the next deployment's initramfs-etc already tracks every file.
+all_tracked() {
+    local tracked f
+    tracked="$(ostree_query tracked)" || return
+    for f in "${TRACKED[@]}"; do
+        grep -qxF "${f}" <<<"${tracked}" || return 1
+    done
+}
+
 upstream_ok() {
     grep -qF 'IMPORT{builtin}="btrfs ready $devnode"' "$1" &&
         grep -qF 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"' "$1"
@@ -285,6 +308,7 @@ status() {
     case "${rc}" in
         0) echo "next-boot initramfs overlay $(next_overlay): in sync with /etc" ;;
         1) echo "next-boot initramfs overlay $(next_overlay): OUT OF SYNC with /etc (re-run installer)" ;;
+        3) echo "next-boot initramfs overlay: unknown - no boot entry for the next deployment $(boot_entries_hint)" ;;
         *) echo "next-boot initramfs overlay: not found" ;;
     esac
     echo "deployments (initramfs-etc tracked files):"
@@ -351,6 +375,7 @@ summary() {
     case "${overlay_rc}" in
         0) echo "next boot:        ready (overlay in sync with /etc)" ;;
         1) echo "next boot:        OUT OF SYNC - re-run this script before rebooting"; ok=0 ;;
+        3) echo "next boot:        NO BOOT ENTRY for the next deployment $(boot_entries_hint)"; ok=0 ;;
         *) echo "next boot:        overlay not found - re-run this script before rebooting"; ok=0 ;;
     esac
     if (( ok )); then
@@ -431,6 +456,16 @@ NEXT_ROOT="$(ostree_query next-root)"
 for up in "${UPSTREAM_RULE}" "${NEXT_ROOT}${UPSTREAM_RULE}"; do
     upstream_ok "${up}" || die "UPSTREAM CHANGED: ${up} no longer sets SYSTEMD_READY=0 from ID_BTRFS_READY; review ${RULE} logic first. Nothing was changed."
 done
+# Once every file is tracked, install compares the next boot's initramfs
+# overlay with /etc, and finds it through the next deployment's boot entry:
+# without the entry it could not tell whether the overlay is in sync. A
+# staged deployment has no entry yet (ostree writes it at shutdown) and needs
+# none; a first install only tracks the files, and files-only leaves the
+# initramfs alone.
+if [[ "${1:-}" != "--files-only" && "$(ostree_query next-staged)" != "yes" ]] && all_tracked; then
+    next_boot_entry "${NEXT_ROOT}" >/dev/null ||
+        die "no boot entry for the next deployment ${NEXT_ROOT} $(boot_entries_hint). Nothing was changed."
+fi
 
 # ------------------------------------------------------------------ files ---
 # The rule first: one that fails `udevadm verify` stops the install before
@@ -859,7 +894,9 @@ if (( ${#args[@]} )); then
     run_or_plan rpm-ostree initramfs-etc "${args[@]}"
 else
     rc=0; overlay_in_sync || rc=$?
-    if (( rc == 1 )) || { (( rc == 2 )) && ! tracked_sums | cmp -s - "${SYNCED_SUM_FILE}" 2>/dev/null; }; then
+    # Overlay not found (2), or no boot entry (3; the guards refuse that
+    # before): the sums recorded at the last sync decide.
+    if (( rc == 1 )) || { (( rc >= 2 )) && ! tracked_sums | cmp -s - "${SYNCED_SUM_FILE}" 2>/dev/null; }; then
         echo "next-boot overlay differs from /etc: rpm-ostree initramfs-etc --force-sync"
         run_or_plan rpm-ostree initramfs-etc --force-sync
     else

@@ -336,6 +336,8 @@ class DegradedBootTest(unittest.TestCase):
         if not (repoint or stub_overlay):
             raise AssertionError("the real next_overlay needs the repointed paths")
         stub = 'next_overlay() { echo "next_overlay is not stubbed" >&2; return 97; }' if stub_overlay else ""
+        if not repoint:  # BOOT_DIR is the host's /boot
+            stub += '\nnext_boot_entry() { echo "next_boot_entry is not stubbed" >&2; return 97; }'
         lib = os.path.join(self.tmp, "lib", "btrfs")
         script = f"""
 # Never re-exec through sudo: the prelude does that when not root.
@@ -345,7 +347,7 @@ unset -f exec
 PATH="{self.tmp}/bin:/usr/bin:/bin"
 R="{self.root}"
 {REPOINT if repoint else ""}
-# It reads /boot and /run/ostree: a test that reaches it stubs it, or repoints them.
+# They read /boot and /run/ostree: a test that reaches them stubs them, or repoints them.
 {stub}
 {code}
 """
@@ -434,6 +436,12 @@ R="{self.root}"
         self.assertEqual(r.returncode, 97, r.stdout + r.stderr)
         self.assertIn("next_overlay is not stubbed", r.stderr)
 
+    def test_next_boot_entry_must_be_stubbed_without_the_repointed_paths(self) -> None:
+        """next_boot_entry reads the host's /boot: without the repointed paths, unstubbed, it stops the test."""
+        r = self.run_bash("next_boot_entry", repoint=False)
+        self.assertEqual(r.returncode, 97, r.stdout + r.stderr)
+        self.assertIn("next_boot_entry is not stubbed", r.stderr)
+
     def test_the_fakes_are_the_commands_the_functions_find(self) -> None:
         out = self.ok("for c in " + " ".join(FAKES) + ' ; do type -P "$c"; done')
         self.assertEqual(out.splitlines(), [os.path.join(self.tmp, "bin", c) for c in FAKES])
@@ -517,23 +525,33 @@ R="{self.root}"
     # -------------------------------------------------------------- guards --
     GOOD_KARGS: Final = f"root=UUID={UUID} rootflags=subvol=root,degraded rd.luks.uuid=luks-1111 quiet\n"
 
-    def guards(self, *, kargs: str = GOOD_KARGS, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        """The guards section; the next deployment's root is $FAKE/next. Prints UUID, ndev and NEXT_ROOT."""
+    def guards(
+        self, *args: str, kargs: str = GOOD_KARGS, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """The guards section with these arguments; the next deployment's root is $FAKE/next. Prints UUID, ndev and NEXT_ROOT."""
         self.put("kargs", kargs)
         self.put("calls", "")
         code = f"""
 eval "real_$(declare -f ostree_query)"
 ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/next"; else real_ostree_query "$1"; fi; }}
-{self.section("guards")}
+{self.section("guards", *args)}
 echo "UUID=$UUID ndev=$ndev NEXT_ROOT=$NEXT_ROOT"
 """
         return self.run_bash(code, env=env)
 
     def guard_root(self) -> None:
-        """A fake root and next deployment the guards accept."""
+        """A fake root and next deployment (with its boot entry) the guards accept."""
         self.put("root/run/ostree-booted", "")
         self.put("next/usr/.keep", "")
         self.put("next" + self.at("/usr/lib/udev/rules.d/64-btrfs.rules"), UPSTREAM_64)
+        self.boot_entry("ostree-1.conf", f"{self.tmp}/next")
+
+    def boot_entry(self, name: str, deployment: str) -> None:
+        """A boot entry in the fake root's /boot whose ostree= is this deployment."""
+        self.put(
+            f"root/boot/loader/entries/{name}",
+            f"title e\noptions root=UUID={UUID} ostree={deployment} rw\ninitrd /ostree/e/initramfs.img\n",
+        )
 
     def test_guards_accept_a_multi_device_btrfs_root_and_change_nothing(self) -> None:
         self.guard_root()
@@ -595,6 +613,56 @@ echo "UUID=$UUID ndev=$ndev NEXT_ROOT=$NEXT_ROOT"
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(self.mutating_calls(), [])
 
+    def test_guards_refuse_without_a_boot_entry_for_the_next_deployment(self) -> None:
+        """Every file tracked, install could not find the next boot's overlay: plan and install refuse before anything is written."""
+        entries = self.at("/boot/loader/entries")
+        cases = ("no entries folder", "an empty entries folder", "an entry for another deployment only")
+        for case in cases:
+            with self.subTest(case):
+                self.guard_root()
+                shutil.rmtree(self.at("/boot"))
+                if case != "no entries folder":
+                    os.makedirs(entries)
+                if case == "an entry for another deployment only":
+                    os.makedirs(os.path.join(self.tmp, "other"), exist_ok=True)
+                    self.boot_entry("ostree-2.conf", f"{self.tmp}/other")
+                self.status_json(fixture("unpinned.json", {"initramfs-etc": [self.at(p) for p in TRACKED]}))
+                before = self.tree()
+                r = self.guards()
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(
+                    r.stderr,
+                    f"ERROR: no boot entry for the next deployment {self.tmp}/next in {entries} "
+                    f"(is {self.at('/boot')} mounted?). Nothing was changed.\n",
+                )
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.mutating_calls(), [])
+
+    def test_guards_need_no_boot_entry_when_install_compares_no_overlay(self) -> None:
+        """A first install only tracks the files, and files-only leaves the initramfs alone: no entry needed."""
+        some = [self.at(p) for p in TRACKED[:2]]
+        every = [self.at(p) for p in TRACKED]
+        cases = {"first install": ([], ()), "some files tracked": (some, ()), "files-only": (every, ("--files-only",))}
+        for case, (tracked, args) in cases.items():
+            with self.subTest(case):
+                self.guard_root()
+                shutil.rmtree(self.at("/boot"))
+                self.status_json(fixture("unpinned.json", {"initramfs-etc": tracked}))
+                r = self.guards(*args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stderr, "")
+                self.assertEqual(r.stdout, f"UUID={UUID} ndev=2 NEXT_ROOT={self.tmp}/next\n")
+
+    def test_guards_need_no_boot_entry_for_a_staged_deployment(self) -> None:
+        """ostree writes a staged deployment's boot entry only at shutdown."""
+        self.guard_root()
+        shutil.rmtree(self.at("/boot"))
+        self.status_json(fixture("staged-clean.json"))
+        r = self.guards()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "")
+
     def test_guards_only_warn_without_rd_luks_uuid(self) -> None:
         self.guard_root()
         r = self.guards(kargs=f"root=UUID={UUID} rootflags=degraded\n")
@@ -644,33 +712,39 @@ next_overlay || :
         self.put(f"{entries}/ostree-2.conf", f"options ostree={self.tmp}/boot.1/0\ninitrd /ostree/next/initramfs.img\n")
         self.assertEqual(self.ok(code, stub_overlay=False), "")
 
-    def test_next_overlay_without_boot_entries_is_silent(self) -> None:
-        """No boot entry: no overlay and nothing on stderr. The unmatched
-        pattern reached awk, which said "cannot open" on every install and
-        status; an entry awk really cannot read still shows."""
+    def test_next_overlay_without_a_boot_entry_says_so(self) -> None:
+        """No boot entry for the next deployment: no overlay, exit status 3
+        (the callers word the message) and nothing on stderr. An unmatched
+        pattern never reaches awk; an entry awk really cannot read still shows."""
         self.status_json(fixture("unpinned.json"))
         os.makedirs(os.path.join(self.tmp, "deploy", "next"))
+        os.makedirs(os.path.join(self.tmp, "deploy", "other"))
         code = f"""
 eval "real_$(declare -f ostree_query)"
 ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/deploy/next"; else real_ostree_query "$1"; fi; }}
-ov="$(next_overlay)"
-echo "[$ov]"
+rc=0; ov="$(next_overlay)" || rc=$?
+echo "[$ov] $rc"
 """
         entries = self.at("/boot/loader/entries")
-        for case in ("no entries folder", "an empty entries folder"):
+        for case in ("no entries folder", "an empty entries folder", "an entry for another deployment only"):
             with self.subTest(case):
                 if case == "an empty entries folder":
                     os.makedirs(entries)
+                if case == "an entry for another deployment only":
+                    self.boot_entry("ostree-1.conf", f"{self.tmp}/deploy/other")
                 r = self.run_bash(code, stub_overlay=False)
-                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "[]\n", ""))
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "[] 3\n", ""))
         os.makedirs(os.path.join(entries, "odd.conf"))  # not a file: awk says so
         r = self.run_bash(code, stub_overlay=False)
-        self.assertEqual((r.returncode, r.stdout), (0, "[]\n"))
+        self.assertEqual((r.returncode, r.stdout), (0, "[] 3\n"))
         self.assertIn("odd.conf", r.stderr)
 
     # ---------------------------------------------------- overlay_in_sync --
-    def overlay_rc(self, overlay: str) -> str:
-        return self.ok(f'next_overlay() {{ echo "{overlay}"; }}; rc=0; overlay_in_sync || rc=$?; echo "$rc"').strip()
+    def overlay_rc(self, overlay: str, *, rc: int = 0) -> str:
+        """overlay_in_sync's exit status, with next_overlay printing overlay and exiting with rc."""
+        return self.ok(
+            f'next_overlay() {{ echo "{overlay}"; return {rc}; }}; rc=0; overlay_in_sync || rc=$?; echo "$rc"'
+        ).strip()
 
     def test_overlay_in_sync_states(self) -> None:
         self.install()
@@ -688,6 +762,8 @@ echo "[$ov]"
             self.assertEqual(self.overlay_rc(""), "2")
         with self.subTest("unreadable overlay"):
             self.assertEqual(self.overlay_rc(self.put("garbage.img", "not an archive\n")), "2")
+        with self.subTest("no boot entry for the next deployment"):
+            self.assertEqual(self.overlay_rc("", rc=3), "3")
 
     # ---------------------------------------------------- generated files --
     def test_generated_rule_and_units_for_the_root_uuid(self) -> None:
@@ -827,10 +903,11 @@ echo "[$ov]"
         self.assertNotIn("self-test: dm-0", r.stdout)
 
     # -------------------------------------------------- initramfs overlay --
-    def overlay_step(self, *args: str, overlay: str = "") -> str:
-        """The initramfs overlay section, with status (its last step) replaced by a marker."""
+    def overlay_step(self, *args: str, overlay: str = "", rc: int = 0) -> str:
+        """The initramfs overlay section, with status (its last step) replaced by a marker;
+        next_overlay prints overlay and exits with rc."""
         self.put("calls", "")
-        code = f'next_overlay() {{ echo "{overlay}"; }}\nstatus() {{ echo STATUS; }}\n' + self.section(
+        code = f'next_overlay() {{ echo "{overlay}"; return {rc}; }}\nstatus() {{ echo STATUS; }}\n' + self.section(
             "initramfs-overlay", *args
         )
         return self.ok(code)
@@ -878,16 +955,24 @@ echo "[$ov]"
         self.assertEqual(self.mutating_calls(), ["rpm-ostree initramfs-etc --force-sync"])
 
     def test_without_an_overlay_the_recorded_sums_decide(self) -> None:
-        self.install()
-        self.tracked_json(list(TRACKED))
-        self.overlay_step()  # no overlay found, no sums yet: sync and record them
-        self.assertEqual(self.mutating_calls(), ["rpm-ostree initramfs-etc --force-sync"])
-        self.overlay_step()  # same sums: nothing to do
-        self.assertEqual(self.mutating_calls(), [])
-        with open(self.at(HELPER), "a", encoding="utf-8") as f:
-            f.write("# changed\n")
-        self.overlay_step()  # a tracked file changed since the last sync
-        self.assertEqual(self.mutating_calls(), ["rpm-ostree initramfs-etc --force-sync"])
+        """Overlay not found (2), or no boot entry (3: the guards refuse that first, unless the entry goes between
+        them and this step): the sums recorded at the last sync decide."""
+        for case, rc in (("overlay not found", 0), ("no boot entry", 3)):
+            with self.subTest(case):
+                shutil.rmtree(self.root)
+                self.put("root/usr/lib/udev/rules.d/64-btrfs.rules", UPSTREAM_64)
+                self.install()
+                self.tracked_json(list(TRACKED))
+                out = self.overlay_step(rc=rc)  # no sums yet: sync and record them
+                self.assertIn("next-boot overlay differs from /etc: rpm-ostree initramfs-etc --force-sync", out)
+                self.assertEqual(self.mutating_calls(), ["rpm-ostree initramfs-etc --force-sync"])
+                out = self.overlay_step(rc=rc)  # same sums: nothing to do
+                self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", out)
+                self.assertEqual(self.mutating_calls(), [])
+                with open(self.at(HELPER), "a", encoding="utf-8") as f:
+                    f.write("# changed\n")
+                self.overlay_step(rc=rc)  # a tracked file changed since the last sync
+                self.assertEqual(self.mutating_calls(), ["rpm-ostree initramfs-etc --force-sync"])
 
     def test_old_full_rule_of_the_first_version_is_migrated(self) -> None:
         self.install()
@@ -1098,17 +1183,18 @@ status() {{ echo STATUS; }}
                 self.assertEqual(self.tree(), before)
 
     # ------------------------------------------------------------- status --
-    def status(self, *, overlay: str = "") -> str:
-        """--status, with the next deployment's root under $FAKE/next."""
+    def status(self, *, overlay: str | None = "") -> str:
+        """--status, with the next deployment's root under $FAKE/next; overlay=None keeps the real next_overlay."""
         self.put("next" + self.at("/usr/lib/udev/rules.d/64-btrfs.rules"), UPSTREAM_64)
         self.put("calls", "")
+        stub = "" if overlay is None else f'next_overlay() {{ echo "{overlay}"; }}'
         code = f"""
 eval "real_$(declare -f ostree_query)"
 ostree_query() {{ if [[ "$1" == next-root ]]; then echo "{self.tmp}/next"; else real_ostree_query "$1"; fi; }}
-next_overlay() {{ echo "{overlay}"; }}
+{stub}
 status
 """
-        return self.ok(code)
+        return self.ok(code, stub_overlay=overlay is not None)
 
     def summary(self, out: str) -> list[str]:
         return out.split("================ summary ================\n", 1)[1].splitlines()
@@ -1173,6 +1259,26 @@ status
                 + self.at("/var/lib/btrfs-degraded-boot")
                 + "; cleared after a clean scrub with RAID1 complete",
                 "next boot:        OUT OF SYNC - re-run this script before rebooting",
+                "verdict:          ATTENTION - see the lines above",
+            ],
+        )
+
+    def test_status_without_a_boot_entry_for_the_next_deployment(self) -> None:
+        """No boot entry (here: no /boot in the fake root at all): status says so, not "not found"."""
+        self.install()
+        self.put("enabled", "")
+        self.status_json(fixture("unpinned.json", {"initramfs-etc": [self.at(p) for p in TRACKED]}))
+        out = self.status(overlay=None)
+        boot = self.at("/boot")
+        self.assertIn(
+            "next-boot initramfs overlay: unknown - no boot entry for the next deployment in "
+            f"{boot}/loader/entries (is {boot} mounted?)\n",
+            out,
+        )
+        self.assertEqual(
+            self.summary(out)[-2:],
+            [
+                f"next boot:        NO BOOT ENTRY for the next deployment in {boot}/loader/entries (is {boot} mounted?)",
                 "verdict:          ATTENTION - see the lines above",
             ],
         )
