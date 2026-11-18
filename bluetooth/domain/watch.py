@@ -11,7 +11,6 @@ from typing import Final, TypedDict
 from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, PwObject, PwProps, node_rate
 
 
-# ---- the LDAC rate watcher (bt-ldac-watch): what it sees and what it decides ---------------
 # Seconds. SETTLE: how long the wrong rate must last before acting (the
 # headset and WirePlumber are often still busy just after a connection).
 SETTLE: Final[float] = 5.0

@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -629,6 +630,10 @@ class StopTest(unittest.TestCase):
             text=True,
             env={"PATH": empty},
         )
+        self.addCleanup(p.kill)  # a program that hangs is killed: the test fails, the run goes on
+        guard = threading.Timer(30, p.kill)  # also one that never prints its first line
+        guard.start()
+        self.addCleanup(guard.cancel)
         assert p.stdout is not None
         first = p.stdout.readline()
         p.send_signal(signal.SIGTERM)

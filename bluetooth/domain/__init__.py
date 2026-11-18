@@ -477,7 +477,7 @@ class PwFormat(TypedDict, total=False):
 
     mediaType: str
     format: Json  # a name, or {"default": name} in EnumFormat
-    rate: int
+    rate: Json  # a number, or a choice ({"default": n, "min": ..., "max": ...}) in EnumFormat
     channels: int
 
 

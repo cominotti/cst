@@ -16,6 +16,7 @@ from types import FrameType
 from typing import IO, Final, Protocol
 
 from bluetooth.domain import (
+    CARD_PREFIX,
     LE_SECTION,
     PactlCard,
     RESTART_UNITS,
@@ -186,7 +187,7 @@ class Live(LiveAudioPort):
 
     def set_profile(self, prof: str) -> bool:
         """Switch `bluez_card.<dev>` to profile `prof` via `pactl`."""
-        return run(["pactl", "set-card-profile", "bluez_card." + self.dev, prof])[0] == 0
+        return run(["pactl", "set-card-profile", CARD_PREFIX + self.dev, prof])[0] == 0
 
 
 # ---- the LDAC rate watcher's loop (bt-ldac-watch): it listens to `pactl subscribe`, looks at the
@@ -430,14 +431,14 @@ def stdin_snapshot(dev: str) -> Snapshot | None:
 
 
 def run_watcher(dev: str, rate: int, *, dry_run: bool) -> int:
-    """Run the watcher until a stop signal (exit status 0); see Stop for a stop during a bounce."""
+    """Run the watcher until a stop signal: Stop's SystemExit(0) goes on up after the "stopped"
+    line, so the program's exit status is 0; see Stop for a stop during a bounce. SIGINT is Stop's
+    as well, so no KeyboardInterrupt comes here."""
     signal.signal(signal.SIGTERM, Stop.handler)
     signal.signal(signal.SIGINT, Stop.handler)
     os.environ.setdefault("LC_ALL", "C")  # pactl's event lines in English
     try:
         Watcher(dev, rate, dry_run).run()
-    except KeyboardInterrupt:
-        log(6, "stopped")
     except SystemExit:  # Stop's exit, status 0
         log(6, "stopped")
         raise
