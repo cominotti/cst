@@ -2,7 +2,7 @@
 """Unit tests for the concepts several CST modules share through cst_core.
 
 errors, text, units, sizes, owned-file states (domain); file reads, journal
-lines, run locks and the NOCOW attribute (adapters). The unit renderer is
+lines, run locks, the NOCOW attribute and sd_notify messages to systemd (adapters). The unit renderer is
 checked against the timers the vm and toolchains programs write today, so
 those modules can switch to it without changing a byte.
 """
@@ -15,11 +15,13 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -40,6 +42,7 @@ from cst_core.adapters.files import (
 from cst_core.adapters.journal import log
 from cst_core.adapters import notify as core_notify
 from cst_core.adapters.notify import Notifier
+from cst_core.adapters.sd_notify import ServiceNotifier
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused, Usage
@@ -1480,6 +1483,132 @@ class NotifierTest(unittest.TestCase):
         )  # fmt: skip
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
+
+
+class _FailingSocket:
+    """A socket whose sends fail, and which records that it was closed."""
+
+    def __init__(self, err: OSError) -> None:
+        self.err = err
+        self.closed = False
+
+    def sendto(self, _data: bytes, _address: str) -> int:
+        raise self.err
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ServiceNotifierTest(unittest.TestCase):
+    """cst_core.adapters.sd_notify: sd_notify(3) datagrams to systemd's NOTIFY_SOCKET, and nothing without it."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-sd-notify-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def listener(self, address: str) -> socket.socket:
+        """A datagram socket bound at address, as systemd's notification socket."""
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(address)
+        sock.settimeout(5)
+        return sock
+
+    def test_ready_and_watchdog_reach_the_socket_notify_socket_names(self) -> None:
+        path = os.path.join(self.tmp, "notify")
+        sock = self.listener(path)
+        notifier = ServiceNotifier.from_environ({"NOTIFY_SOCKET": path, "PATH": "/usr/bin"})
+        self.assertTrue(notifier.ready())
+        self.assertTrue(notifier.watchdog())
+        self.assertTrue(notifier.watchdog())
+        self.assertEqual([sock.recv(64) for _ in range(3)], [b"READY=1", b"WATCHDOG=1", b"WATCHDOG=1"])
+
+    def test_an_abstract_socket_name_starts_with_at(self) -> None:
+        name = f"cst-sd-notify-test-{os.getpid()}-{time.monotonic_ns()}"
+        sock = self.listener("\0" + name)
+        self.assertTrue(ServiceNotifier.from_environ({"NOTIFY_SOCKET": "@" + name}).ready())
+        self.assertEqual(sock.recv(64), b"READY=1")
+
+    def test_without_a_usable_notify_socket_nothing_is_opened_or_sent(self) -> None:
+        out = io.StringIO()
+        opened = mock.patch("socket.socket", side_effect=AssertionError("no socket may be opened"))
+        for environ in ({}, {"NOTIFY_SOCKET": ""}, {"NOTIFY_SOCKET": "@"}, {"NOTIFY_SOCKET": "relative/notify"},
+                        {"NOTIFY_SOCKET": "vsock:2:999"}):  # fmt: skip
+            with self.subTest(environ=environ), contextlib.redirect_stdout(out), opened as made:
+                notifier = ServiceNotifier.from_environ(environ)
+                self.assertFalse(notifier.ready())
+                self.assertFalse(notifier.watchdog())
+                made.assert_not_called()
+        self.assertEqual(out.getvalue(), "")
+
+    def test_a_failed_send_warns_once_until_a_send_works_again(self) -> None:
+        path = os.path.join(self.tmp, "notify")  # nothing bound there yet: ENOENT
+        out = io.StringIO()
+        notifier = ServiceNotifier(path)
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(notifier.ready())
+            self.assertFalse(notifier.watchdog())
+        self.assertEqual(
+            out.getvalue().splitlines(), ["<4>cannot notify systemd (READY): [Errno 2] No such file or directory"]
+        )
+        sock = self.listener(path)
+        with contextlib.redirect_stdout(out):
+            self.assertTrue(notifier.watchdog())
+        self.assertEqual(sock.recv(64), b"WATCHDOG=1")
+        sock.close()
+        os.unlink(path)
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(notifier.watchdog())
+            self.assertFalse(notifier.watchdog())
+        self.assertEqual(len(out.getvalue().splitlines()), 2)
+        self.assertTrue(out.getvalue().splitlines()[1].startswith("<4>cannot notify systemd (WATCHDOG): "))
+
+    def test_a_socket_whose_send_failed_is_closed_and_opened_again(self) -> None:
+        made: list[_FailingSocket] = []
+
+        def failing() -> _FailingSocket:
+            made.append(_FailingSocket(ConnectionRefusedError(111, "Connection refused")))
+            return made[-1]
+
+        notifier = ServiceNotifier("/run/systemd/notify", open_socket=failing)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(notifier.watchdog())
+            self.assertFalse(notifier.watchdog())
+        self.assertEqual([s.closed for s in made], [True, True])
+
+    def test_a_full_queue_fails_the_send_at_once(self) -> None:
+        """systemd not reading its socket (PID 1 busy or stuck) fills the queue: a send then fails, it never waits."""
+        path = os.path.join(self.tmp, "notify")
+        sock = self.listener(path)  # bound, never read
+        notifier = ServiceNotifier(path)
+        sent: list[bool] = []
+        out = io.StringIO()
+
+        def flood() -> None:
+            with contextlib.redirect_stdout(out):
+                sent.extend(notifier.watchdog() for _ in range(5000))
+
+        thread = threading.Thread(target=flood, daemon=True)
+        thread.start()
+        thread.join(10)
+        waited = thread.is_alive()
+        sock.close()  # wakes a send that waits, so the thread ends either way
+        thread.join(5)
+        self.assertFalse(waited, "a send waited for the full queue")
+        self.assertEqual(len(sent), 5000)
+        self.assertTrue(sent[0])
+        self.assertFalse(sent[-1])
+        [warning] = out.getvalue().splitlines()
+        self.assertTrue(warning.startswith("<4>cannot notify systemd (WATCHDOG): [Errno 11]"), warning)
+
+    def test_a_socket_that_cannot_be_opened_is_a_failed_send(self) -> None:
+        def no_socket() -> socket.socket:
+            raise OSError(24, "Too many open files")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(ServiceNotifier("/run/systemd/notify", open_socket=no_socket).ready())
+        self.assertEqual(out.getvalue(), "<4>cannot notify systemd (READY): [Errno 24] Too many open files\n")
 
 
 if __name__ == "__main__":

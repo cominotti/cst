@@ -8,6 +8,7 @@ import os
 
 from btrfs.stall_monitord.adapters.monitor import Monitor
 from btrfs.stall_monitord.adapters.proc import prepare_log_dir
+from cst_core.adapters.sd_notify import ServiceNotifier
 
 
 def main(argv: Sequence[str]) -> int:
@@ -19,5 +20,5 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--duration", type=float, help="stop after N seconds (testing)")
     args = ap.parse_args(argv)
     prepare_log_dir(args.log_dir)
-    Monitor(args.log_dir, args.run_dir, args.duration).run()
+    Monitor(args.log_dir, args.run_dir, args.duration, ServiceNotifier.from_environ(os.environ)).run()
     return 0

@@ -6,7 +6,19 @@ Documentation=file:///usr/local/sbin/btrfs-stall-monitord
 After=local-fs.target
 
 [Service]
-Type=simple
+# The daemon says READY=1 once it is sampling, and WATCHDOG=1 at every pass of
+# its loop (at least every 5 s). When those stop for WatchdogSec= (a deadlock, a
+# read stuck for minutes), systemd logs "Watchdog timeout", kills it and
+# Restart= starts it again: "active" means "still sampling". 2 min is far above
+# the loop's longest pass and leaves room for reads the stall slows down. The
+# program is installed before this unit (an older daemon never sends READY=1).
+# NotifyAccess=main is Type=notify's default, spelled out: only the daemon sends.
+Type=notify
+NotifyAccess=main
+WatchdogSec=2min
+# The watchdog kills with SIGABRT: no core dump of the Python daemon written
+# to the disks during the stall it was recording (it would help nobody).
+LimitCORE=0
 ExecStart=/usr/bin/python3 -I /usr/local/sbin/btrfs-stall-monitord
 # Journal lines under its own name (journalctl -t btrfs-stall-monitord), not "python3".
 SyslogIdentifier=btrfs-stall-monitord

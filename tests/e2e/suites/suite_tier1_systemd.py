@@ -312,25 +312,77 @@ swap_run() {
 )
 
 
-def stub_stall_monitor_unit(shipped: str) -> str:
-    """btrfs-stall-monitor.service as shipped, with the daemon replaced by a
-    sleep. Nice=-5 goes too: a negative nice needs CAP_SYS_NICE, which the
-    tier 1 container does not have (the unit would fail with 201/NICE).
-    Every other line stays, RuntimeDirectory= and its options included."""
+# A stand-in for btrfs-stall-monitord as the main process of a Type=notify unit: READY=1 after
+# argv[1] seconds, then WATCHDOG=1 every 10 s (the shipped WatchdogSec= is 2 min). Installed at
+# NOTIFY_STUB_PATH (not under /tmp or /var/tmp: the unit has PrivateTmp=yes).
+NOTIFY_STUB_PATH = "/usr/local/libexec/e2e-notify-stub"
+NOTIFY_STUB = """\
+import os, socket, sys, time
+time.sleep(float(sys.argv[1]))
+a = os.environ["NOTIFY_SOCKET"]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+a = "\\0" + a[1:] if a.startswith("@") else a
+s.sendto(b"READY=1", a)
+while True:
+    time.sleep(10)
+    s.sendto(b"WATCHDOG=1", a)
+"""
+
+
+def stall_monitor_e2e_unit(shipped: str, exec_start: str, *, folders: str | None = None) -> str:
+    """btrfs-stall-monitor.service as shipped, with ExecStart= replaced by exec_start and Nice=-5
+    dropped: a negative nice needs CAP_SYS_NICE, which the tier 1 container does not have (the unit
+    would fail with 201/NICE). With folders, LogsDirectory= and RuntimeDirectory= are renamed to it,
+    so that a test running the real daemon keeps out of the real folders. Every other line stays,
+    Type=notify, WatchdogSec= and the RuntimeDirectory= options included."""
     out: list[str] = []
-    swapped = dropped = 0
+    seen = {"ExecStart=": 0, "Nice=": 0, "Type=notify": 0, "LogsDirectory=": 0, "RuntimeDirectory=": 0}
     for line in shipped.splitlines():
-        if line.startswith("ExecStart="):
-            out.append("ExecStart=/usr/bin/sleep infinity")
-            swapped += 1
-        elif line.startswith("Nice="):
+        key = next((k for k in seen if line == k or (k.endswith("=") and line.startswith(k))), None)
+        if key is not None:
+            seen[key] += 1
+        if key == "ExecStart=":
+            out.append(f"ExecStart={exec_start}")
+        elif key == "Nice=":
             out.append(f"# {line}: dropped, no CAP_SYS_NICE in the container")
-            dropped += 1
+        elif key in ("LogsDirectory=", "RuntimeDirectory=") and folders is not None:
+            out.append(f"{key}{folders}")
         else:
             out.append(line)
-    if (swapped, dropped) != (1, 1):
-        raise AssertionError(f"the shipped unit changed shape (ExecStart= {swapped}, Nice= {dropped}):\n{shipped}")
+    if set(seen.values()) != {1}:
+        raise AssertionError(f"the shipped unit changed shape ({seen}):\n{shipped}")
     return "\n".join(out) + "\n"
+
+
+# main's btrfs-stall-monitord (8251bb6): old_tree DIR makes a copy of the checkout with the files of
+# tests/fixtures/legacy put back in their places (tests/e2e/README.md, Mixed-version tests).
+STALL_OLD_TREE = r"""
+fx=/opt/cst-rw/tests/fixtures/legacy
+old_tree() {
+    rm -rf "$1" && cp -a /opt/cst-rw "$1"
+    cp "$fx/btrfs-stall_monitord-adapters-monitor.py@8251bb6" "$1/btrfs/stall_monitord/adapters/monitor.py"
+    cp "$fx/btrfs-stall_monitord-cli.py@8251bb6" "$1/btrfs/stall_monitord/cli.py"
+    cp "$fx/btrfs-units-btrfs-stall-monitor.service@8251bb6" "$1/btrfs/units/btrfs-stall-monitor.service"
+}
+"""
+
+# Steps of the stall monitor tests, on the unit $u (file $path) in test $t: use NAME puts $w/NAME.service
+# in place; show PROP is one property of $u; starts counts the daemon's start lines in $u's journal and
+# started_since N waits up to 10 s for more than N. On a failure: the line, the unit's status and journal.
+STALL_UNIT_STEPS = r"""
+set -E
+diag() { systemctl status --no-pager "$u" >&2 || true; journalctl -q --no-pager -u "$u" -n 40 >&2 || true; }
+trap 'echo "$t FAILED at line $LINENO: $BASH_COMMAND" >&2; diag' ERR
+export LC_ALL=C
+use() { cp "$w/$1.service" "$path"; systemctl daemon-reload; }
+show() { systemctl show -p "$1" --value "$u"; }
+starts() { journalctl --sync; journalctl -q --no-pager -o cat -u "$u" | grep -c '^started: ' || true; }
+started_since() {
+    for _ in $(seq 1 40); do (( $(starts) > $1 )) && return 0; sleep 0.25; done
+    echo "no new start line of the daemon in the journal of $u" >&2
+    return 1
+}
+"""
 
 
 # journal_named IDENT MATCH: waits up to 60 s for journal lines under SyslogIdentifier=IDENT
@@ -2272,37 +2324,37 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
 
     def test_14_stall_monitor_unit_keeps_queued_alerts_across_a_restart(self) -> None:
         """btrfs-stall-monitor.service as shipped (read from the checkout), only
-        its daemon swapped for a sleep and Nice=-5 dropped (see
-        stub_stall_monitor_unit): a file in its RuntimeDirectory, where the
+        its daemon swapped for a stand-in that says READY=1 (NOTIFY_STUB) and
+        Nice=-5 dropped (see stall_monitor_e2e_unit): a file in its RuntimeDirectory, where the
         daemon queues alerts for btrfs-stall-alert.service, survives
         `systemctl restart` (RuntimeDirectoryPreserve=restart; with the default
         a restart deleted it), and `stop` removes the folder."""
-        shipped = docker_exec(
-            self.SYSTEMD_CONTAINER, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]
-        ).stdout
-        stub = stub_stall_monitor_unit(shipped)
+        c = self.SYSTEMD_CONTAINER
+        shipped = docker_exec(c, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]).stdout
+        stub = stall_monitor_e2e_unit(shipped, f"/usr/bin/python3 -I {NOTIFY_STUB_PATH} 0")
         unit = "e2e-stall-monitor.service"
         path = f"/etc/systemd/system/{unit}"
         self.addCleanup(
             exec_bash,
-            self.SYSTEMD_CONTAINER,
-            f"systemctl stop {unit}; rm -f {path}; systemctl daemon-reload; systemctl reset-failed {unit}",
+            c,
+            f"systemctl stop {unit}; rm -f {path} {NOTIFY_STUB_PATH}; systemctl daemon-reload; systemctl reset-failed {unit}",
             check=False,
         )
-        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=stub)
+        docker_exec(
+            c,
+            ["bash", "-c", f"install -d {os.path.dirname(NOTIFY_STUB_PATH)} && cat >{NOTIFY_STUB_PATH}"],
+            input_text=NOTIFY_STUB,
+        )
+        docker_exec(c, ["bash", "-c", f"cat >{path}"], input_text=stub)
         out = exec_bash(
-            self.SYSTEMD_CONTAINER,
+            c,
             f"""
             diag() {{ systemctl status --no-pager {unit} >&2 || true; journalctl -q --no-pager -u {unit} -n 30 >&2 || true; }}
             d=/run/btrfs-stall-monitor
             systemctl daemon-reload
-            # Type=simple: start returns at the fork, and the stub runs (or fails) after it. Running, and
-            # never restarted: a failing stub would also keep the folder (Restart=on-failure + Preserve).
+            # Type=notify: start returns once the stand-in said READY=1. Running, and never
+            # restarted: a failing stub would also keep the folder (Restart=on-failure + Preserve).
             running() {{
-                for _ in $(seq 1 20); do
-                    [ "$(systemctl show -p ActiveState --value {unit})" = active ] && [ -d "$d" ] && break
-                    sleep 0.5
-                done
                 [ "$(systemctl show -p ActiveState --value {unit})" = active ] && [ -d "$d" ] &&
                     [ "$(systemctl show -p NRestarts --value {unit})" = 0 ] ||
                     {{ echo "$1: the unit derived from the shipped one is not running here" >&2; diag; exit 1; }}
@@ -2319,6 +2371,245 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_104_stall_monitor_unit_is_active_only_after_ready(self) -> None:
+        """btrfs-stall-monitor.service as shipped (Type=notify, WatchdogSec=), as e2e-stall-notify.service
+        with Nice=-5 dropped and folders of its own (stall_monitor_e2e_unit), and three main processes:
+        (1) a stand-in that says READY=1 after 4 s (NOTIFY_STUB): `start --no-block` leaves the unit
+        activating until then, and it is active only 4 s after the process started; (2) main's daemon
+        (8251bb6, from tests/fixtures/legacy; it never says READY=1) starts and logs its start line, but
+        the unit never becomes active: start fails at TimeoutStartSec= (5 s here). That is why an install
+        writes the program before the unit (test_106). (3) This checkout's daemon, as the installer builds
+        it: start returns once it says READY=1, the unit is active, and its WATCHDOG=1 pings move
+        WatchdogTimestamp on, with no restart."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/lib/e2e-stall-notify"  # not /var/tmp: the unit has PrivateTmp=yes
+        unit = "e2e-stall-notify.service"
+        path, dropin = f"/etc/systemd/system/{unit}", f"/etc/systemd/system/{unit}.d"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"systemctl stop {unit}; rm -rf {path} {dropin} {w} {NOTIFY_STUB_PATH} /var/log/e2e-stall-notify; "
+            f"systemctl daemon-reload; systemctl reset-failed {unit}",
+            check=False,
+        )
+        self._stall_daemons(c, w)
+        shipped = docker_exec(c, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]).stdout
+        for name, exec_start in (
+            ("stub", f"/usr/bin/python3 -I {NOTIFY_STUB_PATH} 4"),
+            ("old", f"/usr/bin/python3 -I {w}/old/usr/local/sbin/btrfs-stall-monitord"),
+            ("new", f"/usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord"),
+        ):
+            text = stall_monitor_e2e_unit(shipped, exec_start, folders="e2e-stall-notify")
+            docker_exec(c, ["bash", "-c", f"cat >{w}/{name}.service"], input_text=text)
+        out = exec_bash(
+            c,
+            STALL_UNIT_STEPS
+            + f"""
+            u={unit} path={path} dropin={dropin} w={w} t=test_104
+            # 1. The stand-in says READY=1 after 4 s: activating until then.
+            use stub
+            systemctl start --no-block $u
+            sleep 1.5
+            [[ "$(show ActiveState)" == activating ]]
+            for _ in $(seq 1 40); do [[ "$(show ActiveState)" == active ]] && break; sleep 0.25; done
+            [[ "$(show ActiveState)" == active ]]
+            (( $(show ActiveEnterTimestampMonotonic) - $(show ExecMainStartTimestampMonotonic) >= 3500000 ))
+            systemctl stop $u
+
+            # 2. main's daemon under this unit: it runs (its start line) but never says READY=1.
+            use old
+            install -d $dropin
+            printf '[Service]\nTimeoutStartSec=5s\n' >$dropin/e2e.conf
+            systemctl daemon-reload
+            before="$(starts)"
+            rc=0; systemctl start $u 2>/dev/null || rc=$?
+            [[ "$rc" != 0 && "$(show Result)" == timeout ]]
+            started_since "$before"
+            systemctl stop $u; rm -rf $dropin; systemctl daemon-reload; systemctl reset-failed $u || true
+
+            # 3. This checkout's daemon: active once it said READY=1, then its pings.
+            use new
+            before="$(starts)"
+            systemctl start $u
+            started_since "$before"
+            [[ "$(show ActiveState) $(show Type) $(show WatchdogUSec)" == "active notify 2min" ]]
+            w1="$(show WatchdogTimestampMonotonic)"
+            sleep 3
+            (( w1 > 0 && $(show WatchdogTimestampMonotonic) > w1 ))
+            [[ "$(show ActiveState) $(show NRestarts)" == "active 0" ]]
+            systemctl stop $u
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_105_stall_monitor_is_restarted_when_its_pings_stop(self) -> None:
+        """This checkout's btrfs-stall-monitord under the shipped unit (as in test_104), with a drop-in
+        that shortens WatchdogSec= to 3 s and RestartSec= to 1 s: its pings keep it running past two
+        such periods with no restart; once its main process is stopped (SIGSTOP: a loop that no longer
+        passes, as a deadlock or a read stuck for minutes), systemd logs "Watchdog timeout", kills it and
+        Restart=on-failure starts a new process, which is active again (NRestarts 1). The shipped
+        LimitCORE=0 holds: the process runs with a core size limit of 0, which systemd-coredump honours,
+        so the SIGABRT leaves no core (in a container it would go to the machine that runs it:
+        core_pattern is not per container)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/lib/e2e-stall-watchdog"
+        unit = "e2e-stall-watchdog.service"
+        path, dropin = f"/etc/systemd/system/{unit}", f"/etc/systemd/system/{unit}.d"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"systemctl stop {unit}; rm -rf {path} {dropin} {w} /var/log/e2e-stall-watchdog; "
+            f"systemctl daemon-reload; systemctl reset-failed {unit}",
+            check=False,
+        )
+        self._stall_daemons(c, w)
+        shipped = docker_exec(c, ["cat", "/opt/cst/btrfs/units/btrfs-stall-monitor.service"]).stdout
+        text = stall_monitor_e2e_unit(
+            shipped, f"/usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord", folders="e2e-stall-watchdog"
+        )
+        docker_exec(c, ["bash", "-c", f"cat >{w}/new.service"], input_text=text)
+        out = exec_bash(
+            c,
+            STALL_UNIT_STEPS
+            + f"""
+            u={unit} path={path} dropin={dropin} w={w} t=test_105
+            use new
+            install -d $dropin
+            printf '[Service]\nWatchdogSec=3s\nRestartSec=1s\n' >$dropin/e2e.conf
+            systemctl daemon-reload
+            systemctl start $u
+            sleep 8
+            [[ "$(show ActiveState) $(show NRestarts) $(show WatchdogUSec) $(show LimitCORE)" == "active 0 3s 0" ]]
+            pid="$(show MainPID)"
+            grep -Eq '^Max core file size +0 +0 ' /proc/$pid/limits  # what systemd-coredump honours
+            kill -STOP "$pid"
+            for _ in $(seq 1 60); do
+                [[ "$(show NRestarts) $(show ActiveState)" == "1 active" ]] && break
+                sleep 0.5
+            done
+            [[ "$(show NRestarts) $(show ActiveState)" == "1 active" ]]
+            [[ "$(show MainPID)" != "$pid" ]]
+            if kill -0 "$pid" 2>/dev/null; then echo "the stopped process $pid is still there" >&2; exit 1; fi
+            journalctl --sync
+            journalctl -q --no-pager -o cat -u $u | grep -q 'Watchdog timeout'
+            systemctl stop $u
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_106_stall_monitor_upgrade_installs_the_program_before_the_unit(self) -> None:
+        """The upgrade from main (8251bb6: tests/fixtures/legacy put back in a copy of the checkout)
+        with the real installers on the container's /, btrfs-stall-monitord and its unit only, and a
+        drop-in with Nice=0 (no CAP_SYS_NICE here) and a log folder of its own: (1) main's install, old daemon and old unit, runs as
+        Type=simple; (2) this checkout's install writes the program before the unit (its output), so
+        no start can meet the new unit with the old daemon (test_104 shows that one never becomes
+        active); after the daemon-reload, the old process keeps running, unwatched (systemd keeps the
+        watchdog a process started with, none here; 3 s later it is still there), until the restart that
+        btrfs-setup.sh install does next, and after it the new daemon is active as Type=notify with its
+        pings, never restarted; (3) a second install writes nothing; (4) the new daemon under main's unit
+        (what an install leaves when the unit's verify refuses it, after the program) also runs, as
+        Type=simple."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/lib/e2e-stall-upgrade"
+        unit = "btrfs-stall-monitor.service"
+        path, dropin = f"/etc/systemd/system/{unit}", f"/etc/systemd/system/{unit}.d"
+        prog, rec = "/usr/local/sbin/btrfs-stall-monitord", "/var/lib/cst/installed.json"
+        logs = "/var/log/e2e-stall-upgrade"  # the drop-in's LogsDirectory=: the real folder is left alone
+        exec_bash(
+            c,
+            f"""
+            [[ ! -e {prog} && ! -e {path} && ! -e {dropin} ]] || {{ echo "a stall monitor is installed already" >&2; exit 1; }}
+            rm -rf {w} && install -d {w}/orig
+            if [[ -e {rec} ]]; then cp -a {rec} {w}/orig/installed.json; fi
+            """,
+        )
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            systemctl stop {unit}; rm -rf {prog} {path} {dropin}
+            if [[ -e {w}/orig/installed.json ]]; then cp -a {w}/orig/installed.json {rec}; else rm -f {rec}; fi
+            rm -rf {w} {logs}; systemctl daemon-reload; systemctl reset-failed {unit}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            STALL_UNIT_STEPS
+            + STALL_OLD_TREE
+            + f"""
+            u={unit} path={path} dropin={dropin} w={w} t=test_106
+            srcs="btrfs/btrfs-stall-monitord btrfs/units/btrfs-stall-monitor.service"
+            line_of() {{ grep -nxF "$1" <<<"$2" | cut -d: -f1; }}
+            install -d $dropin
+            printf '[Service]\nNice=0\nLogsDirectory=\nLogsDirectory=e2e-stall-upgrade\n' >$dropin/e2e.conf
+
+            # 1. main's install: old daemon, old unit.
+            old_tree $w/old-tree
+            /usr/bin/python3 -I -B $w/old-tree/cst_core/installer.py install $srcs >/dev/null
+            systemctl daemon-reload
+            before="$(starts)"
+            systemctl start $u
+            started_since "$before"
+            sleep 2
+            [[ "$(show ActiveState) $(show Type) $(show NRestarts)" == "active simple 0" ]]
+            pid="$(show MainPID)"
+
+            # 2. This checkout's install: the program first, then the unit.
+            out="$(/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install $srcs)"
+            sed "s/^/$t install: /" <<<"$out" >&2
+            p="$(line_of "written:   {prog}" "$out")"; n="$(line_of "written:   {path}" "$out")"
+            [[ -n "$p" && -n "$n" && "$p" -lt "$n" ]]
+            systemctl daemon-reload
+            [[ "$(show ActiveState) $(show MainPID)" == "active $pid" ]]
+            # systemd keeps the watchdog the old process started with (none): no timeout comes later either.
+            sleep 3
+            [[ "$(show ActiveState) $(show MainPID) $(show NRestarts) $(show Result)" == "active $pid 0 success" ]]
+            before="$(starts)"
+            systemctl restart $u
+            started_since "$before"
+            [[ "$(show ActiveState) $(show Type) $(show WatchdogUSec)" == "active notify 2min" ]]
+            w1="$(show WatchdogTimestampMonotonic)"
+            sleep 3
+            (( w1 > 0 && $(show WatchdogTimestampMonotonic) > w1 ))
+            [[ "$(show ActiveState) $(show NRestarts)" == "active 0" ]]
+
+            # 3. A second install writes nothing.
+            again="$(/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install $srcs)"
+            if grep -v '^unchanged: ' <<<"$again"; then echo "a second install changed files" >&2; exit 1; fi
+
+            # 4. The new daemon under main's unit (a unit the verify refused stays the old one).
+            cp "$fx/btrfs-units-btrfs-stall-monitor.service@8251bb6" $path
+            systemctl daemon-reload
+            before="$(starts)"
+            systemctl restart $u
+            started_since "$before"
+            sleep 3
+            [[ "$(show ActiveState) $(show Type) $(show NRestarts)" == "active simple 0" ]]
+            systemctl stop $u
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def _stall_daemons(self, c: str, w: str) -> None:
+        """This checkout's btrfs-stall-monitord in w/new and main's in w/old (the zipapps each version's
+        installer builds, staged with --root), and NOTIFY_STUB at NOTIFY_STUB_PATH."""
+        exec_bash(
+            c,
+            STALL_OLD_TREE
+            + f"""
+            rm -rf {w} && install -d {w}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --root {w}/new btrfs/btrfs-stall-monitord >/dev/null
+            old_tree {w}/old-tree
+            /usr/bin/python3 -I -B {w}/old-tree/cst_core/installer.py install --root {w}/old btrfs/btrfs-stall-monitord >/dev/null
+            install -d {os.path.dirname(NOTIFY_STUB_PATH)}
+            """,
+        )
+        docker_exec(c, ["bash", "-c", f"cat >{NOTIFY_STUB_PATH}"], input_text=NOTIFY_STUB)
 
     def test_15_toolchains_auto_off_forgets_the_timer_stamp(self) -> None:
         """systemd keeps the last run of a Persistent= timer (for a user timer

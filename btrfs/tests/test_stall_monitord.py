@@ -22,7 +22,9 @@ import contextlib
 import errno
 import json
 import os
+import queue
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -42,6 +44,7 @@ from btrfs.stall_monitord import cli as md_cli
 from btrfs.stall_monitord import domain as md_domain
 from btrfs.stall_monitord.adapters import monitor as md_monitor
 from btrfs.stall_monitord.adapters import proc as md_proc
+from cst_core.adapters.sd_notify import ServiceNotifier
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -847,6 +850,185 @@ class CmdlineReadTest(unittest.TestCase):
             self.hung()
         [(_, msg)] = self.events()
         self.assertIn("java:100 (java -jar app.jar; cgroup app.slice)", msg)
+
+
+class _FakeNotifier(ServiceNotifier):
+    """A ServiceNotifier that records its messages in the test's event list and stops the loop after some pings."""
+
+    def __init__(self, events: list[str], pings: int, ready_fails: int = 0) -> None:
+        super().__init__(None)
+        self.events = events
+        self.pings = pings
+        self.ready_fails = ready_fails  # this many READY=1 sends fail first (systemd's queue full)
+        self.monitor: md_monitor.Monitor | None = None
+
+    def ready(self) -> bool:
+        if self.ready_fails:
+            self.ready_fails -= 1
+            self.events.append("READY=1 failed")
+            return False
+        self.events.append("READY=1")
+        return True
+
+    def watchdog(self) -> bool:
+        self.events.append("WATCHDOG=1")
+        self.pings -= 1
+        if self.pings == 0 and self.monitor is not None:
+            self.monitor.stop()
+        return True
+
+
+class _FakeWriter:
+    """The writer thread, not started: its queue only."""
+
+    def __init__(self, _log_dir: str) -> None:
+        self.q: queue.Queue[object] = queue.Queue()
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+
+class _FakePoller:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def poll(self, _timeout: float) -> list[tuple[int, int]]:
+        self.events.append("poll")
+        return []
+
+
+class NotifyLoopTest(unittest.TestCase):
+    """systemd's Type=notify: READY=1 once the PSI trigger and /dev/kmsg are open and SIGTERM is handled, then
+    WATCHDOG=1 at every pass of the sampling loop. Every /proc and /sys read, the writer thread and the signal
+    handlers are fakes."""
+
+    def setUp(self) -> None:
+        self.events: list[str] = []
+        topo = types.SimpleNamespace(fs={}, disks=[], top_devs=set(), containers={})
+        for target, name, value in (
+            (md_monitor, "Topology", lambda: topo),
+            (md_monitor, "Writer", _FakeWriter),
+            (md_monitor, "read_text", lambda _path: ""),
+            (md_monitor, "scan_d_tasks", list),
+            (md_monitor, "log", lambda msg, _prio=6: self.events.append("log:" + msg.split(":", 1)[0])),
+            (md_monitor.signal, "signal", lambda sig, _handler: self.events.append(f"signal:{sig}")),
+            (md_monitor.Monitor, "probe_stack_access", staticmethod(lambda: False)),
+        ):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def monitor(self, notifier: _FakeNotifier | None) -> md_monitor.Monitor:
+        mon = md_monitor.Monitor("/nonexistent/log", "", None, notifier)
+        record = self.events.append
+        fakes: dict[str, object] = {
+            "poller": _FakePoller(self.events),
+            "open_psi_trigger": lambda: record("psi"),
+            "open_kmsg": lambda: record("kmsg"),
+            "meta_record": lambda: {"t": "meta", "ts": 0.0},
+            "probe_commits": lambda: None,
+            "describe_all": lambda _tasks: [],
+            "sample": lambda _tasks: {"t": "s", "ts": 0.0},
+            "update_episode": lambda _rec, _tasks: None,
+            "track_hung": lambda _tasks, _now: None,
+        }
+        for name, value in fakes.items():
+            setattr(mon, name, value)
+        if notifier is not None:
+            notifier.monitor = mon
+        return mon
+
+    def test_ready_after_setup_then_one_watchdog_per_pass(self) -> None:
+        self.monitor(_FakeNotifier(self.events, pings=3)).run()
+        term, intr = f"signal:{int(md_monitor.signal.SIGTERM)}", f"signal:{int(md_monitor.signal.SIGINT)}"
+        self.assertEqual(
+            self.events,
+            ["psi", "kmsg", term, intr, "log:started", "READY=1"] + ["WATCHDOG=1", "poll"] * 3 + ["log:stopped"],
+        )
+
+    def test_a_ready_that_could_not_be_sent_is_sent_again(self) -> None:
+        self.monitor(_FakeNotifier(self.events, pings=3, ready_fails=2)).run()
+        self.assertEqual(
+            self.events[4:],
+            ["log:started", "READY=1 failed", "READY=1 failed", "WATCHDOG=1", "poll", "READY=1"]
+            + ["WATCHDOG=1", "poll"] * 2
+            + ["log:stopped"],
+        )
+
+    def test_a_blocked_cmdline_read_does_not_stop_the_pings(self) -> None:
+        """A hung-task report at every pass whose /proc/PID/cmdline read never ends: the loop still pings."""
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def blocked(_path: str) -> str | None:
+            release.wait(30)
+            return ""
+
+        mon = self.monitor(_FakeNotifier(self.events, pings=3))
+        mon.cmdlines = md_proc.TimedReader(md_domain.CMDLINE_WAIT, blocked)
+
+        def track_hung(d_tasks: Sequence[md_domain.DTask], now: float) -> None:
+            del d_tasks, now
+            self.events.append(mon.where("10", "100", "java"))
+
+        mon.track_hung = track_hung
+        done = threading.Event()
+
+        def run() -> None:
+            with (
+                mock.patch.object(md_monitor, "BASE_INTERVAL", 0.0),  # a sample (and a report) at every pass
+                mock.patch.object(md_monitor, "short_cgroup", lambda _pid: "app.slice"),
+            ):
+                mon.run()
+            done.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        self.assertTrue(done.wait(md_domain.CMDLINE_WAIT + 9.5), "the loop waited for the blocked cmdline read")
+        where = f"java:100 ({md_domain.CMDLINE_SLOW}; cgroup app.slice)"
+        self.assertEqual(self.events[5:], ["READY=1"] + ["WATCHDOG=1", "poll", where] * 3 + ["log:stopped"])
+
+    def test_without_a_notifier_the_loop_sends_nothing(self) -> None:
+        mon = self.monitor(None)
+        mon.duration = 0.01  # the default sends nothing: no socket is even opened
+        with mock.patch("socket.socket", side_effect=AssertionError("no socket may be opened")) as opened:
+            mon.run()
+        opened.assert_not_called()
+        term, intr = f"signal:{int(md_monitor.signal.SIGTERM)}", f"signal:{int(md_monitor.signal.SIGINT)}"
+        self.assertEqual(self.events[:5], ["psi", "kmsg", term, intr, "log:started"])
+        self.assertEqual(self.events[-1], "log:stopped")
+
+    def test_main_hands_the_monitor_the_socket_systemd_names(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-stall-notify-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "notify")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(sock.close)
+        sock.bind(path)
+        sock.settimeout(5)
+        made: list[tuple[object, ...]] = []
+
+        class _Monitor:
+            def __init__(self, *args: object) -> None:
+                made.append(args)
+
+            def run(self) -> None:
+                return None
+
+        with (
+            mock.patch.object(md_cli, "Monitor", _Monitor),
+            mock.patch.object(md_cli, "prepare_log_dir", lambda _d: None),
+            mock.patch.dict(os.environ, {"NOTIFY_SOCKET": path, "LOGS_DIRECTORY": tmp}),
+        ):
+            self.assertEqual(md_cli.main([]), 0)
+        self.assertEqual(len(made), 1)
+        notifier = made[0][3]
+        if not isinstance(notifier, ServiceNotifier):
+            self.fail(f"main handed the monitor {notifier!r}, not a ServiceNotifier")
+        self.assertTrue(notifier.ready())
+        self.assertEqual(sock.recv(64), b"READY=1")
 
 
 if __name__ == "__main__":

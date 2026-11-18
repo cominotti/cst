@@ -468,6 +468,41 @@ kernel shows its own state as files) and in the cgroup tree.
 - It is strongly sandboxed (no network, no writes outside its own folders, limited
   to 192 MiB of memory and 25% of one CPU) and runs with a higher priority, so it
   keeps sampling while everything else is stuck.
+- **systemd watches it** (a *watchdog*). The service is `Type=notify`: it
+  counts as started (`active`) only once the daemon tells systemd it is
+  sampling (`READY=1`, sent over the socket systemd names in `NOTIFY_SOCKET`).
+  After that the daemon sends a sign of life (`WATCHDOG=1`) at every pass of
+  its loop, at least every 5 s. If those stop for **2 minutes**
+  (`WatchdogSec=2min`), for example because the loop is stuck, systemd writes
+  `Watchdog timeout` to the journal, kills the daemon and starts it again
+  (`Restart=on-failure`). So `active` means "still sampling", and a stuck
+  daemon shows up in `journalctl -u btrfs-stall-monitor` instead of silently
+  leaving a gap in the data. The writes to the log files run in a thread of
+  their own: a write stuck on the disk does not stop the signs of life, the
+  samples wait in memory. 2 minutes is far above the loop's longest pass (a
+  pass reads only small kernel files; on the workstation this was written
+  for, 9 days of recording with stalls and heavy swapping had no gap between
+  two samples longer than 5.7 s), and leaves room for reads that the stall
+  slows down. The kill writes no core dump (`LimitCORE=0`): nothing extra
+  goes to the disks during the stall. What the daemon had not written yet is
+  lost (normally the last 10 s of samples; more when the disk writes were
+  stuck too), and a restarted daemon starts its episode, hung-task and alert
+  bookkeeping again (so an alert can come again before its 15 minutes). Some
+  waits cannot be interrupted at all; then the restart happens only when the
+  wait ends. So the value is the journal line and the data after it, not a
+  quick recovery.
+- The signs of life never make the daemon wait for systemd: when systemd's
+  queue is full (PID 1 busy or stuck), a `WATCHDOG=1` is dropped at once,
+  and a `READY=1` that could not be sent is sent again at the next pass. A
+  start counts too: a daemon that has not said `READY=1` within 90 s
+  (systemd's default `TimeoutStartSec=`) is stopped and started again; a
+  start the stall does not slow down takes far less.
+- `install` writes the program before the unit. A daemon from before this
+  change never sends `READY=1`, so under the new unit it would never become
+  `active` (systemd gives up after 90 s and tries again). The old daemon
+  that is still running when `install` reloads systemd keeps running,
+  unwatched, until the restart that `install` does next; that restart starts
+  the new one.
 
 **Desktop alerts from the monitor.** The same kind of alert is sent at most once
 every 15 minutes.
@@ -1975,7 +2010,14 @@ Two possible reasons:
    ```
 
    Inside a toolbox, put `flatpak-spawn --host` in front of these commands.
-   Run `install` again if the service is missing.
+   Run `install` again if the service is missing. `Watchdog timeout` in that
+   journal means the daemon stopped sending its signs of life for 2 minutes
+   and systemd restarted it (section 4.7); the lines before it show what it
+   was doing. A timeout that comes back every few minutes means the daemon
+   gets stuck at the same place again while the stall lasts (for example a
+   read of a kernel file that waits for the stalled disk, or the daemon's own
+   memory coming back from swap): look at the storage and memory at that time
+   (`btrfs-stall-report --since ...` from the time before the first timeout).
 
 ### `report` says `/var/log/btrfs-stall-monitor not found: btrfs-stall-monitor is not installed on this host`
 
@@ -2136,7 +2178,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |
 | `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the protected registries (the strict reader of the settings file, the built-in list read from an installed docker-gc's source, `resolve_protection`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the settings file and the installed program, the host (uptime, the recorder's unit), the terminal and journal. `application.py`: the use cases (`DockerGc`: record, plan, apply with the last checks before an image is removed, run, cleanup-now, status, settings) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), the settings file and the sources of the installed zipapp or script (`GcSettingsFile`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `DOCKER_GC_CONF`, `DOCKER_GC_INSTALLED`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
 | `docker-volumes-nocow` | `docker_volumes_nocow/` | `domain.py`: the paths (`NocowPaths`), what a scan of a volume found, whether a copy matches its original (entries, bytes, SELinux labels), how a dockerd names its data root, docker.service's states, the record of postponed boots; no I/O. `ports.py`: the volume trees, the helper's state files, the Docker daemons, its output. `application.py`: one volume's NOCOW copy (`migrate_one`), `migrate`, `mark`, `unmark` and `status`. `adapters.py`: their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), recovery of an interrupted migration, whether docker.service or another dockerd uses them, the flag, attempts and postponed files, SELinux labels, the journal lines and btrfs-notify. `wiring.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`, read when the program runs) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
-| `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and the records it writes, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`, `settle_kinds`), the episode being recorded (`Episode`), and the loop's rules on the values it read: the longest commit of a probe, what opens and closes an episode, when a D-state task is reported and the words of each report, which kernel log lines count, the alert queue text; no I/O. `adapters/`: `proc.py`, reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), a read that may wait for another program (a task's command line) in a helper thread with a time limit (`TimedReader`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines, the log folder and the `Writer` thread of the log files; `monitor.py`, the daemon (`Monitor`: its state across samples and the sampling loop, the PSI trigger, `/dev/kmsg`, the alert hand-off). `cli.py`: the arguments and `main()`. |
+| `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and the records it writes, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`, `settle_kinds`), the episode being recorded (`Episode`), and the loop's rules on the values it read: the longest commit of a probe, what opens and closes an episode, when a D-state task is reported and the words of each report, which kernel log lines count, the alert queue text; no I/O. `adapters/`: `proc.py`, reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), a read that may wait for another program (a task's command line) in a helper thread with a time limit (`TimedReader`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines, the log folder and the `Writer` thread of the log files; `monitor.py`, the daemon (`Monitor`: its state across samples and the sampling loop, the PSI trigger, `/dev/kmsg`, the alert hand-off, and its READY=1 and WATCHDOG=1 to systemd through cst_core's `ServiceNotifier`). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain/`, no I/O: `records.py`, the record formats and what the analysis returns; `categories.py`, the wait categories and hints and classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift); `window.py`, `summarise()`: one window's coverage, totals, categories, episodes and events, and the open episode; `verdict.py`, the verdict lines and number formats. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, `analyse()` (the records by kind, `summarise()` with the clock, then below when asked), below and the container names. `cli.py`: the text report, the arguments and `main()`. |
 
 Every Python program in `btrfs/` is such an entry point: `btrfs/` holds no
