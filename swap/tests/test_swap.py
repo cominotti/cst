@@ -2081,8 +2081,10 @@ class SwapWiringTest(unittest.TestCase):
         )
         out = io.StringIO()
         env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
-        self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), ctx=ctx), 0)
+        runner = _ScriptedRunner({})  # never the real systemctl (nor flatpak-spawn --host from a toolbox)
+        self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), runner=runner, ctx=ctx), 0)
         self.assertRegex(out.getvalue(), r"DIFF  vm\.swappiness +77 ")
+        self.assertEqual(runner.calls, [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"]])
 
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")
