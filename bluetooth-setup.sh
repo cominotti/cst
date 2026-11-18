@@ -865,7 +865,7 @@ status() {
     echo
     # Before the checks' verdict: an owed restart is often why a check fails.
     if [[ -n "${OWED}" ]]; then
-        echo "A restart an earlier run did not make is still owed ($(tr '\n' ' ' <<<"${OWED}" | sed 's/ $//')): ${PROG} apply makes it."
+        echo "A restart an earlier run did not make is still owed (${OWED//$'\n'/ }): ${PROG} apply makes it."
     fi
     if (( FAILS )); then
         echo "${FAILS} check(s) failed, ${WARNS} warning(s)."

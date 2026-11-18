@@ -580,8 +580,8 @@ class SteamJournal(TypedDict):
     stamp: int
     phase: str
     parts: list[SteamPart]
-    conflict: bool
-    undo: bool
+    conflict: NotRequired[bool]
+    undo: NotRequired[bool]
 
 
 class SteamApp(TypedDict):

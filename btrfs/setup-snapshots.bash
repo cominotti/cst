@@ -84,7 +84,7 @@ snap_user_runtime() {
 snap_as_user() {   # cmd...
     local run session=()
     run="$(snap_user_runtime)" || run=""
-    [[ -n "${run}" && -d "${run}" ]] && session+=("XDG_RUNTIME_DIR=${run}")
+    [[ -d "${run}" ]] && session+=("XDG_RUNTIME_DIR=${run}")
     [[ -S "${run}/bus" ]] && session+=("DBUS_SESSION_BUS_ADDRESS=unix:path=${run}/bus")
     runuser -u "${target_user}" -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "${session[@]}" "$@"
 }

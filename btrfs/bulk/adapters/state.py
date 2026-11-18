@@ -15,7 +15,7 @@ import os
 import re
 from typing import TypeGuard
 
-from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkPaths, ItemJournal, SteamJournal
+from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkPaths, ItemJournal, SteamJournal, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import describe_problems, parse_shell_assignments
@@ -91,8 +91,7 @@ def is_steam_journal(obj: object) -> TypeGuard[SteamJournal]:
     appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
     return (
         obj["kind"] == "steam"
-        and isinstance(appid, str)
-        and re.fullmatch(r"[0-9]+", appid, re.ASCII) is not None
+        and dec(appid)
         and phase in STEAM_PHASES
         and (phase == "prepared" or "stamp2" in obj)
         and isinstance(parts, list)
@@ -123,7 +122,7 @@ class StateFiles:
         # durable: the rename itself is on disk before anything it protects is done.
         write_atomic(self.jpath(ident), json.dumps(j), mode="umask", relabel=False)
 
-    def jload(self, ident: str) -> object:
+    def _jload(self, ident: str) -> object:
         """The journal's JSON; None when it is missing or not JSON."""
         try:
             with open(self.jpath(ident)) as f:
@@ -133,13 +132,13 @@ class StateFiles:
 
     def jread_item(self, ident: str) -> ItemJournal | None:
         """The item's journal; None when missing, not JSON or not the shape btrfs-bulk writes."""
-        j = self.jload(ident)
+        j = self._jload(ident)
         return j if is_item_journal(j) else None
 
     def jread_steam(self, ident: str) -> SteamJournal | None:
         """The Steam game's journal; None when missing, not JSON, not the shape btrfs-bulk writes,
         or of another game than its file's (recovery would act on that game and drop its journal)."""
-        j = self.jload(ident)
+        j = self._jload(ident)
         return j if is_steam_journal(j) and ident == "steam-" + j["appid"] else None
 
     def jdrop(self, ident: str) -> None:
