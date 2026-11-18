@@ -746,6 +746,11 @@ DOCKER_GC_BIN=/usr/local/sbin/docker-gc
 docker_gc_files() {
     cst_installed_dests --component btrfs:docker-gc
 }
+# docker_gc_keep_settings: while the settings file is missing, write it with what the installed
+# docker-gc protects (an older one has registries built in); with the file there, change nothing.
+docker_gc_keep_settings() {
+    DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${DOCKER_GC_BIN}" python3 -I -B "${SRC}/docker-gc" settings --write
+}
 docker_gc() {
     local action="${1:-status}" bin="${DOCKER_GC_BIN}" timer f purge=0 shown=0
     local -a files units
@@ -755,7 +760,7 @@ docker_gc() {
             check_component_syntax btrfs:docker-gc
             # Before the new program replaces the installed one: while the settings file is
             # missing, what the installed docker-gc protects is read from it and kept there.
-            DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${bin}" python3 -I -B "${SRC}/docker-gc" settings --write
+            docker_gc_keep_settings
             cst_install --component btrfs:docker-gc
             systemctl daemon-reload
             systemctl enable docker-gc-recorder.service docker-gc.timer
@@ -779,7 +784,7 @@ docker_gc() {
             # registries an older one has built in. While the settings file is missing they are
             # written there first (as enable does); one it cannot read stops the purge (exit 78).
             if (( purge )) && [[ ! -e "${DOCKER_GC_CONF}" && -e "${bin}" ]]; then
-                DOCKER_GC_CONF="${DOCKER_GC_CONF}" DOCKER_GC_INSTALLED="${bin}" python3 -I -B "${SRC}/docker-gc" settings --write
+                docker_gc_keep_settings
             fi
             # The installer lists the units (a failure would leave the timer enabled behind a "disabled").
             mapfile -t units < <(cst_component_units btrfs:docker-gc)
