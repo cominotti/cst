@@ -148,9 +148,13 @@ alert() {
 }
 clear_alert() { rm -f "${STATE}/alerted-$1"; }
 
-# Free space btrfs estimates for new data (already accounts for RAID1).
+# Free space btrfs estimates for new data (already accounts for RAID1), in bytes;
+# fails (and prints nothing) when the reading is not a number.
 free_bytes() {
-    btrfs filesystem usage -b /var 2>/dev/null | awk '/Free \(estimated\)/ {print $3; exit}'
+    local n
+    n="$(btrfs filesystem usage -b /var 2>/dev/null | awk '/Free \(estimated\)/ {print $3; exit}')"
+    [[ "${n}" =~ ^[0-9]+$ ]] || return 1
+    echo "${n}"
 }
 
 is_subvol() { [[ -d "$1" && "$(stat -c %i "$1" 2>/dev/null)" == 256 ]]; }
@@ -504,12 +508,12 @@ convert() {
 convert_boot() {
     local attempts
     [[ -e "${BOOT_FLAG}" ]] || return 0
-    attempts="$(cat "${STATE}/boot-attempts" 2>/dev/null || echo 0)"
-    # Anything but a number counts as no attempt yet (and is rewritten below), so the
-    # counting and the give-up after two boots still work. 10#: 08 is 8, not octal.
-    if [[ -z "${attempts}" ]]; then
-        attempts=0
-    elif [[ "${attempts}" =~ ^[0-9]{1,9}$ ]]; then
+    # No file or an empty one: no attempt yet. Anything else but a number counts as none
+    # too (and is rewritten below), so the counting and the give-up after two boots still
+    # work. 10#: 08 is 8, not octal.
+    attempts="$(cat "${STATE}/boot-attempts" 2>/dev/null)"
+    attempts="${attempts:-0}"
+    if [[ "${attempts}" =~ ^[0-9]{1,9}$ ]]; then
         attempts=$(( 10#${attempts} ))
     else
         log 4 "convert-boot: ${STATE}/boot-attempts holds '${attempts:0:40}', not a number; counted as 0"
@@ -683,8 +687,7 @@ hourly() {
     drop_pending
     # The space guard comes first: its purges must run even while new
     # snapshots wait (below) for old trees or planned conversions.
-    free="$(free_bytes)"
-    [[ "${free}" =~ ^[0-9]+$ ]] || { log 3 "cannot read free space"; return 1; }
+    free="$(free_bytes)" || { log 3 "cannot read free space"; return 1; }
     [[ -e "${STATE}/paused" ]] && paused=1
 
     if (( free <= EMERGENCY_AT_OR_BELOW_GIB * GIB )); then
@@ -703,8 +706,7 @@ hourly() {
         btrfs subvolume sync /var >/dev/null 2>&1 || true
         # A reading that fails now ends the run as every emergency run ends: the purge ran
         # and was judged above; the next run's first reading fails it if that lasts.
-        free="$(free_bytes)"
-        if [[ "${free}" =~ ^[0-9]+$ ]]; then
+        if free="$(free_bytes)"; then
             log 4 "emergency purge done (rc=${rc}); free now $(( free / GIB )) GiB"
         else
             log 4 "emergency purge done (rc=${rc}); free space cannot be read now"
