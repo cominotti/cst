@@ -85,7 +85,13 @@ case "$me" in
             esac
             args+=("$a")
         done
-        [[ -e "$S/fail-sudo-$1" ]] && exit "$(cat "$S/fail-sudo-$1")"
+        if [[ -e "$S/fail-sudo-$1" ]]; then
+            how="$(cat "$S/fail-sudo-$1")"
+            [[ "$how" == TERM ]] && kill -TERM $$  # killed by a signal
+            [[ "$how" == PARENT-TERM ]] && { kill -TERM "$PPID"; exit 0; }  # the program gets SIGTERM
+            [[ "$how" == PARENT-HUP ]] && { kill -HUP "$PPID"; exec "${args[@]}"; }  # SIGHUP, the step done
+            exit "$how"
+        fi
         exec "${args[@]}"
         ;;
     systemctl)
@@ -325,28 +331,36 @@ class Machine:
         env: Mapping[str, str] | None = None,
         stdin_text: str | None = None,
         timeout: float = 120,
+        closed_stdout: bool = False,
+        ignore_hup: bool = False,
         root: bool = False,
     ) -> Run:
-        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; root: as root
-        in a user namespace, unshare -r, where this user is root with no privilege outside)."""
+        """bluetooth-setup.sh ARGS on this machine (container: as inside a toolbox; closed_stdout:
+        its stdout a pipe nobody reads, as `| head` leaves it; root: as root in a user namespace,
+        unshare -r, where this user is root with no privilege outside)."""
         log = os.path.join(self.state, "log")
         if os.path.exists(log):
             os.unlink(log)
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        start = ["bash", "-c", 'trap "" HUP; exec bash "$0" "$@"'] if ignore_hup else ["bash"]
         r = subprocess.run(
-            [*(["/usr/bin/unshare", "-r"] if root else []), "bash", SETUP, *args],
+            [*(["/usr/bin/unshare", "-r"] if root else []), *start, SETUP, *args],
             check=False,
-            capture_output=True,
+            stdout=write_end if closed_stdout else subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=self.env(container=container, extra=env),
             input=stdin_text,
             stdin=None if stdin_text is not None else subprocess.DEVNULL,
             timeout=timeout,
         )
+        os.close(write_end)
         calls: list[str] = []
         if os.path.exists(log):
             with open(log, encoding="utf-8") as f:
                 calls = f.read().splitlines()
-        return Run(r.returncode, r.stdout, r.stderr, calls)
+        return Run(r.returncode, r.stdout or "", r.stderr, calls)
 
     def env_log(self) -> str:
         """What the stubs saw of the CST_, LC_, LANG and PYTHON variables, one line per call."""

@@ -15,6 +15,7 @@ import json
 import os
 import pwd
 import re
+import signal
 import stat
 import unittest
 
@@ -99,6 +100,18 @@ class StoppedTest(unittest.TestCase):
         self.assertTrue(r.stderr.endswith(stops[0] + "\n"), r.stderr)
         self.assertFalse(os.path.exists(m.wp_conf))
 
+    def test_a_settings_file_it_cannot_read_stops_the_run(self) -> None:
+        # Read twice (the settings, then the keys it sets): each read names it, the second stops.
+        m = Machine(self)
+        m.put(m.main_conf, GENERAL)
+        m.services()
+        m.user_settings("LE_AUDIO=on\n")
+        os.chmod(m.settings, 0)
+        line = f"bt-helper: [Errno 13] Permission denied: '{m.settings}'\n"
+        for args in (("plan",), ("le-audio", "off", "--yes")):
+            r = m.run(*args)
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (1, "", line + line), args)
+
     def test_a_rule_file_it_cannot_read_stops_before_any_change(self) -> None:
         m = Machine(self)
         m.put(m.main_conf, GENERAL)
@@ -120,6 +133,20 @@ class StoppedTest(unittest.TestCase):
             self.assertEqual(f.read(), GENERAL)
         with open(m.wp_conf, "rb") as f:
             self.assertEqual(f.read(), b"# \xff\n")
+
+    def test_a_command_killed_by_a_signal_gives_128_plus_its_number(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, GENERAL)
+        m.services()
+        m.put("fail-sudo-cp", "TERM")
+        r = m.run("apply", "--yes")
+        self.assertEqual(r.returncode, 143, r.text)
+        self.assertTrue(
+            r.stderr.endswith(
+                f"{SETUP}: stopped: a command failed (exit 143). Backup of main.conf: none taken. Undo: {SETUP} revert\n"
+            ),
+            r.stderr,
+        )
 
 
 class StepDownTest(unittest.TestCase):
@@ -1434,6 +1461,67 @@ class EnvironmentTest(SetupCase):
             seen = {word for line in m.env_log().splitlines() for word in line.split(":", 1)[1].split()}
             want = {"CST_BT_CONTAINER=0", f"CST_BT_ROOT={m.root}"} | {f"{k}={v}" for k, v in extra.items()}
             self.assertEqual(seen, want, extra)
+
+
+class ScratchFileTest(SetupCase):
+    """The scratch copy of main.conf (mktemp, in TMPDIR) is removed however the run ends, as the
+    shell's EXIT trap removed it: a closed stdout (`| head`) and SIGTERM end the run killed by
+    that signal, with nothing left behind."""
+
+    def scratch(self, m: Machine) -> dict[str, str]:
+        d = os.path.join(m.tmp, "scratch")
+        os.mkdir(d)
+        return {"TMPDIR": d, "CST_PROG": "cst-t"}
+
+    def test_a_closed_stdout_ends_the_run_by_sigpipe(self) -> None:
+        m = self.machine()
+        env = self.scratch(m)
+        for args in (("plan",), ("status",), ("revert", "--check"), ("le-audio",), ("apply", "--yes")):
+            r = m.run(*args, closed_stdout=True, env=env)
+            self.assertEqual((r.returncode, r.stderr), (-signal.SIGPIPE, ""), args)
+            self.assertEqual(os.listdir(env["TMPDIR"]), [], args)
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+
+    def test_the_help_on_a_closed_stdout_exits_141(self) -> None:
+        # The help came from sed in a pipeline: sed died by SIGPIPE, the script exited 141.
+        r = self.machine().run("help", closed_stdout=True)
+        self.assertEqual((r.returncode, r.stderr), (141, ""))
+
+    def test_sighup_ignored_at_start_stays_ignored(self) -> None:
+        # As under nohup: a shell cannot trap a signal ignored on entry, so apply goes on.
+        m = self.machine()
+        m.put("fail-sudo-cp", "PARENT-HUP")
+        r = m.run("apply", "--yes", "--no-restart", ignore_hup=True)
+        self.assertNotEqual(r.returncode, -signal.SIGHUP, r.text)
+        self.assertIn(ISO, self.text(m.main_conf))
+
+    def test_every_command_needs_its_scratch_file(self) -> None:
+        # bluetooth-setup.sh made it first, for every command but help: no TMPDIR, no run.
+        m = self.machine()
+        env = {"TMPDIR": os.path.join(m.tmp, "missing")}
+        for args in (
+            ("plan",),
+            ("status",),
+            ("le-audio",),
+            ("revert", "--check"),
+            ("le-audio", "on"),
+            ("apply", "--yes"),
+        ):
+            r = m.run(*args, env=env)
+            self.assertEqual((r.returncode, r.stdout), (1, ""), args)
+            self.assertTrue(r.stderr.startswith("mktemp: "), r.stderr)
+            self.assertEqual(r.stderr.count("\n"), 1, r.stderr)
+            self.assertEqual([c for c in r.calls if not c.startswith("  ")], [], args)
+        self.assertFalse(os.path.exists(m.settings))
+
+    def test_sigterm_ends_the_run_by_sigterm(self) -> None:
+        m = self.machine()
+        env = self.scratch(m)
+        m.put("fail-sudo-cp", "PARENT-TERM")
+        r = m.run("apply", "--yes", env=env)
+        self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
+        self.assertEqual(os.listdir(env["TMPDIR"]), [])
+        self.assertEqual(self.text(m.main_conf), VENDOR)
 
 
 if __name__ == "__main__":
