@@ -343,16 +343,32 @@ class ConvertTest(Base):
         self.assertEqual(self.leftovers(), [])
 
     def test_old_trees_left_by_an_earlier_run_are_deleted(self) -> None:
+        # An old tree is deleted; one with a mount below it stays listed; an entry that is no old tree
+        # (not named *.pre-subvol-*, a file, a link) is forgotten with a line and never deleted, so it
+        # no longer keeps new snapshots waiting for ever (before, it stayed listed); a gone one goes.
         old = self.tree("x.pre-subvol-20261101T000000")
         mounted = self.tree("y.pre-subvol-20261101T000000")
         other = self.tree("not-an-old-tree")
+        named = self.write(os.path.join(self.home, "f.pre-subvol-20261101T000000"), "a file\n")
+        link = os.path.join(self.home, "l.pre-subvol-20261101T000000")
+        os.symlink(other, link)
         self.machine(mounts=[f"{mounted}/sub"])
-        self.write(self.state_file("drop-pending"), f"{old}\n{mounted}\n{other}\n{self.home}/gone\n\n")
+        entries = [old, mounted, other, named, link, f"{self.home}/gone", ""]
+        self.write(self.state_file("drop-pending"), "\n".join(entries) + "\n")
         r = self.run_prog("convert")
         self.assertEqual(r.returncode, 0)
+        self.assertEqual(
+            [ln for ln in self.lines(r.stdout) if "drop-pending" in ln],
+            [
+                log(4, f"convert: drop-pending: {p} is not an old tree (*.pre-subvol-*); forgotten, not deleted")
+                for p in (other, named, link)
+            ],
+        )
         self.assertFalse(os.path.exists(old))
-        self.assertEqual(read(self.state_file("drop-pending")), f"{mounted}\n{other}\n")
+        self.assertEqual(read(self.state_file("drop-pending")), f"{mounted}\n")
         self.assertTrue(os.path.isdir(other))
+        self.assertEqual(read(named), "a file\n")
+        self.assertTrue(os.path.islink(link))
 
 
 class ConvertBootTest(Base):

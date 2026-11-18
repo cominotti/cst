@@ -350,6 +350,10 @@ in_use_now() {
 has_mount_below() {
     findmnt -rn -o TARGET | P="$1/" awk 'BEGIN {p = ENVIRON["P"]} index($0, p) == 1 {found = 1; exit} END {exit !found}'
 }
+# The mounts below PATH, one per line (false if none).
+mounts_below() {
+    findmnt -rn -o TARGET | P="$1/" awk 'BEGIN {p = ENVIRON["P"]} index($0, p) == 1 {print; found = 1} END {exit !found}'
+}
 
 # ---- conversion of one directory into a nested subvolume ----------------------------
 # Prepare DST so `cp --reflink=always` can clone everything: NOCOW (+C) is not
@@ -569,14 +573,21 @@ put_aside() {
 }
 
 # Delete the old trees recorded in drop-pending (also retries trees left by an
-# interrupted run). Only paths that are still *.pre-subvol-* directories.
+# interrupted run). Only paths that are still *.pre-subvol-* directories: any
+# other entry is forgotten (with a line), never deleted; one with a mount
+# below it stays listed, and keeps new snapshots waiting, until it is unmounted.
 drop_pending() {
     local list p keep=""
     [[ -s "${STATE}/drop-pending" ]] || return 0
     list="$(cat "${STATE}/drop-pending")"
     while IFS= read -r p; do
         [[ -n "${p}" ]] || continue
-        if [[ -d "${p}" && "${p}" == *.pre-subvol-* ]] && ! has_mount_below "${p}"; then
+        [[ -e "${p}" || -L "${p}" ]] || continue
+        if [[ ! -d "${p}" || -L "${p}" || "${p}" != *.pre-subvol-* ]]; then
+            log 4 "convert: drop-pending: ${p} is not an old tree (*.pre-subvol-*); forgotten, not deleted"
+            continue
+        fi
+        if ! has_mount_below "${p}"; then
             # Bounded and at idle IO priority; what remains is retried next run.
             timeout 900 ionice -c3 nice -n 19 rm -rf --one-file-system -- "${p}"
         fi
@@ -815,7 +826,7 @@ waiting() {
 
 # ---- hourly --------------------------------------------------------------------------
 hourly() {
-    local free paused=0 rc left
+    local free paused=0 rc left held p
     [[ -n "${HOME_DIR}" ]] || { log 3 "not set up; run 'cst btrfs snapshots setup'"; return 1; }
     [[ -x "${CORE}" ]] || { log 3 "${CORE} is missing; re-run 'cst btrfs snapshots setup'"; return 1; }
     convert_planned
@@ -865,9 +876,11 @@ hourly() {
     # month is kept 3 months). Older snapshots still expire normally.
     # 1. Old trees of finished conversions, still being deleted.
     if [[ -s "${STATE}/drop-pending" ]]; then
+        # A mount below an old tree keeps it (it is never deleted through a mount): name it.
+        held="$(while IFS= read -r p; do mounts_below "${p}"; done <"${STATE}/drop-pending" | head -n 3 | tr '\n' ' ')"
         waiting pending "old trees still being deleted ($(grep -c . "${STATE}/drop-pending"))" \
             "Snapshots: waiting for old trees to be deleted" \
-            "For over a day: $(head -n 3 "${STATE}/drop-pending" | tr '\n' ' ')"
+            "For over a day: $(head -n 3 "${STATE}/drop-pending" | tr '\n' ' ')${held:+- mounted below them, so kept until unmounted: ${held}}"
         prune_only
         return 0
     fi

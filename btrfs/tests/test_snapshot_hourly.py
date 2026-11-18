@@ -689,9 +689,16 @@ class WaitingTest(Base):
         self.assertEqual(sent, [])
         self.a_day_ago("pending-since")
         _, sent = self.wait_run("pending-since")
+        # The alert names the mount that keeps it (before, only the tree).
         self.assertEqual(
             sent,
-            [self.alert("normal", "Snapshots: waiting for old trees to be deleted", f"For over a day: {old} ")],
+            [
+                self.alert(
+                    "normal",
+                    "Snapshots: waiting for old trees to be deleted",
+                    f"For over a day: {old} - mounted below them, so kept until unmounted: {old}/m ",
+                )
+            ],
         )
         self.assertTrue(os.path.isdir(old))
 

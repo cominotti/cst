@@ -1727,7 +1727,10 @@ if you want it converted; every run checks again.
 Each run deletes for at most 15 minutes per tree. Look at
 `journalctl -u btrfs-snapshot`. The list is in
 `/var/lib/btrfs-snapshot/drop-pending`. A tree with something mounted inside
-it is not deleted: unmount that first.
+it is not deleted: unmount that first (the daily alert names the mount). An
+entry there that is not an old tree (a path not named `*.pre-subvol-*`, a
+file or a link) is never deleted: the next run takes it off the list, with
+a `... is not an old tree ...; forgotten, not deleted` line in the journal.
 
 **Alert `Subvolume conversion: manual check needed`.**
 Do not delete anything. The message names the folder that holds your latest
