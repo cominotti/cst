@@ -26,12 +26,28 @@ def file_lines(content: str) -> list[str]:
     return lines
 
 
+def read_fields(line: str, n: int) -> list[str]:
+    """The n fields bash's `read -r` assigns from one line with the default IFS: blanks (space, tab,
+    newline) around the line dropped, fields split at runs of blanks, the last field taking the rest
+    of the line as it is (its inner blanks kept); missing fields are ""."""
+    rest = line.strip(" \t\n")
+    out: list[str] = []
+    while rest and len(out) < n - 1:
+        parts = _READ_BLANKS.split(rest, maxsplit=1)
+        out.append(parts[0])
+        rest = parts[1] if len(parts) > 1 else ""
+    if rest:
+        out.append(rest)
+    return out + [""] * (n - len(out))
+
+
 def is_yes(answer: str) -> bool:
     """A [y/N] prompt's answer is yes: it starts with y or s (sim), any case."""
     return answer.strip().lower().startswith(("y", "s"))
 
 
 _KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_READ_BLANKS: Final = re.compile(r"[ \t\n]+")
 _BLANKS: Final = " \t"  # what bash splits words at (not \f, \v or NBSP: bash keeps them in a value)
 # Characters bash treats as syntax in an unquoted word; any of them makes the line a problem.
 _SHELL_SYNTAX: Final = frozenset(";&|<>()")

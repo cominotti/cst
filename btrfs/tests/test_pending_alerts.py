@@ -35,7 +35,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "cst-pending-alerts")
 # How the tests start the program.
-RUN: Final[list[str]] = ["bash", SCRIPT]
+RUN: Final[list[str]] = ["/usr/bin/python3", "-I", "-B", SCRIPT]
 
 USAGE = "usage: cst-pending-alerts [--list]\n"
 SUMMARY_TITLE = "{n} more storage alert(s) while nobody was logged in"
@@ -558,6 +558,56 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (1, ""))
         self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
         self.assertEqual(len(self.notifications()), 1)
+
+    def test_ctrl_c_while_waiting_for_the_desktop_ends_it_quietly(self) -> None:
+        # Ctrl-C reaches the whole foreground group: the program ends by SIGINT, with no traceback and
+        # no record written.
+        self.alert(1)
+        p = subprocess.Popen(
+            RUN,
+            env={**self.env, "CST_ALERTS_WAIT": "60", "BUS_ANSWER": "false"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        time.sleep(1.5)
+        os.killpg(p.pid, signal.SIGINT)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual((p.returncode, out, err), (-signal.SIGINT, b"", b""))
+        self.assertFalse(os.path.exists(self.record))
+        self.assertEqual(self.notifications(), [])
+
+    def test_nul_bytes_are_dropped(self) -> None:
+        # bash's read dropped every NUL byte of a pending file: the fields and the text are shown
+        # without them (a NUL cannot be passed to notify-send at all).
+        name = self.alert(
+            1,
+            text=f"cst-alert 1\nurgency=critical\napp=btrfs-test\nfirst={FIRST}\nlast={FIRST}\n"
+            "count=1\ntitle=Disk: pro\0blem\n\nthe bo\0dy\nline 2\n",
+        )
+        listed = self.run_prog("--list")
+        self.assertEqual(
+            listed.stdout, f"{when(FIRST)}  critical btrfs-test: Disk: problem{NOT_SHOWN}\n", listed.stderr
+        )
+        r = self.run_prog()
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        at = f"Happened {when(FIRST)}, while no desktop session could show it."
+        self.assertEqual(self.notifications(), [self.shown("Disk: problem", at)])
+        self.assertEqual(self.read_record(), f"{name} {find_mtime(self.path(name))} shown 1 {FIRST}\n")
+
+    def test_a_record_it_cannot_replace_still_ends_well(self) -> None:
+        # The folder is there but the new record cannot take the old one's place (here a folder holds
+        # its name): as bash's "mv ... || rm -f", the run still exits 0, and the old record stays, so
+        # the alert comes again at the next login.
+        self.alert(1)
+        os.makedirs(self.record)
+        r = self.run_prog()
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertIn("<5>cst-pending-alerts: shown: btrfs-test: Disk: problem", r.stderr)
+        self.assertTrue(os.path.isdir(self.record))
+        self.assertEqual(self.run_prog().returncode, 0)
+        self.assertEqual(len(self.notifications()), 2)
 
 
 if __name__ == "__main__":

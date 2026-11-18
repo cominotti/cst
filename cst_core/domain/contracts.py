@@ -107,7 +107,7 @@ def version_of(data: object, field: str) -> int | None:
 #   that game.state exists (the profile is on): its name and place never
 #   change. Neither has a version yet.
 _TABLE: Final = r"""
-alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/cst-pending-alerts doctor/application/alerts.py | first line "cst-alert 1"
+alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/adapters/monitor.py | btrfs/btrfs-notify                                 | none (plain text, one boot)
 bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)

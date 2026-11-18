@@ -850,7 +850,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         # Exercise cst-pending-alerts --list and delivered tracking
         listed = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            "bash /opt/cst-rw/btrfs/cst-pending-alerts --list",
+            "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list",
         ).stdout
         self.assertIn("E2E Alert Title", listed)
 
@@ -1751,6 +1751,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
             "/usr/local/bin/btrfs-stall-report": ("--help", 0),
+            # env -i below sets no HOME, which it needs before reading its arguments (as the bash did): exit 1.
+            "/usr/local/bin/cst-pending-alerts": ("--help", 1),
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
@@ -3378,7 +3380,9 @@ echo E2E-OK
         self.assertIn("~/Bulk: nothing moved at boot", doctor)
         self.assertIn("btrfs-bulk-boot.service", doctor)
         self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
-        listed = as_tester_bash(self.SYSTEMD_CONTAINER, "bash /opt/cst-rw/btrfs/cst-pending-alerts --list").stdout
+        listed = as_tester_bash(
+            self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"
+        ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
 
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
@@ -3471,6 +3475,118 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
+        """The installed forms of the two Python ports, under real systemd: btrfs-health-check and
+        cst-pending-alerts as install writes them (zipapps from installer.py payload). The health
+        check runs from the shipped unit (only ExecStart points at the zipapp, under its installed
+        name, plus the test root): healthy, the unit succeeds and its OK line reaches the journal at
+        priority 6 under the identifier btrfs-health-check; with a degraded-boot flag, exit 1, the
+        problem at priority 2, and the real btrfs-notify (no desktop session) keeps the alert, which
+        the cst-pending-alerts zipapp, run as the user, lists for the next login. A second healthy run
+        reads the kernel log from the cursor the first one recorded."""
+        d = "/var/tmp/e2e-hc"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl reset-failed cst-e2e-health-check.service 2>/dev/null || true
+            rm -f /run/systemd/system/cst-e2e-health-check.service
+            systemctl daemon-reload
+            rm -rf {d}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+d={d}
+rm -rf "$d"
+install -d -m 0755 "$d" "$d/sbin" "$d/bin" "$d/root" "$d/root/usr/local/sbin" "$d/alerts" "$d/alerts/pending" "$d/run-user"
+inst="/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+$inst payload btrfs/btrfs-health-check >"$d/sbin/btrfs-health-check"
+$inst payload btrfs/cst-pending-alerts >"$d/sbin/cst-pending-alerts"
+$inst payload btrfs/btrfs-notify >"$d/root/usr/local/sbin/btrfs-notify"
+chmod 0755 "$d/sbin/btrfs-health-check" "$d/sbin/cst-pending-alerts" "$d/root/usr/local/sbin/btrfs-notify"
+python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).getinfo("__main__.py")' "$d/sbin/btrfs-health-check"
+# No btrfs in the container, and the kernel log is the host's: both answer nothing.
+printf '#!/bin/sh\nexit 0\n' >"$d/bin/findmnt"
+cat >"$d/bin/journalctl" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = -k ] && k=1; done
+if [ -n "$k" ]; then
+    for a in "$@"; do
+        case "$a" in --cursor-file=*) f="${{a#--cursor-file=}}"; echo "$*" >>"$f.calls"; echo s=e2e >"$f";; esac
+    done
+    exit 0
+fi
+exec /usr/bin/journalctl "$@"
+EOF
+chmod 0755 "$d/bin/findmnt" "$d/bin/journalctl"
+sed "s|^ExecStart=.*|ExecStart=$d/sbin/btrfs-health-check|" /opt/cst-rw/btrfs/units/btrfs-health-check.service \
+    >/run/systemd/system/cst-e2e-health-check.service
+cat >>/run/systemd/system/cst-e2e-health-check.service <<EOF
+Environment=CST_HEALTH_ROOT=$d/root CST_ALERTS_DIR=$d/alerts CST_RUN_USER=$d/run-user PATH=$d/bin:/usr/local/bin:/usr/bin:/bin
+ExecStopPost=/bin/sh -c 'echo "\$\$EXIT_STATUS \$\$SERVICE_RESULT" >$d/exit'
+EOF
+systemctl daemon-reload
+run_unit() {{
+    rm -f "$d/exit"
+    systemctl start cst-e2e-health-check.service 2>/dev/null || true
+    for _ in $(seq 1 40); do [ -s "$d/exit" ] && break; sleep 0.25; done
+    cat "$d/exit" 2>/dev/null || true
+}}
+# journal_has MESSAGE PRIORITY: the unit logged MESSAGE under btrfs-health-check at PRIORITY.
+journal_has() {{
+    for _ in $(seq 1 60); do
+        journalctl --sync 2>/dev/null || true
+        if journalctl -q --no-pager -o json -u cst-e2e-health-check.service --since "@$start" | python3 -I -c '
+import json, sys
+# All of it first: leaving early would end journalctl with SIGPIPE, and pipefail would fail the match.
+for line in sys.stdin.read().splitlines():
+    e = json.loads(line)
+    if (e.get("MESSAGE"), e.get("SYSLOG_IDENTIFIER"), e.get("PRIORITY")) == (sys.argv[1], "btrfs-health-check", sys.argv[2]):
+        sys.exit(0)
+sys.exit(1)' "$1" "$2"; then return 0; fi
+        sleep 0.5
+    done
+    echo "not in the journal at priority $2: $1" >&2
+    journalctl -q --no-pager -o verbose -u cst-e2e-health-check.service --since "@$start" >&2 || true
+    return 1
+}}
+start="$(date +%s)"
+r="$(run_unit)"
+[ "$r" = "0 success" ] || {{ echo "healthy run: $r" >&2; exit 1; }}
+journal_has "btrfs-health-check: OK (; disks: )" 6
+[ "$(cat "$d/root/var/lib/btrfs-health-check/kernel.cursor")" = s=e2e ]
+mkdir -p "$d/root/run/btrfs-allow-degraded" && touch "$d/root/run/btrfs-allow-degraded/e2e-uuid"
+start="$(date +%s)"
+r="$(run_unit)"
+[ "$r" = "1 exit-code" ] || {{ echo "run with a problem: $r" >&2; exit 1; }}
+journal_has "btrfs-health-check: btrfs e2e-uuid: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)" 2
+f="$(grep -lxF 'title=Disk health: problems detected' "$d"/alerts/pending/*.alert)"
+grep -qxF 'app=btrfs-health-check' "$f"
+grep -qxF 'urgency=critical' "$f"
+grep -qxF 'btrfs e2e-uuid: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)' "$f"
+rm -f "$d/root/run/btrfs-allow-degraded/e2e-uuid" "$d/root/var/lib/btrfs-health-check/kernel.cursor.calls"
+start="$(date +%s)"
+r="$(run_unit)"
+[ "$r" = "0 success" ] || {{ echo "second healthy run: $r" >&2; exit 1; }}
+# The second run read from the cursor: one call, with no --since and no new cursor recorded.
+calls="$(cat "$d/root/var/lib/btrfs-health-check/kernel.cursor.calls")"
+case "$calls" in *--since*|*" -n 1 "*) echo "second run: $calls" >&2; exit 1;; esac
+[ "$(printf '%s\n' "$calls" | wc -l)" = 1 ] || {{ echo "second run: $calls" >&2; exit 1; }}
+echo E2E-OK
+""",
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        listed = as_tester_bash(
+            self.SYSTEMD_CONTAINER, f"CST_ALERTS_DIR={d}/alerts CST_ALERTS_OWNER=0 {d}/sbin/cst-pending-alerts --list"
+        ).stdout
+        self.assertRegex(
+            listed,
+            r"(?m)^.*  critical btrfs-health-check: Disk health: problems detected  \[NOT shown to you yet: next login\]$",
+        )
 
     def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
         """In a container with /.dockerenv (no override), cst vm's commands that change the
