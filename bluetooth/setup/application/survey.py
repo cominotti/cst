@@ -80,6 +80,11 @@ def read_bluetooth_settings(
     return read_settings_output(shown), tuple(set_keys(user)), said
 
 
+def is_cst_rule(files: SetupFilesPort, path: str) -> bool:
+    """The LDAC rule at path carries the marker of CST or of apply-le-audio.sh (its writers)."""
+    return files.contains(path, MARKER, quiet=True) or files.contains(path, OLD_WP_MARKER, quiet=True)
+
+
 def rule_headsets(files: SetupFilesPort, wp_dir: str) -> list[str]:
     """The headsets of the LDAC rules CST (or apply-le-audio.sh) wrote in wp_dir: its
     50-bluez-<ID>.conf files with one of their markers. Another program's file of that name, a .bak
@@ -93,7 +98,7 @@ def rule_headsets(files: SetupFilesPort, wp_dir: str) -> list[str]:
         device, path = rule_device(name), f"{wp_dir}/{name}"
         if device is None or not files.is_file(path):
             continue
-        if files.contains(path, MARKER, quiet=True) or files.contains(path, OLD_WP_MARKER, quiet=True):
+        if is_cst_rule(files, path):
             found.append(device)
     return found
 
@@ -139,7 +144,7 @@ class Survey:
                 cfg = replace(
                     cfg,
                     device=rules[0],
-                    device_from=f"from CST's LDAC rule; apply saves it as DEVICE in {home_tilde(paths.user_settings, paths.home)}",
+                    device_from=f"from CST's LDAC rule; apply saves it as DEVICE in {self.tilde(paths.user_settings)}",
                 )
                 self.device_save = True
             elif len(rules) > 1:
@@ -255,6 +260,10 @@ class Survey:
 
     def no_headset(self) -> str:
         return no_headset_note(self.device_rules, self.tilde(self.p.user_settings))
+
+    def wp_title(self) -> str:
+        """The rule as the WirePlumber section of apply and revert names it."""
+        return self.wp_conf or "no LDAC rule (no headset)"
 
     # ---- the restarts still owed -----------------------------------------------------------
     def unit_invocation(self, unit: str, *, user: bool) -> str:
@@ -380,9 +389,10 @@ class Survey:
             raise self.die(f"could not process {mc} (rc=1)") from e
         f.write_user_file(tmp, new, 0o600)
         self.mc_changed = changed
-        self.wp_state = "none"  # no headset: no rule
-        if self.headset:
-            self.wp_state = self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality))
+        # No headset: no rule.
+        self.wp_state = (
+            self.file_state(self.wp_conf, render_wp(self.c.device, self.c.quality)) if self.headset else "none"
+        )
         self.legacy = f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
         self.le_plan()
         self.bearer_state = "none"

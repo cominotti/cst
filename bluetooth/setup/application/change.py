@@ -22,8 +22,8 @@ from bluetooth.domain import (
     settings_set,
 )
 from bluetooth.setup.application.checks import Checks
-from bluetooth.setup.application.survey import StepFailed
-from bluetooth.setup.domain import A2DP_SINK_UUID, OLD_WP_MARKER, bearer_matches, changes_machine, matches_a_line
+from bluetooth.setup.application.survey import StepFailed, is_cst_rule
+from bluetooth.setup.domain import A2DP_SINK_UUID, bearer_matches, changes_machine, matches_a_line
 from cst_core.domain.errors import Refused, shell_exit_status
 
 SPACE = r"[ \t\n\r\f\v]"
@@ -290,7 +290,7 @@ class Change(Checks):
             self.out(f"           Experimental = true, KernelExperimental = {ISO_UUID}\n")
         else:
             self.out(f"unchanged: {p.main_conf} (Experimental and KernelExperimental already set in [General])\n")
-        self.out(f"== WirePlumber: {self.wp_conf or 'no LDAC rule (no headset)'}\n")
+        self.out(f"== WirePlumber: {self.wp_title()}\n")
         if self.legacy:
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
@@ -490,12 +490,12 @@ class Change(Checks):
         """The rule and the drop-in removed when they are CST's; whether each was."""
         p, f, check = self.p, self.m.files, self.o.check
         wp = le = False
-        self.out(f"== WirePlumber: {self.wp_conf or 'no LDAC rule (no headset)'}\n")
+        self.out(f"== WirePlumber: {self.wp_title()}\n")
         if not self.headset:
             self.out(f"unchanged: {self.no_headset()}\n")
         elif not f.exists(self.wp_conf):
             self.out("unchanged: the rule does not exist\n")
-        elif not (f.contains(self.wp_conf, MARKER, quiet=True) or f.contains(self.wp_conf, OLD_WP_MARKER, quiet=True)):
+        elif not is_cst_rule(f, self.wp_conf):
             self.err(f"WARNING: {self.wp_conf} was not written by CST or apply-le-audio.sh: left alone\n")
         else:
             wp = True
