@@ -14,6 +14,7 @@ import dataclasses
 from typing import TYPE_CHECKING, Protocol
 
 from cst_core.domain.errors import Refused
+from toolchains.domain.common import ToolchainsAction
 from toolchains.domain.prune import SPECS
 
 if TYPE_CHECKING:
@@ -110,7 +111,7 @@ def prune(
     chosen: Sequence[tuple[str, bool]],
     make: Callable[[str], Target],
     settings: Settings,
-    action: str,
+    action: ToolchainsAction,
     *,
     out: RunOutputPort,
     clock: ClockPort,
@@ -123,7 +124,7 @@ def prune(
         return 0
     rc = 0
     deadline = None
-    if action == "apply":
+    if action == ToolchainsAction.APPLY:
         deadline = clock.monotonic() + limits.run_budget
         chosen = sorted(chosen, key=lambda c: SPECS[c[0]].max_seconds is None)  # stable: bounded ones first
     for tid, named in chosen:
@@ -131,20 +132,20 @@ def prune(
         t.named = named
         t.deadline = deadline
         off = "" if settings.enabled[tid] else " (disabled in the settings: runs only because it was named)"
-        if action == "plan":
+        if action == ToolchainsAction.PLAN:
             out.say(f"== {tid}: {out.where(t.location())}{off}")
             out.say(f"  policy: {settings.policy_text(tid)} ({settings.source_of(SPECS[tid])})")
         elif off:
             t.tsay(off.strip(" ()"), 5)
         try:
-            r = (t.plan() or 0) if action == "plan" else t.apply()
+            r = (t.plan() or 0) if action == ToolchainsAction.PLAN else t.apply()
         except Refused as e:
-            if action == "plan":
+            if action == ToolchainsAction.PLAN:
                 out.say(f"  refused: {e}")
             else:
                 t.tsay(f"refused: {e}", 3)
             r = 1
         rc = max(rc, r)
-    if action == "plan":
+    if action == ToolchainsAction.PLAN:
         out.say("(plan: nothing deleted)")
     return rc

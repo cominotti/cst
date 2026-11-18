@@ -12,7 +12,7 @@ import shutil
 import stat
 import subprocess
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict, TypeIs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -44,6 +44,20 @@ from toolchains.domain.build import (
 )
 from toolchains.domain.common import json_items, tilde
 from toolchains.adapters.program import RUNNER, run_idle
+
+
+class CargoMetadata(TypedDict, total=False):
+    """What claimed_folders reads of `cargo metadata --format-version 1` (any JSON
+    object; the values are as cargo gave them, each checked where it is used)."""
+
+    packages: Json
+    workspace_root: Json
+    build_directory: Json
+
+
+def is_cargo_metadata(data: object) -> TypeIs[CargoMetadata]:
+    """DATA (what json.loads gave) is cargo's answer: a JSON object; its keys are not checked."""
+    return isinstance(data, dict)
 
 
 def cargo_binary(p: CargoProc, home: str) -> str:
@@ -279,7 +293,7 @@ def user_cargo(home: str) -> str:
 
 def workspace_metadata(
     cargo: str, manifest: str, env: Mapping[str, str], deadline: float, cmd_timeout: float
-) -> tuple[dict[str, Json] | None, str | None]:
+) -> tuple[CargoMetadata | None, str | None]:
     """cargo metadata of one Cargo.toml: (data, None) or (None, why)."""
     left = deadline - time.monotonic()
     if left <= 0:
@@ -304,8 +318,8 @@ def workspace_metadata(
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
     try:
-        data: Json = json.loads(r.stdout)
-        if not isinstance(data, dict):
+        data: object = json.loads(r.stdout)
+        if not is_cargo_metadata(data):
             raise ValueError
     except ValueError:
         return None, "cargo metadata: unexpected output"

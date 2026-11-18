@@ -17,6 +17,7 @@ from toolchains.domain.build import (
     WORKSPACE_REL,
     CargoCache,
     Folder,
+    FolderAction,
     RustPolicy,
     Workspaces,
     after_total,
@@ -108,8 +109,8 @@ class RustBuild(BaseTarget[RustPolicy]):
         for f, a, why in plan:
             self.machine.out.say(f"  {a:<7} {gib(f.size):>10}  {when(f.activity):<16}  {f.key:<17} {why}")
         print_others(self.machine.out, others, trash)
-        gone = [f for f, a, _ in plan if a == "delete"]
-        trims = [f for f, a, _ in plan if a == "trim"]
+        gone = [f for f, a, _ in plan if a == FolderAction.DELETE]
+        trims = [f for f, a, _ in plan if a == FolderAction.TRIM]
         self.machine.out.say(
             f"  apply would delete {len(gone)} folder(s), {gib(sum(f.size for f in gone))}"
             + (
@@ -183,7 +184,7 @@ class RustBuild(BaseTarget[RustPolicy]):
         left = list(folders)
         # Said once: what the policy alone would delete but a process uses now.
         for f, a, _ in decide(left, pol, now, {}, claimed):
-            if a in ("delete", "trim") and f.key in users:
+            if a in (FolderAction.DELETE, FolderAction.TRIM) and f.key in users:
                 nbusy += 1
                 self.tsay(f"skipped {f.key}: in use: {users_text(users[f.key])}", 5)
         dev = self.machine.tree.device(root)
@@ -191,7 +192,7 @@ class RustBuild(BaseTarget[RustPolicy]):
         stopped_by_budget = False
         root_dir = root
 
-        def recheck(f: Folder, a: str) -> Callable[[], str]:
+        def recheck(f: Folder, a: FolderAction) -> Callable[[], str]:
             """Measure F again (the locks are held) and plan again with it:
             '' when the rule still gives action A (or a delete when A is a
             trim), else why not. F takes the fresh measurement either way."""
@@ -206,9 +207,9 @@ class RustBuild(BaseTarget[RustPolicy]):
                     if g is fresh
                 )
                 f.__dict__.update(fresh.__dict__)
-                if got == a or (a == "trim" and got == "delete" and f.inc):
+                if got == a or (a == FolderAction.TRIM and got == FolderAction.DELETE and f.inc):
                     return ""
-                return f"measured again: {gwhy}" if got == "keep" else f"measured again: now {got}: {gwhy}"
+                return f"measured again: {gwhy}" if got == FolderAction.KEEP else f"measured again: now {got}: {gwhy}"
 
             return check
 
@@ -217,8 +218,8 @@ class RustBuild(BaseTarget[RustPolicy]):
         while True:
             cur = self.clock()
             plan = decide(left, pol, cur, users, claimed)
-            nxt = next(((f, a, why) for f, a, why in plan if a == "delete"), None)
-            nxt = nxt or next(((f, a, why) for f, a, why in plan if a == "trim"), None)
+            nxt = next(((f, a, why) for f, a, why in plan if a == FolderAction.DELETE), None)
+            nxt = nxt or next(((f, a, why) for f, a, why in plan if a == FolderAction.TRIM), None)
             if nxt is None:
                 break
             f, a, why = nxt
@@ -231,7 +232,7 @@ class RustBuild(BaseTarget[RustPolicy]):
                     5,
                 )
                 break
-            if a == "delete":
+            if a == FolderAction.DELETE:
                 result, detail = self.machine.tree.delete(root_dir, f, now, cache, recheck(f, a), self.deadline)
             else:
                 result, detail = self.machine.tree.trim(root_dir, f, now, cache, recheck(f, a), self.deadline)
@@ -239,7 +240,7 @@ class RustBuild(BaseTarget[RustPolicy]):
                 # Planned again with the fresh measurement; a folder that keeps
                 # changing is left for the next run.
                 rechecked[f.key] = rechecked.get(f.key, 0) + 1
-                self.tsay(f"not {'deleted' if a == 'delete' else 'trimmed'}: {f.key}: {detail}", 5)
+                self.tsay(f"not {'deleted' if a == FolderAction.DELETE else 'trimmed'}: {f.key}: {detail}", 5)
                 if rechecked[f.key] < 3:
                     continue
                 result = "busy"
@@ -270,9 +271,10 @@ class RustBuild(BaseTarget[RustPolicy]):
                 failed += 1
                 rc = 1
                 self.tsay(
-                    f"could not delete {'the incremental folders of ' if a == 'trim' else ''}{f.key}: {detail}", 3
+                    f"could not delete {'the incremental folders of ' if a == FolderAction.TRIM else ''}{f.key}: {detail}",
+                    3,
                 )
-            if a == "delete" and not self.machine.tree.exists(f.path):
+            if a == FolderAction.DELETE and not self.machine.tree.exists(f.path):
                 left.remove(f)  # renamed away; the next run deletes the leftover
             users = dict(users)
             users[f.key] = [("-", detail)]

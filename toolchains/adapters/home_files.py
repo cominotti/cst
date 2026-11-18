@@ -6,6 +6,7 @@ it appends to or rewrites, the run summaries of the targets and the run lock.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -23,9 +24,8 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
-from cst_core.domain.files import UnitFileState, WholeFileState
+from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
 from cst_core.domain.install import INSTALL_MANIFEST, Owner, expand_dest, manifest_by_src
-from cst_core.domain.values import Json
 from toolchains.adapters.program import program_folder
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
 from toolchains.domain.common import (
@@ -55,7 +55,7 @@ from toolchains.domain.config import (
     WrapperValues,
     wrapper_path,
 )
-from toolchains.domain.prune import RunRecord, Settings, checked_settings, parse_defaults
+from toolchains.domain.prune import RunRecord, SavedRun, Settings, checked_settings, is_saved_run, parse_defaults
 
 
 # The component of auto on's files (copies and units); the sccache wrapper's is SCCACHE_COMPONENT.
@@ -197,11 +197,11 @@ def write_state(home: str, tid: str, data: RunRecord, out: RunOutputPort) -> Non
         out.say(f"{tid}: could not save the run summary: {e}", 4)
 
 
-def read_state(home: str, tid: str) -> dict[str, Json] | None:
+def read_state(home: str, tid: str) -> SavedRun | None:
     try:
         with open(state_path(home, tid)) as f:
-            data: Json = json.load(f)
-            return data if isinstance(data, dict) else None
+            data: object = json.load(f)
+            return data if is_saved_run(data) else None
     except OSError, ValueError:
         return None
 
@@ -214,17 +214,15 @@ class RunSummaries:
         self.home = home
         self.out = out
 
-    def read(self, tid: str) -> dict[str, Json] | None:
+    def read(self, tid: str) -> SavedRun | None:
         return read_state(self.home, tid)
 
     def write(self, tid: str, record: RunRecord) -> None:
         write_state(self.home, tid, record, self.out)
 
     def forget(self, tid: str) -> None:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(state_path(self.home, tid))
-        except OSError:
-            pass
 
 
 class ToolchainsLock:
@@ -348,8 +346,8 @@ def stale_files(home: str) -> list[tuple[str, bool]]:
     for rel in [f"{UNIT_DIR_REL}/{u}" for u in OLD_UNITS] + list(OLD_FILES):
         path = os.path.join(home, rel)
         st = file_state(path, None, OLD_MARKER)
-        if st != "missing":
-            out.append((path, st == "change"))
+        if st != OwnedState.MISSING:
+            out.append((path, st == OwnedState.CHANGE))
     for rel in OLD_DATA:
         path = os.path.join(home, rel)
         if os.path.lexists(path):
@@ -377,16 +375,16 @@ def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:
     return text if n == m == 1 else None
 
 
-def wrapper_state(home: str, text: str) -> str:
+def wrapper_state(home: str, text: str) -> WholeFileState:
     """ok | change | missing | conflict (not CST's; a symlink counts by what it points to)."""
     path = wrapper_path(home)
     st = file_state(path, text)
-    if st == "ok":
+    if st == OwnedState.OK:
         try:
             if stat.S_IMODE(os.stat(path).st_mode) != 0o755:
-                st = "change"
+                st = OwnedState.CHANGE
         except OSError:
-            st = "change"
+            st = OwnedState.CHANGE
     return st
 
 
@@ -405,7 +403,7 @@ class HomeFiles:
         return unit_states(self.home, self.entry_file)
 
     def timer_missing(self) -> bool:
-        return file_state(os.path.join(self.home, UNIT_DIR_REL, TIMER), render_timer()) == "missing"
+        return file_state(os.path.join(self.home, UNIT_DIR_REL, TIMER), render_timer()) == OwnedState.MISSING
 
     def stale_files(self) -> list[tuple[str, bool]]:
         return stale_files(self.home)
@@ -435,10 +433,8 @@ class HomeFiles:
         return os.path.islink(path) and not os.path.exists(path)
 
     def remove_if_empty(self, path: str) -> None:
-        try:
+        with contextlib.suppress(OSError):
             os.rmdir(path)
-        except OSError:
-            pass
 
     def old_conf_present(self) -> bool:
         return os.path.lexists(os.path.join(self.home, OLD_CONF_REL))
@@ -458,7 +454,7 @@ class HomeFiles:
     def wrapper_text(self, values: WrapperValues) -> str | None:
         return wrapper_text(values, self.entry_file)
 
-    def wrapper_state(self, text: str) -> str:
+    def wrapper_state(self, text: str) -> WholeFileState:
         return wrapper_state(self.home, text)
 
     def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:

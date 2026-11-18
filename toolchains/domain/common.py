@@ -9,7 +9,8 @@ import json
 import os
 import time
 import tomllib
-from typing import TYPE_CHECKING, TypedDict
+from enum import StrEnum
+from typing import TYPE_CHECKING, Final, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
@@ -17,7 +18,17 @@ if TYPE_CHECKING:
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import parse_shell_assignments
-from cst_core.domain.values import ByteSize, DomainValidationError, Duration, Json, format_bytes_gib_mib
+from cst_core.domain.values import (
+    DAY,
+    HOUR,
+    MINUTE,
+    WEEK,
+    ByteSize,
+    DomainValidationError,
+    Duration,
+    Json,
+    format_bytes_gib_mib,
+)
 
 
 MARKER = "# managed-by: toolchains-setup.sh (CST)"
@@ -51,28 +62,28 @@ class ConfigError(Exception):
     pass
 
 
-def gib(n: int | float) -> str:
+def gib(n: float) -> str:
     """GiB from 1 GiB on, else rounded MiB."""
     return format_bytes_gib_mib(n, mib_floor=False)
 
 
-def ago(seconds: int | float) -> str:
+def ago(seconds: float) -> str:
     secs = max(0, int(seconds))
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 4 * 86400:
-        return f"{secs / 3600:.1f}h"
-    return f"{secs / 86400:.1f}d"
+    if secs < HOUR:
+        return f"{secs // MINUTE}m"
+    if secs < 4 * DAY:
+        return f"{secs / HOUR:.1f}h"
+    return f"{secs / DAY:.1f}d"
 
 
 def span(seconds: int) -> str:
     """A setting's duration, short: 48h, 2h, 90m, 14d."""
-    if seconds % 3600 == 0 and seconds < 7 * 86400:
-        return f"{seconds // 3600}h"
-    if seconds % 86400 == 0:
-        return f"{seconds // 86400}d"
-    if seconds % 60 == 0:
-        return f"{seconds // 60}m"
+    if seconds % HOUR == 0 and seconds < WEEK:
+        return f"{seconds // HOUR}h"
+    if seconds % DAY == 0:
+        return f"{seconds // DAY}d"
+    if seconds % MINUTE == 0:
+        return f"{seconds // MINUTE}m"
     return f"{seconds}s"
 
 
@@ -105,11 +116,18 @@ def parse_size(text: str) -> int:
         raise ConfigError(str(e)) from None
 
 
+# The words a yes/no setting takes (any case, blanks around ignored).
+YES_WORDS: Final = frozenset({"yes", "true", "on", "1"})
+NO_WORDS: Final = frozenset({"no", "false", "off", "0"})
+# The words that turn a rule with a duration off (parse_off_or_duration).
+OFF_WORDS: Final = frozenset({"0", "off", "no", "none"})
+
+
 def parse_bool(text: str) -> bool:
     t = text.strip().lower()
-    if t in ("yes", "true", "on", "1"):
+    if t in YES_WORDS:
         return True
-    if t in ("no", "false", "off", "0"):
+    if t in NO_WORDS:
         return False
     raise ConfigError(f"'{text}' is not yes or no")
 
@@ -156,7 +174,7 @@ OPTIONS: dict[str, Callable[[str], bool | str]] = {
 
 def parse_off_or_duration(text: str) -> int:
     """Seconds, or 0 for 0/off/no (the rule is off)."""
-    if text.strip().lower() in ("0", "off", "no", "none"):
+    if text.strip().lower() in OFF_WORDS:
         return 0
     return parse_duration(text)
 
@@ -218,9 +236,28 @@ usage: cst-toolchains status [--brief]
        (each also takes --home DIR; help: cst-toolchains help)"""
 
 
+class ToolchainsCommand(StrEnum):
+    """The commands of cst-toolchains (the first word of its command line)."""
+
+    HELP = "help"
+    STATUS = "status"
+    PRUNE = "prune"
+    AUTO = "auto"
+    CONFIG = "config"
+
+
+class ToolchainsAction(StrEnum):
+    """The word after a command: plan or apply (prune, config), on or off (auto)."""
+
+    PLAN = "plan"
+    APPLY = "apply"
+    ON = "on"
+    OFF = "off"
+
+
 class ParsedArgs(TypedDict):
-    cmd: str
-    action: str | None
+    cmd: ToolchainsCommand
+    action: ToolchainsAction | None
     targets: list[str]
     brief: bool
     unless_off: bool
@@ -246,7 +283,7 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
         else:
             args.append(a)
     out: ParsedArgs = {
-        "cmd": "help",
+        "cmd": ToolchainsCommand.HELP,
         "action": None,
         "targets": [],
         "brief": False,
@@ -255,43 +292,50 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
         "lean": None,
         "sccache": None,
     }
-    if not args or args[0] in ("help", "-h", "--help"):
+    if not args or args[0] in (ToolchainsCommand.HELP, "-h", "--help"):
         return out
     cmd, rest = args[0], args[1:]
-    out["cmd"] = cmd
-    if cmd == "status":
-        for a in rest:
-            if a != "--brief":
-                raise Usage(f"status: unknown argument '{a}' (only --brief)")
-            out["brief"] = True
-    elif cmd == "prune":
-        if not rest or rest[0] not in ("plan", "apply"):
-            raise Usage("prune: plan or apply, then the targets (none: every enabled one)")
-        out["action"] = rest[0]
-        for a in rest[1:]:
-            if a.startswith("-"):
-                raise Usage(f"prune: unknown option '{a}'")
-            out["targets"].append(a)
-    elif cmd == "auto":
-        if not rest or rest[0] not in ("on", "off"):
-            raise Usage("auto: on or off")
-        out["action"] = rest[0]
-        for a in rest[1:]:
-            if a == "--unless-off" and rest[0] == "on":
-                out["unless_off"] = True
-            else:
-                raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
-    elif cmd == "config":
-        if not rest or rest[0] not in ("plan", "apply"):
-            raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
-        out["action"] = rest[0]
-        for a in rest[1:]:
-            if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
-                out["lean"] = a == "--lean-debuginfo"
-            elif a in ("--sccache", "--no-sccache") and out["sccache"] is None:
-                out["sccache"] = a == "--sccache"
-            else:
-                raise Usage(f"config {rest[0]}: unknown argument '{a}'")
-    else:
-        raise Usage(f"unknown command '{cmd}'")
+    command = ToolchainsCommand(cmd) if cmd in ToolchainsCommand else None
+    match command:
+        case ToolchainsCommand.STATUS:
+            for a in rest:
+                if a != "--brief":
+                    raise Usage(f"status: unknown argument '{a}' (only --brief)")
+                out["brief"] = True
+        case ToolchainsCommand.PRUNE:
+            out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
+            if out["action"] is None:
+                raise Usage("prune: plan or apply, then the targets (none: every enabled one)")
+            for a in rest[1:]:
+                if a.startswith("-"):
+                    raise Usage(f"prune: unknown option '{a}'")
+                out["targets"].append(a)
+        case ToolchainsCommand.AUTO:
+            out["action"] = _action(rest, ToolchainsAction.ON, ToolchainsAction.OFF)
+            if out["action"] is None:
+                raise Usage("auto: on or off")
+            for a in rest[1:]:
+                if a == "--unless-off" and out["action"] == ToolchainsAction.ON:
+                    out["unless_off"] = True
+                else:
+                    raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
+        case ToolchainsCommand.CONFIG:
+            out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
+            if out["action"] is None:
+                raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
+            for a in rest[1:]:
+                if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
+                    out["lean"] = a == "--lean-debuginfo"
+                elif a in ("--sccache", "--no-sccache") and out["sccache"] is None:
+                    out["sccache"] = a == "--sccache"
+                else:
+                    raise Usage(f"config {rest[0]}: unknown argument '{a}'")
+        case _:
+            raise Usage(f"unknown command '{cmd}'")
+    out["cmd"] = command
     return out
+
+
+def _action(rest: Sequence[str], *allowed: ToolchainsAction) -> ToolchainsAction | None:
+    """The member of ALLOWED that REST's first word (argv's text) is, else None."""
+    return next((a for a in allowed if rest and rest[0] == a), None)

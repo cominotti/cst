@@ -11,7 +11,8 @@ import dataclasses
 import os
 import re
 import stat
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, override
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -122,6 +123,7 @@ class Folder:
     def inc_size(self) -> int:
         return sum(d.size for d in self.inc)
 
+    @override
     def __repr__(self) -> str:
         return f"Folder({self.key}, {self.size}, {self.activity})"
 
@@ -291,50 +293,65 @@ def is_tool_file(name: str) -> bool:
     return name in TOOL_FILE_NAMES or name.endswith(TOOL_FILE_SUFFIXES)
 
 
+class FolderAction(StrEnum):
+    """What decide plans for one build folder: delete it, trim it (delete only its
+    incremental folders) or keep it."""
+
+    DELETE = "delete"
+    TRIM = "trim"
+    KEEP = "keep"
+
+
 def decide(
     folders: Sequence[Folder],
     pol: RustPolicy,
     now: float,
     in_use: Mapping[str, Sequence[tuple[int | str, str]]],
     claimed: Mapping[str, Sequence[str]] | None = None,
-) -> list[tuple[Folder, str, str]]:
+) -> list[tuple[Folder, FolderAction, str]]:
     """[(folder, action, reason)] sorted least recently active first.
     action: 'delete', 'trim' (delete only its incremental folders) or
     'keep'. CLAIMED: {folder key: ...} of a complete workspace search, or
     None (no orphan rule). Pure: no file access."""
     order = sorted(folders, key=lambda f: (f.activity, f.key))
-    act: dict[str, tuple[str, str]] = {}
+    act: dict[str, tuple[FolderAction, str]] = {}
     total = sum(f.size for f in folders)
     inc_idle = pol.incremental_idle
     for f in order:
         idle = now - f.activity
         if f.problem:
-            act[f.key] = ("keep", f"left alone: {f.problem}")
+            act[f.key] = (FolderAction.KEEP, f"left alone: {f.problem}")
         elif f.key in in_use:
-            act[f.key] = ("keep", "in use: " + users_text(in_use[f.key]))
+            act[f.key] = (FolderAction.KEEP, "in use: " + users_text(in_use[f.key]))
         elif idle < pol.min_keep:
-            act[f.key] = ("keep", f"active {ago(idle)} ago (within MIN_KEEP)")
+            act[f.key] = (FolderAction.KEEP, f"active {ago(idle)} ago (within MIN_KEEP)")
         elif idle > pol.max_idle:
-            act[f.key] = ("delete", f"idle {ago(idle)} > MAX_IDLE")
+            act[f.key] = (FolderAction.DELETE, f"idle {ago(idle)} > MAX_IDLE")
             total -= f.size
         elif claimed is not None and pol.orphans and f.key not in claimed:
-            act[f.key] = ("delete", f"orphan: no workspace claims it (idle {ago(idle)})")
+            act[f.key] = (FolderAction.DELETE, f"orphan: no workspace claims it (idle {ago(idle)})")
             total -= f.size
         elif inc_idle and idle > inc_idle and f.inc_size:
-            act[f.key] = ("trim", f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})")
+            act[f.key] = (
+                FolderAction.TRIM,
+                f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})",
+            )
             total -= f.inc_size
     if pol.max_total and total > pol.max_total:
         for f in order:
             if total <= pol.max_total:
                 break
             a = act.get(f.key, ("", ""))[0]
-            if a in ("keep", "delete"):
+            if a in (FolderAction.KEEP, FolderAction.DELETE):
                 continue
-            act[f.key] = ("delete", f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active")
-            total -= f.size - (f.inc_size if a == "trim" else 0)
-    out: list[tuple[Folder, str, str]] = []
+            act[f.key] = (
+                FolderAction.DELETE,
+                f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active",
+            )
+            total -= f.size - (f.inc_size if a == FolderAction.TRIM else 0)
+    out: list[tuple[Folder, FolderAction, str]] = []
     for f in order:
-        a, why = act.get(f.key, ("keep", f"active {ago(now - f.activity)} ago"))
+        a, why = act.get(f.key, (FolderAction.KEEP, f"active {ago(now - f.activity)} ago"))
         out.append((f, a, why))
     return out
 
@@ -344,8 +361,8 @@ def users_text(users: Sequence[tuple[int | str, str]]) -> str:
     return shown + (f" and {len(users) - 3} more" if len(users) > 3 else "")
 
 
-def after_total(plan: Sequence[tuple[Folder, str, str]]) -> int:
-    return sum(f.size - (f.inc_size if a == "trim" else 0) for f, a, _ in plan if a != "delete")
+def after_total(plan: Sequence[tuple[Folder, FolderAction, str]]) -> int:
+    return sum(f.size - (f.inc_size if a == FolderAction.TRIM else 0) for f, a, _ in plan if a != FolderAction.DELETE)
 
 
 HOST_SUFFIX = re.compile(r"-(?:x86_64|aarch64|i686|armv7|riscv64gc|powerpc64le|s390x|loongarch64)-[\w.-]+\Z")

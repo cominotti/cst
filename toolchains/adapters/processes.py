@@ -5,6 +5,7 @@ processes (their folder, program, arguments and settings).
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import TYPE_CHECKING
 
@@ -53,8 +54,7 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     unreadable = 0
 
     def note(pid: str, comm: str, path: str) -> None:
-        if path.endswith(" (deleted)"):
-            path = path[: -len(" (deleted)")]
+        path = path.removesuffix(" (deleted)")
         for p in pre:
             if path.startswith(p + "/"):
                 parts = path[len(p) + 1 :].split("/")
@@ -73,19 +73,15 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
             continue
         except OSError:
             pass
-        try:
+        with contextlib.suppress(OSError):
             note(pid, comm, os.readlink(os.path.join(base, "exe")))
-        except OSError:
-            pass
         try:
             fds = os.listdir(os.path.join(base, "fd"))
         except OSError:
             fds = []
         for fd in fds:
-            try:
+            with contextlib.suppress(OSError):
                 note(pid, comm, os.readlink(os.path.join(base, "fd", fd)))
-            except OSError:
-                pass
         try:
             with open(os.path.join(base, "maps")) as f:
                 for line in f:
@@ -109,14 +105,10 @@ def cargo_procs(uid: int | None = None) -> list[CargoProc]:
         exe = ""
         args: tuple[str, ...] = ()
         env: dict[str, str] = {}
-        try:
+        with contextlib.suppress(OSError):
             cwd = os.readlink(os.path.join(base, "cwd"))
-        except OSError:
-            pass
-        try:
+        with contextlib.suppress(OSError):
             exe = os.readlink(os.path.join(base, "exe"))
-        except OSError:
-            pass
         raw = b""
         try:
             with open(os.path.join(base, "cmdline"), "rb") as f:

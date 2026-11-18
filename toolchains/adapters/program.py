@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import program_path, restore_default_signals
 from cst_core.ports import CommandResult, CommandRunnerPort
-from toolchains.domain.common import tilde
+from toolchains.domain.common import ToolchainsAction, ToolchainsCommand, tilde
 
 
 # The commands cst-toolchains runs (each call names its stdin, environment
@@ -112,11 +112,11 @@ def home_folder(home: str | None) -> str:
     return os.path.abspath(pwd.getpwuid(os.getuid()).pw_dir if home is None else home)
 
 
-def output_mode(cmd: str, action: str | None) -> None:
+def output_mode(cmd: ToolchainsCommand, action: ToolchainsAction | None) -> None:
     """A command that only reads (help, status, prune plan, config plan) gets
     SIGPIPE back at its default, so `cst toolchains status | head` ends
     quietly. The ones that change files (prune, auto, config apply) keep
     Python's handling: a closed pipe never cuts their lock release or file
     writes short."""
-    if cmd in ("help", "status") or action == "plan":
+    if cmd in (ToolchainsCommand.HELP, ToolchainsCommand.STATUS) or action == ToolchainsAction.PLAN:
         restore_default_signals()

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import override
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -94,6 +95,7 @@ FAKE_SYSTEMCTL = FAKE_LOG + FAKE_ANSWERS
 class Scratch(unittest.TestCase):
     """A scratch home, a stub systemctl, and the program loaded as a module."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -464,7 +466,7 @@ class SnapshotsSetupTest(Scratch):
     def test_preview_has_no_apply_hint(self) -> None:
         # setup applies the settings itself after the confirmation: its
         # preview must not tell the user to run `config apply` by hand.
-        rc, out = self.run_main("config", "plan")
+        _rc, out = self.run_main("config", "plan")
         self.assertIn("Apply with:", out)  # the plain command still has it
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
@@ -1322,13 +1324,13 @@ class PackageLayersTest(Scratch):
 
     def test_cli_commands_run_on_the_scratch_home(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(tc_config.cmd_config(self.session(), "apply"), 0)
+            self.assertEqual(tc_config.cmd_config(self.session(), tcd_common.ToolchainsAction.APPLY), 0)
         self.assertEqual(self.read(".cargo/config.toml"), OLD_CARGO % self.home)
         self.assertEqual(self.read(".config/uv/uv.toml"), OLD_UV)
         with contextlib.redirect_stdout(io.StringIO()):
             tc_status.cmd_status(self.session(), True)  # it raises on a problem, else returns nothing
-            self.assertEqual(tc_prune.cmd_prune(self.session(), "plan", []), 0)
-            self.assertEqual(tc_config.cmd_config(self.session(), "plan"), 0)
+            self.assertEqual(tc_prune.cmd_prune(self.session(), tcd_common.ToolchainsAction.PLAN, []), 0)
+            self.assertEqual(tc_config.cmd_config(self.session(), tcd_common.ToolchainsAction.PLAN), 0)
             self.assertEqual(tc_auto.cmd_auto_on(self.session()), 0)
             self.assertEqual(tc_auto.cmd_auto_off(self.session()), 0)
 
@@ -1402,14 +1404,24 @@ class ClosedPipeTest(Scratch):
 
     def test_only_the_commands_that_read_get_sigpipe_back(self) -> None:
         restored: list[tuple[str, str | None]] = []
-        for cmd, action in (("help", None), ("status", None), ("prune", "plan"), ("config", "plan")):
+        for cmd, action in (
+            (tcd_common.ToolchainsCommand.HELP, None),
+            (tcd_common.ToolchainsCommand.STATUS, None),
+            (tcd_common.ToolchainsCommand.PRUNE, tcd_common.ToolchainsAction.PLAN),
+            (tcd_common.ToolchainsCommand.CONFIG, tcd_common.ToolchainsAction.PLAN),
+        ):
             with mock.patch.object(
                 tc_program, "restore_default_signals", lambda c=cmd, a=action: restored.append((c, a))
             ):
                 tc_program.output_mode(cmd, action)
         self.assertEqual(restored, [("help", None), ("status", None), ("prune", "plan"), ("config", "plan")])
         with mock.patch.object(tc_program, "restore_default_signals", side_effect=AssertionError("restored")):
-            for cmd, action in (("prune", "apply"), ("config", "apply"), ("auto", "on"), ("auto", "off")):
+            for cmd, action in (
+                (tcd_common.ToolchainsCommand.PRUNE, tcd_common.ToolchainsAction.APPLY),
+                (tcd_common.ToolchainsCommand.CONFIG, tcd_common.ToolchainsAction.APPLY),
+                (tcd_common.ToolchainsCommand.AUTO, tcd_common.ToolchainsAction.ON),
+                (tcd_common.ToolchainsCommand.AUTO, tcd_common.ToolchainsAction.OFF),
+            ):
                 tc_program.output_mode(cmd, action)  # a lock to release or files to write: Python's handling stays
 
 
@@ -1446,6 +1458,7 @@ class NotUtf8OutputTest(unittest.TestCase):
     """cargo, ionice'd commands, rm, rustup, sccache and systemctl: bytes of
     their output that are not UTF-8 become U+FFFD (they raised UnicodeDecodeError)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-tc-bytes-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1478,6 +1491,7 @@ class SessionEnvTest(unittest.TestCase):
     uid's XDG_RUNTIME_DIR (root's /run/user/0, which sudo and runuser pass on) and a bus inside it
     become this user's; this user's own folder and bus stay. The stub prints what reached it."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-tc-session-"))
         self.addCleanup(shutil.rmtree, self.tmp)

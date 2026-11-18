@@ -7,6 +7,7 @@ them, and deletes a folder only while it holds its locks and nothing uses it.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
 import stat
@@ -146,7 +147,7 @@ def measure(folder: Folder, dev: int, now: float) -> Folder:
                     folder.inc[sub].size += s.st_blocks * 512
                 if stat.S_ISDIR(s.st_mode):
                     stack.append((e.path, depth + 1, sub))
-    folder.activity = newest if newest else now
+    folder.activity = newest or now
     if folder.foreign:
         folder.problem = folder.problem or f"{folder.foreign} entr(y/ies) on another filesystem"
     return folder
@@ -254,10 +255,8 @@ def take_locks(path: str) -> tuple[list[int], str | None]:
 
 def release(fds: Sequence[int]) -> None:
     for fd in fds:
-        try:
+        with contextlib.suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
 
 
 def remove_tree(path: str, timeout: float | None = None) -> tuple[bool, str]:
@@ -413,10 +412,8 @@ class CargoBuildTree:
         result, detail = self.guarded(root, folder, cache, step, recheck)
         if result != "moved":
             return result, detail
-        try:
+        with contextlib.suppress(OSError):
             os.rmdir(top)  # the XX folder, when this was its last hash
-        except OSError:
-            pass
         ok, msg = self.remove(trash, self.time_left(deadline))
         if not ok:
             return "failed", f"rm: {msg}"
@@ -460,10 +457,8 @@ class CargoBuildTree:
                 except OSError as e:
                     return "failed", f"rename {os.path.relpath(path, folder.path)}: {e.strerror}"
                 moved.append(trash)
-                try:
+                with contextlib.suppress(OSError):
                     os.utime(parent, ns=(pst.st_atime_ns, pst.st_mtime_ns), follow_symlinks=False)
-                except OSError:
-                    pass
             return "moved", ""
 
         result, detail = self.guarded(root, folder, cache, step, recheck)

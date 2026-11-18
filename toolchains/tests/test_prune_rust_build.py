@@ -26,7 +26,7 @@ import tempfile
 import time
 import unittest
 from collections.abc import Callable, Iterator, Sequence
-from typing import Protocol
+from typing import Protocol, override
 from unittest import mock
 
 # Run directly (python3 -I -B toolchains/tests/test_prune_rust_build.py): the checkout root holds the tests package.
@@ -70,6 +70,7 @@ class FakeUnits(tc_units.UserUnits):
         super().__init__(out, "/nonexistent/systemctl")
         self.fake = fake
 
+    @override
     def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
         return self.fake(*args, check=check, ok=ok)
 
@@ -82,6 +83,7 @@ def quiet_signals(test: unittest.TestCase) -> None:
 
 
 class Base(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         quiet_signals(self)
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-toolchains-test-"))
@@ -116,6 +118,7 @@ class Base(unittest.TestCase):
         # A build tree of the test's own for main (None: the one wiring builds).
         self.tree_for_main: tc_build_tree.CargoBuildTree | None = None
 
+    @override
     def tearDown(self) -> None:
         for k, v in self.env.items():
             if v is None:

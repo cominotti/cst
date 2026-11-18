@@ -14,10 +14,11 @@ from toolchains.domain.prune import select_targets
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from toolchains.domain.common import ToolchainsAction
     from toolchains.wiring import Session
 
 
-def cmd_prune(s: Session, action: str, names: Sequence[str]) -> int:
+def cmd_prune(s: Session, action: ToolchainsAction, names: Sequence[str]) -> int:
     settings = wiring.settings(s)
     chosen = select_targets(names, settings.enabled)
     return prune(

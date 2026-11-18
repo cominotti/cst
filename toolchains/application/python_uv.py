@@ -18,6 +18,7 @@ from toolchains.domain.uv import (
     UV_REMOVED,
     UV_TIMEOUT,
     UV_UNITS,
+    UvCacheKind,
     UvPolicy,
 )
 
@@ -43,9 +44,9 @@ class PythonUv(BaseTarget[UvPolicy]):
         """The cache folder, or None when it does not exist (nothing to do)."""
         c = self.location()
         kind = self.machine.uv.cache_kind(c)
-        if kind == "missing":
+        if kind == UvCacheKind.MISSING:
             return None
-        if kind != "folder":
+        if kind != UvCacheKind.FOLDER:
             raise Refused(f"{tilde(c, self.home)} is not a folder: refused")
         return c
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +32,16 @@ class UvPolicy:
 
 
 UV_CACHE_REL = ".cache/uv"
+
+
+class UvCacheKind(StrEnum):
+    """What is at uv's cache path (followed through links)."""
+
+    MISSING = "missing"
+    FOLDER = "folder"
+    OTHER = "other"
+
+
 UV_TIMEOUT = 10 * 60  # seconds for one `uv cache prune` (also bounded by the run's budget)
 UV_LOCK_WAIT = 60  # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
 # What uv says when UV_LOCK_TIMEOUT ran out ("Timeout (60s) when waiting for
