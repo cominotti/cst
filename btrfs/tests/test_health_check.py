@@ -17,9 +17,9 @@ problem), the alert's title and body, the commands run, and the state files
 
 Not covered here: the member disks of a filesystem. They are found only for
 devices that are block devices (lsblk below them, readlink -f for the
-device-mapper name), which a test folder cannot fake. Their SMART check and
-the kernel-line filter by device are covered on the swap disks and in the
-tier 1 run of the installed program.
+device-mapper name), which a test folder cannot fake. MemberDisksTest covers them: the rules
+themselves, and one whole run in this process with the block-device test
+replaced.
 
 Run with: invowk cmd test module btrfs.tests.test_health_check
 """
@@ -884,6 +884,72 @@ class MemberDisksTest(unittest.TestCase):
             "b: I/O error, dev nvme0n1p3, sector 9 | e: I/O error, dev nvme0n1, sector 2 | ",
         )
         self.assertIsNone(kernel_problem("d: I/O error, dev sdb, sector 1\n", ["dm-0"]))
+
+    def test_a_whole_run_with_member_disks(self) -> None:
+        # The run in this process, the block-device test answering yes for the fake members: the member
+        # disks' health logs (no role), the OK line's disks, a swap on a member disk read once, and the
+        # kernel lines of member devices.
+        import contextlib
+        import io
+        from unittest import mock
+
+        from btrfs.health_check import adapters, cli
+        from cst_core.adapters.runner import SubprocessCommandRunner
+
+        h = HealthCheckTest("test_healthy")
+        h.setUp()
+        self.addCleanup(h.doCleanups)
+        h.machine["lsblk"] = {
+            "cst-test-1": "dm-0 crypt\nnvme0n1p3 part\nnvme0n1 disk\n",
+            "cst-test-2": "dm-1 crypt\nnvme2n1p3 part\nnvme2n1 disk\n",
+            "dm-2": "dm-2 crypt\nnvme0n1p2 part\nnvme0n1 disk\n",
+        }
+        h.swaps("/dev/dm-2 partition 1 0 -2")
+        h.machine["nvme"] = {"nvme0": HEALTHY_SMART, "nvme2": HEALTHY_SMART}
+        h.machine["kernel"] = (
+            "a: BTRFS error (device cst-test-1): csum failed\n"
+            "b: I/O error, dev nvme2n1p3, sector 1\n"
+            "c: BTRFS error (device dm-9): other\n"
+        )
+
+        def run() -> tuple[int, str, str]:
+            with open(h.machine_file, "w", encoding="utf-8") as f:
+                json.dump(h.machine, f)
+            if os.path.exists(h.calls_log):
+                os.unlink(h.calls_log)
+            env = {"PATH": f"{h.bin}:/usr/bin:/bin", "FAKE_MACHINE": h.machine_file, "FAKE_CALLS": h.calls_log}
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(adapters, "is_block", lambda p: p.startswith("/dev/mapper/cst-test-")),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+            ):
+                rc = cli.run_check(adapters.Probe(h.root, SubprocessCommandRunner()))
+            return rc, out.getvalue(), err.getvalue()
+
+        rc, out, err = run()
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(
+            err,
+            f"<2>{TAG}: kernel: 2 btrfs/IO error message(s) since last check, e.g.: a: BTRFS error (device "
+            "cst-test-1): csum failed | b: I/O error, dev nvme2n1p3, sector 1 | \n",
+        )
+        self.assertEqual([c[1:] for c in h.calls("nvme")], [["smart-log", "/dev/nvme0"], ["smart-log", "/dev/nvme2"]])
+        h.machine["kernel"] = ""
+        h.machine["nvme"] = {"nvme0": FAILING_SMART.replace("12", "1"), "nvme2": HEALTHY_SMART}
+        rc, out, err = run()
+        self.assertEqual(
+            (rc, err),
+            (
+                1,
+                f"<2>{TAG}: NVMe nvme0n1: critical_warning=1\n<2>{TAG}: NVMe nvme0n1: media_errors=1\n"
+                f"<2>{TAG}: NVMe nvme0n1: available_spare 5% below threshold 10%\n",
+            ),
+        )
+        h.machine["nvme"] = {"nvme0": HEALTHY_SMART, "nvme2": HEALTHY_SMART}
+        rc, out, err = run()
+        self.assertEqual((rc, out, err), (0, f"<6>{TAG}: OK (/var; disks: nvme0n1 nvme2n1)\n", ""))
 
     def test_mounts_in_the_order_findmnt_lists_them(self) -> None:
         # bash kept them in awk's hash order (two or more filesystems); the port keeps findmnt's order.

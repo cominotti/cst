@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MPL-2.0
+# Vendored for btrfs/tests/test_health_check_mixed.py: the bash btrfs-health-check of main
+# at d4d8c91 plus the CST_HEALTH_ROOT test seam that PR-F5a-B added before porting it to Python
+# (commit cebf28c of that branch, which a squash merge does not keep).
 #
 # btrfs-health-check
 #
