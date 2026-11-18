@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Final
+from typing import Final, override
 import unittest
 
 from btrfs.tests import test_health_check as base
@@ -34,6 +34,7 @@ NEW: Final[list[str]] = list(base.RUN)
 class MixedVersionsTest(unittest.TestCase):
     h: base.HealthCheckTest
 
+    @override
     def setUp(self) -> None:
         self.h = base.HealthCheckTest("test_healthy")
         self.h.setUp()

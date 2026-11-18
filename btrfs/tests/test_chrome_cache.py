@@ -20,7 +20,7 @@ import signal
 import unittest
 from collections.abc import Callable, Sequence
 from unittest import mock
-from typing import Protocol, cast
+from typing import Protocol, cast, override
 
 # Run directly (python3 -I -B btrfs/tests/test_chrome_cache.py): the checkout root holds the tests package.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -80,6 +80,7 @@ class ChromeCacheTest(unittest.TestCase):
     cfg: str
     path: str
 
+    @override
     def setUp(self) -> None:
         self.m = load()
         self.addCleanup(cast("PackageView", self.m).restore)
@@ -92,6 +93,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.cfg = os.path.join(self.home, ".var/app/com.google.Chrome/config")
         self.path = os.path.join(self.cfg, "chrome-flags.conf")
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
@@ -335,7 +337,7 @@ class ChromeCacheTest(unittest.TestCase):
         state, _, changed = self.m.apply(self.home)
         self.assertEqual((state, changed), ("managed", False))
         self.assertEqual(self.read(), "--a\n" + old)  # not rewritten for the new name
-        msg, changed, still_set = self.m.off(self.home)
+        _msg, changed, still_set = self.m.off(self.home)
         self.assertEqual((changed, still_set), (True, False))
         self.assertEqual(self.read(), f"--a\n{self.m.OFF_LINE}\n")
 
@@ -346,7 +348,7 @@ class ChromeCacheTest(unittest.TestCase):
         self.assertEqual((state, changed), ("off", False))
 
     def test_off_before_any_apply(self) -> None:
-        msg, changed, still_set = self.m.off(self.home)
+        _msg, changed, still_set = self.m.off(self.home)
         self.assertEqual((changed, still_set), (True, False))
         self.assertEqual(self.read(), self.m.OFF_LINE + "\n")
         self.install()
@@ -513,7 +515,7 @@ class SnapExcludeTest(unittest.TestCase):
             "copy /home/u/Bulk",
         ]
         self.assertEqual(self.stale(current), "")
-        old = current[:3] + ["copy /home/u/.var/app/com.google.Chrome/cache"] + current[3:]
+        old = [*current[:3], "copy /home/u/.var/app/com.google.Chrome/cache", *current[3:]]
         out = self.stale(old)
         self.assertIn("from an older version", out)
         self.assertIn("/home/u/.var/app/com.google.Chrome/cache", out)

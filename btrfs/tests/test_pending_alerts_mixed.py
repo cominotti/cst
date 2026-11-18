@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Final
+from typing import Final, override
 import unittest
 
 from btrfs.tests import test_pending_alerts as base
@@ -33,6 +33,7 @@ NEW: Final[list[str]] = base.RUN
 class MixedVersionsTest(unittest.TestCase):
     h: base.PendingAlertsTest
 
+    @override
     def setUp(self) -> None:
         # The behaviour tests' alerts folder, stubs and helpers.
         self.h = base.PendingAlertsTest("test_usage")

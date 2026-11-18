@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Final
+from typing import Final, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -79,6 +79,7 @@ class PendingAlertsTest(unittest.TestCase):
     env: dict[str, str]
     now: int
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="pending-alerts-test-")
         self.addCleanup(shutil.rmtree, self.tmp)

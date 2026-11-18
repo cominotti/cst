@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import StrEnum
 from typing import TypedDict
 import shlex
 
+from cst_core.domain.values import GIB, MIB
+
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
-CACHE_SIZE = 512 * 1024 * 1024  # 536870912: mandatory cap (shared tmpfs)
+CACHE_SIZE = 512 * MIB  # 536870912: mandatory cap (shared tmpfs)
 FLAG_DIR = f"--disk-cache-dir={CACHE_DIR}"
 FLAG_SIZE = f"--disk-cache-size={CACHE_SIZE}"
 APP_DIR = f".var/app/{APP}"
@@ -32,6 +35,33 @@ OFF_LINE = (
 # Where a system or user install of the app has its deployed files.
 SYSTEM_INSTALLS = ["/var/lib/flatpak", "/run/host/var/lib/flatpak"]
 USER_INSTALL_REL = ".local/share/flatpak"
+
+
+class ChromeCacheCommand(StrEnum):
+    """chrome-cache's commands (undo is another name for off)."""
+
+    STATUS = "status"
+    PLAN = "plan"
+    APPLY = "apply"
+    OFF = "off"
+    UNDO = "undo"
+
+
+def chrome_command(word: str) -> ChromeCacheCommand | None:
+    """The command the word names; None for any other word."""
+    return ChromeCacheCommand(word) if word in ChromeCacheCommand else None
+
+
+class ChromeFlagsState(StrEnum):
+    """What decide finds in chrome-flags.conf (and apply's no-app)."""
+
+    OFF = "off"  # off by the user's choice, no flags of theirs
+    USER = "user"  # flags set by the user, or off with flags of theirs
+    ABSENT = "absent"  # no flags: to be added
+    MANAGED = "managed"  # our flags under our marker
+    USER_SAME = "user-same"  # our values, written by the user
+    CAP_MISSING = "cap-missing"  # our marker and folder flag, the size cap line gone
+    NO_APP = "no-app"  # Chrome Flatpak not installed (apply only)
 
 
 class _InspectResult(TypedDict):
@@ -87,24 +117,24 @@ def inspect(text: str) -> _InspectResult:
     }
 
 
-def decide(text: str) -> tuple[str, str | None, str]:
+def decide(text: str) -> tuple[ChromeFlagsState, str | None, str]:
     """(state, new_text or None, message). new_text None: nothing to write."""
     i = inspect(text)
     d, s = i["dir"], i["size"]
     ours_d, ours_s = d == CACHE_DIR, s == str(CACHE_SIZE)
     if i["off"] or (i["on"] and d is None):
         if d is None and s is None:
-            return "off", None, "off by your choice (marker without the flags): nothing added"
-        return "user", None, f"off by your choice; your own cache flags there: {fmt(d, s)}"
+            return ChromeFlagsState.OFF, None, "off by your choice (marker without the flags): nothing added"
+        return ChromeFlagsState.USER, None, f"off by your choice; your own cache flags there: {fmt(d, s)}"
     if d is None and s is None:
-        return "absent", add_block(text), "add the cache flags (sandbox /tmp, at most 512 MiB)"
+        return ChromeFlagsState.ABSENT, add_block(text), "add the cache flags (sandbox /tmp, at most 512 MiB)"
     if ours_d and ours_s:
         if i["on"]:
-            return "managed", None, "flags present (managed by CST)"
-        return "user-same", None, "flags present (written by you, same values): left as they are"
+            return ChromeFlagsState.MANAGED, None, "flags present (managed by CST)"
+        return ChromeFlagsState.USER_SAME, None, "flags present (written by you, same values): left as they are"
     if i["on"] and ours_d and s is None and has_line(text, FLAG_DIR):
         return (
-            "cap-missing",
+            ChromeFlagsState.CAP_MISSING,
             add_after(text, FLAG_DIR, FLAG_SIZE),
             "the 512 MiB cap line is missing under the marker: add it back",
         )
@@ -113,7 +143,7 @@ def decide(text: str) -> tuple[str, str | None, str]:
         note = "; WARNING: that cache lives in RAM, keep it small"
     elif ours_d and (s is None or s in ("", "0")):
         note = "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
-    return "user", None, f"set by you ({fmt(d, s)}): left as it is{note}"
+    return ChromeFlagsState.USER, None, f"set by you ({fmt(d, s)}): left as it is{note}"
 
 
 def fmt(d: str | None, s: str | None) -> str:
@@ -167,7 +197,7 @@ def turn_off(text: str) -> str | None:
 
 
 def size_text(n: int) -> str:
-    return f"{n / 1024**3:.1f} GiB" if n >= 1024**3 // 10 else f"{n >> 20} MiB"
+    return f"{n / GIB:.1f} GiB" if n >= GIB // 10 else f"{n >> 20} MiB"
 
 
 def off_message(text: str, new: str) -> str:

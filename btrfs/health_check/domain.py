@@ -8,11 +8,12 @@ from (doctor/domain.py UNALLOC_DEFAULTS).
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import re
 from typing import Final
 
 from cst_core.domain.text import file_lines, read_fields
-from cst_core.domain.values import GIB, MIB
+from cst_core.domain.values import GIB, HOUR, MIB, MINUTE
 
 TAG: Final = "btrfs-health-check"
 ALERT_TITLE: Final = "Disk health: problems detected"
@@ -21,8 +22,8 @@ WEAR_ALERT_PCT: Final = 80
 UNALLOC_MIN_GIB: Final = 50  # early warning, per device
 UNALLOC_CRIT_GIB: Final = 5  # near ENOSPC: btrfs' own dynamic reclaim only starts here
 NAS_MAX_AGE_DAYS: Final = 8
-SNAPSHOT_MAX_AGE: Final = 3 * 3600  # s since the last successful hourly snapshot
-SNAPSHOT_GRACE: Final = 20 * 60  # s after boot or resume: the timer catches up first
+SNAPSHOT_MAX_AGE: Final = 3 * HOUR  # s since the last successful hourly snapshot
+SNAPSHOT_GRACE: Final = 20 * MINUTE  # s after boot or resume: the timer catches up first
 KNOBS: Final = ("dynamic_reclaim", "periodic_reclaim")
 RECLAIM_KINDS: Final = ("data", "metadata")
 UPSTREAM_RULE_LINE: Final = 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"'
@@ -31,6 +32,16 @@ SUSPEND_UNITS: Final = (
     "systemd-hibernate.service",
     "systemd-suspend-then-hibernate.service",
 )
+MISSING_DEVICE: Final = "missing"  # the name btrfs device usage gives a member that is not there
+
+
+class StderrRoute(StrEnum):
+    """Where a command's stderr goes, as in the bash version."""
+
+    PASS = "pass"  # passed on (to the journal)
+    DROP = "drop"  # 2>/dev/null
+    MERGE = "merge"  # 2>&1: into its output
+
 
 _SPACE: Final = r"[ \t\n\r\f\v]"  # [[:space:]]
 _DIGITS: Final = re.compile(r"[0-9]+")
@@ -142,7 +153,7 @@ def mixed_profiles(usage: str) -> bool:
 def missing_bytes(usage: str) -> str:
     """The "Device missing" value(s) of btrfs filesystem usage, blanks removed."""
     return lines_of(
-        [re.sub(_SPACE, "", (line.split(":") + [""])[1]) for line in file_lines(usage) if "Device missing" in line]
+        [re.sub(_SPACE, "", [*line.split(":"), ""][1]) for line in file_lines(usage) if "Device missing" in line]
     )
 
 
@@ -165,7 +176,7 @@ def unallocated_problems(mnt: str, rows: Sequence[tuple[str, str]]) -> tuple[lis
     least: int | None = None
     for dev, text in rows:
         unalloc = bash_int(text)
-        if dev == "missing" or unalloc is None:
+        if dev == MISSING_DEVICE or unalloc is None:
             continue
         least = unalloc if least is None or unalloc < least else least
         if unalloc < UNALLOC_CRIT_GIB * GIB:
@@ -232,7 +243,7 @@ class Scrub:
 
 def parse_scrub(text: str) -> Scrub:
     lines = file_lines(text)
-    started = [(re.split(": +", line) + [""])[1] for line in lines if "Scrub started" in line]
+    started = [[*re.split(": +", line), ""][1] for line in lines if "Scrub started" in line]
     status = [awk_field(line, 2) for line in lines if line.startswith("Status:")]
     return Scrub(text, lines_of(started), lines_of(status))
 
@@ -387,7 +398,7 @@ def awake_since(suspend_journal: str, boot_since: int) -> int:
     short-unix line), or the boot."""
     lines = file_lines(suspend_journal)
     last = awk_int(lines[0]) if len(lines) == 1 else 0
-    return last if last > boot_since else boot_since
+    return max(boot_since, last)
 
 
 def alert_body(problems: Sequence[str]) -> str:

@@ -19,10 +19,20 @@ from btrfs.chrome_cache.adapters import (
     ram_cache,
     real_home,
 )
-from btrfs.chrome_cache.domain import CACHE_SUBVOL_REL, FLAGS_REL, OLD_CACHE_REL, decide, size_text
+from btrfs.chrome_cache.domain import (
+    CACHE_SUBVOL_REL,
+    FLAGS_REL,
+    OLD_CACHE_REL,
+    ChromeCacheCommand,
+    ChromeFlagsState,
+    chrome_command,
+    decide,
+    size_text,
+)
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import MIB
 
 
 def status(home: str) -> int:
@@ -32,22 +42,22 @@ def status(home: str) -> int:
     rc = 0
     try:
         state, _, msg = decide(flags_text(home))
-        if state == "absent":
+        if state == ChromeFlagsState.ABSENT:
             msg = "absent" + ("; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" if inst else "")
-        elif state == "cap-missing":
+        elif state == ChromeFlagsState.CAP_MISSING:
             msg = "the 512 MiB cap line is missing: 'snapshots chrome-cache apply' adds it back"
         print(f"  ~/{FLAGS_REL}:")
         print(f"                         {msg}")
     except (Refused, OSError, ValueError) as e:
         print(f"  ~/{FLAGS_REL}: NEEDS A LOOK: {e}")
-        state, rc = "?", 1
+        state, rc = None, 1
     ram = ram_cache()
     if ram is not None:
         print(f"  in RAM now:            {size_text(allocated_bytes(ram))} ({ram})")
     http, code, profiles = old_cache(home)
     sub = is_subvol(os.path.join(home, CACHE_SUBVOL_REL))
     where = "" if sub else ", in /home snapshots"
-    if state in ("managed", "user-same") and http >= 1024**2:
+    if state in (ChromeFlagsState.MANAGED, ChromeFlagsState.USER_SAME) and http >= MIB:
         print(f"  old on-disk HTTP cache: {size_text(http)} in {profiles} profile(s){where}. Quit Chrome")
         print("                         (all windows), start it again, then delete it (never done automatically):")
         print(f"                         rm -rf ~/{OLD_CACHE_REL}/*/Cache")
@@ -65,12 +75,12 @@ def status(home: str) -> int:
 
 def main(argv: Sequence[str]) -> int:
     args = argv[1:]
-    cmd = args[0] if args else "status"
+    cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
     home = None
     if "--home" in args:
         i = args.index("--home")
         home = args[i + 1] if i + 1 < len(args) else None
-    if cmd not in ("status", "plan", "apply", "off", "undo") or (("--home" in args) and not home):
+    if cmd is None or (("--home" in args) and not home):
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
     if HostExecutionContext().is_root():
@@ -84,17 +94,17 @@ def main(argv: Sequence[str]) -> int:
     except OSError as e:
         print(f"chrome-cache: {home}: {e}", file=sys.stderr)
         return 2
-    if cmd in ("status", "plan"):
+    if cmd in (ChromeCacheCommand.STATUS, ChromeCacheCommand.PLAN):
         restore_default_signals()  # they only read: `| head` ends them quietly; apply and off keep Python's handling
     try:
-        if cmd == "status":
+        if cmd == ChromeCacheCommand.STATUS:
             return status(home)
-        if cmd == "plan":
+        if cmd == ChromeCacheCommand.PLAN:
             print(plan_line(home))
             return 0
-        if cmd == "apply":
+        if cmd == ChromeCacheCommand.APPLY:
             state, msg, changed = apply(home)
-            where = f"~/{FLAGS_REL}: " if state != "no-app" else ""
+            where = f"~/{FLAGS_REL}: " if state != ChromeFlagsState.NO_APP else ""
             print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
             if changed:
                 print("           Takes effect when Chrome starts again (quit all its windows first).")

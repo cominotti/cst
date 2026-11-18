@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Final
+from typing import Final, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -165,6 +165,7 @@ class HealthCheckTest(unittest.TestCase):
     machine: dict[str, object]
     fs: dict[str, object]
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="health-check-test-")
         self.addCleanup(shutil.rmtree, self.tmp)

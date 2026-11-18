@@ -2,6 +2,7 @@
 """cst-pending-alerts' I/O: the pending files (trusted only), the record, the desktop's notifications."""
 
 from collections.abc import Sequence
+import contextlib
 import io
 import locale
 import os
@@ -18,6 +19,7 @@ from btrfs.pending_alerts.domain import (
     NAME,
     TAG,
     Alert,
+    AlertUrgency,
     Seen,
     PendingPaths,
     find_mtime,
@@ -25,6 +27,7 @@ from btrfs.pending_alerts.domain import (
     parse_delivered,
 )
 from cst_core.adapters.files import read_bytes, write_atomic
+from cst_core.domain.values import DAY
 from cst_core.ports import CommandRunnerPort
 
 
@@ -37,10 +40,8 @@ def pass_bytes_through() -> None:
 
 def use_callers_time_locale() -> None:
     """Dates in the caller's language, as date(1) prints them (C when that locale is missing)."""
-    try:
+    with contextlib.suppress(locale.Error):
         locale.setlocale(locale.LC_TIME, "")
-    except locale.Error:
-        pass
 
 
 def trusted(path: str, owner: str) -> bool:
@@ -70,9 +71,12 @@ def pending_files(s: PendingPaths) -> list[tuple[str, str]]:
             st = e.stat(follow_symlinks=False)
         except OSError:
             continue
-        if e.is_file(follow_symlinks=False) and st.st_size <= MAX_FILE:
-            if now - st.st_mtime_ns < KEEP_DAYS * 86400 * 10**9:
-                found.append((st.st_mtime_ns, e.name))
+        if (
+            e.is_file(follow_symlinks=False)
+            and st.st_size <= MAX_FILE
+            and now - st.st_mtime_ns < KEEP_DAYS * DAY * 10**9
+        ):
+            found.append((st.st_mtime_ns, e.name))
     return [(find_mtime(ns), name) for ns, name in sorted(found)[-MAX_FILES:]]
 
 
@@ -158,7 +162,7 @@ def wait_for_notification_server(runner: CommandRunnerPort, wait: int) -> bool:
     return True
 
 
-def show_notification(runner: CommandRunnerPort, urgency: str, app: str, title: str, body: str) -> bool:
+def show_notification(runner: CommandRunnerPort, urgency: AlertUrgency, app: str, title: str, body: str) -> bool:
     """One desktop notification (notify-send); True when it was shown."""
     argv: Sequence[str] = ["notify-send", "-u", urgency, "-a", app, "-i", ICON, "--", title, body]
     r = runner.run(argv, output="inherit")

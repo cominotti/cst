@@ -13,7 +13,6 @@ import os
 import stat
 import sys
 import time
-from typing import Literal
 
 from btrfs.health_check.domain import (
     ALERT_TITLE,
@@ -26,6 +25,7 @@ from btrfs.health_check.domain import (
     SUSPEND_UNITS,
     TAG,
     UPSTREAM_RULE_LINE,
+    StderrRoute,
     alert_body,
     awake_since,
     awk_int,
@@ -59,9 +59,9 @@ from cst_core.domain.contracts import NOTIFY_PROGRAM
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
+from cst_core.domain.values import DAY
 from cst_core.ports import CommandResult, CommandRunnerPort
 
-type _Stderr = Literal["pass", "drop", "merge"]
 NOTIFY = NOTIFY_PROGRAM
 RECLAIM_CONF = manifest_by_src()["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
 
@@ -94,35 +94,35 @@ class Probe:
         data = read_bytes(p)
         return None if data is None else data.decode("utf-8", "surrogateescape")
 
-    def run(self, argv: Sequence[str], stderr: _Stderr) -> CommandResult:
+    def run(self, argv: Sequence[str], stderr: StderrRoute) -> CommandResult:
         """Run argv; its stderr passed on, dropped or merged into its output."""
-        r = self.runner.run(argv, output="merge" if stderr == "merge" else "capture")
+        r = self.runner.run(argv, output="merge" if stderr == StderrRoute.MERGE else "capture")
         if r.fault is not None:
             why = "command not found" if r.fault == "missing" else str(r.cause or r.fault)
             note = f"{TAG}: {argv[0]}: {why}\n"
-            if stderr == "merge":
+            if stderr == StderrRoute.MERGE:
                 return CommandResult(r.returncode, note, "", r.argv, r.fault, r.cause)
-            if stderr == "pass":
+            if stderr == StderrRoute.PASS:
                 sys.stderr.write(note)
                 sys.stderr.flush()
             return r
-        if stderr == "pass" and r.stderr:
+        if stderr == StderrRoute.PASS and r.stderr:
             sys.stderr.write(r.stderr)
             sys.stderr.flush()
         return r
 
-    def out(self, argv: Sequence[str], stderr: _Stderr = "drop") -> str:
+    def out(self, argv: Sequence[str], stderr: StderrRoute = StderrRoute.DROP) -> str:
         """$(argv): its output without the newlines at the end."""
         return output(self.run(argv, stderr).stdout)
 
     def first_line(self, argv: Sequence[str]) -> str:
         """$(argv | head -n1), its stderr passed on."""
-        lines = file_lines(self.run(argv, "pass").stdout)
+        lines = file_lines(self.run(argv, StderrRoute.PASS).stdout)
         return lines[0] if lines else ""
 
     def epoch(self, when: str) -> int | None:
         """date -d WHEN +%s: the time as date(1) reads it; None when it cannot."""
-        r = self.run(["date", "-d", when, "+%s"], "drop")
+        r = self.run(["date", "-d", when, "+%s"], StderrRoute.DROP)
         value = output(r.stdout)
         try:
             return int(value) if r.returncode == 0 and r.fault is None else None
@@ -174,13 +174,13 @@ def housekeeping(m: Probe) -> None:
 
 def mounts(m: Probe) -> list[str]:
     """One mount point per btrfs filesystem."""
-    return pick_mounts(m.run(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID,TARGET"], "pass").stdout)
+    return pick_mounts(m.run(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID,TARGET"], StderrRoute.PASS).stdout)
 
 
 def check_filesystem(m: Probe, mnt: str, members: Members) -> list[str]:
     """The problems of one btrfs filesystem; its member devices go into members."""
     problems: list[str] = []
-    show = m.out(["btrfs", "filesystem", "show", mnt], "merge")
+    show = m.out(["btrfs", "filesystem", "show", mnt], StderrRoute.MERGE)
     if has_missing(show):
         problems.append(f"btrfs {mnt}: member device MISSING (running degraded)")
     # A transaction abort or a tree-checker rejection forces the fs read-only without touching the
@@ -205,15 +205,15 @@ def check_filesystem(m: Probe, mnt: str, members: Members) -> list[str]:
     alloc = m.path(f"/sys/fs/btrfs/{uuid}/allocation")
     if uuid and os.path.isdir(alloc):
         problems += allocation_problems(m, mnt, uuid, alloc, least)
-    if m.run(["btrfs", "device", "stats", "--check", mnt], "drop").returncode != 0:
-        stats = stats_lines(m.run(["btrfs", "device", "stats", mnt], "pass").stdout)
+    if m.run(["btrfs", "device", "stats", "--check", mnt], StderrRoute.DROP).returncode != 0:
+        stats = stats_lines(m.run(["btrfs", "device", "stats", mnt], StderrRoute.PASS).stdout)
         problems.append(f"btrfs {mnt}: non-zero device error counters: {stats}")
     problems += scrub_problems(m, mnt)
     for devpath in member_paths(show):
         if not is_block(devpath):
             continue
         members.dms.append(os.path.basename(os.path.realpath(devpath)))
-        members.disks += disks_of(m.run(["lsblk", "-lnso", "NAME,TYPE", devpath], "pass").stdout)
+        members.disks += disks_of(m.run(["lsblk", "-lnso", "NAME,TYPE", devpath], StderrRoute.PASS).stdout)
     return problems
 
 
@@ -234,12 +234,12 @@ def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | 
     # knobs are needed.
     conf_path = m.path(RECLAIM_CONF)
     conf = m.text(conf_path) or ""
-    for knob in KNOBS:
-        if f"/sys/fs/btrfs/{uuid}/allocation/data/{knob}" in conf and m.cat(f"{alloc}/data/{knob}") != "1":
-            problems.append(
-                f"btrfs {mnt}: automatic reclaim is configured but data/{knob} is off - run "
-                f"'systemd-tmpfiles --create {conf_path}'"
-            )
+    problems.extend(
+        f"btrfs {mnt}: automatic reclaim is configured but data/{knob} is off - run "
+        f"'systemd-tmpfiles --create {conf_path}'"
+        for knob in KNOBS
+        if f"/sys/fs/btrfs/{uuid}/allocation/data/{knob}" in conf and m.cat(f"{alloc}/data/{knob}") != "1"
+    )
     # reclaim_errors counts since mount (it resets on reboot). The state file remembers boot id and
     # count, so errors right after a reboot are still compared against 0, and a damaged file just
     # restarts at 0.
@@ -278,7 +278,7 @@ def scrub_problems(m: Probe, mnt: str) -> list[str]:
             f"btrfs {mnt}: last scrub (started {scrub.started}) did not finish: status {scrub.status or 'unknown'}"
         )
     elif (started := m.epoch(scrub.started)) is not None:
-        age_days = bash_div(now() - started, 86400)
+        age_days = bash_div(now() - started, DAY)
         if age_days > SCRUB_MAX_AGE_DAYS:
             problems.append(f"btrfs {mnt}: last scrub is {age_days} days old")
     return problems
@@ -302,13 +302,17 @@ def degraded_boot_problems(m: Probe) -> list[str]:
         nxt = next_root(m)
         if nxt:
             ups.append(m.path(f"{nxt}/usr/lib/udev/rules.d/64-btrfs.rules"))
-        for up in ups:
-            if UPSTREAM_RULE_LINE not in (m.text(up) or ""):
-                problems.append(f"udev: {up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)")
+        problems.extend(
+            f"udev: {up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+            for up in ups
+            if UPSTREAM_RULE_LINE not in (m.text(up) or "")
+        )
     flags = m.path("/run/btrfs-allow-degraded")
-    for name in _glob_names(flags):
-        if os.path.exists(f"{flags}/{name}"):
-            problems.append(f"btrfs {name}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)")
+    problems.extend(
+        f"btrfs {name}: this boot is DEGRADED (btrfs-last-resort: member disk missing at boot)"
+        for name in _glob_names(flags)
+        if os.path.exists(f"{flags}/{name}")
+    )
     folder = m.path("/var/lib/btrfs-degraded-boot")
     for name in _glob_names(folder):
         marker = f"{folder}/{name}"
@@ -329,7 +333,7 @@ def next_root(m: Probe) -> str:
     """The root of the deployment rpm-ostree lists first (the next boot's): "" when unknown."""
 
     def run(argv: list[str]) -> tuple[int, str, str]:
-        r = m.run(argv, "drop")
+        r = m.run(argv, StderrRoute.DROP)
         return r.returncode, r.stdout, r.stderr
 
     status = query_status(run)
@@ -352,11 +356,11 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
     uuid = marker.rsplit("/degraded-", 1)[1]
     text = m.text(marker) or ""
     since, since_h, complete = (sed_values(text, k) for k in ("since", "since_human", "complete_since"))
-    mnt = mount_of(m.run(["findmnt", "-rn", "-t", "btrfs", "-o", "TARGET,UUID"], "pass").stdout, uuid)
+    mnt = mount_of(m.run(["findmnt", "-rn", "-t", "btrfs", "-o", "TARGET,UUID"], StderrRoute.PASS).stdout, uuid)
     state = "not mounted"
     since_n = bash_int(since)
     if mnt and since_n is not None:
-        if has_missing(m.out(["btrfs", "filesystem", "show", mnt], "merge")):
+        if has_missing(m.out(["btrfs", "filesystem", "show", mnt], StderrRoute.MERGE)):
             state = "still missing a device"
             keep = "".join(line + "\n" for line in file_lines(text) if not line.startswith("complete_since="))
             _rewrite(marker, keep)
@@ -367,7 +371,7 @@ def marker_problems(m: Probe, marker: str) -> list[str]:
                 complete = str(complete_n)
                 _append_text(marker, f"complete_since={complete}\n")
             # date(1), as in bash: a value it cannot show leaves the time out (its error goes to the journal).
-            at = m.out(["date", "-d", f"@{complete}", "+%F %T"], "pass")
+            at = m.out(["date", "-d", f"@{complete}", "+%F %T"], StderrRoute.PASS)
             state = f"all devices present since {at}, waiting for a clean scrub started after that"
             scrub = parse_scrub(m.out(["btrfs", "scrub", "status", mnt]))
             started = m.epoch(scrub.started) or 0
@@ -424,17 +428,17 @@ def kernel_log(m: Probe, ours: Sequence[str]) -> list[str]:
     base = ["journalctl", "-k", "-q", "--no-pager", "-o", "short-iso"]
     klog = None
     if _size(cursor) > 0:
-        r = m.run([*base, f"--cursor-file={cursor}"], "merge")
+        r = m.run([*base, f"--cursor-file={cursor}"], StderrRoute.MERGE)
         klog = output(r.stdout) if r.returncode == 0 else None
     if klog is None:
         # journalctl refuses --since together with --cursor-file, so the first run (or a run after a
         # bad cursor) looks back 65 min and then records a cursor.
         _remove(cursor)
-        r = m.run([*base, "--since", "-65min"], "merge")
+        r = m.run([*base, "--since", "-65min"], StderrRoute.MERGE)
         klog = output(r.stdout)
         if r.returncode != 0:
             problems.append(f"kernel log scan failed: {klog[:200]}")
-        m.run(["journalctl", "-k", "-q", "-n", "1", "-o", "short-iso", f"--cursor-file={cursor}"], "drop")
+        m.run(["journalctl", "-k", "-q", "-n", "1", "-o", "short-iso", f"--cursor-file={cursor}"], StderrRoute.DROP)
     found = kernel_problem(klog, ours)
     return problems + ([found] if found else [])
 
@@ -450,7 +454,7 @@ def snapshot_problems(m: Probe) -> list[str]:
     """Hourly /home snapshots ('cst btrfs snapshots setup'): still running? The space guard,
     btrfs-snapshot-core's checks and the NAS backup alert on their own; this catches a timer or a
     snapshot run that silently stopped working."""
-    if m.run(["systemctl", "is-enabled", "-q", "btrfs-snapshot.timer"], "drop").returncode != 0:
+    if m.run(["systemctl", "is-enabled", "-q", "btrfs-snapshot.timer"], StderrRoute.DROP).returncode != 0:
         return []
     problems: list[str] = []
     snap = m.path("/var/lib/btrfs-snapshot")
@@ -466,7 +470,7 @@ def snapshot_problems(m: Probe) -> list[str]:
             "-n",
             "1",
         ],
-        "drop",
+        StderrRoute.DROP,
     ).stdout
     uptime = m.text(m.path("/proc/uptime")) or ""
     boot_since = now() - awk_int(uptime.split("\n")[0])
@@ -492,7 +496,7 @@ def snapshot_problems(m: Probe) -> list[str]:
             if v is not None and v > nas_last:
                 nas_last = v
         # Journal only: btrfs-snapshot already notifies once a day about a stale NAS backup.
-        if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * 86400:
+        if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * DAY:
             log(4, "no successful NAS backup (restic) for over 8 days (journalctl -u btrfs-snapshot-nas)", tag=TAG)
     return problems
 
@@ -505,7 +509,7 @@ def md_problems(m: Probe) -> list[str]:
 
 def smart(m: Probe, disk: str, role: str = "") -> list[str]:
     """The disk's own NVMe health log (none: nothing to say)."""
-    r = m.run(["nvme", "smart-log", controller(disk)], "drop")
+    r = m.run(["nvme", "smart-log", controller(disk)], StderrRoute.DROP)
     return smart_problems(disk, role, r.stdout) if r.returncode == 0 and r.fault is None else []
 
 
@@ -518,7 +522,7 @@ def swap_disks(m: Probe, members: Sequence[str]) -> list[str]:
         return []
     found: list[str] = []
     for dev in swap_partitions(m.text(swaps) or ""):
-        for name in disks_of(m.run(["lsblk", "-lnso", "NAME,TYPE", dev], "drop").stdout):
+        for name in disks_of(m.run(["lsblk", "-lnso", "NAME,TYPE", dev], StderrRoute.DROP).stdout):
             if name.startswith("nvme") and name not in members and name not in found:
                 found.append(name)
     return found
