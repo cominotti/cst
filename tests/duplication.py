@@ -46,9 +46,11 @@ out:
   its parameters to attributes. With every name replaced, any two records of
   eight fields read the same (`N : N` eight times), which says nothing about
   copied code. The members of an enum class (`StrEnum`, `IntEnum`, `Enum`:
-  `NAME = value` lines) are declarations too, for the same reason. Type 1
-  still measures them as written, so a field or member list copied word for
-  word is still found.
+  `NAME = value` lines) are declarations too, for the same reason, and so
+  are the module's constants written `NAME: Final = <literal>` (a value
+  `ast.literal_eval` reads: `N : N = S` lines). Type 1 still measures
+  them as written, so a field, member or constant list copied word for word
+  is still found.
 A left-out line is a barrier, not a deletion (`BARRIER`): no window runs
 across it and it is not a code line, so the lines before and after it do not
 join into a block the file does not have.
@@ -200,6 +202,22 @@ def _assigns_parameters_only(node: ast.FunctionDef) -> bool:
     return True
 
 
+def _is_final_literal(stmt: ast.stmt) -> bool:
+    """`NAME: Final = <literal>` (also `Final[T]`, `typing.Final`): a value `ast.literal_eval` reads."""
+    if not (
+        isinstance(stmt, ast.AnnAssign)
+        and isinstance(stmt.target, ast.Name)
+        and stmt.value is not None
+        and _simple_name(stmt.annotation) == "Final"
+    ):
+        return False
+    try:
+        ast.literal_eval(stmt.value)
+    except ValueError, TypeError, SyntaxError, MemoryError, RecursionError:
+        return False
+    return True
+
+
 def _lines(node: ast.stmt) -> range:
     """The 1-based lines a statement spans."""
     return range(node.lineno, (node.end_lineno or node.lineno) + 1)
@@ -207,7 +225,8 @@ def _lines(node: ast.stmt) -> range:
 
 def declared_lines(source: str, *, records: bool) -> set[int]:
     """The lines the measure leaves out (1-based): `Protocol` bodies; with `records`, also record
-    fields, enum members and `__init__` bodies that only assign their parameters (see the module docstring)."""
+    fields, enum members, `__init__` bodies that only assign their parameters and the module's
+    `NAME: Final = <literal>` constants (see the module docstring)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -227,6 +246,10 @@ def declared_lines(source: str, *, records: bool) -> set[int]:
                         out.update(_lines(stmt))
         elif records and isinstance(node, ast.FunctionDef) and _assigns_parameters_only(node):
             out.update(_lines(node))
+    if records:
+        for stmt in tree.body:
+            if _is_final_literal(stmt):
+                out.update(_lines(stmt))
     return out
 
 

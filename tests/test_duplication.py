@@ -255,6 +255,32 @@ class DuplicationRatchetTest(unittest.TestCase):
         plain = {p: measured_lines(enums[p].replace("(StrEnum)", ""), type2=True) for p in ("a", "b")}
         self.assertEqual(clones(plain, 8).cross_file, 24)
 
+    def test_type2_leaves_out_final_literal_constants_and_type1_keeps_them(self) -> None:
+        def consts(prefix: str, annotation: str = ": Final", value: str = '"{}"') -> str:
+            rows = "".join(f"{prefix}_{i}{annotation} = {value.format(prefix + str(i))}\n" for i in range(9))
+            return f"from typing import Final\nimport typing\n\n{rows}"
+
+        files = {"a": consts("A"), "b": consts("B")}
+        self.assertEqual(declared_lines(files["a"], records=True), set(range(4, 13)))
+        self.assertEqual(declared_lines(files["a"], records=False), set())
+        self.assertEqual(declared_lines(consts("C", ": Final[str]"), records=True), set(range(4, 13)))
+        self.assertEqual(
+            declared_lines(consts("D", ": typing.Final", "({!r}, 1, -2)"), records=True), set(range(4, 13))
+        )
+        self.assertEqual(clones({p: normalized_python(s, type2=True) for p, s in files.items()}, 8).cross_file, 22)
+        self.assertEqual(clones({p: measured_lines(s, type2=True) for p, s in files.items()}, 8).duplicated, 0)
+        # Type 1 still finds a list of constants copied word for word.
+        same = {p: measured_lines(files["a"], type2=False) for p in ("X", "Y")}
+        self.assertEqual(clones(same, 8).cross_file, 22)
+        # Only module-level Final constants whose value is a literal: a plain
+        # assignment, a computed value and a Final inside a function are code.
+        plain = {p: measured_lines(consts(p, ""), type2=True) for p in ("a", "b")}
+        self.assertEqual(clones(plain, 8).cross_file, 22)
+        computed = {p: measured_lines(consts(p, value='f("{}")'), type2=True) for p in ("a", "b")}
+        self.assertEqual(clones(computed, 8).cross_file, 22)
+        inner = "def f():\n" + "".join(f'    X_{i}: Final = "x{i}"\n' for i in range(9))
+        self.assertEqual(declared_lines(inner, records=True), set())
+
     def test_a_generic_protocol_body_is_left_out(self) -> None:
         port = "from typing import Protocol\n\nclass P[T](Protocol):\n    def f(self) -> T: ...\n"
         old_style = (
