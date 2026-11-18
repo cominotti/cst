@@ -19,6 +19,7 @@ tests that run them.
 from collections.abc import Mapping
 from dataclasses import dataclass
 import posixpath
+import re
 from typing import Final, Literal, get_args
 
 from cst_core.domain.install import manifest_by_src
@@ -77,6 +78,21 @@ class StateFormat:
         )
 
 
+def first_line_version(text: str, magic: str) -> int | None:
+    """The format version a text file names on its first line, "MAGIC N" (cst-alert 1, cst-game-intended
+    1): 0 when the first line is no such line (a file written before the format had a version); None when
+    it names MAGIC with something that is not a whole number."""
+    words = text.split("\n", 1)[0].split()
+    if not words or words[0] != magic:
+        return 0
+    if len(words) != 2 or not re.fullmatch("[0-9]+", words[1]):
+        return None
+    try:
+        return int(words[1])
+    except ValueError:  # more digits than int() converts (sys.get_int_max_str_digits): no version either
+        return None
+
+
 def version_of(data: object, field: str) -> int | None:
     """The format version a JSON object carries in field: 0 when it has no such field; None when data is not
     an object or the field is not a whole number >= 0 (true is not 1)."""
@@ -105,7 +121,9 @@ def version_of(data: object, field: str) -> int | None:
 # install-record: what CST installed (cst_core/domain/record.py).
 # game-state, game-intended: the game profile's state. Other projects check
 #   that game.state exists (the profile is on): its name and place never
-#   change. Neither has a version yet.
+#   change, and it has no version. game.intended (what 'on' set, for the
+#   drift repair) names its format on its first line; an installed bash copy
+#   of an older CST skips that line (it is no record it knows).
 _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
@@ -116,7 +134,7 @@ docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/dock
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters/backup.py            | vm/adapters/backup.py doctor/application/vm.py     | "version"
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters.py             | cpu/game/adapters.py cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
-game-intended      | /run/cpu-setup/game.intended               | 0 | cpu/game/adapters.py             | cpu/game/adapters.py doctor/application/cpu.py     | none yet
+game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters.py             | cpu/game/adapters.py doctor/application/cpu.py     | first line "cst-game-intended 1" (none: 0)
 """
 
 

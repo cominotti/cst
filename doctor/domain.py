@@ -426,7 +426,8 @@ def per_device_allocated(profiles: Mapping[str, Mapping[str, int]], ndev: int) -
 def read_intended(text: str) -> list[tuple[str, ...]]:
     """Records of game.intended (fields written with bash printf %q):
     ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
-    A line that does not parse, or of another kind, is skipped."""
+    A line that does not parse, or of another kind (the format line
+    "cst-game-intended 1"), is skipped."""
     out: list[tuple[str, ...]] = []
     for line in text.splitlines():
         try:
