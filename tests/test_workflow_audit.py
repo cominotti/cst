@@ -11,14 +11,18 @@ what zizmor itself cannot:
   every file, and zizmor then counts none of its findings as ignored);
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
-- the nightly runs `invowk cmd ci uv-audit`, and that task runs
-  `uv audit --locked` on every dependency group (no --no-group,
-  --only-group, --no-dev, --only-dev, --ignore, --frozen);
-- `invowk cmd check` runs `invowk cmd test workflows`, and that task gives
-  zizmor --offline, the config file and --strict-collection (without it, a
-  file zizmor cannot parse is skipped with a warning and the audit passes),
-  and no option that filters findings out (--min-severity,
-  --min-confidence, --persona, --collect).
+- the nightly runs `invowk cmd ci uv-audit`, and that task runs exactly
+  UV_AUDIT_COMMAND: `uv audit --locked` on every dependency group;
+- `invowk cmd check` runs `invowk cmd test workflows`, and that task runs
+  exactly ZIZMOR_COMMAND: zizmor with --offline, the config file and
+  --strict-collection (without it, a file zizmor cannot parse is skipped
+  with a warning and the audit passes), on all of .github.
+
+The two commands are compared word for word, not searched for options to
+refuse: any other word (an option that filters findings or packages out or
+keeps the tool from failing, such as --min-severity, --no-exit-codes,
+--fix, --ignore-until-fixed or --service-url; a variable; a narrower input;
+`|| true`) fails, including options a later release adds.
 
 Standard library only (no YAML parser: the config is read line by line).
 See docs/dev-tools.md, "The workflow audit".
@@ -36,18 +40,16 @@ from tests.repo_files import REPO, repo_files
 
 CONFIG = ".github/zizmor.yml"
 INVOWKFILE = "cst.invowkmod/invowkfile.cue"
-AUDIT_COMMAND = "tests/uv-dev zizmor"
-FILTER_OPTIONS = ("--min-severity", "--min-confidence", "--persona", "--collect")
 NIGHTLY = ".github/workflows/nightly.yml"
-UV_AUDIT_FILTERS = (
-    "--no-group",
-    "--only-group",
-    "--no-dev",
-    "--only-dev",
-    "--no-default-groups",
-    "--ignore",
-    "--frozen",
-)
+# The exact commands of the two audit tasks, word for word. Any other word
+# (an option such as --no-exit-codes, --fix, --min-severity, --ignore or
+# --service-url, a variable, a narrower input, `|| true`) could leave
+# findings or packages out, or keep the audit from failing. Change the task
+# and this test together, with the reason in the pull request.
+AUDIT_WHY = 'docs/dev-tools.md, "The workflow audit"'
+UV_AUDIT_WHY = 'docs/dev-tools.md, "Known vulnerabilities in the pins"'
+ZIZMOR_COMMAND = ("tests/uv-dev", "zizmor", "--offline", "--strict-collection", "--config", CONFIG, ".github")
+UV_AUDIT_COMMAND = ("uv", "audit", "--locked", "--preview-features", "audit-command")
 INLINE_IGNORE = re.compile(r"zizmor\s*:\s*ignore\b")
 _KEY = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
 
@@ -114,24 +116,20 @@ def task_problems(cue: str) -> list[str]:
     check = task_script(cue, "check") or ""
     if not any(line.strip() == "invowk cmd test workflows" for line in check.splitlines()):
         out.append(f"{INVOWKFILE}: the task check does not run `invowk cmd test workflows`")
-    audit = task_script(cue, "test workflows")
-    if audit is None or AUDIT_COMMAND not in audit:
-        out.append(f"{INVOWKFILE}: the task `test workflows` does not run {AUDIT_COMMAND}")
-        return out
-    words = audit.split()
-    if "--offline" not in words:
-        out.append(f"{INVOWKFILE}: `test workflows` must run zizmor --offline (no token, no network)")
-    if f"--config {CONFIG}" not in " ".join(words):
-        out.append(f"{INVOWKFILE}: `test workflows` must give zizmor --config {CONFIG}")
-    if "--strict-collection" not in words:
-        out.append(
-            f"{INVOWKFILE}: `test workflows` must run zizmor --strict-collection "
-            "(without it a file zizmor cannot parse is skipped and the audit passes)"
-        )
-    for option in FILTER_OPTIONS:
-        if any(w == option or w.startswith(option + "=") for w in words):
-            out.append(f"{INVOWKFILE}: `test workflows` passes {option}, which leaves findings out of the audit")
-    return out
+    return out + command_problems(cue, "test workflows", ZIZMOR_COMMAND, AUDIT_WHY)
+
+
+def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> list[str]:
+    """Whether the invowk task `task` runs exactly the command `want`, as text lines (empty: it does)."""
+    script = task_script(cue, task)
+    if script is None:
+        return [f"{INVOWKFILE}: there is no task `{task}`"]
+    got = script.split()
+    if tuple(got) != want:
+        return [
+            f"{INVOWKFILE}: the task `{task}` must run exactly `{' '.join(want)}`, not `{' '.join(got)}` (see {why})"
+        ]
+    return []
 
 
 def uv_audit_problems(cue: str, nightly: str) -> list[str]:
@@ -139,13 +137,7 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     out: list[str] = []
     if not any(line.strip().endswith("invowk cmd ci uv-audit") for line in nightly.splitlines()):
         out.append(f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`")
-    words = (task_script(cue, "ci uv-audit") or "").split()
-    if words[:2] != ["uv", "audit"] or "--locked" not in words:
-        out.append(f"{INVOWKFILE}: the task `ci uv-audit` must run uv audit --locked")
-    for option in UV_AUDIT_FILTERS:
-        if any(w == option or w.startswith(option + "=") for w in words):
-            out.append(f"{INVOWKFILE}: `ci uv-audit` passes {option}, which leaves packages out of the audit")
-    return out
+    return out + command_problems(cue, "ci uv-audit", UV_AUDIT_COMMAND, UV_AUDIT_WHY)
 
 
 GOOD_CONFIG = """# header
@@ -217,39 +209,42 @@ class WorkflowAuditTest(unittest.TestCase):
                 [f"bad.yml:2: an inline zizmor ignore; put the exception in {CONFIG}, with its reason"],
             )
 
-    def test_check_runs_the_audit_with_nothing_filtered(self) -> None:
+    def test_check_runs_exactly_the_audit_command(self) -> None:
         self.assertEqual(task_problems(GOOD_CUE), [])
         self.assertEqual(
             task_problems(GOOD_CUE.replace("\t\t\t\tinvowk cmd test workflows\n", "")),
             [f"{INVOWKFILE}: the task check does not run `invowk cmd test workflows`"],
         )
-        self.assertEqual(
-            task_problems(GOOD_CUE.replace("--offline ", "")),
-            [f"{INVOWKFILE}: `test workflows` must run zizmor --offline (no token, no network)"],
-        )
-        self.assertEqual(
-            task_problems(GOOD_CUE.replace("--config .github/zizmor.yml ", "")),
-            [f"{INVOWKFILE}: `test workflows` must give zizmor --config {CONFIG}"],
-        )
-        self.assertEqual(
-            task_problems(GOOD_CUE.replace("--strict-collection ", "")),
-            [
-                f"{INVOWKFILE}: `test workflows` must run zizmor --strict-collection "
-                "(without it a file zizmor cannot parse is skipped and the audit passes)"
-            ],
-        )
-        for option in ("--min-severity=high", "--min-confidence high", "--persona regular", "--collect=workflows"):
-            with self.subTest(option=option):
+        good = " ".join(ZIZMOR_COMMAND)
+        for bad in (
+            good.replace("--offline ", ""),
+            good.replace("--config .github/zizmor.yml ", ""),
+            good.replace("--strict-collection ", ""),
+            good.replace("tests/uv-dev zizmor", "true"),
+            # Options that leave findings out, or keep zizmor from failing on them.
+            good + " --min-severity=high",
+            good.removesuffix(" .github") + " --min-confidence high .github",
+            good.removesuffix(" .github") + " --persona regular .github",
+            good.removesuffix(" .github") + " --collect=workflows .github",
+            good.removesuffix(" .github") + " --no-exit-codes .github",
+            good.removesuffix(" .github") + " --no-ignores .github",
+            good.removesuffix(" .github") + " --fix .github",
+            good.removesuffix(" .github") + " --no-config .github",
+            good + " || true",
+            good.removesuffix(" .github") + " .github/workflows",
+            "ZIZMOR_OFFLINE=1 " + good,
+        ):
+            with self.subTest(command=bad):
                 self.assertEqual(
-                    task_problems(GOOD_CUE.replace(' .github"', f' {option} .github"')),
+                    task_problems(GOOD_CUE.replace(good, bad)),
                     [
-                        f"{INVOWKFILE}: `test workflows` passes {option.split('=')[0].split()[0]}, "
-                        "which leaves findings out of the audit"
+                        f"{INVOWKFILE}: the task `test workflows` must run exactly `{good}`, "
+                        f"not `{bad}` (see {AUDIT_WHY})"
                     ],
                 )
         self.assertEqual(
-            task_problems(GOOD_CUE.replace("tests/uv-dev zizmor", "true")),
-            [f"{INVOWKFILE}: the task `test workflows` does not run {AUDIT_COMMAND}"],
+            task_problems(GOOD_CUE.replace('name:        "test workflows"', 'name:        "test flows"')),
+            [f"{INVOWKFILE}: there is no task `test workflows`"],
         )
 
     def test_the_nightly_audits_every_locked_package(self) -> None:
@@ -258,17 +253,25 @@ class WorkflowAuditTest(unittest.TestCase):
             uv_audit_problems(GOOD_CUE, "      - run: invowk cmd check\n"),
             [f"{NIGHTLY}: no step runs `invowk cmd ci uv-audit`"],
         )
-        self.assertEqual(
-            uv_audit_problems(GOOD_CUE.replace("uv audit --locked", "uv audit"), GOOD_NIGHTLY),
-            [f"{INVOWKFILE}: the task `ci uv-audit` must run uv audit --locked"],
-        )
-        for option in ("--no-group mutation", "--only-dev", "--ignore=GHSA-1", "--frozen"):
-            with self.subTest(option=option):
+        good = " ".join(UV_AUDIT_COMMAND)
+        for bad in (
+            good.replace("--locked ", ""),
+            good + " --no-group mutation",
+            good + " --only-dev",
+            good + " --ignore=GHSA-1",
+            good + " --ignore-until-fixed GHSA-1",
+            good + " --no-extra docs",
+            good + " --frozen",
+            good + " --service-url http://localhost:1",
+            "UV_NO_DEV=1 " + good,
+            good + " || true",
+        ):
+            with self.subTest(command=bad):
                 self.assertEqual(
-                    uv_audit_problems(GOOD_CUE.replace("--locked", f"--locked {option}"), GOOD_NIGHTLY),
+                    uv_audit_problems(GOOD_CUE.replace(good, bad), GOOD_NIGHTLY),
                     [
-                        f"{INVOWKFILE}: `ci uv-audit` passes {option.split('=')[0].split()[0]}, "
-                        "which leaves packages out of the audit"
+                        f"{INVOWKFILE}: the task `ci uv-audit` must run exactly `{good}`, "
+                        f"not `{bad}` (see {UV_AUDIT_WHY})"
                     ],
                 )
 

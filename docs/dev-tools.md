@@ -242,10 +242,13 @@ for local actions) and `superfluous-actions` on the release step.
 `tests/test_workflow_audit.py` (a unit test) fails when an ignore list has
 no reason, when an audit is disabled (`disable: true`, which also hides it
 from zizmor's count of ignored findings), on an inline `zizmor: ignore`
-comment in `.github`, and when `check` stops running the task, the task
-drops `--offline`, the config or `--strict-collection`, or it gives zizmor
-an option that leaves findings out (`--min-severity`,
-`--min-confidence`, `--persona`, `--collect`). `tests/uv-dev zizmor
+comment in `.github`, and when `check` stops running the task or the task
+runs anything but exactly that command. The words are compared one by one:
+dropping `--offline`, the config or `--strict-collection` fails, and so
+does any word added, such as an option that leaves findings out or keeps
+zizmor from failing (`--min-severity`, `--persona`, `--no-exit-codes`,
+`--no-ignores`, `--fix`), a variable, `|| true` or a narrower input
+than `.github`. `tests/uv-dev zizmor
 --offline --no-ignores .github` shows what the exceptions hide.
 
 ## Coverage
@@ -463,9 +466,11 @@ the notice that the command is new in uv 0.12. It needs the network, so the
 nightly workflow runs it (in its static gates job) and `check` does not.
 When it fails, upgrade that pin (below), or the tool that pulls it in.
 `tests/test_workflow_audit.py` fails when the nightly stops running the task
-or the task drops `--locked` or leaves packages out (`--no-group`,
-`--only-group`, `--no-dev`, `--only-dev`, `--no-default-groups`,
-`--ignore`, `--frozen`).
+or the task runs anything but exactly that command: dropping `--locked`
+fails, and so does any word added, such as an option that leaves packages
+or vulnerabilities out (`--no-group`, `--only-dev`, `--no-extra`,
+`--ignore`, `--ignore-until-fixed`, `--frozen`, `--service-url`), a
+variable or `|| true`.
 
 ## Upgrading a pin
 
