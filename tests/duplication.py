@@ -45,8 +45,10 @@ out:
   `name: type = default` lines) and an `__init__` whose body only assigns
   its parameters to attributes. With every name replaced, any two records of
   eight fields read the same (`N : N` eight times), which says nothing about
-  copied code. Type 1 still measures them as written, so a field list copied
-  word for word is still found.
+  copied code. The members of an enum class (`StrEnum`, `IntEnum`, `Enum`:
+  `NAME = value` lines) are declarations too, for the same reason. Type 1
+  still measures them as written, so a field or member list copied word for
+  word is still found.
 A left-out line is a barrier, not a deletion (`BARRIER`): no window runs
 across it and it is not a code line, so the lines before and after it do not
 join into a block the file does not have.
@@ -81,6 +83,7 @@ _SHELL_TRIVIAL: Final = frozenset({"fi", "done", "esac", "}", "{", ";;", "else",
 # Stands for left-out lines in a normalized file: no window holds it, and it is no code line.
 BARRIER: Final = "\0"
 _RECORD_BASES: Final = frozenset({"TypedDict", "NamedTuple"})
+_ENUM_BASES: Final = frozenset({"Enum", "StrEnum", "IntEnum"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +207,7 @@ def _lines(node: ast.stmt) -> range:
 
 def declared_lines(source: str, *, records: bool) -> set[int]:
     """The lines the measure leaves out (1-based): `Protocol` bodies; with `records`, also record
-    fields and `__init__` bodies that only assign their parameters (see the module docstring)."""
+    fields, enum members and `__init__` bodies that only assign their parameters (see the module docstring)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -217,6 +220,10 @@ def declared_lines(source: str, *, records: bool) -> set[int]:
             elif records and _is_record(node):
                 for stmt in node.body:
                     if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        out.update(_lines(stmt))
+            elif records and any(_simple_name(b) in _ENUM_BASES for b in node.bases):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Assign) and all(isinstance(t, ast.Name) for t in stmt.targets):
                         out.update(_lines(stmt))
         elif records and isinstance(node, ast.FunctionDef) and _assigns_parameters_only(node):
             out.update(_lines(node))
