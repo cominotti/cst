@@ -184,6 +184,9 @@ if name == "btrfs":
         free = take("free", None)
         if free is None:
             sys.exit(1)
+        if isinstance(free, str):  # a reading that is not a number
+            print("Overall:\n    Free (estimated):\t\t %s" % free)
+            sys.exit(0)
         print("Overall:\n    Device size:\t\t 4000797868032\n    Free (estimated):\t\t %d\t(min: %d)" % (free, free // 2))
         sys.exit(0)
     if args[:2] == ["subvolume", "create"]:

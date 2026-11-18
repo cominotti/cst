@@ -691,7 +691,14 @@ hourly() {
                 "btrfs-snapshot-core rc=${rc}; see journalctl -u btrfs-snapshot."
         # Deletions free space asynchronously: wait before the next decision.
         btrfs subvolume sync /var >/dev/null 2>&1 || true
-        log 4 "emergency purge done (rc=${rc}); free now $(( $(free_bytes) / GIB )) GiB"
+        # A reading that fails now ends the run as every emergency run ends: the purge ran
+        # and was judged above; the next run's first reading fails it if that lasts.
+        free="$(free_bytes)"
+        if [[ "${free}" =~ ^[0-9]+$ ]]; then
+            log 4 "emergency purge done (rc=${rc}); free now $(( free / GIB )) GiB"
+        else
+            log 4 "emergency purge done (rc=${rc}); free space cannot be read now"
+        fi
         return 0
     fi
     rm -f "${STATE}/emergency"

@@ -517,14 +517,29 @@ class SpaceGuardTest(Base):
         self.assertEqual(sorted(os.listdir(self.state)), ["alerted-emergency", "emergency", "paused"])
 
     def test_free_space_unreadable_after_the_emergency_purge(self) -> None:
-        # Bug (phase 1 list): the purge ran, but the log line after it divides an empty
-        # reading: bash's arithmetic error ends the run with exit 1 and no "done" line.
-        self.machine(free=[150 * GIB, None])
-        r = self.run_prog("hourly")
-        self.assertEqual(r.returncode, 1)
-        self.assertEqual([c[0] for c in self.core_calls()], ["prune"])
-        self.assertFalse(any("emergency purge done" in ln for ln in self.lines(r.stdout)))
-        self.assertIn("arithmetic syntax error", r.stderr)
+        # The purge ran: a clear line instead of the free space, and the run ends as every
+        # emergency run ends (exit 0). Before, bash's arithmetic error on the empty reading
+        # ended it with exit 1 and no "done" line. A lasting failure fails the next run
+        # ("cannot read free space", test_free_space_unreadable).
+        title = "Snapshots: emergency purge"
+        body = "Only 150 GiB free (limit 150): keeping only the last day and 3 dailies. Free space on /home or /var."
+        for second in (None, "garbage"):
+            with self.subTest(second):
+                self.forget_calls()
+                self.machine(free=[150 * GIB, second])
+                r = self.run_prog("hourly")
+                self.assertEqual(
+                    (r.returncode, self.lines(r.stdout), r.stderr),
+                    (
+                        0,
+                        [
+                            log(4, f"{title}: {body}"),
+                            log(4, "emergency purge done (rc=0); free space cannot be read now"),
+                        ],
+                        "",
+                    ),
+                )
+                self.assertEqual([c[0] for c in self.core_calls()], ["prune"])
 
     def test_emergency_purge_failure_alerts(self) -> None:
         self.machine(free=10 * GIB)

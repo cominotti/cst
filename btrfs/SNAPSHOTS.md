@@ -2544,6 +2544,11 @@ How it works, as a sequence:
      `Snapshots: safety check blocked deletions`).
    - After an emergency purge, snapshots stay paused until free space is
      above 270 GiB.
+   - The journal ends the run with the free space after the purge
+     (`emergency purge done (rc=N); free now X GiB`). If it cannot be read
+     at that moment, the line says `free space cannot be read now` and the
+     run still ends normally; the next hourly run reads it again first and
+     fails with `cannot read free space` if it still cannot.
 
 The limits are in `/etc/btrfs-setup/snapshots.conf`: `SKIP_AT_OR_BELOW_GIB=250`,
 `RESUME_ABOVE_GIB=270`, `EMERGENCY_AT_OR_BELOW_GIB=150`.
