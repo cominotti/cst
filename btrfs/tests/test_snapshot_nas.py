@@ -667,6 +667,27 @@ class MaintenanceTest(Base):
                 self.assertEqual([a[4] for a in self.notified()], [alert] if alert else [])
                 self.assertFalse(os.path.exists(self.state_file("nas-last-check")))
 
+    def test_a_capture_file_that_cannot_be_written_does_not_stop_the_run(self) -> None:
+        # The check's output goes to a scratch file too (bash: tee -a). A file that cannot be opened
+        # or written (a full /tmp; here mktemp names a folder) is said on stderr, as tee says it, and
+        # the run goes on: the check is judged, the summary and the "ok" line follow. Before, the
+        # OSError of the relay ended the run with a traceback (exit 1).
+        folder = os.path.join(self.tmp, "tmpdir", "capture")
+        self.write(os.path.join(self.bin, "mktemp"), f"#!/bin/sh\nmkdir -p '{folder}' && echo '{folder}'\n")
+        os.chmod(os.path.join(self.bin, "mktemp"), 0o755)
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"tee: {folder}: Is a directory", err.splitlines())
+        self.assertNotIn("Traceback", err)
+        self.assertIn(log(4, "restic: Fatal: connection lost"), lines)
+        self.assertIn(
+            log(4, "NAS: restic check failed (rc=1) without naming damaged data (connection lost?); retried next run"),
+            lines,
+        )
+        self.assertEqual(self.read_state("nas-check-failures"), "1\n")
+        self.assertTrue(any(ln.startswith(log(5, "NAS backup ok: ")) for ln in lines), lines)
+
     def test_a_check_that_keeps_failing_alerts_on_the_third_run(self) -> None:
         self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
         for n in (1, 2, 3):

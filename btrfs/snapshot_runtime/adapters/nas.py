@@ -16,6 +16,7 @@ import os
 import shutil
 import signal
 import sys
+from typing import TextIO
 
 from btrfs.health_check.domain import bash_div
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
@@ -48,6 +49,41 @@ from btrfs.snapshot_runtime.domain import (
 )
 
 UMOUNT_TRIES = 5
+
+
+class _Capture:
+    """tee -a PATH: restic's journal lines appended to PATH. A file that cannot be opened or written
+    is said once on stderr, as tee says it, and no longer written; the lines still reach the journal
+    and the run goes on."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.file: TextIO | None = None
+        try:
+            self.file = open(path, "a", encoding="utf-8", errors="surrogateescape")
+        except OSError as e:
+            self.failed(e)
+
+    def failed(self, e: OSError) -> None:
+        print(f"tee: {self.path}: {e.strerror}", file=sys.stderr, flush=True)
+
+    def add(self, line: str) -> None:
+        if self.file is None:
+            return
+        try:
+            self.file.write(line + "\n")
+            self.file.flush()
+        except OSError as e:
+            self.failed(e)
+            self.close()
+
+    def close(self) -> None:
+        f, self.file = self.file, None
+        if f is not None:
+            with contextlib.suppress(OSError):
+                f.close()
+
+
 NAS_RECORDS = ("nas-summary", "nas-last-prune", "nas-last-check", "nas-check-failures")
 
 
@@ -123,17 +159,21 @@ class Nas:
         """restic bounded by LIMIT seconds (timeout --kill-after=5m), its output in the journal
         format line by line, and appended to CAPTURE if given. Its exit status (124: time limit)."""
         m = self.m
+        sink = _Capture(capture) if capture else None
 
         def relay(line: str) -> None:
             out = restic_line(line)
             m.say(out)
-            if capture:
-                with open(capture, "a", encoding="utf-8", errors="surrogateescape") as f:
-                    f.write(out + "\n")
+            if sink is not None:
+                sink.add(out)
 
         argv = ["timeout", "--kill-after=5m", str(limit), "env", *env, "restic", *args]
         extra = {"RESTIC_CAPTURE": capture} if capture else None
-        return m.rc(m.run(argv, output="merge", on_line=relay, env=extra))
+        try:
+            return m.rc(m.run(argv, output="merge", on_line=relay, env=extra))
+        finally:
+            if sink is not None:
+                sink.close()
 
     def reachable(self) -> bool:
         """Connection, key, host key and SFTP subsystem in one go (what restic uses)."""
