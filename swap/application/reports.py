@@ -31,6 +31,7 @@ from swap.domain import (
     SETTINGS_REL,
     SpecResolution,
     human,
+    human_size,
     is_cst_dropin,
     marked_crypttab_entry,
     marked_fstab_name,
@@ -41,7 +42,6 @@ from swap.domain import (
     parse_meminfo,
     parse_memory_low,
     parse_proc_swaps,
-    parse_size,
     parse_sysctl,
     parse_tmpfiles_params,
     psi_value,
@@ -484,9 +484,7 @@ class SwapReports:
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
-            size = parse_size(effective)
-            live = effective if size is None else human(size)
-            return SettingCheckRow("over", "machine.slice MemoryLow", live, human(want_low)), source
+            return SettingCheckRow("over", "machine.slice MemoryLow", human_size(effective), human(want_low)), source
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
         if live_low is None:
             return SettingCheckRow(

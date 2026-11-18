@@ -358,6 +358,13 @@ def human(n: int | None) -> str:
     return format_bytes_human(n)
 
 
+def human_size(value: str) -> str:
+    """A size as systemd prints it (`systemctl show`: bytes), in binary IEC units; other text (infinity)
+    as it is."""
+    size = parse_size(value)
+    return value if size is None else human(size)
+
+
 def psi_value(text: str, kind: str = "some", key: str = "avg60") -> str | None:
     """Extract one metric from PSI file text (e.g. kind='some', key='avg60')."""
     for line in text.splitlines():

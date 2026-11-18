@@ -9,6 +9,7 @@ from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, SWAP_DROPIN, WAR
 from doctor.ports import CheckFn, DoctorHostPort
 from swap.domain import (
     human,
+    human_size,
     marked_fstab_name,
     memory_low_override,
     parse_memory_low,
@@ -109,10 +110,9 @@ def check_machine_slice_memory_low(host: DoctorHostPort) -> Iterator[Result]:
     source = memory_low_override(effective, dropins, SWAP_DROPIN, want)
     size = parse_size(effective)
     if source is not None:
-        live = effective if size is None else human(size)
         yield Result(
             INFO,
-            f"machine.slice MemoryLow {live}: set by {source}, which systemd applies after CST's"
+            f"machine.slice MemoryLow {human_size(effective)}: set by {source}, which systemd applies after CST's"
             f" {SWAP_DROPIN} ({human(want)}); cst swap leaves it",
         )
     elif SWAP_DROPIN in paths and size == want:
