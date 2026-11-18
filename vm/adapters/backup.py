@@ -16,7 +16,8 @@ from typing import Self, TextIO
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.notify import Notifier, Urgency
+from cst_core.adapters.notify import Notifier
+from cst_core.domain.contracts import Urgency
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR

@@ -18,7 +18,8 @@ import time
 
 from btrfs.bulk.adapters.machine import HomeTree, kind, log
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.adapters.notify import Notifier, PENDING_ALERTS, Urgency
+from cst_core.adapters.notify import Notifier, PENDING_ALERTS
+from cst_core.domain.contracts import Urgency
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP
 

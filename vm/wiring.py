@@ -9,8 +9,8 @@ Every path can be moved by its CST_VM_* variable, for the tests only
 from collections.abc import Mapping
 import os
 
-from cst_core.adapters.notify import PENDING_ALERTS, Urgency
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.adapters.notify import PENDING_ALERTS
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.values import HOUR

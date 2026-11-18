@@ -42,7 +42,8 @@ from cst_core.adapters.files import (
 )
 from cst_core.adapters.journal import log
 from cst_core.adapters import notify as core_notify
-from cst_core.adapters.notify import Notifier, Urgency
+from cst_core.adapters.notify import Notifier
+from cst_core.domain.contracts import Urgency
 from cst_core.adapters.sd_notify import ServiceNotifier
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import confirm

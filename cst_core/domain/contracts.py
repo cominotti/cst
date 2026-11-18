@@ -167,6 +167,14 @@ if sorted(_FORMATS) != sorted(StateFormatKey):
 NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
 
 
+class Urgency(StrEnum):
+    """An alert's urgency, as btrfs-notify -u takes it (and the alert spool's files keep it)."""
+
+    LOW = "low"
+    NORMAL = "normal"
+    CRITICAL = "critical"
+
+
 def state_format(key: StateFormatKey) -> StateFormat:
     """The registered format of key."""
     return _FORMATS[key]

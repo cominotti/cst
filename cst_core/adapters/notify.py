@@ -24,21 +24,13 @@ import time
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.ports import CommandRunnerPort
 
 _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
-
-
-class Urgency(StrEnum):
-    """An alert's urgency, as btrfs-notify -u takes it."""
-
-    LOW = "low"
-    NORMAL = "normal"
-    CRITICAL = "critical"
 
 
 class _Outcome(StrEnum):

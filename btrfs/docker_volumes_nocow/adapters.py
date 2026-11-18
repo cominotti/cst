@@ -26,7 +26,8 @@ from btrfs.docker_volumes_nocow.domain import (
 )
 from cst_core.adapters.files import CounterFile, write_atomic
 from cst_core.adapters.journal import log as journal_log
-from cst_core.adapters.notify import Notifier, Urgency
+from cst_core.adapters.notify import Notifier
+from cst_core.domain.contracts import Urgency
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
 
