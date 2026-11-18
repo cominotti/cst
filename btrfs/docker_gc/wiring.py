@@ -31,7 +31,8 @@ def settings_from(env: Mapping[str, str]) -> GcSettings:
 
 def paths_from(env: Mapping[str, str]) -> GcPaths:
     """The state and runtime folders, the settings file and the installed program (DOCKER_GC_STATE,
-    DOCKER_GC_RUNTIME, DOCKER_GC_CONF and DOCKER_GC_INSTALLED: tests)."""
+    DOCKER_GC_RUNTIME, DOCKER_GC_CONF and DOCKER_GC_INSTALLED: tests; the last two also the installer's
+    SettingsStep, cst_core/domain/settings_steps.py, which names the staged copy and file with them)."""
     d = GcPaths()  # the defaults
     return GcPaths(
         state_dir=env.get("DOCKER_GC_STATE", d.state_dir),

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Local files for the install use case: atomic writes, modes, root ownership, SELinux labels."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import os
 import shutil
@@ -15,7 +15,6 @@ from cst_core.adapters.runtime import checkout_commit, checkout_root, install_pa
 from cst_core.application.install import InstallService
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
-from cst_core.domain.settings_steps import SettingsStep
 from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
 from cst_core.ports import CommandResult, CommandRunnerPort, UnitVerdict, WriteFailed
 
@@ -121,16 +120,15 @@ class JsonInstallRecord:
 
 class CheckoutSettingsStep:
     """SettingsStepPort: the checkout's copy of the program, on python (the interpreter the installer
-    runs on), with the two paths in its environment; its output merged, at most 120 s."""
+    runs on), with env added to its environment; its output merged, at most 120 s."""
 
     def __init__(self, checkout: str, python: str, runner: CommandRunnerPort | None = None) -> None:
         self._checkout = checkout
         self._python = python
         self._runner = runner or SubprocessCommandRunner()
 
-    def run(self, src: str, step: SettingsStep, *, program: str, settings: str) -> CommandResult:
-        argv = [self._python, "-I", "-B", os.path.join(self._checkout, src), *step.args]
-        env = {step.env_program: program, step.env_file: settings}
+    def run(self, src: str, args: Sequence[str], env: Mapping[str, str]) -> CommandResult:
+        argv = [self._python, "-I", "-B", os.path.join(self._checkout, src), *args]
         return self._runner.run(argv, env=env, timeout=120, output="merge")
 
 

@@ -1627,8 +1627,10 @@ and asks you to write the file yourself.
 **Never "none" by mistake.** The docker-gc of this CST has no registry of its
 own: it reads the file. If the file is gone while it is installed (removed by
 hand), every run, `status` and `cleanup-now` stop with exit 78 and say so,
-instead of running with nothing protected; write the file again
-(`DOCKER_GC_PROTECT=` protects none). To see the list and where it comes from
+instead of running with nothing protected. So do `enable` and `disable
+--purge` (exit 78), and the installer's `install` or `remove` of it (exit 1),
+before they change anything: the installed copy cannot tell them the list.
+Write the file again (`DOCKER_GC_PROTECT=` protects none). To see the list and where it comes from
 without changing anything (exit 10: `enable` would write the file), from the
 top of the CST folder:
 

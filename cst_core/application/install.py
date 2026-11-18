@@ -31,7 +31,7 @@ from cst_core.domain.install import (
     render_template,
     template_keys,
 )
-from cst_core.domain.settings_steps import SETTINGS_STEPS
+from cst_core.domain.settings_steps import SETTINGS_STEPS, SettingsStep
 from cst_core.domain.record import (
     ROOT_RECORD,
     USER_RECORD_REL,
@@ -231,23 +231,29 @@ class InstallService:
         """
         todo = self._prepare(entries, req)
         todo.sort(key=lambda pd: pd[0].kind == "unit")
-        replaced = [p for p, data in todo if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root)]
+        # Only a program with a SettingsStep is read here (is_current reads the whole file).
+        replaced = [
+            p
+            for p, data in todo
+            if (p.src or "") in SETTINGS_STEPS
+            and not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root)
+        ]
         done = self._settings_steps(replaced)
         return itertools.chain(done, self._write_all(todo, req))
 
-    def _due_steps(self, places: Sequence[Placement]) -> list[tuple[Placement, str]]:
-        """The places with a SettingsStep whose settings file is missing, and that file: staged under
-        the same root as the place (its path is that root followed by its dest)."""
+    def _due_steps(self, places: Sequence[Placement]) -> list[tuple[Placement, SettingsStep, str]]:
+        """The places with a SettingsStep whose settings file is missing, with that step and that file:
+        staged under the same root as the place (its path is that root followed by its dest)."""
         if self._steps is None:
             return []
-        due: list[tuple[Placement, str]] = []
+        due: list[tuple[Placement, SettingsStep, str]] = []
         for p in places:
             step = SETTINGS_STEPS.get(p.src or "")
             if step is None or not p.path.endswith(p.dest):
                 continue
-            settings = staged(p.path[: len(p.path) - len(p.dest)], step.settings_file)
+            settings = staged(p.path.removesuffix(p.dest), step.settings_file)
             if self._target.current(settings) is None:
-                due.append((p, settings))
+                due.append((p, step, settings))
         return due
 
     def _settings_steps(self, places: Sequence[Placement]) -> list[str]:
@@ -257,9 +263,8 @@ class InstallService:
         runner = self._steps
         if runner is None:
             return lines
-        for p, settings in self._due_steps(places):
-            step = SETTINGS_STEPS[p.src or ""]
-            r = runner.run(p.src or "", step, program=p.path, settings=settings)
+        for p, step, settings in self._due_steps(places):
+            r = runner.run(p.src or "", step.args, {step.env_program: p.path, step.env_file: settings})
             out = [line for line in r.stdout.splitlines() if line.strip()]
             if r.returncode != 0:
                 raise InstallRefused(
@@ -368,7 +373,9 @@ class InstallService:
         """Remove each file (a link itself) and its line in the record; `removed:   PATH` for each that
         was there. Works without a record (an install from before it): the files are the manifest's.
         A program with a SettingsStep that is there runs it first, while its settings file is missing."""
-        yield from self._settings_steps([p for p in places if self._target.current(p.path) is not None])
+        yield from self._settings_steps(
+            [p for p in places if (p.src or "") in SETTINGS_STEPS and self._target.current(p.path) is not None]
+        )
         gone: list[Placement] = []
         try:
             for p in places:
@@ -392,7 +399,7 @@ class InstallService:
                 replaced.append(p)
         # A settings file install would write first, from the program it replaces (SettingsStep).
         settings = [
-            f"would write: {path} (from {p.path}, before it is replaced)" for p, path in self._due_steps(replaced)
+            f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)
         ]
         return settings + lines, len(replaced) + len(settings)
 

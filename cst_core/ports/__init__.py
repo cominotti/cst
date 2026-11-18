@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Literal, NewType, Protocol
 
 from cst_core.domain.install import OnDisk
-from cst_core.domain.settings_steps import SettingsStep
 from cst_core.domain.record import InstallRecord
 
 
@@ -339,9 +338,9 @@ class UnitVerifierPort(Protocol):
 class SettingsStepPort(Protocol):
     """Runs a manifest program's SettingsStep (cst_core.domain.settings_steps) from the checkout."""
 
-    def run(self, src: str, step: SettingsStep, *, program: str, settings: str) -> CommandResult:
-        """The checkout's src with step.args; program: the installed copy, settings: the file (both as
-        the install sees them, staged under --root)."""
+    def run(self, src: str, args: Sequence[str], env: Mapping[str, str]) -> CommandResult:
+        """The checkout's src with args, env added to its environment (the step's two variables: the
+        installed copy and the settings file, both as the install sees them, staged under --root)."""
         ...
 
 
