@@ -3,7 +3,8 @@
 
 This folder holds the parts of `cpu-setup.sh`, the `cpu` module of CST
 (Cominotti Setup Tools). The script lives one level up, at the top of
-the CST folder. You run it as `cst cpu <command>` (how to set
+the CST folder: a shim whose header comment is the help, which runs
+`cpu/cpu-setup` (Python, the `cpu.setup` package). You run it as `cst cpu <command>` (how to set
 up `cst`: [../README.md](../README.md#the-cst-command));
 `bash cpu-setup.sh <command>` from the repository folder does the same. It is
 written for one machine, the workstation **sophia**:
@@ -297,8 +298,8 @@ uses the same five names as its default.) A byte that is not UTF-8 in this
 file, or in a mapped file's name that `cpu-watch` reads in `/proc/PID/maps`,
 is replaced and no longer stops `vm-pin` or `cpu-watch`.
 
-The game profile sources this file with bash, and `vm-pin` and `cst doctor`
-read it the same way (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
+The game profile, `vm-pin` and `cst doctor` read this file as bash reads
+it when it sources it (cst_core's settings reader) (`BUILD_CPUS='12-23' # E-cores` is `12-23` for all of
 them). Keep to plain `KEY=value` lines: quote a value with blanks in single
 quotes. A line bash would read differently, or that it would run as a
 command (`BUILD_CPUS = 12-23`, a `$` or a backtick outside single quotes),
@@ -1465,7 +1466,15 @@ this is harmless.
 
 | File | Installed as / used by |
 |------|------------------------|
-| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`); `cst cpu game state` runs this copy |
+| `cpu-setup` | What `cpu-setup.sh` runs (checkout only): `cli.main` of `setup/` |
+| `setup/domain.py` | `cst cpu`'s rules, no I/O: its commands and where each goes, the paths it uses, the lines it writes (`cpu-setup.conf`, the drop-ins, the HWP tmpfiles line), how `status` reads what it shows, the `daemon.json` edit, the memory experiments |
+| `setup/adapters.py` | `CpuSetup`: install, status, uninstall, game, vm-pin, docker-slice and experiment on the machine, through the installer (`cst_core/installer.py`, as the user through runuser for the home's files), systemctl and the checkout's programs; a step that failed ends the command with its exit status, as under `set -e` |
+| `setup/wiring.py` | What the shim hands over (`CST_SELF`, `CST_ARG0`), the environment, the command lines it execs (cpu-watch, flatpak-spawn from a toolbox, sudo) and `CpuSetup` over the real adapters |
+| `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
+| `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
+| `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
+| `game/adapters.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/cli.py` | The command line of `cpu-game-profile` |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
 | `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |

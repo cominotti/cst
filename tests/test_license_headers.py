@@ -93,9 +93,16 @@ class LicenseGateTest(unittest.TestCase):
 
     def test_every_script_that_prints_its_header_comment_is_listed(self) -> None:
         # A script copied from these (same sed) is checked by the test below only once it is listed;
-        # so is a shim whose help cst_core/route.py prints from its header (script_help, the same rule).
-        idioms = ("sed -n '2,/^$/", "/cst_core/route.py")
-        using = {rel for rel in shell_files() if any(i in Path(REPO, rel).read_text(encoding="utf-8") for i in idioms)}
+        # so is a shim whose help cst_core/route.py or cpu/cpu-setup prints from its header (script_help,
+        # the same rule).
+        # The previous version's programs in tests/fixtures/legacy are an older commit's bytes, never edited.
+        idioms = ("sed -n '2,/^$/", "/cst_core/route.py", "/cpu/cpu-setup")
+        using = {
+            rel
+            for rel in shell_files()
+            if not rel.startswith("tests/fixtures/legacy/")
+            and any(i in Path(REPO, rel).read_text(encoding="utf-8") for i in idioms)
+        }
         self.assertEqual(using, {script for script, _, _ in HELP_FROM_HEADER})
 
     def test_help_from_the_header_comment_shows_no_license_line(self) -> None:

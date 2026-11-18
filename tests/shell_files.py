@@ -31,6 +31,9 @@ SHELL_TEST_SCRIPTS: Final[frozenset[str]] = frozenset(
         "tests/e2e/scripts/entrypoint-host-sim.sh",
         "tests/e2e/scripts/setup-dind.sh",
         "tests/e2e/scripts/setup-loop-btrfs.sh",
+        # The previous version's programs (tests/fixtures/legacy), installed by tier 1 next to this one.
+        "tests/fixtures/legacy/cpu-setup.sh@cfb496a",
+        "tests/fixtures/legacy/game-profile@cfb496a",
     }
 )
 
