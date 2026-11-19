@@ -105,8 +105,9 @@ repository:
   (syntax errors), `PLW1510`, and the families that had no hit when they
   were turned on: `PGH` (no blanket ignore comments), `A` (no builtin name
   shadowed), `T10` (no debugger call), `TID` (no relative import from a
-  parent package), `LOG` and `G` (logging calls), `PLE` (pylint errors) and
-  `W` (pycodestyle warnings), for every Python file (`test pylint`). `ANN`
+  parent package), `LOG` and `G` (logging calls), `PLE` (pylint errors),
+  `W` (pycodestyle warnings) and `C4` (comprehensions), for every Python
+  file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
   own (`ruff check --select ANN`), on every Python file (see "ANN applies
   to every file" below).
@@ -139,7 +140,11 @@ repository:
   `PLR0913`, `PLR0915` (more than 6 returns, 12 branches, 5 arguments or
   50 statements, ruff's defaults), with `FBT003` (a bare `True`/`False`
   passed by position) and the `N` family (pep8-naming), counted under `N`:
-  an entry of RULES made of letters only counts every code of its family. A second ruff run fails on any `# noqa` that suppresses nothing
+  an entry of RULES made of letters only counts every code of its family.
+  The families of lint group 2 that still have hits no safe fix removes
+  are budgeted the same way: `DTZ`, `PLW`, `RUF`, `SIM`, `PERF`, `FURB`,
+  `PIE`, `RET`, `PYI`, `EXE` and `ERA`. A family that reaches 0 moves to
+  `select`. A second ruff run fails on any `# noqa` that suppresses nothing
   (`RUF100`). When a budget fails, the script prints the measured table;
   see [tests/budgets.py](../tests/budgets.py) for how budgets work.
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):

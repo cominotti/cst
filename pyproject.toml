@@ -84,8 +84,9 @@ exclude = ["*.md"]
 # ignore` or `# noqa`), A (no builtin name shadowed), T10 (no debugger call
 # left), TID (no relative import from a parent package), LOG and G (logging
 # calls: no f-string or % formatting in the message), PLE (pylint errors),
-# W (pycodestyle warnings: trailing whitespace, invalid escapes).
-select = ["F", "B", "UP", "E9", "PLW1510", "PGH", "A", "T10", "TID", "LOG", "G", "PLE", "W"]
+# W (pycodestyle warnings: trailing whitespace, invalid escapes), C4
+# (comprehensions: no list() around a generator, no needless dict()).
+select = ["F", "B", "UP", "E9", "PLW1510", "PGH", "A", "T10", "TID", "LOG", "G", "PLE", "W", "C4"]
 # CST uses the standard library only: no rule may suggest or write an import
 # from the third-party typing_extensions (tests/test_python_files.py checks
 # this is false).
