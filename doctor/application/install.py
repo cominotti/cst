@@ -33,8 +33,9 @@ class _InstallFindings:
 def _file_findings(
     host: DoctorHostPort, files: InstalledFilesPort, dest: str, f: RecordedFile, home: str, out: _InstallFindings
 ) -> None:
-    """One recorded file: missing, changed since CST installed it, not readable, mode or owner, older
-    than this checkout, the programs its unit runs."""
+    """One recorded file: missing, differing from its record (changed by hand, or written by an install that
+    could not update the record), not readable, mode or owner, older than this checkout, the programs its
+    unit runs."""
     view = host.path(HostPath(dest))
     fix = refresh(host, f.component)
     try:
@@ -54,7 +55,14 @@ def _file_findings(
             Result(INFO, f"{dest}: not readable as your user (compared the record with this checkout only)")
         )
     elif sha != f.sha256:
-        out.results.append(Result(WARN, f"{dest}: changed since CST installed it ({f.component})", fix))
+        out.results.append(
+            Result(
+                WARN,
+                f"{dest}: differs from its install record ({f.component}): changed by hand, or written by an "
+                "install that could not update the record",
+                fix,
+            )
+        )
         problem = True
     if st is not None and st.st_mode & 0o7777 != f.mode:
         out.results.append(Result(INFO, f"{dest}: mode {st.st_mode & 0o7777:04o}, CST installed it {f.mode:04o}"))

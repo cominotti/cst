@@ -543,17 +543,20 @@ EOF
 
 # install_report_launcher: btrfs-stall-report in the target user's ~/.local/bin,
 # for the host and toolboxes alike (no target user: none); listed in that
-# user's install record under btrfs:report-launcher. When the installer fails
-# (no home, a record of a newer CST, a folder the user cannot write), it says so
-# and install goes on: the launcher is left as it is, and mark_report_launcher
-# does not mark it done.
+# user's install record under btrfs:report-launcher. When the installer fails,
+# it says so and install goes on, and mark_report_launcher does not mark it
+# done. Most failures come before the write (no home, a record of a newer CST,
+# a ~/.local/bin the user cannot write): the launcher is left as it is. One
+# comes after it: a record that cannot be written (its folder, a full disk);
+# the launcher is then written without its record line, which cst doctor
+# reports when the line it has is stale. The warning fits both.
 install_report_launcher() {
     report_launcher_written=0
     [[ -n "${shim}" ]] || return 0
     if shim_content | cst_install_text "${shim}" 0755 "${target_user}" btrfs:report-launcher; then
         report_launcher_written=1
     else
-        echo "WARNING: the install record of ${target_user} was not changed (see above); ${shim} was not installed or updated" >&2
+        echo "WARNING: ${shim} may not have been installed or updated, and the install record of ${target_user} was not updated for it (see above)" >&2
     fi
 }
 

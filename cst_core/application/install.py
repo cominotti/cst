@@ -3,8 +3,10 @@
 
 Output lines are the ones the setup scripts always printed:
 `unchanged: DEST` and `written:   DEST`; a plan prints
-`would write: DEST` instead and changes nothing; a removal
-`removed:   DEST`. Every entry's bytes are built and checked (templates)
+`would write: DEST` instead and changes nothing (and `would record: DEST`
+for a file already right that the install record does not list yet, or
+lists otherwise); a
+removal `removed:   DEST`. Every entry's bytes are built and checked (templates)
 before the first write, so a bad call writes nothing; then one line comes
 per file, as it is written.
 
@@ -36,6 +38,7 @@ from cst_core.domain.install import (
 )
 from cst_core.domain.settings_steps import SETTINGS_STEPS, SettingsStep
 from cst_core.domain.record import (
+    EMPTY_RECORD,
     ROOT_RECORD,
     USER_RECORD_REL,
     ComponentState,
@@ -195,7 +198,10 @@ class InstallService:
                     f"{entry.src}: belongs to the user; install it as the user (cst_install_as USER), not as root"
                 )
 
-    def _prepare(self, entries: Sequence[InstallEntry], req: InstallRequest) -> list[tuple[Placement, bytes]]:
+    def _prepare(
+        self, entries: Sequence[InstallEntry], req: InstallRequest
+    ) -> tuple[list[tuple[Placement, bytes]], dict[str, InstallRecord]]:
+        """Every entry's placement and bytes, checked; and their records as they are now (_read_records)."""
         self._check(entries, req)
         for e in entries:
             self.destination(e, req)  # every destination checked before any payload is built
@@ -203,22 +209,36 @@ class InstallService:
             (self.placement(e, req, values), data)
             for e, (data, values) in zip(entries, self._render(entries, req.values), strict=True)
         ]
-        self._check_records({p.record for p, _ in places})
-        return places
+        return places, self._read_records({p.record for p, _ in places})
 
-    def _check_records(self, records: set[str], outcome: str = "nothing was changed") -> None:
-        """A record of a newer CST stops the call before any write (it is never rewritten by an older one);
-        outcome ends the refusal (what the call left undone)."""
+    def _read_records(self, records: set[str], outcome: str = "nothing was changed") -> dict[str, InstallRecord]:
+        """Each record, read once, as it is now. A record of a newer CST stops the call before any write (it
+        is never rewritten by an older one); outcome ends the refusal (what the call left undone). No record
+        yet, or one that is no record (install starts it again), is empty; a record that cannot be read is
+        left out (plan cannot tell; the update after the files says why)."""
+        found: dict[str, InstallRecord] = {}
         if self._record is None:
-            return
+            return found
         for path in sorted(r for r in records if r):
             try:
-                self._record.read(path)
+                found[path] = self._record.read(path) or EMPTY_RECORD
             except RecordFormatError as e:
                 if e.newer:
                     raise InstallRefused(f"{path}: {e}: {outcome}") from None
+                found[path] = EMPTY_RECORD
             except OSError:
-                continue  # unreadable here: the update below says why, after the files
+                continue
+        return found
+
+    def _record_changes(self, records: Mapping[str, InstallRecord], p: Placement, data: bytes) -> bool:
+        """True when install would add or change p's line in its record (read in records): no line, or one
+        that is not the same install (RecordedFile.same_install: the checkout's stamp aside). False when the
+        record could not be read: plan cannot tell."""
+        rec = records.get(p.record)
+        if rec is None or self._record is None:
+            return False
+        old = rec.files.get(p.dest)
+        return old is None or not old.same_install(_recorded_file(p, self._record.sha256(data), self._commit, ""))
 
     def is_current(
         self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
@@ -244,7 +264,7 @@ class InstallService:
         is never there before what it runs). The record is updated after
         the last file, and also when a write fails (with the files before it).
         """
-        todo = self._prepare(entries, req)
+        todo, _ = self._prepare(entries, req)
         todo.sort(key=lambda pd: pd[0].kind == ArtifactKind.UNIT)
         # Only a program with a SettingsStep is read here (is_current reads the whole file).
         replaced = [
@@ -349,9 +369,7 @@ class InstallService:
             if not p.record:
                 continue
             sha = self._record.sha256(data)
-            f = RecordedFile(
-                p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, self._commit, trees.get(p.component, sha)
-            )
+            f = _recorded_file(p, sha, self._commit, trees.get(p.component, sha))
             per_record.setdefault(p.record, {})[p.dest] = (f, written)
         for path, files in sorted(per_record.items()):
             self._update(path, _adding(files))
@@ -364,11 +382,23 @@ class InstallService:
         except RecordFormatError as e:
             raise InstallRefused(f"{path}: {e}: not changed") from None
 
+    def _plan_line(self, records: Mapping[str, InstallRecord], p: Placement, data: bytes, *, as_root: bool) -> str:
+        """What a write of p would print, changing nothing: `would write:`, `would record:` (current, but its
+        record line is missing or not what the write records: _record_changes) or `unchanged:`."""
+        if not self.is_current(p.path, data, p.mode, p.owner, as_root=as_root):
+            return f"would write: {p.path}"
+        return f"{'would record:' if self._record_changes(records, p, data) else 'unchanged:'} {p.path}"
+
+    def plan_put(self, place: Placement, data: bytes, *, as_root: bool) -> str:
+        """What put would do, changing nothing: its _plan_line. A place with a record reads it (a record of a
+        newer CST refuses, as put does); one without (no component) is never `would record:`."""
+        return self._plan_line(self._read_records({place.record}), place, data, as_root=as_root)
+
     def put(self, place: Placement, data: bytes, *, as_root: bool) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
         True when it was written."""
         # Only this file: the module may have changed other things before it (swap's crypttab).
-        self._check_records({place.record}, f"{place.path} was not written")
+        self._read_records({place.record}, f"{place.path} was not written")
         written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
             "written"
         )
@@ -405,20 +435,28 @@ class InstallService:
                 self.forget(record, [p.dest for p in gone if p.record == record])
 
     def plan(self, entries: Sequence[InstallEntry], req: InstallRequest) -> tuple[list[str], int]:
-        """What install would do, changing nothing: (report lines, number of files to write)."""
+        """What install would do, changing nothing: (report lines, number of files to write).
+
+        A current file its record does not list yet, or lists otherwise (other bytes, mode, owner, component,
+        source or values: a record not saved after a write), is `would record:` (install records it again).
+        It is not counted: it needs no write, so `check` still takes it as current."""
         lines: list[str] = []
         replaced: list[Placement] = []
-        for p, data in self._prepare(entries, req):
-            if self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
-                lines.append(f"unchanged: {p.path}")
-            else:
-                lines.append(f"would write: {p.path}")
+        todo, records = self._prepare(entries, req)
+        for p, data in todo:
+            lines.append(self._plan_line(records, p, data, as_root=req.as_root))
+            if lines[-1].startswith("would write:"):
                 replaced.append(p)
         # A settings file install would write first, from the program it replaces (SettingsStep).
         settings = [
             f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)
         ]
         return settings + lines, len(replaced) + len(settings)
+
+
+def _recorded_file(p: Placement, sha: str, commit: str, tree: str) -> RecordedFile:
+    """The record line install writes for p with these bytes (sha) from this checkout (commit, tree)."""
+    return RecordedFile(p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, commit, tree)
 
 
 def _adding(files: Mapping[str, tuple[RecordedFile, bool]]) -> Callable[[InstallRecord], InstallRecord]:

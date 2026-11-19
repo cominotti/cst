@@ -2368,7 +2368,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
             # cst doctor, pointed at the stage, names it (its install area reads the stage's record).
             doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
-            grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
+            grep -qF "/usr/local/sbin/docker-gc: differs from its install record (btrfs:docker-gc)" <<<"$doc" ||
                 {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
             # Captured first: under pipefail, `install | grep -q` fails when grep stops reading at the
             # match and the installer, still printing, ends on SIGPIPE (141).
@@ -6351,3 +6351,177 @@ echo E2E-OK
                 f"'/opt/cst/cst vm {subcmd}' must run on the host, not inside a toolbox/container.\n"
                 f"In a host terminal: /opt/cst/cst vm {subcmd}\n",
             )
+
+    def test_149_installer_generated_components_refused_and_plan_names_unrecorded_files(self) -> None:
+        """installer.py on the container's real / and its real install records. remove --component and
+        forget --component of each component of GENERATED_COMPONENTS (root's as root, the user's as
+        tester through the real runuser) exit 2 with one line naming the DEST form, print nothing on
+        stdout, and change nothing: both records keep their bytes, and the files a record lists under
+        that component (another test's) stay as they are. Then cpu:gamemode (tester's ~/.config/gamemode.ini,
+        through the real runuser, so tester's record is the one read; no test before this one leaves it,
+        and its being there fails the test) installed as an older CST left it (installed, its lines
+        taken out): plan prints "would record:" for it and changes nothing, check exits 0, install writes
+        nothing and lists it, plan then says "unchanged:", and a second install changes nothing."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import GENERATED_COMPONENTS; "
+            'print(" ".join(f"{c}={o}" for c, o in GENERATED_COMPONENTS.items()))'
+        )
+        generated = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
+        self.assertIn("btrfs:degraded-boot=root", generated)
+        self.assertIn("cpu:toolbox=user", generated)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        for pair in generated:
+            comp, owner = pair.split("=")
+            user = owner == "user"
+            run = "runuser -u tester -- " if user else ""
+            home = "--home /home/tester " if user else ""
+            record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
+            as_user = " --home DIR, as the user" if user else ""
+            with self.subTest(component=comp):
+                out = exec_bash(
+                    c,
+                    rf"""
+                    set -E
+                    trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+                    set -e
+                    state() {{
+                        sha256sum /var/lib/cst/installed.json /home/tester/.local/state/cst/installed.json 2>/dev/null || true
+                        listed="$({lines} {record} {comp})"
+                        for f in ${{listed% *}}; do [[ "$f" == - || ! -e "$f" ]] || sha256sum "$f"; done
+                    }}
+                    before="$(state)"
+                    err="$(mktemp)"
+                    for command in remove forget; do
+                        rc=0
+                        out="$({run}{installer} "$command" {home}--component {comp} 2>"$err")" || rc=$?
+                        [[ "$rc" == 2 && -z "$out" ]] || {{ echo "$command: exit $rc: $out $(cat "$err")" >&2; exit 1; }}
+                        want="cst installer: $command --component {comp}: its files are generated text, not manifest files; name them: $command-text DEST...{as_user}"
+                        [[ "$(cat "$err")" == "$want" ]] || {{ echo "$command said: $(cat "$err")" >&2; exit 1; }}
+                        [[ "$(state)" == "$before" ]] || {{ echo "$command changed something" >&2; exit 1; }}
+                    done
+                    rm -f "$err"
+                    echo E2E-OK
+                    """,
+                ).stdout
+                self.assertIn("E2E-OK", out)
+
+        ini = "/home/tester/.config/gamemode.ini"
+        there = exec_bash(c, f"[[ ! -e {ini} ]] || echo there").stdout.strip()
+        if there:
+            self.fail(f"{ini} is there already (another test's): this part needs cpu:gamemode absent")
+        user_installer = f"runuser -u tester -- {installer}"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"{user_installer} remove --home /home/tester --component cpu:gamemode >/dev/null",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U=/home/tester/.local/state/cst/installed.json
+            sel=(--home /home/tester --component cpu:gamemode)
+            {user_installer} install "${{sel[@]}}" >/dev/null
+            {user_installer} forget "${{sel[@]}}"
+            [[ "$({lines} "$U" cpu:gamemode)" == "- -" ]]
+            before="$(sha256sum "$U")"
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "would record: {ini}" ]] || {{ echo "plan said: $plan" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "plan changed the record" >&2; exit 1; }}
+            {user_installer} check "${{sel[@]}}" || {{ echo "check: exit $?" >&2; exit 1; }}
+            out="$({user_installer} install "${{sel[@]}}")"
+            [[ "$out" == "unchanged: {ini}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            [[ "$({lines} "$U" cpu:gamemode)" == "{ini} pending" ]]
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "unchanged: {ini}" ]] || {{ echo "plan after install said: $plan" >&2; exit 1; }}
+            before="$(sha256sum "$U" {ini})"
+            again="$({user_installer} install "${{sel[@]}}")"
+            [[ "$again" == "unchanged: {ini}" && "$(sha256sum "$U" {ini})" == "$before" ]] ||
+                {{ echo "a second install changed something: $again" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_150_stall_report_launcher_written_while_its_record_cannot_be_written(self) -> None:
+        """btrfs-setup.sh's install_report_launcher as root on the container's /, the launcher written for
+        tester through the real runuser. Installed and marked once, then replaced by an older text that
+        tester's record lists (done). With tester's record folder not writable by tester (0555: tester is
+        not root, so the real permission check applies), install_report_launcher writes the new launcher,
+        prints the warning that it may not have been installed and its record was not updated, does not
+        mark it, and the record keeps its bytes; tester's cst doctor then names the launcher in a WARN
+        (it differs from its install record: changed by hand, or written by an install that could not
+        update the record). With the folder writable again, install records the launcher and doctor has no
+        WARN about it. The cleanup makes the folder writable first, then removes the launcher and its line."""
+        c = self.SYSTEMD_CONTAINER
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        state = "/home/tester/.local/state/cst"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"[[ ! -e {shim} ]] || echo there").stdout.strip():
+            self.fail(f"{shim} is there already (another test's): this test needs it absent")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {shim}; runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        self.addCleanup(exec_bash, c, f"[[ ! -d {state} ]] || chmod 0755 {state}", check=False)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_150 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U={state}/installed.json
+            . /opt/cst-rw/cst-install.bash
+            for f in shim_content install_report_launcher mark_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content install_report_launcher mark_report_launcher >/dev/null
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            # The launcher as an older version wrote it, recorded and marked.
+            printf '#!/bin/sh\n# Installed by btrfs-setup.sh (CST), an older version.\nexec /usr/local/bin/btrfs-stall-report "$@"\n' |
+                cst_install_text "$shim" 0755 tester btrfs:report-launcher >/dev/null
+            cst_mark_as tester btrfs:report-launcher
+            before="$(sha256sum "$U")"
+            chmod 0555 {state}
+            err="$(mktemp)"
+            install_report_launcher >/dev/null 2>"$err"
+            (( ! report_launcher_written )) || {{ echo "the launcher counts as written" >&2; exit 1; }}
+            mark_report_launcher
+            grep -qxF "WARNING: {shim} may not have been installed or updated, and the install record of tester was not updated for it (see above)" "$err" ||
+                {{ echo "install said: $(cat "$err")" >&2; exit 1; }}
+            cmp -s "$shim" <(shim_content) || {{ echo "the launcher was not written" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "the record changed" >&2; exit 1; }}
+            # tester's cst doctor names the launcher: it differs from its record line, for one of two causes.
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            grep -E '^ *WARN' <<<"$inst" | grep -qF "{shim}: differs from its install record (btrfs:report-launcher): changed by hand, or written by an install that could not update the record" ||
+                {{ echo "doctor did not name the launcher: $inst" >&2; exit 1; }}
+            chmod 0755 {state}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            grep -qF "\"$(sha256sum <"$shim" | cut -d' ' -f1)\"" "$U" || {{ echo "the record lacks the new launcher" >&2; exit 1; }}
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor still warns about the launcher" >&2; exit 1
+            fi
+            rm -f "$err"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

@@ -101,8 +101,8 @@ write_if_changed() {
     real_write_if_changed "${dest}" "$2"
 }"""
 # The installer as the developer (never root), its record in $FAKE/home: every call is logged to
-# $FAKE/installer-calls; text, text-plan and remove-text run the real installer with --home there (a
-# run as a user records under that home); mark only logs (it would go to root's record).
+# $FAKE/installer-calls; text, text-plan, remove-text and forget-text run the real installer with --home
+# there (a run as a user records under that home); mark only logs (it would go to root's record).
 INSTALLER_REDIRECT: Final = """_cst_installer_as() {
     shift
     echo "installer $*" >>"${FAKE}/installer-calls"
@@ -974,10 +974,60 @@ echo "[$ov] $rc"
         self.assertFalse(os.path.exists(self.at(RULE)))
         self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
 
+    def test_selftest_failure_drops_the_rules_line_when_the_installer_did_not_remove_it(self) -> None:
+        # The installer stopped before it removed the rule: rm -f removes it, and cst_forget_text (the real
+        # installer here) drops its record line, so the record lists no file that is gone.
+        self.install()
+        self.assertIn(self.at(RULE), self.record()[0], "the install did not record the rule")
+        failing = 'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertNotIn(self.at(RULE), self.record()[0])
+        self.assertIn(f"installer forget-text {self.at(RULE)}", self.installer_calls())
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
+    def test_selftest_failure_goes_on_when_the_line_cannot_be_dropped_either(self) -> None:
+        # The second try fails too (a record of a newer CST, a disk still full): the cleanup still ends with
+        # the rule gone, udev reloaded and the self-test's error.
+        failing = (
+            'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+            'cst_forget_text() { echo "cst installer: cannot forget" >&2; return 1; }\n'
+        )
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cst installer: cannot forget", r.stderr)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
+    def test_selftest_failure_goes_on_when_the_rule_cannot_be_removed_at_all(self) -> None:
+        # The installer failed and rm -f fails too (a read-only /etc): set -e must not end the run there.
+        # The rule stays and keeps its record line (no forget), udev is reloaded, and the self-test's
+        # error is the one the run ends with.
+        failing = (
+            'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+            'rm() { if [[ "${*: -1}" == "${RULE}" ]]; then echo "rm: cannot remove: read-only" >&2; return 1; fi\n'
+            '    command rm "$@"; }\n'
+        )
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("rm: cannot remove: read-only", r.stderr)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertTrue(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        self.assertFalse(any(c.startswith("installer forget-text") for c in self.installer_calls()))
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
     def test_selftest_failure_keeps_a_rule_that_was_there(self) -> None:
         r = self.selftest(ready={"dm-0": False, "dm-1": True}, rule_was_present=1)
         self.assertEqual(r.returncode, 1)
         self.assertTrue(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        calls = self.installer_calls()
+        self.assertFalse([c for c in calls if c.startswith(("installer remove-text", "installer forget-text"))], calls)
 
     def test_selftest_fails_when_lsblk_lists_another_member_count(self) -> None:
         """Every member btrfs counts must be checked: fewer (or more) in lsblk fails, all ready or not."""
@@ -1160,6 +1210,37 @@ status() {{ echo STATUS; }}
             self.assertIn(f"unchanged: {self.at(dest)}\n", out)
         self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", out)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", out)
+
+    def test_plan_names_an_installed_file_whose_record_line_is_missing(self) -> None:
+        # The rule is right, but the record lost its line (an install whose record step failed): plan says
+        # install would record it, the other files stay unchanged, and plan changes nothing (the record
+        # included). install then adds the line, and plan says unchanged again.
+        self.installed()
+        path = os.path.join(self.tmp, "home", USER_RECORD_REL)
+        with open(path, encoding="utf-8") as f:
+            doc = object_of(parse_json(f.read()))
+        del object_of(doc["files"])[self.at(RULE)]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc))
+        with open(path, "rb") as f:
+            before = f.read()
+        overlay = self.overlay(self.tracked_bytes())
+        out = self.plan(overlay=overlay)
+        self.assertEqual(
+            [line for line in out.splitlines() if line.startswith("would")], [f"would record: {self.at(RULE)}"], out
+        )
+        for dest in (HELPER, TIMER, SERVICE, RECORD, SYNCED):
+            self.assertIn(f"unchanged: {self.at(dest)}\n", out)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before, "plan changed the record")
+        self.assertIn(
+            f"installer text-plan {self.at(RULE)} 0644 --component btrfs:degraded-boot", self.installer_calls()
+        )
+        r = self.install_path(plan=False, overlay=overlay)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.at(RULE), self.record()[0])
+        out = self.plan(overlay=overlay)
+        self.assertEqual([line for line in out.splitlines() if line.startswith("would")], [], out)
 
     def test_plan_stops_where_install_stops(self) -> None:
         """A check plan shares with install stops it the same way: a rule that fails udevadm verify,

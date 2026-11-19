@@ -138,13 +138,14 @@ warn() { echo "WARNING: $*" >&2; }
 # shellcheck source=cst-install.bash
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../cst-install.bash"
 # With --plan, the text is kept under etc_base and the installer only says
-# `unchanged: DEST` or `would write: DEST`.
+# `unchanged: DEST`, `would write: DEST` or `would record: DEST` (right, but
+# its record line under btrfs:degraded-boot missing or not what install writes).
 write_if_changed() {
     local dest="$1" mode="$2"
     if (( plan )); then
         mkdir -p "$(dirname "${etc_base}${dest}")"
         cat >"${etc_base}${dest}"
-        cst_install_text_plan "${dest}" "${mode}" <"${etc_base}${dest}"
+        cst_install_text_plan "${dest}" "${mode}" root btrfs:degraded-boot <"${etc_base}${dest}"
     else
         cst_install_text "${dest}" "${mode}" root btrfs:degraded-boot
     fi
@@ -896,9 +897,22 @@ else
     fi
     if (( ! selftest_ok )); then
         if (( ! rule_was_present )); then
-            # An installer that fails here (a record of a newer CST) must not stop the cleanup:
-            # the rule that failed goes without its record line.
-            cst_remove_text "${RULE}" >/dev/null || rm -f "${RULE}"
+            # A failing installer must not stop the cleanup. The rule and its record line were
+            # written just before the self-test, so the installer can fail here only on something
+            # that changed since then: a full disk (the record cannot be saved) or a record a newer
+            # CST wrote. Either way it has already removed the rule when it fails; rm -f matters
+            # only when it stopped before that (it could not start, or the unlink itself failed).
+            # When rm -f removed it, cst_forget_text drops the rule's record line, so the record
+            # lists no file that is gone. It is a second try that may fail for the same reason
+            # (always with a newer CST's record, which this CST never rewrites; with a full disk,
+            # unless space came back). A rule rm -f cannot remove either keeps its line. Neither
+            # failure stops the cleanup (both are tested, so set -e does not end the script here):
+            # udev is reloaded and the self-test's error is the one the run ends with.
+            if ! cst_remove_text "${RULE}" >/dev/null; then
+                if rm -f "${RULE}"; then
+                    cst_forget_text "${RULE}" >/dev/null || true
+                fi
+            fi
             udevadm control --reload
         fi
         die "udev self-test failed; no initramfs change made"

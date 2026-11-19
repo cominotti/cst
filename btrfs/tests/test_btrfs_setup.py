@@ -1446,6 +1446,14 @@ class ReportLauncherTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
 
+    def not_recorded(self) -> str:
+        """install_report_launcher's warning when the installer fails (the target user: this account)."""
+        user = pwd.getpwuid(os.getuid()).pw_name
+        return (
+            f"WARNING: {self.shim} may not have been installed or updated, and the install record of {user} "
+            "was not updated for it (see above)\n"
+        )
+
     def test_install_records_the_launcher_and_marks_it(self) -> None:
         self.bash("install_report_launcher", "mark_report_launcher")
         self.assertEqual(os.stat(self.shim).st_mode & 0o777, 0o755)
@@ -1504,9 +1512,24 @@ class ReportLauncherTest(unittest.TestCase):
         r = self.bash("install_report_launcher", "mark_report_launcher", "echo went-on")
         self.assertEqual(r.stdout, "went-on\n")
         self.assertIn("written by a newer CST", r.stderr)
-        self.assertIn(f"was not changed (see above); {self.shim} was not installed or updated\n", r.stderr)
+        self.assertIn(self.not_recorded(), r.stderr)
         self.assertFalse(os.path.lexists(self.shim))
         self.assertEqual(Path(record).read_text(), newer)
+
+    def test_a_record_that_cannot_be_written_after_the_launcher_is_warned_about_and_not_marked(self) -> None:
+        # The installer writes the launcher, then fails to save the record (here its folder is a file; a
+        # full disk does the same). The launcher is there, without its record line: the warning says it
+        # may have been written, install goes on, and the launcher is not marked done.
+        state = os.path.dirname(os.path.join(self.tmp, "home", USER_RECORD_REL))
+        os.makedirs(os.path.dirname(state))
+        Path(state).write_text("not a folder\n")
+        r = self.bash("install_report_launcher", "mark_report_launcher", "echo went-on")
+        self.assertTrue(r.stdout.endswith("went-on\n"), r.stdout)
+        self.assertIn("cst installer: cannot write", r.stderr)
+        self.assertIn(self.not_recorded(), r.stderr)
+        expected = self.bash("shim_content").stdout
+        self.assertEqual(Path(self.shim).read_text(), expected)
+        self.assertEqual(Path(state).read_text(), "not a folder\n")
 
     def test_a_user_without_a_home_folder_does_not_stop_the_removal(self) -> None:
         # The installer cannot run as the user (no home folder to keep the record in): our launcher
