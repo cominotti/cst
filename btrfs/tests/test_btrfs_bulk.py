@@ -521,6 +521,21 @@ class BulkTest(BulkBase):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
         self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
 
+    @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
+    def test_root_reads_an_empty_bulk_user_as_no_user(self) -> None:
+        # An empty BULK_USER must not reach the account lookup: pwd.getpwnam("") raises KeyError.
+        root = self.root_wiring()
+        for text in ("BULK_USER=\n", "# CST\nBULK_USER=''\n"):
+            with self.subTest(text=text):
+                with open(self.paths.conf, "w") as f:
+                    f.write(text)
+                with self.assertRaisesRegex(NoUser, "needs --user NAME"):
+                    root.user_ctx([])
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
+                self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
+
     def test_a_bad_bulk_conf_line_at_boot_exits_non_zero_and_alerts(self) -> None:
         # The boot service runs `btrfs-bulk boot` before any login. The refusal to guess whose home
         # it moves only reached the boot console and the journal, every boot, unseen.
