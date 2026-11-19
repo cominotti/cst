@@ -66,7 +66,8 @@ cst vm help
 `nocow apply` and `nocow plan --root` must run on the host: in a toolbox
 they stop and show the command to type in a host terminal. `list`,
 `status`, `backup-timer status`, `tune plan` and `nocow plan` run on the
-host by themselves (through `flatpak-spawn --host`).
+host by themselves (through `flatpak-spawn --host`). `list` without a VM, or
+with an empty one (`cst vm list ""`), lists the backups of every VM.
 Settings: the optional `/etc/cst/vm.conf` (sections 8 and 10.7).
 
 ## 2. The incident that started it (Fedora 45)
@@ -141,7 +142,12 @@ cannot be read as one (not JSON, or no `"backups"` list, or a read error other
 than a missing file): read as empty, the next backup would have written an index
 with only itself. The message names the file; move it aside (`mv
 /var/lib/cst/vm-backups.json /var/lib/cst/vm-backups.json.bad`) to start a new
-index. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+index. If the index changes that way while a backup runs (a newer `cst vm`
+rewrote it, or it was damaged), the backup is finished and kept (the folder,
+or the restic snapshot), but it is not added to the index: the backup ends with
+exit 1 and a message that names it and says how to restore it by hand, after
+its notes (a TPM state not found, ...) and its restore lines, as a backup that
+is indexed prints them. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
@@ -594,6 +600,10 @@ A VM that is **shut off** (and not saved: see the managed-save note in
 section 3) is read directly, without a snapshot. CST checks the state again
 afterwards, and that no file changed while restic read it. If the VM was
 started in between, that restic snapshot is forgotten and the backup fails.
+The same for a snapshot restic could not finish (some files not read). When
+restic cannot forget it (the repository locked, the NAS gone), the message
+says so and names the snapshot to forget by hand (`restic forget ID`, with
+the variables of section 10.9).
 
 **Paused**, suspended or other states: refused. Resume the VM or shut it down.
 

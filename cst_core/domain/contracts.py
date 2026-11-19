@@ -169,6 +169,13 @@ NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
 # The cpu settings file: cst cpu, its game profile and vm-pin read it, and so do cst doctor and cst vm.
 CPU_SETTINGS: Final = "/etc/cpu-setup/cpu-setup.conf"
 
+# The /home NAS backup's files, which btrfs-snapshot's runtime owns and cst vm's NAS backup reuses
+# (cst doctor reads the settings file too); setup-snapshots.bash keeps literals of its own.
+NAS_SSH_ALIAS: Final = "btrfs-setup-nas"  # the managed Host block in /root/.ssh/config
+SNAPSHOTS_CONF: Final = "/etc/btrfs-setup/snapshots.conf"
+RESTIC_PW_FILE: Final = "/etc/btrfs-setup/restic-password"  # the repository's password (root only)
+RESTIC_CACHE_DIR: Final = "/var/cache/btrfs-snapshot-restic"
+
 
 class Urgency(StrEnum):
     """An alert's urgency, as btrfs-notify -u takes it (and the alert spool's files keep it)."""

@@ -31,7 +31,15 @@ from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import PENDING_ALERTS, Notifier, NotifyOutcome
 from cst_core.adapters.runtime import beside_program
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import (
+    NOTIFY_PROGRAM,
+    RESTIC_CACHE_DIR,
+    RESTIC_PW_FILE,
+    SNAPSHOTS_CONF,
+    StateFormatKey,
+    Urgency,
+    state_format,
+)
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -53,7 +61,7 @@ class SnapshotRun:
         # The test seam never moves a run as root.
         r = "" if os.geteuid() == 0 else environ.get("CST_SNAPSHOT_ROOT", "")
         self.root = r
-        self.conf = f"{r}/etc/btrfs-setup/snapshots.conf"
+        self.conf = f"{r}{SNAPSHOTS_CONF}"
         self.plan = f"{r}/etc/btrfs-setup/convert-plan"
         self.state = f"{r}/var/lib/btrfs-snapshot"
         self.core = f"{r}/usr/local/sbin/btrfs-snapshot-core"
@@ -64,8 +72,8 @@ class SnapshotRun:
         self.pin_file = f"{self.run_dir}/pinned"
         self.nas_mnt = f"{self.run_dir}/nas"
         self.nas_lock = f"{r}/run/btrfs-snapshot-nas.lock"
-        self.restic_password = f"{r}/etc/btrfs-setup/restic-password"
-        self.restic_cache = f"{r}/var/cache/btrfs-snapshot-restic"
+        self.restic_password = f"{r}{RESTIC_PW_FILE}"
+        self.restic_cache = f"{r}{RESTIC_CACHE_DIR}"
         self.boot_flag = f"{r}/etc/btrfs-setup/convert-at-boot"
         self.bulk_flag = f"{r}/etc/btrfs-setup/bulk-at-boot"
         # btrfs-bulk's journals (the registered bulk-journal format; any version: one there is a move

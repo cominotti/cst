@@ -39,7 +39,16 @@ from vm.domain import (
     overlay_recovery,
     quiesce_skipped,
 )
-from vm.domain.backup import Fingerprint, Manifest, ResticSummary, Uncertain, is_restic_snapshot, manifest_text
+from vm.domain.backup import (
+    Fingerprint,
+    IndexRefused,
+    Manifest,
+    ResticSummary,
+    Uncertain,
+    is_restic_snapshot,
+    manifest_text,
+    not_indexed_text,
+)
 from vm.ports import (
     BackupStorePort,
     LockPort,
@@ -349,17 +358,14 @@ def nas_run(
             store.unstage(stage)
         snap = str(summary.get("snapshot_id") or "")
         if rc != 0 or not snap:
-            if snap:
-                p.restic.run(
-                    nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT
-                )  # incomplete (rc 3): not a backup
+            left = forget_torn(p, nas, snap) if snap else None  # incomplete (rc 3): not a backup
             why = {
                 ResticExit.INCOMPLETE: "some files could not be read",
                 ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
                 ExitStatus.NOT_FOUND: "restic not found",
                 ResticExit.LOCKED: "the repository stayed locked",
             }.get(rc, f"restic exit {rc}")
-            raise Refused(f"restic backup failed: {why}; no backup recorded")
+            raise Refused(f"restic backup failed: {why}; no backup recorded{'' if left is None else f'; {left}'}")
         if live:
             for src in before:
                 try:
@@ -375,10 +381,10 @@ def nas_run(
             try:
                 check_shut_off(p.commands, vm)
             except Refused as e:
-                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
+                left = forget_torn(p, nas, snap)
                 raise Refused(
                     f"the VM's state changed during the backup, the copy is not consistent "
-                    f"(restic snapshot {snap[:8]} forgotten): {e}"
+                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
                 ) from None
 
             def now_fp(path: str) -> Fingerprint | None:
@@ -389,10 +395,10 @@ def nas_run(
 
             changed = [src for src, _ in sources if now_fp(src) != before[src]]
             if changed:
-                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
+                left = forget_torn(p, nas, snap)
                 raise Refused(
                     "changed during the backup (the VM was started?), the copy is not consistent "
-                    f"(restic snapshot {snap[:8]} forgotten): {', '.join(changed)}"
+                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"
                 )
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
@@ -444,37 +450,47 @@ def nas_run(
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
     retention(cfg, p, vm, nas)
-    entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
-    entries.append(
-        {
-            "vm": vm,
-            "timestamp": stamp,
-            "epoch": int(epoch),
-            "mode": "nas",
-            "snapshot": snap,
-            "repository": nas["repo"],
-            "host": nas["host"],
-            "consistency": consistency,
-            "keep": keep,
-            "versions": versions,
-            "deployment": deployment,
-        }
-    )
-    alive = nas_snapshot_ids(p.restic, vm, nas)
-    if alive is not None:
-        alive.add(snap)
-        entries = [
-            e
-            for e in entries
-            if not (
-                e["vm"] == vm
-                and e.get("mode") == "nas"
-                and e.get("repository") == nas["repo"]
-                and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
-            )
-        ]
-    entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-    store.write_index(entries)
+    # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
+    # since: the snapshot stays, and its notes and restore line are printed before the refusal.
+    refused: Refused | None = None
+    try:
+        entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
+        entries.append(
+            {
+                "vm": vm,
+                "timestamp": stamp,
+                "epoch": int(epoch),
+                "mode": "nas",
+                "snapshot": snap,
+                "repository": nas["repo"],
+                "host": nas["host"],
+                "consistency": consistency,
+                "keep": keep,
+                "versions": versions,
+                "deployment": deployment,
+            }
+        )
+        alive = nas_snapshot_ids(p.restic, vm, nas)
+        if alive is not None:
+            alive.add(snap)
+            entries = [
+                e
+                for e in entries
+                if not (
+                    e["vm"] == vm
+                    and e.get("mode") == "nas"
+                    and e.get("repository") == nas["repo"]
+                    and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
+                )
+            ]
+        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+        store.write_index(entries)
+    except IndexRefused as e:
+        kept = (
+            "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
+            '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
+        )
+        refused = Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e))
     for n in notes:
         out.say(f"  note: {n}")
     out.say(
@@ -485,6 +501,8 @@ def nas_run(
         'Restore: vm/README.md in CST, section "Restore from the NAS" (restic restore '
         f"{snap[:8]} --sparse --target <a NOCOW folder>)."
     )
+    if refused is not None:
+        raise refused
 
 
 def take_snapshot(
@@ -594,6 +612,19 @@ def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | No
     # All or nothing: an answer of another shape is no list of the live snapshots, and reading it
     # as one would drop the index entries of every snapshot it does not name.
     return {s["id"] for s in data} if list_of(data, is_restic_snapshot) else None
+
+
+def forget_torn(p: NasBackup, nas: NasRepo, snap: str) -> str | None:
+    """Forget a restic snapshot that is no backup (incomplete, or not consistent). None when restic
+    forgot it; else the words that name the snapshot left in the repository and how to forget it."""
+    rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
+    if rc == 0:
+        return None
+    return (
+        f"restic snapshot {snap[:8]} could NOT be forgotten ({first_line(err) or f'exit {rc}'}): it is no "
+        f"backup; forget it by hand, restic forget {snap}, with the repository's variables of vm/README.md, "
+        'section "Restore from the NAS"'
+    )
 
 
 def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:

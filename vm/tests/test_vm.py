@@ -159,6 +159,9 @@ fi
 if [ -n "$FIX_CP_STARTS_VM" ]; then
   echo "$FIX_CP_STARTS_VM" >"$FIX/state.txt"; touch -d '+1 min' "$FIX_CP_TOUCH"
 fi
+if [ -n "$FIX_CP_WRITES_INDEX" ]; then
+  cat "$FIX_CP_WRITES_INDEX" >"$CST_VM_INDEX"
+fi
 args=""
 for a in "$@"; do
   case "$a" in --reflink=*|--sparse=*) ;; *) set -- "$@" "$a" ;; esac
@@ -344,6 +347,10 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(short(["tune", "plan", "w", "--guest-has-virtio"]), ("tune", "plan", "w", False, True, False))
         self.assertEqual(short(["nocow", "plan", "--root"]), ("nocow", "plan", None, False, False, True))
         self.assertEqual(short(["nocow", "apply"]), ("nocow", "apply", None, False, False, False))
+        # An empty name names no VM, for every command that takes one.
+        for argv in (["list", ""], ["status", ""], ["backup", "", "--nas"], ["backup-timer", "on", ""]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(vm_domain.parse_args(argv).vm)
         for bad in (
             ["status", "--full"],
             ["backup", "a", "b"],
@@ -539,6 +546,62 @@ class BackupTest(Scratch):
         self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
+
+    def test_an_index_changed_during_the_copy_keeps_the_backup_and_says_it_is_not_indexed(self) -> None:
+        # A newer cst vm (or a damage) rewrote the index while this one copied. The backup was made,
+        # but the message said "nothing is backed up".
+        newer = os.path.join(self.tmp, "index-written-during-the-copy")
+        for text, problem, advice in (
+            (
+                json.dumps({"version": 2, "backups": []}),
+                f"{self.index} is format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST",
+                "use the cst vm of that CST (in that checkout: cst vm backup-timer on installs it)",
+            ),
+            (
+                "{",
+                f"{self.index} cannot be read as cst vm's backup index (not JSON)",
+                f"move it aside (mv {self.index} {self.index}.bad) to start a new index",
+            ),
+        ):
+            with self.subTest(problem=problem):
+                shutil.rmtree(os.path.dirname(self.index), ignore_errors=True)
+                shutil.rmtree(self.backups, ignore_errors=True)
+                with open(newer, "w") as f:
+                    f.write(text)
+                self.env["FIX_CP_WRITES_INDEX"] = newer
+                os.makedirs(os.path.dirname(self.index))
+                r = self.run_tool("backup", "win")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"cst vm: the backup {self.dest()} is complete but not in the index: {problem}, so the index "
+                    "was left as it is and cst vm does not list this backup; the folder stays until removed by "
+                    "hand, and its manifest.json says what it holds (restore by hand: vm/README.md, section 5). "
+                    f"Then: {advice}",
+                    r.stderr,
+                )
+                self.assertNotIn("nothing is backed up", r.stderr)
+                self.assertNotIn("incomplete backup removed", r.stdout + r.stderr)
+                self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
+                with open(self.index) as f:
+                    self.assertEqual(f.read(), text)
+
+    def test_a_backup_not_indexed_still_prints_its_notes_and_how_to_restore_it(self) -> None:
+        # The refusal came before the notes and the restore lines: a missing TPM state went unsaid, and
+        # the backup cst vm does not list had only the README to restore it by.
+        shutil.rmtree(os.path.join(self.swtpm, UUID))
+        newer = os.path.join(self.tmp, "index-written-during-the-copy")
+        with open(newer, "w") as f:
+            f.write(json.dumps({"version": 2, "backups": []}))
+        self.env["FIX_CP_WRITES_INDEX"] = newer
+        os.makedirs(os.path.dirname(self.index))
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("is complete but not in the index", r.stderr)
+        self.assertIn("  note: TPM state", r.stdout)
+        self.assertIn("BitLocker", r.stdout)
+        self.assertIn("To restore (never done automatically; read each line first):", r.stdout)
+        self.assertIn(self.dest(), r.stdout.split("To restore", 1)[1])
+        self.assertNotIn("the next backup drops it from", r.stdout)
 
     def test_a_damaged_index_stops_backup_and_list_and_is_left_as_it_is(self) -> None:
         # Read as empty, the next backup wrote an index with only itself: every older entry lost.
@@ -779,6 +842,22 @@ class ListStatusTest(Scratch):
         r = self.run_tool("status", "win")
         self.assertIn("qemu-kvm: qemu-kvm-11.1.3-1.fc45.x86_64 -> qemu-kvm-11.2.0-1.fc45.x86_64", r.stdout)
         self.assertNotIn("libvirt-daemon:", r.stdout)
+
+    def test_list_with_an_empty_vm_name_lists_every_vm(self) -> None:
+        # "" names no VM (as status, tune and backup take it): it printed "no VM backups in INDEX".
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        with open(self.index) as f:
+            data = json.load(f)
+        other = dict(data["backups"][0], vm="linux", path=os.path.join(self.backups, "linux", "20261108T010640Z"))
+        os.makedirs(other["path"])
+        data["backups"].append(other)
+        with open(self.index, "w") as f:
+            json.dump(data, f)
+        for args, vms in ((("list", ""), ["linux", "win"]), (("list",), ["linux", "win"]), (("list", "win"), ["win"])):
+            with self.subTest(args=args):
+                r = self.run_tool(*args)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual([ln.split()[0] for ln in r.stdout.splitlines()], vms, r.stdout)
 
     def test_status_with_fixed_cpu_and_without_virsh(self) -> None:
         self.domain(

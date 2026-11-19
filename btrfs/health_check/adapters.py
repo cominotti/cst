@@ -56,7 +56,7 @@ from btrfs.health_check.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.adapters.journal import log
-from cst_core.domain.contracts import NOTIFY_PROGRAM, Urgency
+from cst_core.domain.contracts import NOTIFY_PROGRAM, SNAPSHOTS_CONF, Urgency
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
@@ -492,7 +492,7 @@ def snapshot_problems(m: Probe) -> list[str]:
     last_n = bash_int(last)
     if not quiet and last_n is not None and now() - last_n > SNAPSHOT_MAX_AGE and now() - awake > SNAPSHOT_GRACE:
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
-    conf = m.path("/etc/btrfs-setup/snapshots.conf")
+    conf = m.path(SNAPSHOTS_CONF)
     settings = parse_snapshots_conf(m.text(conf) or "").values if os.access(conf, os.R_OK) else {}
     if settings.get("NAS_ENABLED", "0") == "1":
         # The last success, or when the backup was turned on if later (as btrfs-snapshot).

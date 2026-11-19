@@ -7,12 +7,21 @@ import os
 import re
 import shlex
 import time
+from typing import Final
 
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
-from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
+from doctor.application.shared import (
+    check,
+    conf_value,
+    ignored_line_text,
+    read_text,
+    settings_file_warnings,
+    settings_of,
+    snapshots_conf_text,
+)
 from doctor.domain import (
     BTRFS_SYSFS,
     ERROR,
@@ -41,6 +50,8 @@ from doctor.domain import (
     per_device_allocated,
     pick_mount,
     scrub_dropin_limit,
+    ScrubLimitLines,
+    scrub_limit_lines_both,
     scrub_limit_setting,
     view_join,
     ViewPath,
@@ -372,21 +383,34 @@ def live_scrub_limits(host: DoctorHostPort) -> str:
     return ", ".join(limits) if limits else "no limit on any device"
 
 
+# What btrfs-snapshot does with a problem line of snapshots.conf (the warnings' note).
+SNAPSHOT_NOTE: Final = " (btrfs-snapshot ignores it too, with a warning in its journal)"
+
+
+def scrub_settings(host: DoctorHostPort) -> ShellAssignments:
+    """The btrfs settings file as `cst btrfs install` reads SCRUB_LIMIT from it: the whole file with its
+    line ends, as bash reads it ("\r" is part of a value there)."""
+    return parse_shell_assignments(snapshots_conf_text(host) or "")
+
+
+def scrub_lines(host: DoctorHostPort) -> ScrubLimitLines:
+    """The SCRUB_LIMIT problem lines, as `cst btrfs install` reads them and as CST's Python programs do."""
+    return scrub_limit_lines_both(snapshots_conf_text(host) or "", scrub_settings(host), settings_of(host, SNAP_CONF))
+
+
 @check(CHECKS, "btrfs")
 def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
     """The weekly scrub's speed limit: SCRUB_LIMIT, the service's drop-in, sysfs now."""
-    # The whole file with its line ends, as bash reads it ("\r" is part of a value there).
-    try:
-        with host.open_bytes(host.path(SNAP_CONF)) as f:
-            conf = f.read().decode("utf-8", "replace")
-    except OSError:
-        conf = ""
-    setting, problem = scrub_limit_setting(parse_shell_assignments(conf))
-    if problem:
-        yield Result(
-            WARN,
-            f"{SNAP_CONF} {problem}: `cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
-        )
+    setting, problem = scrub_limit_setting(scrub_settings(host))
+    lines = scrub_lines(host)
+    refuses = "`cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)"
+    # Every SCRUB_LIMIT problem line, with what the settings row would have said of the lines it leaves
+    # to this row (CST's Python programs find a problem there too); else the value's problem.
+    for p in lines.bash:
+        also = f". {ignored_line_text(SNAPSHOT_NOTE)}" if p.line in lines.python_too else ""
+        yield Result(WARN, f"{SNAP_CONF} {p}: {refuses}{also}")
+    if not lines.bash and problem:
+        yield Result(WARN, f"{SNAP_CONF} {problem}: {refuses}")
     if not host.exists(host.path(SCRUB_UNIT)):
         return
     installed = scrub_dropin_limit(read_text(host, host.path(SCRUB_DROPIN), 4096))
@@ -402,9 +426,11 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "btrfs")
 def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
-    # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line.
+    # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line. A
+    # SCRUB_LIMIT problem line that check_scrub_limit reports too (the same place in the file) is warned
+    # there, with these words.
     yield from settings_file_warnings(
-        host, SNAP_CONF, bash_sourced=True, note=" (btrfs-snapshot ignores it too, with a warning in its journal)"
+        host, SNAP_CONF, bash_sourced=True, note=SNAPSHOT_NOTE, skip=scrub_lines(host).taken
     )
 
 

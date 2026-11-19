@@ -6,6 +6,7 @@ layers).
 """
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 import os.path
 import re
@@ -16,10 +17,10 @@ import xml.etree.ElementTree as ET
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, SNAPSHOTS_CONF, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import ShellAssignments, group
+from cst_core.domain.text import SettingsProblem, ShellAssignments, group
 from cst_core.domain.values import HOUR, Json
 from swap.domain import SETTINGS_REL
 
@@ -118,7 +119,7 @@ RESIZE_SLACK = 16 * 2**20
 SNAP_STATE = HostPath(DEFAULT_STATE_DIR)
 SNAP_UNFINISHED = HostPath(f"{SNAP_STATE}/{UNFINISHED_FILE}")
 SNAP_WRITABLE = HostPath(f"{SNAP_STATE}/{WRITABLE_FILE}")
-SNAP_CONF = HostPath("/etc/btrfs-setup/snapshots.conf")  # also read by the VM NAS check
+SNAP_CONF = HostPath(SNAPSHOTS_CONF)  # also read by the VM NAS check
 
 NOCOW_POSTPONED = HostPath(NocowPaths().postponed)  # docker-volumes-nocow's record (StoredPostponed)
 
@@ -561,15 +562,58 @@ def parse_args(argv: Sequence[str]) -> tuple[DoctorCommand, bool]:
     return DoctorCommand.RUN, brief
 
 
+def universal_newlines(text: str) -> str:
+    """text as Python's text mode reads a file: each "\r\n" and each lone "\r" a "\n"."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def scrub_limit_lines(settings: ShellAssignments) -> tuple[SettingsProblem, ...]:
+    """The problem lines of the btrfs settings file that set SCRUB_LIMIT: each one makes
+    `cst btrfs install` refuse to run."""
+    return tuple(p for p in settings.problems if _SCRUB_LIMIT_LINE.match(p.text))
+
+
+def bash_line_numbers(text: str) -> list[int]:
+    """For each line of text as text mode reads it (universal_newlines), the number of the line bash
+    reads it in: only a "\n" ends a line there, a lone "\r" stays in it."""
+    numbers, line = [1], 1
+    for end in re.finditer(r"\r\n|\r|\n", text):
+        line += end.group() != "\r"
+        numbers.append(line)
+    return numbers
+
+
+@dataclass(frozen=True, slots=True)
+class ScrubLimitLines:
+    """The SCRUB_LIMIT problem lines of snapshots.conf, read both ways. bash: as `cst btrfs install`
+    reads them (bash's line ends). taken: the SCRUB_LIMIT problems CST's Python programs find (text
+    mode) on those same lines; the scrub row warns about them, so the settings row skips them.
+    python_too: the bash line numbers of taken."""
+
+    bash: tuple[SettingsProblem, ...]
+    taken: tuple[SettingsProblem, ...]
+    python_too: frozenset[int]
+
+
+def scrub_limit_lines_both(text: str, bash: ShellAssignments, python: ShellAssignments | None) -> ScrubLimitLines:
+    """ScrubLimitLines of snapshots.conf's text (line ends as they are), read by bash as bash and by
+    CST's Python programs as python (None: not readable). A Python problem is matched to a bash line by
+    where it is in the file, not by its text or line number, which the line ends can change."""
+    lines = scrub_limit_lines(bash)
+    where = bash_line_numbers(text)
+    numbers = {p.line for p in lines}
+    taken = tuple(p for p in (scrub_limit_lines(python) if python else ()) if where[p.line - 1] in numbers)
+    return ScrubLimitLines(lines, taken, frozenset(where[p.line - 1] for p in taken))
+
+
 def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:
     """SCRUB_LIMIT of the btrfs settings file (read strictly, as bash sources it):
     (size, "") with size "" for no limit (unset, empty or 0), or ("", problem)
-    when a SCRUB_LIMIT line is not a plain assignment or the value is not a
-    size (digits, then K, M, G or T). btrfs-setup.sh's scrub_limit_setting
+    when a SCRUB_LIMIT line is not a plain assignment (the first one) or the value
+    is not a size (digits, then K, M, G or T). btrfs-setup.sh's scrub_limit_setting
     reads it the same way and refuses to install on a problem."""
-    for p in settings.problems:
-        if _SCRUB_LIMIT_LINE.match(p.text):
-            return "", str(p)
+    if lines := scrub_limit_lines(settings):
+        return "", str(lines[0])
     value = settings.values.get("SCRUB_LIMIT", "")
     if value in ("", "0"):
         return "", ""

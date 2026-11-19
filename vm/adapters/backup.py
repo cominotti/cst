@@ -31,6 +31,7 @@ from vm.domain.backup import (
     NO_BACKUPS_LIST,
     Fingerprint,
     IndexEntry,
+    IndexRefused,
     Stop,
     is_index_entry,
     stored_list,
@@ -88,10 +89,10 @@ def tree_sizes(path: str) -> tuple[int, int]:
 
 
 def stored_backups(cfg: VmSettings) -> list[object]:
-    """The "backups" list of the index as stored ([] when there is no index). Refused, naming the file,
+    """The "backups" list of the index as stored ([] when there is no index). IndexRefused, naming the file,
     when the index is there but cannot be read as one (an error other than a missing file, not JSON,
     not an object with a "backups" list): reading it as empty would let the next backup write an index
-    without every older entry. Refused for an index of a newer cst vm ("version" above INDEX_FORMAT's):
+    without every older entry. IndexRefused for an index of a newer cst vm ("version" above INDEX_FORMAT's):
     listing it could mislead, and writing it back would lose what this one does not know. The index is
     cfg.paths.index."""
     path = cfg.paths.index
@@ -109,9 +110,9 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     except ValueError, RecursionError:
         raise _unreadable(path, "not JSON") from None
     if (found := INDEX_FORMAT.newer(data, "version")) is not None:
-        raise Refused(
-            f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
-            f"with it; use the cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)"
+        raise IndexRefused(
+            INDEX_FORMAT.newer_text(path, found),
+            f"use the cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)",
         )
     backups = stored_list(data)
     if backups is None:
@@ -119,10 +120,10 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     return backups
 
 
-def _unreadable(path: str, why: str) -> Refused:
-    return Refused(
-        f"{path} cannot be read as cst vm's backup index ({why}): left as it is, and nothing is backed up "
-        f"or listed with it; move it aside (mv {path} {path}.bad) to start a new index"
+def _unreadable(path: str, why: str) -> IndexRefused:
+    return IndexRefused(
+        f"{path} cannot be read as cst vm's backup index ({why})",
+        f"move it aside (mv {path} {path}.bad) to start a new index",
     )
 
 

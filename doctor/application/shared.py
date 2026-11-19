@@ -3,13 +3,23 @@
 deployment, the libvirt domains, each VM's definition), the settings files, an installed program, the
 command that installs a component again, and the decorator that registers a check (@check)."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass, field
 
 from cst_core.domain.install import COMPONENTS
 from cst_core.domain.ostree import OstreeStatus, query_status
-from cst_core.domain.text import ShellAssignments, parse_shell_assignments, parse_snapshots_conf
-from doctor.domain import SNAP_CONF, WARN, Deployment, HostPath, OstreeAnswer, Result, ViewPath, is_deployment
+from cst_core.domain.text import SettingsProblem, ShellAssignments, parse_shell_assignments, parse_snapshots_conf
+from doctor.domain import (
+    SNAP_CONF,
+    WARN,
+    Deployment,
+    HostPath,
+    OstreeAnswer,
+    Result,
+    ViewPath,
+    is_deployment,
+    universal_newlines,
+)
 from doctor.ports import CheckFn, DoctorHostPort
 
 
@@ -33,6 +43,11 @@ class DoctorFacts:
     ostree: tuple[OstreeAnswer, list[Deployment]] | None = None
     domains: tuple[list[str] | None, str] | None = None
     dumpxml: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    # Read once, boxed (None: not read yet): snapshots.conf's text with its line ends, None when it
+    # cannot be read (snapshots_conf_text).
+    snap_conf: tuple[str | None] | None = None
+    # cst vm's backup index as read_vm_index reads it, boxed the same way.
+    vm_index: tuple[tuple[object, str | None] | None] | None = None
 
 
 # host -> its facts. A host hashes by identity, so a new Host starts with none.
@@ -82,11 +97,6 @@ def ostree_facts(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deployment]]:
     return known.ostree
 
 
-def deployments(host: DoctorHostPort) -> OstreeAnswer:
-    """(booted, pending, error) of ostree_facts."""
-    return ostree_facts(host)[0]
-
-
 def runs(host: DoctorHostPort, program: HostPath) -> bool:
     """program is installed and executable."""
     view = host.path(program)
@@ -101,16 +111,31 @@ def read_text(host: DoctorHostPort, path: ViewPath, limit: int = 256) -> str:
         return ""
 
 
+def snapshots_conf_text(host: DoctorHostPort) -> str | None:
+    """snapshots.conf as UTF-8 (bad bytes replaced) with its line ends as they are, read once per
+    check-up (several rows read it, and each must judge the same text); None when it cannot be read."""
+    known = facts(host)
+    if known.snap_conf is None:
+        try:
+            with host.open_bytes(host.path(SNAP_CONF)) as f:
+                text: str | None = f.read().decode("utf-8", "replace")
+        except OSError:
+            text = None
+        known.snap_conf = (text,)
+    return known.snap_conf[0]
+
+
 def settings_of(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
-    bash_sourced), or None when it cannot be read. snapshots.conf also takes the
-    lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
+    bash_sourced), or None when it cannot be read. Read as text, as cst vm reads them (each
+    line end a newline). snapshots.conf also takes the lines an older CST wrote there with
+    printf %q (parse_snapshots_conf)."""
+    if path == SNAP_CONF:
+        text = snapshots_conf_text(host)
+        return None if text is None else parse_snapshots_conf(universal_newlines(text))
     try:
         with host.open_text(host.path(path)) as f:
-            text = f.read()
-        if path == SNAP_CONF:
-            return parse_snapshots_conf(text)
-        return parse_shell_assignments(text, bash_sourced=bash_sourced)
+            return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
     except OSError:
         return None
 
@@ -124,11 +149,16 @@ def conf_value(host: DoctorHostPort, path: HostPath, key: str) -> str | None:
 
 
 def settings_file_warnings(
-    host: DoctorHostPort, path: HostPath, *, bash_sourced: bool, note: str | None = None
+    host: DoctorHostPort,
+    path: HostPath,
+    *,
+    bash_sourced: bool,
+    note: str | None = None,
+    skip: Container[SettingsProblem] = (),
 ) -> Iterator[Result]:
-    """WARN for each line of a settings file that is not a plain assignment. note: what the warning
-    adds after "take nothing from the line" (by default, for a file bash sources, that bash reads the
-    line its own way)."""
+    """WARN for each line of a settings file that is not a plain assignment, but the lines in skip
+    (another check warns about them). note: what the warning adds after "take nothing from the line" (by
+    default, for a file bash sources, that bash reads the line its own way)."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
     bash = (
         (" (bash, which also sources this file, reads it its own way)" if bash_sourced else "")
@@ -136,11 +166,18 @@ def settings_file_warnings(
         else note
     )
     for p in parsed.problems if parsed else ():
-        yield Result(
-            WARN,
-            f"{path} {p}. CST's Python programs take nothing from the line{bash}, and the cst commands "
-            "that change the machine with these settings refuse to run until it is fixed",
-        )
+        if p in skip:
+            continue
+        yield Result(WARN, f"{path} {p}. {ignored_line_text(bash)}")
+
+
+def ignored_line_text(note: str) -> str:
+    """What a problem line of a settings file means for CST (settings_file_warnings); note goes after
+    "take nothing from the line"."""
+    return (
+        f"CST's Python programs take nothing from the line{note}, and the cst commands that change the "
+        "machine with these settings refuse to run until it is fixed"
+    )
 
 
 def refresh(host: DoctorHostPort, component: str) -> str:
