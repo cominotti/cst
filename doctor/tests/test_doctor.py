@@ -2332,6 +2332,46 @@ class VmNasBackupTest(VmTest):
         )
         self.assertNotIn("bash, which also sources", line)
 
+    def test_a_target_user_with_no_account_warns_that_the_game_profile_does_not_switch_on(self) -> None:
+        # 'on' refuses such a name and the watchdog does not start the profile; the doctor names it. Asked of
+        # the host's accounts (getent passwd, on the host also from a toolbox).
+        me = pwd.getpwuid(os.getuid()).pw_name
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        conf = os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf")
+        warning = "/etc/cpu-setup/cpu-setup.conf: TARGET_USER names no account: no-such-user-here. The game profile"
+        for container in ("0", "1"):
+            self.env["CST_DOCTOR_CONTAINER"] = container
+            with open(conf, "w") as f:
+                f.write("TARGET_USER='no-such-user-here'\n")
+            host = doc_adapters.Host(self.env, repo=REPO)
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                res = list(doc_cpu.check_cpu_settings(host))
+            self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+            self.assertTrue(res[0].message.startswith(warning), res[0].message)
+            self.assertIn("Set TARGET_USER to your user (id -un)", res[0].message)
+            for text in (f"TARGET_USER='{me}'\n", "TARGET_USER=''\n", "BUILD_CPUS='12-23'\n"):
+                with open(conf, "w") as f:
+                    f.write(text)
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    self.assertEqual(list(doc_cpu.check_cpu_settings(host)), [], text)
+        self.assertIn("flatpak-spawn --host getent -- passwd no-such-user-here", self.calls())
+        self.assert_read_only()
+        # The whole run: the warning in the cpu area.
+        self.deployments(rollback_pinned=True)
+        self.env["CST_DOCTOR_CONTAINER"] = "0"
+        with open(conf, "w") as f:
+            f.write("TARGET_USER='no-such-user-here'\n")
+        r = self.run_tool()
+        line = next((x for x in r.stdout.split("\n") if "TARGET_USER names no account" in x), "")
+        self.assertIn("WARN", line)
+
+    def test_getent_that_cannot_answer_is_no_warning(self) -> None:
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(host, "run", return_value=(127, "", "getent: not found")):
+            self.assertFalse(doc_cpu.names_no_account(host, "no-such-user-here"))
+        with mock.patch.object(host, "run", return_value=(0, "x:x:1:1::/:/bin/sh\n", "")):
+            self.assertFalse(doc_cpu.names_no_account(host, "x"))
+
     def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
         # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.
         self.deployments(rollback_pinned=True)

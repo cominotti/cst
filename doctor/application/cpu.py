@@ -3,6 +3,7 @@
 boxes outside CST's rules."""
 
 from collections.abc import Iterator
+from typing import Final
 
 from cpu.game.domain import intended_records, newer_intended
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
@@ -33,6 +34,16 @@ from doctor.ports import CheckFn, DoctorHostPort
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
 
+# getent's exit status for a key its database does not hold (getent(1)).
+GETENT_NO_KEY: Final = 2
+
+
+def names_no_account(host: DoctorHostPort, name: str) -> bool:
+    """No account of the host is called name: getent passwd, run on the host (from a toolbox too, whose own
+    passwd lacks the host's other accounts). False when getent cannot tell (missing, a timeout)."""
+    rc, _, _ = host.run(["getent", "--", "passwd", name], timeout=20)
+    return rc == GETENT_NO_KEY
+
 
 def game_dropins_left(host: DoctorHostPort) -> list[str]:
     """Host paths of the game profile's MemoryLow drop-ins that exist now."""
@@ -60,6 +71,14 @@ def game_again(host: DoctorHostPort) -> str:
 def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
     # Read with bash's rules (an older CST's bash copies sourced it), but no bash program of this CST does.
     yield from settings_file_warnings(host, CPU_CONF, bash_sourced=True, note=" (the game profile does not switch on)")
+    target = conf_value(host, CPU_CONF, "TARGET_USER")
+    if target is not None and target != "" and names_no_account(host, target):
+        yield Result(
+            WARN,
+            f"{CPU_CONF}: TARGET_USER names no account: {target}. The game profile does not switch on: "
+            "cpu-game.service fails when a game starts it, and the watchdog does not start it (its journal says "
+            "so once per boot). Set TARGET_USER to your user (id -un)",
+        )
 
 
 def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
