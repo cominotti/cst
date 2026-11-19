@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.shapes import json_object, parse_json, parse_toml
+from cst_core.domain.text import cgroup_v2_path
 from toolchains.domain.build import HASH_VAR, ROOT_REL
 from toolchains.domain.common import parses_as, plain
 
@@ -260,7 +261,7 @@ def server_place(env_id: str, cgroup_text: str | None, sock: str, facts: ScopeFa
     """
     facts = facts or ScopeFacts()
     scope = f"cst-sccache-{env_id}.scope"
-    path = next((ln[3:] for ln in (cgroup_text or "").splitlines() if ln.startswith("0::")), "")
+    path = cgroup_v2_path(cgroup_text or "") or ""
     if not path:
         return f"sccache server {env_id}: cgroup unknown (its process could not be read)"
     shown = re.sub(r"^.*?/user@\d+\.service/", "", path)

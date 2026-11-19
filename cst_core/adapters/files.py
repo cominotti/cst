@@ -5,6 +5,7 @@ Two text readers decode on purpose in two ways; do not merge them:
 - read_text here is the LENIENT reader: bytes that are not UTF-8 become
   U+FFFD (errors="replace"). For files CST only looks at (sysfs, procfs,
   settings, state): a stray byte must never stop a program with a traceback.
+  It turns "\r\n" and "\r" into a newline unless asked to keep line ends.
 - LocalFileSystemAdapter.read_text (below) is the BYTE-TRANSPARENT
   reader (errors="surrogateescape", line ends kept): for shared files that
   CST edits and writes back (fstab, crypttab, sysctl files through cst swap),
@@ -32,21 +33,25 @@ from cst_core.domain.units import MASK_TARGET
 
 
 @overload
-def read_text(path: str) -> str | None: ...
+def read_text(path: str, *, keep_line_ends: bool = False) -> str | None: ...
 
 
 @overload
-def read_text(path: str, default: str, *, limit: int = -1) -> str: ...
+def read_text(path: str, default: str, *, limit: int = -1, keep_line_ends: bool = False) -> str: ...
 
 
-def read_text(path: str, default: str | None = None, *, limit: int = -1) -> str | None:
+def read_text(path: str, default: str | None = None, *, limit: int = -1, keep_line_ends: bool = False) -> str | None:
     """The file as UTF-8 text, at most limit characters; default on OSError.
 
     The lenient decode policy (see the module docstring): a byte that is not
     UTF-8 becomes U+FFFD. Not for a file that is written back.
+    Line ends become a newline ("\r\n" and "\r" too), unless keep_line_ends:
+    then every character comes back as it is, for a file where only a newline
+    ends a line and a "\r" is part of the text (/proc/PID/cgroup: a cgroup's
+    name may hold one).
     """
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace", newline="" if keep_line_ends else None) as fh:
             return fh.read(limit)
     except OSError:
         return default

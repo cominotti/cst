@@ -78,6 +78,7 @@ from cst_core.domain.text import (
     HELP_WORDS,
     NO_WORDS,
     YES_WORDS,
+    cgroup_v2_path,
     describe_problems,
     enum_member,
     first_line,
@@ -151,6 +152,27 @@ class DomainTest(unittest.TestCase):
                 )
                 with self.subTest(line=line, n=n):
                     self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
+
+    def test_cgroup_v2_path_is_the_rest_of_the_first_0_line(self) -> None:
+        scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"
+        self.assertEqual(cgroup_v2_path(f"0::{scope}\n"), scope)  # cgroup v2 only
+        hybrid = f"12:cpuset:/\n2:cpu,cpuacct:/user.slice\n1:name=systemd:{scope}\n0::{scope}\n"
+        self.assertEqual(cgroup_v2_path(hybrid), scope)  # cgroup v1 lines first, the 0:: line last
+        self.assertEqual(cgroup_v2_path("0::/a.scope\n1:name=systemd:/b::c\n0::/d.scope"), "/a.scope")
+        self.assertEqual(cgroup_v2_path("0::/a.scope  \n"), "/a.scope  ")  # the rest of the line, as it is
+        # A 0:: line with no path is no path (the rustc wrapper's 0::/* case skips it too).
+        self.assertEqual(cgroup_v2_path("0::\n0::/a.scope\n"), "/a.scope")
+        for text in ("0::\n", "0::a.scope\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
+        # Only a newline ends a line: a cgroup name may hold any other separator (not "/" or "\n").
+        for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=sep):
+                self.assertEqual(cgroup_v2_path(f"0::/user.slice/a{sep}b.scope\n"), f"/user.slice/a{sep}b.scope")
+                self.assertIsNone(cgroup_v2_path(f"1:name=systemd:/a{sep}0::/b.scope\n"))
+        for text in ("", "\n", "1:name=systemd:/a.scope\n", " 0::/a.scope", "10::/a.scope", "0:/a.scope"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")
@@ -258,6 +280,16 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(read_int(self.path("n", b"-7\n")), -7)
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
+
+    def test_read_text_keeps_line_ends_only_when_asked(self) -> None:
+        # By default a "\r" or "\r\n" becomes a newline (universal newlines); keep_line_ends gives
+        # every character as it is, with the same default, limit and lenient decode.
+        p = self.path("ends", b"0::/a\rb.scope\r\nx\xff\n")
+        self.assertEqual(read_text(p), "0::/a\nb.scope\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, keep_line_ends=True), "0::/a\rb.scope\r\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, "", limit=6, keep_line_ends=True), "0::/a\r")
+        self.assertIsNone(read_text(self.path("missing"), keep_line_ends=True))
+        self.assertEqual(read_text(self.path("missing"), "d", keep_line_ends=True), "d")
 
     def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
         # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().

@@ -18,6 +18,7 @@ from btrfs.stall_monitord.domain import (
     FsTopo,
 )
 from cst_core.adapters.journal import log as journal_log
+from cst_core.domain.text import cgroup_v2_path
 from cst_core.domain.values import DAY
 
 CGROUP_ROOT = "/sys/fs/cgroup"
@@ -219,15 +220,25 @@ class TimedReader:
 
 
 def short_cgroup(pid: str | int) -> str:
+    """The name of the task's cgroup as an event line shows it (the last part of its cgroup v2
+    path, a docker or podman scope cut to its id's first 12 characters); "?" when unreadable. A
+    character that is not printable (a carriage return, an escape) is written as its Python
+    escape (\\r, \\x1b): a cgroup's name may hold any character but "/" and a newline, and the
+    name goes into the event text, the alert and the report's lines."""
     text = read_text(f"/proc/{pid}/cgroup")
     if text is None or text == "":
         return "?"
-    path = text.strip().splitlines()[-1].partition("::")[2] or "/"
+    path = cgroup_v2_path(text) or "/"
     leaf = path.rstrip("/").rsplit("/", 1)[-1] or "/"
     if leaf.startswith(("docker-", "libpod-")) and leaf.endswith(".scope"):
         kind, _, rest = leaf.partition("-")
-        return f"{kind}-{rest[:12]}"
-    return leaf[:60]
+        return _printable_name(f"{kind}-{rest[:12]}")
+    return _printable_name(leaf[:60])
+
+
+def _printable_name(name: str) -> str:
+    """NAME with each character that is not printable written as its Python escape."""
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in name)
 
 
 def run_slices(pid: str | int, tid: str | int) -> int | None:

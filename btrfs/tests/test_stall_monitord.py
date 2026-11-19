@@ -422,6 +422,50 @@ STACKS = {
 }
 
 
+class ShortCgroupTest(unittest.TestCase):
+    """short_cgroup names a task's cgroup in an event line: the last part of its cgroup v2 path
+    (cst_core cgroup_v2_path), a docker or podman scope cut to its id's first 12 characters."""
+
+    def short(self, text: str | None) -> str:
+        with mock.patch.object(md_proc, "read_text", lambda _path: text):
+            return md_proc.short_cgroup(4242)
+
+    def test_the_leaf_of_the_0_line(self) -> None:
+        self.assertEqual(self.short("0::/user.slice/user-1000.slice/session-2.scope\n"), "session-2.scope")
+        self.assertEqual(self.short("0::/\n"), "/")
+        docker = "0::/system.slice/docker-0123456789abcdef0123.scope\n"
+        self.assertEqual(self.short(docker), "docker-0123456789ab")
+
+    def test_the_0_line_not_the_last_line(self) -> None:
+        text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
+        self.assertEqual(self.short(text), "x.scope")
+
+    def test_a_carriage_return_in_the_real_file_is_kept(self) -> None:
+        # The daemon's own read_text decodes the file's bytes (no universal newlines), so a "\r"
+        # in a cgroup's name reaches cgroup_v2_path as it is. Only the path is redirected.
+        real = md_proc.read_text
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cgroup")
+            with open(path, "wb") as f:
+                f.write(b"0::/user.slice/a\rb.scope\n")
+            with mock.patch.object(md_proc, "read_text", lambda _path: real(path)):
+                self.assertEqual(md_proc.short_cgroup(4242), "a\\rb.scope")  # kept, and shown escaped
+
+    def test_a_character_that_is_not_printable_is_shown_escaped(self) -> None:
+        # A cgroup's name may hold a carriage return or an escape; written as it is into the event
+        # text, it would move the cursor of the terminal that shows the report.
+        self.assertEqual(self.short("0::/user.slice/a\rFAKE TEXT\n"), "a\\rFAKE TEXT")
+        self.assertEqual(self.short("0::/user.slice/\x1b[2Jx.scope\n"), "\\x1b[2Jx.scope")
+        self.assertEqual(self.short("0::/system.slice/docker-\x07bcdef0123456789.scope\n"), "docker-\\x07bcdef012345")
+        self.assertEqual(self.short("0::/user.slice/caf\u00e9 x.scope\n"), "caf\u00e9 x.scope")  # printable: kept
+
+    def test_unreadable_empty_or_without_a_0_line(self) -> None:
+        self.assertEqual(self.short(None), "?")
+        self.assertEqual(self.short(""), "?")
+        self.assertEqual(self.short("1:name=systemd:/user.slice/x.scope\n"), "/")
+        self.assertEqual(self.short("\n"), "/")  # only blanks: no 0:: line (it raised IndexError before)
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
