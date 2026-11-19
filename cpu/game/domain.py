@@ -227,19 +227,26 @@ def newer_intended(path: str, text: str) -> str | None:
     return INTENDED_FORMAT.newer_text(path, found) if found > INTENDED_FORMAT.version else None
 
 
+def ends_cut_short(data: str | bytes) -> bool:
+    """The file (its text or its bytes) ends in a line with no newline at its end: a record cut short.
+    Every writer (this one, bash's printf) ends a record with a newline and writes it before the change
+    it describes, so the change of such a line was never made, and a value cut short (an old value "1"
+    of "100") must not be undone. An empty file is none."""
+    if isinstance(data, str):
+        return data != "" and not data.endswith("\n")
+    return data != b"" and not data.endswith(b"\n")
+
+
 def _cut_short(text: str, lines: Sequence[str], number: int) -> bool:
-    """Line number (1-based) of a file is its last line, and has no newline at its end: a record cut
-    short. Every writer (this one, bash's printf) ends a record with a newline and writes it before
-    the change it describes, so the change of such a line was never made, and a value cut short
-    (an old value "1" of "100") must not be undone."""
-    return number == len(lines) and not text.endswith("\n")
+    """Line number (1-based) of a file is its last line, cut short (ends_cut_short)."""
+    return number == len(lines) and ends_cut_short(text)
 
 
 def cut_tail(data: bytes) -> tuple[int, bytes] | None:
-    """A file's last line with no newline at its end (a record cut short): the length the file keeps
-    without it (just after its last newline; 0 for a file of that line only) and the line's bytes. None
-    for an empty file, or one that ends in a newline."""
-    if not data or data.endswith(b"\n"):
+    """A file's last line with no newline at its end (a record cut short, ends_cut_short): the length the
+    file keeps without it (just after its last newline; 0 for a file of that line only) and the line's
+    bytes. None for an empty file, or one that ends in a newline."""
+    if not ends_cut_short(data):
         return None
     keep = data.rfind(b"\n") + 1
     return keep, data[keep:]
