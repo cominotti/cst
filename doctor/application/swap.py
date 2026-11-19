@@ -81,11 +81,15 @@ class _HostSettingsFacts:
         self._lstat_error: OSError | None = None
         self._crypttab: str | None = None
 
+    def _read(self, path: HostPath) -> str:
+        """The whole file (undecodable bytes replaced); OSError when it cannot be read."""
+        with self._host.open_text(self._host.path(path)) as f:
+            return f.read()
+
     def _whole(self, path: HostPath) -> str | None:
-        """The whole file (undecodable bytes replaced); None when it cannot be read."""
+        """The whole file; None when it cannot be read."""
         try:
-            with self._host.open_text(self._host.path(path)) as f:
-                return f.read()
+            return self._read(path)
         except OSError:
             return None
 
@@ -114,12 +118,9 @@ class _HostSettingsFacts:
 
     def crypttab_closed(self) -> bool:
         try:
-            with self._host.open_text(self._host.path(CRYPTTAB)) as f:
-                self._crypttab = f.read()
-        except PermissionError:
-            return True
-        except OSError:
-            return False
+            self._crypttab = self._read(CRYPTTAB)
+        except OSError as e:
+            return isinstance(e, PermissionError)
         return False
 
     def crypttab_text(self) -> str:
