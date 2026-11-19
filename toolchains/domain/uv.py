@@ -6,7 +6,9 @@ from __future__ import annotations
 import dataclasses
 import re
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+
+from cst_core.domain.values import MINUTE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -42,8 +44,8 @@ class UvCacheKind(StrEnum):
     OTHER = "other"
 
 
-UV_TIMEOUT = 10 * 60  # seconds for one `uv cache prune` (also bounded by the run's budget)
-UV_LOCK_WAIT = 60  # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
+UV_TIMEOUT: Final = 10 * MINUTE  # seconds for one `uv cache prune` (also bounded by the run's budget)
+UV_LOCK_WAIT: Final = MINUTE  # seconds uv may wait for its cache lock (UV_LOCK_TIMEOUT)
 # What uv says when UV_LOCK_TIMEOUT ran out ("Timeout (60s) when waiting for
 # lock on `...` at `.../.lock`, is another uv process running?"). Any other
 # error, also one that names the lock file (permission denied, ...), is a

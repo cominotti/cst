@@ -24,6 +24,7 @@ from toolchains.domain.build import (
     CACHE_TAG,
     CARGO_ENV,
     CARGO_MANIFEST,
+    CMD_TIMEOUT,
     CRATE_DEPTH,
     CargoCache,
     CargoProc,
@@ -108,7 +109,7 @@ def cargo_query(p: CargoProc, home: str) -> CargoQuery | str:
 def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str | None, str | None]:
     """(build folder or '', None) or (None, why). Read only: metadata
     --no-deps writes nothing and does not wait for the build lock."""
-    r = RUNNER.run(cmd, cwd=cwd, base_env=env, timeout=60)
+    r = RUNNER.run(cmd, cwd=cwd, base_env=env, timeout=CMD_TIMEOUT)
     if r.cause is not None:
         return None, f"cargo metadata: {r.cause}"
     if r.returncode != 0:

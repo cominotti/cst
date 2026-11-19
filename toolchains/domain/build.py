@@ -12,12 +12,12 @@ import os
 import re
 import stat
 from enum import StrEnum
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-from cst_core.domain.values import MIB
+from cst_core.domain.values import MIB, MINUTE
 from toolchains.domain.common import (
     ConfigError,
     ago,
@@ -241,8 +241,8 @@ SCAN_SKIP = frozenset({"node_modules", "target", "__pycache__", "venv"})
 REPO_DEPTH = 6  # levels below ~/Workspace searched for repositories
 CRATE_DEPTH = 6  # levels below a worktree searched for Cargo.toml
 CARGO_MANIFEST = "Cargo.toml"  # a crate's or a workspace's manifest
-ENUM_BUDGET = 600  # seconds for the whole search; longer: incomplete
-CMD_TIMEOUT = 60  # seconds for one git or cargo call
+ENUM_BUDGET: Final = 10 * MINUTE  # seconds for the whole search; longer: incomplete
+CMD_TIMEOUT: Final = MINUTE  # seconds for one git or cargo call
 PIN_NAMES = ("rust-toolchain.toml", "rust-toolchain")
 # Files that may name a toolchain without pinning it (`cargo +nightly fuzz`,
 # TOOLCHAIN ?= nightly-2026-06-01, a CI job): the toolchains report reads

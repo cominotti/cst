@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.adapters.runner import on_host_argv
 from cst_core.domain.errors import Refused
+from cst_core.domain.values import MINUTE
 from toolchains.domain.auto import TimerFacts, UnitActiveState, own_session_env
 from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER, in_container
@@ -42,7 +43,7 @@ def systemctl_env() -> dict[str, str]:
 def systemctl(*args: str, program: str | None, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=60, stdin="inherit")
+    r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=MINUTE, stdin="inherit")
     if r.cause is not None:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None
