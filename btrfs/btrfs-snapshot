@@ -308,13 +308,35 @@ collect_open_paths() {
         mount_sources
     } | sed '/^$/d' | sort -u)"
 }
+# The kernel writes a blank, a tab, a line break and a backslash in a
+# mountinfo path field as a backslash and three octal digits (\040 \011 \012
+# \134). unesc decodes every such escape in one pass, left to right, so the
+# escaped name a\134040b is a\040b, never "a b" (as bulk's unescape_mountinfo
+# does). POSIX awk; every value is below 128, so the locale does not change
+# what %c prints. A decoded line break splits the path into two lines of
+# OPEN_PATHS, as it does for the /proc links find prints: in_use counts a path
+# with a line break as in use.
+MOUNTINFO_UNESCAPE_AWK='
+function unesc(s,    out) {
+    out = ""
+    while (match(s, /\\[0-7][0-7][0-7]/)) {
+        out = out substr(s, 1, RSTART - 1) \
+            sprintf("%c", substr(s, RSTART + 1, 1) * 64 + substr(s, RSTART + 2, 1) * 8 + substr(s, RSTART + 3, 1))
+        s = substr(s, RSTART + 4)
+    }
+    return out s
+}'
 # Sources of bind mounts of the home subvolume in every mount namespace, as
 # host paths: a container started with -v ~/Workspace/x:/src writes into the
 # tree through a mount that the host's mount table and the container
-# processes' /proc links (/src/...) never show under /var/home.
+# processes' /proc links (/src/...) never show under /var/home. Both path
+# fields (the mount point, the root of the mount) are decoded before they are
+# compared (unesc above).
 mount_sources() {
     local dev pid
-    dev="$(awk -v m="${HOME_MOUNT}" '$5 == m {print $3; exit}' "${R}/proc/self/mountinfo")"
+    dev="$(M="${HOME_MOUNT}" awk "${MOUNTINFO_UNESCAPE_AWK}"'
+        BEGIN {m = ENVIRON["M"]}
+        unesc($5) == m {print $3; exit}' "${R}/proc/self/mountinfo")"
     [[ -n "${dev}" ]] || return 0
     # One process per mount namespace.
     find "${R}"/proc/[0-9]*/ns/mnt -maxdepth 0 -printf '%l %h\n' 2>/dev/null | sort -u -k1,1 |
@@ -322,12 +344,16 @@ mount_sources() {
             pid="${pid#"${R}"/proc/}"; pid="${pid%/ns}"
             cat "${R}/proc/${pid}/mountinfo" 2>/dev/null
         done |
-        D="${dev}" S="/${HOME_SUBVOL}" M="${HOME_MOUNT}" awk '
+        D="${dev}" S="/${HOME_SUBVOL}" M="${HOME_MOUNT}" awk "${MOUNTINFO_UNESCAPE_AWK}"'
             BEGIN {d = ENVIRON["D"]; s = ENVIRON["S"]; m = ENVIRON["M"]}
-            $3 == d && (index($4, s "/") == 1) {r = $4; gsub(/\\040/, " ", r); print m substr(r, length(s) + 1)}' |
+            $3 == d {r = unesc($4); if (index(r, s "/") == 1) print m substr(r, length(s) + 1)}' |
         sort -u
 }
+# A path whose name holds a line break counts as in use: OPEN_PATHS holds one
+# path per line, so a link or a mount source with that name is split across
+# two lines there, and neither is the path or below it.
 in_use() {   # path: true if anything is open at or below it (batch snapshot)
+    [[ "$1" != *$'\n'* ]] || return 0
     P="$1" awk 'BEGIN {p = ENVIRON["P"]}
         index($0, p) == 1 && (length($0) == length(p) || substr($0, length(p) + 1, 1) == "/") {found = 1; exit}
         END {exit !found}' <<<"${OPEN_PATHS}"
@@ -342,10 +368,28 @@ in_use_now() {
         \( -lname "${pat}" -o -lname "${pat}/*" \) -print -quit 2>/dev/null)" ]] && return 0
     OPEN_PATHS="$(mount_sources)" in_use "$1"
 }
+# findmnt -r writes a blank, a tab, a line break, a backslash and every byte
+# from 0x80 up (an accented letter too, whatever the locale) as \xHH; unhex
+# decodes them. awk runs in the C locale, so %c of a value from 128 up is that
+# one byte, not a character encoded in UTF-8, and index() compares bytes.
+FINDMNT_UNESCAPE_AWK='
+function unhex(s,    out, hex) {
+    out = ""; hex = "0123456789abcdef"
+    while (match(s, /\\x[0-9A-Fa-f][0-9A-Fa-f]/)) {
+        out = out substr(s, 1, RSTART - 1) \
+            sprintf("%c", (index(hex, tolower(substr(s, RSTART + 2, 1))) - 1) * 16 + index(hex, tolower(substr(s, RSTART + 3, 1))) - 1)
+        s = substr(s, RSTART + 4)
+    }
+    return out s
+}'
 # A mount below PATH (e.g. a bind mount of the same subvolume) would be walked
 # by cp/find -xdev and emptied by rm --one-file-system: never touch such a path.
+# Each mount point is decoded (unhex above) before it is compared.
 has_mount_below() {
-    findmnt -rn -o TARGET | P="$1/" awk 'BEGIN {p = ENVIRON["P"]} index($0, p) == 1 {found = 1; exit} END {exit !found}'
+    findmnt -rn -o TARGET | P="$1/" LC_ALL=C awk "${FINDMNT_UNESCAPE_AWK}"'
+        BEGIN {p = ENVIRON["P"]}
+        index(unhex($0), p) == 1 {found = 1; exit}
+        END {exit !found}'
 }
 
 # ---- conversion of one directory into a nested subvolume ----------------------------

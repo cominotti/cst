@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 #
 # setup-snapshots.bash: `cst btrfs snapshots ...` (sourced by the frontend,
-# runs as root; uses its helpers cst_install/cst_install_text (cst-install.bash),
+# runs as root; uses its helpers cst_install/cst_install_text/cst_as_user (cst-install.bash),
 # check_component_syntax/root_fs_uuid/install_pending_alerts and
 # variables SRC, UNIT_DIR, PROG, target_user). Nothing here runs unless one of these
 # explicit actions is called.
@@ -79,25 +79,14 @@ snap_user_runtime() {
     echo "${SNAP_USER_RUN}/${uid}"
 }
 
-# runuser to the user with the session variables of that user, so that
-# systemctl --user reaches the user's own manager. sudo can hand root its own
-# XDG_RUNTIME_DIR (/run/user/0) and bus, and runuser keeps them: systemctl
-# --user then fails ("Operation not permitted"). Both are dropped first, then
-# set to the user's folder and bus when they exist.
-snap_as_user() {   # cmd...
-    local run session=()
-    run="$(snap_user_runtime)" || run=""
-    [[ -d "${run}" ]] && session+=("XDG_RUNTIME_DIR=${run}")
-    [[ -S "${run}/bus" ]] && session+=("DBUS_SESSION_BUS_ADDRESS=unix:path=${run}/bus")
-    runuser -u "${target_user}" -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "${session[@]}" "$@"
-}
-
-# toolchains/cst-toolchains as the user, never as root: `config apply` (cargo
-# build-dir, uv link-mode), `auto on --unless-off` (the hourly pruning).
+# toolchains/cst-toolchains as the user (cst_as_user: with the user's session
+# variables, so systemctl --user reaches the user's own manager), never as
+# root: `config apply` (cargo build-dir, uv link-mode), `auto on --unless-off`
+# (the hourly pruning).
 snap_toolchains() {   # args...
     local home
     home="$(snap_home)" || return 1
-    snap_as_user env CST_PROG="$(snap_toolchains_prog)" python3 -I -B "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
+    cst_as_user "${target_user}" CST_PROG="$(snap_toolchains_prog)" python3 -I -B "${TOOLCHAINS_TOOL}" "$@" --home "${home}"
 }
 
 # The `config plan` lines for the setup preview, indented, without its
@@ -111,7 +100,7 @@ snap_toolchains_config_preview() {
 snap_chrome() {   # action
     local home
     home="$(snap_home)" || return 1
-    snap_as_user python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
+    cst_as_user "${target_user}" python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
 }
 
 snap_home() {
@@ -236,23 +225,21 @@ snap_conf_render() {   # KEY=VALUE...
 
 # Update settings in snapshots.conf: KEY=VALUE arguments; everything else
 # (including manual edits) is kept. Created with defaults the first time.
-# Written only when its content changes.
+# Written only when its content or its mode changes, through the installer
+# (cst_install_text: a new file renamed into place and synced, owner root,
+# mode 0644, a link in its place replaced; doctor and cst vm read it as a
+# user); it prints written: or unchanged:.
+# The whole content is rendered first, so a refused value writes nothing.
 snap_conf_set() {   # KEY=VALUE...
-    local tmp
+    local tmp rc=0
     tmp="$(mktemp)"
     if ! snap_conf_render "$@" >"${tmp}"; then
         rm -f "${tmp}"
         exit 1
     fi
-    if [[ -e "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}"; then
-        rm -f "${tmp}"
-        # Same content: only a drifted mode is put back (doctor and cst vm read it as a user).
-        [[ "$(stat -c %a "${SNAP_CONF}")" == 644 ]] || chmod 0644 "${SNAP_CONF}"
-        return 0
-    fi
-    install -d -m 0755 "$(dirname "${SNAP_CONF}")"
-    install -m 0644 "${tmp}" "${SNAP_CONF}"
+    cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?
     rm -f "${tmp}"
+    return "${rc}"
 }
 
 # snap_conf_read KEY...: set KEYs (the caller's locals) from snapshots.conf as

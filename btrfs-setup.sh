@@ -520,7 +520,7 @@ status_pending_alerts() {
     [[ -d "${OLD_ALERTS_DIR}" && ! -L "${OLD_ALERTS_DIR}" ]] &&
         echo "  ${OLD_ALERTS_DIR} (a version named f44-tools) is still there: ${PROG} install moves it"
     if [[ -n "${target_user}" && "${target_user}" != root ]]; then
-        runuser -u "${target_user}" -- python3 -I -B "${SRC}/cst-pending-alerts" --list
+        cst_as_user "${target_user}" python3 -I -B "${SRC}/cst-pending-alerts" --list
     else
         python3 -I -B "${SRC}/cst-pending-alerts" --list
     fi 2>&1 | sed 's/^/  /'

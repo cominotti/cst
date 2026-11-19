@@ -3008,12 +3008,18 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         The real `cst btrfs snapshots nas disable` (as root, the real systemctl)
         rewrites them in quotes with the values bash read from the old file,
         the cst_core reader then finds no problem, and a second run leaves the
-        file as it is (same inode, same time)."""
+        file as it is (same inode, same time). The real installer writes it: a
+        new file renamed into place (a new inode), owner root, mode 0644,
+        `written:` and then `unchanged:` on the output; the same content with
+        its mode changed to 0600 is written again (root 0644, `written:`, then
+        `unchanged:`); a link in its place, to a file with the same content, is
+        replaced by a regular file and the file it pointed to is left as it was."""
         conf = "/etc/btrfs-setup/snapshots.conf"
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"rm -f {conf}; if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
+            f"rm -f {conf} /var/tmp/e2e-snapconf.target; "
+            f"if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
             check=False,
         )
         out = exec_bash(
@@ -3031,7 +3037,11 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             grep -qF 'NAS_PATH=/volume1/My\\ Backups' "$conf"
             values() {{ (. "$conf"; printf '%s|' "$NAS_ENABLED" "$NAS_PATH" "$NAS_RESTIC_HOST" "$NAS_USER"); }}
             before="$(values)"
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            old_ino="$(stat -c %i "$conf")"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            [ "$(stat -c %i "$conf")" != "$old_ino" ] || {{ echo "written in place, not renamed" >&2; exit 1; }}
             after="$(values)"
             [ "$after" = "0|${{before#1|}}" ] || {{ echo "values changed: $before -> $after" >&2; exit 1; }}
             grep -qx "NAS_PATH='/volume1/My Backups'" "$conf"
@@ -3047,10 +3057,31 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
 ' "$conf"
             st="$(stat -c '%i %y' "$conf")"
             cp "$conf" /var/tmp/e2e-snapconf.first
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "no unchanged: line: $out" >&2; exit 1; }}
             [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
             cmp "$conf" /var/tmp/e2e-snapconf.first
-            rm -f /var/tmp/e2e-snapconf.first
+            # The same content, mode changed by hand to 0600: written again (root 0644) and
+            # named so; the next run leaves it.
+            chmod 0600 "$conf"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "mode 0600: no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "after the mode: no unchanged: line: $out" >&2; exit 1; }}
+            # A link in its place (to a file with the same content, mode 0600): replaced by a
+            # regular file; the file it pointed to keeps its bytes and its mode.
+            target=/var/tmp/e2e-snapconf.target
+            cp "$conf" "$target"; chmod 0600 "$target"
+            rm -f "$conf"; ln -s "$target" "$conf"
+            /opt/cst-rw/cst btrfs snapshots nas disable >/dev/null
+            [ -f "$conf" ] && [ ! -L "$conf" ] || {{ echo "the link is still there" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            cmp "$target" /var/tmp/e2e-snapconf.first
+            [ "$(stat -c %a "$target")" = 600 ] || {{ echo "the link's target was changed" >&2; exit 1; }}
+            rm -f /var/tmp/e2e-snapconf.first "$target"
             echo E2E-OK
             """,
         ).stdout
@@ -3839,7 +3870,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             fi
             [[ -S /run/user/1000/systemd/private ]]
             out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
-                . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
             sed 's/^/test_81: /' <<<"$out" >&2
             if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
             grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
@@ -3847,6 +3878,134 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             as_tester systemctl --user is-active cst-toolchains-prune.timer
             python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["components"].get("toolchains:auto") != "done")' \
                 "$H/.local/state/cst/installed.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_115_cst_as_user_gives_the_command_the_users_session(self) -> None:
+        """cst_as_user (cst-install.bash), as root with what sudo hands root (SUDO_USER, its own
+        XDG_RUNTIME_DIR and bus): the real runuser runs the command as tester with HOME, USER,
+        LOGNAME, tester's /run/user/1000 and bus, and no SUDO_USER; systemctl --user reaches
+        tester's manager, which root's variables do not (checked first, else the test proves
+        nothing). What a fake runuser cannot show: what the real one keeps or resets."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_115 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export SUDO_USER=tester XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+            [[ -S /run/user/1000/systemd/private ]]
+            if runuser -u tester -- systemctl --user show-environment >/dev/null 2>&1; then
+                echo "root's variables still reach tester's manager: the test would prove nothing" >&2
+                exit 1
+            fi
+            . /opt/cst-rw/cst-install.bash
+            seen="$(cst_as_user tester sh -c 'id -un; env')"
+            [[ "$(head -n1 <<<"$seen")" == tester ]]
+            for want in HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; do
+                grep -qxF "$want" <<<"$seen" || { echo "no $want in: $seen" >&2; exit 1; }
+            done
+            if grep -q '^SUDO_USER=' <<<"$seen"; then echo "SUDO_USER reached the command" >&2; exit 1; fi
+            state="$(cst_as_user tester systemctl --user is-system-running 2>&1 || true)"
+            case "$state" in
+                running | degraded | starting | initializing) ;;
+                *) echo "tester's manager not reached: $state" >&2; exit 1 ;;
+            esac
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_116_btrfs_snapshot_reads_the_real_kernels_and_findmnts_escapes(self) -> None:
+        """btrfs/btrfs-snapshot against the real kernel's mountinfo and the real findmnt, as root.
+        A tmpfs stands in for the home subvolume (its folder "home" bind-mounted at a HOME_MOUNT
+        with a blank, set in snapshots.conf); another mount namespace (unshare -m) bind-mounts
+        folders whose names hold a tab, a blank, a backslash and an accented letter, as a
+        container's -v does: `busy` lists each, no sibling, and nothing once that namespace is
+        gone. A tmpfs mounted below a folder whose path findmnt -r writes escaped (\\x20,
+        \\xc3\\xba): `convert-one` skips it (is or contains a mountpoint). The escapes are
+        checked first, else the test proves nothing. What the fakes of the unit tests cannot
+        show: how the kernel and findmnt write these names."""
+        cleanup = r"""
+        d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+        if [ -s "$d/holder" ]; then kill "$(cat "$d/holder")" 2>/dev/null || true; fi
+        if mountpoint -q "$d/top" 2>/dev/null; then
+            umount -R "$d/home mnt" "$d/top" 2>/dev/null || umount -lR "$d/top" || true
+        fi
+        rm -rf "$d" "$state"
+        if [ -e "$d.state" ]; then mv "$d.state" "$state"; fi
+        if [ -e "$d.conf" ]; then mv -f "$d.conf" "$conf"; else rm -f "$conf"; fi
+        """
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, cleanup, check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_116 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+            snap=/opt/cst-rw/btrfs/btrfs-snapshot
+            install -d -m 0755 "$d" /etc/btrfs-setup
+            if [ -e "$conf" ]; then cp -a "$conf" "$d.conf"; fi
+            if [ -e "$state" ]; then mv "$state" "$d.state"; fi
+            # The home subvolume without btrfs: a tmpfs whose folder "home" is bind-mounted at
+            # HOME_MOUNT (root field /home in mountinfo), a mount point with a blank.
+            install -d "$d/top"
+            mount -t tmpfs tmpfs "$d/top"
+            h="$d/home mnt"
+            mkdir -p "$d/top/home/u" "$h"
+            mount --bind "$d/top/home" "$h"
+            printf '%s\n' "HOME_MOUNT='$h'" "HOME_SUBVOL='home'" >"$conf"
+            names=($'Work\tspace' 'a b' 'back\slash' $'M\xc3\xbasica')
+            paths=()
+            i=0
+            for n in "${names[@]}"; do
+                mkdir -p "$h/u/$n" "$d/src$i"
+                paths+=("$h/u/$n")
+                i=$((i + 1))
+            done
+            mkdir -p "$h/u/Work" "$h/u/a"
+            # Another mount namespace bind-mounts each folder, as a container's -v does: the real
+            # kernel writes the root field of each (/home/u/a\040b, ...) in its mountinfo.
+            (
+                i=0
+                for p in "${paths[@]}"; do printf '%s\0%s\0' "$p" "$d/src$i"; i=$((i + 1)); done
+            ) >"$d/binds"
+            D="$d" unshare -m bash -c '
+                while IFS= read -r -d "" src && IFS= read -r -d "" dst; do mount --bind "$src" "$dst"; done <"$D/binds"
+                echo "$" >"$D/holder"
+                : >"$D/ready"
+                exec sleep 300' >"$d/holder.log" 2>&1 &
+            holder=$!
+            for _ in $(seq 100); do [ -e "$d/ready" ] && break; sleep 0.1; done
+            [ -e "$d/ready" ] || { cat "$d/holder.log" >&2; exit 1; }
+            # The kernel escapes them in mountinfo: else the test proves nothing.
+            grep -qF 'home/u/a\040b' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/Work\011space' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/back\134slash' "/proc/$holder/mountinfo"
+            grep -qF 'home\040mnt' /proc/self/mountinfo
+            want="$(printf '%s\n' "${paths[@]}")"
+            got="$("$snap" busy "$h/u/Work" "$h/u/a" "${paths[@]}")"
+            [ "$got" = "$want" ] || { printf 'busy listed:\n%s\nwanted:\n%s\n' "$got" "$want" >&2; exit 1; }
+            kill "$holder"; wait "$holder" 2>/dev/null || true
+            [ -z "$("$snap" busy "${paths[@]}")" ]
+            # A mount below a folder whose path findmnt -r writes escaped (\x20, \xc3\xba).
+            conv=("$h/u/conv a b" "$h/u/conv "$'M\xc3\xbasica')
+            for p in "${conv[@]}"; do
+                mkdir -p "$p/m"
+                [ "$(stat -c %i "$p")" != 256 ]   # a tmpfs inode 256 would read as a subvolume
+                mount -t tmpfs tmpfs "$p/m"
+            done
+            findmnt -rn -o TARGET | grep -qF 'conv\x20a\x20b/m'   # escaped: else the test proves nothing
+            findmnt -rn -o TARGET | grep -qF 'conv\x20M\xc3\xbasica/m'
+            for p in "${conv[@]}"; do
+                rc=0; out="$("$snap" convert-one "$p")" || rc=$?
+                [ "$rc" = 1 ]
+                [ "$out" = "<4>btrfs-snapshot: convert: $p: is or contains a mountpoint, skipped" ] ||
+                    { echo "convert-one $p: $out" >&2; exit 1; }
+                mountpoint -q "$p/m"
+            done
             echo E2E-OK
             """,
         ).stdout

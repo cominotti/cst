@@ -1418,9 +1418,10 @@ class ShellAssignmentsTest(unittest.TestCase):
         conf = os.path.join(self.tmp, "snapshots.conf")
         quoted = self.bash_text(
             f"TMPDIR={shlex.quote(self.tmp)}; SRC={shlex.quote(os.path.join(REPO, 'btrfs'))}; "
+            f". {shlex.quote(os.path.join(REPO, 'cst-install.bash'))}; "
             f'. "$SRC/setup-snapshots.bash"; SNAP_CONF={shlex.quote(conf)}; '
             "snap_conf_set NAS_HOST=nas.local NAS_USER=danilo NAS_PATH=/volume1/backup/sophia NAS_PORT=2204 "
-            'NAS_RESTIC_HOST="it\'s" HOME_DIR=\'/var/home/a b\' && cat "$SNAP_CONF"'
+            'NAS_RESTIC_HOST="it\'s" HOME_DIR=\'/var/home/a b\' >/dev/null && cat "$SNAP_CONF"'
         )
         self.assertIn("HOME_DIR='/var/home/a b'", quoted.splitlines())
         for name, text in (

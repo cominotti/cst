@@ -243,6 +243,12 @@ section 8). It alerts about:
 | A Fedora update changed the udev rule that degraded-boot depends on (only with the degraded-boot part) | `udev: .../64-btrfs.rules changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)` |
 | Hourly snapshots stopped working (only with snapshots set up) | `snapshots: no successful hourly run for over 3 hours` |
 
+When rpm-ostree cannot say which deployment boots next (it fails, its
+output is unreadable, or it lists no complete deployment), the check writes
+`udev: next deployment unknown (REASON); its 64-btrfs.rules was not checked`
+to the journal as a warning (not an alert) and checks only the booted
+system's rule.
+
 **Swap disks too.** Swap has no second copy: if the swap disk fails, the
 programs whose memory was swapped out crash or hang. So the SMART checks also
 run for the NVMe disk under each swap device listed in `/proc/swaps`. An
