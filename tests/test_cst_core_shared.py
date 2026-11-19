@@ -814,8 +814,9 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(kw["pass_fds"], (5,))
 
     def test_keep_signals_hands_this_process_s_dispositions_on(self) -> None:
-        # Python ignores SIGPIPE (bit 13 of SigIgn): by default subprocess puts it back to its
-        # default in the command; with keep_signals the command gets it ignored, as a shell's child.
+        # With SIGPIPE ignored here (bit 13 of SigIgn), as Python sets it at start: by default
+        # subprocess puts it back to its default in the command; with keep_signals the command gets
+        # it ignored, as a shell's child.
         def pipe_ignored(
             runner: core_runner.SubprocessCommandRunner, on_line: Callable[[str], None] | None = None
         ) -> bool:
@@ -823,7 +824,9 @@ class CommandRunnerTest(unittest.TestCase):
             mask = int(res.stdout.split()[1], 16)
             return bool(mask & (1 << (signal.SIGPIPE - 1)))
 
-        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+        # This process's disposition is the test's own input: set here, not taken from the runner.
+        before = signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGPIPE, before)
         self.assertFalse(pipe_ignored(core_runner.SubprocessCommandRunner()))
         self.assertTrue(pipe_ignored(core_runner.SubprocessCommandRunner(keep_signals=True)))
         # The same through on_line (subprocess.Popen).
