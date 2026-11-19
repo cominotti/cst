@@ -2948,12 +2948,17 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         The real `cst btrfs snapshots nas disable` (as root, the real systemctl)
         rewrites them in quotes with the values bash read from the old file,
         the cst_core reader then finds no problem, and a second run leaves the
-        file as it is (same inode, same time)."""
+        file as it is (same inode, same time). The real installer writes it: a
+        new file renamed into place (a new inode), owner root, mode 0644,
+        `written:` and then `unchanged:` on the output; a link in its place,
+        to a file with the same content, is replaced by a regular file and the
+        file it pointed to is left as it was."""
         conf = "/etc/btrfs-setup/snapshots.conf"
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"rm -f {conf}; if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
+            f"rm -f {conf} /var/tmp/e2e-snapconf.target; "
+            f"if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
             check=False,
         )
         out = exec_bash(
@@ -2971,7 +2976,11 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             grep -qF 'NAS_PATH=/volume1/My\\ Backups' "$conf"
             values() {{ (. "$conf"; printf '%s|' "$NAS_ENABLED" "$NAS_PATH" "$NAS_RESTIC_HOST" "$NAS_USER"); }}
             before="$(values)"
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            old_ino="$(stat -c %i "$conf")"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            [ "$(stat -c %i "$conf")" != "$old_ino" ] || {{ echo "written in place, not renamed" >&2; exit 1; }}
             after="$(values)"
             [ "$after" = "0|${{before#1|}}" ] || {{ echo "values changed: $before -> $after" >&2; exit 1; }}
             grep -qx "NAS_PATH='/volume1/My Backups'" "$conf"
@@ -2987,10 +2996,22 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
 ' "$conf"
             st="$(stat -c '%i %y' "$conf")"
             cp "$conf" /var/tmp/e2e-snapconf.first
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "no unchanged: line: $out" >&2; exit 1; }}
             [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
             cmp "$conf" /var/tmp/e2e-snapconf.first
-            rm -f /var/tmp/e2e-snapconf.first
+            # A link in its place (to a file with the same content, mode 0600): replaced by a
+            # regular file; the file it pointed to keeps its bytes and its mode.
+            target=/var/tmp/e2e-snapconf.target
+            cp "$conf" "$target"; chmod 0600 "$target"
+            rm -f "$conf"; ln -s "$target" "$conf"
+            /opt/cst-rw/cst btrfs snapshots nas disable >/dev/null
+            [ -f "$conf" ] && [ ! -L "$conf" ] || {{ echo "the link is still there" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            cmp "$target" /var/tmp/e2e-snapconf.first
+            [ "$(stat -c %a "$target")" = 600 ] || {{ echo "the link's target was changed" >&2; exit 1; }}
+            rm -f /var/tmp/e2e-snapconf.first "$target"
             echo E2E-OK
             """,
         ).stdout

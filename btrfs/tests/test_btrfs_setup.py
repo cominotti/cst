@@ -351,6 +351,7 @@ disable_timers x.service
         # Sourced the way the frontend does; the paths it writes point into the test's folder.
         self.touch(*(os.path.join(self.units, t) for t in ("btrfs-snapshot.timer", "btrfs-snapshot-nas.timer")))
         self.run_bash(
+            f'. "{REPO}/cst-install.bash"\n'
             '. "$SRC/setup-snapshots.bash"\n'
             'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"; SNAP_CONF="$T/snapshots.conf"\n'
             "target_user=u\n"
@@ -757,13 +758,15 @@ class SnapshotsConfTest(unittest.TestCase):
     def run_bash(
         self, body: str, values: dict[str, str] | None = None, *, locale: str = "C.UTF-8", rc: int | None = 0
     ) -> subprocess.CompletedProcess[str]:
-        """body after setup-snapshots.bash is sourced as the frontend sources it; SNAP_CONF and
-        the other paths it writes point into the test's folder. values: environment variables
-        (surrogate escapes stand for bytes that are not UTF-8)."""
+        """body after cst-install.bash and setup-snapshots.bash are sourced as the frontend sources
+        them (the real installer writes snapshots.conf); SNAP_CONF and the other paths it writes
+        point into the test's folder. values: environment variables (surrogate escapes stand for
+        bytes that are not UTF-8)."""
         script = "\n".join(
             [
                 STUBS,
                 f"SRC={BTRFS}; PROG=cst-btrfs-test",
+                f'. "{REPO}/cst-install.bash"',
                 '. "$SRC/setup-snapshots.bash"',
                 'SNAP_CONF="$T/snapshots.conf"; SNAP_PLAN="$T/convert-plan"; SNAP_BOOT_FLAG="$T/convert-at-boot"',
                 body,
@@ -907,6 +910,39 @@ class SnapshotsConfTest(unittest.TestCase):
         self.assertEqual(oct(after.st_mode & 0o777), "0o644")
         self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
 
+    def test_the_installer_writes_the_file_and_names_it(self) -> None:
+        # Through cst_install_text: written: on a change, unchanged: otherwise; a change is a new
+        # file renamed into place (a new inode), never a write into the file the hourly run reads.
+        self.assertEqual(self.run_bash("snap_conf_set NAS_ENABLED=1").stdout, f"written:   {self.conf}\n")
+        before = os.stat(self.conf)
+        self.assertEqual(self.run_bash("snap_conf_set NAS_ENABLED=1").stdout, f"unchanged: {self.conf}\n")
+        self.assertEqual(self.run_bash("snap_conf_set NAS_ENABLED=0").stdout, f"written:   {self.conf}\n")
+        after = os.stat(self.conf)
+        self.assertNotEqual(after.st_ino, before.st_ino)
+        self.assertEqual(oct(after.st_mode & 0o777), "0o644")
+        self.assertIn("NAS_ENABLED='0'", self.text().splitlines())
+
+    def test_a_link_in_its_place_is_replaced_and_its_target_is_left(self) -> None:
+        # The installer replaces the link itself with a regular file and never writes into what
+        # it points to. (As root it also replaces a link whose target holds the same content,
+        # which the old writer kept, changing the target's mode: tier 1 test_17.)
+        target = os.path.join(self.tmp, "elsewhere")
+        with open(target, "w") as f:
+            f.write("NAS_ENABLED='1'\n")
+        os.symlink(target, self.conf)
+        r = self.run_bash("snap_conf_set NAS_ENABLED=0")
+        self.assertEqual(r.stdout, f"written:   {self.conf}\n")
+        self.assertFalse(os.path.islink(self.conf))
+        self.assertIn("NAS_ENABLED='0'", self.text().splitlines())
+        with open(target) as f:
+            self.assertEqual(f.read(), "NAS_ENABLED='1'\n")
+
+    def test_its_folder_is_created(self) -> None:
+        conf = os.path.join(self.tmp, "etc", "btrfs-setup", "snapshots.conf")
+        r = self.run_bash(f'SNAP_CONF="{conf}"; snap_conf_set NAS_ENABLED=1')
+        self.assertEqual(r.stdout, f"written:   {conf}\n")
+        self.assertEqual(oct(os.stat(conf).st_mode & 0o777), "0o644")
+
     def test_an_old_writer_file_reads_as_bash_reads_it_and_is_rewritten_in_quotes(self) -> None:
         # The upgrade: the fixture comes from the old writer and real bash printf %q, every byte
         # 1..255 and the tricky values, written in either locale and rewritten in either.
@@ -960,7 +996,6 @@ snap_clean_targets_plan() { :; }
 snap_clean_targets_apply() { :; }
 snap_toolchains_config_preview() { :; }
 snap_chrome() { echo "chrome $*"; }
-cst_install_text() { cat >"$1"; }
 snap_install_runtime() { echo "runtime installed"; }
 snap_user_configs() { :; }
 snap_activate() { echo "activated"; }

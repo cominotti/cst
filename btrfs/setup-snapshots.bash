@@ -236,23 +236,26 @@ snap_conf_render() {   # KEY=VALUE...
 
 # Update settings in snapshots.conf: KEY=VALUE arguments; everything else
 # (including manual edits) is kept. Created with defaults the first time.
-# Written only when its content changes.
+# Written only when its content changes, through the installer
+# (cst_install_text: a new file renamed into place and synced, owner root,
+# mode 0644, a link in its place replaced); it prints written: or unchanged:.
+# The whole content is rendered first, so a refused value writes nothing.
 snap_conf_set() {   # KEY=VALUE...
-    local tmp
+    local tmp rc=0
     tmp="$(mktemp)"
     if ! snap_conf_render "$@" >"${tmp}"; then
         rm -f "${tmp}"
         exit 1
     fi
-    if [[ -e "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}"; then
-        rm -f "${tmp}"
-        # Same content: only a drifted mode is put back (doctor and cst vm read it as a user).
-        [[ "$(stat -c %a "${SNAP_CONF}")" == 644 ]] || chmod 0644 "${SNAP_CONF}"
-        return 0
+    # Same content, mode changed by hand: only the mode is put back (doctor and
+    # cst vm read the file as a user), the file is not rewritten.
+    if [[ -f "${SNAP_CONF}" && ! -L "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}" &&
+        [[ "$(stat -c %a "${SNAP_CONF}")" != 644 ]]; then
+        chmod 0644 "${SNAP_CONF}"
     fi
-    install -d -m 0755 "$(dirname "${SNAP_CONF}")"
-    install -m 0644 "${tmp}" "${SNAP_CONF}"
+    cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?
     rm -f "${tmp}"
+    return "${rc}"
 }
 
 # snap_conf_read KEY...: set KEYs (the caller's locals) from snapshots.conf as

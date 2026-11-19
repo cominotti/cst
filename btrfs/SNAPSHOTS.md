@@ -1871,8 +1871,11 @@ quotes when the value holds a `'`. `btrfs-snapshot` (bash and its Python runtime
 file as data, below) and CST's other Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
-is written only when its content changes; a mode changed by hand goes back
-to 0644 (everyone may read it).
+is written only when its content changes, through CST's installer: a new
+file renamed into place (a run never reads half a file) and synced to disk;
+`written:` or `unchanged:` names it. On every run its owner (root) and mode
+0644 are put back (everyone may read it); a link in its place is replaced by
+the file.
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
 `K=$'a\tb'`). `cst doctor`, `cst vm` and the health check read those lines as bash does, so
