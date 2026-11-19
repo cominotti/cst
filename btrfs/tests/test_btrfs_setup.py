@@ -901,15 +901,20 @@ class SnapshotsConfTest(unittest.TestCase):
         self.assertEqual(oct(os.stat(self.conf).st_mode & 0o777), "0o644")
 
     def test_an_unchanged_file_gets_its_mode_back(self) -> None:
-        """Same content, mode changed by hand: the mode goes back to 0644 (as the old writer's
-        install -m 0644 did on every run); the file itself is not rewritten."""
+        """Same content, mode changed by hand: the installer writes the file again with mode 0644
+        (as the old writer's install -m 0644 did on every run) and says so. Before, a chmod put the
+        mode back and the installer then printed unchanged: for the file it had just changed."""
         self.set_values({"NAS_ENABLED": "1"})
+        content = self.raw()
         os.chmod(self.conf, 0o600)
         before = os.stat(self.conf)
-        self.set_values({"NAS_ENABLED": "1"})
+        r = self.run_bash("snap_conf_set NAS_ENABLED=1")
+        self.assertEqual((r.returncode, r.stdout), (0, f"written:   {self.conf}\n"))
         after = os.stat(self.conf)
         self.assertEqual(oct(after.st_mode & 0o777), "0o644")
-        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+        self.assertNotEqual(after.st_ino, before.st_ino)
+        self.assertEqual(self.raw(), content)
+        self.assertEqual(self.run_bash("snap_conf_set NAS_ENABLED=1").stdout, f"unchanged: {self.conf}\n")
 
     def test_the_installer_writes_the_file_and_names_it(self) -> None:
         # Through cst_install_text: written: on a change, unchanged: otherwise; a change is a new

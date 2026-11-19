@@ -225,9 +225,10 @@ snap_conf_render() {   # KEY=VALUE...
 
 # Update settings in snapshots.conf: KEY=VALUE arguments; everything else
 # (including manual edits) is kept. Created with defaults the first time.
-# Written only when its content changes, through the installer
+# Written only when its content or its mode changes, through the installer
 # (cst_install_text: a new file renamed into place and synced, owner root,
-# mode 0644, a link in its place replaced); it prints written: or unchanged:.
+# mode 0644, a link in its place replaced; doctor and cst vm read it as a
+# user); it prints written: or unchanged:.
 # The whole content is rendered first, so a refused value writes nothing.
 snap_conf_set() {   # KEY=VALUE...
     local tmp rc=0
@@ -235,12 +236,6 @@ snap_conf_set() {   # KEY=VALUE...
     if ! snap_conf_render "$@" >"${tmp}"; then
         rm -f "${tmp}"
         exit 1
-    fi
-    # Same content, mode changed by hand: only the mode is put back (doctor and
-    # cst vm read the file as a user), the file is not rewritten.
-    if [[ -f "${SNAP_CONF}" && ! -L "${SNAP_CONF}" ]] && cmp -s "${tmp}" "${SNAP_CONF}" &&
-        [[ "$(stat -c %a "${SNAP_CONF}")" != 644 ]]; then
-        chmod 0644 "${SNAP_CONF}"
     fi
     cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?
     rm -f "${tmp}"
