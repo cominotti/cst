@@ -2609,8 +2609,13 @@ class InstallAreaTest(Scratch):
             ),
             res[0].message,
         )
+        # btrfs-snapshot-nas's alerts go through cst_core's Notifier too (the runtime's NAS run);
+        # btrfs-snapshot.service's conversion step is bash, whose alerts are not kept.
         self.assertTrue(
-            res[0].message.endswith("; btrfs-bulk-boot.service: also the pending alerts above"), res[0].message
+            res[0].message.endswith(
+                "; btrfs-bulk-boot.service, btrfs-snapshot-nas.service: also the pending alerts above"
+            ),
+            res[0].message,
         )
         self.install("btrfs:alerts")
         self.assertEqual(list(doc_alerts.check_alert_program(self.host)), [])

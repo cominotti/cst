@@ -545,8 +545,9 @@ logged in to the desktop** at that moment. When a service starts it, the alert
 text is also written to the journal. When you start it from a terminal (as
 `test-alert` does), that text goes to the terminal instead.
 
-**When `btrfs-notify` is missing or fails.** Three of the Python programs
-(`btrfs-bulk`, `docker-volumes-nocow`, `cst vm`'s backups) send their alerts
+**When `btrfs-notify` is missing or fails.** Four of the Python programs
+(`btrfs-bulk`, `docker-volumes-nocow`, `cst vm`'s backups, and the hourly and
+NAS runs of `btrfs-snapshot`, but not its conversion engine) send their alerts
 through one `cst_core` adapter (the health check runs `btrfs-notify` itself:
 without it, its alert reaches only the journal). When `btrfs-notify` is not installed, does not answer
 within 60 s, or could neither show nor keep the alert, the adapter writes a
