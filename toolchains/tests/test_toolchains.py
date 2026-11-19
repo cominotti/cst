@@ -956,6 +956,24 @@ class AutoTest(Scratch):
         self.assertNotIn("stamp-", out)
         self.assertEqual(self.calls(), [])
 
+    def test_a_stamp_that_cannot_be_removed_is_reported_and_the_rest_goes_on(self) -> None:
+        # A folder where the stamp should be: unlink fails (EISDIR). An error line, exit 1,
+        # and the rest of auto off still done.
+        link = self.orphan()
+        os.makedirs(os.path.join(self.home, self.STAMP))
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("cst-toolchains: cannot remove ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer", out)
+        self.assertFalse(os.path.lexists(link))
+        self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
+        self.assertTrue(os.path.isdir(os.path.join(self.home, self.STAMP)))
+        # The earlier timer's stamp: auto on reports it and still turns the timer on.
+        os.makedirs(os.path.join(self.home, self.OLD_STAMP))
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("cst-toolchains: cannot remove ~/.local/share/systemd/timers/stamp-cst-cargo-build-gc.timer", out)
+        self.assertIn("enabled:   cst-toolchains-prune.timer", out)
+
     def test_auto_off_keeps_the_stamp_when_the_manager_does_not_answer(self) -> None:
         link = self.orphan()
         self.write(self.STAMP, "")

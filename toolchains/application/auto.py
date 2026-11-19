@@ -20,6 +20,7 @@ from toolchains.domain.common import (
     LIB_REL,
     OFF_REL,
     OLD_CONF_REL,
+    NAME,
     OLD_TIMER,
     SERVICE,
     TIMER,
@@ -58,22 +59,24 @@ class AutoTimer:
 
     def remove_stale(self) -> bool:
         """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
-        well; False when the daemon-reload after the removal failed (reported).
-        Refused (nothing removed) when its timer could not be stopped."""
+        well; False when the daemon-reload after the removal failed, or its
+        timer's stamp could not be removed (reported). Refused (nothing removed)
+        when its timer could not be stopped."""
         home = self.home
         found = self.files.stale_files()
         timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
+        stamp_ok = True
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
-            self.forget_stamp(OLD_TIMER, f"the last run of the earlier `cst btrfs cargo-gc` timer, {CLEAN_LEFT}")
+            stamp_ok = self.forget_stamp(OLD_TIMER, f"the last run of the earlier `cst btrfs cargo-gc` timer, {CLEAN_LEFT}")
         elif timer not in (path for path, _ in found) and self.files.present(
             os.path.join(home, timer_stamp_rel(OLD_TIMER))
         ):
             # Its stamp says it ran: it may still run although its file is gone.
             self.stop_orphan_timer(OLD_TIMER)
-            self.forget_stamp(OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone")
+            stamp_ok = self.forget_stamp(OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone")
         if not found:
-            return True
+            return stamp_ok
         reload = False
         for path, ours in found:
             if not ours:
@@ -82,7 +85,7 @@ class AutoTimer:
             self.files.remove(path)
             self.out.say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
             reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
-        return not (reload and self.units.reload_failed())
+        return not (reload and self.units.reload_failed()) and stamp_ok
 
     def on(self, *, unless_off: bool = False) -> int:
         rc = 0 if self.remove_stale() else 1
@@ -161,13 +164,26 @@ class AutoTimer:
         if self.units.stop_if_running(name):
             self.out.say(f"stopped:   {name} (it was still running although its file was gone)")
 
-    def forget_stamp(self, name: str, why: str) -> None:
+    def forget_stamp(self, name: str, why: str) -> bool:
         """Remove the stamp of timer NAME (its last run, which systemd keeps for a Persistent= timer),
         once the timer is stopped: when its unit file is gone (`systemctl --user clean` needs the
-        timer loaded, so it cannot), or what a failed clean left."""
+        timer loaded, so it cannot), or what a failed clean left. False (and an
+        error line) when it is there and cannot be removed: the rest of the job
+        goes on."""
         rel = timer_stamp_rel(name)
-        if self.files.remove_if_present(os.path.join(self.home, rel)):
+        try:
+            removed = self.files.remove_if_present(os.path.join(self.home, rel))
+        except OSError as e:
+            self.out.say(
+                f"{NAME}: cannot remove ~/{rel} ({why}): {e.strerror or e}; systemd keeps that last run "
+                "until the file is removed",
+                3,
+                err=True,
+            )
+            return False
+        if removed:
             self.out.say(f"removed:   ~/{rel} ({why})")
+        return True
 
     def off(self) -> int:
         home = self.home
@@ -180,10 +196,14 @@ class AutoTimer:
         elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
         rc = 0 if self.remove_stale() else 1
-        if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE):
-            self.forget_stamp(TIMER, f"the last run of the timer, {CLEAN_LEFT}")
-        elif st[TIMER] == OwnedState.MISSING:
-            self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
+        if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE, OwnedState.MISSING):
+            why = (
+                "the last run of the timer whose file was gone"
+                if st[TIMER] == OwnedState.MISSING
+                else f"the last run of the timer, {CLEAN_LEFT}"
+            )
+            if not self.forget_stamp(TIMER, why):
+                rc = 1
         removed = False
         for name in AUTO_UNITS:
             if st[name] in (OwnedState.OK, OwnedState.CHANGE):
