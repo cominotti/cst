@@ -1632,6 +1632,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.DOCKER_GC_STATE,
         StateFormatKey.DOCKER_GC_LAST_RUN,
         StateFormatKey.VM_INDEX,
+        StateFormatKey.VM_NAS_TORN,
         StateFormatKey.INSTALL_RECORD,
         StateFormatKey.GAME_STATE,
         StateFormatKey.GAME_INTENDED,

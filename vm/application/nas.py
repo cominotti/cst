@@ -45,6 +45,7 @@ from vm.domain.backup import (
     Manifest,
     ResticSnapshot,
     ResticSummary,
+    TornEntry,
     Uncertain,
     is_restic_snapshot,
     manifest_text,
@@ -236,6 +237,7 @@ def backup_nas(cfg: VmSettings, vm: str, keep: str | None, p: NasBackup, *, quie
     check_backup_start(cfg, p.store, "backup --nas", root=p.root)
     if "," in vm or not vm.strip():
         raise Refused(f"VM name {vm!r}: a comma cannot be part of a restic tag")
+    p.store.read_torn()  # a record this cst vm cannot use refuses before anything is done (TornRefused)
     nas = p.settings.nas_repo()
     state = domain_state(p.commands, vm)
     if state not in ("running", SHUT_OFF):
@@ -359,7 +361,8 @@ def nas_run(
             store.unstage(stage)
         snap = str(summary.get("snapshot_id") or "")
         if rc != 0 or not snap:
-            left = forget_torn(p, nas, snap) if snap else None  # incomplete (rc 3): not a backup
+            # incomplete (rc 3): not a backup
+            left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "incomplete")) if snap else None
             why = {
                 ResticExit.INCOMPLETE: "some files could not be read",
                 ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
@@ -382,7 +385,7 @@ def nas_run(
             try:
                 check_shut_off(p.commands, vm)
             except Refused as e:
-                left = forget_torn(p, nas, snap)
+                left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "state changed"))
                 raise Refused(
                     f"the VM's state changed during the backup, the copy is not consistent "
                     f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
@@ -396,7 +399,7 @@ def nas_run(
 
             changed = [src for src, _ in sources if now_fp(src) != before[src]]
             if changed:
-                left = forget_torn(p, nas, snap)
+                left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "changed during the read"))
                 raise Refused(
                     "changed during the backup (the VM was started?), the copy is not consistent "
                     f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"
@@ -450,7 +453,7 @@ def nas_run(
         f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
-    retention(cfg, p, vm, nas)
+    retention_after_torn(cfg, p, vm, nas)
     # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
     # since: the snapshot stays, and its notes and restore line are printed before the refusal.
     refused: Refused | None = None
@@ -621,17 +624,107 @@ def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo) -> list[ResticSnaps
     return data if list_of(data, is_restic_snapshot) else None
 
 
-def forget_torn(p: NasBackup, nas: NasRepo, snap: str) -> str | None:
+def torn_entry(nas: NasRepo, snap: str, vm: str, stamp: str, why: str) -> TornEntry:
+    """The record of snap, a torn snapshot of vm's run at stamp (why: what tore it)."""
+    return {"snapshot": snap, "vm": vm, "repository": nas["repo"], "host": nas["host"], "timestamp": stamp, "why": why}
+
+
+def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -> str | None:
     """Forget a restic snapshot that is no backup (incomplete, or not consistent). None when restic
-    forgot it; else the words that name the snapshot left in the repository and how to forget it."""
+    forgot it; else the words that name the snapshot left in the repository and how to forget it.
+
+    The snapshot goes into the torn record first, and out again once restic forgot it: a stop while
+    forget waits for the repository's lock leaves it recorded, and the next NAS backup of the VM
+    forgets it before its retention could count it as a backup."""
+    snap, vm = entry["snapshot"], entry["vm"]
+    try:
+        p.store.record_torn(entry)
+        unrecorded = None
+    except (OSError, Refused) as e:
+        unrecorded = str(e)
     rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
     if rc == 0:
+        if unrecorded is None:
+            try:
+                p.store.drop_torn([entry])
+            except (OSError, Refused) as e:
+                p.out.say(
+                    f"  note: restic snapshot {snap[:8]} is forgotten but still in {cfg.paths.torn} ({e}): "
+                    f"the next NAS backup of {vm} drops it"
+                )
         return None
-    return (
+    left = (
         f"restic snapshot {snap[:8]} could NOT be forgotten ({first_line(err) or f'exit {rc}'}): it is no "
         f"backup; forget it by hand, restic forget {snap}, with the repository's variables of vm/README.md, "
         'section "Restore from the NAS"'
     )
+    if unrecorded is None:
+        return f"{left}; recorded in {cfg.paths.torn}: the next NAS backup of {vm} forgets it before its retention"
+    return (
+        f"{left}; it could NOT be recorded ({unrecorded}): forget it by hand before the next backup of {vm}, "
+        "whose retention would count it"
+    )
+
+
+def retry_torn(p: NasBackup, vm: str, nas: NasRepo) -> str | None:
+    """Forget the torn snapshots of vm in this repository that an earlier run recorded and could not
+    forget, before the retention. A recorded id alone is never enough: restic must still list exactly
+    one snapshot of vm's tags that it names (prefix either way), and that one is forgotten by its listed
+    id. One that restic no longer lists that way is left alone and dropped from the record. Returns why
+    the retention must wait (an entry kept, the listing or the record not usable), else None. With no
+    such entry it runs nothing."""
+    try:
+        mine = [e for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
+    except (OSError, Refused) as e:
+        return f"the record of torn snapshots cannot be read ({e})"
+    if not mine:
+        return None
+    listed = nas_snapshots(p.restic, vm, nas)
+    if listed is None:
+        return f"restic snapshots did not list the snapshots of {vm}, so the torn ones were not forgotten"
+    kept: list[str] = []
+    done: list[TornEntry] = []
+    for e in mine:
+        why = forget_listed(p, vm, nas, e, listed)
+        if why is None:
+            done.append(e)
+        else:
+            kept.append(why)
+    if done:
+        try:
+            p.store.drop_torn(done)
+        except (OSError, Refused) as e:
+            kept.append(f"the record of torn snapshots was not updated ({e})")
+    return "; ".join(kept) or None
+
+
+def forget_listed(p: NasBackup, vm: str, nas: NasRepo, e: TornEntry, listed: Sequence[ResticSnapshot]) -> str | None:
+    """Forget the listed snapshot the torn entry e names (retry_torn); None when the entry is done with
+    (forgotten, or no longer a snapshot of vm here), else why it stays."""
+    short = e["snapshot"][:8]
+    found = [s for s in listed if s["id"].startswith(e["snapshot"]) or e["snapshot"].startswith(s["id"])]
+    if len(found) > 1:
+        return f"the torn snapshot {short} names {len(found)} listed snapshots"
+    tags = found[0].get("tags") if found else None
+    if not found or not isinstance(tags, list) or TAG not in tags or f"vm:{vm}" not in tags:
+        p.out.say(f"  torn restic snapshot {short}: left alone: no longer a {TAG} snapshot of {vm} in this repository")
+        return None
+    snap = found[0]["id"]
+    rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
+    if rc != 0:
+        return f"restic forget {snap[:8]} (torn, of an earlier run): {first_line(err) or f'exit {rc}'}"
+    p.out.say(f"  torn restic snapshot {snap[:8]} of an earlier run forgotten")
+    return None
+
+
+def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
+    """The retention, once the torn snapshots of earlier runs are forgotten (retry_torn); skipped when
+    one is not: a torn snapshot would take a good backup's place among those kept."""
+    why = retry_torn(p, vm, nas)
+    if why is None:
+        retention(cfg, p, vm, nas)
+    else:
+        p.out.say(f"  retention skipped: {why}; the repository keeps more until the next backup")
 
 
 def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:

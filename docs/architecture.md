@@ -286,6 +286,6 @@ CI (`.github/workflows/ci.yml`) runs the same `invowk cmd ...` tasks: the fast-g
 ## Machine-specific state lives outside the repository
 
 - Knobs: `/etc/cst/vm.conf`, `/etc/cst/swap.conf` (swap's partition, no default) and `/etc/cst/docker-gc.conf` (docker-gc's protected registries), all root's; `~/.config/cst/toolchains.conf` and `~/.config/cst/bluetooth.conf` (the headset, no default), the user's. The defaults are in the scripts, in `toolchains/toolchains.conf` and in `bluetooth/bluetooth.conf`.
-- The VM backup index is `/var/lib/cst/vm-backups.json`.
+- The VM backup index is `/var/lib/cst/vm-backups.json`; the restic snapshots a NAS backup could not forget are recorded in `/var/lib/cst/vm-nas-torn.json`.
 - User units go in `~/.config/systemd/user`.
 - "Adapting CST to another PC" in README.md lists what is specific to this machine.

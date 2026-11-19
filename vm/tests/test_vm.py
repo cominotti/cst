@@ -1775,6 +1775,7 @@ class PackageTest(unittest.TestCase):
         variables = {
             "backup_dir": "CST_VM_BACKUP_DIR",
             "index": "CST_VM_INDEX",
+            "torn": "CST_VM_TORN",
             "swtpm_dir": "CST_VM_SWTPM_DIR",
             "vm_conf": "CST_VM_CONF",
             "cpu_conf": "CST_VM_CPU_CONF",
@@ -1793,6 +1794,7 @@ class PackageTest(unittest.TestCase):
         moved = vm_wiring.vm_paths({var: f"/t/{field}" for field, var in variables.items()})
         self.assertEqual({f: getattr(moved, f) for f in variables}, {f: f"/t/{f}" for f in variables})
         machine = vm_wiring.vm_paths(dict.fromkeys(variables.values(), ""))  # empty: the machine's path
+        self.assertEqual(machine.torn, "/var/lib/cst/vm-nas-torn.json")
         self.assertEqual(
             (machine.backup_dir, machine.index, machine.vm_conf, machine.unit_dir, machine.sbin_copy),
             (

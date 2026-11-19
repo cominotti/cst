@@ -605,6 +605,23 @@ restic cannot forget it (the repository locked, the NAS gone), the message
 says so and names the snapshot to forget by hand (`restic forget ID`, with
 the variables of section 10.9).
 
+Such a **torn** snapshot is no backup, but the retention (section 10.6) would
+count it as one and could forget a good backup in its place. So, before the
+forget, its ID goes into `/var/lib/cst/vm-nas-torn.json` (0644, with the
+VM, the repository, the host, the time and what tore it; a stop while
+`restic forget` waits for the repository's lock leaves it there), and it
+leaves the record once restic forgot it. When the forget fails, the message
+adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
+forgets it before its retention". If the record cannot be written either,
+the message says so: then forget it by hand before the next backup. The
+next NAS backup of that VM forgets the recorded snapshots first, and only
+those restic still lists with the tags `cst-vm` and `vm:<name>` (one
+listed snapshot per recorded ID, forgotten by its listed ID): never by the
+recorded ID alone. A recorded ID that restic no longer lists that way is
+left alone and dropped from the record. The record is shared by every VM
+and changed under its own lock (`/run/cst-vm/torn-record.lock`, one minute
+at most), so the backups of two VMs never lose each other's entries.
+
 **Paused**, suspended or other states: refused. Resume the VM or shut it down.
 
 ### 10.3 Consistent, or crash-consistent
@@ -786,6 +803,19 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 - `forget` only removes the snapshot records. The space is freed by
   `restic prune`, which the `/home` NAS job runs for the whole repository,
   at most every `NAS_PRUNE_EVERY_DAYS` (7). The VM backup never prunes.
+
+**Torn snapshots first.** When the record of torn snapshots (section 10.2)
+names one of this VM in this repository, the backup forgets it before the
+retention. If that does not work (restic forget fails, `restic snapshots`
+cannot be read, a recorded ID names several listed snapshots, or the record
+cannot be read or written), the run **skips the retention** and says so
+("retention skipped: WHY; the repository keeps more until the next backup"):
+the repository keeps more, never less. The backup itself is good, so the run
+still ends with exit status 0, and the next backup tries again. A record of
+a newer CST, or one that cannot be read as the record (not JSON, no `torn`
+list), makes `backup --nas` refuse before anything is done: use the newer
+CST's `cst vm`, or forget the snapshots it names by hand and move it aside
+(`mv /var/lib/cst/vm-nas-torn.json /var/lib/cst/vm-nas-torn.json.bad`).
 
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the
@@ -1001,7 +1031,17 @@ is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert
 is sent), the recovery text per case (a definition still on a stale overlay:
 `virsh edit`, never `qemu-img commit`), and the note for UEFI variables
-written during the read.
+written during the read. The torn record (`TornRecordTest`, its path a
+scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
+is recorded (once, 0644, atomically), one it forgets leaves no entry, a
+record that cannot be written or updated is said, a stop while forget waits
+leaves the entry; the next run forgets a recorded snapshot restic lists with
+both tags by its listed ID, skips the retention when that forget fails, a
+listing fails or an ID is ambiguous, drops one restic no longer lists that
+way without forgetting it, keeps the entries of other VMs, repositories and
+newer formats, refuses a newer or unreadable record before anything, and
+the record's lock gives up after its timeout. No E2E test covers the NAS
+path: neither tier has a restic repository, a NAS or a running guest.
 
 For `tune`: the transform of a copy of the real `win11-devbox` definition
 (no diff), of the same VM before its migration (SATA, plain driver,
@@ -1055,8 +1095,9 @@ The Python code inside `vm/` (standard library only at run time):
   answer (systemctl runs through cst_core's `SystemctlAdapter` with them, in the C
   locale, 120 s at most); `VmCommands` (libvirt, the packages, the deployment) and
   `VmConfFiles` (the settings) are the ports' adapters there. `backup.py`: the
-  backup index, fingerprints and sizes, the stop signals, the per-VM lock and
-  the alert; `BackupFiles`, `StopSignals` and `TerminalLines` are the ports'
+  backup index, the record of torn NAS snapshots (`read_torn`, `record_torn`,
+  `drop_torn`, under its own lock), fingerprints and sizes, the stop signals,
+  the per-VM lock and the alert; `BackupFiles`, `StopSignals` and `TerminalLines` are the ports'
   adapters there. `restic.py`: restic (`Restic`: a command, and `restic backup
   --json` with its progress), generic: it takes the repository's variables at
   each call and names no VM, so the /home NAS backup can use it as it is.
@@ -1078,7 +1119,8 @@ The Python code inside `vm/` (standard library only at run time):
   `VmCommandsPort`, `BackupStorePort` (the backups' files and the index,
   `vm/adapters/backup.py`'s `BackupFiles`), cst_core's `ClockPort` and a
   `ProgressPort` (the lines it prints as it goes). `nas.py`: the NAS backup
-  (`backup_nas`: the snapshot, restic, the merge back, the retention), moved
+  (`backup_nas`: the snapshot, restic, the merge back, the torn snapshots of
+  earlier runs, the retention), moved
   from the cli as it was, over the same ports plus `SettingsPort` (vm.conf and
   the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
   the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,

@@ -53,6 +53,7 @@ from vm.domain.backup import BootedDeployment
 NAME = "cst-vm"
 
 INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
+TORN_FORMAT = state_format(StateFormatKey.VM_NAS_TORN)
 
 # The component of the files backup-timer on installs (the install record lists them under it).
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component

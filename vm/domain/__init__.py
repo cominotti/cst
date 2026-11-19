@@ -151,6 +151,7 @@ class VmPaths:
 
     backup_dir: str  # the local copies: BACKUP_DIR/VM/STAMP
     index: str  # the backups index (cst_core.domain.contracts "vm-index")
+    torn: str  # the restic snapshots a NAS backup failed to forget (cst_core.domain.contracts "vm-nas-torn")
     swtpm_dir: str  # the software TPM's state, per domain UUID
     vm_conf: str  # this module's settings (optional; every knob defaults to yes)
     cpu_conf: str  # cpu-setup.conf: VM_NAME, VM_CPU_DISABLE

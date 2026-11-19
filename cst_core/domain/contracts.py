@@ -36,6 +36,7 @@ class StateFormatKey(StrEnum):
     DOCKER_GC_STATE = "docker-gc-state"
     DOCKER_GC_LAST_RUN = "docker-gc-last-run"
     VM_INDEX = "vm-index"
+    VM_NAS_TORN = "vm-nas-torn"
     INSTALL_RECORD = "install-record"
     GAME_STATE = "game-state"
     GAME_INTENDED = "game-intended"
@@ -122,6 +123,8 @@ def version_of(data: object, field: str) -> int | None:
 #   recorder and read by the weekly run and `cst btrfs docker-gc status`.
 # docker-gc-last-run: what the last weekly run removed (status shows it).
 # vm-index: the VM backups cst vm made (local copies and NAS snapshots).
+# vm-nas-torn: the restic snapshots cst vm's NAS backup failed to forget (torn:
+#   incomplete, or not consistent), retried before that VM's next retention.
 # install-record: what CST installed (cst_core/domain/record.py).
 # game-state, game-intended: the game profile's state. Other projects check
 #   that game.state exists (the profile is on): its name and place never
@@ -136,6 +139,7 @@ bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters/backup.py            | vm/adapters/backup.py doctor/application/vm.py     | "version"
+vm-nas-torn        | /var/lib/cst/vm-nas-torn.json              | 1 | vm/adapters/backup.py            | vm/adapters/backup.py                              | "version"
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
 game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters.py             | cpu/game/adapters.py cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
 game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters.py             | cpu/game/adapters.py doctor/application/cpu.py     | first line "cst-game-intended 1" (none: 0)

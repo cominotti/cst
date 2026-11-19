@@ -17,6 +17,8 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+import contextlib
 import fcntl
 import json
 import os
@@ -39,10 +41,12 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from cst_core.adapters.zipapp import build_python_zipapp
-from cst_core.domain.errors import Usage
+from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.shapes import items_of
 from btrfs.tests.snapshot_fakes import RuntimeTest
 from vm import domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup
+from vm.domain import backup as vm_domain_backup
 from vm import wiring as vm_wiring
 
 sys.dont_write_bytecode = True
@@ -180,6 +184,10 @@ if cmd == "backup":
         import time; time.sleep(3)
     if "write_index" in cfg:  # [path, text]: a newer cst vm rewrote the index meanwhile
         open(cfg["write_index"][0], "w").write(cfg["write_index"][1])
+    if "break_torn" in cfg:  # the torn record's path becomes a folder: it can no longer be written
+        if os.path.isfile(cfg["break_torn"]):
+            os.unlink(cfg["break_torn"])
+        os.makedirs(cfg["break_torn"])
     for line in cfg.get("backup_lines", []):
         print(line)
     print(json.dumps({"message_type": "status", "percent_done": 0.5, "total_bytes": 10, "bytes_done": 5}))
@@ -194,13 +202,20 @@ if cmd == "backup":
                           "total_bytes_processed": 2048, "data_added": 1024}))
     sys.exit(rc)
 if cmd == "forget":
+    one = "--keep-weekly" not in args  # one snapshot by its id, not the retention
+    if one and "term-during-forget" in vm.get("fail", []):
+        import signal, time
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(30)
+    if one and "freeze_torn_on_forget" in cfg:  # the torn record's folder can no longer be written
+        os.chmod(cfg["freeze_torn_on_forget"], 0o555)
     print("remove 1 snapshots:" if cfg.get("forgot") else "keep 2 snapshots:")
     if "forget_err" in cfg:
         print(cfg["forget_err"], file=sys.stderr)
-    sys.exit(cfg.get("forget_rc", 0))
+    sys.exit(cfg.get("forget_rc_by_id", {}).get(args[-1], cfg.get("forget_rc", 0)))
 if cmd == "snapshots":
     print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
-    sys.exit(0)
+    sys.exit(cfg.get("snapshots_rc", 0))
 sys.exit(1)
 """
 RPM = """#!/bin/sh
@@ -274,6 +289,7 @@ class Nas(unittest.TestCase):
         with open(self.password, "w") as f:
             f.write("pw\n")
         self.index = os.path.join(self.tmp, "lib-cst", "vm-backups.json")
+        self.torn = os.path.join(self.tmp, "lib-torn", "vm-nas-torn.json")
         self.stage = os.path.join(self.tmp, "lib-cst", "vm-nas")
         self.log = os.path.join(self.tmp, "stub.log")
         self.env = {
@@ -286,6 +302,7 @@ class Nas(unittest.TestCase):
             "CST_VM_NONROOT_OK": "1",
             "CST_VM_NOW": str(NOW),
             "CST_VM_INDEX": self.index,
+            "CST_VM_TORN": self.torn,
             "CST_VM_SWTPM_DIR": self.swtpm,
             "CST_PROG": "cst vm",
             "CST_VM_CPU_CONF": os.path.join(self.tmp, "cpu-setup.conf"),
@@ -1132,6 +1149,298 @@ class SharedRepositoryTest(Nas):
         self.assertEqual(forget[forget.index("--tag") + 1], "btrfs-setup")
         vm_forget = next(c["args"] for c in vm_calls if c["args"][0] == "forget")
         self.assertEqual(vm_forget[vm_forget.index("--tag") + 1], "cst-vm,vm:win")
+
+
+REPO_URL = "sftp:btrfs-setup-nas:/volume1/restic"
+TORN_ID = "f00dbabe" + "1" * 56  # a torn snapshot of an earlier run (the good one of a run is SNAP_ID)
+BOTH_TAGS = ["cst-vm", "vm:win"]
+
+
+class TornRecordTest(Nas):
+    """The restic snapshots a NAS backup could not forget (torn: incomplete, or not consistent) are
+    recorded in CST_VM_TORN, and the next NAS backup of that VM forgets them before its retention, or
+    skips the retention."""
+
+    def torn_entry(
+        self,
+        snapshot: str = TORN_ID,
+        *,
+        vm: str = "win",
+        repository: str = REPO_URL,
+        timestamp: str = "20261101T010000Z",
+        why: str = "incomplete",
+    ) -> vm_domain_backup.TornEntry:
+        return {
+            "snapshot": snapshot,
+            "vm": vm,
+            "repository": repository,
+            "host": "sophia",
+            "timestamp": timestamp,
+            "why": why,
+        }
+
+    def write_torn(self, entries: Sequence[object], version: int = 1) -> None:
+        os.makedirs(os.path.dirname(self.torn), exist_ok=True)
+        with open(self.torn, "w") as f:
+            json.dump({"version": version, "torn": entries}, f)
+
+    def torn_doc(self) -> object:
+        with open(self.torn) as f:
+            return json.load(f)
+
+    def torn_list(self) -> list[object]:
+        doc = self.torn_doc()
+        torn = doc.get("torn") if isinstance(doc, dict) else None
+        if not isinstance(torn, list):
+            self.fail(f"no torn list in {doc!r}")
+        return items_of(torn)
+
+    def listed(self, *snaps: tuple[str, list[str] | None]) -> str:
+        return json.dumps([{"id": i, **({} if tags is None else {"tags": tags})} for i, tags in snaps])
+
+    def forgets(self) -> list[list[str]]:
+        return [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
+
+    def test_a_torn_snapshot_restic_does_not_forget_is_recorded(self) -> None:
+        for vm_kw, why in (
+            ({"state": "running", "agent": "connected"}, "incomplete"),
+            ({"state": "shut off", "fail": ["start-during-backup"]}, "state changed"),
+            ({"state": "shut off", "fail": ["touch-nvram"]}, "changed during the read"),
+        ):
+            with self.subTest(why=why):
+                shutil.rmtree(os.path.dirname(self.torn), ignore_errors=True)
+                self.vm(**vm_kw)
+                self.restic_cfg(backup_rc=3 if why == "incomplete" else 0, forget_rc=1)
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"could NOT be forgotten (exit 1): it is no backup; forget it by hand, restic forget {SNAP_ID}, "
+                    'with the repository\'s variables of vm/README.md, section "Restore from the NAS"; recorded in '
+                    f"{self.torn}: the next NAS backup of win forgets it before its retention",
+                    r.stderr,
+                )
+                doc = self.torn_doc()
+                self.assertEqual(doc, {"version": 1, "torn": [self.torn_entry(SNAP_ID, timestamp=STAMP, why=why)]})
+                self.assertEqual(stat.S_IMODE(os.stat(self.torn).st_mode), 0o644)
+                self.assertEqual(os.listdir(os.path.dirname(self.torn)), ["vm-nas-torn.json"], "no temporary file")
+                # The same snapshot torn again is recorded once.
+                self.vm(**vm_kw)
+                self.run_tool("backup", "win", "--nas")
+                self.assertEqual(len(self.torn_list()), 1)
+
+    def test_a_torn_snapshot_restic_forgets_leaves_nothing_in_the_record(self) -> None:
+        self.restic_cfg(backup_rc=3)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("some files could not be read; no backup recorded\n", r.stderr)
+        self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
+
+    def test_a_torn_snapshot_that_cannot_be_recorded_says_so(self) -> None:
+        # The record was fine at the start of the run, and cannot be written when the forget comes.
+        self.restic_cfg(backup_rc=3, forget_rc=1, break_torn=self.torn)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"forget it by hand, restic forget {SNAP_ID}, with the repository's variables", r.stderr)
+        self.assertIn(
+            f"; it could NOT be recorded ({self.torn} cannot be read as cst vm's record of torn NAS snapshots (",
+            r.stderr,
+        )
+        self.assertIn("forget it by hand before the next backup of win, whose retention would count it", r.stderr)
+        self.assertEqual(self.forgets(), [["forget", "--retry-lock", "30m", SNAP_ID]], "the forget still ran")
+        # restic forgets it: nothing more is said.
+        os.rmdir(self.torn)
+        self.restic_cfg(backup_rc=3, break_torn=self.torn)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertIn("some files could not be read; no backup recorded\n", r.stderr)
+
+    def test_a_record_not_updated_after_a_good_forget_is_said_and_cleared_by_the_next_run(self) -> None:
+        folder = os.path.dirname(self.torn)
+        self.addCleanup(lambda: os.path.isdir(folder) and os.chmod(folder, 0o755))
+        self.restic_cfg(backup_rc=3, freeze_torn_on_forget=folder)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"note: restic snapshot {SNAP_ID[:8]} is forgotten but still in {self.torn} (", r.stdout + r.stderr
+        )
+        self.assertIn("the next NAS backup of win drops it", r.stdout + r.stderr)
+        os.chmod(folder, 0o755)
+        self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP)])
+        # The next run: restic no longer lists it (it was forgotten), so it is dropped, never forgotten again.
+        good = "c0ffee00" + "2" * 56
+        self.restic_cfg(id=good, snapshots_json=self.listed((good, BOTH_TAGS)))
+        os.unlink(os.path.join(self.fix, "restic.log"))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.torn_list(), [])
+        self.assertEqual(len(self.forgets()), 1, "only the retention's")
+        self.assertIn("--keep-weekly", self.forgets()[0])
+
+    def test_a_stop_while_forget_waits_leaves_the_snapshot_recorded(self) -> None:
+        self.vm(fail=["term-during-forget"], agent="connected")
+        self.restic_cfg(backup_rc=3)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("stopped by signal SIGTERM", r.stderr)
+        self.assertEqual(len(self.virsh_calls("blockcommit")), 1, "merged back as after any stop")
+        self.assertEqual(self.vm_state()["live"]["sda"], self.disk)
+        self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP)])
+
+    def test_the_next_run_forgets_a_recorded_snapshot_restic_still_lists_with_both_tags(self) -> None:
+        for recorded in (TORN_ID, TORN_ID[:8]):  # the full id, or a short one restic named
+            with self.subTest(recorded=recorded):
+                self.write_torn([self.torn_entry(recorded)])
+                self.restic_cfg(snapshots_json=self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS)))
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(self.fix, "restic.log"))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                calls = [c["args"] for c in self.restic_calls()]
+                self.assertEqual([a[0] for a in calls], ["cat", "backup", "snapshots", "forget", "forget", "snapshots"])
+                self.assertEqual(
+                    calls[2], ["snapshots", "--json", "--no-lock", "--host", "sophia", "--tag", "cst-vm,vm:win"]
+                )
+                self.assertEqual(calls[3], ["forget", "--retry-lock", "30m", TORN_ID], "by the listed full id")
+                self.assertIn("--keep-weekly", calls[4])
+                self.assertIn(f"torn restic snapshot {TORN_ID[:8]} of an earlier run forgotten", r.stdout)
+                self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
+
+    def test_a_retry_that_fails_skips_the_retention(self) -> None:
+        self.write_torn([self.torn_entry()])
+        self.restic_cfg(
+            snapshots_json=self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS)), forget_rc_by_id={TORN_ID: 1}
+        )
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.forgets(), [["forget", "--retry-lock", "30m", TORN_ID]], "no retention forget")
+        self.assertIn(
+            f"retention skipped: restic forget {TORN_ID[:8]} (torn, of an earlier run): exit 1; the repository "
+            "keeps more until the next backup",
+            r.stdout,
+        )
+        self.assertEqual(self.torn_list(), [self.torn_entry()])
+        self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID, "the backup itself is recorded")
+
+    def test_a_recorded_snapshot_restic_no_longer_lists_with_both_tags_is_left_alone(self) -> None:
+        for listing in (
+            self.listed((SNAP_ID, BOTH_TAGS)),  # gone
+            self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, ["cst-vm"])),
+            self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, ["cst-vm", "vm:other"])),
+            self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, None)),  # restic gave no tags
+            json.dumps([{"id": SNAP_ID, "tags": BOTH_TAGS}, {"id": TORN_ID, "tags": "cst-vm,vm:win"}]),
+        ):
+            with self.subTest(listing=listing):
+                self.write_torn([self.torn_entry()])
+                self.restic_cfg(snapshots_json=listing)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(self.fix, "restic.log"))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertFalse([a for a in self.forgets() if TORN_ID in a], "never forgotten by its recorded id")
+                self.assertEqual(len(self.forgets()), 1)
+                self.assertIn("--keep-weekly", self.forgets()[0], "the retention runs")
+                self.assertIn(
+                    f"torn restic snapshot {TORN_ID[:8]}: left alone: no longer a cst-vm snapshot of win in this "
+                    "repository",
+                    r.stdout,
+                )
+                self.assertEqual(self.torn_list(), [])
+
+    def test_an_ambiguous_or_unlisted_record_keeps_the_entry_and_skips_the_retention(self) -> None:
+        other = "f00dbabe" + "3" * 56
+        for recorded, cfg, said in (
+            (
+                "f00dbabe",
+                {"snapshots_json": self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS), (other, BOTH_TAGS))},
+                "the torn snapshot f00dbabe names 2 listed snapshots",
+            ),
+            (TORN_ID, {"snapshots_rc": 1}, "restic snapshots did not list the snapshots of win"),
+            (TORN_ID, {"snapshots_json": '{"id": "x"}'}, "restic snapshots did not list the snapshots of win"),
+        ):
+            with self.subTest(cfg=cfg):
+                self.write_torn([self.torn_entry(recorded)])
+                self.restic_cfg(**cfg)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(self.fix, "restic.log"))
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(self.forgets(), [], "nothing forgotten, no retention")
+                self.assertIn(f"retention skipped: {said}", r.stdout)
+                self.assertEqual(self.torn_list(), [self.torn_entry(recorded)])
+
+    def test_entries_of_other_vms_and_repositories_and_unknown_ones_are_kept_as_they_are(self) -> None:
+        odd: list[object] = [
+            self.torn_entry(vm="other"),
+            self.torn_entry(repository="sftp:elsewhere:/r"),
+            {"snapshot": TORN_ID, "vm": "win", "note": "an entry of a newer cst vm"},
+        ]
+        self.write_torn([*odd, self.torn_entry()])
+        self.restic_cfg(snapshots_json=self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, BOTH_TAGS)))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", TORN_ID])
+        self.assertEqual(self.torn_doc(), {"version": 1, "torn": odd})
+        # Only entries of other VMs or repositories: no restic call for them.
+        self.write_torn(odd[:2])
+        os.unlink(os.path.join(self.fix, "restic.log"))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget", "snapshots"])
+        self.assertEqual(self.torn_list(), odd[:2])
+
+    def test_a_good_run_without_a_record_writes_none(self) -> None:
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.lexists(self.torn))
+
+    def test_a_record_cst_vm_cannot_use_refuses_before_anything_is_done(self) -> None:
+        for content, said in (
+            (
+                json.dumps({"version": 2, "torn": []}).encode(),
+                (
+                    f"{self.torn} is format 2 of the vm-nas-torn (this CST reads format 1 and older): written by "
+                    "a newer CST: left as it is, and no NAS backup runs with it; use the cst vm of that CST"
+                ),
+            ),
+            (b"{not json", f"{self.torn} cannot be read as cst vm's record of torn NAS snapshots (not JSON)"),
+            (b'{"torn": "\xff\xfe"}', "(not JSON)"),
+            (b"\xff\xfe", "(not JSON)"),
+            (json.dumps({"version": 1}).encode(), '(no "torn" list)'),
+            (None, f"{self.torn} cannot be read as cst vm's record of torn NAS snapshots ("),
+        ):
+            with self.subTest(content=content):
+                shutil.rmtree(os.path.dirname(self.torn), ignore_errors=True)
+                os.makedirs(self.torn if content is None else os.path.dirname(self.torn))  # None: a folder there
+                if content is not None:
+                    with open(self.torn, "wb") as f:
+                        f.write(content)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.log)
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(said, r.stderr)
+                if content is not None and b"version" not in content[:12]:
+                    self.assertIn(f"then move it aside (mv {self.torn} {self.torn}.bad)", r.stderr)
+                self.assertFalse([c for c in self.calls() if c.startswith("restic ") or "snapshot-create" in c])
+                if content is not None:
+                    with open(self.torn, "rb") as f:
+                        self.assertEqual(f.read(), content, "left as it is")
+
+    def test_the_record_waits_for_its_lock_and_gives_up_after_the_timeout(self) -> None:
+        cfg = vm_wiring.vm_settings({"CST_VM_TORN": self.torn, "CST_VM_RUN_DIR": os.path.join(self.tmp, "run")})
+        vm_adapters_backup.record_torn(cfg, self.torn_entry())
+        os.makedirs(os.path.join(self.tmp, "run"), exist_ok=True)
+        lock = os.path.join(self.tmp, "run", "torn-record.lock")
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with self.assertRaisesRegex(Refused, f"{re.escape(lock)} stayed taken for 0.2 s"):
+            vm_adapters_backup.drop_torn(cfg, [self.torn_entry()], lock_timeout=0.2)
+        self.assertEqual(len(self.torn_list()), 1, "nothing changed without the lock")
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        # The NAS backup of a VM named "torn" holds its own lock, never the record's.
+        with vm_adapters_backup.VmLock("torn", os.path.join(self.tmp, "run")):
+            vm_adapters_backup.drop_torn(cfg, [self.torn_entry()], lock_timeout=0.2)
+        self.assertEqual(self.torn_list(), [])
 
 
 class ConstantsTest(unittest.TestCase):
