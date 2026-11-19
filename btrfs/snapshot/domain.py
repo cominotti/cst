@@ -12,12 +12,14 @@ from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from enum import StrEnum
 from typing import NewType, TypedDict
 import dataclasses
 import datetime as dt
 import os
 import re
 from cst_core.domain.errors import Usage
+from cst_core.domain.values import DAY, HOUR
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUSY, EXIT_REFUSED = 0, 1, 2, 3, 4
 DEFAULT_LOCK = "/run/btrfs-snapshot.lock"
@@ -38,8 +40,8 @@ TS_FORMAT = "%Y%m%dT%H%M"  # btrbk timestamp_format long, local time
 NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 KEEP_NEWEST = 3  # never delete the 3 newest snapshots of a source
-MIN_AGE = 24 * 3600  # ... nor any younger than this
-SAFETY_NET = 24 * 3600  # snapshot an unchanged source at least this often
+MIN_AGE = DAY  # ... nor any younger than this
+SAFETY_NET = DAY  # snapshot an unchanged source at least this often
 CLOCK_SLACK = 5 * 60  # tolerated clock step backwards (NTP slews, RTC drift)
 NTP_GRACE = 30 * 60  # after boot: wait this long for NTP before trusting a far-ahead clock
 MASS_DELETE_MIN = 5  # circuit breaker: more than max(5, 10% of owned)
@@ -135,6 +137,32 @@ def parse_snapshot_name(name: str, entry: str) -> tuple[dt.datetime, int] | None
     except ValueError:
         return None
     return wall, int(m.group(2) or 0)
+
+
+class PathKind(StrEnum):
+    """What SnapshotHostPort.kind finds at a path (lstat, no link followed)."""
+
+    SUBVOL = "subvol"  # a real subvolume root
+    SYMLINK = "symlink"
+    MISSING = "missing"
+    OTHER = "other"
+
+
+class SealOutcome(StrEnum):
+    """seal() and finish_entry(): sealed, left (not ours: untouched, still listed) or error."""
+
+    SEALED = "sealed"
+    LEFT = "left"
+    ERROR = "error"
+
+
+class ScanVerdict(StrEnum):
+    """Why scan_entry() found an entry is not ours: ignored (never touched), writable (ignored,
+    not read-only) or unverifiable (could be ours: it blocks deletions)."""
+
+    IGNORED = "ignored"
+    WRITABLE = "writable"
+    UNVERIFIABLE = "unverifiable"
 
 
 # ---- retention (pure) ----------------------------------------------------------------
@@ -243,7 +271,7 @@ def _plan_item(s: Snap, now_wall: dt.datetime, tz: dt.tzinfo, hod: int, dow: int
         month_corr -= 1
         if month_corr < 0:
             month_corr, year_corr = 11, year_corr - 1
-    dh = int((now_h - tm.replace(minute=0, second=0)).total_seconds()) // 3600
+    dh = int((now_h - tm.replace(minute=0, second=0)).total_seconds()) // HOUR
     dd = perl_int_div(dh + hfh, 24)
     dw = perl_int_div(dd + dfe, 7)
     dy = now_wall.year - year_corr
@@ -544,10 +572,10 @@ def parse_state(text: str) -> LastRun | None:
 
 def fmt_span(seconds: float) -> str:
     seconds = int(seconds)
-    if seconds >= 2 * 86400:
-        return f"{seconds // 86400} days"
-    if seconds >= 2 * 3600:
-        return f"{seconds // 3600} h"
+    if seconds >= 2 * DAY:
+        return f"{seconds // DAY} days"
+    if seconds >= 2 * HOUR:
+        return f"{seconds // HOUR} h"
     return f"{seconds // 60} min"
 
 

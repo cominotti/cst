@@ -29,6 +29,7 @@ from btrfs.snapshot.domain import (
     CacheDir,
     CacheWalk,
     ParseError,
+    PathKind,
     SubvolInfo,
     SubvolPath,
     err_text,
@@ -382,17 +383,17 @@ class Host:
     def listdir(self, path: str) -> list[str]:
         return sorted(os.listdir(path))
 
-    def kind(self, path: str) -> str:
+    def kind(self, path: str) -> PathKind:
         """'subvol' (a real subvolume root), 'symlink', 'missing' or 'other'."""
         try:
             st = os.lstat(path)
         except FileNotFoundError:
-            return "missing"
+            return PathKind.MISSING
         if stat.S_ISLNK(st.st_mode):
-            return "symlink"
+            return PathKind.SYMLINK
         if stat.S_ISDIR(st.st_mode) and st.st_ino == 256:
-            return "subvol"
-        return "other"
+            return PathKind.SUBVOL
+        return PathKind.OTHER
 
     def mkdir(self, path: str, mode: int) -> None:
         os.mkdir(path, mode)

@@ -9,21 +9,67 @@ from __future__ import annotations
 import json
 import os
 import sys
+from typing import NotRequired, TypedDict
+
 from btrfs.snapshot.domain import CacheWalk, Listing, SourceCaches, SourceListing
 from cst_core.domain.values import format_bytes_human
 
 
-def source_listing_json(s: SourceListing) -> dict[str, object]:
+class PathReasonJson(TypedDict):
+    """An entry of ignored, unverifiable or problems in `list --json` and `caches --json`."""
+
+    path: str
+    reason: str
+
+
+class ListedSnapshotJson(TypedDict):
+    """One snapshot of a source in `list --json`, with its decision."""
+
+    path: str
+    entry: str
+    time: str
+    uuid: str
+    gen_at_creation: int
+    action: str
+    reason: str
+
+
+class ListedSnapshotsJson(TypedDict):
+    """The part of a readable source in `list --json`."""
+
+    uuid: str
+    generation: int
+    changed: bool
+    snapshots: list[ListedSnapshotJson]
+    ignored: list[PathReasonJson]
+    unverifiable: list[PathReasonJson]
+    deletions_blocked: str | None
+
+
+class SourceListingJson(TypedDict):
+    """One source of `list --json`: name, source and policy, then error or the listed part."""
+
+    name: str
+    source: str
+    policy: str
+    error: NotRequired[str]
+    uuid: NotRequired[str]
+    generation: NotRequired[int]
+    changed: NotRequired[bool]
+    snapshots: NotRequired[list[ListedSnapshotJson]]
+    ignored: NotRequired[list[PathReasonJson]]
+    unverifiable: NotRequired[list[PathReasonJson]]
+    deletions_blocked: NotRequired[str | None]
+
+
+def source_listing_json(s: SourceListing) -> SourceListingJson:
     """One source of `list --json` (an "error" entry when it could not be read)."""
-    entry: dict[str, object] = {"name": s.name, "source": s.source, "policy": s.policy}
     if s.error is not None:
-        entry["error"] = s.error
-    else:
-        entry.update(listed_snapshots_json(s))
-    return entry
+        return {"name": s.name, "source": s.source, "policy": s.policy, "error": s.error}
+    return {"name": s.name, "source": s.source, "policy": s.policy, **listed_snapshots_json(s)}
 
 
-def listed_snapshots_json(s: SourceListing) -> dict[str, object]:
+def listed_snapshots_json(s: SourceListing) -> ListedSnapshotsJson:
     """The part of a readable source in `list --json`."""
     return {
         "uuid": s.uuid,
@@ -75,17 +121,50 @@ def render_listing(listing: Listing, *, as_json: bool) -> None:
         )
 
 
-def source_caches_json(s: SourceCaches) -> dict[str, object]:
+class CacheFolderJson(TypedDict):
+    """One tagged folder in `caches --json`."""
+
+    path: str
+    files: int
+    bytes: int
+
+
+class CacheWalkJson(TypedDict):
+    """The part of a readable source in `caches --json`."""
+
+    folders: list[CacheFolderJson]
+    files: int
+    bytes: int
+    kept: list[str]
+    skipped: list[str]
+    problems: list[PathReasonJson]
+    seconds: float
+
+
+class SourceCachesJson(TypedDict):
+    """One source of `caches --json`: name, source and skips, then error or the walk's part."""
+
+    name: str
+    source: str
+    skips: list[str]
+    error: NotRequired[str | None]
+    folders: NotRequired[list[CacheFolderJson]]
+    files: NotRequired[int]
+    bytes: NotRequired[int]
+    kept: NotRequired[list[str]]
+    skipped: NotRequired[list[str]]
+    problems: NotRequired[list[PathReasonJson]]
+    seconds: NotRequired[float]
+
+
+def source_caches_json(s: SourceCaches) -> SourceCachesJson:
     """One source of `caches --json` (an "error" entry when it could not be read)."""
-    entry: dict[str, object] = {"name": s.name, "source": s.source, "skips": list(s.skips)}
     if s.walk is None:
-        entry["error"] = s.error
-    else:
-        entry.update(walk_json(s.walk))
-    return entry
+        return {"name": s.name, "source": s.source, "skips": list(s.skips), "error": s.error}
+    return {"name": s.name, "source": s.source, "skips": list(s.skips), **walk_json(s.walk)}
 
 
-def walk_json(walk: CacheWalk) -> dict[str, object]:
+def walk_json(walk: CacheWalk) -> CacheWalkJson:
     """The part of a readable source in `caches --json`."""
     return {
         "folders": [{"path": c.rel, "files": c.files, "bytes": c.size} for c in walk.folders],

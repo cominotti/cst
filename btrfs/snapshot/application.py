@@ -14,7 +14,6 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Sequence
-from typing import Literal
 import dataclasses
 import datetime as dt
 import os
@@ -37,8 +36,11 @@ from btrfs.snapshot.domain import (
     LatestQuery,
     Listing,
     ParseError,
+    PathKind,
     RunOptions,
     Scan,
+    ScanVerdict,
+    SealOutcome,
     Snap,
     Source,
     SourceCaches,
@@ -300,7 +302,7 @@ class Run:
     # Per source ---------------------------------------------------------------
     def source_info(self, src: Source) -> SubvolInfo:
         kind = self.host.kind(src.path)
-        if kind != "subvol":
+        if kind != PathKind.SUBVOL:
             raise ParseError(f"{src.path} is not a subvolume ({kind})")
         return self.btrfs.show(SubvolPath(src.path))
 
@@ -588,7 +590,7 @@ def recheck(run: Run, snap: Snap, source_uuid: str) -> str | None:
     problem = run.pins()[1]
     if problem:
         return problem
-    if run.host.kind(snap.path) != "subvol":
+    if run.host.kind(snap.path) != PathKind.SUBVOL:
         return "no longer a subvolume"
     try:
         info = run.btrfs.show(SubvolPath(snap.path))
@@ -617,7 +619,7 @@ def free_name(host: SnapshotHostPort, snapdir: str, name: str, wall: dt.datetime
 
 
 def create_snapshot(run: Run, src: Source, info: SubvolInfo, dest: str, entry: str, reason: str) -> bool:
-    if run.host.kind(run.snapdir) == "missing":
+    if run.host.kind(run.snapdir) == PathKind.MISSING:
         try:
             run.host.mkdir(run.snapdir, 0o700)
             run.log(5, f"created the snapshot directory {run.snapdir}")
@@ -642,14 +644,14 @@ def create_snapshot(run: Run, src: Source, info: SubvolInfo, dest: str, entry: s
     rc, _, err = run.btrfs.snapshot(SubvolPath(src.path), dest, readonly=not tracked)
     if rc != 0:
         run.log(3, f"{src.name}: creating {dest} failed (rc={rc}): {err.strip()}")
-        if tracked and run.host.kind(dest) == "missing":
+        if tracked and run.host.kind(dest) == PathKind.MISSING:
             try:
                 run.list_remove(UNFINISHED_FILE, entry)
             except OSError:
                 pass  # the next run sees it missing and forgets it
         return False
     run.log(5, f"{src.name}: created {entry} ({reason})")
-    return seal(run, src, dest, entry, info["uuid"], created=True) == "sealed" if tracked else True
+    return seal(run, src, dest, entry, info["uuid"], created=True) == SealOutcome.SEALED if tracked else True
 
 
 def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str) -> tuple[str | None, bool | None]:
@@ -659,8 +661,8 @@ def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str
     if os.path.dirname(dest) != run.snapdir or not name_regex(src.name).fullmatch(entry):
         return f"not a snapshot name of {src.name} in {run.snapdir}", None
     kind = run.host.kind(dest)
-    if kind != "subvol":
-        return ("missing" if kind == "missing" else f"not a subvolume ({kind})"), None
+    if kind != PathKind.SUBVOL:
+        return ("missing" if kind == PathKind.MISSING else f"not a subvolume ({kind})"), None
     try:
         info = run.btrfs.show(SubvolPath(dest))  # host.kind said so
         ro = run.btrfs.readonly(SubvolPath(dest))
@@ -670,9 +672,7 @@ def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str
     return (f"a {other}" if other else None), ro
 
 
-def seal(
-    run: Run, src: Source, dest: str, entry: str, source_uuid: str, *, created: bool
-) -> Literal["sealed", "left", "error"]:
+def seal(run: Run, src: Source, dest: str, entry: str, source_uuid: str, *, created: bool) -> SealOutcome:
     """The second half of a snapshot taken writable: drop its cache folders
     (with --exclude-caches), make it read-only, check that it is, and take
     it off the unfinished list. CREATED: this run has just made it, so any
@@ -687,7 +687,7 @@ def seal(
             f"{src.name}: {entry} is listed in {run.state_file(UNFINISHED_FILE)} but is {problem}; "
             f"left alone - check it, then remove its line from that file",
         )
-        return "left"
+        return SealOutcome.LEFT
     if problem:
         run.log(
             3,
@@ -697,9 +697,9 @@ def seal(
     elif ro is False and run.options.exclude_caches:
         drop_caches(run, src, dest, entry)
     if ro is not True and not make_readonly(run, src, dest, entry):
-        return "error"
+        return SealOutcome.ERROR
     forget_sealed(run, src, entry)
-    return "sealed"
+    return SealOutcome.SEALED
 
 
 def make_readonly(run: Run, src: Source, dest: str, entry: str) -> bool:
@@ -819,12 +819,12 @@ def finish_unfinished(run: Run) -> int:
     status = EXIT_OK
     infos: dict[str, str | None] = {}
     for entry in entries:
-        if finish_entry(run, entry, infos) == "error":
+        if finish_entry(run, entry, infos) == SealOutcome.ERROR:
             status = EXIT_ERROR
     return status
 
 
-def finish_entry(run: Run, entry: str, infos: dict[str, str | None]) -> Literal["sealed", "left", "error"]:
+def finish_entry(run: Run, entry: str, infos: dict[str, str | None]) -> SealOutcome:
     """One line of the unfinished list (INFOS: each source's UUID, read once per run; None: unreadable)."""
     path = run.state_file(UNFINISHED_FILE)
     src = next((s for s in run.options.sources if "/" not in entry and name_regex(s.name).fullmatch(entry)), None)
@@ -834,11 +834,11 @@ def finish_entry(run: Run, entry: str, infos: dict[str, str | None]) -> Literal[
             f"{entry!r} is listed in {path} but is no snapshot name of "
             f"{', '.join(s.name for s in run.options.sources)}; left alone",
         )
-        return "left"
+        return SealOutcome.LEFT
     dest = os.path.join(run.snapdir, entry)
-    if run.host.kind(dest) == "missing":
+    if run.host.kind(dest) == PathKind.MISSING:
         forget_missing(run, src, entry)
-        return "left"
+        return SealOutcome.LEFT
     if src.name not in infos:
         try:
             infos[src.name] = run.source_info(src)["uuid"]
@@ -847,10 +847,10 @@ def finish_entry(run: Run, entry: str, infos: dict[str, str | None]) -> Literal[
             run.log(4, f"{src.name}: cannot read source {src.path}: {e}; its interrupted snapshots wait")
     source_uuid = infos[src.name]
     if source_uuid is None:
-        return "left"
+        return SealOutcome.LEFT
     if run.options.dry_run:
         run.log(5, f"{src.name}: would finish {entry}, left writable by an interrupted run")
-        return "left"
+        return SealOutcome.LEFT
     run.log(4, f"{src.name}: finishing {entry}, left writable by an interrupted run")
     return seal(run, src, dest, entry, source_uuid, created=False)
 
@@ -870,7 +870,7 @@ def forget_missing(run: Run, src: Source, entry: str) -> None:
 
 def check_snapdir(host: SnapshotHostPort, snapdir: str) -> None:
     # A missing directory just holds no snapshots yet (snapshot creates it).
-    if host.kind(snapdir) == "symlink":
+    if host.kind(snapdir) == PathKind.SYMLINK:
         raise Usage(f"--snapdir {snapdir} is a symlink")
 
 
@@ -1083,35 +1083,35 @@ def scan_snapshots(host: SnapshotHostPort, btrfs: BtrfsPort, snapdir: str, name:
             owned.append(found)
             continue
         verdict, why = found
-        if verdict == "unverifiable":
+        if verdict == ScanVerdict.UNVERIFIABLE:
             unverifiable.append((path, why))
             continue
         ignored.append((path, why))
-        if verdict == "writable":
+        if verdict == ScanVerdict.WRITABLE:
             writable.append(path)
     return Scan(owned, ignored, unverifiable, writable)
 
 
 def scan_entry(
     host: SnapshotHostPort, btrfs: BtrfsPort, path: str, name: str, entry: str, source_uuid: str | None
-) -> Snap | tuple[Literal["ignored", "writable", "unverifiable"], str]:
+) -> Snap | tuple[ScanVerdict, str]:
     """The snapshot at PATH (its ENTRY named like NAME's) when it is ours, else why not:
     ignored (not ours, never touched; "writable": not read-only), or
     unverifiable (could be ours: it blocks deletions)."""
     parsed = parse_snapshot_name(name, entry)
     if parsed is None:
-        return "ignored", "invalid date in the name"
+        return ScanVerdict.IGNORED, "invalid date in the name"
     kind = host.kind(path)
-    if kind != "subvol":
-        return "ignored", "not a subvolume" if kind != "symlink" else "symlink"
+    if kind != PathKind.SUBVOL:
+        return ScanVerdict.IGNORED, "not a subvolume" if kind != PathKind.SYMLINK else "symlink"
     try:
         info = btrfs.show(SubvolPath(path))  # host.kind said so
         ro = btrfs.readonly(SubvolPath(path))
     except ParseError as e:
-        return "unverifiable", str(e)
+        return ScanVerdict.UNVERIFIABLE, str(e)
     if not ro:
-        return "writable", "not read-only"
+        return ScanVerdict.WRITABLE, "not read-only"
     other = other_parent(info, source_uuid) if source_uuid is not None else None
     if other:
-        return "ignored", other
+        return ScanVerdict.IGNORED, other
     return Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"])

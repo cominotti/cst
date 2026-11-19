@@ -12,7 +12,7 @@ from collections.abc import Collection
 from collections.abc import Sequence
 from typing import Literal, Protocol
 
-from btrfs.snapshot.domain import CacheWalk, SubvolInfo, SubvolPath
+from btrfs.snapshot.domain import CacheWalk, PathKind, SubvolInfo, SubvolPath
 
 # A journal line: (syslog priority, text).
 type LogFn = Callable[[int, str], None]
@@ -35,7 +35,7 @@ class SnapshotHostPort(Protocol):
         """The sorted entries of PATH; FileNotFoundError, OSError as os.listdir."""
         ...
 
-    def kind(self, path: str) -> str:
+    def kind(self, path: str) -> PathKind:
         """'subvol' (a real subvolume root), 'symlink', 'missing' or 'other'."""
         ...
 
