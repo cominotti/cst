@@ -3,7 +3,7 @@
 deployment, the libvirt domains, each VM's definition), the settings files, an installed program, the
 command that installs a component again, and the decorator that registers a check (@check)."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass, field
 
 from cst_core.domain.install import COMPONENTS
@@ -124,9 +124,9 @@ def settings_file_warnings(
     *,
     bash_sourced: bool,
     note: str | None = None,
-    skip: Callable[[SettingsProblem], bool] | None = None,
+    skip: Container[SettingsProblem] = (),
 ) -> Iterator[Result]:
-    """WARN for each line of a settings file that is not a plain assignment, but the lines skip takes
+    """WARN for each line of a settings file that is not a plain assignment, but the lines in skip
     (another check warns about them). note: what the warning adds after "take nothing from the line" (by
     default, for a file bash sources, that bash reads the line its own way)."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
@@ -136,7 +136,7 @@ def settings_file_warnings(
         else note
     )
     for p in parsed.problems if parsed else ():
-        if skip is not None and skip(p):
+        if p in skip:
             continue
         yield Result(
             WARN,

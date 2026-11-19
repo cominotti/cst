@@ -412,13 +412,12 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
 def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
     # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line. A
     # SCRUB_LIMIT problem line that check_scrub_limit reports (the same line, read the same) is warned there.
-    scrub = set(scrub_limit_lines(scrub_settings(host)))
     yield from settings_file_warnings(
         host,
         SNAP_CONF,
         bash_sourced=True,
         note=" (btrfs-snapshot ignores it too, with a warning in its journal)",
-        skip=scrub.__contains__,
+        skip=scrub_limit_lines(scrub_settings(host)),
     )
 
 
