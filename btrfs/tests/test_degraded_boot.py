@@ -1518,7 +1518,9 @@ status
         r = self.uninstall()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("written by a newer CST", r.stderr)
-        self.assertIn("WARNING: the install record was not changed (see above); removing the files without it\n", r.stderr)
+        self.assertIn(
+            "WARNING: the install record was not changed (see above); removing the files without it\n", r.stderr
+        )
         self.assertEqual(self.mutating_calls()[-2:], ["systemctl daemon-reload", "udevadm control --reload"])
         self.assertEqual(
             sorted(os.path.relpath(p, self.root) for p in self.tree()), ["usr/lib/udev/rules.d/64-btrfs.rules"]
