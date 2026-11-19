@@ -43,6 +43,7 @@ from vm.domain.backup import (
     Fingerprint,
     IndexRefused,
     Manifest,
+    ResticSnapshot,
     ResticSummary,
     Uncertain,
     is_restic_snapshot,
@@ -598,6 +599,12 @@ def take_snapshot(
 
 def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | None:
     """The ids of the VM's restic snapshots, or None when not readable."""
+    snaps = nas_snapshots(restic, vm, nas)
+    return None if snaps is None else {s["id"] for s in snaps}
+
+
+def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo) -> list[ResticSnapshot] | None:
+    """The VM's restic snapshots (restic snapshots --json of its tags), or None when not readable."""
     rc, so, _ = restic.run(
         nas["env"],
         ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"],
@@ -611,7 +618,7 @@ def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | No
         return None
     # All or nothing: an answer of another shape is no list of the live snapshots, and reading it
     # as one would drop the index entries of every snapshot it does not name.
-    return {s["id"] for s in data} if list_of(data, is_restic_snapshot) else None
+    return data if list_of(data, is_restic_snapshot) else None
 
 
 def forget_torn(p: NasBackup, nas: NasRepo, snap: str) -> str | None:

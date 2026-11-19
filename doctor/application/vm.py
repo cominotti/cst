@@ -178,13 +178,16 @@ def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
     so they all judge the same contents."""
     known = facts(host)
     if known.vm_index is None:
-        known.vm_index = (_read_vm_index(host),)
+        known.vm_index = (_read_json_state(host, VM_INDEX),)
     return known.vm_index[0]
 
 
-def _read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
+def _read_json_state(host: DoctorHostPort, path: HostPath) -> tuple[object, str | None] | None:
+    """A JSON state file of cst vm read as cst vm reads it (vm.adapters.backup's load_json_file): None when
+    it is missing; (data, None) when it is JSON; (None, why) when it is there but cannot be read, or is
+    not JSON."""
     try:
-        with host.open_bytes(host.path(VM_INDEX)) as f:
+        with host.open_bytes(host.path(path)) as f:
             raw = f.read()
     except FileNotFoundError:
         return None

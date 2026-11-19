@@ -2,7 +2,7 @@
 """The backups' files and the run of a backup: the index, the fingerprints and sizes of what
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 import json
 import os
@@ -97,18 +97,9 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     cfg.paths.index."""
     path = cfg.paths.index
     try:
-        with open(path) as f:
-            text = f.read()
+        data = load_json_file(path, _unreadable)
     except FileNotFoundError:
         return []
-    except OSError as e:
-        raise _unreadable(path, e.strerror or str(e)) from None
-    except UnicodeDecodeError:  # a ValueError, not an OSError: bytes that are not text are not JSON
-        raise _unreadable(path, "not JSON") from None
-    try:
-        data = parse_json(text)
-    except ValueError, RecursionError:
-        raise _unreadable(path, "not JSON") from None
     if (found := INDEX_FORMAT.newer(data, "version")) is not None:
         raise IndexRefused(
             INDEX_FORMAT.newer_text(path, found),
@@ -118,6 +109,25 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     if backups is None:
         raise _unreadable(path, NO_BACKUPS_LIST)
     return backups
+
+
+def load_json_file(path: str, unreadable: Callable[[str, str], Refused]) -> object:
+    """The JSON a state file of cst vm holds, parsed. FileNotFoundError when there is none; unreadable(path,
+    why) raised when it is there but cannot be read (why: the error) or is not JSON (bytes that are not
+    UTF-8 included)."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise unreadable(path, e.strerror or str(e)) from None
+    except UnicodeDecodeError:  # a ValueError, not an OSError: bytes that are not text are not JSON
+        raise unreadable(path, "not JSON") from None
+    try:
+        return parse_json(text)
+    except ValueError, RecursionError:
+        raise unreadable(path, "not JSON") from None
 
 
 def _unreadable(path: str, why: str) -> IndexRefused:
