@@ -165,9 +165,12 @@ repository:
   make it keyword-only), `PLR2004` (a number compared with a literal;
   production code only: name it, see
   [.agents/rules/magic-values.md](../.agents/rules/magic-values.md)) and `C901` (a function over
-  `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
-  SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
-  measures. Ratchets on the size of a function: `PLR0911`, `PLR0912`,
+  `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 counts
+  cyclomatic complexity and is only a rough local hint for SonarCloud's
+  cognitive complexity rule (S3776): a survey found about five times as
+  many production functions over 15 by cognitive complexity as C901 flags,
+  and not the same ones. SonarCloud's S3776 stays the gate for cognitive
+  complexity; a green C901 budget says little about it. Ratchets on the size of a function: `PLR0911`, `PLR0912`,
   `PLR0913`, `PLR0915`, `PLR0917` (more than 6 returns, 12 branches, 5
   arguments, 50 statements or 5 positional arguments, ruff's defaults), with `FBT003` (a bare `True`/`False`
   passed by position) and the `N` family (pep8-naming), counted under `N`:
