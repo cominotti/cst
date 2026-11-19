@@ -21,7 +21,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
     cov = res["coverage"]
     if (first := cov.get("first_sample")) is not None and first != 0:
         print(
-            f"recorded {fmt_ts(cov['first_sample'])} -> {fmt_ts(cov['last_sample'])} "
+            f"recorded {fmt_ts(first)} -> {fmt_ts(cov['last_sample'])} "
             f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps', 0) else ''})"
         )
     print()
