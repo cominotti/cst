@@ -10,7 +10,6 @@ from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 import glob
-import io
 import locale
 import os
 import pwd
@@ -95,11 +94,11 @@ def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
 
 
 def user_id(user: str) -> str:
-    """The user's uid as `id -u USER` prints it ("" and id's message on stderr for an unknown user)."""
+    """The user's uid as `id -u USER` prints it, "" for an unknown user (quietly: GameProfile says id's
+    message where it is wanted)."""
     try:
         return str(pwd.getpwnam(user).pw_uid)
     except KeyError:
-        print(f"id: '{user}': no such user", file=sys.stderr, flush=True)
         return ""
 
 
@@ -154,7 +153,6 @@ class GameProfile:
         self._uid_of = uid_of
         self._name_of = name_of
         self._out = out
-        self._say_lookups = True  # tick and state turn it off: see _lookup_uid
         self._uids: dict[str, str] = {}
 
     # ---- output ----------------------------------------------------------------------
@@ -179,17 +177,19 @@ class GameProfile:
             sys.stderr.flush()
 
     # ---- systemd -------------------------------------------------------------------------
-    def uid(self) -> str:
-        """The target user's uid."""
-        return self._lookup_uid(self.s.target_user, say=True)
+    def uid(self, *, say: bool = False) -> str:
+        """The target user's uid (say: see _lookup_uid)."""
+        return self._lookup_uid(self.s.target_user, say=say)
 
     def _lookup_uid(self, user: str, *, say: bool) -> str:
-        """The uid of user ("" for none), looked up once per run. id's "no such user" line only when say (False
-        from _target_refusal: its caller logs a line of its own), never in tick or state (_say_lookups), once."""
+        """The uid of user ("" for none), looked up once per run. With say ('off' only), the first lookup
+        of a user with no account prints id's "no such user" line on stderr, once; on, tick and state
+        never print it."""
         if user not in self._uids:
-            quiet = not (say and self._say_lookups)
-            with contextlib.redirect_stderr(io.StringIO()) if quiet else contextlib.nullcontext():
-                self._uids[user] = self._uid_of(user)
+            found = self._uid_of(user)
+            if say and not found:
+                print(f"id: '{user}': no such user", file=sys.stderr, flush=True)
+            self._uids[user] = found
         return self._uids[user]
 
     def _argv(self, mgr: Manager, args: Sequence[str]) -> list[str]:
@@ -220,9 +220,9 @@ class GameProfile:
         """The property as `systemctl show -P` shows it ("" for [not set] and on an error)."""
         return shown(self.ask(mgr, "show", "-P", name, unit).stdout)
 
-    def ctl_file(self, mgr: Manager, unit: str, prop: str) -> str:
-        """Where `set-property --runtime` writes PROP of UNIT."""
-        return ctl_file(self.paths, mgr, unit, prop, self.uid() if mgr == "usr" else "")
+    def ctl_file(self, mgr: Manager, unit: str, prop: str, *, say: bool = False) -> str:
+        """Where `set-property --runtime` writes PROP of UNIT (say: see _lookup_uid)."""
+        return ctl_file(self.paths, mgr, unit, prop, self.uid(say=say) if mgr == "usr" else "")
 
     def _units(self, mgr: Manager, pattern: str) -> list[str]:
         """The running scopes matching pattern (list-units, first column)."""
@@ -556,9 +556,9 @@ class GameProfile:
     def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
         also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
-        The tick and 'state' act for that user too, quietly (say False; _lookup_uid: never id's "no such
-        user" line there, 'off' says it once), so what the tick sets in the user manager is what 'off'
-        undoes."""
+        The tick and 'state' act for that user too, quietly (say False: neither the line below nor id's
+        "no such user" line, which 'off' says once: _lookup_uid), so what the tick sets in the user
+        manager is what 'off' undoes."""
         uid = state_uid(recs)
         if uid is None:
             return
@@ -582,7 +582,7 @@ class GameProfile:
                 _write_line(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
-                    f = self.ctl_file(mgr, unit, prop)
+                    f = self.ctl_file(mgr, unit, prop, say=True)
                     with contextlib.suppress(OSError):
                         os.unlink(f)
                     with contextlib.suppress(OSError):
@@ -655,7 +655,6 @@ class GameProfile:
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
-        self._say_lookups = False
         p = self.paths
         why = None if self.problems else self._target_refusal()  # 'on' would refuse for TARGET_USER
         if not self.problems and why is None:  # fixed: a line or a name that breaks again is said again
@@ -726,7 +725,6 @@ class GameProfile:
     def state(self) -> int:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
-        self._say_lookups = False
         on = os.path.exists(self.paths.state)
         if on:
             self._user_from_state(records(self._state_text()), say=False)
