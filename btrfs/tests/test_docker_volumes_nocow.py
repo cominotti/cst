@@ -37,6 +37,7 @@ import gc
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import struct
@@ -615,6 +616,17 @@ class ImportTest(unittest.TestCase):
 
                 with mock.patch.object(builtins, "open", fake_open):
                     self.assertEqual(nocow_adapters.docker_root(), want)
+
+    def test_a_daemon_json_that_is_not_utf8_is_not_json(self) -> None:
+        # A byte that is not UTF-8 fails the read itself (UnicodeDecodeError, a ValueError): the
+        # file is not JSON, as for any other text dockerd cannot parse, never a crash.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daemon.json")
+            with open(path, "wb") as f:
+                f.write(b'{"data-root": "/srv/\xff"}')
+            self.assertEqual(nocow_adapters.daemon_config(path), (None, f"{path}: not JSON"))
+            with self.assertRaisesRegex(OSError, f"^{re.escape(path)}: not JSON$"):
+                nocow_adapters.configured_root(path)
 
 
 class StatusTest(Base):

@@ -44,6 +44,8 @@ def daemon_config(path: str) -> tuple[str | None, str]:
             text = f.read()
     except FileNotFoundError:
         return None, ""
+    except UnicodeDecodeError:  # a ValueError, not an OSError: the bytes are not text, so not JSON
+        return None, f"{path}: not JSON"
     try:
         data = parse_json(text)
     except ValueError, RecursionError:
