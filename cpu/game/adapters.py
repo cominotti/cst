@@ -583,18 +583,8 @@ class GameProfile:
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
         drifts = self.drift(text)
-        skipped = unheld(drifts, records(self._state_text()))
-        if skipped:  # 'off' could not undo them: said once per boot, at notice
-            said = "\n".join(unheld_text(d) for d in skipped)
-
-            def emit() -> None:
-                for line in said.split("\n"):
-                    self.log(5, line)
-
-            self._say_once(self.paths.drift_warned, said, emit)
-        else:
-            with contextlib.suppress(OSError):  # nothing left to say: a later one is said again
-                os.unlink(self.paths.drift_warned)
+        skipped = self._unheld(drifts)
+        self._say_unheld(skipped)
         for d in drifts:
             if d in skipped:
                 continue
@@ -605,6 +595,25 @@ class GameProfile:
                 mgr: Manager = "sys" if r[1] == "sys" else "usr"
                 ok = self.ctl(mgr, "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True) == 0
             self.log(*repaired_text(d, ok=ok))
+
+    def _unheld(self, drifts: Sequence[Drift]) -> list[Drift]:
+        """The drifts game.state holds no record of (unheld)."""
+        return unheld(drifts, records(self._state_text()))
+
+    def _say_unheld(self, skipped: Sequence[Drift]) -> None:
+        """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
+        notice; with none, forget the mark, so a later one is said again."""
+        if not skipped:
+            with contextlib.suppress(OSError):
+                os.unlink(self.paths.drift_warned)
+            return
+        said = "\n".join(unheld_text(d) for d in skipped)
+
+        def emit() -> None:
+            for line in said.split("\n"):
+                self.log(5, line)
+
+        self._say_once(self.paths.drift_warned, said, emit)
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
@@ -712,7 +721,7 @@ class GameProfile:
             return drift_lines(None, manual=os.path.exists(p.manual))
         text, newer = self._intended()
         drifts = self.drift(text) if newer is None else None
-        not_held = [] if drifts is None else unheld(drifts, records(self._state_text()))
+        not_held = [] if drifts is None else self._unheld(drifts)
         return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer, not_held=not_held)
 
     def _intended(self) -> tuple[str, str | None]:
