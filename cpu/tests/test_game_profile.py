@@ -590,6 +590,19 @@ class GameProfileDriftTest(GameProfileCase):
         self.assertEqual(self.sets(actions), [])
         self.assertEqual(out, "")
 
+    def test_a_short_record_of_game_intended_asks_systemd_nothing(self) -> None:
+        # game.intended read as cst doctor reads it (intended_records): a prop line of five fields is no
+        # drift record, so no systemctl show asks about it.
+        self.write(self.state, "prop sys builds.slice CPUWeight new -\n")
+        self.write(self.intended, "cst-game-intended 1\nprop sys builds.slice CPUWeight idle\n")
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(out, "")
+        self.assertEqual([a for a in actions if " show -p " in a or "set-property" in a], [])
+        report, actions = self.drift_report()
+        self.assertEqual([a for a in actions if " show " in a], [])
+        self.assertEqual(report, "  drift: none (every setting the profile made still holds)\n")
+
     def test_old_format_state_is_tolerated(self) -> None:
         # Switched on by a version without game.intended: no comparison at all.
         self.write(self.state, "prop sys machine.slice CPUWeight new -\nprop sys user.slice MemoryLow new -\n")

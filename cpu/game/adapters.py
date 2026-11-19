@@ -48,6 +48,7 @@ from cpu.game.domain import (
     has_record_part,
     intended_header,
     intended_props,
+    intended_records,
     newer_intended,
     manager_of,
     on_text,
@@ -586,7 +587,7 @@ class GameProfile:
 
     def drift(self, text: str) -> list[Drift]:
         """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
-        recs = records(text)
+        recs = intended_records(text)  # as cst doctor reads it
         now: dict[tuple[str, str], dict[str, str]] = {}
         for (mgr, unit), props in intended_props(recs).items():
             args = ["show", "-p", "LoadState"] + [a for prop in props for a in ("-p", prop)] + [unit]
