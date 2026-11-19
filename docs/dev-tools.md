@@ -585,8 +585,9 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
 
 Add a commit there only when its code changes are layout only, by the full
-SHA that landed on `main` (the squash commit), with a comment naming its pull
-request. `git blame` skips the whole commit, so any config or doc lines it
+SHA that landed on `main` (the squash commit of a one-change pull request,
+or the layout commit itself inside a batch merged with a merge commit), with
+a comment naming its pull request. `git blame` skips the whole commit, so any config or doc lines it
 changed are skipped too (#16 also added the format gate to the config and
 the docs; #32, the SPDX header line in every file, also added the header
 gate and its fixer).

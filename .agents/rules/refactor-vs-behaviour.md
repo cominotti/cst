@@ -6,10 +6,12 @@ description: A change is either a refactor (no behaviour change, proved) or a be
 
 # Refactor or behaviour change: one kind per change
 
-Every commit and every pull request is one of two kinds, a refactor or a
-behaviour change, unless it changes no behaviour at all (docs and comments,
-below).
-Say which one in the message, with its proof.
+Every commit is one of two kinds, a refactor or a behaviour change, unless it
+changes no behaviour at all (docs and comments, below).
+Say which one in the message, with its proof. A pull request of one change
+is of that change's kind. A batch pull request (several changes, landed
+together with a merge commit, [AGENTS.md, "Rules"](../../AGENTS.md#rules))
+lists the kind of each commit in its description.
 
 ## A refactor changes no behaviour
 

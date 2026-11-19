@@ -71,9 +71,20 @@ consistent.
   new files; `tests/test_license_headers.py` fails on a file without it.
   The few files that cannot carry it (no comment syntax, captured data) are
   in `LICENSE_EXEMPT` of `tests/license_headers.py`, each with its reason.
-- **CI is the gate.** Work on a branch and open a pull request; `main` accepts
-  squash merges with a green `CI Status` (fast gates, both E2E tiers) and a
-  green SonarCloud check. Never weaken a check to make it pass.
+- **CI is the gate.** Work on a branch and open a pull request; nothing is
+  pushed to `main` directly. A pull request lands only with a green
+  `CI Status` (fast gates, both E2E tiers) and a green SonarCloud check on
+  its head, merged through GitHub in one of two ways:
+  - a pull request of one kind (one change, a Dependabot bump): a squash
+    merge;
+  - a batch, or any pull request whose commits are of more than one kind: a
+    merge commit, never squashed or rebased, so each commit keeps its kind
+    and its proof. The pull request lists each commit's kind.
+
+  The merge names the head CI tested
+  (`gh pr merge N --merge --match-head-commit SHA`). `git log --first-parent
+  main` shows one entry per pull request either way. Never weaken a check
+  to make it pass.
 
 ## Index: where each part is documented
 
