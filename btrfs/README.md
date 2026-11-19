@@ -879,7 +879,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed programs in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher (only CST's: a file there without
-  its "btrfs-setup.sh" line is kept, and dropped from the install record);
+  its "btrfs-setup.sh" line, or a link that leads nowhere, is kept, and dropped
+  from the install record);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
 - the writeback file. Then it restarts `tuned` so its own values come back. If

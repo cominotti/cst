@@ -1424,6 +1424,17 @@ class ReportLauncherTest(unittest.TestCase):
         self.assertEqual(Path(self.shim).read_text(), "#!/bin/sh\necho mine\n")
         self.assertEqual(home_record(self.tmp)["files"], {})
 
+    def test_remove_keeps_a_link_of_the_user_that_leads_nowhere(self) -> None:
+        # The user's own launcher, a link into a folder that is not mounted now: it is not "no file",
+        # so it is kept (as before the record), and its line dropped.
+        self.bash("install_report_launcher")
+        os.unlink(self.shim)
+        os.symlink(os.path.join(self.tmp, "not-mounted", "stall-report"), self.shim)
+        r = self.bash("remove_report_launcher")
+        self.assertEqual(r.stdout, "")
+        self.assertTrue(os.path.islink(self.shim))
+        self.assertEqual(home_record(self.tmp)["files"], {})
+
     def test_remove_drops_the_line_of_a_launcher_already_gone(self) -> None:
         self.bash("install_report_launcher")
         os.unlink(self.shim)

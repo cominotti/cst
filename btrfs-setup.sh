@@ -550,11 +550,11 @@ install_report_launcher() {
 }
 
 # remove_report_launcher: that launcher, with its record line, only when this
-# script wrote it; a file there without its marker is kept, and its line
-# dropped. No file: a line left over is dropped.
+# script wrote it; a file there without its marker (also a link that leads
+# nowhere) is kept, and its line dropped. No file: a line left over is dropped.
 remove_report_launcher() {
     [[ -n "${shim}" ]] || return 0
-    if [[ ! -e "${shim}" ]] || grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
+    if [[ ! -e "${shim}" && ! -L "${shim}" ]] || grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
         cst_remove_text_as "${target_user}" "${shim}"
     else
         cst_forget_text_as "${target_user}" "${shim}"
