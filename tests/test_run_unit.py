@@ -154,19 +154,31 @@ class T(unittest.TestCase):
             f = open(os.devnull)
             del f
         self.assertEqual([w.category for w in seen], [ResourceWarning])
+class S(unittest.TestCase):
+    def test_replaces_showwarning_then_leaks(self):
+        warnings.showwarning = lambda *args, **kwargs: None  # as logging.captureWarnings(True) does
+        f = open(os.devnull)
+        del f
 """
 
 
 class ResourceWarningGateTest(unittest.TestCase):
     """A test that leaves a file or socket open fails the run, even though unittest says OK."""
 
-    def run_probe(self, name: str, *options: str) -> subprocess.CompletedProcess[str]:
-        """The runner in a child (with these interpreter options) on one test of _LEAKS."""
+    def run_probe(self, name: str, *options: str, cls: str = "T") -> subprocess.CompletedProcess[str]:
+        """The runner in a child (with these interpreter options) on one test of _LEAKS (or the
+        whole class, for an empty name)."""
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
         with open(os.path.join(tmp, "probe_leaks.py"), "w", encoding="utf-8") as f:
             f.write(_LEAKS)
         return subprocess.run(
-            [sys.executable, "-B", *options, os.path.join(REPO, "tests", "run_unit.py"), f"probe_leaks.T.{name}"],
+            [
+                sys.executable,
+                "-B",
+                *options,
+                os.path.join(REPO, "tests", "run_unit.py"),
+                ".".join(part for part in ("probe_leaks", cls, name) if part),
+            ],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -204,6 +216,13 @@ class ResourceWarningGateTest(unittest.TestCase):
             "error: ResourceWarning in probe_leaks.T.test_leaks_a_file_in_a_cycle (or one before it: found by the "
             "last garbage collection): unclosed file",
             done.stderr,
+        )
+
+    def test_a_leak_after_showwarning_was_replaced_fails_the_run(self) -> None:
+        done = self.run_probe("test_replaces_showwarning_then_leaks", cls="S")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.S.test_replaces_showwarning_then_leaks: unclosed file", done.stderr
         )
 
     def test_a_warning_the_test_records_itself_is_its_own(self) -> None:

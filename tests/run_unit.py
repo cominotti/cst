@@ -56,7 +56,8 @@ No test may leave a file, a socket or a child process open. Python finds
 such a leak when the object is freed and only prints a ResourceWarning
 (an exception raised in a __del__ is only printed too), so the test still
 passes; a daemon that leaks a descriptor per event fails slowly. This
-runner records every ResourceWarning and every exception raised in a
+runner records every ResourceWarning (one that goes to a
+warnings.showwarning a test replaced too) and every exception raised in a
 __del__ with the test that was running (LeakRecordingResult), runs the
 garbage collector once more after the last test, and fails the run on
 each one, with a hint: run the test again with -X tracemalloc=8 to see
@@ -231,8 +232,12 @@ LEAK_HINT: Final = (
 )
 
 
-# The warnings module's function that writes one warning (WarningMessage) out.
+# The warnings module's functions that write one warning (WarningMessage) out: _showwarnmsg is the
+# one Python calls; it hands the warning to warnings.showwarning when that was replaced (and its
+# original is _showwarning_orig), and to _showwarnmsg_impl otherwise.
 _SHOW_HOOK: Final = "_showwarnmsg_impl"
+_SHOW_ENTRY: Final = "_showwarnmsg"
+_SHOWWARNING_ORIG: Final = "_showwarning_orig"
 
 
 class LeakRecordingResult(unittest.TextTestResult):
@@ -256,8 +261,16 @@ class LeakRecordingResult(unittest.TextTestResult):
         # original prints where the object was allocated (with -X tracemalloc), and a test's
         # warnings.catch_warnings(record=True) replaces it for the test's own warnings.
         self._show: Callable[[warnings.WarningMessage], None] = getattr(warnings, _SHOW_HOOK)
-        self._hook = mock.patch.object(warnings, _SHOW_HOOK, self._warned)
-        self._hook.start()
+        # A replaced warnings.showwarning (mock.patch, logging.captureWarnings) gets the warning
+        # instead, and _showwarnmsg_impl never sees it: the hook on _showwarnmsg records those.
+        self._show_entry: Callable[[warnings.WarningMessage], None] = getattr(warnings, _SHOW_ENTRY)
+        self._showwarning_orig: object = getattr(warnings, _SHOWWARNING_ORIG)
+        self._hooks = (
+            mock.patch.object(warnings, _SHOW_HOOK, self._warned),
+            mock.patch.object(warnings, _SHOW_ENTRY, self._entered),
+        )
+        for hook in self._hooks:
+            hook.start()
         self._unraisablehook = sys.unraisablehook
         sys.unraisablehook = self._unraisable
 
@@ -272,14 +285,23 @@ class LeakRecordingResult(unittest.TextTestResult):
         # hooks still record, instead of at exit.
         self._running = f"{self._running} (or one before it: found by the last garbage collection)"
         gc.collect()
-        self._hook.stop()
+        for hook in reversed(self._hooks):
+            hook.stop()
         sys.unraisablehook = self._unraisablehook
         super().stopTestRun()
 
+    def _entered(self, msg: warnings.WarningMessage) -> None:
+        if warnings.showwarning is not self._showwarning_orig:
+            self._record(msg)  # the replacement gets it, not _warned
+        self._show_entry(msg)
+
     def _warned(self, msg: warnings.WarningMessage) -> None:
+        self._record(msg)
+        self._show(msg)
+
+    def _record(self, msg: warnings.WarningMessage) -> None:
         if issubclass(msg.category, ResourceWarning):
             self.leaks.append(f"ResourceWarning in {self._running}: {msg.message} ({msg.filename}:{msg.lineno})")
-        self._show(msg)
 
     def _unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
         self.leaks.append(f"exception in {self._running}, ignored in {unraisable.object!r}: {unraisable.exc_value!r}")
