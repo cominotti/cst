@@ -66,6 +66,7 @@ from doctor.application import (
     registry as doc_registry,
     services as doc_services,
     shared as doc_shared,
+    swap as doc_swap,
     vm as doc_vm,
 )
 from btrfs.health_check import domain as hc_domain
@@ -1355,6 +1356,58 @@ class SwapSettingsDoctorTest(Scratch):
                 NOT_CONFIGURED.replace(
                     "swap.conf)",
                     f"swap.conf; the swap0 line in crypttab names /dev/disk/by-partuuid/{SWAP_PU}, which is not here)",
+                )
+            ],
+        )
+
+    def partition_here(self) -> doc_adapters.Host:
+        """An older CST's marked lines, and the by-partuuid link of its crypttab line leading to a block
+        device of 4 GiB (sysfs: 8388608 sectors): a Host whose stat says so (a test cannot make a block
+        device)."""
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.write("dev/nvme0n1p5", "")
+        self.write("sys/class/block/nvme0n1p5/size", "8388608\n")
+        os.makedirs(os.path.join(self.root, "dev/disk/by-partuuid"))
+        os.symlink("../../nvme0n1p5", os.path.join(self.root, "dev/disk/by-partuuid", SWAP_PU))
+        host = doc_adapters.Host(dict(self.env))
+        device = os.path.join(self.root, "dev/nvme0n1p5")
+
+        def stat_of(path: str) -> os.stat_result:
+            st = os.stat(path)
+            return os.stat_result((stat.S_IFBLK | 0o660, *tuple(st)[1:])) if path == device else st
+
+        patcher = mock.patch.object(host, "stat", stat_of)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return host
+
+    def test_a_crypttab_line_whose_partition_is_here_is_written_by_apply(self) -> None:
+        # cst swap plan shows "write" there: apply writes swap.conf from the line and the size.
+        host = self.partition_here()
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
+                    " `cst swap apply` writes it from /etc/crypttab",
+                    "cst swap apply",
+                )
+            ],
+        )
+
+    def test_a_crypttab_line_whose_partition_sysfs_does_not_size_is_not_configured(self) -> None:
+        host = self.partition_here()
+        self.write("sys/class/block/nvme0n1p5/size", "\n")
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf; the swap0 line in"
+                    f" crypttab names /dev/disk/by-partuuid/{SWAP_PU}, which is not here): cst swap apply refuses"
+                    " (swap/README.md, section 2.3)",
                 )
             ],
         )
