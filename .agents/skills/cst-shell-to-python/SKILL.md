@@ -43,8 +43,9 @@ and `busy` for good and execs `btrfs/btrfs-snapshot-runtime` (a zipapp of
 `list`, `caches`, `prune`, `purge` and `configure`, handing over
 `CST_LC_CTYPE` and `CST_SIGPIPE_IGNORED`. `btrfs/tests/test_snapshot_mixed.py`
 runs the last bash version (`tests/fixtures/legacy/btrfs-snapshot@47038aa`)
-and the new one on the same state, both ways; tier 1's `test_110` and
-`test_111` run the installed pair as root. Its fix commits gave the last
+and the new one on the same state, both ways; tier 1's `test_109` and
+`test_110` run the installed pair as root, and `test_108` and `test_111`
+check that `snapshots.conf` is read as data. Its fix commits gave the last
 items of the checklist below.
 
 ## The port checklist (from PR-A's regressions)
@@ -95,8 +96,8 @@ command, against the bash, with a test:
       and the reverse (a parity harness, and a tier 1 test that runs the
       bash version next to the checkout: vendored as
       `tests/fixtures/legacy/<file>@<short-sha>`, never read from the git
-      history, which was rewritten once: the short SHAs of the older
-      fixtures, such as d4d8c91 and cfb496a, no longer resolve;
+      history: the short SHAs in the names of the older fixtures, such as
+      d4d8c91 and cfb496a, no longer resolve in it;
       tests/e2e/README.md, "Mixed-version tests").
 - [ ] **What the commands get, as bash gave it.** A program with cleanup
       leaves SIGPIPE ignored, but its children get the disposition bash's

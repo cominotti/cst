@@ -46,6 +46,25 @@ None` in place of `x` is a behaviour change where `""` or 0 reached the
 test, so say in the message why it cannot
 ([docs/dev-tools.md, "What each gate checks"](../../../docs/dev-tools.md#what-each-gate-checks)).
 
+## 2c. A typing refactor whose tests must pass members: two commits, A and B
+
+When production code starts to take a StrEnum member where it took a plain
+string, ty can then ask the tests to pass the member too. Split the change in two commits, each with its own proof:
+
+- **A**, production only: the tests are unchanged and pass on the old code
+  and on the new (step 2). A `StrEnum` member equals its plain string, so
+  the old tests still pass at run time.
+- **B**, tests only: each raw string that a typed parameter now takes
+  becomes the member of the same value, plus the imports those members need;
+  assertions keep the raw strings, which pin the values
+  ([magic-values](../../rules/magic-values.md)). Its proof is that the diff
+  is nothing else: compare each changed test file's syntax tree at A and at
+  B with every member reference put back as its string value and the
+  imports dropped; they must be equal. No such checker is in the repository
+  today: a throwaway script in a temporary folder does it (`ast.parse` both
+  versions, `git show A:FILE` and `git show B:FILE`), and the commit message
+  says it ran.
+
 ## 3. Review the test diff
 
 A refactor must not:

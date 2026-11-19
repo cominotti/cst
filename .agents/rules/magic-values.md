@@ -37,9 +37,11 @@ declared once and used by name.
   or `parse_toml` gave, and checks every key whose type is narrower than
   `object` or `Json` and every Required key. Two gates keep this border:
   `json.load(s)` and `tomllib.load(s)` are called nowhere else in production
-  code (`PRIMITIVE_OWNERS` in `tests/test_architecture.py`), and ty's
-  `unsound-return` and `unsound-assignment` refuse the parsed value (or any
-  other value typed `Any`) where a narrower type is declared
+  code (`PRIMITIVE_OWNERS` in `tests/test_architecture.py`), so every reader
+  gets the `object` that `parse_json` and `parse_toml` return, which ty does
+  not let reach a narrower type unchecked; and ty's `unsound-return` and
+  `unsound-assignment` refuse a value typed `Any` from elsewhere (a regex
+  group, `sys.stdout`, `struct.unpack`) where a narrower type is declared
   ([docs/dev-tools.md](../../docs/dev-tools.md#what-each-gate-checks)).
 
 ## Rules that keep the behaviour
