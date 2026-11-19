@@ -13,7 +13,7 @@ from vm.domain.tune import cpu_status_line, tune_line
 
 def cmd_list(cfg: VmSettings, vm: str | None) -> None:
     store = wiring.backup_store(cfg)
-    entries = [e for e in store.read_index() if vm is None or e["vm"] == vm]
+    entries = [e for e in store.read_index() if vm is None or vm == "" or e["vm"] == vm]  # "": no VM
     if not entries:
         print(f"no VM backups{of_vm(vm)} in {cfg.paths.index} (make one: {cfg.cst} vm backup)")
         return

@@ -821,6 +821,22 @@ class ListStatusTest(Scratch):
         self.assertIn("qemu-kvm: qemu-kvm-11.1.3-1.fc45.x86_64 -> qemu-kvm-11.2.0-1.fc45.x86_64", r.stdout)
         self.assertNotIn("libvirt-daemon:", r.stdout)
 
+    def test_list_with_an_empty_vm_name_lists_every_vm(self) -> None:
+        # "" names no VM (as status, tune and backup take it): it printed "no VM backups in INDEX".
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        with open(self.index) as f:
+            data = json.load(f)
+        other = dict(data["backups"][0], vm="linux", path=os.path.join(self.backups, "linux", "20261108T010640Z"))
+        os.makedirs(other["path"])
+        data["backups"].append(other)
+        with open(self.index, "w") as f:
+            json.dump(data, f)
+        for args, vms in ((("list", ""), ["linux", "win"]), (("list",), ["linux", "win"]), (("list", "win"), ["win"])):
+            with self.subTest(args=args):
+                r = self.run_tool(*args)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual([ln.split()[0] for ln in r.stdout.splitlines()], vms, r.stdout)
+
     def test_status_with_fixed_cpu_and_without_virsh(self) -> None:
         self.domain(
             self.domain_xml(

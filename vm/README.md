@@ -66,7 +66,8 @@ cst vm help
 `nocow apply` and `nocow plan --root` must run on the host: in a toolbox
 they stop and show the command to type in a host terminal. `list`,
 `status`, `backup-timer status`, `tune plan` and `nocow plan` run on the
-host by themselves (through `flatpak-spawn --host`).
+host by themselves (through `flatpak-spawn --host`). `list` without a VM, or
+with an empty one (`cst vm list ""`), lists the backups of every VM.
 Settings: the optional `/etc/cst/vm.conf` (sections 8 and 10.7).
 
 ## 2. The incident that started it (Fedora 45)
