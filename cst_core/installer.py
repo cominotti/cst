@@ -261,8 +261,11 @@ def _stream(lines: Iterable[str]) -> int:
     return 0
 
 
-def _forget(service: InstallService, places: Sequence[Placement]) -> int:
-    """forget or forget-text: the record lines of these files dropped, the files left alone."""
+def _remove_or_forget(service: InstallService, command: str, places: Sequence[Placement]) -> int:
+    """remove or remove-text: the files and their record lines ('removed:' per file that was there);
+    forget or forget-text: only the record lines dropped, the files left alone."""
+    if command not in (InstallerCommand.FORGET, InstallerCommand.FORGET_TEXT):
+        return _stream(service.remove(places))
     for record in sorted({p.record for p in places if p.record}):
         service.forget(record, [p.dest for p in places if p.record == record])
     return 0
@@ -279,8 +282,7 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
                 else "forgotten as the user"
             )
             raise InstallRefused(f"files of the user are {how}, not as root")
-        places = [service.placement(e, req) for e in entries]
-        return _forget(service, places) if a.command == InstallerCommand.FORGET else _stream(service.remove(places))
+        return _remove_or_forget(service, a.command, [service.placement(e, req) for e in entries])
     if a.command == InstallerCommand.INSTALL:
         return _stream(service.install(entries, req))
     lines, todo = service.plan(entries, req)
@@ -300,9 +302,7 @@ def _command(service: InstallService, a: argparse.Namespace) -> int:
     if a.command in (InstallerCommand.REMOVE_TEXT, InstallerCommand.FORGET_TEXT):
         if not a.args:
             raise _UsageError(f"{a.command} DEST...")
-        places = [_text_place(d, 0, None, a, recorded=True) for d in a.args]
-        forget = a.command == InstallerCommand.FORGET_TEXT
-        return _forget(service, places) if forget else _stream(service.remove(places))
+        return _remove_or_forget(service, a.command, [_text_place(d, 0, None, a, recorded=True) for d in a.args])
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
     if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)
