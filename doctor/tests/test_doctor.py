@@ -1421,6 +1421,12 @@ class SwapSettingsDoctorTest(Scratch):
         self.close("etc/cst/swap.conf")
         self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
 
+    def test_only_the_first_64_kib_of_swap_conf_are_read(self) -> None:
+        # As every settings file doctor reads: a swap.conf that never ends (a link to /dev/zero) must not
+        # fill the memory. Here the partition's lines come after 64 KiB of comments, so doctor sees none.
+        self.write("etc/cst/swap.conf", "# padding\n" * 7000 + "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.assertEqual(self.lines(self.run_tool().stdout), [NOT_CONFIGURED])
+
     def test_root_in_a_toolbox_who_cannot_read_swap_conf_is_asked_to_read_it_on_the_host(self) -> None:
         # sudo cst doctor in a toolbox: root of the user namespace may not read a host root's 0600 file.
         # cst swap status --root on the host reads it: the info row, not "cannot be read" (apply refuses).

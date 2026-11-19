@@ -3,6 +3,7 @@
 
 from collections.abc import Iterator
 import stat
+from typing import Final
 
 from cst_core.domain.values import format_bytes_human as human
 from doctor.application.cpu import unit_props
@@ -33,6 +34,10 @@ from swap.domain import (
     resolve_settings,
     sysfs_partition,
 )
+
+# How much of swap.conf, /etc/crypttab and /etc/fstab doctor reads, as of every settings file it reads:
+# a file that never ends (a link to /dev/zero) must not fill the memory.
+SETTINGS_READ_LIMIT: Final = 65536
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
@@ -84,19 +89,20 @@ class _HostSettingsFacts:
         self._lstat: tuple[OSError | None] | None = None
 
     def _read(self, path: HostPath) -> str | OSError:
-        """The whole file (undecodable bytes replaced), or the OSError of its read; read once."""
+        """The file's first SETTINGS_READ_LIMIT characters (undecodable bytes replaced), or the OSError of
+        its read; read once."""
         known = self._reads.get(path)
         if known is None:
             try:
                 with self._host.open_text(self._host.path(path)) as f:
-                    known = f.read()
+                    known = f.read(SETTINGS_READ_LIMIT)
             except OSError as e:
                 known = e
             self._reads[path] = known
         return known
 
     def _text(self, path: HostPath) -> str:
-        """The whole file; "" when it cannot be read."""
+        """The file's text as _read gives it; "" when it cannot be read."""
         text = self._read(path)
         return text if isinstance(text, str) else ""
 
