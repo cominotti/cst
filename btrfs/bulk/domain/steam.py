@@ -12,13 +12,14 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 from typing import NoReturn
 from typing import NotRequired
 from typing import TypedDict
 import os
 import re
 
-from btrfs.bulk.domain import BIG, BulkCommand, Ctx, Unexpected, gib
+from btrfs.bulk.domain import BIG, BulkCommand, BulkJournalKind, Ctx, Unexpected, gib
 
 # ---- Steam: move installed games into the ~/Bulk/steam library ---------------------------------
 # `btrfs-bulk steam plan|apply [--app ID]...`. Steam must be closed. The game's
@@ -368,9 +369,9 @@ class SteamPart(TypedDict):
 
 
 class SteamJournal(TypedDict):
-    """journal-steam-<appid>.json. phase: prepared | switching | switched | finishing."""
+    """journal-steam-<appid>.json (is_steam_journal checks kind and phase)."""
 
-    kind: str
+    kind: Literal[BulkJournalKind.STEAM]
     appid: str
     src_lib: str
     dst_lib: str
@@ -378,7 +379,7 @@ class SteamJournal(TypedDict):
     stamp2: NotRequired[int]
     contentid: str
     stamp: int
-    phase: str
+    phase: SteamPhase
     parts: list[SteamPart]
     conflict: NotRequired[bool]
     undo: NotRequired[bool]

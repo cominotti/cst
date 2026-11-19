@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 from typing import NotRequired
 from typing import TypedDict
 import os
@@ -363,9 +364,9 @@ class BulkJournalKind(StrEnum):
 
 
 class ItemJournal(TypedDict):
-    """journal-<id>.json of one item's move. kind: copy | subvol."""
+    """journal-<id>.json of one item's move (is_item_journal checks kind)."""
 
-    kind: str
+    kind: Literal[BulkJournalKind.COPY, BulkJournalKind.SUBVOL]
     src: str
     target: str
     new: str
