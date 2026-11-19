@@ -6,6 +6,7 @@ no, a restart that failed) stay owed in a record that the next run reads
 (Survey.restart_state): apply resumes them.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import os.path
 import re
@@ -56,13 +57,19 @@ class Change(Checks):
         prog = self.c.prog
         # apply and revert name the backup and the undo when a command stops them (the ERR trap of old).
         changing = self.o.cmd == BluetoothCommand.APPLY or (self.o.cmd == BluetoothCommand.REVERT and not self.o.check)
-        commands = {"plan": self.plan, "status": self.status, "apply": self.apply, "revert": self.revert}
+        commands: dict[BluetoothCommand, Callable[[], int | ReRun]] = {
+            BluetoothCommand.PLAN: self.plan,
+            BluetoothCommand.STATUS: self.status,
+            BluetoothCommand.APPLY: self.apply,
+            BluetoothCommand.REVERT: self.revert,
+            BluetoothCommand.LE_AUDIO: self.le_audio,
+        }
         try:
             self.need_tmp()  # every command made it first (TMP="$(mktemp)"), before the ERR trap
         except StepFailed as e:
             return e.status
         try:
-            return commands.get(self.o.cmd, self.le_audio)()
+            return commands[self.o.cmd]()
         except BrokenPipeError:
             if not changes_machine(self.o):
                 raise  # a command that only reads ends by SIGPIPE (wiring.run_guarded)
