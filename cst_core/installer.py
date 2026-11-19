@@ -18,11 +18,12 @@ Usage:
                                           --component, listed in the install record under C
   installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
                                           removed: per file that was there
-  installer.py remove-text DEST... [--root DIR]
-                                          the same for generated files
+  installer.py remove-text DEST... [--home DIR] [--root DIR]
+                                          the same for generated files (--home: run as a user,
+                                          the record in that home)
   installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
                                           are (a file a setup script keeps); prints nothing
-  installer.py forget-text DEST... [--root DIR]
+  installer.py forget-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
                                           component stays "pending" from a write until then)
