@@ -24,7 +24,15 @@ import time
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import (
+    ALERT_APP_MAX,
+    ALERT_BODY_MAX,
+    ALERT_TITLE_MAX,
+    NOTIFY_PROGRAM,
+    StateFormatKey,
+    Urgency,
+    state_format,
+)
 from cst_core.ports import CommandFault, CommandRunnerPort
 
 _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
@@ -41,15 +49,11 @@ class _Outcome(StrEnum):
     LOST = "lost"  # only the journal has it
 
 
-# As btrfs-notify bounds what it shows and keeps.
-_MAX_APP, _MAX_TITLE, _MAX_BODY = 40, 200, 4000
-
-
 def _bounded(urgency: Urgency, app: str, title: str, body: str) -> tuple[str, str, str, str]:
     """urgency, app, title and body as btrfs-notify normalizes them before it shows or keeps an alert."""
-    app = re.sub(r"[^A-Za-z0-9._-]", "_", app)[:_MAX_APP] or "btrfs"
-    title = re.sub(r"[\n\r\t]", " ", title)[:_MAX_TITLE] or f"{app} alert"
-    return (Urgency.CRITICAL if urgency == Urgency.CRITICAL else Urgency.NORMAL), app, title, body[:_MAX_BODY]
+    app = re.sub(r"[^A-Za-z0-9._-]", "_", app)[:ALERT_APP_MAX] or "btrfs"
+    title = re.sub(r"[\n\r\t]", " ", title)[:ALERT_TITLE_MAX] or f"{app} alert"
+    return (Urgency.CRITICAL if urgency == Urgency.CRITICAL else Urgency.NORMAL), app, title, body[:ALERT_BODY_MAX]
 
 
 def _pending_name(app: str, title: str) -> str:

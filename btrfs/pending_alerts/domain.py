@@ -28,7 +28,14 @@ import re
 import time
 from typing import Final
 
-from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import (
+    ALERT_APP_MAX,
+    ALERT_BODY_MAX,
+    ALERT_TITLE_MAX,
+    StateFormatKey,
+    Urgency,
+    state_format,
+)
 from cst_core.domain.text import file_lines, read_fields
 from cst_core.domain.values import MINUTE
 
@@ -54,7 +61,7 @@ MARKS: Final[Mapping[str, str]] = {
     "": "  [NOT shown to you yet: next login]",
 }
 _HEADERS: Final = (f"cst-alert {_SPOOL.version}", "f44-alert 1")  # f44-tools wrote the second
-_APP: Final = re.compile(r"[A-Za-z0-9._-]{1,40}")
+_APP: Final = re.compile(rf"[A-Za-z0-9._-]{{1,{ALERT_APP_MAX}}}")
 _EPOCH: Final = re.compile(r"[0-9]{1,12}")
 _COUNT: Final = re.compile(r"[0-9]{1,9}")
 _MTIME: Final = re.compile(r"[0-9]{1,12}(\.[0-9]{1,10})?")
@@ -138,7 +145,15 @@ def parse_alert(text: str) -> Alert | None:
         return None
     if not (_EPOCH.fullmatch(first) and _EPOCH.fullmatch(last) and _COUNT.fullmatch(count)) or not title:
         return None
-    return Alert(urgency, app, title[:200], "\n".join(body).rstrip("\n")[:4000], int(first), int(last), int(count))
+    return Alert(
+        urgency,
+        app,
+        title[:ALERT_TITLE_MAX],
+        "\n".join(body).rstrip("\n")[:ALERT_BODY_MAX],
+        int(first),
+        int(last),
+        int(count),
+    )
 
 
 @dataclass(frozen=True, slots=True)

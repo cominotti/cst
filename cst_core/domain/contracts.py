@@ -176,6 +176,13 @@ class Urgency(StrEnum):
     CRITICAL = "critical"
 
 
+# As btrfs-notify bounds an alert's app name, title and body before it shows or keeps it (the alert
+# spool's files hold them so bounded; cst-pending-alerts reads them with the same bounds).
+ALERT_APP_MAX: Final = 40
+ALERT_TITLE_MAX: Final = 200
+ALERT_BODY_MAX: Final = 4000
+
+
 def state_format(key: StateFormatKey) -> StateFormat:
     """The registered format of key."""
     return _FORMATS[key]
