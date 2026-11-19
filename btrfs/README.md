@@ -990,6 +990,7 @@ episodes 1 (worst first)
 |---|---|---|
 | `NO DATA for this window` | nothing was recorded: the monitor was not running, or your user cannot read the data | see section 13, "`report` says `NO DATA`" |
 | `INCOMPLETE DATA` | part of the window is not recorded yet, or there was a gap | wait a little and run again, or narrow the window. Do not conclude anything yet. |
+| `INCOMPLETE DATA: N damaged record(s) in this window were left out` | lines of the log that are not JSON, or records without what the report reads (a sample without its time, an episode without its end), were skipped: a torn write or a line another program wrote. The last line of a file still being written is not counted. With `NO DATA`, it follows that line | re-running does not help: the window's numbers lack those records. A damaged line belongs to its own time, else to the record before it. |
 | `KERNEL/FS PROBLEMS` | a stuck task, a btrfs maintenance task stuck for 15 min, a btrfs error or a disk error was recorded | read the `events` lines marked `!` |
 | `btrfs device error counters INCREASED in this window.` | a disk reported new read, write or checksum errors | treat it like a health-check alert (section 13, `non-zero device error counters`) |
 | `Storage was NOT a bottleneck` | the disks were not the reason | look at CPU, memory, the network or the program itself. Extra lines may say `CPU contention` or `Memory pressure`. For CPU sharing between games, builds, Docker and the VM, see [../cpu/README.md](../cpu/README.md). |
@@ -1076,7 +1077,8 @@ episode without a record yet), `vm.zswap_in_bytes`, `vm.zswap_out_bytes` and
 `vm.swap_out_bypass_bytes` (`null` when no sample came from a daemon version 7
 or later), and `read_await_ms` / `write_await_ms` per disk. Each episode
 has `max_d_mem` (most tasks waiting on memory at once); episodes of a daemon
-before version 8 whose numbers were corrected carry `"estimated": true`. The `units` block of the JSON output explains them too.
+before version 8 whose numbers were corrected carry `"estimated": true`. `coverage.skipped` counts the
+damaged records and lines of the window (see the verdict table). The `units` block of the JSON output explains them too.
 
 ### 7.5 `watch`: label a run for comparisons
 

@@ -89,6 +89,7 @@ def summarise(
         "first_sample": samples[0]["ts"] if samples else None,
         "last_sample": samples[-1]["ts"] if samples else None,
         "complete": False,
+        "skipped": sum(1 for t in recorded.damaged if since <= t <= until),
     }
     if len(samples) < 2:
         return res, meta

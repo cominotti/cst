@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's machine side: the log folder, `date -d` for --since/--until, reading the daily log files, the analysis with the clock and below, and container names."""
 
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import IO, Final, NamedTuple
 import glob
 import gzip
-import json
 import os
 import re
 import shutil
@@ -15,10 +15,21 @@ import time
 import zlib
 
 from btrfs.stall_monitord.domain import StallRecordTag
-from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
+from btrfs.stall_report.domain.records import (
+    AnalyseResult,
+    BelowItem,
+    BelowSection,
+    MetaRecord,
+    Recorded,
+    is_episode_record,
+    is_meta_record,
+    is_notice,
+    is_sample_record,
+    record_ts,
+)
 from btrfs.stall_report.domain.window import summarise
 from cst_core.domain.contracts import StateFormatKey, state_format
-from cst_core.domain.shapes import parse_json
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import DAY, MINUTE
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
@@ -54,9 +65,56 @@ def log_dir_exists(log_dir: str) -> bool:
     return os.path.isdir(log_dir)
 
 
-def load(log_dir: str, since: float, until: float) -> list[Any]:
-    # Each line that parses to a JSON object; analyse() picks the records by their "t".
-    recs = []
+class Loaded(NamedTuple):
+    """What load() read: each line that parses to a JSON object, in file order, and the time each
+    damaged line belongs to."""
+
+    records: list[object]
+    damaged: list[float]
+
+
+def _file_lines(path: str, opener: Callable[..., IO[str]]) -> tuple[list[object], list[float], BaseException | None]:
+    """The objects of one log file, and the times of its damaged lines: a line that is not a JSON
+    object, or a record of a known kind without what the report reads. A damaged line belongs to
+    its own "ts" when it has one, else to the record before it in the file (the one after it when
+    there is none before; the file's day when it has none). A last line without its newline is
+    not counted: the daemon may be writing it. A file that cannot be read to its end (a cut .gz) gives
+    the lines read before the error, and the error."""
+    lines: list[str] = []
+    error: BaseException | None = None
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+            lines.extend(f)
+    except (OSError, EOFError, zlib.error) as e:
+        error = e
+    objects: list[object] = []
+    seen: list[float | None] = []  # per line: its record's time, None for a damaged line without one
+    bad: list[int] = []
+    for i, line in enumerate(lines):
+        try:
+            rec = parse_json(line)
+        except ValueError, RecursionError:
+            rec = None
+        ts = record_ts(rec)
+        seen.append(ts)
+        if json_object(rec) and not damaged_record(rec):
+            objects.append(rec)
+        elif i < len(lines) - 1 or line.endswith("\n"):
+            bad.append(i)
+    day = os.path.basename(path)[6:16]
+    file_day = time.mktime(time.strptime(day, "%Y-%m-%d"))
+    out: list[float] = []
+    for i in bad:
+        own = seen[i]
+        before = [t for t in seen[:i] if t is not None]
+        after = [t for t in seen[i + 1 :] if t is not None]
+        out.append(own if own is not None else before[-1] if before else after[0] if after else file_day)
+    return objects, out, error
+
+
+def load(log_dir: str, since: float, until: float) -> Loaded:
+    """The records of the log files around the window; analyse() picks them by their "t"."""
+    loaded = Loaded([], [])
     first_day = time.strftime("%Y-%m-%d", time.localtime(since - DAY))
     # Records buffered across midnight can land in the next day's file.
     last_day = time.strftime("%Y-%m-%d", time.localtime(until + DAY))
@@ -71,39 +129,61 @@ def load(log_dir: str, since: float, until: float) -> list[Any]:
         if path.endswith(".gz") and path[:-3] in plain:
             continue
         opener = gzip.open if path.endswith(".gz") else open
-        try:
-            with opener(path, "rt", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(rec, dict):  # a list, number or string is no record either
-                        recs.append(rec)
-        except (OSError, EOFError, zlib.error) as e:
-            print(f"warning: cannot fully read {path}: {e}", file=sys.stderr)
-    return recs
+        records, damaged, error = _file_lines(path, opener)
+        if error is not None:
+            print(f"warning: cannot fully read {path}: {error}", file=sys.stderr)
+        loaded.records.extend(records)
+        loaded.damaged.extend(damaged)
+    return loaded
+
+
+def damaged_record(r: object) -> bool:
+    """r has a known kind ("t") and lacks what the report reads of it."""
+    tag = r.get("t") if json_object(r) else None
+    check = _CHECKS.get(tag) if isinstance(tag, str) else None
+    return check is not None and not check(r)
+
+
+_CHECKS: Final[dict[str, Callable[[object], bool]]] = {
+    StallRecordTag.META: is_meta_record,
+    StallRecordTag.SAMPLE: is_sample_record,
+    StallRecordTag.EPISODE: is_episode_record,
+    StallRecordTag.EVENT: is_notice,
+    StallRecordTag.ALERT: is_notice,
+}
+
+
+def _tagged(r: object, tag: StallRecordTag) -> bool:
+    return json_object(r) and r.get("t") == tag
+
+
+def records_of(recs: Sequence[object], damaged: Sequence[float] = ()) -> Recorded:
+    """The records by their kind ("t"), after DAMAGED (load's). One of a known kind without what the
+    report reads is damaged too, at its own time (none: in no window). Another kind is not read."""
+    tag = StallRecordTag
+    return Recorded(
+        metas=[r for r in recs if _tagged(r, tag.META) and is_meta_record(r)],
+        samples=[r for r in recs if _tagged(r, tag.SAMPLE) and is_sample_record(r)],
+        episodes=[r for r in recs if _tagged(r, tag.EPISODE) and is_episode_record(r)],
+        events=[r for r in recs if _tagged(r, tag.EVENT) and is_notice(r)],
+        alerts=[r for r in recs if _tagged(r, tag.ALERT) and is_notice(r)],
+        damaged=[*damaged, *(_own_time(r) for r in recs if damaged_record(r))],
+    )
+
+
+def _own_time(r: object) -> float:
+    ts = record_ts(r)
+    return float("-inf") if ts is None else ts
 
 
 def analyse(
-    recs: list[Any], since: float, until: float, with_below: bool, verbose: bool
+    recs: Loaded | Sequence[object], since: float, until: float, with_below: bool, verbose: bool
 ) -> tuple[AnalyseResult, MetaRecord]:
-    """The analysis of the window (summarise(), with the clock) of the records
-    load() read, and below's per-process section when asked (a window with 2+
+    """The analysis of the window (summarise(), with the clock) of the records load() read (or
+    records given as they are), and below's per-process section when asked (a window with 2+
     samples only, the last key of the result)."""
-    recorded = Recorded([], [], [], [], [])
-    by_tag = {
-        StallRecordTag.META: recorded.metas,
-        StallRecordTag.SAMPLE: recorded.samples,
-        StallRecordTag.EPISODE: recorded.episodes,
-        StallRecordTag.EVENT: recorded.events,
-        StallRecordTag.ALERT: recorded.alerts,
-    }
-    for r in recs:
-        tag = r.get("t")
-        kept = by_tag.get(tag) if isinstance(tag, str) else None  # another kind of record: not read
-        if kept is not None:
-            kept.append(r)
+    loaded = recs if isinstance(recs, Loaded) else Loaded(list(recs), [])
+    recorded = records_of(loaded.records, loaded.damaged)
     res, meta = summarise(recorded, since, until, verbose=verbose, now=time.time())
     if with_below and res["samples"] >= 2:
         res["below"] = below_section(since, until)
