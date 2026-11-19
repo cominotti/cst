@@ -143,8 +143,10 @@ class LocalVolumeTree:
         self._runner = runner
 
     def _run(self, argv: list[str]) -> CommandResult:
-        # As subprocess.run(capture_output=True, text=True) did: stdin ours, output decoded strictly.
-        return checked(self._runner.run(argv, stdin="inherit", decode_errors="strict"))
+        # stdin ours; bytes that are not UTF-8 become U+FFFD: a cp or chcon message that names such a
+        # file is still a message (decoded strictly, it raised UnicodeDecodeError before the twin was
+        # removed). btrfs filesystem usage is parsed from its ASCII digits either way.
+        return checked(self._runner.run(argv, stdin="inherit", decode_errors="replace"))
 
     def is_dir(self, path: str) -> bool:
         return os.path.isdir(path)

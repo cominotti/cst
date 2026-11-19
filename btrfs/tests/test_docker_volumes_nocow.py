@@ -64,6 +64,7 @@ from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import NocowPaths, postponed_line
 from cst_core.adapters import nocow as core_nocow
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import object_of, parse_json
 from cst_core.ports import CommandFault, CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
@@ -317,12 +318,12 @@ class FakeSystem:
     def not_found(self, args: list[str], kw: Mapping[str, object]) -> CommandResult | None:
         """Checks the options of a command, and answers for one that is missing (None: it is installed).
 
-        As subprocess.run(capture_output=True, text=True) ran them: stdin ours, strict
-        decoding; btrfs-notify's output was never decoded."""
+        stdin ours; systemctl's answer decoded strictly, cp's, chcon's and btrfs's leniently
+        (U+FFFD); btrfs-notify's output was never decoded."""
         want = (
             {"timeout": 60, "new_session": True}
             if args[0] == self.notify
-            else {"stdin": "inherit", "decode_errors": "strict"}
+            else {"stdin": "inherit", "decode_errors": "strict" if args[0] == "systemctl" else "replace"}
         )
         if kw != want:
             raise AssertionError(f"{args[0]} run with {kw}, not {want}")
@@ -844,6 +845,49 @@ class MissingProgramTest(Base):
         self.assertIn("\ntitle=Docker volumes: NOCOW migration gave up\n\nGave up after two boots", text)
         self.assertFalse(os.path.exists(self.flag))
         self.assertIsNone(read_attempts(self))
+
+
+class LenientMessagesTest(unittest.TestCase):
+    """LocalVolumeTree over the real runner and a real program: a cp or chcon message that names a
+    file whose name is not UTF-8 is a message, not a UnicodeDecodeError."""
+
+    @override
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="cst-nocow-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = os.path.realpath(tmp.name)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.mkdir(self.bin)
+        # A Python script, not sh: stdin is inherited, and bash with a socket there reads ~/.bashrc.
+        for name in ("cp", "chcon"):
+            path = os.path.join(self.bin, name)
+            with open(path, "w") as f:
+                f.write(
+                    "#!/usr/bin/python3 -I\nimport sys\n"
+                    f"sys.stderr.buffer.write(b\"{name}: cannot create '\\xff': No space left on device\\n\")\n"
+                    "sys.exit(1)\n"
+                )
+            os.chmod(path, 0o755)
+        runner = SubprocessCommandRunner(base_env={"PATH": self.bin})
+        self.tree = nocow_adapters.LocalVolumeTree(NocowPaths(volumes=self.tmp), runner)
+        self.data, self.new = os.path.join(self.tmp, "_data"), os.path.join(self.tmp, "_data.nocow-new")
+        os.mkdir(self.data)
+        os.mkdir(self.new)
+
+    def test_a_cp_message_with_bytes_that_are_not_utf8(self) -> None:
+        r = self.tree.copy(self.data, self.new)
+        self.assertEqual((r.returncode, r.stderr), (1, "cp: cannot create '\ufffd': No space left on device\n"))
+
+    def test_a_chcon_message_with_bytes_that_are_not_utf8(self) -> None:
+        with (
+            mock.patch.object(nocow_adapters, "label", lambda _p: b"system_u:object_r:container_file_t:s0"),
+            self.assertRaises(RuntimeError) as cm,
+        ):
+            self.tree.reference_label(self.data, self.new)
+        self.assertEqual(
+            str(cm.exception), "SELinux label not copied: chcon: cannot create '\ufffd': No space left on device"
+        )
+        self.assertFalse(os.path.exists(self.new))
 
 
 class MigrateTest(Base):
