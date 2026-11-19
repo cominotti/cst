@@ -2950,9 +2950,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         the cst_core reader then finds no problem, and a second run leaves the
         file as it is (same inode, same time). The real installer writes it: a
         new file renamed into place (a new inode), owner root, mode 0644,
-        `written:` and then `unchanged:` on the output; a link in its place,
-        to a file with the same content, is replaced by a regular file and the
-        file it pointed to is left as it was."""
+        `written:` and then `unchanged:` on the output; the same content with
+        its mode changed to 0600 is written again (root 0644, `written:`, then
+        `unchanged:`); a link in its place, to a file with the same content, is
+        replaced by a regular file and the file it pointed to is left as it was."""
         conf = "/etc/btrfs-setup/snapshots.conf"
         self.addCleanup(
             exec_bash,
@@ -3000,6 +3001,15 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "no unchanged: line: $out" >&2; exit 1; }}
             [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
             cmp "$conf" /var/tmp/e2e-snapconf.first
+            # The same content, mode changed by hand to 0600: written again (root 0644) and
+            # named so; the next run leaves it.
+            chmod 0600 "$conf"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "mode 0600: no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "after the mode: no unchanged: line: $out" >&2; exit 1; }}
             # A link in its place (to a file with the same content, mode 0600): replaced by a
             # regular file; the file it pointed to keeps its bytes and its mode.
             target=/var/tmp/e2e-snapconf.target
