@@ -64,20 +64,20 @@ from toolchains.domain.prune import RunRecord, SavedRun, Settings, checked_setti
 AUTO_COMPONENT = manifest_by_src()["toolchains/cst-toolchains"].component
 
 
-SCCACHE_COMPONENT = manifest_by_src()["toolchains/rustc-wrapper"].component
+SCCACHE_ENTRY = manifest_by_src()["toolchains/rustc-wrapper"]
+SCCACHE_COMPONENT = SCCACHE_ENTRY.component
 
 
-def put_home_file(place: Placement, data: bytes, installer: InstallService) -> bool:
-    """Write place's file in the home unless it is current (the caller checked conflicts and masks first)
-    and list it in home's install record; True when it was written."""
-    return installer.put(place, data, as_root=False)
+# The puts below write a file in the home unless it is current (the caller checked conflicts and
+# masks first) and list it in home's install record.
 
 
 def put_auto_copy(home: str, rel: str, data: bytes, installer: InstallService) -> bool:
     """One of auto on's copies, ~/rel (its manifest entry gives mode, source and component); True when written."""
     e = next(e for e in INSTALL_MANIFEST if e.dest == "~/" + rel)
     path = expand_dest(e.dest, home)
-    return put_home_file(Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home)), data, installer)
+    place = Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home))
+    return installer.put(place, data, as_root=False)
 
 
 def put_auto_unit(home: str, name: str, text: str, installer: InstallService) -> bool:
@@ -93,7 +93,7 @@ def put_auto_unit(home: str, name: str, text: str, installer: InstallService) ->
         owner=Owner.USER,
         mode=0o644,
     )
-    return put_home_file(place, text.encode(), installer)
+    return installer.put(place, text.encode(), as_root=False)
 
 
 def forget_auto_files(home: str, installer: InstallService) -> None:
@@ -105,9 +105,8 @@ def forget_auto_files(home: str, installer: InstallService) -> None:
 def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], installer: InstallService) -> bool:
     """The sccache wrapper (rustc-wrapper with the settings written in) through the installer, listed with
     those values, its component marked done; True when written."""
-    e = manifest_by_src()["toolchains/rustc-wrapper"]
-    place = Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home), values=values)
-    written = put_home_file(place, text.encode(), installer)
+    place = Placement.of(SCCACHE_ENTRY, path=path, dest=path, record=record_file(Owner.USER, home), values=values)
+    written = installer.put(place, text.encode(), as_root=False)
     record_done(home, SCCACHE_COMPONENT, installer)
     return written
 
