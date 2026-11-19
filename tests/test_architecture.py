@@ -148,7 +148,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 149,
     "bluetooth/setup/cli.py": 32,
-    "btrfs/bulk/cli.py": 95,
+    "btrfs/bulk/cli.py": 88,
     "btrfs/chrome_cache/cli.py": 84,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
@@ -161,9 +161,9 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "cpu/cli.py": 146,
     "cpu/game/cli.py": 13,
     "cpu/setup/cli.py": 32,
-    "cst_core/cli.py": 10,
+    "cst_core/cli.py": 7,
     "doctor/cli.py": 24,
-    "swap/cli.py": 98,
+    "swap/cli.py": 95,
     "toolchains/cli/": 79,
     "vm/cli/": 280,
 }
@@ -272,14 +272,11 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "bluetooth subprocess.Popen": 1,
     "btrfs/bulk os.fsync": 3,
     "btrfs/bulk subprocess.Popen": 1,
-    "btrfs/bulk subprocess.run": 12,
     "btrfs/chrome_cache os.fsync": 1,
     "btrfs/docker_gc subprocess.Popen": 1,
     "btrfs/docker_volumes_nocow os.fsync": 1,
     "btrfs/stall_monitord subprocess.Popen": 1,
-    "btrfs/stall_report subprocess.run": 3,
     "cpu subprocess.Popen": 1,
-    "cpu subprocess.run": 1,
     "cpu tempfile.NamedTemporaryFile": 1,
     "cst_core subprocess.run": 1,
     "toolchains fcntl.flock": 3,
@@ -290,7 +287,6 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
 # Uses of a primitive's literal outside its owners (docstrings aside), per
 # "<package> <literal>". Never above; a missing key is 0.
 LITERAL_BUDGETS: Final[dict[str, int]] = {
-    "bluetooth LC_ALL": 1,
     "btrfs/bulk restorecon": 1,
     "btrfs/stall_report flatpak-spawn": 1,
     "cpu qemu:///system": 1,
