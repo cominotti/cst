@@ -541,12 +541,13 @@ class BackupTest(Scratch):
         # Read as empty, the next backup wrote an index with only itself: every older entry lost.
         os.makedirs(os.path.dirname(self.index))
         for text, why in (
-            ("{", "not JSON"),
-            ("[]", 'no "backups" list'),
-            ('{"backups": {}}', 'no "backups" list'),
-            ("{}", 'no "backups" list'),
+            (b"{", "not JSON"),
+            (b'{"backups": ["\xff"]}', "not JSON"),  # a byte that is not UTF-8: not JSON either, never a crash
+            (b"[]", 'no "backups" list'),
+            (b'{"backups": {}}', 'no "backups" list'),
+            (b"{}", 'no "backups" list'),
         ):
-            with open(self.index, "w") as f:
+            with open(self.index, "wb") as f:
                 f.write(text)
             for args in (("backup", "win"), ("list",), ("status", "win")):
                 with self.subTest(text=text, args=args):
@@ -557,7 +558,7 @@ class BackupTest(Scratch):
                         f"and nothing is backed up or listed with it; move it aside (mv {self.index} {self.index}.bad)",
                         r.stderr,
                     )
-            with open(self.index) as f:
+            with open(self.index, "rb") as f:
                 self.assertEqual(f.read(), text)
         self.assertEqual([c for c in self.calls() if c.startswith("cp ")], [])
         self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))

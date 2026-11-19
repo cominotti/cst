@@ -1901,9 +1901,10 @@ class VmTest(Scratch):
         self.deployments(rollback_pinned=True)
         self.backup_index(NOW - 86400)
         path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
-        for text, why in (("{", "not JSON"), ("[]", 'no "backups" list')):
+        # A byte that is not UTF-8, even inside a string, is "not JSON" for cst vm, so for doctor too.
+        for text, why in ((b"{", "not JSON"), (b'{"backups": ["\xff"]}', "not JSON"), (b"[]", 'no "backups" list')):
             with self.subTest(text=text):
-                with open(path, "w") as f:
+                with open(path, "wb") as f:
                     f.write(text)
                 r = self.run_tool()
                 self.assertEqual(r.returncode, 1, r.stdout)

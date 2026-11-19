@@ -93,6 +93,8 @@ def stored_backups(cfg: VmSettings) -> list[object]:
         return []
     except OSError as e:
         raise _unreadable(path, e.strerror or str(e)) from None
+    except UnicodeDecodeError:  # a ValueError, not an OSError: bytes that are not text are not JSON
+        raise _unreadable(path, "not JSON") from None
     try:
         data = parse_json(text)
     except ValueError, RecursionError:

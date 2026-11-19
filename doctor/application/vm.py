@@ -183,14 +183,14 @@ def vm_index_problem(host: DoctorHostPort) -> str | None:
     """Why cst vm's backup index cannot be read as one, as cst vm reads it (vm.adapters.backup's
     stored_backups); None when it is missing, readable, or of a newer cst vm."""
     try:
-        with host.open_text(host.path(VM_INDEX)) as f:
-            text = f.read()
+        with host.open_bytes(host.path(VM_INDEX)) as f:
+            raw = f.read()
     except FileNotFoundError:
         return None
     except OSError as e:
         return e.strerror or str(e)
-    try:
-        data = parse_json(text)
+    try:  # decoded strictly, as cst vm decodes it: a byte that is not UTF-8 is not JSON there either
+        data = parse_json(raw.decode())
     except ValueError, RecursionError:
         return "not JSON"
     if VM_INDEX_FORMAT.newer(data, "version") is not None:
