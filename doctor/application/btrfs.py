@@ -9,6 +9,7 @@ import re
 import shlex
 import time
 
+from btrfs.docker_volumes_nocow.domain import is_stored_postponed
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
@@ -450,7 +451,7 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
         return  # never postponed, or not set up
     except OSError, ValueError:
         rec = None
-    if not isinstance(rec, dict):
+    if not is_stored_postponed(rec):
         yield Result(INFO, f"Docker volumes NOCOW: cannot read {NOCOW_POSTPONED}")
         return
     boots, last = rec.get("boots"), rec.get("last")
