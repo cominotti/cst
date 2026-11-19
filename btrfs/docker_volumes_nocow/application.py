@@ -41,6 +41,10 @@ class DockerVolumesNocow:
         btrfs) is one journal line; exit 0 for the boot's migrate and for unmark, else 2."""
         try:
             match command:
+                case NocowCommand.MARK if self.paths.config_problem:
+                    # btrfs-setup then leaves the request to the boot, which waits until it is fixed.
+                    self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
+                    return 2
                 case NocowCommand.MARK:
                     return 1 if self.mark() else 0
                 case NocowCommand.MIGRATE:
@@ -135,7 +139,8 @@ class DockerVolumesNocow:
         # Not an attempt and no alert, but recorded when there was work to
         # do (a scheduled migration, or the folder still without +C), so status
         # and `cst doctor` can show a migration held back boot after boot.
-        if self.state.flag_exists() or not self.tree.is_nocow(self.paths.volumes):
+        vols = self.paths.volumes
+        if self.state.flag_exists() or (self.tree.is_dir(vols) and not self.tree.is_nocow(vols)):
             self.note_postponed(busy)
         else:
             self.state.clear_postponed()
@@ -168,6 +173,9 @@ class DockerVolumesNocow:
     def migrate(self) -> None:
         """The boot's run (docker-volumes-nocow.service, before docker.service)."""
         vols = self.paths.volumes
+        if self.paths.config_problem:  # the folder Docker uses is unknown: it may not be vols
+            self.postpone(f"{self.paths.config_problem}, so the volumes folder Docker uses is unknown")
+            return
         if not self.tree.is_dir(vols):
             self.state.clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
             return
@@ -229,6 +237,8 @@ class DockerVolumesNocow:
 
     def status(self) -> None:
         vols = self.paths.volumes
+        if self.paths.config_problem:
+            self.out.say(f"{self.paths.config_problem}: the boot's migration waits until it is fixed")
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent")
             return

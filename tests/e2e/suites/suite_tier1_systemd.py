@@ -3672,6 +3672,58 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
+        requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
+        the boot as postponed with the file's reason, and status names the file; mark exits 2 and marks
+        nothing. With the file fixed, the reason is gone from the next run. The check comes before
+        any btrfs call, so the container's file system is enough."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "rm -rf /etc/docker/daemon.json /etc/btrfs-setup/docker-nocow-pending /var/lib/docker-volumes-nocow "
+            "/var/tmp/e2e-nocow; [ -e /var/tmp/e2e-nocow-docker ] && rm -rf /etc/docker || true; rm -f /var/tmp/e2e-nocow-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            """
+            set -E
+            trap 'echo "test_114 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            [ -e /etc/docker ] || { mkdir -p /etc/docker && touch /var/tmp/e2e-nocow-docker; }
+            [ ! -e /etc/docker/daemon.json ] || { echo "a daemon.json is there already" >&2; exit 1; }
+            printf '{' >/etc/docker/daemon.json
+            install -d -m 0755 /etc/btrfs-setup && touch /etc/btrfs-setup/docker-nocow-pending
+            mkdir -p /var/tmp/e2e-nocow && ls -la /var/lib/docker 2>/dev/null >/var/tmp/e2e-nocow/before || true
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_114 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown: migration left for the next boot" <<<"$out"
+            grep -qF '"reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown"' \
+                /var/lib/docker-volumes-nocow/postponed
+            ls -la /var/lib/docker 2>/dev/null >/var/tmp/e2e-nocow/after || true
+            cmp -s /var/tmp/e2e-nocow/before /var/tmp/e2e-nocow/after
+            [[ -e /etc/btrfs-setup/docker-nocow-pending ]]
+            status="$($prog status 2>&1)" || true
+            grep -qF "/etc/docker/daemon.json: not JSON: the boot's migration waits until it is fixed" <<<"$status"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            [[ "$rc" == 2 ]]
+            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            printf '{}' >/etc/docker/daemon.json
+            out="$($prog migrate 2>&1)" || true
+            echo "test_114 fixed: $out" >&2
+            if grep -qF "daemon.json" <<<"$out"; then echo "the fixed file still holds the migration back" >&2; exit 1; fi
+            if grep -qF "daemon.json" /var/lib/docker-volumes-nocow/postponed 2>/dev/null; then
+                echo "the record still names the fixed file" >&2; exit 1
+            fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own

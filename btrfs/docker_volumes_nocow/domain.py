@@ -46,6 +46,9 @@ class NocowPaths:
     # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
     alerts: str = state_format(StateFormatKey.ALERT_SPOOL).folder
     proc: str = "/proc"  # where running dockerd processes are looked for
+    # Why /etc/docker/daemon.json cannot be read ("" when it can or there is none): then which
+    # volumes folder Docker uses is unknown, and the migration waits (wiring reads it).
+    config_problem: str = ""
 
 
 @dataclass(frozen=True, slots=True)

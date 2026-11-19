@@ -47,6 +47,7 @@ import time
 import unittest
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from typing import override
 from unittest import mock
@@ -593,14 +594,17 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(paths, NocowPaths())
 
     def test_docker_root_reads_data_root(self) -> None:
+        dj = "/etc/docker/daemon.json"
+        default = "/var/lib/docker/volumes"
         for text, want in (
-            ('{"data-root": "/srv/docker", "cgroup-parent": "builds.slice"}', "/srv/docker/volumes"),
-            ('{"cgroup-parent": "builds.slice"}', "/var/lib/docker/volumes"),
-            ('{"data-root": ""}', "/var/lib/docker/volumes"),
-            ("not json {", "/var/lib/docker/volumes"),
-            # Not an object, or not a path: dockerd's default (these crashed the helper at load).
-            ('["data-root"]', "/var/lib/docker/volumes"),
-            ('{"data-root": 5}', "/var/lib/docker/volumes"),
+            ('{"data-root": "/srv/docker", "cgroup-parent": "builds.slice"}', ("/srv/docker/volumes", "")),
+            ('{"cgroup-parent": "builds.slice"}', (default, "")),
+            # Not JSON, not an object, or not a path: dockerd refuses the file, so which folder
+            # Docker uses is unknown (these read as its default: the migration ran there).
+            ('{"data-root": ""}', (default, f"{dj}: data-root is not a folder name")),
+            ("not json {", (default, f"{dj}: not JSON")),
+            ('["data-root"]', (default, f"{dj}: not a JSON object")),
+            ('{"data-root": 5}', (default, f"{dj}: data-root is not a folder name")),
         ):
             with self.subTest(text=text):
 
@@ -1323,6 +1327,37 @@ class PostponeBase(Base):
         self.assertEqual(read_attempts(self), "1")
 
 
+class DaemonJsonProblemTest(PostponeBase):
+    """/etc/docker/daemon.json that dockerd cannot read (NocowPaths.config_problem): which volumes
+    folder Docker uses is unknown, so nothing is migrated, and mark changes nothing."""
+
+    PROBLEM = "/etc/docker/daemon.json: not JSON"
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.paths = replace(self.paths, config_problem=self.PROBLEM)
+        self.cli = Commands(nocow_wiring.build_nocow(self.paths, runner=self.fs))
+
+    def test_the_migration_is_postponed_and_recorded(self) -> None:
+        rc, out = self.call(self.cli.migrate)
+        self.assertEqual(rc, 0)
+        why = f"{self.PROBLEM}, so the volumes folder Docker uses is unknown"
+        self.assert_postponed(out, why)
+        with open(self.postponed) as f:
+            self.assertEqual(json.load(f)["reason"], why)
+        self.assertIn(f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1])
+        self.assertIn("migration postponed at 1 boot(s) in a row", self.call(self.cli.status)[1])
+
+    def test_mark_changes_nothing(self) -> None:
+        self.fs.sets.clear()
+        before = tree(self.vols)
+        rc, out, err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
+        self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+
+
 class DockerRunningTest(PostponeBase):
     """docker_busy(): the ActiveState of docker.service, failing closed."""
 
@@ -1480,10 +1515,6 @@ class DockerdTest(PostponeBase):
         self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}')
         self.process(7, ["dockerd"])
 
-    def ours_daemon_json_not_an_object(self) -> None:
-        self.daemon_json(self.tmp, '["data-root"]')  # dockerd's default then
-        self.process(7, ["dockerd"])
-
     def ours_config_file(self) -> None:
         # --config-file names ours; /etc/docker/daemon.json (the decoy) is not read then.
         self.daemon_json(self.tmp, f'{{"data-root": "{self.alias()}"}}', "custom.json")
@@ -1532,7 +1563,6 @@ class DockerdTest(PostponeBase):
             self.ours_graph_equals,
             self.ours_relative,
             self.ours_daemon_json,
-            self.ours_daemon_json_not_an_object,
             self.ours_config_file,
             self.ours_config_file_equals,
             self.ours_by_program_file,
@@ -1548,6 +1578,18 @@ class DockerdTest(PostponeBase):
                 rc, out = self.call(self.cli.migrate)
                 self.assertEqual(rc, 0)
                 self.assert_postponed(out, f"dockerd (pid 7) uses {self.vols} outside docker.service")
+
+    def test_a_config_file_it_cannot_read_as_one_postpones(self) -> None:
+        # Not an object: that dockerd refuses it, but which data root it would use is unknown
+        # (read as its default before, which made it ours only by chance).
+        d = self.process(7, ["dockerd"])
+        self.daemon_json(self.tmp, '["data-root"]')
+        rc, out = self.call(self.cli.migrate)
+        self.assertEqual(rc, 0)
+        path = os.path.join(d, "root", "etc/docker/daemon.json")
+        self.assert_postponed(
+            out, f"dockerd (pid 7) is running and its data root cannot be read ({path}: not a JSON object)"
+        )
 
     def test_unreadable_config_file_postpones(self) -> None:
         # Fails closed: a config file that exists but cannot be read may name

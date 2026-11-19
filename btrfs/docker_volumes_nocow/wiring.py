@@ -21,7 +21,8 @@ from cst_core.ports import CommandRunnerPort
 
 def nocow_paths() -> NocowPaths:
     """The machine's paths; the volumes folder is data-root/volumes of docker.service."""
-    return NocowPaths(volumes=docker_root())
+    volumes, problem = docker_root()
+    return NocowPaths(volumes=volumes, config_problem=problem)
 
 
 def build_nocow(paths: NocowPaths | None = None, *, runner: CommandRunnerPort | None = None) -> DockerVolumesNocow:

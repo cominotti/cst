@@ -741,6 +741,14 @@ docker volume rm <name>         # or one volume by name
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
   start Docker again with `sudo systemctl start docker.socket docker.service`.
+- A `/etc/docker/daemon.json` that dockerd cannot read (not JSON, not an
+  object, a `data-root` that is not a folder name, or a read error) leaves
+  unknown which volumes folder Docker uses, so the boot's migration waits too:
+  it is recorded as postponed with that reason (`status` shows it, `cst doctor`
+  from two boots on), and the first boot after the file is fixed runs it. `mark`
+  (what `install` runs) changes nothing then and exits 2, so `install` leaves the
+  request to that boot. Another dockerd whose config file cannot be read that way
+  counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
   written to disk (fsync) before each rewrite starts, so a boot that hangs or
