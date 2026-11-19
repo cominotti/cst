@@ -29,7 +29,7 @@ from btrfs.snapshot_runtime.domain import (
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
-from cst_core.adapters.notify import PENDING_ALERTS, Notifier
+from cst_core.adapters.notify import PENDING_ALERTS, Notifier, NotifyOutcome
 from cst_core.adapters.runtime import beside_program
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import shell_exit_status
@@ -187,7 +187,7 @@ class SnapshotRun:
         the next login show it; it says so in the journal). False when the alert is only in the
         journal."""
         notifier = Notifier(self.runner, self.notify, self.pending_alerts, log=self.log)
-        return self._call(lambda: notifier.send(urgency, TAG, title, body)) in ("sent", "kept")
+        return self._call(lambda: notifier.send(urgency, TAG, title, body)) in (NotifyOutcome.SENT, NotifyOutcome.KEPT)
 
     def _call[T](self, call: Callable[[], T]) -> T:
         """One command; a signal trap_stop caught while it ran ends the run once it is done (bash

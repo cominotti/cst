@@ -41,8 +41,8 @@ _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its l
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
 
 
-class _Outcome(StrEnum):
-    """What became of an alert."""
+class NotifyOutcome(StrEnum):
+    """What became of an alert (Notifier.send's answer)."""
 
     SENT = "sent"  # btrfs-notify showed or kept it
     KEPT = "kept"  # CST kept it in its place
@@ -116,11 +116,11 @@ class Notifier:
     pending: str = PENDING_ALERTS
     log: Callable[[int, str], None] | None = None
 
-    def send(self, urgency: Urgency, app: str, title: str, body: str) -> _Outcome:
+    def send(self, urgency: Urgency, app: str, title: str, body: str) -> NotifyOutcome:
         """Show the alert (or have btrfs-notify keep it); when that fails, keep it here and say so."""
         r = self.runner.run([self.program, "-u", urgency, "-a", app, title, body], timeout=_TIMEOUT, new_session=True)
         if r.fault is None and r.returncode == 0:
-            return _Outcome.SENT
+            return NotifyOutcome.SENT
         if r.fault == CommandFault.MISSING:
             why = f"{self.program} is not installed"
         elif r.fault == CommandFault.TIMEOUT:
@@ -134,6 +134,6 @@ class Notifier:
             path = _keep_alert(self.pending, urgency, app, title, body)
         except (OSError, ValueError) as e:  # ValueError: a folder that is no plain path, a title no file holds
             say(3, f"alert not delivered ({why}) and not kept ({e}): {title}; it is only in this journal")
-            return _Outcome.LOST
+            return NotifyOutcome.LOST
         say(3, f"alert not delivered ({why}): {title}; kept in {path} (cst doctor shows it)")
-        return _Outcome.KEPT
+        return NotifyOutcome.KEPT
