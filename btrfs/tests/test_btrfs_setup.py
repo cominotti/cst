@@ -1417,32 +1417,36 @@ class UserStepsTest(unittest.TestCase):
             return [json.loads(line) for line in f]
 
     def test_the_users_session_variables_replace_roots(self) -> None:
-        # Whatever exists in the user's runtime folder (a bus, only the folder, nothing): the
-        # variables a login of the user sets, SUDO_USER removed. Before, XDG_RUNTIME_DIR and the bus
-        # were set only when they existed, and SUDO_USER reached the programs.
+        # The variables a login of the user sets, SUDO_USER removed, whether /run/user/UID exists
+        # or not: cst_as_user reads the real /run/user, so the second case makes id -u answer a
+        # uid that has no folder there. Before, XDG_RUNTIME_DIR and the bus were set only when
+        # they existed, and SUDO_USER reached the programs.
         home = os.path.join(self.tmp, "home")
-        for case in ("bus", "folder only", "nothing"):
+        missing = next(n for n in range(4_000_000_000, 4_000_000_100) if not os.path.lexists(f"/run/user/{n}"))
+        for case, uid in (("the user's uid", None), ("no /run/user/UID", missing)):
             with self.subTest(case):
-                if case == "bus":
-                    self.socket_at(os.path.join(self.run_dir, "bus"))
-                elif case == "folder only":
-                    shutil.rmtree(self.run_dir)
-                    os.makedirs(self.run_dir)
-                else:
-                    shutil.rmtree(os.path.join(self.tmp, "run"))
                 if os.path.exists(self.tool_log):
                     os.remove(self.tool_log)
-                r = self.run_bash("snap_toolchains auto on --unless-off\nsnap_chrome apply")
+                fake_id = (
+                    ""
+                    if uid is None
+                    else f'id() {{ if [[ "$1" == -u && $# == 2 ]]; then echo {uid}; else command id "$@"; fi; }}\n'
+                )
+                r = self.run_bash(fake_id + "snap_toolchains auto on --unless-off\nsnap_chrome apply")
                 self.assertEqual(r.returncode, 0, r.stderr)
+                session = dict(self.session)
+                if uid is not None:
+                    session["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+                    session["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{uid}/bus"
                 self.assertEqual(
                     self.seen(),
                     [
                         {
                             "argv": ["auto", "on", "--unless-off", "--home", home],
                             "CST_PROG": "cst toolchains",
-                            **self.session,
+                            **session,
                         },
-                        {"argv": ["apply", "--home", home], "CST_PROG": None, **self.session},
+                        {"argv": ["apply", "--home", home], "CST_PROG": None, **session},
                     ],
                 )
 
