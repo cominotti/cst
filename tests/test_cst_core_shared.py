@@ -71,6 +71,7 @@ from cst_core.domain.shapes import (
     object_or_empty,
     parse_json,
     parse_toml,
+    shape_problem,
 )
 from cst_core.domain.text import (
     describe_problems,
@@ -1495,6 +1496,25 @@ class ShapesTest(unittest.TestCase):
             None,
         ):
             with self.subTest(obj=obj):
+                self.assertFalse(has_shape(obj, required, optional))
+
+    def test_shape_problem_names_what_fails(self) -> None:
+        required = {"kind": (str,), "n": (int,)}
+        optional = {"flag": (bool,), "link": (str, type(None))}
+        self.assertIsNone(shape_problem({"kind": "a", "n": 1, "link": None, "other": []}, required, optional))
+        for obj, why in (
+            ({"kind": "a"}, "no n"),
+            ({"n": True, "flag": 1}, "no kind"),  # required keys first, in their order
+            ({"kind": "a", "n": True}, "n is bool"),  # a bool is no int
+            ({"kind": "a", "n": 1.0}, "n is float"),
+            ({"kind": "a", "n": 1, "flag": 1}, "flag is int"),
+            ({"kind": "a", "n": 1, "link": 3}, "link is int"),
+            ([{"kind": "a", "n": 1}], "not an object"),
+            ({1: "a"}, "not an object"),
+            (None, "not an object"),
+        ):
+            with self.subTest(obj=obj):
+                self.assertEqual(shape_problem(obj, required, optional), why)
                 self.assertFalse(has_shape(obj, required, optional))
 
 

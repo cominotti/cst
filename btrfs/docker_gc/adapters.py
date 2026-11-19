@@ -40,7 +40,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdin
-from cst_core.domain.shapes import KeyTypes, json_object, number_or_none, parse_json
+from cst_core.domain.shapes import KeyTypes, json_object, number_or_none, parse_json, shape_problem
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -103,13 +103,9 @@ RELIED_ON: Final[dict[str, KeyTypes]] = {
 def record_problem(kind: str, record: object) -> str | None:
     """What a record of `docker KIND inspect` lacks of the keys the plan relies on ("no Image",
     "Mounts is a str"), or None. A container's Config also holds Labels (an object or null)."""
-    if not json_object(record):
-        return "not an object"
-    for key, kinds in RELIED_ON.get(kind, {}).items():
-        if key not in record:
-            return f"no {key}"
-        if not isinstance(record[key], kinds):
-            return f"{key} is {type(record[key]).__name__}"
+    why = shape_problem(record, RELIED_ON.get(kind, {}), {})
+    if why is not None or not json_object(record):
+        return why
     config = record.get("Config")
     if kind == "container" and json_object(config):
         if "Labels" not in config:

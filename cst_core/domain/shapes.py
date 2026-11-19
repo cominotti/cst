@@ -108,17 +108,24 @@ def list_of[T](value: object, item: Callable[[object], TypeIs[T]]) -> TypeIs[lis
     return isinstance(value, list) and all(item(v) for v in value)
 
 
-def has_shape(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
-    """obj is a JSON object with every required key and each known key of its type (a bool
-    is no int here, as JSON tells them apart). Keys it does not name are not checked."""
+def shape_problem(obj: object, required: KeyTypes, optional: KeyTypes) -> str | None:
+    """Why obj does not have has_shape's shape, in words: "not an object", "no KEY" (a required
+    key missing) or "KEY is TYPE" (the first key of another type, required keys first); None
+    when it has it. For a reader that names what is missing."""
     if not json_object(obj):
-        return False
+        return "not an object"
     for key, kinds in (*required.items(), *optional.items()):
         if key not in obj:
             if key in required:
-                return False
+                return f"no {key}"
             continue
         value = obj[key]
         if not isinstance(value, kinds) or (isinstance(value, bool) and bool not in kinds):
-            return False
-    return True
+            return f"{key} is {type(value).__name__}"
+    return None
+
+
+def has_shape(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
+    """obj is a JSON object with every required key and each known key of its type (a bool
+    is no int here, as JSON tells them apart). Keys it does not name are not checked."""
+    return shape_problem(obj, required, optional) is None
