@@ -1179,7 +1179,9 @@ class ArchitectureGateTest(unittest.TestCase):
         )
 
     def test_the_bootstrap_is_not_counted(self) -> None:
-        self.assertEqual(hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [11])
+        self.assertEqual(
+            hard_io_lines(BOOTSTRAP + "import os\nX = os.getcwd()\n", "pkg/cli.py"), [BOOTSTRAP.count("\n") + 2]
+        )
 
     def test_io_budgets(self) -> None:
         measured = measure_io()
