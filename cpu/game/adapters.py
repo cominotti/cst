@@ -607,10 +607,15 @@ class GameProfile:
         them (and again when they or the word change, or after a tick found the file fixed), then quiet
         until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
         said = "\n".join([what, *self._problem_lines()])  # another word on the same lines is said too
-        mark = self.paths.settings_warned
+        self._say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
+
+    @staticmethod
+    def _say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
+        """emit() unless the mark holds said (it was said already this boot: the mark is in /run); then
+        the mark holds said, so another text is said again."""
         if read_text(mark) == said:
             return
-        self._log_problems(4, what, "; said once per boot")
+        emit()
         with contextlib.suppress(OSError):
             write_atomic(mark, said, mode=0o644, durable=False, relabel=False)
 
