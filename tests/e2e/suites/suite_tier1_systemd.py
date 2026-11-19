@@ -4644,8 +4644,9 @@ echo E2E-OK
         none, for its BindsTo=), with a last-used.json of a newer docker-gc ("v": 99): the recorder exits
         65 before any docker call, and RestartPreventExitStatus= keeps systemd from starting it again
         after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
-        names the format once, and the file is byte for byte as it was. Control: the same unit ending
-        with exit 1 is restarted."""
+        names the format once, and the file is byte for byte as it was. The same unit ending with exit
+        76 (an inspect record without a key docker-gc relies on) is not restarted either. Control: the
+        same unit ending with exit 1 is restarted."""
         shipped = docker_exec(
             self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
         ).stdout
@@ -4724,6 +4725,25 @@ echo E2E-OK
             n="$(systemctl show -p NRestarts --value {unit})"
             systemctl stop {unit} || true
             [ "$n" -ge 1 ] || {{ echo "an exit 1 was not restarted (NRestarts=$n)" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Exit 76 (IncompleteRecord: docker answers the same at every start) is exempt as well.
+        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=derived("/bin/sh -c 'exit 76'"))
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            systemctl daemon-reload
+            systemctl start {unit} || true
+            sleep 14   # past RestartSec=10
+            state="$(show ActiveState)" n="$(show NRestarts)" rc="$(show ExecMainStatus)"
+            systemctl stop {unit} || true
+            [ "$state" = failed ] && [ "$n" = 0 ] && [ "$rc" = 76 ] ||
+                {{ echo "exit 76: state $state, NRestarts $n, status $rc" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout

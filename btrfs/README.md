@@ -1578,8 +1578,8 @@ Because of this:
   `status` stop with exit 65 and a journal line that names the format, `... is
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
   nothing is removed by a record they do not understand. systemd does not
-  restart the recorder for exit 65 (`RestartPreventExitStatus=`; any other
-  failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  restart the recorder for exit 65 (`RestartPreventExitStatus=`; nor for exit
+  76, below; any other failure is restarted after 10 s): `docker-gc-recorder.service` stays
   failed, which `cst doctor` lists, and images are held back meanwhile, as
   with any recorder that is not running. Install the docker-gc of that CST
   again (`cst btrfs docker-gc enable` in that checkout), which starts the
@@ -1595,8 +1595,12 @@ counts as empty). Without one, a protection would be lost (a container without
 holds another type there, or is not an object at all, stops `run`, `run --dry-run`, `cleanup-now`,
 `status` and the recorder's start before anything is removed, with a journal
 line that names the object and the key: `container inspect: <id>: no Image;
-nothing done` (exit 1; systemd restarts the recorder). The same holds for an
-object missing from the answer or an answer that is not JSON. During the
+nothing done` (exit 76). Docker gives the same answer at every try, so
+systemd does not restart the recorder for exit 76, as for exit 65:
+`docker-gc-recorder.service` stays failed, which `cst doctor` lists, and
+images are held back meanwhile. An object missing from the answer or an
+answer that is not JSON stops them the same way, with exit 1 (it may not come
+back: systemd restarts the recorder after 10 s). During the
 removals, the check before an image is removed reads the containers again: if
 that list cannot be read, that image is kept (`kept image ...: container list
 unreadable: ...`, counted in the run's failures) and the run goes on with the

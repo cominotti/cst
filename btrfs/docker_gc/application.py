@@ -12,11 +12,13 @@ from btrfs.docker_gc.domain import (
     HEARTBEAT_SECONDS,
     MIN_UPTIME,
     RECENT_USE,
+    INCOMPLETE_RECORD_EXIT,
     NEWER_STATE_EXIT,
     NOT_RECORDED,
     UnknownProtection,
     DockerEvent,
     GcCommand,
+    IncompleteRecord,
     InspectError,
     GcPaths,
     GcPlan,
@@ -159,7 +161,8 @@ class DockerGc:
         self.settings = replace(self.settings, protected=self.protection.prefixes)
 
     def execute(self, command: GcCommand, *, dry: bool = False, write: bool = False) -> int:
-        """Run one command; its exit status. A docker error is one journal line and exit 1; a state file of
+        """Run one command; its exit status. A docker error is one journal line and exit 1 (an inspect
+        record without what the plan relies on: INCOMPLETE_RECORD_EXIT); a state file of
         a newer docker-gc one line and NEWER_STATE_EXIT; protected registries it cannot tell (UnknownProtection)
         one line and BAD_SETTINGS_EXIT, before anything else (the recorder needs no settings). Inside a
         toolbox or container, a command container_refusal names ends first: one line and exit 1."""
@@ -190,6 +193,9 @@ class DockerGc:
             for line in str(e).splitlines():
                 self.console.log(3, line)
             return BAD_SETTINGS_EXIT
+        except IncompleteRecord as e:  # the same at every try: the recorder unit is not restarted for it
+            self.console.log(3, f"{e}; nothing done")
+            return INCOMPLETE_RECORD_EXIT
         except InspectError as e:
             self.console.log(3, f"{e}; nothing done")
             return 1

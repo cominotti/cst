@@ -40,6 +40,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
 RECORDER_UNIT = os.path.join(os.path.dirname(HERE), "units", "docker-gc-recorder.service")
 DAY = 86400
 NEWER_STATE_EXIT = 65  # a state file of a newer docker-gc: the recorder unit does not restart on it
+INCOMPLETE_RECORD_EXIT = 76  # an inspect record without a key docker-gc relies on: nor on this
 PROTECTED = "registry.example.com"  # an invented registry: what the settings file of these tests protects
 
 FAKE_DOCKER = r"""#!@PYTHON@ -I
@@ -461,9 +462,10 @@ class StatusTest(unittest.TestCase):
                 before = self.p.last_used()
                 # run --dry-run and status plan as the weekly run does (a run itself is skipped in the
                 # first 10 minutes after boot, before it plans: ApplicationTest covers it).
-                for args in (("run", "--dry-run"), ("status",)):
+                # The recorder's start too, with the exit status its unit does not restart on.
+                for args in (("run", "--dry-run"), ("status",), ("record",)):
                     rc, out, err = self.p.run(*args)
-                    self.assertEqual((rc, err), (1, ""), out)
+                    self.assertEqual((rc, err), (INCOMPLETE_RECORD_EXIT, ""), out)
                     self.assertTrue(
                         out.endswith(f"<3>docker-gc: container inspect: {'1' * 64}: no {key}; nothing done\n"), out
                     )
@@ -475,7 +477,9 @@ class StatusTest(unittest.TestCase):
         del records(st, "images")[0]["RepoTags"]  # a protected registry could hide in it: not read as "untagged"
         self.p.set_docker(st)
         rc, out, _err = self.p.run("run", "--dry-run")
-        self.assertEqual((rc, out), (1, f"<3>docker-gc: image inspect: {sha('a')}: no RepoTags; nothing done\n"))
+        self.assertEqual(
+            (rc, out), (INCOMPLETE_RECORD_EXIT, f"<3>docker-gc: image inspect: {sha('a')}: no RepoTags; nothing done\n")
+        )
 
     def test_docker_s_nulls_are_read_as_none(self) -> None:
         # null Mounts, Config.Labels, volume Labels, RepoTags and RepoDigests: Docker's "none".
@@ -531,12 +535,13 @@ class StatusTest(unittest.TestCase):
 
     def test_the_recorder_unit_does_not_restart_on_a_newer_state(self) -> None:
         # Restart=on-failure with RestartSec=10 would start the recorder again every 10 s, forever, to
-        # read the same file (systemd's start limit never trips at that pace), and the unit would never
-        # show as failed. Its exit status for that case stops the restarts (tier 1 test_78: real systemd).
+        # read the same file or get the same inspect answer (systemd's start limit never trips at that
+        # pace), and the unit would never show as failed. Its exit statuses for those cases stop the
+        # restarts (tier 1 test_78: real systemd).
         with open(RECORDER_UNIT) as f:
             service = f.read().split("[Service]\n", 1)[1].split("\n[", 1)[0].splitlines()
         self.assertIn("Restart=on-failure", service)
-        self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT}", service)
+        self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT} {INCOMPLETE_RECORD_EXIT}", service)
 
     def test_cleanup_now_needs_a_terminal(self) -> None:
         rc, out, err = self.p.run("cleanup-now")

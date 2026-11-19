@@ -501,10 +501,20 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(self.f.docker.calls[-2:], [("rm image", "alpine:old"), ("prune", "336")])
 
     def test_an_unreadable_inspect_stops_the_run_before_anything_is_removed(self) -> None:
-        self.f.docker.container_errors = [gc_domain.InspectError("container inspect: c1: no Image")]
+        self.f.docker.container_errors = [gc_domain.InspectError("container inspect failed for 1 object(s)")]
         self.assertEqual(self.f.gc.execute(GcCommand.RUN), 1)
-        self.assertEqual(self.f.console.lines, ["<3>container inspect: c1: no Image; nothing done"])
+        self.assertEqual(self.f.console.lines, ["<3>container inspect failed for 1 object(s); nothing done"])
         self.assertEqual(self.f.docker.calls, [])
+
+    def test_an_incomplete_record_stops_every_command_with_its_own_status(self) -> None:
+        # Docker answers the same at every try: the recorder unit is not restarted for this status.
+        for command in (GcCommand.RUN, GcCommand.STATUS, GcCommand.RECORD):
+            with self.subTest(command=command):
+                self.f.console.lines.clear()
+                self.f.docker.container_errors = [gc_domain.IncompleteRecord("container inspect: c1: no Image")]
+                self.assertEqual(self.f.gc.execute(command), gc_domain.INCOMPLETE_RECORD_EXIT)
+                self.assertEqual(self.f.console.lines[-1], "<3>container inspect: c1: no Image; nothing done")
+                self.assertEqual(self.f.docker.calls, [])
 
     def test_an_unreadable_container_list_during_the_removals_keeps_that_image_and_goes_on(self) -> None:
         # The re-check of the first image cannot read the containers: that image stays (counted as a
@@ -1229,7 +1239,7 @@ class DockerInspectTest(unittest.TestCase):
         for key in ("Image", "State", "Config", "HostConfig", "Mounts"):
             with self.subTest(key=key):
                 rec = {k: v for k, v in self.container.items() if k != key}
-                with self.answer([rec]), self.assertRaises(gc_domain.InspectError) as stop:
+                with self.answer([rec]), self.assertRaises(gc_domain.IncompleteRecord) as stop:
                     self.docker.containers()
                 self.assertEqual(str(stop.exception), f"container inspect: c1: no {key}")
         for key, value, kind in (("Image", None, "NoneType"), ("Mounts", "x", "str"), ("State", [], "list")):
