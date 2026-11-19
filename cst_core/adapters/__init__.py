@@ -70,19 +70,18 @@ class SystemctlAdapter:
         program, user = scope.get("program"), scope.get("user", False)
         self._head = [program or "systemctl", *(["--user"] if user else [])]
         self._stub = program is not None
-        self._on_host = scope.get("on_host", False) and not self._stub
+        on_host = scope.get("on_host", False) and not self._stub
         self._scope = _ScopeOptions()
+        if on_host:
+            self._scope["on_host"] = True
         if (base_env := scope.get("base_env")) is not None:
             self._scope["base_env"] = base_env
         if (stdin := scope.get("stdin", "devnull")) != "devnull":
             self._scope["stdin"] = stdin
 
     def _systemctl(self, *args: str, check: bool = False) -> CommandResult:
-        scope = _ScopeOptions(self._scope)
-        if self._on_host:
-            scope["on_host"] = True
         return self._runner.run(
-            [*self._head, *args], check=check, timeout=self._timeout, locale_c=self._locale_c, **scope
+            [*self._head, *args], check=check, timeout=self._timeout, locale_c=self._locale_c, **self._scope
         )
 
     def daemon_reload(self) -> None:
