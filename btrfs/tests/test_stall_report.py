@@ -136,6 +136,19 @@ class RecordTypesTest(unittest.TestCase):
         self.assertIn("psi", rp_records.SampleRecord.__required_keys__)
 
 
+class ByteFormatTest(unittest.TestCase):
+    """fmt_bytes: MiB with commas below 10 GiB, GiB with one decimal from it. It is cst_core's
+    format_bytes_gib_mib (since 5fa45a0), which compares the size of the count: a count at or
+    below -10 GiB, which no figure of the report reaches, prints in GiB as the positive one does
+    (the copy before compared the count itself and printed it in MiB)."""
+
+    def test_mib_below_10_gib_and_gib_from_it_on_either_side_of_zero(self) -> None:
+        self.assertEqual(rp_verdict.fmt_bytes(1500 * 2**20), "1,500 MiB")
+        self.assertEqual(rp_verdict.fmt_bytes(11 * 2**30), "11.0 GiB")
+        self.assertEqual(rp_verdict.fmt_bytes(-1500 * 2**20), "-1,500 MiB")
+        self.assertEqual(rp_verdict.fmt_bytes(-11 * 2**30), "-11.0 GiB")
+
+
 class ZswapAcrossUpgradeTest(unittest.TestCase):
     m: _StallReportModule
 

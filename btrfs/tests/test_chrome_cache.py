@@ -72,6 +72,19 @@ def load() -> _ChromeCacheModule:
     return cast("_ChromeCacheModule", cast("object", view))
 
 
+class SizeTextTest(unittest.TestCase):
+    """size_text: MiB below 0.1 GiB, GiB with one decimal from it. It is cst_core's
+    format_bytes_gib_mib (since 5fa45a0), which compares the size of the count: a count at or
+    below -0.1 GiB, which no size of chrome-cache reaches (sums of st_blocks * 512), prints in GiB
+    as the positive one does (the copy before compared the count itself and printed it in MiB)."""
+
+    def test_mib_below_a_tenth_of_a_gib_and_gib_from_it_on_either_side_of_zero(self) -> None:
+        self.assertEqual(chrome_domain.size_text(5 * 2**20), "5 MiB")
+        self.assertEqual(chrome_domain.size_text(2**30), "1.0 GiB")
+        self.assertEqual(chrome_domain.size_text(-5 * 2**20), "-5 MiB")
+        self.assertEqual(chrome_domain.size_text(-(2**30)), "-1.0 GiB")
+
+
 class ChromeCacheTest(unittest.TestCase):
     m: _ChromeCacheModule
     tmp: str
