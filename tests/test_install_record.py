@@ -912,6 +912,57 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertIn("files of the user are forgotten as the user, not as root", err.getvalue())
         service.return_value.forget.assert_not_called()
 
+    def test_generated_text_commands_as_root_refuse_another_accounts_home(self) -> None:
+        # As root on the real root, text commands keep root's record whatever --home says: a --home of
+        # another account is refused (exit 1), not ignored; root's own home and a staged call go on.
+        service = mock.Mock(spec=InstallService)
+        service.plan_put.return_value = "unchanged: /etc/x"
+        service.put.return_value = False
+        dest = "/home/u/.local/bin/btrfs-stall-report"
+        hint = {
+            "text": "cst_install_text DEST MODE USER",
+            "text-plan": "cst_install_text_plan DEST MODE USER",
+            "remove-text": "cst_remove_text_as USER",
+            "forget-text": "cst_forget_text_as USER",
+        }
+        args = {"text": [dest, "0755"], "text-plan": [dest, "0755"], "remove-text": [dest], "forget-text": [dest]}
+        with (
+            mock.patch("cst_core.wiring.start_installer"),
+            mock.patch("cst_core.wiring.installer_identity", return_value=(True, "/root")),
+            mock.patch("cst_core.wiring.install_service", return_value=service),
+        ):
+            for command, how in hint.items():
+                err = io.StringIO()
+                # text reads stdin after the place: a closed-off stdin keeps a regression from waiting on ours.
+                stdin = io.TextIOWrapper(io.BytesIO(b"x\n"))
+                self.addCleanup(stdin.close)
+                with (
+                    self.subTest(command=command),
+                    mock.patch("sys.stdin", stdin),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(err),
+                ):
+                    rc = installer.main([command, "--home", "/home/u", *args[command]])
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(
+                        err.getvalue(),
+                        f"cst installer: --home /home/u: a user's generated files are handled as that user ({how}), "
+                        f"not as root: as root {command} keeps root's record\n",
+                    )
+            self.assertEqual(service.method_calls, [])
+            for extra in (["--home", "/root/"], ["--home", "/home/u", "--root", self.stage]):
+                stdin = io.TextIOWrapper(io.BytesIO(b"x\n"))
+                self.addCleanup(stdin.close)
+                with (
+                    self.subTest(extra=extra),
+                    mock.patch("sys.stdin", stdin),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(installer.main(["forget-text", dest, *extra]), 0)
+                    self.assertEqual(installer.main(["text-plan", "/etc/x", "0644", *extra]), 0)
+        self.assertEqual(service.forget.call_args_list[0].args[0], "/var/lib/cst/installed.json")
+        self.assertEqual(len(service.plan_put.call_args_list), 2)
+
     def test_mark_of_a_component_of_generated_files_only(self) -> None:
         # btrfs:degraded-boot has no manifest file: its owner (root) comes from GENERATED_COMPONENTS.
         dest = "/etc/systemd/system/btrfs-degraded-boot-record.service"

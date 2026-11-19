@@ -23,7 +23,8 @@ Usage:
                                           removed: per file that was there
   installer.py remove-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files (--home: run as a user,
-                                          the record in that home)
+                                          the record in that home; as root, refused for a home
+                                          not root's own, as for text, text-plan, forget-text)
   installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
                                           are (a file a setup script keeps); prints nothing
   installer.py forget-text DEST... [--home DIR] [--root DIR]
@@ -82,7 +83,7 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
     _cst_sys.path.insert(0, _cst_root)
 
 import argparse
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
 import sys
 from typing import Final, NoReturn, override
@@ -204,9 +205,24 @@ def _own() -> tuple[Owner, str, bool]:
     return (Owner.ROOT if as_root else Owner.USER), home, as_root
 
 
+# How a user's generated files are handled as that user, by text command.
+_AS_THE_USER: Final[Mapping[str, str]] = {
+    InstallerCommand.TEXT: "cst_install_text DEST MODE USER",
+    InstallerCommand.TEXT_PLAN: "cst_install_text_plan DEST MODE USER",
+    InstallerCommand.REMOVE_TEXT: "cst_remove_text_as USER",
+    InstallerCommand.FORGET_TEXT: "cst_forget_text_as USER",
+}
+
+
 def _text_place(dest: str, mode: int, component: str | None, a: argparse.Namespace, *, recorded: bool) -> Placement:
-    """Where generated text goes (staged under --root), and its record (when recorded)."""
-    owner, home, _ = _own()
+    """Where generated text goes (staged under --root), and its record (when recorded). As root on the real
+    root, the owner is root and so is the record: a --home of another account is refused, not ignored."""
+    owner, home, as_root = _own()
+    if as_root and a.home and not a.root and a.home.rstrip("/") != home.rstrip("/"):
+        raise InstallRefused(
+            f"--home {a.home}: a user's generated files are handled as that user "
+            f"({_AS_THE_USER[a.command]}), not as root: as root {a.command} keeps root's record"
+        )
     return Placement(
         path=staged(a.root, dest),
         dest=dest,
