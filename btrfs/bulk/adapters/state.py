@@ -14,7 +14,7 @@ import contextlib
 import json
 import os
 import re
-from typing import TypeGuard
+from typing import TypeIs
 
 from btrfs.bulk.domain import BY_ID, ITEMS, KEEP_HEADER, BadSettings, BulkJournalKind, BulkPaths, ItemJournal
 from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
@@ -84,7 +84,7 @@ def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
     return True
 
 
-def is_item_journal(obj: object) -> TypeGuard[ItemJournal]:
+def is_item_journal(obj: object) -> TypeIs[ItemJournal]:
     """A journal-<id>.json's JSON has the shape btrfs-bulk writes (kind copy or subvol)."""
     return (
         isinstance(obj, dict)
@@ -93,7 +93,7 @@ def is_item_journal(obj: object) -> TypeGuard[ItemJournal]:
     )
 
 
-def is_steam_journal(obj: object) -> TypeGuard[SteamJournal]:
+def is_steam_journal(obj: object) -> TypeIs[SteamJournal]:
     """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
     phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
     if not isinstance(obj, dict) or not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
