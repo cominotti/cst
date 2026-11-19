@@ -48,7 +48,7 @@ from doctor.domain import (
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from vm.domain import VmOverlayKind
-from vm.domain.tune import guest_kind, tune_domain
+from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
@@ -476,7 +476,7 @@ def check_vm_hardware(
             yield Result(OK, f"VM {vm}: disks and network card as {host.cst} vm tune recommends")
             continue
         first = "; ".join(changes[:3]) + (f"; and {len(changes) - 3} more" if len(changes) > 3 else "")
-        extra = " Windows: the virtio drivers go in first (the plan shows how)." if kind != "linux" else ""
+        extra = " Windows: the virtio drivers go in first (the plan shows how)." if kind != GuestKind.LINUX else ""
         yield Result(
             INFO,
             f"VM {vm}: hardware differs from what {host.cst} vm tune recommends: {first}.{extra} "

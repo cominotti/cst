@@ -17,7 +17,7 @@ from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.units import masked_refusal
 from cst_core.ports import CommandFailed, CommandResult, SystemdPort, UnitName
 from vm.domain import SHUT_OFF, URI, TimerStatus, TimerStep, TimerStepKind, instance
-from vm.domain.tune import TunePlan, guest_kind, normalized, tune_domain
+from vm.domain.tune import GuestKind, TunePlan, guest_kind, normalized, tune_domain
 from vm.ports import DefinitionStorePort, TimerFilesPort, VmCommandsPort
 
 
@@ -138,7 +138,7 @@ def plan_tune(commands: VmCommandsPort, vm: str, kn: Mapping[str, bool], *, gues
     keep_prefixes(plain)
     root = ET.fromstring(plain)
     kind, why = guest_kind(root)
-    allow_bus = kind == "linux" or guest_virtio
+    allow_bus = kind == GuestKind.LINUX or guest_virtio
     after, changes, held, notes = tune_domain(plain, kn, allow_bus)
     if after is None:
         raise Refused(f"{vm}: {notes[0]}")
@@ -150,7 +150,7 @@ def tune_blocked(commands: VmCommandsPort, plan: TunePlan) -> str:
     """Why the plan may not be applied now ("" when it may): a guest not known to be Linux gets the
     bus and network card changes only while shut off, and not from a managed save."""
     vm, state = plan.vm, plan.state
-    if plan.kind == "linux" or not any(" bus " in c or "network card" in c for c in plan.changes):
+    if plan.kind == GuestKind.LINUX or not any(" bus " in c or "network card" in c for c in plan.changes):
         return ""
     if state != SHUT_OFF:
         return (

@@ -7,10 +7,19 @@ the same rules.
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import re
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.libvirt_xml import keep_prefixes
+
+
+class GuestKind(StrEnum):
+    """What a VM's guest is, as tune reads its definition (guest_kind)."""
+
+    WINDOWS = "windows"
+    LINUX = "linux"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +30,7 @@ class TunePlan:
 
     vm: str
     state: str
-    kind: str
+    kind: GuestKind
     why: str
     root: ET.Element
     knobs: dict[str, bool]
@@ -63,21 +72,21 @@ LINUX_OS = (
 )
 
 
-def guest_kind(root: ET.Element) -> tuple[str, str]:
-    """("windows" | "linux" | "unknown", why). From the libosinfo id that
+def guest_kind(root: ET.Element) -> tuple[GuestKind, str]:
+    """(windows | linux | unknown, why). From the libosinfo id that
     virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
     enlightenments (only Windows guests use them)."""
     for el in root.iter():
         if el.tag.endswith("}os") and el.get("id"):
             osid = el.get("id") or ""
             if "microsoft.com/win" in osid:
-                return "windows", f"libosinfo {osid}"
+                return GuestKind.WINDOWS, f"libosinfo {osid}"
             if any(k in osid for k in LINUX_OS):
-                return "linux", f"libosinfo {osid}"
-            return "unknown", f"libosinfo {osid}"
+                return GuestKind.LINUX, f"libosinfo {osid}"
+            return GuestKind.UNKNOWN, f"libosinfo {osid}"
     if root.find("features/hyperv") is not None:
-        return "windows", "Hyper-V enlightenments in <features>"
-    return "unknown", "no libosinfo id in the definition"
+        return GuestKind.WINDOWS, "Hyper-V enlightenments in <features>"
+    return GuestKind.UNKNOWN, "no libosinfo id in the definition"
 
 
 def disk_index(name: str | None) -> int | None:
@@ -289,7 +298,7 @@ def tune_line(xml_text: str, kn: Mapping[str, bool], cst: str) -> str:
         return "hardware: definition not readable"
     if not changes:
         return "hardware: disks and network card as tune recommends"
-    extra = " (Windows: virtio drivers first, the plan shows how)" if kind != "linux" else ""
+    extra = " (Windows: virtio drivers first, the plan shows how)" if kind != GuestKind.LINUX else ""
     return f"hardware: {len(changes)} difference(s) from tune{extra}: {cst} vm tune plan"
 
 

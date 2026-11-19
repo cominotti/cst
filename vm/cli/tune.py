@@ -9,7 +9,7 @@ from cst_core.domain.errors import Refused
 from vm import application, wiring
 from vm.application.backup import backup_time
 from vm.domain import KNOBS, URI, VmSettings
-from vm.domain.tune import WINDOWS_STEPS, cpu_owner_line
+from vm.domain.tune import WINDOWS_STEPS, GuestKind, cpu_owner_line
 from vm.ports import DefinitionStorePort, VmCommandsPort
 
 
@@ -30,7 +30,7 @@ def cmd_tune(
     conf = wiring.settings_port(cfg)
     kn = conf.knobs()
     plan = application.plan_tune(virsh, vm, kn, guest_virtio=guest_virtio)
-    label = {"windows": "Windows", "linux": "Linux", "unknown": "not known"}[plan.kind]
+    label = {GuestKind.WINDOWS: "Windows", GuestKind.LINUX: "Linux", GuestKind.UNKNOWN: "not known"}[plan.kind]
     print(f"{vm}: {plan.state}; guest: {label} ({plan.why})")
     off = [k for k in KNOBS[1:] if not kn[k]]
     if off:
@@ -42,7 +42,7 @@ def cmd_tune(
     for n in plan.notes:
         print(f"  note: {n}")
     print(f"  {cpu_owner_line(plan.root, conf.cpu_disable(), cfg.cst)}")
-    if plan.kind == "linux" and plan.changes and any("bus" in c or "network card" in c for c in plan.changes):
+    if plan.kind == GuestKind.LINUX and plan.changes and any("bus" in c or "network card" in c for c in plan.changes):
         print(
             "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
             "drivers (hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first."
