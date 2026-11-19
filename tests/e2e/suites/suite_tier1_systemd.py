@@ -6357,7 +6357,11 @@ echo E2E-OK
         forget --component of each component of GENERATED_COMPONENTS (root's as root, the user's as
         tester through the real runuser) exit 2 with one line naming the DEST form, print nothing on
         stdout, and change nothing: both records keep their bytes, and the files a record lists under
-        that component (another test's) stay as they are."""
+        that component (another test's) stay as they are. Then cpu:gamemode (tester's ~/.config/gamemode.ini,
+        through the real runuser, so tester's record is the one read; no test before this one leaves it,
+        and its being there fails the test) installed as an older CST left it (installed, its lines
+        taken out): plan prints "would record:" for it and changes nothing, check exits 0, install writes
+        nothing and lists it, plan then says "unchanged:", and a second install changes nothing."""
         c = self.SYSTEMD_CONTAINER
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         script = (
@@ -6403,3 +6407,44 @@ echo E2E-OK
                     """,
                 ).stdout
                 self.assertIn("E2E-OK", out)
+
+        ini = "/home/tester/.config/gamemode.ini"
+        there = exec_bash(c, f"[[ ! -e {ini} ]] || echo there").stdout.strip()
+        if there:
+            self.fail(f"{ini} is there already (another test's): this part needs cpu:gamemode absent")
+        user_installer = f"runuser -u tester -- {installer}"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"{user_installer} remove --home /home/tester --component cpu:gamemode >/dev/null",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U=/home/tester/.local/state/cst/installed.json
+            sel=(--home /home/tester --component cpu:gamemode)
+            {user_installer} install "${{sel[@]}}" >/dev/null
+            {user_installer} forget "${{sel[@]}}"
+            [[ "$({lines} "$U" cpu:gamemode)" == "- -" ]]
+            before="$(sha256sum "$U")"
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "would record: {ini}" ]] || {{ echo "plan said: $plan" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "plan changed the record" >&2; exit 1; }}
+            {user_installer} check "${{sel[@]}}" || {{ echo "check: exit $?" >&2; exit 1; }}
+            out="$({user_installer} install "${{sel[@]}}")"
+            [[ "$out" == "unchanged: {ini}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            [[ "$({lines} "$U" cpu:gamemode)" == "{ini} pending" ]]
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "unchanged: {ini}" ]] || {{ echo "plan after install said: $plan" >&2; exit 1; }}
+            before="$(sha256sum "$U" {ini})"
+            again="$({user_installer} install "${{sel[@]}}")"
+            [[ "$again" == "unchanged: {ini}" && "$(sha256sum "$U" {ini})" == "$before" ]] ||
+                {{ echo "a second install changed something: $again" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

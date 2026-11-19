@@ -3,8 +3,9 @@
 
 Output lines are the ones the setup scripts always printed:
 `unchanged: DEST` and `written:   DEST`; a plan prints
-`would write: DEST` instead and changes nothing; a removal
-`removed:   DEST`. Every entry's bytes are built and checked (templates)
+`would write: DEST` instead and changes nothing (and `would record: DEST`
+for a file already right that the install record does not list yet); a
+removal `removed:   DEST`. Every entry's bytes are built and checked (templates)
 before the first write, so a bad call writes nothing; then one line comes
 per file, as it is written.
 
@@ -220,6 +221,23 @@ class InstallService:
             except OSError:
                 continue  # unreadable here: the update below says why, after the files
 
+    def _listed(self, records: set[str]) -> dict[str, frozenset[str]]:
+        """The destinations each record lists: none for no record yet, or for one that is no record (install
+        starts it again; a newer one was refused before). A record that cannot be read is left out: plan
+        cannot tell."""
+        listed: dict[str, frozenset[str]] = {}
+        if self._record is None:
+            return listed
+        for path in sorted(r for r in records if r):
+            try:
+                rec = self._record.read(path)
+            except RecordFormatError:
+                rec = None
+            except OSError:
+                continue
+            listed[path] = frozenset(rec.files) if rec is not None else frozenset()
+        return listed
+
     def is_current(
         self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
     ) -> bool:
@@ -405,15 +423,22 @@ class InstallService:
                 self.forget(record, [p.dest for p in gone if p.record == record])
 
     def plan(self, entries: Sequence[InstallEntry], req: InstallRequest) -> tuple[list[str], int]:
-        """What install would do, changing nothing: (report lines, number of files to write)."""
+        """What install would do, changing nothing: (report lines, number of files to write).
+
+        A current file its record does not list yet is `would record:` (install adopts it). It is not
+        counted: it needs no write, so `check` still takes it as current."""
         lines: list[str] = []
         replaced: list[Placement] = []
-        for p, data in self._prepare(entries, req):
-            if self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
-                lines.append(f"unchanged: {p.path}")
-            else:
+        todo = self._prepare(entries, req)
+        listed = self._listed({p.record for p, _ in todo})
+        for p, data in todo:
+            if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
                 lines.append(f"would write: {p.path}")
                 replaced.append(p)
+            elif p.record in listed and p.dest not in listed[p.record]:
+                lines.append(f"would record: {p.path}")
+            else:
+                lines.append(f"unchanged: {p.path}")
         # A settings file install would write first, from the program it replaces (SettingsStep).
         settings = [
             f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)

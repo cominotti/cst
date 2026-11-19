@@ -188,6 +188,62 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.svc.plan([self.a], InstallRequest())
         self.assertEqual(self.record.texts, {})
 
+    def test_plan_names_a_current_file_the_record_does_not_list_and_counts_no_write_for_it(self) -> None:
+        # An install from before the record: the file is right, no line lists it. plan says install would
+        # record it (it adopts it); it is no file to write, so check stays 0. plan writes no record.
+        req = InstallRequest(values={"UUID": "u-1"})
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would record: /usr/local/sbin/a", "would write: /etc/t"], 1)
+        )
+        self.assertEqual(self.record.texts, {})
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["unchanged: /usr/local/sbin/a"])
+        self.assertEqual(self.target.writes, [])
+        self.assertIn("/usr/local/sbin/a", self.record.doc().files)
+        self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["unchanged: /usr/local/sbin/a"], 0))
+
+    def test_plan_reads_which_files_the_record_lists(self) -> None:
+        req = InstallRequest(values={"UUID": "u-1"})
+        list(self.svc.install([self.t], req))
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would record: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
+        )
+        # A file to write is "would write:" alone, listed or not.
+        self.target.files["/usr/local/sbin/a"] = (b"old\n", 0o755)
+        self.target.files["/etc/t"] = (b"edited\n", 0o644)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would write: /usr/local/sbin/a", "would write: /etc/t"], 2)
+        )
+
+    def test_plan_takes_a_record_that_is_no_record_as_none_and_says_unchanged_when_it_cannot_read_it(self) -> None:
+        # Not JSON, or JSON of the wrong shape: install starts such a record again, so the file would be recorded.
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        for text in ("not json\n", '{"format": 1, "files": []}\n'):
+            with self.subTest(text=text):
+                self.record.texts[self.ROOT] = text
+                self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["would record: /usr/local/sbin/a"], 0))
+                self.assertEqual(self.record.texts[self.ROOT], text)
+
+        class _Unreadable(_MemoryRecord):
+            @override
+            def read(self, path: str) -> InstallRecord | None:
+                raise PermissionError(13, "Permission denied", path)
+
+        svc = InstallService(self.target, lambda e: self.payloads[e.src], record=_Unreadable())
+        self.assertEqual(svc.plan([self.a], InstallRequest()), (["unchanged: /usr/local/sbin/a"], 0))
+
+    def test_plan_of_the_users_files_reads_the_users_record(self) -> None:
+        req = InstallRequest(home="/home/tester")
+        self.target.files["/home/tester/.config/u"] = (b"U\n", 0o644)
+        self.assertEqual(self.svc.plan([self.u], req), (["would record: /home/tester/.config/u"], 0))
+        list(self.svc.install([self.u], req))
+        self.assertEqual(list(self.record.texts), ["/home/tester/.local/state/cst/installed.json"])
+        self.assertEqual(self.svc.plan([self.u], req), (["unchanged: /home/tester/.config/u"], 0))
+        # The same file listed in root's record only: the user's record decides.
+        self.record.texts = {self.ROOT: self.record.texts.pop("/home/tester/.local/state/cst/installed.json")}
+        self.assertEqual(self.svc.plan([self.u], req), (["would record: /home/tester/.config/u"], 0))
+
     def test_user_files_go_to_the_record_in_the_home_and_staging_moves_both(self) -> None:
         list(self.svc.install([self.u], InstallRequest(home="/home/tester", root="/stage")))
         path = "/stage/home/tester/.local/state/cst/installed.json"
@@ -601,6 +657,27 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(self.doc(), EMPTY_RECORD)
         want = [e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc"]
         self.assertTrue(all(os.path.isfile(self.stage + d) for d in want))
+
+    def test_plan_names_the_files_an_older_install_left_unrecorded_and_check_stays_current(self) -> None:
+        # An install from before the record (its lines taken out): plan says "would record:" for each file
+        # and changes nothing; check still exits 0 (its exit code is a later decision); install writes
+        # nothing and lists them; plan then says only "unchanged:".
+        sel = ("--component", "btrfs:docker-gc")
+        want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        self.assertEqual(self.cli("forget", *sel).returncode, 0)
+        before = Path(self.record).read_bytes()
+        plan = self.cli("plan", *sel)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(sorted(plan.stdout.decode().splitlines()), [f"would record: {self.stage}{d}" for d in want])
+        self.assertEqual(Path(self.record).read_bytes(), before)
+        check = self.cli("check", *sel)
+        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        r = self.cli("install", *sel)
+        self.assertEqual(sorted(r.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+        self.assertEqual(sorted(self.doc().files), want)
+        again = self.cli("plan", *sel)
+        self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
 
     def test_forget_without_a_record_writes_none(self) -> None:
         r = self.cli("forget", "btrfs/docker-gc")
