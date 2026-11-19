@@ -12,6 +12,7 @@ from datetime import datetime
 import difflib
 from enum import StrEnum
 from itertools import islice
+import posixpath
 import re
 from typing import Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
@@ -83,7 +84,7 @@ class CpuPaths:
 
     runs: str
     conf: str = CPU_SETTINGS
-    etc: str = "/etc/cpu-setup"
+    etc: str = posixpath.dirname(CPU_SETTINGS)
 
 
 def disable_features(root: ET.Element, names: Sequence[str]) -> None:
