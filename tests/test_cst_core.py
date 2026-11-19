@@ -137,8 +137,16 @@ class ValueObjectsTest(unittest.TestCase):
         self.assertIsNone(ByteSize.parse("9" * 5000 + "G"))
         # Huge but finite values keep their value.
         self.assertEqual(ByteSize.parse_iec("8" + "0" * 290 + "T"), ByteSize(int(8e290 * 2**40)))
-        self.assertEqual(ByteSize.parse("9" * 400), ByteSize(int("9" * 400)))
-        self.assertEqual(ByteSize.parse("9" * 400 + "K"), ByteSize(int("9" * 400) * 1024))
+
+    def test_a_systemd_size_above_64_bits_is_invalid(self) -> None:
+        # systemd's sizes are 64-bit unsigned: one above 2**64 - 1 is invalid (None), before or
+        # after its unit. A value that big once came back whole, and the float formats raised
+        # OverflowError on it (format_bytes_human of 10**400 - 1).
+        self.assertEqual(ByteSize.parse(str(2**64 - 1)), ByteSize(2**64 - 1))
+        self.assertEqual(ByteSize.parse("16777215T"), ByteSize(16777215 * 2**40))
+        for spec in (str(2**64), "16777216T", "18014398509481984K", "9" * 400, "9" * 400 + "K"):
+            with self.subTest(spec=spec[-6:]):
+                self.assertIsNone(ByteSize.parse(spec))
 
     def test_durations_too_large_to_hold_are_the_domain_error(self) -> None:
         with self.assertRaisesRegex(DomainValidationError, "invalid duration"):

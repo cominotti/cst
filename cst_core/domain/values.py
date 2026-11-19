@@ -36,6 +36,9 @@ _DURATION_UNITS: Final[dict[str, int]] = {
     "w": WEEK,
 }
 
+# The largest size ByteSize.parse accepts: systemd's sizes are 64-bit unsigned (above it, systemd refuses).
+_SIZE_MAX: Final = 2**64 - 1
+
 _SIZE_UNITS: Final[dict[str, int]] = {
     "k": 1 << 10,
     "m": 1 << 20,
@@ -106,12 +109,14 @@ class ByteSize:
 
     @classmethod
     def parse(cls, spec: str | None) -> Self | None:
-        """Parse a systemd-style binary size ('48G', '512M', '1024'), or None if invalid."""
+        """Parse a systemd-style binary size ('48G', '512M', '1024'), or None if invalid or above
+        _SIZE_MAX (2**64 - 1, the largest size systemd takes)."""
         m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
         number = _whole_number(m.group(1)) if m else None
         if m is None or number is None:
             return None
-        return cls(number * 1024 ** " KMGT".index(m.group(2) or " "))
+        count = number * 1024 ** " KMGT".index(m.group(2) or " ")
+        return cls(count) if count <= _SIZE_MAX else None
 
     @classmethod
     def parse_iec(cls, spec: str) -> Self:
