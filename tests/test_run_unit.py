@@ -208,11 +208,9 @@ class F(unittest.TestCase):
 class ResourceWarningGateTest(unittest.TestCase):
     """A test that leaves a file or socket open fails the run, even though unittest says OK."""
 
-    def run_probe(
-        self, name: str, *options: str, cls: str = "T", runner: str = os.path.join(REPO, "tests", "run_unit.py")
-    ) -> subprocess.CompletedProcess[str]:
+    def run_probe(self, name: str, *options: str, cls: str = "T") -> subprocess.CompletedProcess[str]:
         """The runner in a child (with these interpreter options) on one test of _LEAKS (or the
-        whole class, for an empty name). runner: another copy of tests/run_unit.py (an old one)."""
+        whole class, for an empty name)."""
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
         with open(os.path.join(tmp, "probe_leaks.py"), "w", encoding="utf-8") as f:
             f.write(_LEAKS)
@@ -221,7 +219,7 @@ class ResourceWarningGateTest(unittest.TestCase):
                 sys.executable,
                 "-B",
                 *options,
-                runner,
+                os.path.join(REPO, "tests", "run_unit.py"),
                 ".".join(part for part in ("probe_leaks", cls, name) if part),
             ],
             capture_output=True,
@@ -376,13 +374,11 @@ class BytecodeGateTest(unittest.TestCase):
             ["a/__pycache__/rewritten.cpython-314.pyc", "b/__pycache__/new.cpython-314.pyc"],
         )
 
-    def run_copy(
-        self, name: str, *, runner: str = os.path.join(REPO, "tests", "run_unit.py")
-    ) -> tuple[subprocess.CompletedProcess[str], str]:
+    def run_copy(self, name: str) -> tuple[subprocess.CompletedProcess[str], str]:
         """A copy of the runner in a temporary checkout of its own, run by its shebang on one test of _BYTECODE."""
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-run-"))
         os.makedirs(os.path.join(tmp, "tests"))
-        shutil.copy2(runner, os.path.join(tmp, "tests", "run_unit.py"))
+        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
         for rel, text in (
             ("probe_bytecode.py", _BYTECODE),
             (
