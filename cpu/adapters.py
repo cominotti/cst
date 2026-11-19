@@ -131,9 +131,12 @@ def save_definition_once(etc: str, name: str, xml_text: str) -> str:
 
 def define_domain(xml_text: str) -> None:
     """`virsh define` a domain from its XML text (a temporary file, removed after)."""
-    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
-        f.write(xml_text)
+    f = tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False)
     try:
+        # The unlink covers the write too: a failed write (a full disk) leaves no copy of the
+        # definition, which holds --security-info secrets, in the temporary folder.
+        with f:
+            f.write(xml_text)
         virsh("define", f.name)
     finally:
         os.unlink(f.name)
