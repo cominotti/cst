@@ -12,7 +12,7 @@ Two text readers decode on purpose in two ways; do not merge them:
   every byte, also one that is not UTF-8, is written back as it was.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 import contextlib
 from enum import StrEnum
 import errno
@@ -104,6 +104,30 @@ def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
         os.chmod(d, mode)
         created.append(d)
     return created
+
+
+def create_private(path: str, text: str) -> None:
+    """A new file holding text, 0600 from the start (it may hold secrets: no moment where others can
+    read it; the umask can only take more away). An existing file, a link included (dangling or
+    not), raises FileExistsError. The text is written in the locale's encoding, as open(path, "w")
+    does; no fsync and no relabel."""
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+        f.write(text)
+
+
+@contextlib.contextmanager
+def temp_text_file(text: str, *, prefix: str, suffix: str) -> Generator[str]:
+    """The path of a new temporary file (tempfile.mkstemp: 0600, in tempfile.gettempdir(), named
+    PREFIX<random>SUFFIX) that holds text, for a command that reads its input from a file. The file
+    is removed when the block ends, whatever happens: also when writing it fails, so no copy of the
+    text (a definition with secrets) is left behind."""
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        yield path
+    finally:
+        os.unlink(path)
 
 
 def owned_file_state_at(

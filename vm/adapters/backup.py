@@ -14,7 +14,7 @@ from types import FrameType
 from typing import Self, TextIO
 
 from cst_core.adapters import nocow as inode_attrs
-from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, create_private, ensure_dir, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
@@ -148,7 +148,7 @@ def write_index(entries: Sequence[IndexEntry], path: str, carried: Sequence[obje
 def precreate_nocow(dest: str) -> None:
     """btrfs clones only between files with the same NOCOW flag: an empty
     destination with the flag set, which cp then fills. Best effort."""
-    os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    create_private(dest, "")
     with suppress(OSError):
         inode_attrs.set_nocow(dest)
 
@@ -189,12 +189,6 @@ def private_dirs(*folders: str) -> None:
         os.chmod(d, 0o700)
 
 
-def write_private(path: str, text: str) -> None:
-    """A new file (an existing one: FileExistsError), 0600 from the start: it may hold secrets."""
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-        f.write(text)
-
-
 class BackupFiles(LocalFileSystemAdapter):
     """BackupStorePort on this machine: the paths of cfg, the functions of this module (and the
     path tests of cst_core's LocalFileSystemAdapter: os.path.isfile, isdir, exists, lexists)."""
@@ -229,7 +223,7 @@ class BackupFiles(LocalFileSystemAdapter):
         copy(self.cfg, src, dest, mode, big)
 
     def write_private(self, path: str, text: str) -> None:
-        write_private(path, text)
+        create_private(path, text)
 
     def remove_tree(self, path: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
@@ -243,7 +237,7 @@ class BackupFiles(LocalFileSystemAdapter):
             path = os.path.join(d, name)
             with suppress(FileNotFoundError):
                 os.unlink(path)
-            write_private(path, text)
+            create_private(path, text)
         return d
 
     def unstage(self, folder: str) -> None:
@@ -453,5 +447,5 @@ class DefinitionFiles:
         keep = os.path.join(self.backup_dir, vm, "definitions")
         private_dirs(self.backup_dir, os.path.join(self.backup_dir, vm), keep)
         saved = os.path.join(keep, f"{stamp}.before-tune.xml")
-        write_private(saved, text)
+        create_private(saved, text)
         return saved
