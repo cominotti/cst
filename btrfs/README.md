@@ -558,6 +558,14 @@ the reason ends with its last error line) and keeps the alert itself in
 and also warns that the installed units alert through a missing `btrfs-notify`
 (fix: `cst btrfs install`). So, for example, `btrfs-bulk-boot`'s refusal of a
 bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
+Kept alerts expire: `btrfs-health-check` runs `btrfs-notify --prune`, and
+`cst-pending-alerts` shows only those of the last `KEEP_DAYS` (7) days. An
+alert kept twice (`btrfs-notify` kept it but answered too late, then the
+adapter kept it too) is merged into the same file under the folder's lock and
+counted once more, never a second file. One accepted edge case: under a C
+locale, a long title with non-ASCII letters can be cut at a different place
+by `btrfs-notify` and by the adapter, and the same alert then gets a second
+pending file.
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
