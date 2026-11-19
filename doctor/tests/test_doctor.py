@@ -2082,6 +2082,89 @@ class VmTest(Scratch):
                 self.assertNotIn("Traceback", r.stdout + r.stderr)
                 self.assert_read_only()
 
+    def write_torn(self, raw: bytes) -> str:
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-nas-torn.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(raw)
+        return path
+
+    def torn_lines(self, r: subprocess.CompletedProcess[str]) -> list[str]:
+        lines = self.vm_lines(r)
+        after = [ln.strip().startswith("fix") and i > 0 and "vm-nas-torn" in lines[i - 1] for i, ln in enumerate(lines)]
+        return [ln.strip() for ln, fix in zip(lines, after, strict=True) if "vm-nas-torn" in ln or fix]
+
+    def test_no_row_without_torn_snapshots(self) -> None:
+        r = self.run_tool()
+        self.assertEqual(self.torn_lines(r), [])
+        self.write_torn(json.dumps({"version": 1, "torn": []}).encode())
+        r = self.run_tool()
+        self.assertEqual(self.torn_lines(r), [], r.stdout)
+        self.assert_read_only()
+
+    def test_torn_snapshots_a_nas_backup_could_not_forget_warn(self) -> None:
+        def entry(vm: str, snapshot: str, stamp: str) -> dict[str, str]:
+            return {
+                "snapshot": snapshot,
+                "vm": vm,
+                "repository": "sftp:nas:/r",
+                "host": "h",
+                "timestamp": stamp,
+                "why": "x",
+            }
+
+        torn: list[object] = [
+            entry("win", "a1b2c3d4" + "e" * 56, "20261108T010640Z"),
+            entry("lab", "f00dbabe" + "1" * 56, "20261101T010000Z"),
+            {"snapshot": "c0ffee", "note": "an entry of a newer cst vm: not counted"},
+        ]
+        self.write_torn(json.dumps({"version": 1, "torn": torn}).encode())
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.torn_lines(r),
+            [
+                (
+                    "WARN   2 restic snapshot(s) that a failed NAS backup could not forget, in "
+                    "/var/lib/cst/vm-nas-torn.json: win a1b2c3d4 (20261108T010640Z), lab f00dbabe (20261101T010000Z); "
+                    "the next `cst vm backup VM --nas` forgets them before its retention, and skips the retention "
+                    "until then"
+                ),
+                "fix: or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9",
+            ],
+        )
+        self.assertFalse([c for c in self.calls() if c.startswith("restic")], "no restic call")
+        self.assert_read_only()
+
+    def test_a_torn_record_cst_vm_cannot_use_warns(self) -> None:
+        for raw, said in (
+            (
+                json.dumps({"version": 2, "torn": []}).encode(),
+                (
+                    "/var/lib/cst/vm-nas-torn.json is format 2 of the vm-nas-torn (this CST reads format 1 and older): "
+                    "written by a newer CST: cst vm backup --nas refuses to run with it; use the cst vm of that CST"
+                ),
+            ),
+            (b"{", "(not JSON)"),
+            (b'{"torn": ["\xff"]}', "(not JSON)"),
+            (b'{"version": 1}', '(no "torn" list)'),
+        ):
+            with self.subTest(raw=raw):
+                self.write_torn(raw)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                lines = self.torn_lines(r)
+                self.assertEqual(len(lines), 1, r.stdout)
+                self.assertIn(said, lines[0])
+                if b"version" not in raw[:12]:
+                    self.assertEqual(
+                        lines[0],
+                        f"WARN   /var/lib/cst/vm-nas-torn.json cannot be read as cst vm's record of torn NAS snapshots "
+                        f"{said}: cst vm backup --nas refuses to run with it; forget the snapshots it names by hand, "
+                        "then move it aside",
+                    )
+                self.assert_read_only()
+
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
         # After going back to an older CST: a newer index is neither taken for "never backed up"
         # nor read as if this checkout knew its format.

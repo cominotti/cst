@@ -38,9 +38,12 @@ from doctor.domain import (
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
     VM_TIMER_WANTS,
+    VM_TORN,
+    VM_TORN_FORMAT,
     WARN,
     HostPath,
     Result,
+    name_list,
     parse_offered_features_xml,
     virt_changes,
     virt_versions,
@@ -48,7 +51,7 @@ from doctor.domain import (
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from vm.domain import VmOverlayKind
-from vm.domain.backup import NO_BACKUPS_LIST, is_index_entry, stored_list
+from vm.domain.backup import NO_BACKUPS_LIST, NO_TORN_LIST, is_index_entry, is_torn_entry, stored_list, stored_torn
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -255,6 +258,43 @@ def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"{VM_INDEX_FORMAT.newer_text(VM_INDEX, found)}: {host.cst} vm refuses to back up or list "
             "with it; use the cst vm of that CST (its checkout: cst vm backup-timer on)",
+        )
+
+
+@check(CHECKS, "vm")
+def check_vm_nas_torn(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN while cst vm's record of torn NAS snapshots (restic snapshots a failed NAS backup could not
+    forget) names one: the next NAS backup of that VM forgets it first, and skips its retention until
+    then. WARN when the record is of a newer format or cannot be read as one: cst vm backup --nas
+    refuses to run with it. Reads the file only (no restic)."""
+    read = _read_json_state(host, VM_TORN)
+    if read is None:
+        return
+    data, why = read
+    if why is None and (found := VM_TORN_FORMAT.newer(data, "version")) is not None:
+        yield Result(
+            WARN,
+            f"{VM_TORN_FORMAT.newer_text(VM_TORN, found)}: {host.cst} vm backup --nas refuses to run with it; "
+            "use the cst vm of that CST",
+        )
+        return
+    torn = stored_torn(data) if why is None else None
+    if torn is None:
+        yield Result(
+            WARN,
+            f"{VM_TORN} cannot be read as cst vm's record of torn NAS snapshots ({why or NO_TORN_LIST}): "
+            f"{host.cst} vm backup --nas refuses to run with it; forget the snapshots it names by hand, then "
+            "move it aside",
+        )
+        return
+    named = [f"{e['vm']} {e['snapshot'][:8]} ({e['timestamp'] or '?'})" for e in torn if is_torn_entry(e)]
+    if named:
+        yield Result(
+            WARN,
+            f"{len(named)} restic snapshot(s) that a failed NAS backup could not forget, in {VM_TORN}: "
+            f"{name_list(named)}; the next `{host.cst} vm backup VM --nas` forgets them before its retention, "
+            "and skips the retention until then",
+            "or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9",
         )
 
 

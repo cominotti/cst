@@ -816,6 +816,8 @@ a newer CST, or one that cannot be read as the record (not JSON, no `torn`
 list), makes `backup --nas` refuse before anything is done: use the newer
 CST's `cst vm`, or forget the snapshots it names by hand and move it aside
 (`mv /var/lib/cst/vm-nas-torn.json /var/lib/cst/vm-nas-torn.json.bad`).
+`cst doctor` shows a row while the record names a snapshot, and one for a
+record it cannot use (it reads only the file, no restic).
 
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the
