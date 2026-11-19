@@ -255,6 +255,19 @@ snap_conf_set() {   # KEY=VALUE...
     rm -f "${tmp}"
 }
 
+# snap_conf_read KEY...: set KEYs (the caller's locals) from snapshots.conf as
+# btrfs-snapshot reads it: only its plain assignment lines (btrfs-snapshot
+# settings-lines, the same filter), every other line ignored with a warning on
+# stderr. The file is never sourced: a command in it runs nowhere, and status
+# shows what the units use.
+snap_conf_read() {   # KEY...
+    local lines
+    [[ -r "${SNAP_CONF}" ]] || return 0
+    lines="$(bash "${SRC}/btrfs-snapshot" settings-lines "${SNAP_CONF}" "$@")" || return 0
+    # Only lines the filter accepts as plain assignments of KEYs: eval decodes their values.
+    eval "${lines}"
+}
+
 # For the setup preview: the lines of snapshots.conf that snap_conf_set
 # rewrites in quotes (an older CST wrote them with printf %q).
 snap_conf_plan() {
@@ -599,11 +612,9 @@ snap_list() {
 snap_status() {
     local home entry strategy rel state timer name
     local -a snaps
-    # snapshots.conf, read as btrfs-snapshot reads it (sourced: quotes,
-    # comments, the last value wins).
+    # snapshots.conf, read as btrfs-snapshot reads it (snap_conf_read).
     local NAS_ENABLED=0 NAS_HOST="" NAS_PORT="" NAS_USER="" NAS_PATH="" SNAPSHOT_EXCLUDE_CACHES=""
-    # shellcheck source=/dev/null
-    [[ -r "${SNAP_CONF}" ]] && . "${SNAP_CONF}"
+    snap_conf_read NAS_ENABLED NAS_HOST NAS_PORT NAS_USER NAS_PATH SNAPSHOT_EXCLUDE_CACHES
     home="$(snap_home)"
     timer="$(systemctl is-enabled btrfs-snapshot.timer 2>/dev/null)" || timer=off
     echo "hourly snapshots: ${timer}, keep ${SNAP_PRESERVE_TEXT} (btrfs-snapshot-core)"
@@ -799,8 +810,7 @@ snap_nas() {
     local action="${1:-status}" host user port path key restic_now=0 repo_exists=0
     [[ $# -gt 0 ]] && shift
     local NAS_ENABLED=0 NAS_HOST="" NAS_PORT="" NAS_USER="" NAS_PATH="" NAS_RESTIC_HOST="" HOME_DIR=""
-    # shellcheck source=/dev/null
-    [[ -r "${SNAP_CONF}" ]] && . "${SNAP_CONF}"
+    snap_conf_read NAS_ENABLED NAS_HOST NAS_PORT NAS_USER NAS_PATH NAS_RESTIC_HOST HOME_DIR
     host="${NAS_HOST:-diskstation.local}"; port="${NAS_PORT:-2204}"; user="${NAS_USER:-${target_user}}"; path="${NAS_PATH}"
     key="${SNAP_NAS_KEY}"
     SNAP_REPO_PATH="${path}"

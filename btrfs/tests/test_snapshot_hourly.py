@@ -14,10 +14,12 @@ Run with: invowk cmd test module btrfs.tests.test_snapshot_hourly
 import json
 import os
 import shutil
+import subprocess
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import GIB, USAGE, RuntimeTest, log
+from btrfs.tests.snapshot_fakes import GIB, SCRIPT, UMASK, USAGE, RuntimeTest, log, read
+from tests.test_module_routing import userns_root
 
 HOME_POLICY = "72h 7d 4w 3m"
 WS_POLICY = "48h 7d"
@@ -57,6 +59,31 @@ class CommandLineTest(Base):
         r = self.run_prog("configure", "extra")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertEqual(self.calls_but_hostname(), [])
+
+    def test_as_root_the_test_seam_is_ignored(self) -> None:
+        # CST_SNAPSHOT_ROOT moves every file of the program: a run as root never obeys it. In a user
+        # namespace where this user is root, it reads the real /etc and /var/lib (only reads; the
+        # state folder cannot be created there) and stops at the usage error; the scratch root stays
+        # untouched. Before, a root run with the variable set read its settings, state and lock there.
+        if not userns_root():
+            self.skipTest("needs an unprivileged user namespace (unshare -r); tier 1 test_108 runs it as root")
+        unshare = shutil.which("unshare", path="/usr/bin:/bin") or "unshare"
+        r = subprocess.run(
+            [unshare, "-r", "bash", SCRIPT, "bogus"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.env,
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertTrue(r.stderr.endswith(USAGE), r.stderr)
+        self.assertFalse(os.path.exists(self.state))
+        # As this user, the same run uses the seam.
+        self.assertEqual(self.run_prog("bogus").returncode, 2)
+        self.assertTrue(os.path.isdir(self.state))
 
     def test_every_command_creates_the_state_folder_first(self) -> None:
         shutil.rmtree(self.state, ignore_errors=True)
@@ -111,12 +138,63 @@ class SettingsTest(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.core_calls()[0][-2:], ["--caches-skip", "home=u v/.local/share/containers"])
 
-    def test_the_settings_file_is_sourced_by_bash(self) -> None:
-        # Not parsed: bash runs it, as root. A line that is a command runs.
+    def test_the_settings_file_is_read_as_data_never_run(self) -> None:
+        # Only plain assignments of its settings are applied (as cst_core's parse_snapshots_conf
+        # reads them; test_snapshot_settings.py checks the two agree on a corpus). A line that is a
+        # command, or a value bash would expand, gets a warning on stderr and is ignored; a key that
+        # is no setting (STATE) never moves anything; "export" in front is dropped. Before, bash
+        # sourced the file as root: every line ran.
         marker = os.path.join(self.tmp, "ran")
-        self.conf(f"touch {marker}\n")
-        self.run_prog("configure")
-        self.assertTrue(os.path.exists(marker))
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        self.conf(
+            f"touch {marker}\nHOME_PRESERVE='24h 2d'  # kept\nNAS_PATH=$(touch {marker})\n"
+            f"STATE='{elsewhere}'\nexport WS_PRESERVE='12h'\nSCRUB_LIMIT='100M'\n"
+        )
+        r = self.run_prog("list")
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stderr)),
+            (
+                0,
+                [
+                    log(4, f"{conf} line 4: touch {marker}: not a KEY=VALUE line; ignored"),
+                    log(
+                        4,
+                        f"{conf} line 6: NAS_PATH=$(touch {marker}): $, ` or \\ outside single quotes: bash would "
+                        "expand it (use single quotes); ignored",
+                    ),
+                ],
+            ),
+        )
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(elsewhere))
+        call = self.core_calls()[0]
+        self.assertEqual(call[call.index("--state-dir") + 1], self.state)
+        self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:24h 2d"])
+        self.assertEqual(self.call_envs("btrfs-snapshot-core"), [{}])
+
+    def test_a_line_with_a_carriage_return_is_ignored(self) -> None:
+        # A Windows line end: bash would keep the \r in the value, so the line is warned on and
+        # ignored, and the line after it still counts (found by the parity harness of the port: a
+        # reader that turns \r\n into \n applied it).
+        self.conf("HOME_PRESERVE='24h'\r\nWS_PRESERVE='12h'\n")
+        r = self.run_prog("list")
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stderr)),
+            (
+                0,
+                [
+                    log(
+                        4,
+                        f"{conf} line 4: HOME_PRESERVE='24h': a carriage return (Windows line end): bash keeps it "
+                        "in the value; ignored",
+                    )
+                ],
+            ),
+        )
+        call = self.core_calls()[0]
+        self.assertEqual(call[-2:], ["--source", f"home={self.top}/home:72h 7d 4w 3m"])
 
     def test_without_a_settings_file_it_is_not_set_up(self) -> None:
         os.remove(self.path("etc/btrfs-setup/snapshots.conf"))
@@ -378,6 +456,117 @@ class HourlyTest(Base):
         self.assertEqual(self.calls_but_hostname(), [])
 
 
+class StateRecordTest(Base):
+    def test_last_ok_is_replaced_whole_never_rewritten_in_place(self) -> None:
+        # The records (last-ok, nas-last-ok, nas-repo-id, ...) were truncated and rewritten in place:
+        # a power loss or ENOSPC in between left an empty file (health-check then stopped checking
+        # staleness; an empty nas-repo-id starts every NAS record over). Now a new file is renamed
+        # over the old one: another link to the old file keeps the old content.
+        last_ok = self.write(self.state_file("last-ok"), "1\n")
+        kept = os.path.join(self.tmp, "old-last-ok")
+        os.link(last_ok, kept)
+        self.core(snapshot={})
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertNotEqual(self.read_state("last-ok"), "1\n")
+        self.assertEqual(read(kept), "1\n")
+        self.assertEqual(self.mode(last_ok), 0o666 & ~UMASK)
+
+
+class ClosedStdoutTest(Base):
+    """systemd runs the service with SIGPIPE ignored: when stdout is gone (journald restarted), a
+    line that cannot be written fails with EPIPE and is dropped without a word, and the run goes on
+    (bash's echo and printf did so): the snapshot is still taken and last-ok written."""
+
+    def closed_run(self, *, stderr_too: bool = False) -> subprocess.CompletedProcess[str]:
+        """hourly with stdout (and stderr, with stderr_too) a pipe nobody reads, SIGPIPE ignored."""
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            return subprocess.run(
+                ["bash", SCRIPT, "hourly"],
+                stdout=write_end,
+                stderr=write_end if stderr_too else subprocess.PIPE,
+                text=True,
+                env=self.env,
+                cwd=self.tmp,
+                stdin=subprocess.DEVNULL,
+                restore_signals=False,  # SIGPIPE stays ignored, as this runner has it
+                timeout=120,
+                check=False,
+            )
+        finally:
+            os.close(write_end)
+
+    def test_hourly_goes_on_without_its_stdout(self) -> None:
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n<6>btrfs-snapshot: summary\n"})
+        self.write(self.state_file("alerted-paused"), "")
+        r = self.closed_run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertEqual(r.stderr, "")
+
+    def test_the_commands_it_runs_keep_sigpipe_ignored(self) -> None:
+        # The engine step (bash) logs a line: an entry of drop-pending that is no old tree is
+        # forgotten. Started with SIGPIPE at its default (what subprocess gives a child unless told
+        # otherwise), it died of SIGPIPE on that line, and hourly failed without a snapshot.
+        other = os.path.join(self.home, "not-an-old-tree")
+        os.makedirs(other)
+        self.write(self.state_file("drop-pending"), f"{other}\n")
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n"})
+        r = self.closed_run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+        self.assertEqual(self.read_state("drop-pending"), "")
+        self.assertTrue(os.path.isdir(other))
+
+    def test_hourly_goes_on_without_its_stdout_and_stderr(self) -> None:
+        # One journal stream under systemd: stdout and stderr go together. A settings line that gets
+        # a warning (on stderr, from the runtime and from the engine step) stopped the runtime.
+        self.conf("NAS_PATH=$(echo x)\n")
+        self.core(snapshot={"out": "<6>btrfs-snapshot: home: created\n"})
+        r = self.closed_run(stderr_too=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertTrue(self.read_state("last-ok").strip().isdigit())
+
+
+class LockLifetimeTest(Base):
+    """The lock of a run (fd 9 on /run/btrfs-snapshot.lock) is inherited by everything the run
+    starts: when the run itself is killed, a child still working (here btrfs-snapshot-core, in the
+    middle of its snapshot) keeps the lock, and a second run waits for it to end (DESIGN 8.1: the
+    port must keep that)."""
+
+    def test_a_killed_run_with_a_child_still_working_keeps_the_lock(self) -> None:
+        self.core(snapshot=[{"sleep": 4}, {}])
+        p = self.start_prog("hourly")
+        for _ in range(200):
+            if self.core_calls():
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the run never reached btrfs-snapshot-core")
+        p.kill()  # the run's own process only: its child keeps working
+        p.wait(timeout=30)
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(
+            (r.returncode, r.stdout), (0, log(5, "another conversion/snapshot run is active; skipped") + "\n")
+        )
+        self.assertEqual(self.core_calls(), [])
+        # Once the child has ended, the next run goes ahead.
+        for _ in range(200):
+            r = self.run_prog("hourly")
+            if self.core_calls():
+                break
+            time.sleep(0.1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+
+
 class BlockedTest(Base):
     """Exit 4 of the core: a safety check blocked a creation or deletion."""
 
@@ -389,6 +578,26 @@ class BlockedTest(Base):
         self.assertTrue(os.path.exists(self.state_file("alerted-blocked")))
         (alert,) = self.notified()
         return alert
+
+    def test_bytes_that_are_not_utf_8_reach_the_journal_and_the_alert_as_they_were(self) -> None:
+        # A home folder with a Latin-1 name: the core's lines and CORE_REASON name it with the byte
+        # 0xE9. They were decoded with U+FFFD on the way, so the journal and the alert named a path
+        # that does not exist; bash passed the bytes on.
+        reason = "home: not deleting /home/u/caf\udce9.20261101T0000: blocked"
+        self.core(snapshot={"out": log(4, reason) + "\n", "rc": 4})
+        r = subprocess.run(
+            ["bash", SCRIPT, "hourly"],
+            capture_output=True,
+            env=self.env,
+            cwd=self.tmp,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertIn(b"<4>btrfs-snapshot: home: not deleting /home/u/caf\xe9.20261101T0000: blocked\n", r.stdout)
+        (alert,) = self.notified()
+        self.assertTrue(str(alert[5]).startswith("home: not deleting /home/u/caf\udce9.20261101T0000: blocked - "))
 
     def test_circuit_breaker(self) -> None:
         conf = self.path("etc/btrfs-setup/snapshots.conf")
@@ -478,7 +687,33 @@ class AlertStampTest(Base):
         _, sent = self.paused_run()
         self.assertEqual(len(sent), 1)
 
-    def test_without_btrfs_notify_only_the_journal_line(self) -> None:
+    def test_an_alert_btrfs_notify_cannot_take_is_kept_for_cst_doctor(self) -> None:
+        # btrfs-notify missing (btrfs:alerts half removed) or failing: the alert went only to the
+        # journal. cst_core's Notifier keeps it in the pending alerts folder (cst doctor and the next
+        # login show it) and says so; the once-a-day stamp stays unset, so the next run tries again.
+        pending = self.path("var/lib/cst-alerts/pending")
+        for name, setup, why in (
+            ("failing", lambda: self.machine(notify_rc=1), "exited 1"),
+            ("missing", lambda: os.remove(self.path("usr/local/sbin/btrfs-notify")), "is not installed"),
+        ):
+            with self.subTest(name):
+                shutil.rmtree(pending, ignore_errors=True)
+                setup()
+                out, _ = self.paused_run()
+                (kept,) = os.listdir(pending)
+                path = os.path.join(pending, kept)
+                text = read(path)
+                self.assertTrue(text.startswith("cst-alert 1\nurgency=normal\napp=btrfs-snapshot\n"), text)
+                self.assertIn("\ntitle=Snapshots paused: low space\n", text)
+                notify = self.path("usr/local/sbin/btrfs-notify")
+                self.assertIn(
+                    log(3, f"alert not delivered ({notify} {why}): Snapshots paused: low space; kept in {path} "
+                        "(cst doctor shows it)"),
+                    out.splitlines(),
+                )  # fmt: skip
+                self.assertFalse(os.path.exists(self.state_file("alerted-paused")))
+
+    def test_without_btrfs_notify_nothing_is_sent_and_no_stamp_is_set(self) -> None:
         os.remove(self.path("usr/local/sbin/btrfs-notify"))
         out, sent = self.paused_run()
         self.assertEqual(sent, [])
@@ -634,11 +869,38 @@ class WaitingTest(Base):
         self.assertEqual(sent, [])
         self.a_day_ago("pending-since")
         _, sent = self.wait_run("pending-since")
+        # The alert names the mount that keeps it (before, only the tree).
         self.assertEqual(
             sent,
-            [self.alert("normal", "Snapshots: waiting for old trees to be deleted", f"For over a day: {old} ")],
+            [
+                self.alert(
+                    "normal",
+                    "Snapshots: waiting for old trees to be deleted",
+                    f"For over a day: {old} - mounted below them, so kept until unmounted: {old}/m ",
+                )
+            ],
         )
         self.assertTrue(os.path.isdir(old))
+
+    def test_the_mount_table_is_read_once_for_every_old_tree(self) -> None:
+        # The hourly run asked findmnt once per drop-pending entry; one reading serves them all (the
+        # engine step still asks once per tree it keeps, as before).
+        olds = [os.path.join(self.home, f".c{i}.pre-subvol-20261118T100000") for i in range(3)]
+        for old in olds:
+            os.makedirs(os.path.join(old, "m"))
+        self.machine(mounts=["/", *(f"{old}/m" for old in olds)])
+        self.write(self.state_file("drop-pending"), "".join(f"{old}\n" for old in olds))
+        self.wait_run("pending-since")
+        self.a_day_ago("pending-since")
+        self.forget_calls()
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        held = " ".join(f"{old}/m" for old in olds)
+        self.assertEqual(
+            [str(a[5]) for a in self.notified()],
+            [f"For over a day: {' '.join(olds)} - mounted below them, so kept until unmounted: {held} "],
+        )
+        self.assertEqual(len(self.calls("findmnt")), len(olds) + 1, self.calls("findmnt"))
 
     def test_conversions_waiting_for_the_next_boot(self) -> None:
         ws = os.path.join(self.home, "Workspace")
@@ -763,10 +1025,22 @@ class PurgeTest(Base):
         r = self.run_prog("purge")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "No snapshot directory: nothing to delete.\n", ""))
         self.assertEqual(self.core_calls(), [])
+
+    def test_not_set_up_deletes_nothing_and_fails(self) -> None:
+        # No HOME_DIR: nothing can be told apart as ours. Exit 1 with a journal line, as for a list
+        # that cannot be read, so disable --purge does not report success. Before: "No snapshot
+        # directory: nothing to delete." and exit 0, with the snapshots still there.
+        self.make("home.20261101T0000")
         self.conf(HOME_DIR="")
-        os.makedirs(self.snapdir)
         r = self.run_prog("purge")
-        self.assertEqual((r.returncode, r.stdout), (0, "No snapshot directory: nothing to delete.\n"))
+        conf = self.path("etc/btrfs-setup/snapshots.conf")
+        self.assertEqual(
+            (r.returncode, self.lines(r.stdout), r.stderr),
+            (1, [log(3, f"purge: not set up (no HOME_DIR in {conf}); nothing deleted")], ""),
+        )
+        self.assertEqual(self.core_calls(), [])
+        self.assertEqual(self.calls("btrfs"), [])
+        self.assertEqual(os.listdir(self.snapdir), ["home.20261101T0000"])
 
     def test_deletes_in_batches_of_ten_and_keeps_the_pinned_one(self) -> None:
         names = [f"home.202611{d:02d}T0000" for d in range(1, 13)]

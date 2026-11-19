@@ -107,7 +107,9 @@ ALERTING_UNITS = tuple(
     )
 )
 # Those whose programs send through cst_core's notify adapter, which keeps an alert btrfs-notify cannot take.
-KEEPING_UNITS = frozenset({"btrfs-bulk-boot.service", "docker-volumes-nocow.service"})
+# btrfs-snapshot.service is not among them: its runtime's alerts are kept, but those of its conversion step
+# (the bash engine: "Subvolume conversion: manual check needed") are not.
+KEEPING_UNITS = frozenset({"btrfs-bulk-boot.service", "btrfs-snapshot-nas.service", "docker-volumes-nocow.service"})
 # GiB: the health check's own levels, when neither the installed copy nor the checkout's can be read.
 UNALLOC_DEFAULTS = (UNALLOC_MIN_GIB, UNALLOC_CRIT_GIB)
 FS_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

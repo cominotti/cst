@@ -376,15 +376,16 @@ class InstallService:
             self._update(record, lambda rec: without_files(rec, list(dests)))
 
     def remove(self, places: Sequence[Placement]) -> Iterator[str]:
-        """Remove each file (a link itself) and its line in the record; `removed:   PATH` for each that
-        was there. Works without a record (an install from before it): the files are the manifest's.
+        """Remove each file (a link itself) and its line in the record, in the reverse of the order given
+        (install writes in that order: what uses an earlier file goes before it); `removed:   PATH` for
+        each that was there. Works without a record (an install from before it): the files are the manifest's.
         A program with a SettingsStep that is there runs it first, while its settings file is missing."""
         yield from self._settings_steps(
             [p for p in places if (p.src or "") in SETTINGS_STEPS and self._target.current(p.path) is not None]
         )
         gone: list[Placement] = []
         try:
-            for p in places:
+            for p in reversed(places):
                 existed = self._target.remove(p.path)
                 gone.append(p)
                 if existed:

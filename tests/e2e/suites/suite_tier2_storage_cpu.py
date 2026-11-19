@@ -968,8 +968,8 @@ EOF
             dev0="$(head -n1 /run/e2e-loop-devs)"
             mount -o "$opts" "$dev0" /var/mnt/btrfs-top
             findmnt -rn -M /var/mnt/btrfs-top >/dev/null
-            # The installer writes btrfs-snapshot-core as the zipapp a real install makes.
-            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
+            # The installer writes btrfs-snapshot-core and btrfs-snapshot-runtime as the zipapps a real install makes.
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
 
             /usr/local/sbin/btrfs-snapshot convert
             btrfs subvolume show /var/home/tester/Workspace >/dev/null
@@ -1029,7 +1029,7 @@ EOF
             fi
             trap 'umount "$TOP" 2>/dev/null || true' EXIT
             # $RT and $CORE are the manifest's dests; the core goes in as its zipapp.
-            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core
             # test_03 made these subvolumes; ~/Workspace is a source of its own.
             btrfs subvolume show "$WS" >/dev/null
             btrfs subvolume show "$H/.cache" >/dev/null
@@ -1624,8 +1624,8 @@ EOF
             printf '%s\n' HOME_DIR=/var/home/tester HOME_MOUNT=/var/home HOME_SUBVOL=home "TOP=$TOP" \
                 SNAP_DIR_NAME=snapshots SKIP_AT_OR_BELOW_GIB=0 RESUME_ABOVE_GIB=0 EMERGENCY_AT_OR_BELOW_GIB=0 \
                 NAS_ENABLED=0 >"$CONF"
-            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot \
-                btrfs/btrfs-snapshot-core btrfs/btrfs-notify btrfs/units/btrfs-snapshot.service \
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot-runtime \
+                btrfs/btrfs-snapshot btrfs/btrfs-snapshot-core btrfs/btrfs-notify btrfs/units/btrfs-snapshot.service \
                 btrfs/units/btrfs-snapshot.timer btrfs/units/btrfs-snapshot-nas.service \
                 btrfs/units/btrfs-snapshot-nas.timer btrfs/units/btrfs-subvol-convert.service >/dev/null
             /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install --set "UUID=$(cat /run/e2e-loop-uuid)" \

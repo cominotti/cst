@@ -116,7 +116,8 @@ def version_of(data: object, field: str) -> int | None:
 #   installed together (btrfs:core).
 # bulk-journal: a move of ~/Bulk not finished yet: `cst btrfs bulk apply`
 #   (the checkout) writes it, btrfs-bulk-boot.service (the installed copy)
-#   finishes or undoes it at the next boot.
+#   finishes or undoes it at the next boot. btrfs-snapshot's hourly run waits
+#   while one is there (whatever its version) that is not "bulk_only".
 # docker-gc-state: the last use of each image, written by the installed
 #   recorder and read by the weekly run and `cst btrfs docker-gc status`.
 # docker-gc-last-run: what the last weekly run removed (status shows it).
@@ -131,7 +132,7 @@ _TABLE: Final = r"""
 alert-spool        | /var/lib/cst-alerts/pending/*.alert        | 1 | btrfs/btrfs-notify cst_core/adapters/notify.py | btrfs/pending_alerts/domain.py doctor/application/alerts.py | first line "cst-alert 1"
 stall-records      | /var/log/btrfs-stall-monitor/stall-*.jsonl | 8 | btrfs/stall_monitord/adapters/monitor.py | btrfs/stall_report/domain/window.py                | "v" of each record
 stall-queue        | /run/btrfs-stall-monitor/alert-*.txt       | 0 | btrfs/stall_monitord/adapters/monitor.py | btrfs/btrfs-notify                                 | none (plain text, one boot)
-bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py                       | "v" (none: 0)
+bulk-journal       | /var/lib/btrfs-bulk/journal-*.json         | 1 | btrfs/bulk/adapters/state.py     | btrfs/bulk/adapters/state.py btrfs/snapshot_runtime/adapters/machine.py | "v" (none: 0)
 docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters/backup.py            | vm/adapters/backup.py doctor/application/vm.py     | "version"

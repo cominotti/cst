@@ -27,6 +27,14 @@ def running_archive(main_file: str) -> str | None:
     return parent if os.path.isfile(parent) and zipfile.is_zipfile(parent) else None
 
 
+def beside_program(name: str, started_as: str) -> str:
+    """The program NAME in the folder of started_as (the path this program was run by, sys.argv[0]),
+    not resolved: a copy in any folder pairs with the neighbour it was copied with (a shell front
+    finds it the same way, by $(dirname "${BASH_SOURCE[0]}")), and errors name it as the shell
+    does. "" when started_as is empty."""
+    return os.path.join(os.path.dirname(os.path.abspath(started_as)), name) if started_as else ""
+
+
 def checkout_root(main_file: str) -> str | None:
     """The CST checkout an entry runs from (the folder above its own), or None when installed."""
     if running_archive(main_file) is not None:
@@ -93,6 +101,13 @@ def lc_ctype_handover() -> str:
     "" when unset, "=VALUE" when set)."""
     value = os.environ.get("LC_CTYPE")
     return "CST_LC_CTYPE=" + ("" if value is None else "=" + value)
+
+
+def restore_lc_ctype() -> None:
+    """Only the LC_CTYPE part of undo_python_start: the caller's LC_CTYPE back from CST_LC_CTYPE
+    (which goes), signals left as they are. For a program with cleanup (SIGPIPE stays ignored, so a
+    closed pipe cannot cut it short) that a shell front hands LC_CTYPE over to."""
+    _restore_lc_ctype(os.environ.pop("CST_LC_CTYPE", None))
 
 
 def undo_python_start() -> None:

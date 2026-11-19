@@ -96,6 +96,7 @@ INSTALL_MANIFEST: Final[tuple[InstallEntry, ...]] = parse_manifest(
 btrfs/btrfs-bulk                                    /usr/local/sbin/btrfs-bulk                                    755  root  python-entry  root   btrfs:snapshots
 btrfs/btrfs-health-check                            /usr/local/sbin/btrfs-health-check                            755  root  python-entry  root   btrfs:core
 btrfs/btrfs-snapshot-core                           /usr/local/sbin/btrfs-snapshot-core                           755  root  python-entry  root   btrfs:snapshots
+btrfs/btrfs-snapshot-runtime                        /usr/local/sbin/btrfs-snapshot-runtime                        755  root  python-entry  root   btrfs:snapshots
 btrfs/btrfs-stall-monitord                          /usr/local/sbin/btrfs-stall-monitord                          755  root  python-entry  root   btrfs:core
 btrfs/btrfs-stall-report                            /usr/local/bin/btrfs-stall-report                             755  root  python-entry  user   btrfs:core
 btrfs/cst-pending-alerts                            /usr/local/bin/cst-pending-alerts                             755  root  python-entry  user   btrfs:alerts

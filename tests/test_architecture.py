@@ -135,6 +135,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/health_check/cli.py": 32,
     "btrfs/pending_alerts/cli.py": 80,
     "btrfs/snapshot/cli.py": 147,
+    "btrfs/snapshot_runtime/cli.py": 13,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 152,
     "cpu/cli.py": 146,

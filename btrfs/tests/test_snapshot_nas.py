@@ -21,7 +21,7 @@ import signal
 import time
 import unittest
 
-from btrfs.tests.snapshot_fakes import RuntimeTest, log, read
+from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
 
 ALIAS = "btrfs-setup-nas"
 REPO_ID = "ab" * 32
@@ -297,6 +297,26 @@ class BackupTest(Base):
         self.assertEqual(self.read_state("nas-done-home"), f"{SNAP} {REPO_ID}\n")
         self.assertFalse(os.path.exists(self.state_file("nas-check-failures")))
 
+    def test_records_without_a_repository_id_start_over_with_a_line(self) -> None:
+        # nas-repo-id gone (removed by hand, or a run killed in between) while records stay: they
+        # cannot be told apart from another repository's, so they go, and now the journal says so.
+        # Before, they went without a word. A first run (no records) says nothing (test_a_whole_run).
+        self.write(self.state_file("nas-done-home"), f"{SNAP} {REPO_ID}\n")
+        self.days_ago("nas-last-prune", 1)
+        rc, lines, _ = self.nas()
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            lines[0],
+            log(
+                5,
+                f"NAS: {self.state}/nas-repo-id is missing, so the records of the NAS backup are not known to be "
+                "this repository's; they start over",
+            ),
+        )
+        self.assertIn(self.backup_args(), self.restic_calls())
+        self.assertIn("--prune", next(c for c in self.restic_calls() if c[0] == "forget"))
+        self.assertEqual(self.read_state("nas-repo-id"), REPO_ID + "\n")
+
     def test_a_repository_id_that_cannot_be_read_never_counts_a_record(self) -> None:
         self.write(self.state_file("nas-done-home"), f"{SNAP} \n")
         self.restic(cat={"out": "{}\n"})
@@ -377,6 +397,25 @@ class BackupTest(Base):
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="soon")
         rc, lines, _ = self.nas()
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
+
+    def test_a_time_budget_bash_arithmetic_refuses_stops_the_run(self) -> None:
+        # 08 is no number for bash (a leading 0 is octal): its run stopped there with exit 1, after
+        # its exit trap had unmounted (found by the parity harness of the port; 010 is 8 seconds).
+        for value in ("08", "08m"):
+            with self.subTest(value):
+                self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT=value)
+                rc, lines, _ = self.nas()
+                self.assertEqual((rc, lines), (1, []))
+                self.assertEqual(self.calls_but_hostname(), [])
+        self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="010")
+        rc, lines, _ = self.nas()
+        self.assertEqual(
+            lines[-2:],
+            [
+                log(4, "NAS: home: no time left in this run (NAS_TIMEOUT=010)"),
+                log(4, "NAS backup failed for 1 of 1 source(s); will retry next run"),
+            ],
+        )
 
     def test_the_hourly_run_holding_the_lock(self) -> None:
         with self.hold_lock():
@@ -627,6 +666,40 @@ class MaintenanceTest(Base):
                     self.assertIn(log(4, line), lines)
                 self.assertEqual([a[4] for a in self.notified()], [alert] if alert else [])
                 self.assertFalse(os.path.exists(self.state_file("nas-last-check")))
+
+    def test_a_capture_file_that_cannot_be_written_does_not_stop_the_run(self) -> None:
+        # The check's output goes to a scratch file too (bash: tee -a). A file that cannot be opened
+        # or written (a full /tmp; here mktemp names a folder) is said on stderr, as tee says it, and
+        # the run goes on: the check is judged, the summary and the "ok" line follow. Before, the
+        # OSError of the relay ended the run with a traceback (exit 1).
+        folder = os.path.join(self.tmp, "tmpdir", "capture")
+        self.write(os.path.join(self.bin, "mktemp"), f"#!/bin/sh\nmkdir -p '{folder}' && echo '{folder}'\n")
+        os.chmod(os.path.join(self.bin, "mktemp"), 0o755)
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"tee: {folder}: Is a directory", err.splitlines())
+        self.assertNotIn("Traceback", err)
+        self.assertIn(log(4, "restic: Fatal: connection lost"), lines)
+        self.assertIn(
+            log(4, "NAS: restic check failed (rc=1) without naming damaged data (connection lost?); retried next run"),
+            lines,
+        )
+        self.assertEqual(self.read_state("nas-check-failures"), "1\n")
+        self.assertTrue(any(ln.startswith(log(5, "NAS backup ok: ")) for ln in lines), lines)
+
+    def test_a_failure_count_that_names_a_word_stops_the_run_and_says_why(self) -> None:
+        # bash's $(( abc + 1 )) under set -u stopped the run; the runtime stops it too, and now
+        # says which file holds what (before, exit 1 without a line).
+        self.known_repository()
+        self.write(self.state_file("nas-check-failures"), "abc\n")
+        self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})
+        rc, _, err = self.nas()
+        self.assertEqual(rc, 1)
+        failures = self.state_file("nas-check-failures")
+        self.assertIn(f"{SCRIPT}: {failures} holds 'abc': not a number", err.splitlines())
+        self.assertEqual(self.read_state("nas-check-failures"), "abc\n")
+        self.assertFalse(os.path.exists(self.path("run/btrfs-snapshot/pinned")))
 
     def test_a_check_that_keeps_failing_alerts_on_the_third_run(self) -> None:
         self.restic(check={"rc": 1, "out": "Fatal: connection lost\n"})

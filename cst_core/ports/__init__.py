@@ -18,13 +18,16 @@ type CommandFault = Literal["missing", "unstartable", "timeout"]
 type StdinMode = Literal["devnull", "inherit"]
 
 # Its stdout and stderr: both captured; stderr merged into the captured
-# stdout; stdout captured and stderr discarded; or both left on ours (the
-# result's stdout and stderr are then empty).
-type OutputMode = Literal["capture", "merge", "stdout", "inherit"]
+# stdout; stdout captured and stderr discarded; stdout captured and stderr
+# left on ours ("stdout-show-stderr": a shell's $(cmd)); or both left on ours
+# (the result's stdout and stderr are then empty).
+type OutputMode = Literal["capture", "merge", "stdout", "stdout-show-stderr", "inherit"]
 
 # Captured output that is not UTF-8: U+FFFD for the bad bytes (every CST
-# caller), or a UnicodeDecodeError out of run().
-type DecodeErrors = Literal["replace", "strict"]
+# caller), a UnicodeDecodeError out of run(), or the bad bytes kept as lone
+# surrogates ("surrogateescape": written back with surrogateescape, or passed
+# in an argv, they are the bytes the command printed, as a shell passes them on).
+type DecodeErrors = Literal["replace", "strict", "surrogateescape"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +98,13 @@ class CommandRunnerPort(Protocol):
       flatpak-spawn process, not on the host command (a timeout stops
       flatpak-spawn; the host command may run on);
     - stdin, output, decode_errors: see StdinMode, OutputMode, DecodeErrors;
-    - nice: added to the command's niceness before it starts.
+    - nice: added to the command's niceness before it starts;
+    - pass_fds: open file descriptors the command gets as they are (the
+      others are closed): a lock this process holds, handed on;
+    - on_line: called with each line of the captured stdout (output
+      "merge", "stdout" or "stdout-show-stderr"; without its newline) as soon as the
+      command writes it, for a caller that passes the lines on while the
+      command runs; not with timeout (use timeout(1) then) or input_text.
     """
 
     def run(
@@ -116,6 +125,8 @@ class CommandRunnerPort(Protocol):
         output: OutputMode = "capture",
         decode_errors: DecodeErrors = "replace",
         nice: int | None = None,
+        pass_fds: Sequence[int] = (),
+        on_line: Callable[[str], None] | None = None,
     ) -> CommandResult: ...
 
 

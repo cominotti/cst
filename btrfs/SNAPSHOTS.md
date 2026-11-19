@@ -1309,7 +1309,11 @@ Rules the script follows about the password:
 
 1. Checks the NAS is reachable. If not, it skips the run. You get an alert
    only when the last good backup is `NAS_STALE_DAYS` (7) days old or more.
-2. Opens the repository with the password.
+2. Opens the repository with the password. What
+   `/var/lib/btrfs-snapshot` records about it (which snapshots it has, the
+   last prune and check) belongs to that repository's id
+   (`nas-repo-id`): for another repository, or when that file is missing,
+   the records start over, and the journal says so.
 3. Takes the **newest local snapshot** of `home` and of `Workspace`, **pins**
    them (a pin is a mark that stops the hourly run from deleting them during
    the upload), and mounts them read-only at fixed paths:
@@ -1426,6 +1430,11 @@ desktop user), with these rules:
 - If nobody is logged in to the desktop when it happens (for example at boot,
   or at night), the alert is **kept and shown at your next login**, with the
   time it happened. Details: [README.md, section 4.9](README.md#49-desktop-alerts-btrfs-notify).
+- If `btrfs-notify` itself is missing, fails or does not answer within 60
+  seconds, the hourly and NAS runs keep the alert in the same place
+  (`/var/lib/cst-alerts/pending`), where `cst doctor` and your next login
+  show it, and say so in the journal; the run tries to send it again the next
+  time.
 - This also holds for `Subvolume conversion at boot gave up`: it happens at
   boot, before any login, and you see it when you log in. It is also in the
   journal (`journalctl -u btrfs-subvol-convert`) and on the boot screen. Check
@@ -1723,7 +1732,10 @@ if you want it converted; every run checks again.
 Each run deletes for at most 15 minutes per tree. Look at
 `journalctl -u btrfs-snapshot`. The list is in
 `/var/lib/btrfs-snapshot/drop-pending`. A tree with something mounted inside
-it is not deleted: unmount that first.
+it is not deleted: unmount that first (the daily alert names the mount). An
+entry there that is not an old tree (a path not named `*.pre-subvol-*`, a
+file or a link) is never deleted: the next run takes it off the list, with
+a `... is not an old tree ...; forgotten, not deleted` line in the journal.
 
 **Alert `Subvolume conversion: manual check needed`.**
 Do not delete anything. The message names the folder that holds your latest
@@ -1804,7 +1816,7 @@ After `snapshots setup`:
 
 | Path | What |
 |------|------|
-| `/usr/local/sbin/btrfs-snapshot`, `btrfs-snapshot-core`, `btrfs-notify`, `btrfs-bulk` | the programs |
+| `/usr/local/sbin/btrfs-snapshot`, `btrfs-snapshot-runtime`, `btrfs-snapshot-core`, `btrfs-notify`, `btrfs-bulk` | the programs ([section 15](#15-safety-rules-of-btrfs-snapshot-core): who does what) |
 | `/usr/local/bin/cst-pending-alerts`, `/etc/systemd/user/cst-pending-alerts.service`, `/var/lib/cst-alerts/` | alerts raised while nobody was logged in, shown at the next login ([README.md, section 4.9](README.md#49-desktop-alerts-btrfs-notify)); shared with the monitoring setup |
 | `/etc/systemd/system/btrfs-snapshot.{service,timer}` | hourly snapshots |
 | `/etc/systemd/system/btrfs-snapshot-nas.{service,timer}` | NAS backup (enabled only by `nas setup`) |
@@ -1854,8 +1866,8 @@ After `snapshots nas setup`, in addition:
 
 `setup`, `nas setup`, `nas disable` and the other commands that set a key
 write its value in single quotes (`NAS_PATH='/volume1/backup'`), or in double
-quotes when the value holds a `'`. `btrfs-snapshot` (bash, which sources the
-file) and CST's Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
+quotes when the value holds a `'`. `btrfs-snapshot` (bash and its Python runtime, which read the
+file as data, below) and CST's other Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
 is written only when its content changes; a mode changed by hand goes back
@@ -1863,7 +1875,22 @@ to 0644 (everyone may read it).
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
 `K=$'a\tb'`). `cst doctor`, `cst vm` and the health check read those lines as bash does, so
-nothing needs to be done. The next command that writes the file (`setup`
+nothing needs to be done.
+
+`btrfs-snapshot` reads the file as data too: it applies only the lines that
+are plain assignments of its own settings (the keys of section 5 and 16 and
+the NAS keys), in the forms above, and a `# comment` after a value; an
+`export` in front is dropped. A line that is anything else (a command, a
+value with `$`, a backtick or a blank outside quotes) is never run: it gets
+a warning on stderr (`... snapshots.conf line N: TEXT: REASON; ignored`, in
+the journal of the unit) and the snapshot runs without it. A line for a key
+that is not one of its settings (`SCRUB_LIMIT`, set by `cst btrfs`) is left
+to its own reader. Before, bash sourced the whole file as root, so every line
+ran. `cst btrfs snapshots status` and `snapshots nas setup|status|enable`
+read the NAS settings the same way (through `btrfs-snapshot settings-lines`,
+the same filter), so they show and check what the units use, and run nothing
+in the file either. Its rules are those of `cst doctor`'s reader; a unit test checks the
+two on one corpus of lines. The next command that writes the file (`setup`
 lists it in its plan) puts them in quotes, with the same values. Your other
 lines stay as they are, and in any other CST settings file a backslash outside
 single quotes is still a problem.
@@ -1893,7 +1920,10 @@ many entries were left. If btrfs-snapshot-core's list of the snapshots cannot
 be read (not its JSON), nothing is deleted: `disable --purge` says
 `WARNING: deleting the snapshots failed`, and
 `/var/lib/btrfs-snapshot/core-unfinished` and `core-writable` stay, since
-they still describe the snapshots.
+they still describe the snapshots. The same when `snapshots.conf` names no
+`HOME_DIR` (setup never finished, or the line was removed): without it no
+snapshot can be told apart as CST's, so nothing is deleted and the command
+fails (`purge: not set up (no HOME_DIR in ...)`).
 
 ### Undo one Bulk link
 
@@ -2374,6 +2404,23 @@ repository (`btrfs/btrfs-snapshot-core`). It creates and deletes the
 snapshots. It uses only Python's standard library, so nothing has to be
 installed. Its main idea: **a snapshot is deleted only if every rule agrees.**
 
+The program the units, `cst btrfs` and `btrfs-bulk` run is
+`/usr/local/sbin/btrfs-snapshot`, with the same commands as always. It is a
+bash front: the conversion engine (`convert`, `convert-boot`, `convert-one`,
+`planned-left`, `busy`) stays bash for good, and the other commands
+(`hourly`, `nas`, `list`, `caches`, `prune`, `purge` and `configure`) go at once, with their command line, to
+`/usr/local/sbin/btrfs-snapshot-runtime` (Python, `btrfs/snapshot_runtime`),
+installed next to it, before it and removed after it. The runtime reads
+`snapshots.conf` with the same reader as `cst doctor` and runs
+`btrfs-snapshot-core` for every snapshot decision. The hourly run's first
+step (the planned conversions and the old trees) is the engine's: the runtime
+runs `btrfs-snapshot convert-planned --lock-held FD` under its lock. The
+commands the runtime starts get the signals bash's children got: when the
+unit starts the front with SIGPIPE ignored (systemd does), the front says so
+and the engine, the core and restic get it ignored too, so a journal stream
+that goes away is a failed write for them, not a kill; the runtime's own
+lines that cannot be written are dropped and the run goes on.
+
 ### What it considers "its own" (ownership)
 
 It looks only at entries in the snapshot folder that:
@@ -2489,11 +2536,16 @@ clock guards still apply.
   checked again (same UUID, still owned, still due, not pinned meanwhile).
   Deletions go one by one.
 - Only one run at a time: the lock file `/run/btrfs-snapshot.lock` is shared
-  by the hourly run, the conversions, `prune` and `purge`.
+  by the hourly run, the conversions, `prune` and `purge`. Everything a run
+  starts holds it too: if the run is killed while a child still works (the
+  core deleting, a clone), the next run waits for that child to end.
+  `btrfs-snapshot convert-planned --lock-held FD` (internal: the first step
+  of the hourly run, for a caller that holds the lock and hands it on as fd
+  FD) refuses to convert anything unless FD is that lock and it is held.
 - Exit codes: 0 ok, 1 error, 2 wrong usage, 3 another run holds the lock,
   4 a safety rule blocked a creation or deletion.
-- For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` reads
-  and writes every file below that folder instead of `/` (`snapshots.conf`,
+- For tests only: `CST_SNAPSHOT_ROOT`. With it set, `btrfs-snapshot` run as a
+  user reads and writes every file below that folder instead of `/` (`snapshots.conf`,
   the convert plan and flags, `/var/lib/btrfs-snapshot`, the locks, the pin
   file, `/proc`) and runs `btrfs-snapshot-core` and `btrfs-notify` from
   there; commands still come from `PATH`. The unit tests run the whole
@@ -2510,12 +2562,11 @@ clock guards still apply.
     no `Environment=`, `EnvironmentFile=` or `PassEnvironment=`). What root
     itself puts into systemd's own environment (`systemctl set-environment`)
     still reaches them; CST never does that.
-  Never run `/usr/local/sbin/btrfs-snapshot` as root with the variable set:
-  it is not a sandbox. Only the files listed above move; `TOP`, `HOME_MOUNT`
-  and the other settings still name real paths, and `btrfs`, `cp`, `rm` and
-  `mount` from `PATH` act on them. Its lock is then that folder's, not
-  `/run/btrfs-snapshot.lock`, so it does not wait for the real hourly run or
-  btrfs-bulk.
+  And a run as root ignores the variable altogether (tier 1 test_108 checks
+  it as real root): whatever hands it on, a root run reads the real settings,
+  state and lock. Before, a root run with the variable set moved them, while
+  `TOP`, `HOME_MOUNT` and `btrfs`, `cp`, `rm` and `mount` still acted on
+  the real paths, and did not wait for the real hourly run or btrfs-bulk.
 
 ---
 

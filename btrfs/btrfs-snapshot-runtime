@@ -1,0 +1,34 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: MPL-2.0
+"""btrfs-snapshot-runtime
+
+The Python side of btrfs-snapshot (CST), installed as
+/usr/local/sbin/btrfs-snapshot-runtime. The bash front,
+/usr/local/sbin/btrfs-snapshot, hands it these commands with their command
+line: hourly, nas, list [--json], caches [--json], prune, purge and
+configure (the conversion engine and busy stay in the bash). Run it through
+btrfs-snapshot, not on its own.
+"""
+
+import os.path as _cst_path
+import sys as _cst_sys
+
+# CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
+# it): from a checkout, cst_core and the module packages are in the folder above
+# this file; inside an installed zipapp, sys.path already holds the archive.
+_cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
+if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.path.insert(0, _cst_root)
+
+import sys
+
+from btrfs.snapshot_runtime import cli
+
+
+def main() -> int:
+    """Run the command btrfs-snapshot handed over."""
+    return cli.main(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

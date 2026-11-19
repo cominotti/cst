@@ -25,7 +25,7 @@ from cst_core.adapters.runner import HostExecutionContext, can_spawn_on_host, on
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.dispatch import LocalCstDispatchAdapter
 from cst_core.adapters.files import LocalFileSystemAdapter
-from cst_core.adapters.runtime import lc_ctype_handover, undo_python_start
+from cst_core.adapters.runtime import beside_program, lc_ctype_handover, restore_lc_ctype, undo_python_start
 from cst_core import wiring as core_wiring
 from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format, version_of
 from cst_core.domain.install import INSTALL_MANIFEST
@@ -661,6 +661,32 @@ class LocalCstDispatchAdapterTest(unittest.TestCase):
                 undo_python_start()
                 self.assertEqual(os.environ.get("LC_CTYPE"), after)
                 self.assertNotIn("CST_LC_CTYPE", os.environ)
+
+    def test_beside_program_is_in_the_folder_it_was_run_from_unresolved(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-beside-")
+        self.addCleanup(shutil.rmtree, tmp)
+        real = os.path.join(tmp, "real")
+        os.mkdir(real)
+        link = os.path.join(tmp, "link")
+        os.symlink(real, link)
+        self.assertEqual(beside_program("front", f"{link}/prog"), f"{link}/front")
+        self.assertEqual(beside_program("front", "/usr/local/sbin/prog"), "/usr/local/sbin/front")
+        self.assertEqual(beside_program("front", "prog"), os.path.join(os.getcwd(), "front"))
+        self.assertEqual(beside_program("front", ""), "")
+
+    def test_restore_lc_ctype_leaves_the_signals_alone(self) -> None:
+        # The LC_CTYPE part only: a program with cleanup keeps SIGPIPE ignored.
+        before = signal.getsignal(signal.SIGPIPE)
+        self.addCleanup(signal.signal, signal.SIGPIPE, before)
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        with mock.patch.dict(os.environ, {"LC_CTYPE": "C.UTF-8", "CST_LC_CTYPE": "=C"}, clear=True):
+            restore_lc_ctype()
+            self.assertEqual(os.environ.get("LC_CTYPE"), "C")
+            self.assertNotIn("CST_LC_CTYPE", os.environ)
+        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+        with mock.patch.dict(os.environ, {"LC_CTYPE": "C.UTF-8", "CST_LC_CTYPE": ""}, clear=True):
+            restore_lc_ctype()
+            self.assertNotIn("LC_CTYPE", os.environ)
 
     def test_undo_python_start_gives_a_child_the_caller_s_lc_ctype(self) -> None:
         # A real Python under a C locale (no LC_ALL, LANG or LC_CTYPE: PEP 538 sets LC_CTYPE=C.UTF-8), and
@@ -1457,6 +1483,7 @@ class StateContractsTest(unittest.TestCase):
     def test_the_programs_use_the_registered_paths(self) -> None:
         from btrfs.bulk.domain import BulkPaths
         from btrfs.docker_gc.domain import GcPaths
+        from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
         from btrfs.stall_monitord.domain import VERSION
         from btrfs.stall_report.adapters import LOG_DIR
         from cpu.domain import GAME_STATE
@@ -1466,6 +1493,8 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(GcPaths().last_used, state_format(StateFormatKey.DOCKER_GC_STATE).path)
         self.assertEqual(GcPaths().last_run, state_format(StateFormatKey.DOCKER_GC_LAST_RUN).path)
         self.assertEqual(BulkPaths().state, state_format(StateFormatKey.BULK_JOURNAL).folder)
+        journal = state_format(StateFormatKey.BULK_JOURNAL)
+        self.assertEqual(SnapshotRun({}, SubprocessCommandRunner()).bulk_journals, journal.path)
         self.assertEqual(
             (VERSION, LOG_DIR),
             (state_format(StateFormatKey.STALL_RECORDS).version, state_format(StateFormatKey.STALL_RECORDS).folder),

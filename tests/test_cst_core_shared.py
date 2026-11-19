@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import struct
@@ -798,12 +799,135 @@ class CommandRunnerTest(unittest.TestCase):
         }
         self.assertEqual(kw, want)
 
+    def test_pass_fds_hands_an_open_descriptor_on(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        read_end, write_end = os.pipe()
+        self.addCleanup(os.close, read_end)
+        self.addCleanup(os.close, write_end)
+        probe = [self.py, "-I", "-c", "import os, sys; os.write(int(sys.argv[1]), b'x')", str(write_end)]
+        self.assertEqual(runner.run(probe, pass_fds=(write_end,)).returncode, 0)
+        self.assertEqual(os.read(read_end, 1), b"x")
+        # Without it the descriptor is closed in the command, as before.
+        self.assertNotEqual(runner.run(probe).returncode, 0)
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], pass_fds=[5]))
+        self.assertEqual(kw["pass_fds"], (5,))
+
+    def test_keep_signals_hands_this_process_s_dispositions_on(self) -> None:
+        # Python ignores SIGPIPE (bit 13 of SigIgn): by default subprocess puts it back to its
+        # default in the command; with keep_signals the command gets it ignored, as a shell's child.
+        def pipe_ignored(
+            runner: core_runner.SubprocessCommandRunner, on_line: Callable[[str], None] | None = None
+        ) -> bool:
+            res = runner.run(["grep", "^SigIgn:", "/proc/self/status"], output="stdout", on_line=on_line)
+            mask = int(res.stdout.split()[1], 16)
+            return bool(mask & (1 << (signal.SIGPIPE - 1)))
+
+        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+        self.assertFalse(pipe_ignored(core_runner.SubprocessCommandRunner()))
+        self.assertTrue(pipe_ignored(core_runner.SubprocessCommandRunner(keep_signals=True)))
+        # The same through on_line (subprocess.Popen).
+        self.assertTrue(pipe_ignored(core_runner.SubprocessCommandRunner(keep_signals=True), on_line=lambda ln: None))
+        self.assertFalse(pipe_ignored(core_runner.SubprocessCommandRunner(), on_line=lambda ln: None))
+        _, kw = self.recorded(core_runner.SubprocessCommandRunner(keep_signals=True), lambda r: r.run(["cmd"]))
+        self.assertIs(kw["restore_signals"], False)
+
+    def test_on_line_gets_each_line_while_the_command_runs(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        seen: list[tuple[str, float]] = []
+        script = (
+            "import sys, time\nprint('one', flush=True)\ntime.sleep(0.6)\nprint('two')\nsys.stdout.write('three')\n"
+        )
+        res = runner.run(
+            [self.py, "-I", "-c", script], output="stdout", on_line=lambda ln: seen.append((ln, time.monotonic()))
+        )
+        self.assertEqual((res.returncode, res.stdout), (0, "one\ntwo\nthree"))
+        self.assertEqual([ln for ln, _ in seen], ["one", "two", "three"])
+        # 'one' came before the command slept: it was not held until the end.
+        self.assertGreater(seen[1][1] - seen[0][1], 0.4)
+        merged = runner.run(
+            [self.py, "-I", "-c", "import sys; print('out', flush=True); print('err', file=sys.stderr)"],
+            output="merge",
+            on_line=lambda ln: None,
+        )
+        self.assertEqual(sorted(merged.stdout.splitlines()), ["err", "out"])
+        failed = runner.run(
+            [self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"], output="stdout", on_line=lambda ln: None
+        )
+        self.assertEqual((failed.returncode, failed.stdout), (3, "x\n"))
+        missing = runner.run(["/nonexistent/cst-test-cmd"], output="stdout", on_line=lambda ln: None)
+        self.assertEqual((missing.returncode, missing.fault), (127, "missing"))
+        with self.assertRaises(ValueError):
+            runner.run(["true"], output="stdout", on_line=lambda ln: None, timeout=1)
+
+    def test_on_line_splits_at_newlines_only(self) -> None:
+        # As a shell's read: a carriage return stays in its line (text mode would make it a line end).
+        runner = core_runner.SubprocessCommandRunner()
+        seen: list[str] = []
+        probe = [self.py, "-I", "-c", "import sys; sys.stdout.buffer.write(b'a\\rb\\r\\nc\\xff\\n')"]
+        res = runner.run(probe, output="stdout", on_line=seen.append)
+        self.assertEqual(seen, ["a\rb\r", "c\ufffd"])
+        self.assertEqual(res.stdout, "a\rb\r\nc\ufffd\n")
+        with self.assertRaises(UnicodeDecodeError):
+            runner.run(probe, output="stdout", on_line=seen.append, decode_errors="strict")
+
+    def test_on_line_refuses_capture_whose_stderr_could_fill_and_hang(self) -> None:
+        # With stderr captured, a command that writes more than the pipe holds to stderr while its
+        # stdout is read to the end would never end: refused, and merge does not hang on it.
+        runner = core_runner.SubprocessCommandRunner()
+        noisy = [self.py, "-I", "-c", "import sys; sys.stderr.write('e' * 300000); print('done')"]
+        with self.assertRaises(ValueError):
+            runner.run(noisy, on_line=lambda ln: None)
+        res = runner.run(noisy, output="merge", on_line=lambda ln: None)
+        self.assertEqual((res.returncode, res.stdout.endswith("done\n")), (0, True))
+
+    def test_stdout_show_stderr_captures_stdout_and_leaves_stderr_on_ours(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        script = "import sys; print('out'); print('err', file=sys.stderr)"
+        probe = [self.py, "-I", "-c", script]
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Our stderr: a file, so the test can read what reached it.
+        with tempfile.TemporaryFile("w+") as err:
+            wrapper = [
+                self.py,
+                "-I",
+                "-c",
+                "import subprocess, sys\n"
+                f"sys.path.insert(0, {repo!r})\n"
+                "from cst_core.adapters.runner import SubprocessCommandRunner\n"
+                "r = SubprocessCommandRunner()\n"
+                "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
+                "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
+                "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n",
+                *probe,
+            ]
+            out = subprocess.run(
+                wrapper, stdout=subprocess.PIPE, stderr=err, text=True, stdin=subprocess.DEVNULL, check=True
+            )
+            err.seek(0)
+            self.assertEqual(err.read(), "err\nerr\n")
+        self.assertEqual(out.stdout, repr(("out\n", "", "out\n", "")) + "\n")
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], output="stdout-show-stderr"))
+        self.assertEqual((kw["stdout"], "stderr" in kw, "capture_output" in kw), (subprocess.PIPE, False, False))
+
     def test_strict_decoding_raises_as_text_true_did(self) -> None:
         runner = core_runner.SubprocessCommandRunner()
         with self.assertRaises(UnicodeDecodeError):
             runner.run(["printf", "\\377abc"], decode_errors="strict")
         _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], decode_errors="strict"))
         self.assertNotIn("errors", kw)
+
+    def test_surrogateescape_keeps_the_bytes_that_are_not_utf_8(self) -> None:
+        runner = core_runner.SubprocessCommandRunner()
+        got = runner.run(["printf", "caf\\351\\n"], decode_errors="surrogateescape")
+        self.assertEqual(got.stdout, "caf\udce9\n")
+        self.assertEqual(got.stdout.encode("utf-8", "surrogateescape"), b"caf\xe9\n")
+        lines: list[str] = []
+        streamed = runner.run(
+            ["printf", "a\\377\\nb\\n"], output="stdout", on_line=lines.append, decode_errors="surrogateescape"
+        )
+        self.assertEqual((lines, streamed.stdout), (["a\udcff", "b"], "a\udcff\nb\n"))
+        # The default stays U+FFFD.
+        self.assertEqual(runner.run(["printf", "caf\\351"]).stdout, "caf\ufffd")
 
     def test_faults_are_marked_with_their_cause(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-runner-")

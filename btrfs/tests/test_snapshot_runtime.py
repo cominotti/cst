@@ -174,3 +174,58 @@ class ShippedUnitsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallOrderTest(unittest.TestCase):
+    """DESIGN 8.3: the bash front (btrfs/btrfs-snapshot) hands its commands to btrfs-snapshot-runtime,
+    so the runtime is written before the front and removed after it. install writes in manifest
+    order and remove deletes in the reverse order (tests/test_install_record.py), so its row comes
+    first, in the same component."""
+
+    def test_the_runtime_is_written_before_the_front_and_removed_after_it(self) -> None:
+        from cst_core.application.install import InstallRequest, InstallService
+        from cst_core.domain.install import INSTALL_MANIFEST, select_entries
+        from tests.test_install import MemoryTarget
+
+        entries = select_entries(INSTALL_MANIFEST, component="btrfs:snapshots")
+        target = MemoryTarget()
+        svc = InstallService(target, lambda e: f"{e.src}\n".encode())
+        req = InstallRequest()
+        list(svc.install(entries, req))
+        runtime, front = "/usr/local/sbin/btrfs-snapshot-runtime", "/usr/local/sbin/btrfs-snapshot"
+        self.assertLess(target.writes.index(runtime), target.writes.index(front))
+        removed = [ln.removeprefix("removed:   ") for ln in svc.remove([svc.placement(e, req) for e in entries])]
+        self.assertLess(removed.index(front), removed.index(runtime))
+        by_src = {e.src: e for e in INSTALL_MANIFEST}
+        runtime, front = by_src["btrfs/btrfs-snapshot-runtime"], by_src["btrfs/btrfs-snapshot"]
+        # Side by side: the front runs the runtime from its own folder.
+        self.assertEqual(os.path.dirname(runtime.dest), os.path.dirname(front.dest))
+        self.assertEqual((runtime.kind, runtime.owner), ("python-entry", "root"))
+
+
+class GuardNumbersTest(unittest.TestCase):
+    """DESIGN 8.2: the space-guard defaults are the runtime's (DEFAULTS); btrfs-bulk reads them from
+    the text of btrfs-snapshot, whose three lines must say the same."""
+
+    def test_the_front_and_the_runtime_agree(self) -> None:
+        from btrfs.bulk.adapters.host import Host
+        from btrfs.bulk.adapters.machine import HomeTree, Primitives
+        from btrfs.bulk.domain import BIG, BulkPaths
+        from btrfs.snapshot_runtime.domain import DEFAULTS, GUARD_KEYS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = BulkPaths.under(etc=tmp, state=tmp, lock=os.path.join(tmp, "lock"))
+            script = os.path.join(BTRFS, "btrfs-snapshot")
+            guard = Host(paths, HomeTree(Primitives()), lambda: script).snapshot_guard()
+        names = {
+            "pause": "SKIP_AT_OR_BELOW_GIB",
+            "resume": "RESUME_ABOVE_GIB",
+            "emergency": "EMERGENCY_AT_OR_BELOW_GIB",
+        }
+        self.assertEqual(set(names.values()), set(GUARD_KEYS))
+        self.assertEqual(guard, {k: int(DEFAULTS[n]) * BIG for k, n in names.items()})
+        # Read from the file, not bulk's own fallback: each line is there once.
+        with open(script, encoding="utf-8") as f:
+            text = f.read()
+        for name in GUARD_KEYS:
+            self.assertEqual(re.findall(rf"^{name}=(\d+)$", text, re.M), [DEFAULTS[name]])
