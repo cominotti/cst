@@ -180,9 +180,9 @@ def write(stage: str) -> list[UnitText]:
     """The generated units and drop-ins under STAGE/etc/systemd/{system,user}; returns them."""
     units = generated_units() + generated_dropins()
     for u in units:
-        folder = os.path.join(stage, "etc", "systemd", u.scope, *([] if u.dropin_of is None else [f"{u.dropin_of}.d"]))
-        os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, u.name), "w", encoding="utf-8") as fh:
+        path = os.path.join(stage, "etc", "systemd", u.scope, u.label)  # a drop-in in its UNIT.d folder
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(u.text)
     return units
 
