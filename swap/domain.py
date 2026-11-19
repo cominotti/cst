@@ -566,7 +566,7 @@ class SliceActiveState(StrEnum):
 def slice_not_active(active_state: str) -> bool:
     """systemd says the slice is not active: an ActiveState other than "active" (any word, known or not).
     "" (systemd gave no answer) is False: not known, so the cgroup is read as before."""
-    return bool(active_state) and enum_member(SliceActiveState, active_state) != SliceActiveState.ACTIVE
+    return active_state not in ("", SliceActiveState.ACTIVE)
 
 
 # The width of the state column of the settings rows and of apply's verification notes under them:
