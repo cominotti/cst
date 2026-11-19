@@ -20,7 +20,7 @@ from btrfs.bulk.adapters.machine import HomeTree, kind, log, ran
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import Notifier, PENDING_ALERTS
 from cst_core.domain.contracts import Urgency
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandResult, CommandRunnerPort
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
 
@@ -93,13 +93,7 @@ class Host:
         btrfs-snapshot's own detection. If it cannot be asked, all are busy."""
         if not paths:
             return set()
-        r = self.runner.run(
-            ["bash", self.snapshot_program(), "busy", "--home", home, *paths],
-            stdin="inherit",
-            decode_errors="strict",
-            base_env=snapshot_env(),
-            timeout=300,
-        )
+        r = self._snapshot("busy", "--home", home, *paths, timeout=300)
         if r.cause is not None:  # bash could not start, or timed out
             log(f"  cannot check open files ({r.cause}): treated as busy")
             return set(paths)
@@ -111,15 +105,19 @@ class Host:
     def convert_bulk_dir(self, bulk: str) -> list[str]:
         """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
         subvolume (its convert_one: reflink clone + switch, busy -> later)."""
-        r = ran(
-            self.runner.run(
-                ["bash", self.snapshot_program(), "convert-one", bulk],
-                stdin="inherit",
-                decode_errors="strict",
-                base_env=snapshot_env(),
-            )
-        )
+        r = ran(self._snapshot("convert-one", bulk))
         return (r.stdout + r.stderr).splitlines()
+
+    def _snapshot(self, *args: str, timeout: float | None = None) -> CommandResult:
+        """bash btrfs-snapshot ARGS: stdin ours, its output decoded strictly, the environment
+        without its test seam (snapshot_env)."""
+        return self.runner.run(
+            ["bash", self.snapshot_program(), *args],
+            stdin="inherit",
+            decode_errors="strict",
+            base_env=snapshot_env(),
+            timeout=timeout,
+        )
 
     def steam_running(self, ctx: Ctx) -> list[str]:
         """Why Steam seems to run (empty: it does not). Every process of the
