@@ -147,6 +147,18 @@ class ApplyDoneTest(unittest.TestCase):
             console.stdout,
         )
 
+    def test_a_roles_answer_it_cannot_read_is_a_warning(self) -> None:
+        # bt-helper wp-roles answered with no roles state: not a passing "LE Audio roles included"
+        # (LE Audio is off here), a warning that names the answer.
+        m = self.machine()
+        m.put("wp-roles", "garbage|x\n")
+        run, console, _ = change(m, "apply", "--yes", "--no-restart")
+        run.apply()
+        self.assertEqual((run.fails, run.warns), (0, 1), console.stdout)
+        self.assertNotIn("LE Audio roles included", console.stdout)
+        self.assertIn("WirePlumber bluez5.roles", console.stdout)
+        self.assertIn("bt-helper wp-roles answered 'garbage', not a roles state", console.stdout)
+
     def test_no_headset(self) -> None:
         # No headset set: no LDAC rule and no headset checks, so no word of a headset playing.
         m = self.machine()

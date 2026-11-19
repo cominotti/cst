@@ -55,6 +55,8 @@ class Checks(Survey):
                     label,
                     f"{val}: no LE Audio roles although LE Audio is on (a WirePlumber file other than CST's sets them)",
                 )
+            case _, None:
+                self.check_warn(label, f"bt-helper wp-roles answered {st!r}, not a roles state")
             case _:
                 self.check_ok(label, f"{val or 'not set: the PipeWire defaults'} (LE Audio roles included)")
 
