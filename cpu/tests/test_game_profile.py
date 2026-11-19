@@ -940,6 +940,48 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertNotIn("undoing for", out)
         self.assertIn(f"{USR} daemon-reload", actions)
 
+    def test_tick_and_state_act_for_the_user_on_acted_for_when_target_user_names_another_one(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.set_now("usr", "user.slice", CPUWeight="30")  # undone meanwhile (a daemon-reload)
+        self.systemd.units["usr"] = ["app-flatpak-com.valvesoftware.Steam-7.scope"]  # a game started after 'on'
+        steam_override = self.ctrl("usr", "app-flatpak-com.valvesoftware.Steam-7.scope", "MemoryLow")
+
+        def other_profile() -> tuple[GameProfile, io.StringIO]:
+            out = io.StringIO()
+            p = GameProfile(
+                self.paths,
+                GameSettings(target_user="other"),  # changed while the profile was on
+                self.systemd,
+                uid_of={USER: UID, "other": "424242"}.__getitem__,
+                name_of={UID: USER, "424242": "other"}.__getitem__,
+                out=out,
+            )
+            self.systemd.actions = []
+            return p, out
+
+        p, out = other_profile()
+        self.assertEqual(p.tick(), 0)
+        # Everything in the user manager for the user 'off' undoes for, nothing in other's.
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn(f"{USR} set-property --runtime user.slice CPUWeight=idle", self.systemd.actions)
+        self.assertIn(
+            f"{USR} set-property --runtime app-flatpak-com.valvesoftware.Steam-7.scope MemoryLow=16G",
+            self.systemd.actions,
+        )
+        self.assertIn("drift: user.slice CPUWeight was '30' instead of 'idle'", out.getvalue())
+        self.assertNotIn("undoing for", out.getvalue())  # the tick switches quietly
+        self.assertTrue(os.path.exists(steam_override))
+        p, out = other_profile()
+        self.assertEqual(p.state(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn("  toolboxes       weight=idle\n", out.getvalue())
+        self.assertIn("  drift: none (every setting the profile made still holds)\n", out.getvalue())
+        p, out = other_profile()
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(steam_override))  # what the tick set, 'off' undid
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+
     def test_on_records_the_user_first(self) -> None:
         self.run_profile("on")
         self.assertTrue(self.read(self.state).startswith(f"prop sys user@{UID}.service MemoryLow new -\n"))

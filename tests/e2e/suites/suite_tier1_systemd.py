@@ -4481,8 +4481,10 @@ EOF
     def test_130_cpu_game_profile_off_acts_for_the_recorded_user_when_target_user_names_another(self) -> None:
         """'off' with the real system and user managers, after 'on' for tester, with TARGET_USER
         changed to another account that exists (e2e130, made here, with no user manager of its own):
-        the user manager's side is undone for tester, the uid game.state names, and the journal line
-        says so (user.slice's CPUWeight back, its user.control override gone)."""
+        a tick first sets tester's user.slice CPUWeight, changed meanwhile, again (the tick acts for the
+        user 'off' undoes for); then the user manager's side is undone for tester, the uid game.state
+        names, and the journal line says so (user.slice's CPUWeight back, its user.control override
+        gone)."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -4515,6 +4517,12 @@ EOF
             test -e "$override"
             useradd -M e2e130
             printf '%s\n' "TARGET_USER='e2e130'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # The tick acts for tester too: a setting undone in tester's manager is set again there.
+            systemctl --user -M tester@ set-property --runtime user.slice CPUWeight=50
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == 50 ]]
+            ticked=$(gp tick)
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]] \
+                || { echo "the tick did not set tester's user.slice again: $ticked" >&2; exit 1; }
             got=$(gp off)
             grep -qF "TARGET_USER in /etc/cpu-setup/cpu-setup.conf is e2e130: undoing for tester (uid $uid)" <<<"$got" \
                 || { echo "off: $got" >&2; exit 1; }

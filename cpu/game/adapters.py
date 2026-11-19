@@ -523,18 +523,21 @@ class GameProfile:
         self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
         return 0
 
-    def _user_from_state(self, recs: Sequence[Record]) -> None:
+    def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
-        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now."""
+        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
+        The tick and 'state' act for that user too (say False: quietly), so what the tick sets in the
+        user manager is what 'off' undoes."""
         uid = state_uid(recs)
         target = self.s.target_user
         if uid is None or (target and self._uid_of(target) == uid):
             return
         name = self._name_of(uid)
         if name:
-            conf = self.paths.conf
-            why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
-            self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
+            if say:
+                conf = self.paths.conf
+                why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
+                self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
             self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
@@ -640,6 +643,7 @@ class GameProfile:
         if self.problems:
             self.warn_once("tick changes nothing")
             return 0
+        self._user_from_state(records(self._state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
         self.protect_steam()  # the game's own scope, started after 'on'
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
@@ -679,9 +683,12 @@ class GameProfile:
 
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
-        """What is applied now, and which settings drifted from what 'on' set."""
+        """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
+        user manager of the user 'on' acted for)."""
+        on = os.path.exists(self.paths.state)
+        if on:
+            self._user_from_state(records(self._state_text()), say=False)
         p, s = self.paths, self.s
-        on = os.path.exists(p.state)
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
         for line in self._problem_lines():
