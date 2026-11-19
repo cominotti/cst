@@ -48,7 +48,7 @@ from doctor.domain import (
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from vm.domain import VmOverlayKind
-from vm.domain.backup import NO_BACKUPS_LIST, stored_list
+from vm.domain.backup import NO_BACKUPS_LIST, is_index_entry, stored_list
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -201,15 +201,12 @@ def vm_index_problem(host: DoctorHostPort) -> str | None:
 
 def newest_vm_backup(host: DoctorHostPort) -> float | None:
     """Epoch of the newest backup in cst vm's index, 0 when none or unreadable, None when the index is of
-    a newer cst vm (not read: check_vm_index says so)."""
+    a newer cst vm (not read: check_vm_index says so). Only the entries cst vm lists count
+    (is_index_entry): one it keeps without understanding it is no backup it can restore."""
     data = vm_index_data(host)
     if VM_INDEX_FORMAT.newer(data, "version") is not None:
         return None
-    entries = data.get("backups") if isinstance(data, dict) else None
-    return max(
-        (e["epoch"] for e in entries or [] if isinstance(e, dict) and isinstance(e.get("epoch"), (int, float))),
-        default=0,
-    )
+    return max((e.get("epoch", 0) for e in stored_list(data) or [] if is_index_entry(e)), default=0)
 
 
 def nas_configured(host: DoctorHostPort) -> bool:

@@ -1915,6 +1915,25 @@ class VmTest(Scratch):
         self.assertNotIn("ostree admin pin", r.stdout)
         self.assertIn("No VM backup since the booted deployment was built", r.stdout)
 
+    def test_entries_cst_vm_does_not_list_are_no_backup(self) -> None:
+        # cst vm keeps them in the index without listing them (is_index_entry): an empty vm, a NAS
+        # entry without its snapshot, an epoch that is a bool. Their epoch must not pass for a backup.
+        self.deployments(rollback_pinned=True)
+        d = os.path.join(self.root, "var", "lib", "cst")
+        os.makedirs(d, exist_ok=True)
+        foreign = [
+            {"vm": "", "epoch": NOW, "path": "/x"},
+            {"vm": "win", "mode": "nas", "epoch": NOW},
+            {"vm": "win", "epoch": True, "path": "/x"},
+            {"vm": "win", "epoch": NOW, "path": "/x", "versions": {"qemu-kvm": 1}},
+        ]
+        with open(os.path.join(d, "vm-backups.json"), "w") as f:
+            json.dump({"version": 1, "backups": foreign}, f)
+        r = self.run_tool()
+        self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+        self.assertIn("last backup: never", r.stdout)
+        self.assert_read_only()
+
     def test_a_damaged_index_warns(self) -> None:
         # cst vm refuses to back up or list with it: doctor says so, and changes nothing.
         self.deployments(rollback_pinned=True)

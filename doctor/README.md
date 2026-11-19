@@ -374,8 +374,10 @@ When they differ and libvirt has at least one VM, it wants two things:
   Unpin it later with `sudo ostree admin pin --unpin N`, once the VMs work on
   the new deployment;
 - a **VM backup** made after the booted deployment was built: an entry in
-  `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp. The
-  fix is `cst vm backup` (with the VM shut off).
+  `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp (only an
+  entry `cst vm list` shows counts: one it keeps without understanding it, such
+  as a NAS entry without its snapshot, does not). The fix is `cst vm backup`
+  (with the VM shut off).
 
 With both in place the line is `info`. A NAS backup (`mode` `nas` in the
 index) counts like a local one. When the NAS backup of `/home` is set up
