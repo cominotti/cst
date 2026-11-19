@@ -187,7 +187,9 @@ class Survey:
         self.wp_owed = False
         self.bt_restart = False
         self.wp_restart = False
-        self.unit_states: dict[str, tuple[str, str]] = {}  # unit -> (ActiveState, InvocationID), see unit_show
+        # (user, unit) -> (ActiveState, InvocationID), see unit_show: a system unit and a user unit
+        # of the same name are two units.
+        self.unit_states: dict[tuple[bool, str], tuple[str, str]] = {}
 
     # ---- running commands ------------------------------------------------------------------
     def out(self, text: str) -> None:
@@ -289,15 +291,17 @@ class Survey:
         """(ActiveState, InvocationID) of the unit from one `systemctl show` (cst_core's: C locale, 20 s
         at most, on the host from a toolbox; '' for what it cannot tell), read once per run and kept
         until CST restarts the unit (forget_unit); fresh: read it again (and keep that)."""
-        if fresh or unit not in self.unit_states:
+        key = (user, unit)
+        if fresh or key not in self.unit_states:
             shown = self.m.systemd.show(UnitName(unit), ("ActiveState", "InvocationID"), user=user)
-            self.unit_states[unit] = (shown.get("ActiveState", ""), shown.get("InvocationID", ""))
-        return self.unit_states[unit]
+            self.unit_states[key] = (shown.get("ActiveState", ""), shown.get("InvocationID", ""))
+        return self.unit_states[key]
 
     def forget_unit(self, *units: str) -> None:
-        """The units were restarted: the next unit_show of each reads it again."""
+        """The units were restarted: the next unit_show of each reads it again (in either scope)."""
         for unit in units:
-            self.unit_states.pop(unit, None)
+            for user in (False, True):
+                self.unit_states.pop((user, unit), None)
 
     def unit_invocation(self, unit: str, *, user: bool) -> str:
         """The unit's InvocationID while it runs (as `systemctl is-active` sees it), else ''."""

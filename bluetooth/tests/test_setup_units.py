@@ -139,6 +139,26 @@ class UnitActivityTest(unittest.TestCase):
         # In the C locale, whatever the caller's.
         self.assertIn("LC_ALL=C", m.env_log().splitlines()[-1].split("\t", 1)[1].split())
 
+    def test_a_system_unit_and_a_user_unit_of_one_name(self) -> None:
+        # Each scope is a unit of its own: one's state never answers for the other's.
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, _, _ = change(m, "status")
+        self.assertEqual(run.unit_show("bluetooth.service", user=False), ("active", "bt-0"))
+        self.assertEqual(run.unit_show("bluetooth.service", user=True), ("inactive", ""))
+        self.assertEqual(run.unit_show("wireplumber.service", user=True), ("active", "wp-0"))
+        self.assertEqual(run.unit_show("wireplumber.service", user=False), ("inactive", ""))
+        # Kept per scope, and forgotten in both after a restart.
+        shows = len(m.read("log").splitlines())
+        self.assertEqual(run.unit_show("bluetooth.service", user=True), ("inactive", ""))
+        self.assertEqual(len(m.read("log").splitlines()), shows)
+        run.forget_unit("bluetooth.service")
+        run.unit_show("bluetooth.service", user=False)
+        run.unit_show("bluetooth.service", user=True)
+        self.assertEqual(len([c for c in m.read("log").splitlines()[shows:] if c.startswith("systemctl")]), 2)
+
     def test_a_systemctl_that_does_not_answer(self) -> None:
         # Nothing answers (PID 1 or the user manager stuck): the look gives up at the limit and
         # tells nothing, so the unit reads as not running and a wait for it can end.
