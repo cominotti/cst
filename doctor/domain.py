@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import SNAPSHOTS_CONF, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments, group
@@ -118,7 +118,7 @@ RESIZE_SLACK = 16 * 2**20
 SNAP_STATE = HostPath(DEFAULT_STATE_DIR)
 SNAP_UNFINISHED = HostPath(f"{SNAP_STATE}/{UNFINISHED_FILE}")
 SNAP_WRITABLE = HostPath(f"{SNAP_STATE}/{WRITABLE_FILE}")
-SNAP_CONF = HostPath("/etc/btrfs-setup/snapshots.conf")  # also read by the VM NAS check
+SNAP_CONF = HostPath(SNAPSHOTS_CONF)  # also read by the VM NAS check
 
 NOCOW_POSTPONED = HostPath(NocowPaths().postponed)  # docker-volumes-nocow's record (StoredPostponed)
 

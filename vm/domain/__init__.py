@@ -44,8 +44,6 @@ USER_IMAGES = (
 
 BTRFS_MAGIC = 0x9123683E
 
-NAS_SSH_ALIAS = "btrfs-setup-nas"
-
 OVERLAY_MARK = ".cst-overlay-"  # in the name of the snapshot overlay: <image>.cst-overlay-<UTC>
 
 TAG = "cst-vm"  # every VM backup; plus vm:<name>

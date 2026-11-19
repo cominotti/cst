@@ -394,7 +394,6 @@ def blocked_alert(reason: str, conf: str) -> tuple[str, str]:
 
 
 # ---- the NAS backup --------------------------------------------------------------------------
-NAS_SSH_ALIAS: Final = "btrfs-setup-nas"  # the managed Host block in /root/.ssh/config
 # Seconds of NAS_TIMEOUT when it cannot be read (6 h).
 DEFAULT_NAS_TIMEOUT_S: Final = 21600
 # What a step needs at least of the time left.

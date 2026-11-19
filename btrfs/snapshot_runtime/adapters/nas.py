@@ -22,14 +22,13 @@ from btrfs.health_check.domain import bash_div
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
-from cst_core.domain.contracts import Urgency
+from cst_core.domain.contracts import NAS_SSH_ALIAS, Urgency
 from cst_core.domain.values import DAY
 from btrfs.snapshot_runtime.domain import (
     CHECK_FAILURES_ALERTED,
     EXIT_STOPPED,
     MIN_LEFT_S,
     NAS_LOCK_WAIT_S,
-    NAS_SSH_ALIAS,
     RESTIC_DAMAGE_RE,
     RESTIC_INIT_S,
     RESTIC_SHORT_S,
