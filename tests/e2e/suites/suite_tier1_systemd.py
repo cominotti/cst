@@ -4528,7 +4528,8 @@ EOF
         self.assertIn("E2E-OK", out)
 
     def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
-        """The real game profile, on for tester with a last line of game.state cut short (no newline,
+        """The real game profile, on for tester: game.state's first record is user@UID.service's MemoryLow
+        (it names the user). With a last line of game.state cut short (no newline,
         "existed 1"), then a box next to the game (a slice of the user manager's own, made by
         systemd-run --user): the tick's record of the box removes the cut line first and names it, the
         box's record is a whole last line, and 'off' undoes the box (its override gone) and leaves
@@ -4561,6 +4562,9 @@ EOF
             io=$(systemctl show -P IOWeight machine.slice)
             touch /run/cpu-setup/manual
             gp on
+            # The first record names the user 'on' acts for, whatever step it may die at.
+            first=$(head -n 1 "$st")
+            [[ "$first" == "prop sys user@$uid.service MemoryLow "* ]] || { echo "first record: $first" >&2; exit 1; }
             printf 'prop sys machine.slice IOWeight existed 1' >>"$st"   # cut short
             n=$(( $(wc -l <"$st") + 1 ))
             systemd-run --user -M tester@ --quiet --slice=e2e129.slice --unit=e2e129-box sleep 300

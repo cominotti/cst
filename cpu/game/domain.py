@@ -256,8 +256,8 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
 
 
 def state_uid(recs: Sequence[Record]) -> str | None:
-    """The uid of the user 'on' acted for, from game.state: 'on' always records MemoryLow of the system
-    manager's user@UID.service (its memory chain). None when no such record is there."""
+    """The uid of the user 'on' acted for, from game.state: 'on' records MemoryLow of the system
+    manager's user@UID.service (its memory chain) first. None when no such record is there."""
     for r in recs:
         if len(r) >= 3 and r[0] == "prop" and r[1] == "sys":
             m = re.fullmatch(r"user@([0-9]+)\.service", r[2])

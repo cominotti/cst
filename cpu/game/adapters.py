@@ -454,6 +454,11 @@ class GameProfile:
                 fh.write(intended_header())
         except OSError as e:  # no drift repair then; the profile itself still works
             print(f"{p.intended}: {e.strerror or e}", file=sys.stderr, flush=True)
+        # The memory chain first, leaf first: game.state's first record is then user@UID.service's,
+        # so 'off' knows the user 'on' acted for whatever step 'on' died at (state_uid).
+        for unit in reversed(self.game_dropin_units()):
+            self.setp("sys", unit, f"MemoryLow={s.game_memory_low}")
+        self.write_game_dropins()
         self.setp(
             "sys",
             "machine.slice",
@@ -471,9 +476,6 @@ class GameProfile:
             self.cpus_fallback("user.slice")
             self.cpus_fallback("flatpak-session-helper.service")
         self.demote_escapes()
-        for unit in self.game_dropin_units():
-            self.setp("sys", unit, f"MemoryLow={s.game_memory_low}")
-        self.write_game_dropins()
         self.setp("usr", "app.slice", f"MemoryLow={s.game_memory_low}")
         self.protect_steam()
         if s.game_zswap_writeback == "no" and self.prop("usr", "app.slice", "MemoryZSwapWriteback"):

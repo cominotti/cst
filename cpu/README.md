@@ -687,7 +687,10 @@ In short: `off` puts every setting back exactly as it was before `on`, even if
 **Details (for experts).** Before each change, `on` writes a line to
 `/run/cpu-setup/game.state`: which property, and whether a runtime override
 already existed (with its old value). It writes the line *before* the change,
-so if `on` stops halfway, `off` can still undo what was done. When the line
+so if `on` stops halfway, `off` can still undo what was done. `on` sets the
+memory chain (7.1) first, `user@<uid>.service` before its parents, so the
+first line of `game.state` names the user it acts for, whatever step `on`
+stopped at (`off` acts for that user, 6.2). When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,

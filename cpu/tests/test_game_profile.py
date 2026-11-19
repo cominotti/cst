@@ -588,7 +588,7 @@ class IntendedFormatTest(GameProfileCase):
         self.run_profile("on")
         first, _, rest = self.read(self.intended).partition("\n")
         self.assertEqual(first, "cst-game-intended 1")
-        self.assertTrue(rest.startswith("prop sys machine.slice AllowedCPUs 12-23 "), rest)
+        self.assertTrue(rest.startswith(f"prop sys user@{UID}.service MemoryLow 16G "), rest)
         self.assertEqual(records(first + "\n"), [("cst-game-intended", "1")])
         # Drift is compared below it as before.
         self.write(self.manual, "")
@@ -763,6 +763,10 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertNotIn("unreadable", out)
 
 
+class _OnDiedError(Exception):
+    """'on' stopped halfway (killed, or a crash) in a test."""
+
+
 class OffWithoutTargetUserTest(GameProfileCase):
     """'off' with no TARGET_USER (its line became one that sets nothing, `TARGET_USER="$(id -un 1000)"`,
     or it is gone) after 'on' ran for a user: the user manager's side is undone for the user game.state
@@ -832,6 +836,42 @@ class OffWithoutTargetUserTest(GameProfileCase):
         out, actions = self.run_profile("off")
         self.assertNotIn("undoing for", out)
         self.assertIn(f"{USR} daemon-reload", actions)
+
+    def test_on_records_the_user_first(self) -> None:
+        self.run_profile("on")
+        self.assertTrue(self.read(self.state).startswith(f"prop sys user@{UID}.service MemoryLow new -\n"))
+
+    def test_off_after_on_died_at_the_user_manager_acts_for_the_user_on_acted_for(self) -> None:
+        # 'on' dies at its first call to the user manager (its user.slice): game.state names the uid already.
+        real = self.systemd.run
+
+        def dying(argv: Sequence[str], **kw: object) -> CommandResult:
+            res = real(argv, **kw)
+            if list(argv[:2]) == ["systemctl", "--user"] and "set-property" in argv:
+                raise _OnDiedError
+            return res
+
+        p, _ = self.profile()
+        with unittest.mock.patch.object(self.systemd, "run", dying), self.assertRaises(_OnDiedError):
+            p.on()
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.assertTrue(os.path.exists(user_override))
+        self.assertTrue(self.read(self.state).endswith("\nprop usr user.slice CPUWeight new -\n"))
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            GameSettings(target_user="other"),
+            self.systemd,
+            uid_of={USER: UID, "other": "424242"}.__getitem__,
+            name_of={UID: USER, "424242": "other"}.__getitem__,
+            out=out,
+        )
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(user_override))
+        self.assertIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn(f"undoing for {USER} (uid {UID})", out.getvalue())
 
     def test_the_user_name_of_a_uid(self) -> None:
         import pwd
@@ -1346,7 +1386,7 @@ class FullRunFolderTest(GameProfileCase):
         self.systemd.actions = []
         p, out = self.profile()
         err = io.StringIO()
-        with self.full_after(3), contextlib.redirect_stderr(err):  # machine.slice's three records fit
+        with self.full_after(6), contextlib.redirect_stderr(err):  # the memory chain's and machine.slice's records fit
             self.assertEqual(p.locked("on"), 0)
         log = out.getvalue()
         self.assertIn(
@@ -1357,9 +1397,16 @@ class FullRunFolderTest(GameProfileCase):
         self.assertIn(f"{self.state}: No space left on device\n", err.getvalue())
         sets = self.sets(self.systemd.actions)
         self.assertEqual(
-            sets[0], f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10"
+            sets[:4],
+            [
+                f"{SYS} set-property --runtime user@{UID}.service MemoryLow=16G",
+                f"{SYS} set-property --runtime user-{UID}.slice MemoryLow=16G",
+                f"{SYS} set-property --runtime user.slice MemoryLow=16G",
+                f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10",
+            ],
         )
-        self.assertFalse([a for a in sets if " user.slice " in a])  # never changed without its record
+        # The user's user.slice is never changed without its record.
+        self.assertFalse([a for a in sets if a.startswith(USR) and " user.slice " in a])
         self.assertEqual(self.now("usr", "user.slice", "CPUWeight"), "30")
         self.assertTrue(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
         # What 'on' recorded, 'off' undoes.
