@@ -162,7 +162,7 @@ def _short_etc_path(etc_dir: str, path: str) -> str:
 
 
 class _FileSettingsFacts:
-    """swap.domain's SwapSettingsFacts over swap's file system (the paths of env; partition: the
+    """swap.ports' SwapSettingsFacts over swap's file system (the paths of env; partition: the
     device a path leads to and its size, from sysfs)."""
 
     def __init__(

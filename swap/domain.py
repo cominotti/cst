@@ -8,13 +8,14 @@ import contextlib
 import posixpath
 import re
 import shlex
-from typing import Final, Literal, Protocol, TypedDict
+from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
 from cst_core.ports import ActiveState
+from swap.ports import SwapSettingsFacts
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
 SWAP_OLD_MARKERS: Final[tuple[str, ...]] = (
@@ -245,27 +246,6 @@ class SpecResolution:
     note: str = ""
     # "bad" from the settings file's own lines: each problem (note is their "; " join).
     problems: tuple[str, ...] = ()
-
-
-class SwapSettingsFacts(Protocol):
-    """What resolve_settings asks of the machine, each only when it needs it, as the reader sees it:
-    settings_text: /etc/cst/swap.conf's text, None when it could not be read (not there included);
-    settings_seen: something is at it (a link too, even one that points nowhere); settings_is_file: a
-    regular file (through a link); settings_readable: this user may read it; settings_folder_closed: the
-    nearest folder above it that is there is one this user may not search (whether it is there cannot
-    be seen); crypttab_closed: /etc/crypttab is there and this user may not read it; crypttab_text and
-    fstab_text: "" when not there or not readable; partition_size: the size in bytes of the block
-    device a path leads to, None when it leads to none."""
-
-    def settings_text(self) -> str | None: ...
-    def settings_seen(self) -> bool: ...
-    def settings_is_file(self) -> bool: ...
-    def settings_readable(self) -> bool: ...
-    def settings_folder_closed(self) -> bool: ...
-    def crypttab_closed(self) -> bool: ...
-    def crypttab_text(self) -> str: ...
-    def fstab_text(self) -> str: ...
-    def partition_size(self, device_path: str) -> int | None: ...
 
 
 def resolve_settings(facts: SwapSettingsFacts, *, as_root: bool) -> SpecResolution:

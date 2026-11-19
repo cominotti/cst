@@ -70,7 +70,7 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
 
 
 class _HostSettingsFacts:
-    """swap.domain's SwapSettingsFacts over doctor's view of the host, so that doctor reads
+    """swap.ports' SwapSettingsFacts over doctor's view of the host, so that doctor reads
     /etc/cst/swap.conf as cst swap reads it (each file read once)."""
 
     def __init__(self, host: DoctorHostPort) -> None:
