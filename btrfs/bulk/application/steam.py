@@ -13,7 +13,6 @@ from collections.abc import Sequence
 import os
 import posixpath
 import time
-from typing import Literal
 
 from btrfs.bulk.application.context import Bulk
 from btrfs.bulk.domain import MARGIN, BulkJournalKind, Ctx, LstatKind, PathChain, Unexpected, present
@@ -557,15 +556,15 @@ def steam_copy_need(b: Bulk, a: SteamApp) -> int:
     return a["copy_bytes"] + steam_copy_floor(b) if a["copy_bytes"] else 0
 
 
-def steam_race_guard(b: Bulk, j: SteamJournal) -> SteamMoveResult | Literal[""]:
-    """Why the switch must not happen now (running | busy | changed), or ''."""
+def steam_race_guard(b: Bulk, j: SteamJournal) -> SteamMoveResult | None:
+    """Why the switch must not happen now (running | busy | changed), or None."""
     if b.host.steam_running(b.ctx):
         return SteamMoveResult.RUNNING
     if b.host.busy_paths([p["src"] for p in j["parts"]], b.ctx.home):
         return SteamMoveResult.BUSY
     if b.user.steam_changed(j):
         return SteamMoveResult.CHANGED
-    return ""
+    return None
 
 
 def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> SteamMoveResult:
@@ -606,7 +605,7 @@ def steam_move(b: Bulk, sv: SteamSurvey, a: SteamApp) -> SteamMoveResult:
         user.steam_drop_news(j)
         state.jdrop(ident)
         raise
-    if why:
+    if why is not None:
         user.steam_drop_news(j)
         state.jdrop(ident)
         return why
