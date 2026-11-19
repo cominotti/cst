@@ -1255,8 +1255,9 @@ own checks:
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
-  again (also when the installer cannot drop its record line) and the
-  initramfs is **not** changed. The other helper files stay in
+  again with its install record line (when the installer fails before it
+  removes the rule, the script removes it and tries once more to drop the
+  line) and the initramfs is **not** changed. The other helper files stay in
   `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).

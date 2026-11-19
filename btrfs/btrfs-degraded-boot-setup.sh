@@ -896,9 +896,19 @@ else
     fi
     if (( ! selftest_ok )); then
         if (( ! rule_was_present )); then
-            # An installer that fails here (a record of a newer CST) must not stop the cleanup:
-            # the rule that failed goes without its record line.
-            cst_remove_text "${RULE}" >/dev/null || rm -f "${RULE}"
+            # A failing installer must not stop the cleanup. The rule and its record line were
+            # written just before the self-test, so the installer can fail here only on something
+            # that changed since then: a full disk (the record cannot be saved) or a record a newer
+            # CST wrote. Either way it has already removed the rule when it fails; rm -f matters
+            # only when it stopped before that (it could not start, or the unlink itself failed).
+            # cst_forget_text then drops the rule's record line, so the record lists no file that
+            # is gone. It is a second try that may fail for the same reason (always with a newer
+            # CST's record, which this CST never rewrites; with a full disk, unless space came
+            # back), and its failure never stops the cleanup.
+            if ! cst_remove_text "${RULE}" >/dev/null; then
+                rm -f "${RULE}"
+                cst_forget_text "${RULE}" >/dev/null || true
+            fi
             udevadm control --reload
         fi
         die "udev self-test failed; no initramfs change made"

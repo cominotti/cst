@@ -101,8 +101,8 @@ write_if_changed() {
     real_write_if_changed "${dest}" "$2"
 }"""
 # The installer as the developer (never root), its record in $FAKE/home: every call is logged to
-# $FAKE/installer-calls; text, text-plan and remove-text run the real installer with --home there (a
-# run as a user records under that home); mark only logs (it would go to root's record).
+# $FAKE/installer-calls; text, text-plan, remove-text and forget-text run the real installer with --home
+# there (a run as a user records under that home); mark only logs (it would go to root's record).
 INSTALLER_REDIRECT: Final = """_cst_installer_as() {
     shift
     echo "installer $*" >>"${FAKE}/installer-calls"
@@ -974,10 +974,42 @@ echo "[$ov] $rc"
         self.assertFalse(os.path.exists(self.at(RULE)))
         self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
 
+    def test_selftest_failure_drops_the_rules_line_when_the_installer_did_not_remove_it(self) -> None:
+        # The installer stopped before it removed the rule: rm -f removes it, and cst_forget_text (the real
+        # installer here) drops its record line, so the record lists no file that is gone.
+        self.install()
+        self.assertIn(self.at(RULE), self.record()[0], "the install did not record the rule")
+        failing = 'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertNotIn(self.at(RULE), self.record()[0])
+        self.assertIn(f"installer forget-text {self.at(RULE)}", self.installer_calls())
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
+    def test_selftest_failure_goes_on_when_the_line_cannot_be_dropped_either(self) -> None:
+        # The second try fails too (a record of a newer CST, a disk still full): the cleanup still ends with
+        # the rule gone, udev reloaded and the self-test's error.
+        failing = (
+            'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+            'cst_forget_text() { echo "cst installer: cannot forget" >&2; return 1; }\n'
+        )
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cst installer: cannot forget", r.stderr)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
     def test_selftest_failure_keeps_a_rule_that_was_there(self) -> None:
         r = self.selftest(ready={"dm-0": False, "dm-1": True}, rule_was_present=1)
         self.assertEqual(r.returncode, 1)
         self.assertTrue(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        calls = self.installer_calls()
+        self.assertFalse([c for c in calls if c.startswith(("installer remove-text", "installer forget-text"))], calls)
 
     def test_selftest_fails_when_lsblk_lists_another_member_count(self) -> None:
         """Every member btrfs counts must be checked: fewer (or more) in lsblk fails, all ready or not."""
