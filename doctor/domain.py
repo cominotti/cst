@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments, group
@@ -155,7 +155,7 @@ USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.sli
 LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
-CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
+CPU_CONF = HostPath(CPU_SETTINGS)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)

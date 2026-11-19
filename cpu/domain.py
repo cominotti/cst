@@ -16,7 +16,7 @@ import re
 from typing import Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import group
@@ -82,7 +82,7 @@ class CpuPaths:
     file; etc, where vm-pin keeps the definition it replaced."""
 
     runs: str
-    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    conf: str = CPU_SETTINGS
     etc: str = "/etc/cpu-setup"
 
 

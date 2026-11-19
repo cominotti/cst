@@ -19,7 +19,7 @@ import posixpath
 import re
 from typing import Final, Literal
 
-from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, first_line_version, state_format
 from cst_core.domain.text import file_lines, group, printf_q, printf_q_words
 
 type Manager = Literal["sys", "usr"]
@@ -50,7 +50,7 @@ def _in(folder: str, name: str) -> str:
 class GamePaths:
     """Where the profile reads and writes (tests point them into a folder of their own)."""
 
-    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    conf: str = CPU_SETTINGS
     run: str = posixpath.dirname(state_format(StateFormatKey.GAME_STATE).path)
     cgroot: str = "/sys/fs/cgroup"
     # The system manager's runtime unit folder (the MemoryLow drop-ins).

@@ -13,6 +13,7 @@ import json
 import re
 from typing import Final, TypedDict, TypeIs
 
+from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
@@ -82,7 +83,7 @@ def route(cmd: str) -> CpuRoute:
 class SetupPaths:
     """Where `cst cpu` reads and writes on the host (tests point them into a folder of their own)."""
 
-    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    conf: str = CPU_SETTINGS
     unit_dir: str = "/etc/systemd/system"
     daemon_json: str = "/etc/docker/daemon.json"
     # intel_pstate: raise the frequency at once when a task wakes up after an I/O wait (builds with

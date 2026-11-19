@@ -166,6 +166,8 @@ if sorted(_FORMATS) != sorted(StateFormatKey):
 
 # The program every CST alert goes through (its manifest destination); it also keeps the alert spool.
 NOTIFY_PROGRAM: Final = manifest_by_src()["btrfs/btrfs-notify"].dest
+# The cpu settings file: cst cpu, its game profile and vm-pin read it, and so do cst doctor and cst vm.
+CPU_SETTINGS: Final = "/etc/cpu-setup/cpu-setup.conf"
 
 
 class Urgency(StrEnum):
