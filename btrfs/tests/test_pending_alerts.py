@@ -208,9 +208,14 @@ class PendingAlertsTest(unittest.TestCase):
         for args in ((), ("--list",), ("--bogus",)):
             with self.subTest(args):
                 r = subprocess.run(
-                    [*RUN, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+                    [*RUN, *args],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
                     timeout=60,
-                )  # fmt: skip
+                )
                 self.assertEqual((r.returncode, r.stdout), (1, ""))
                 self.assertIn("HOME", r.stderr)
         self.assertEqual(self.notifications(), [])
@@ -255,9 +260,13 @@ class PendingAlertsTest(unittest.TestCase):
         self.alert(1)
         env = {**self.env, "LC_ALL": "pt_BR.UTF-8"}
         want = subprocess.run(
-            ["date", "-d", f"@{FIRST}", "+%a %d %b %H:%M"], env=env, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, check=True,
-        ).stdout.strip()  # fmt: skip
+            ["date", "-d", f"@{FIRST}", "+%a %d %b %H:%M"],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=True,
+        ).stdout.strip()
         r = self.run_prog("--list", LC_ALL="pt_BR.UTF-8")
         self.assertEqual(r.stdout, f"{want}  critical btrfs-test: Disk: problem{NOT_SHOWN}\n")
 
@@ -400,9 +409,14 @@ class PendingAlertsTest(unittest.TestCase):
         os.close(r)
         try:
             p = subprocess.run(
-                [*RUN, "--list"], check=False, stdout=w, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                env=self.env, timeout=60,
-            )  # fmt: skip
+                [*RUN, "--list"],
+                check=False,
+                stdout=w,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                env=self.env,
+                timeout=60,
+            )
         finally:
             os.close(w)
         self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))

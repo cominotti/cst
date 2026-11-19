@@ -582,8 +582,10 @@ class InstallerCliTest(unittest.TestCase):
         conf = os.path.join(self.stage, "etc/cst/docker-gc.conf")
         r = self.cli("remove", "--root", self.stage, "--component", "btrfs:docker-gc")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.decode().splitlines()[:2], [
-            f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", f"removed:   {prog}"])  # fmt: skip
+        self.assertEqual(
+            r.stdout.decode().splitlines()[:2],
+            [f"written:   {conf} (DOCKER_GC_PROTECT=registry.example.com)", f"removed:   {prog}"],
+        )
         self.assertTrue(Path(conf).read_text().endswith("\nDOCKER_GC_PROTECT=registry.example.com\n"))
 
     def test_an_installed_docker_gc_it_cannot_read_stops_the_install_before_any_write(self) -> None:

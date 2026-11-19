@@ -93,11 +93,31 @@ FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
 # are resolved through aliases and `from m import x`.
 PURE_MODULES: Final[frozenset[str]] = frozenset(
     {
-        "__future__", "ast", "collections", "collections.abc", "dataclasses", "difflib", "enum", "fnmatch",
-        "functools", "itertools", "json", "math", "operator", "posixpath", "re", "shlex", "stat",
-        "string", "textwrap", "tomllib", "typing", "unicodedata", "xml.etree.ElementTree",
+        "__future__",
+        "ast",
+        "collections",
+        "collections.abc",
+        "dataclasses",
+        "difflib",
+        "enum",
+        "fnmatch",
+        "functools",
+        "itertools",
+        "json",
+        "math",
+        "operator",
+        "posixpath",
+        "re",
+        "shlex",
+        "stat",
+        "string",
+        "textwrap",
+        "tomllib",
+        "typing",
+        "unicodedata",
+        "xml.etree.ElementTree",
     }
-)  # fmt: skip
+)
 PURE_NAMES: Final[dict[str, frozenset[str]]] = {
     "os": frozenset({"path", "sep", "stat_result"}),
     "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),

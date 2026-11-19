@@ -122,8 +122,11 @@ class DomainTest(unittest.TestCase):
                 values = " ".join(f'"$v{i}"' for i in range(n))
                 r = subprocess.run(
                     ["bash", "-c", f'read -r {names} <<<"$1"; printf "%s\\x1f" {values}', "_", line],
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True,
-                )  # fmt: skip
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=True,
+                )
                 with self.subTest(line=line, n=n):
                     self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
 
@@ -1660,8 +1663,12 @@ class NotifierTest(unittest.TestCase):
         notify = os.path.join(REPO, "btrfs", "btrfs-notify")
         done = subprocess.run(
             ["bash", notify, "-u", "critical", "-a", "btrfs-bulk", "Disk: problem", "from bash"],
-            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
-        )  # fmt: skip
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
         self.assertEqual(done.returncode, 0, done.stderr)
         [name] = self.kept()
         path = self.missing(body="from python")
@@ -1679,8 +1686,11 @@ class NotifierTest(unittest.TestCase):
         listed = subprocess.run(
             ["/usr/bin/python3", "-I", "-B", os.path.join(REPO, "btrfs", "cst-pending-alerts"), "--list"],
             env={**env, "HOME": home, "CST_ALERTS_OWNER": str(os.getuid())},
-            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
-        )  # fmt: skip
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
 
@@ -1750,8 +1760,13 @@ class ServiceNotifierTest(unittest.TestCase):
     def test_without_a_usable_notify_socket_nothing_is_opened_or_sent(self) -> None:
         out = io.StringIO()
         opened = mock.patch("socket.socket", side_effect=AssertionError("no socket may be opened"))
-        for environ in ({}, {"NOTIFY_SOCKET": ""}, {"NOTIFY_SOCKET": "@"}, {"NOTIFY_SOCKET": "relative/notify"},
-                        {"NOTIFY_SOCKET": "vsock:2:999"}):  # fmt: skip
+        for environ in (
+            {},
+            {"NOTIFY_SOCKET": ""},
+            {"NOTIFY_SOCKET": "@"},
+            {"NOTIFY_SOCKET": "relative/notify"},
+            {"NOTIFY_SOCKET": "vsock:2:999"},
+        ):
             with self.subTest(environ=environ), contextlib.redirect_stdout(out), opened as made:
                 notifier = ServiceNotifier.from_environ(environ)
                 self.assertFalse(notifier.ready())

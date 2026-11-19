@@ -305,9 +305,12 @@ class PartsTest(unittest.TestCase):
         p = vm_domain.domain_parts(xml)
         self.assertEqual(
             p.skipped,
-            ["unnamed disk on /iso/win.iso (cdrom, not copied)", "unnamed disk (cdrom, not copied)",
-             "unnamed disk (no source file)"],
-        )  # fmt: skip
+            [
+                "unnamed disk on /iso/win.iso (cdrom, not copied)",
+                "unnamed disk (cdrom, not copied)",
+                "unnamed disk (no source file)",
+            ],
+        )
         self.assertEqual(len(p.problems), 1)
         self.assertTrue(p.problems[0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p.problems)
         self.assertEqual(p.disks, ["/a.qcow2"])

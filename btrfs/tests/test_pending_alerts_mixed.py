@@ -42,9 +42,14 @@ class MixedVersionsTest(unittest.TestCase):
 
     def run_as(self, prog: list[str], *args: str) -> subprocess.CompletedProcess[str]:
         r = subprocess.run(
-            [*prog, *args], env=self.h.env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+            [*prog, *args],
+            env=self.h.env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
             timeout=120,
-        )  # fmt: skip
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 

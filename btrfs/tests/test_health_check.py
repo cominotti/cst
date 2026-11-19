@@ -699,10 +699,17 @@ class HealthCheckTest(unittest.TestCase):
             [c[1:] for c in self.calls("journalctl")][1:],
             [
                 ["-k", "-q", "--no-pager", "-o", "short-iso", "--since", "-65min"],
-                ["-k", "-q", "-n", "1", "-o", "short-iso", "--cursor-file=" + self.path(
-                    "var/lib/btrfs-health-check/kernel.cursor")],
+                [
+                    "-k",
+                    "-q",
+                    "-n",
+                    "1",
+                    "-o",
+                    "short-iso",
+                    "--cursor-file=" + self.path("var/lib/btrfs-health-check/kernel.cursor"),
+                ],
             ],
-        )  # fmt: skip
+        )
         self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-new\n")
 
     def unwritable(self, rel: str) -> None:
@@ -775,10 +782,20 @@ class HealthCheckTest(unittest.TestCase):
         self.assertEqual(
             self.calls("journalctl")[-1][1:],
             [
-                "-q", "-o", "short-unix", "--no-pager", "-u", "systemd-suspend.service", "-u",
-                "systemd-hibernate.service", "-u", "systemd-suspend-then-hibernate.service", "-n", "1",
+                "-q",
+                "-o",
+                "short-unix",
+                "--no-pager",
+                "-u",
+                "systemd-suspend.service",
+                "-u",
+                "systemd-hibernate.service",
+                "-u",
+                "systemd-suspend-then-hibernate.service",
+                "-n",
+                "1",
             ],
-        )  # fmt: skip
+        )
         self.machine["suspend"] = f"{self.now - 3600}.5 host systemd[1]: Finished System Suspend.\n"
         self.assertEqual(self.run_check().returncode, 1)
 
