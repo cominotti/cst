@@ -31,7 +31,7 @@ from cst_core import installer
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner
+from cst_core.domain.install import GENERATED_COMPONENTS, INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner
 from cst_core.domain.record import (
     EMPTY_RECORD,
     ComponentState,
@@ -628,6 +628,59 @@ class InstallerRecordCliTest(unittest.TestCase):
                 r = self.cli(*args)
                 self.assertEqual(r.returncode, 2, r.stderr)
         self.assertFalse(os.path.exists(self.record))
+
+    def test_remove_and_forget_refuse_a_component_of_generated_files_only(self) -> None:
+        # No manifest entry names its files (generated text): --component would select nothing and say
+        # nothing. Refused (exit 2), naming the DEST form; nothing is changed: a file the record lists
+        # under it and a file with no record line stay, and so do the record's bytes.
+        listed, loose = "/etc/x-listed.conf", Path(self.stage + "/etc/x-loose.conf")
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        for component, owner in GENERATED_COMPONENTS.items():
+            r = self.cli("text", listed, "0644", "--component", component, stdin=b"x\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            loose.write_bytes(b"y\n")
+            before = user_record.read_bytes()
+            self.assertIn(listed, parse_record(before.decode()).files)
+            for command in ("remove", "forget"):
+                with self.subTest(component=component, command=command):
+                    r = self.cli(command, "--component", component)
+                    self.assertEqual(r.returncode, 2, r.stderr)
+                    self.assertEqual(r.stdout, b"")
+                    as_user = " --home DIR, as the user" if owner == "user" else ""
+                    self.assertEqual(
+                        r.stderr.decode(),
+                        f"cst installer: {command} --component {component}: its files are generated text, not "
+                        f"manifest files; name them: {command}-text DEST...{as_user}\n",
+                    )
+                    self.assertEqual(user_record.read_bytes(), before)
+                    self.assertEqual(Path(self.stage + listed).read_bytes(), b"x\n")
+                    self.assertEqual(loose.read_bytes(), b"y\n")
+            # dests and srcs still answer: such a component has no manifest file.
+            for command in ("dests", "srcs"):
+                r = self.cli(command, "--component", component)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""), command)
+        self.assertFalse(os.path.exists(self.record), "root's record was written")
+
+    def test_a_new_component_of_generated_files_only_is_refused_too(self) -> None:
+        # The refusal follows GENERATED_COMPONENTS: a component added to it is refused without a change here.
+        service = mock.Mock(spec=InstallService)
+        with (
+            mock.patch.dict("cst_core.domain.install.COMPONENTS", {"m:gen": "cst m install"}),
+            mock.patch.dict("cst_core.domain.install.GENERATED_COMPONENTS", {"m:gen": Owner.ROOT}),
+            mock.patch("cst_core.wiring.start_installer"),
+            mock.patch("cst_core.wiring.installer_identity", return_value=(False, "/home/u")),
+            mock.patch("cst_core.wiring.install_service", return_value=service),
+        ):
+            for command in ("remove", "forget"):
+                err = io.StringIO()
+                with self.subTest(command=command), contextlib.redirect_stderr(err):
+                    self.assertEqual(installer.main([command, "--component", "m:gen", "--root", self.stage]), 2)
+                    self.assertEqual(
+                        err.getvalue(),
+                        f"cst installer: {command} --component m:gen: its files are generated text, not manifest "
+                        f"files; name them: {command}-text DEST...\n",
+                    )
+        self.assertEqual(service.method_calls, [])
 
     def test_files_of_the_user_are_not_forgotten_as_root(self) -> None:
         # As root on the real root (no --root), a user's file is forgotten as that user, not here.

@@ -6351,3 +6351,55 @@ echo E2E-OK
                 f"'/opt/cst/cst vm {subcmd}' must run on the host, not inside a toolbox/container.\n"
                 f"In a host terminal: /opt/cst/cst vm {subcmd}\n",
             )
+
+    def test_149_installer_generated_components_refused_and_plan_names_unrecorded_files(self) -> None:
+        """installer.py on the container's real / and its real install records. remove --component and
+        forget --component of each component of GENERATED_COMPONENTS (root's as root, the user's as
+        tester through the real runuser) exit 2 with one line naming the DEST form, print nothing on
+        stdout, and change nothing: both records keep their bytes, and the files a record lists under
+        that component (another test's) stay as they are."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import GENERATED_COMPONENTS; "
+            'print(" ".join(f"{c}={o}" for c, o in GENERATED_COMPONENTS.items()))'
+        )
+        generated = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
+        self.assertIn("btrfs:degraded-boot=root", generated)
+        self.assertIn("cpu:toolbox=user", generated)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        for pair in generated:
+            comp, owner = pair.split("=")
+            user = owner == "user"
+            run = "runuser -u tester -- " if user else ""
+            home = "--home /home/tester " if user else ""
+            record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
+            as_user = " --home DIR, as the user" if user else ""
+            with self.subTest(component=comp):
+                out = exec_bash(
+                    c,
+                    rf"""
+                    set -E
+                    trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+                    set -e
+                    state() {{
+                        sha256sum /var/lib/cst/installed.json /home/tester/.local/state/cst/installed.json 2>/dev/null || true
+                        listed="$({lines} {record} {comp})"
+                        for f in ${{listed% *}}; do [[ "$f" == - || ! -e "$f" ]] || sha256sum "$f"; done
+                    }}
+                    before="$(state)"
+                    err="$(mktemp)"
+                    for command in remove forget; do
+                        rc=0
+                        out="$({run}{installer} "$command" {home}--component {comp} 2>"$err")" || rc=$?
+                        [[ "$rc" == 2 && -z "$out" ]] || {{ echo "$command: exit $rc: $out $(cat "$err")" >&2; exit 1; }}
+                        want="cst installer: $command --component {comp}: its files are generated text, not manifest files; name them: $command-text DEST...{as_user}"
+                        [[ "$(cat "$err")" == "$want" ]] || {{ echo "$command said: $(cat "$err")" >&2; exit 1; }}
+                        [[ "$(state)" == "$before" ]] || {{ echo "$command changed something" >&2; exit 1; }}
+                    done
+                    rm -f "$err"
+                    echo E2E-OK
+                    """,
+                ).stdout
+                self.assertIn("E2E-OK", out)

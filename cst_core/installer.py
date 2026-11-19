@@ -37,7 +37,9 @@ Usage:
 OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
          --set KEY=VALUE (templates), --module M / --kind K / --owner root|user /
          --component C (select entries instead of naming them; C as in
-         COMPONENTS, e.g. btrfs:core: every file one command installs)
+         COMPONENTS, e.g. btrfs:core: every file one command installs;
+         remove and forget refuse a C of GENERATED_COMPONENTS, whose files
+         are generated text: name them, remove-text or forget-text DEST...)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
 Every file install writes or finds current is listed in the install record
 (/var/lib/cst/installed.json for root's files, ~/.local/state/cst/installed.json
@@ -296,6 +298,20 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
     return 0 if todo == 0 else 1
 
 
+def _refuse_generated(a: argparse.Namespace) -> None:
+    """remove or forget --component C of a component whose files are all generated text (GENERATED_COMPONENTS):
+    no manifest file names them, so the call would select nothing and say nothing; a usage error that names
+    the DEST form (the paths its setup script generates; never paths read from a record a user can edit)."""
+    if a.command not in (InstallerCommand.REMOVE, InstallerCommand.FORGET) or a.component not in GENERATED_COMPONENTS:
+        return
+    text = InstallerCommand.REMOVE_TEXT if a.command == InstallerCommand.REMOVE else InstallerCommand.FORGET_TEXT
+    as_user = " --home DIR, as the user" if GENERATED_COMPONENTS[a.component] == Owner.USER else ""
+    raise _UsageError(
+        f"{a.command} --component {a.component}: its files are generated text, not manifest files; "
+        f"name them: {text} DEST...{as_user}"
+    )
+
+
 def _command(service: InstallService, a: argparse.Namespace) -> int:
     """One command of the parsed command line; its exit status."""
     if a.command in (InstallerCommand.TEXT, InstallerCommand.TEXT_PLAN):
@@ -307,6 +323,7 @@ def _command(service: InstallService, a: argparse.Namespace) -> int:
         if not a.args:
             raise _UsageError(f"{a.command} DEST...")
         return _remove_or_forget(service, a.command, [_text_place(d, 0, None, a, recorded=True) for d in a.args])
+    _refuse_generated(a)
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
     if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)
