@@ -325,7 +325,9 @@ file fixed; its mark is `/run/cpu-setup/settings-warned`, a file only root
 can write there, replaced and never followed), and its unit does not fail. `off`
 still undoes everything (for the user `on` acted for, the uid of its
 `user@UID.service` record in `game.state`, also when `TARGET_USER` sets
-nothing or names another user now), and `cst cpu game state` shows the line.
+nothing or names another user now; the watchdog's `tick` acts for that
+user too, without a word every 30 s about a `TARGET_USER` that names no
+account), and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|

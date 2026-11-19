@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import GameProfile, load_profile, read_settings, user_name
+from cpu.game.adapters import GameProfile, load_profile, read_settings, user_id, user_name
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -994,6 +994,45 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertEqual(p.off(), 0)
         self.assertFalse(os.path.exists(steam_override))  # what the tick set, 'off' undid
         self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+
+    def test_tick_says_nothing_about_a_target_user_that_names_no_account(self) -> None:
+        # TARGET_USER changed to a name no account has while the profile was on: the tick (every 30 s)
+        # acts for the user 'on' acted for, and the uid lookup's "no such user" stays out of the journal.
+        self.run_profile("on")
+        self.write(self.manual, "")
+        nobody = "cst-test-no-such-user"
+
+        def uid_of(user: str) -> str:
+            return UID if user == USER else user_id(user)  # the real lookup (and its message) for the other
+
+        for _ in range(2):
+            out, err = io.StringIO(), io.StringIO()
+            p = GameProfile(
+                self.paths,
+                GameSettings(target_user=nobody),
+                self.systemd,
+                uid_of=uid_of,
+                name_of={UID: USER}.__getitem__,
+                out=out,
+            )
+            self.systemd.actions = []
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.tick(), 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual([a for a in self.systemd.actions if f"-M {nobody}@" in a], [])
+        # 'off' still says it (once, when it runs).
+        err = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            GameSettings(target_user=nobody),
+            self.systemd,
+            uid_of=uid_of,
+            name_of={UID: USER}.__getitem__,
+            out=io.StringIO(),
+        )
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.off(), 0)
+        self.assertEqual(err.getvalue(), f"id: '{nobody}': no such user\n")
 
     def test_on_records_the_user_first(self) -> None:
         self.run_profile("on")

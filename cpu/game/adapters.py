@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 import glob
+import io
 import locale
 import os
 import pwd
@@ -533,12 +534,18 @@ class GameProfile:
     def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
         also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
-        The tick and 'state' act for that user too (say False: quietly), so what the tick sets in the
-        user manager is what 'off' undoes."""
+        The tick and 'state' act for that user too (say False: quietly, also about a TARGET_USER that
+        names no account: the tick runs every 30 s), so what the tick sets in the user manager is what
+        'off' undoes."""
         uid = state_uid(recs)
-        target = self.s.target_user
-        if uid is None or (target and self._uid_of(target) == uid):
+        if uid is None:
             return
+        target = self.s.target_user
+        if target:
+            with contextlib.nullcontext() if say else contextlib.redirect_stderr(io.StringIO()):
+                same = self._uid_of(target) == uid
+            if same:
+                return
         name = self._name_of(uid)
         if name:
             if say:
