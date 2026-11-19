@@ -230,9 +230,9 @@ class GameProfile:
         wrote it) and name it in the journal: a record glued onto it would become one line with the
         cut fields, which 'off' would read as a whole record (an old IOWeight "1" of "100"). False when
         the file cannot be cut (said on stderr, as a failed write)."""
-        data = read_bytes(path)
-        cut = None if data is None else cut_tail(data)
-        if data is None or cut is None:
+        data = read_bytes(path) or b""
+        cut = cut_tail(data)
+        if cut is None:
             return True
         keep, line = cut
         try:
