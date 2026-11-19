@@ -447,14 +447,17 @@ everything with `plan`, `status` or `doctor` before changing anything:
   coding agents such as Claude Code and Codex, which read it by themselves
   (there is no separate `CLAUDE.md`): the rules, the index of the documents,
   the commands and the test gotchas. It links to `docs/architecture.md` (how
-  the code fits together) and to the agent rules and skills in `.agents/`
-  (`.claude/rules` and `.claude/skills` are links to them).
+  the code fits together) and to the agent rules, skills and the `cst-change`
+  workflow in `.agents/` (`.claude/rules`, `.claude/skills` and
+  `.claude/workflows` are links to them).
   `tests/test_docs.py` checks the links of every Markdown file, that each
   document is in the AGENTS.md index, and the agent files.
 - `pyproject.toml`, `uv.lock`, `tests/uv-dev`, `tests/mutation/`, `docs/dev-tools.md`: the
   developer tools for the Python code (the ruff linter and formatter, the
-  ty type checker and the cosmic-ray mutation tester), pinned and installed through uv for
-  `invowk cmd test pylint`, `invowk cmd test types` and the optional
+  ty type checker, the zizmor workflow audit, coverage.py and the cosmic-ray
+  mutation tester), pinned and installed through uv for
+  `invowk cmd test pylint`, `invowk cmd test types`, `invowk cmd test workflows`,
+  the nightly's `invowk cmd test coverage` and the optional
   `invowk cmd test mutation`. CST itself installs nothing from them: the helpers
   keep running on the system's `/usr/bin/python3` with the standard library
   only ([docs/dev-tools.md](docs/dev-tools.md)).
@@ -462,7 +465,8 @@ everything with `plan`, `status` or `doctor` before changing anything:
   Tier 2 runs a `--privileged` container that sees the host's disks, so it
   refuses to start unless you opt in with `CST_E2E_ALLOW_PRIVILEGED=1` (or
   `--allow_privileged`). CI sets that opt-in; don't use it on your workstation.
-- `.github/`: the CI workflows. `.github/actions/setup-invowk` installs the
+- `.github/`: the CI workflows (audited by zizmor; its exceptions, each with
+  its reason, are in `.github/zizmor.yml`). `.github/actions/setup-invowk` installs the
   pinned invowk release only if the archive's SHA256 matches the hash pinned in
   that file and the release's `checksums.txt` carries a valid cosign signature
   from invowk's own release workflow. The binary inside also has its own pinned
