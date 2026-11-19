@@ -647,24 +647,20 @@ def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None
     found = False
     for o in map(object_of, items_of(objs)):
         info = object_or_empty(o.get("info"))
+        kind = str(o.get("type", ""))
         # Read only where the object's type needs them: another type's props and params are
         # never looked into.
-        p: object = info.get("props") or {}
+        p = object_of(info.get("props") or {}) if kind.endswith(("Device", "Node")) else {}
         params: object = info.get("params") or {}
-        kind = str(o.get("type", ""))
-        if kind.endswith("Device") and object_of(p).get("device.name") == CARD_PREFIX + dev:
+        if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             found = True
             prof = " ".join(
                 str(object_of(pr).get("name", "?")) for pr in items_of(object_of(params).get("Profile", []) or [])
             )
-            raw_rule = object_of(p).get("bluez5.a2dp.ldac.quality")
+            raw_rule = p.get("bluez5.a2dp.ldac.quality")
             rule = None if raw_rule is None else str(raw_rule)
-        if (
-            kind.endswith("Node")
-            and str(object_of(p).get("node.name", "")).startswith("bluez_output." + dev)
-            and object_of(p).get(CODEC_KEY)
-        ):
-            codec = str(object_of(p)[CODEC_KEY])
+        if kind.endswith("Node") and str(p.get("node.name", "")).startswith("bluez_output." + dev) and p.get(CODEC_KEY):
+            codec = str(p[CODEC_KEY])
             rate = node_rate(info)
             for pr in items_of(object_of(params).get("Props", []) or []):
                 if has_item(pr, "quality"):
