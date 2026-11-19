@@ -4209,9 +4209,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             # status asks the socket who listens and reads that process's cgroup.
             status_out=$("$cst" toolchains status)
             grep -qF "sccache server host: in its own scope (app.slice/$scope)" <<<"$status_out" ||
-                { printf 'e2e: status said:
-%s
-' "$status_out" >&2; exit 1; }
+                { printf 'e2e: status said:\n%s\n' "$status_out" >&2; exit 1; }
 
             # A second build: the server is there, nothing starts.
             build 2
