@@ -902,13 +902,16 @@ else
             # that changed since then: a full disk (the record cannot be saved) or a record a newer
             # CST wrote. Either way it has already removed the rule when it fails; rm -f matters
             # only when it stopped before that (it could not start, or the unlink itself failed).
-            # cst_forget_text then drops the rule's record line, so the record lists no file that
-            # is gone. It is a second try that may fail for the same reason (always with a newer
-            # CST's record, which this CST never rewrites; with a full disk, unless space came
-            # back), and its failure never stops the cleanup.
+            # When rm -f removed it, cst_forget_text drops the rule's record line, so the record
+            # lists no file that is gone. It is a second try that may fail for the same reason
+            # (always with a newer CST's record, which this CST never rewrites; with a full disk,
+            # unless space came back). A rule rm -f cannot remove either keeps its line. Neither
+            # failure stops the cleanup (both are tested, so set -e does not end the script here):
+            # udev is reloaded and the self-test's error is the one the run ends with.
             if ! cst_remove_text "${RULE}" >/dev/null; then
-                rm -f "${RULE}"
-                cst_forget_text "${RULE}" >/dev/null || true
+                if rm -f "${RULE}"; then
+                    cst_forget_text "${RULE}" >/dev/null || true
+                fi
             fi
             udevadm control --reload
         fi

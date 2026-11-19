@@ -1003,6 +1003,24 @@ echo "[$ov] $rc"
         self.assertIn(self.at(RULE), self.record()[0])
         self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
 
+    def test_selftest_failure_goes_on_when_the_rule_cannot_be_removed_at_all(self) -> None:
+        # The installer failed and rm -f fails too (a read-only /etc): set -e must not end the run there.
+        # The rule stays and keeps its record line (no forget), udev is reloaded, and the self-test's
+        # error is the one the run ends with.
+        failing = (
+            'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+            'rm() { if [[ "${*: -1}" == "${RULE}" ]]; then echo "rm: cannot remove: read-only" >&2; return 1; fi\n'
+            '    command rm "$@"; }\n'
+        )
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("rm: cannot remove: read-only", r.stderr)
+        self.assertTrue(r.stderr.endswith("ERROR: udev self-test failed; no initramfs change made\n"), r.stderr)
+        self.assertTrue(os.path.exists(self.at(RULE)))
+        self.assertIn(self.at(RULE), self.record()[0])
+        self.assertFalse(any(c.startswith("installer forget-text") for c in self.installer_calls()))
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
     def test_selftest_failure_keeps_a_rule_that_was_there(self) -> None:
         r = self.selftest(ready={"dm-0": False, "dm-1": True}, rule_was_present=1)
         self.assertEqual(r.returncode, 1)

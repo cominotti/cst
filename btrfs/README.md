@@ -1257,7 +1257,8 @@ own checks:
   unchecked). If the self-test fails, a **newly written** rule is removed
   again with its install record line (when the installer fails before it
   removes the rule, the script removes it and tries once more to drop the
-  line) and the initramfs is **not** changed. The other helper files stay in
+  line; a rule it cannot remove either keeps its line, and the cleanup still
+  reloads udev) and the initramfs is **not** changed. The other helper files stay in
   `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).
