@@ -263,9 +263,10 @@ def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "vm")
 def check_vm_nas_torn(host: DoctorHostPort) -> Iterator[Result]:
-    """WARN while cst vm's record of torn NAS snapshots (restic snapshots a failed NAS backup could not
-    forget) names one: the next NAS backup of that VM forgets it first, and skips its retention until
-    then. WARN when the record is of a newer format or cannot be read as one: cst vm backup --nas
+    """WARN while cst vm's record of torn NAS snapshots (restic snapshots a failed NAS backup recorded
+    as no backup, not forgotten as far as the record knows) names one: the next NAS backup of that VM
+    to that repository forgets it first (or drops it, when restic no longer lists it), and skips its
+    retention until then; the fix line points to the ways out by hand. WARN when the record is of a newer format or cannot be read as one: cst vm backup --nas
     refuses to run with it. Reads the file only (no restic)."""
     read = _read_json_state(host, VM_TORN)
     if read is None:
@@ -291,10 +292,12 @@ def check_vm_nas_torn(host: DoctorHostPort) -> Iterator[Result]:
     if named:
         yield Result(
             WARN,
-            f"{len(named)} restic snapshot(s) that a failed NAS backup could not forget, in {VM_TORN}: "
-            f"{name_list(named)}; the next `{host.cst} vm backup VM --nas` forgets them before its retention, "
-            "and skips the retention until then",
-            "or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9",
+            f"{len(named)} restic snapshot(s) recorded as torn (no backup) by a failed NAS backup, in {VM_TORN}: "
+            f"{name_list(named)}; the next `{host.cst} vm backup VM --nas` to the same repository forgets them "
+            "(or drops those already forgotten) before its retention, and skips the retention until then",
+            "or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9; for a "
+            f"VM or repository with no more NAS backups, and for an older cst-vm the weekly timer runs "
+            f"(`{host.cst} vm backup-timer on VM`), see section 10.6",
         )
 
 

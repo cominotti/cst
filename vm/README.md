@@ -814,8 +814,8 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 names one of this VM in this repository, the backup forgets it before the
 retention. If that does not work (restic forget fails, `restic snapshots`
 cannot be read, a recorded ID names several listed snapshots or one listed
-without both tags, or the record
-cannot be read or written), the run **skips the retention** and says so
+without both tags, or the record cannot be read or written), the run
+**skips the retention** and says so
 ("retention skipped: WHY; the repository keeps more until the next backup"):
 the repository keeps more, never less. The backup itself is good, so the run
 still ends with exit status 0, and the next backup tries again. A record of
@@ -825,6 +825,25 @@ CST's `cst vm`, or forget the snapshots it names by hand and move it aside
 (`mv /var/lib/cst/vm-nas-torn.json /var/lib/cst/vm-nas-torn.json.bad`).
 `cst doctor` shows a row while the record names a snapshot, and one for a
 record it cannot use (it reads only the file, no restic).
+
+**How an entry leaves the record.** Only a NAS backup of the same VM to the
+same repository takes an entry out: it forgets the snapshot, or drops the
+entry when restic no longer lists the snapshot (forgotten by hand with
+`restic forget ID`, or by the run that recorded it when that run could not
+update the record). A VM that gets no more NAS backups (deleted, renamed,
+its timer off) or a repository it no longer uses (`NAS_PATH` changed)
+keeps its entries, and `cst doctor` keeps warning about them. Then forget
+each of its snapshots by hand (section 10.9) and take its entries out of
+the file by hand, as root with an editor. Remove the whole file only when
+it names no other entry: an absent record is an empty one, so removing
+one that names another VM's torn snapshot would let that VM's retention
+count it as a backup.
+
+The weekly timer runs the installed copy `/usr/local/sbin/cst-vm`
+(section 10.5). A copy installed before this record existed does not read
+it and runs the retention anyway, so after updating CST run
+`cst vm backup-timer on VM` again (`cst vm backup-timer status VM` and
+the `install` row of `cst doctor` show an older copy).
 
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the

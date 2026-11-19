@@ -2125,12 +2125,16 @@ class VmTest(Scratch):
             self.torn_lines(r),
             [
                 (
-                    "WARN   2 restic snapshot(s) that a failed NAS backup could not forget, in "
+                    "WARN   2 restic snapshot(s) recorded as torn (no backup) by a failed NAS backup, in "
                     "/var/lib/cst/vm-nas-torn.json: win a1b2c3d4 (20261108T010640Z), lab f00dbabe (20261101T010000Z); "
-                    "the next `cst vm backup VM --nas` forgets them before its retention, and skips the retention "
-                    "until then"
+                    "the next `cst vm backup VM --nas` to the same repository forgets them (or drops those already "
+                    "forgotten) before its retention, and skips the retention until then"
                 ),
-                "fix: or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9",
+                (
+                    "fix: or by hand: restic forget ID, with the repository's variables of vm/README.md, section "
+                    "10.9; for a VM or repository with no more NAS backups, and for an older cst-vm the weekly "
+                    "timer runs (`cst vm backup-timer on VM`), see section 10.6"
+                ),
             ],
         )
         self.assertFalse([c for c in self.calls() if c.startswith("restic")], "no restic call")
