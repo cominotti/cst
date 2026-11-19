@@ -10,6 +10,7 @@ export const meta = {
     { title: 'Review', detail: 'findings only: code-review high <branch> + checklist lenses by path' },
     { title: 'Fix', detail: 'one independent agent applies confirmed findings, runs the gates once' },
     { title: 'Fast lane', detail: 'instead of Review and Fix for a small change of docs, tests and tooling: one agent reviews by hand and fixes' },
+    { title: 'Re-review', detail: 'when the fixer changed code outside tests: findings only, by hand, on its commits; a high finding stops the run' },
   ],
 }
 //
@@ -40,6 +41,9 @@ export const meta = {
 // its reason, and a deferral without one makes the branch not ready. In both lanes the
 // result's needs_review is true when the fixer says its commits change code outside tests or when a path it
 // changed is neither Markdown nor a test: in the fast lane the reviewer is the fixer, so its word is not enough.
+// When it is true and the branch is otherwise ready, the workflow reviews the fixer's commits itself (Re-review:
+// one findings-only agent, by hand, on reviewed_head..head; the orchestrator no longer does): a "high" finding
+// stops the run (ready false, stopped "re-review"), the others go to the result's rereview.low.
 //
 // Facts this script is built on (checked 2026-11-18; recheck after a Claude Code upgrade):
 // - A workflow agent has the Skill tool (and the advisor) but not Agent or Workflow; it loads AGENTS.md and the
@@ -132,6 +136,13 @@ function deferralProblem(deferred) {
   return bad.length ? bad.length + ' deferral(s) without a finding or a reason' : ''
 }
 
+// The re-review's findings split by severity: a "high" one stops the run, the others go to the result. A finding
+// with no severity, or one the script does not know, counts as high. Pure: tested below.
+function reReviewOutcome(findings) {
+  const high = findings.filter((f) => String(f.severity || '').trim().toLowerCase() !== 'low')
+  return { high, low: findings.filter((f) => !high.includes(f)) }
+}
+
 // The largest change (added plus deleted lines) the fast lane takes.
 const FAST_LINES = 150
 // The changed lines (added plus deleted) that git diff --numstat prints; null when a file is binary ("-") or a line
@@ -213,6 +224,8 @@ function selftest() {
   eq([fullReviewReason([M('swap/domain.py')], 10, ['primitives']), fullReviewReason([M('tests/e2e/suites/suite_tier1_systemd.py')], 10, []), fullReviewReason([M('vm/tests/test_vm.py')], 10, ['parity'])], ['paths beyond docs, unit tests and repository tooling: swap/domain.py', 'paths beyond docs, unit tests and repository tooling: tests/e2e/suites/suite_tier1_systemd.py', 'lenses beyond primitives: parity'], 'full review by path and lens')
   eq([fixerChangedCode({ needs_review: false, fix_paths: [] }), fixerChangedCode({ needs_review: false, fix_paths: ['vm/tests/test_vm.py', 'AGENTS.md'] }), fixerChangedCode({ needs_review: false, fix_paths: ['.agents/workflows/cst-change.js'] }), fixerChangedCode({ needs_review: true, fix_paths: [] }), fixerChangedCode({ needs_review: false })], [false, false, true, true, false], 'the fixer changed code')
   eq([deferralProblem([]), deferralProblem([{ finding: 'f', reason: 'the parser wants a redesign' }]), deferralProblem([{ finding: 'f', reason: ' ' }, { reason: 'r' }]), deferralProblem(undefined)], ['', '', '2 deferral(s) without a finding or a reason', 'deferred is not a list'], 'deferrals')
+  const fh = { file: 'a', summary: 's', scenario: 'c', severity: 'high' }, fl = { ...fh, severity: 'low' }, fn = { file: 'a', summary: 's', scenario: 'c' }
+  eq([reReviewOutcome([]), reReviewOutcome([fh, fl]), reReviewOutcome([fn, { ...fl, severity: 'LOW ' }, { ...fl, severity: 'medium' }])], [{ high: [], low: [] }, { high: [fh], low: [fl] }, { high: [fn, { ...fl, severity: 'medium' }], low: [{ ...fl, severity: 'LOW ' }] }], 're-review outcome')
   return 'ok'
 }
 
@@ -322,6 +335,7 @@ const REVIEWED = ' Report reviewed_head: what "git -C ' + QWT + ' rev-parse HEAD
 const FIX_RULES = 'Dedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, one commit per finding or per group of findings that belong together, each commit of one kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Defer a confirmed finding ONLY when you suspect a redesign would be significantly more appropriate than a local fix: put it in deferred with the finding and the reason (the redesign you suspect, and why a local fix is the wrong answer). Never defer by size or count: a long fix, or many findings, is applied. Commit the confirmed fixes BEFORE the long gates, so a cut-short run leaves them committed. Then run the gates on the final tree (if one fails, fix it and run all of them again: the last run must be on the final tree): "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests; report fix_paths, the paths your commits changed, as "git -C ' + QWT + ' diff --name-only ' + HEAD + ' HEAD" prints them (none: an empty list). Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head, and report descends_from_reviewed (true when "git -C ' + QWT + ' merge-base --is-ancestor ' + HEAD + ' HEAD" exits 0).'
 const FIX_PROPS = { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, fix_paths: { type: 'array', items: { type: 'string' } }, deferred: { type: 'array', items: { type: 'object', properties: { finding: { type: 'string' }, reason: { type: 'string' } }, required: ['finding', 'reason'] } }, final_head: { type: 'string' }, descends_from_reviewed: { type: 'boolean' }, ...GATED }
 const FIX_REQ = ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'fix_paths', 'deferred', 'gated_head', 'worktree_clean', 'final_head', 'descends_from_reviewed']
+const mainMoved = () => trail.some((t) => t.main_changed || t.main_changed_between)
 let all, fix
 if (LANE === 'full') {
   const reviewPrompt = (lens) => lens === 'code-review'
@@ -336,7 +350,6 @@ if (LANE === 'full') {
     return r
   }
   let reviews = await parallel(labels.map((l) => () => runReview(l)))
-  const mainMoved = () => trail.some((t) => t.main_changed || t.main_changed_between)
   for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
   const missing = labels.filter((l, i) => !reviews[i])
   if (missing.length) return stopped('review', { impl, simp, missing })
@@ -363,6 +376,29 @@ const deferWhy = deferralProblem(fix.deferred)
 if (deferWhy) { log('fix: ' + deferWhy + ': not ready'); trail.push({ label: 'fix', problem: deferWhy }) }
 else if (fix.deferred.length) log('fix: ' + fix.deferred.length + ' finding(s) deferred to a redesign (see deferred)')
 if (fix.gates_ok && String(fix.final_head).trim() !== String(fix.gated_head).trim()) log('fix: HEAD moved after the gates (' + fix.gated_head + ' -> ' + fix.final_head + '): not ready')
-// needs_review: the fixer changed code outside tests (its own word, or a path it changed); the orchestrator reviews
-// reviewed_head..head before it integrates. In the fast lane the reviewer is the fixer, so the paths decide.
-return { ready: ready && fix.descends_from_reviewed === true && !deferWhy, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: fixerChangedCode(fix), reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail }
+const fixReady = ready && fix.descends_from_reviewed === true && !deferWhy
+const changedCode = fixerChangedCode(fix)
+const done = (extra) => ({ ready: fixReady, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: changedCode, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail, ...extra })
+if (!changedCode) return done({ rereview: null })
+if (!fixReady) { log('re-review: skipped, the branch is not ready anyway'); return done({ rereview: null }) }
+
+// The fixer changed code outside tests: one more findings-only review, of its commits only (reviewed_head..head).
+// By hand: code-review takes a branch and reviews it against main (see the header).
+phase('Re-review')
+const FIXED = String(fix.gated_head).trim()
+const RANGE = 'git -C ' + QWT + ' diff ' + shq(HEAD) + ' ' + shq(FIXED)
+const runReReview = async () => {
+  const r = await guarded('re-review', 'Re-review', shared('re-review', false) + '\n\nStage: re-review of the fixer\'s commits, by hand, FINDINGS ONLY (edit nothing; do not invoke the code-review skill: it reviews only against main). The range is "' + RANGE + '" ("git -C ' + QWT + ' log ' + shq(HEAD) + '..' + shq(FIXED) + '" lists its commits); the change before it was already reviewed. Check that each commit does what its message says and breaks nothing around it (read the code around it on the branch with "git -C ' + QWT + ' show ' + shq(FIXED) + ':<file>"), keeps the repository rules and the proof the kind "' + A.kind + '" asks for, and has a test where it needs one. Give each finding file, line, summary, a concrete failure scenario and severity: "high" when the branch must not be integrated as it is (a bug, a broken rule or gate, a missing proof), "low" for anything else.' + REVIEWED,
+    { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string', enum: ['high', 'low'] } }, required: ['file', 'summary', 'scenario', 'severity'] } }, reviewed_head: { type: 'string' } }, ['findings', 'reviewed_head'])
+  const why = r ? reviewProblem('re-review', r, FIXED) : ''
+  if (why) { log('re-review: ' + why); trail.push({ label: 're-review', problem: why }); return null }
+  return r
+}
+let rr = await runReReview()
+if (!rr && !mainMoved()) { log('re-review: retrying once'); rr = await runReReview() }
+if (!rr) return { ...done({ rereview: null }), ready: false, stopped: 're-review' }
+const out = reReviewOutcome(rr.findings)
+const rereview = { range: HEAD + '..' + FIXED, high: out.high, low: out.low }
+log('re-review: ' + out.high.length + ' high, ' + out.low.length + ' low finding(s)')
+if (out.high.length) return { ...done({ rereview }), ready: false, stopped: 're-review' }
+return done({ rereview })
