@@ -389,7 +389,7 @@ summary() {
 }
 
 uninstall() {
-    local f tracked to_untrack=()
+    local f tracked to_untrack=() generated=()
     if compgen -G "${FLAG_DIR}/*" >/dev/null; then
         die "this boot is DEGRADED (${FLAG_DIR} has flags); /var and /home depend on the rule. Uninstall after restoring RAID1 and rebooting."
     fi
@@ -410,7 +410,13 @@ uninstall() {
     systemctl stop 'btrfs-last-resort@*.timer' 2>/dev/null || true
     old_rule_is_ours && rm -fv "${OLD_RULE}"
     # The files this script generated, with their install record lines; the old ones were never listed.
-    cst_remove_text "${TRACKED[@]}" "${UNIT_DIR}/${RECORD_UNIT}" "${SYNCED_SUM_FILE}"
+    # An installer that fails (a record of a newer CST) leaves the record as it is: the files go
+    # without it, and uninstall goes on (the initramfs no longer has them).
+    generated=("${TRACKED[@]}" "${UNIT_DIR}/${RECORD_UNIT}" "${SYNCED_SUM_FILE}")
+    if ! cst_remove_text "${generated[@]}"; then
+        warn "the install record was not changed (see above); removing the files without it"
+        rm -fv "${generated[@]}"
+    fi
     rm -fv "${OLD_FILES[@]}"
     rmdir -v "${CONF_DIR}" 2>/dev/null || true
     systemctl daemon-reload

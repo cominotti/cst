@@ -1505,6 +1505,26 @@ status
             self.assertIn(f"removed:   {self.at(dest)}\n", r.stdout)
         self.assertEqual(self.record(), ({}, {}))
 
+    def test_uninstall_with_a_record_it_cannot_change_still_removes_and_reloads(self) -> None:
+        # The install record was written by a newer CST: the installer refuses to change it. The
+        # initramfs is untracked first, so uninstall must not stop there: the files go without their
+        # lines, and systemd and udev are reloaded.
+        self.install()
+        self.put("root" + SYNCED, "sums\n")
+        self.tracked_json([], nxt=list(TRACKED))
+        newer = '{"format": 999, "files": {}, "components": {}}\n'
+        self.put("home/.local/state/cst/installed.json", newer)
+        r = self.uninstall()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("written by a newer CST", r.stderr)
+        self.assertIn("WARNING: the install record was not changed (see above); removing the files without it\n", r.stderr)
+        self.assertEqual(self.mutating_calls()[-2:], ["systemctl daemon-reload", "udevadm control --reload"])
+        self.assertEqual(
+            sorted(os.path.relpath(p, self.root) for p in self.tree()), ["usr/lib/udev/rules.d/64-btrfs.rules"]
+        )
+        self.assertTrue(r.stdout.endswith("Uninstalled (initramfs: from the next deployment on).\n"), r.stdout)
+        self.assertEqual(self.read("home/.local/state/cst/installed.json"), newer)
+
     def test_uninstall_keeps_a_foreign_64_btrfs_rule_and_past_markers(self) -> None:
         self.install()
         self.put("root" + OLD_RULE, "someone else's rule\n")

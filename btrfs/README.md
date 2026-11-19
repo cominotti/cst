@@ -1250,7 +1250,9 @@ on every run; `plan` does not list that.
 after 45 s and alert` when everything is in place.
 
 **To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It removes
-the files with their install record lines (`removed:   PATH` for each). It
+the files with their install record lines (`removed:   PATH` for each).
+When the installer cannot change the install record (one written by a newer
+CST), it removes the files without it, with a warning, and goes on. It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
 
