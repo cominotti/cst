@@ -796,16 +796,40 @@ scc_setup() {
     # The fake sccache. --start-server: a daemon (setsid, stdio closed)
     # that records its cgroup, then the socket 0.3 s later. A compile
     # with no live server starts one in its own cgroup, as the real
-    # client does.
+    # client does. The socket is a bare socket node; with a file
+    # $st/listen, the daemon itself (same PID) listens on it, as the real
+    # server does, so that status can ask it who it is (SO_PEERCRED),
+    # and a start returns once it listens.
     cat >"$w/bin/sccache" <<'EOF'
 #!/bin/sh
 st=$SCCACHE_E2E_STATE
+listener='
+import socket, sys, time
+time.sleep(0.3)
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen()
+end = time.monotonic() + 300
+while (left := end - time.monotonic()) > 0:
+    s.settimeout(left)
+    try:
+        s.accept()[0].close()
+    except TimeoutError:
+        break
+'
 serve() {
-    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"; exec sleep 300' \
-        sh "$st" </dev/null >/dev/null 2>&1 &
+    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"
+        [ -e "$1/listen" ] && exec python3 -I -c "$2" "$SCCACHE_SERVER_UDS"; exec sleep 300' \
+        sh "$st" "$listener" </dev/null >/dev/null 2>&1 &
     for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
 }
-sock() { python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"; }
+sock() {
+    if [ -e "$st/listen" ]; then
+        for _ in $(seq 50); do [ -S "$SCCACHE_SERVER_UDS" ] && return 0; sleep 0.1; done
+        return 0
+    fi
+    python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"
+}
 live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
 if [ "${1:-}" = --start-server ]; then
     echo start >>"$st/starts"
@@ -4001,7 +4025,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         starts in, and the socket comes 0.3 s after the start; unlike the real
         one it runs rustc in the client's cgroup). The toolbox is a stand-in
         (CST_SCCACHE_CONTAINERENV names "e2ebox"), so this is the toolbox
-        branch; the host one (app.slice) has unit tests only. The first build
+        branch; test_133 covers the host one (app.slice). The first build
         runs in a transient scope with MemoryMax, like a test harness's capped
         lane: the wrapper must start the one server in
         cst-sccache-e2ebox.scope in the inner user.slice (MemoryMax infinity),
@@ -4113,6 +4137,92 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             systemctl --user stop e2e-scc-block "$scope" 2>/dev/null || true
 
             # Undo: cargo no longer names the wrapper.
+            "$cst" toolchains config apply --no-sccache >/dev/null
+            if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_133_sccache_host_server_starts_in_app_slice_scope(self) -> None:
+        """The host branch of the real rustc wrapper (test_83 covers a toolbox's): with no
+        container file (CST_SCCACHE_CONTAINERENV names a file that is not there) the wrapper's
+        environment is "host", its socket cst-sccache-host.sock, and a first build inside a
+        transient scope with MemoryMax starts the one server in cst-sccache-host.scope in the user
+        manager's app.slice (MemoryMax infinity), not in the capped scope and not in user.slice
+        (the toolboxes' slice). The fake sccache is test_83's, with its server listening on its
+        socket (SCCACHE_FAKE_STEPS, $st/listen), so that `cst toolchains status` asks the real
+        socket who listens (SO_PEERCRED), reads that process's real /proc/PID/cgroup and says the
+        server is in its own scope. A second build starts nothing; the scope goes away when the
+        server stops."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            for f in /home/tester/work/scc-host/state/*.pid; do
+                [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
+            done
+            systemctl --user stop 'e2e-scc-*' cst-sccache-host.scope 2>/dev/null || true
+            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
+            rm -rf /home/tester/work/scc-host /run/user/1000/cst-sccache-host.sock \
+                /run/user/1000/cst-sccache-host.sock.lock /run/user/1000/cst-sccache-host.sock.failed
+            """,
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            SCCACHE_FAKE_STEPS
+            + r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=/home/tester/work/scc-host
+            st=$w/state
+            ucg=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            scope=cst-sccache-host.scope
+            want="0::/user.slice/user-1000.slice/user@1000.service/app.slice/$scope"
+            sock=/run/user/1000/cst-sccache-host.sock
+            rm -rf "$w" "$sock" "$sock.lock" "$sock.failed"
+            mkdir -p "$w/bin" "$w/crate/src" "$st"
+            : >"$st/listen"
+            scc_setup
+            # No $w/containerenv: build's CST_SCCACHE_CONTAINERENV names a missing file.
+            test ! -e "$w/containerenv"
+
+            "$cst" toolchains config apply --sccache >/dev/null
+
+            build 1
+            # One start, by the wrapper; the compiles ran in the capped scope.
+            [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+            [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
+            if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
+            # The server is in its own scope, in app.slice.
+            server=$(cat "$st/live")
+            got=$(cat "$st/server-$server.cgroup")
+            [ "$got" = "$want" ] || { echo "e2e: the server's cgroup: '$got'" >&2; exit 1; }
+            test -d "$ucg/app.slice/$scope"
+            test ! -e "$ucg/user.slice/$scope"
+            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            [ "$(systemctl --user show -P MemoryMax "$scope")" = infinity ]
+            test -S "$sock"
+
+            # status asks the socket who listens and reads that process's cgroup.
+            status_out=$("$cst" toolchains status)
+            grep -qF "sccache server host: in its own scope (app.slice/$scope)" <<<"$status_out" ||
+                { printf 'e2e: status said:
+%s
+' "$status_out" >&2; exit 1; }
+
+            # A second build: the server is there, nothing starts.
+            build 2
+            [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+
+            # The server stops: the scope goes away.
+            kill "$server"
+            for _ in $(seq 50); do [ -d "$ucg/app.slice/$scope" ] || break; sleep 0.1; done
+            test ! -d "$ucg/app.slice/$scope"
+            [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
+
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
             echo E2E-OK
