@@ -14,7 +14,7 @@ cmds: [
 		// The one entry point for people, agents and CI (fast-gates and nightly run it).
 		name:        "check"
 		category:    "check"
-		description: "Run every fast gate: invowk validate and audit, test lint, test pylint, test types, test unit (the docs gate is in the unit suite)"
+		description: "Run every fast gate: invowk validate and audit, test lint, test pylint, test types, test workflows, test unit (the docs gate is in the unit suite)"
 		depends_on: {
 			tools: [
 				{alternatives: ["invowk"]},
@@ -34,6 +34,7 @@ cmds: [
 				invowk cmd test lint
 				invowk cmd test pylint
 				invowk cmd test types
+				invowk cmd test workflows
 				invowk cmd test unit
 				"""}
 		}]
@@ -220,6 +221,62 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test workflows"
+		category:    "test"
+		description: "Run zizmor offline on the workflows, the actions and dependabot.yml of .github, with the exceptions in .github/zizmor.yml (a file it cannot read fails), through uv (tests/uv-dev)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "tests/uv-dev zizmor --offline --strict-collection --config .github/zizmor.yml .github"}
+		}]
+	},
+	{
+		// Slow (a second unit run): the nightly runs it, `check` does not. See docs/dev-tools.md, "Coverage".
+		name:        "test coverage"
+		category:    "test"
+		description: "Run the unit suite under coverage.py (statements and branches), write the reports and check COVERAGE_FLOORS of tests/coverage_floors.py (domain and application layers), through uv (tests/uv-dev)"
+		flags: [
+			{name: "out", description: "A folder outside the checkout for the data and the reports (default: a new folder under ~/.cache/cst-coverage/)"},
+		]
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "20m"
+			script: {content: """
+				set -euo pipefail
+				out="${INVOWK_FLAG_OUT:-${XDG_CACHE_HOME:-${HOME}/.cache}/cst-coverage/$(date +%Y%m%d-%H%M%S)}"
+				if [[ "${out}" != /* ]]; then
+					echo "test coverage: --out must be an absolute path (outside the checkout)" >&2
+					exit 2
+				fi
+				repo="$(pwd -P)"
+				# Judged before anything is created: a refused folder is never made.
+				out="$(realpath -m -- "${out}")"
+				if [[ "${out}/" == "${repo}/"* ]]; then
+					echo "test coverage: ${out} is inside the checkout; give a folder outside it" >&2
+					exit 2
+				fi
+				mkdir -p "${out}"
+				# coverage runs the suite on uv's Python without -B: keep __pycache__ out of the checkout.
+				export PYTHONDONTWRITEBYTECODE=1
+				cov=(tests/uv-dev --group coverage coverage)
+				data="--data-file=${out}/coverage.data"
+				"${cov[@]}" run "${data}" tests/run_unit.py
+				"${cov[@]}" report "${data}" > "${out}/report.txt"
+				"${cov[@]}" json "${data}" -q -o "${out}/coverage.json"
+				"${cov[@]}" html "${data}" -q -d "${out}/html"
+				echo "test coverage: reports in ${out} (report.txt, coverage.json, html/index.html)"
+				python3 -I -B tests/coverage_floors.py "${out}/coverage.json" | tee "${out}/floors.txt"
+				"""}
+		}]
+	},
+	{
 		// Optional and slow: `test all` and CI do not run it. See docs/dev-tools.md, "Mutation testing".
 		name:        "test mutation"
 		category:    "test"
@@ -364,6 +421,20 @@ cmds: [
 				python3 -I -B .github/scripts/audit_summary.py "${report}" "${rc}"
 				exit "${rc}"
 				"""}
+		}]
+	},
+	{
+		// Needs the network (the vulnerability database): the nightly runs it, `check` does not.
+		name:        "ci uv-audit"
+		category:    "ci"
+		description: "Check every package of uv.lock (all dependency groups) against the known vulnerabilities, with uv audit --locked (needs the network; the nightly runs it)"
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: "uv audit --locked --preview-features audit-command"}
 		}]
 	},
 	{

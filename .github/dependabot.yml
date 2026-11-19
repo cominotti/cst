@@ -8,3 +8,8 @@ updates:
       day: monday
     commit-message:
       prefix: "ci(deps)"
+    # Propose a new action version only once it is a week old: a compromised
+    # release is usually found and withdrawn within days (zizmor's
+    # dependabot-cooldown audit asks for 7 days).
+    cooldown:
+      default-days: 7

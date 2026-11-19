@@ -117,7 +117,7 @@ these two folders, for Claude Code.
 Run from the repository root.
 
 ```
-invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, unit (what CI runs)
+invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (what CI runs)
 invowk cmd test unit                          # all unit tests, socket as stdin (tests/run_unit.py)
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
 invowk cmd test arch                          # the static gates only (seconds)
@@ -128,7 +128,9 @@ invowk cmd fix budgets [--apply]              # list the budget and ceiling entr
 invowk cmd test lint                          # bash -n + shellcheck -S warning on every shell file (falls back to the devbox toolbox)
 invowk cmd test pylint                        # ruff check + ruff format --check + ruff budgets on every Python file (through uv)
 invowk cmd test types                         # ty on the ty gate list + ruff's annotation rules (ANN) on every Python file (through uv)
+invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
+invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
 invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
@@ -155,8 +157,8 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean and strictly annotated: it is
-  listed in `[tool.ty.src] include` of `pyproject.toml`, and an
-  extensionless helper also in `extend-include`. ruff's annotation rules
+  in `[tool.ty.src] include` of `pyproject.toml` (a `*.py` file through its
+  folder; an extensionless helper by name, there and in `extend-include`). ruff's annotation rules
   (ANN) apply to every file: no per-file-ignores entry ignores them.
   No ignore comments, nothing added to `NOT_YET_CLEAN`, no `[tool.ty]`
   setting that switches a file or a rule off: fix the code.

@@ -66,7 +66,8 @@ import unittest
 
 # The static gates: tests that read the repository (layers, budgets,
 # entry points, the manifest, the Python and shell lists, docs, license
-# headers), not the behaviour of a module. Seconds instead of minutes.
+# headers, the workflow audit's settings), not the behaviour of a module.
+# Seconds instead of minutes.
 GATE_MODULES: Final = (
     "tests.test_architecture",
     "tests.test_bytecode",
@@ -85,6 +86,7 @@ GATE_MODULES: Final = (
     "tests.test_subprocess_hygiene",
     "tests.test_typing_budget",
     "tests.test_unit_contract",
+    "tests.test_workflow_audit",
 )
 
 

@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools for the Python code: uv, ruff, ty, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, coverage.py, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -11,6 +11,8 @@ are not part of CST: nothing installed on the machine uses them.
 | [uv](https://docs.astral.sh/uv/) 0.12.0 | installs the tools below, at the exact versions in `uv.lock`, into a virtual environment outside the checkout | `.github/workflows/ci.yml` (CI); any uv 0.12 or later locally (`required-version` in `pyproject.toml`) |
 | [ruff](https://docs.astral.sh/ruff/) 0.17.5 | linter: unused or undefined names, likely bugs, old syntax, syntax errors, `subprocess.run` without `check=`; missing type annotations (every Python file). Formatter: one layout for all Python code | `pyproject.toml`, `uv.lock` |
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
+| [zizmor](https://docs.zizmor.sh/) 1.32.0 | audit of the workflows, the composite actions and `dependabot.yml` in `.github` (see "The workflow audit") | `pyproject.toml`, `uv.lock` |
+| [coverage.py](https://coverage.readthedocs.io/) 7.17.3 | statement and branch coverage of the unit suite, for `invowk cmd test coverage` (its own `coverage` group; the nightly runs it; see "Coverage") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
@@ -22,6 +24,8 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ```
 invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
+invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
+invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/domain.py
@@ -30,7 +34,7 @@ tests/uv-dev --group mutation cosmic-ray --version   # --group NAME adds a group
 
 You need `uv` on `PATH` (for example from Homebrew or
 `https://docs.astral.sh/uv/getting-started/installation/`). The first run
-downloads ruff and ty; later runs start at once. `--locked` makes uv stop
+downloads ruff, ty and zizmor; later runs start at once. `--locked` makes uv stop
 with an error when `uv.lock` does not match `pyproject.toml`, and uv checks
 the hash of every package against the lock.
 
@@ -59,8 +63,10 @@ the environment `tests/uv-dev` made instead
 (`${XDG_CACHE_HOME:-~/.cache}/cst-dev-venv/<key>/bin/python`, after one
 `tests/uv-dev ruff --version`), or delete the `.venv/` it made; `.idea/` is
 in `.gitignore`. No CST command makes one: `tests/uv-dev` is the only
-place in the repository that runs uv on this project (`uv run`; the invowk
-tasks, `tests/ruff_budget.py` and CI all go through it; `cst toolchains`
+place in the repository that runs a tool through uv on this project (`uv run`; the invowk
+tasks, `tests/ruff_budget.py` and CI all go through it; the one other uv
+command on it is `uv audit`, below, which reads `uv.lock` and makes no
+environment; `cst toolchains`
 runs only `uv --version` and `uv cache prune`, outside any project). uv writes a `CACHEDIR.TAG` into a `.venv/`
 it makes, so new snapshots drop one that uv made (unless
 `SNAPSHOT_EXCLUDE_CACHES=no`, [btrfs/SNAPSHOTS.md](../btrfs/SNAPSHOTS.md#cache-folders-cachedirtag-dropped-from-every-new-snapshot)).
@@ -86,6 +92,15 @@ repository:
 - **`[tool.ruff] extend-include`**: the extensionless helpers (`btrfs/btrfs-bulk`,
   `vm/cst-vm`, ...). ruff finds `*.py` files by itself, but not these. A new
   helper must be added here; the test fails until it is.
+- **`[tool.ruff] required-version`** is the exact ruff pin of the `dev`
+  group (`==0.17.5`): a different ruff that reads `pyproject.toml` (an
+  editor's, one on `PATH`) refuses to run instead of linting or formatting
+  by other rules. `tests/test_python_files.py` fails when the two differ.
+- **`[tool.ruff.lint] typing-extensions = false`**: no ruff rule suggests,
+  and no fix writes, an import from the third-party `typing_extensions`
+  (by default ruff falls back to it for names newer than the target
+  Python). CST uses the standard library only. No hit today;
+  `tests/test_python_files.py` fails when the setting is not `false`.
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
   (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
@@ -161,28 +176,142 @@ repository:
   passed". A new file needs no list edit for ANN. (Until 2026-11 a one-line
   `"!{...}" = ["ANN"]` entry named every typed file; every file had joined it,
   and each parallel change conflicted on that one line.)
-- **The ty gate, `[tool.ty.src] include`**: every Python file ty reports
-  nothing on. `error-on-warning` is on, so a warning fails it too. Every
-  Python file joins it; never remove one, or add an ignore comment, to
-  get a green run.
+- **The ty gate, `[tool.ty.src] include`**: every Python file, and ty
+  reports nothing on any. `error-on-warning` is on, so a warning fails it
+  too. It lists the ten folders with Python code (`.github/scripts`, the
+  eight modules, `tests`) and the extensionless helpers by name: ty finds
+  the `*.py` files below a folder by itself (leaving out git-ignored ones,
+  such as `tests/e2e/.artifacts/`), but not a file without the extension.
+  A new `*.py` file in one of these folders is in the gate with no list
+  edit; a new helper, or a new top-level folder, needs its entry, and
+  `tests/test_python_files.py` fails until it has one. An entry is a plain
+  path to a folder with Python files or to a Python file (no pattern, no
+  `.`). Never remove one, or add an ignore comment, to get a green run.
+  ty also leaves out a file that a git ignore rule or an `.ignore` file
+  matches, even a tracked one and even one named in the list, while git
+  keeps tracking it: the test fails on a tracked Python file a git ignore
+  rule matches (`git ls-files -ci --exclude-standard`) and on any
+  `.ignore` file, so that no file leaves the gate that way.
+  (Until 2026-11 the list named every file, 330 entries: ty's compiled
+  pattern for it passed its 1 MB limit, and it printed a warning on every
+  run.)
 - **`NOT_YET_CLEAN` in `tests/test_python_files.py`**: the historical exclusion set,
   now empty (`frozenset()`). Every Python file in the repository is in the ty
-  gate (`[tool.ty.src] include`), so every new file has to join both the ty
-  gate directly. The set sits in the test, not in
-  `pyproject.toml`, so that adding a file to it would be a visible edit of the
-  test. Never add one.
+  gate (`[tool.ty.src] include`). A file below a listed folder could not
+  leave it anyway (ty checks it; the test fails on a file in both). The
+  set sits in the test, not in `pyproject.toml`, so that adding a file to it
+  would be a visible edit of the test. Never add one.
 - **Nothing else switches ty off**: the test also fails when a `ty.toml`
   exists at the top of the repository (ty would read it instead of
   `pyproject.toml`), when `[tool.ty]` sets anything but `src.include`,
-  `terminal.error-on-warning` and rules raised to `"error"` (such as
+  `terminal.error-on-warning`, `environment.python-platform` (only
+  `"linux"`) and rules raised to `"error"` (such as
   `src.exclude`, `overrides`, a rule set to `"warn"` or `"ignore"`, or
   `analysis.allowed-unresolved-imports`), when `error-on-warning` is not
   `true`, and when a ty-gated file has a `ty: ignore` or `type: ignore`
   comment.
+- **`[tool.ty.environment] python-platform = "linux"`**: ty checks the code
+  for Linux, wherever ty runs. Its default is the platform it runs on, and
+  with every platform (`--python-platform all`) it reports a few hundred
+  calls that exist only on Linux or Unix (`os.geteuid`, `os.killpg`). CST
+  runs on Linux only. (`python-version` needs no setting: ty takes it from
+  `requires-python`.)
 - **`[tool.ty.rules]`** raises rules that are warnings or off by default to
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import` and `possibly-unresolved-reference`. A rule may
   be added there only at `"error"`.
+
+## The workflow audit (zizmor)
+
+`invowk cmd test workflows` (part of `invowk cmd check`, so of CI's fast
+gates) runs `zizmor --offline --strict-collection --config .github/zizmor.yml
+.github`. zizmor
+reads the workflows, the composite actions and `.github/dependabot.yml` and
+reports what an attacker could use: a token left in `.git/config` where an
+artifact could carry it (`artipacked`), a script that writes
+`GITHUB_ENV`/`GITHUB_PATH` from data it did not make (`github-env`), a
+template expanded into a shell script, an action not pinned by its full
+SHA, permissions wider than the job needs, Dependabot taking a release the
+day it is published (`dependabot-cooldown`), and more
+(`https://docs.zizmor.sh/audits/`). `--offline`: no token and no network,
+so the audits that ask the hosting service (such as impostor commits) do
+not run. Any finding fails the task, whatever its severity.
+`--strict-collection`: a file zizmor cannot parse fails the task (without
+it zizmor skips that file with a warning and reports no finding for it).
+
+What the audit asked for when it was turned on:
+
+- every `actions/checkout` sets `persist-credentials: false`. No step
+  after a checkout uses git with the job's token (the jobs that need a
+  token, for the image registry or a release, pass it to that step), and
+  several jobs upload files from the checkout;
+- `.github/dependabot.yml` waits 7 days before proposing a new action
+  version (`cooldown: default-days: 7`).
+
+**Exceptions** live in `.github/zizmor.yml` only, as `ignore` lists of
+`FILE` (every finding of that audit in that file) or `FILE:LINE` (one
+finding), by the file's base name only (a folder in the entry matches
+nothing), so an entry must name exactly one file of `.github`: the test
+fails when several files share its base name (for `FILE:LINE`, several
+long enough to have that line), since the entry would hide the finding in
+each, and when no file has it. Each list starts with a comment that
+says why, and so does a per-audit `config` block (it can weaken an audit
+as much as an ignore list: a cooldown of 0 days, actions pinned by tag).
+The file is plain block YAML, which the test reads line by line: no flow
+lists (`ignore: [a, b]`), anchors, aliases, tags or quoted keys. A line entry moves with its file: when a change above it shifts
+the line, the audit fails and names the new line; move the entry. Today:
+the `GITHUB_PATH` write of `setup-invowk` (it checks the binary against
+its pinned SHA-256 first), the style finding `self-repository` (`./...`
+for local actions) and `superfluous-actions` on the release step.
+`tests/test_workflow_audit.py` (a unit test) fails when an ignore list or a
+config block has no reason, on a line it cannot read, when an audit is disabled (`disable: true`, which also hides it
+from zizmor's count of ignored findings), on an inline `zizmor: ignore`
+comment in `.github`, and when `check` stops running the task or the task
+runs anything but exactly that command. The words are compared one by one:
+dropping `--offline`, the config or `--strict-collection` fails, and so
+does any word added, such as an option that leaves findings out or keeps
+zizmor from failing (`--min-severity`, `--persona`, `--no-exit-codes`,
+`--no-ignores`, `--fix`), a variable, `|| true` or a narrower input
+than `.github`. `tests/uv-dev zizmor
+--offline --no-ignores .github` shows what the exceptions hide.
+
+## Coverage
+
+`invowk cmd test coverage` runs the whole unit suite (`tests/run_unit.py`,
+with its gates) under coverage.py, from the `coverage` group, counting
+statements and branches of the production code (`[tool.coverage.run]` in
+`pyproject.toml` leaves the tests out). It takes as long as a unit run, so
+`check` and CI's fast gates do not run it; the nightly workflow does, in
+the same Fedora 45 image and as the same user as the fast gates, and
+uploads the reports as the `nightly-coverage-report` artifact.
+
+`--out DIR` (absolute, outside the checkout; by default a new folder under
+`${XDG_CACHE_HOME:-~/.cache}/cst-coverage/`) receives `report.txt` (per
+file), `coverage.json`, `html/index.html` (each file with the lines no
+test ran), `floors.txt` and coverage.py's data file. A relative folder, or
+one inside the checkout (also through a symlink), is refused before
+anything is created; `tests/test_coverage_floors.py` runs the task's
+script from `invowkfile.cue` to check it. The task stops when a
+unit test fails.
+
+The last step, `tests/coverage_floors.py`, adds the numbers up per package
+and layer (the keys of the budgets, such as `swap domain`) and fails when a
+**domain** or **application** layer is below its entry in
+`COVERAGE_FLOORS`: the percentage of statements and branches covered,
+together. The other layers are only reported. Many of their tests start
+the real program as a child (`/usr/bin/python3 -I ...`), which coverage.py
+cannot follow, so a low number there (`btrfs/pending_alerts` shows 0 %)
+says nothing about the tests. Domain and application code is tested in the
+test process, with fakes behind the ports.
+
+The floors are the reverse of a budget: a measurement may not go **below**
+its entry. A key without an entry passes (a new package; add its floor
+from the next nightly report); an entry whose key is no longer measured
+fails (rename it with its package, or delete it). They were set from one
+run in a Fedora 45 toolbox, rounded down to a whole percent, minus 2, since
+CI skips a few tests a workstation runs. Raise a floor by hand when a
+report shows room; `invowk cmd fix budgets` never touches this table, and
+nothing lowers it to get a green run.
 
 ## Mutation testing (optional)
 
@@ -353,11 +482,36 @@ changed are skipped too (#16 also added the format gate to the config and
 the docs; #32, the SPDX header line in every file, also added the header
 gate and its fixer).
 
+## Known vulnerabilities in the pins (`uv audit`)
+
+`invowk cmd ci uv-audit` runs `uv audit --locked --preview-features
+audit-command`: every package of `uv.lock`, in every group (`dev`,
+`mutation`, `coverage`), is looked up in the public vulnerability database,
+and a known vulnerability fails it. `--locked` stops it when `uv.lock` does
+not match `pyproject.toml`; `--preview-features audit-command` only silences
+the notice that the command is new in uv 0.12. It needs the network, so the
+nightly workflow runs it, in a job of its own (`uv-audit`, in the Fedora 45
+image: the project needs the system's Python 3.15), so that a new
+advisory or a database that does not answer fails that job only and the
+nightly's static gates still run; `check` does not run it.
+When it fails, upgrade that pin (below), or the tool that pulls it in.
+`tests/test_workflow_audit.py` fails when the nightly stops running the task
+(the step must be `run: invowk cmd ci uv-audit` on one line, not a comment),
+when that step is not the last of its job or the job has an `if:` or a
+`continue-on-error:`, when a uv variable (`UV_...`) appears in the
+nightly, or when the task runs anything but exactly that command: dropping `--locked`
+fails, and so does any word added, such as an option that leaves packages
+or vulnerabilities out (`--no-group`, `--only-dev`, `--no-extra`,
+`--ignore`, `--ignore-until-fixed`, `--frozen`, `--service-url`), a
+variable or `|| true`.
+
 ## Upgrading a pin
 
 One tool per pull request, so that new findings are clearly the new version's:
 
-1. Change the version in `[dependency-groups]` of `pyproject.toml`.
+1. Change the version in `[dependency-groups]` of `pyproject.toml`. For
+   ruff, also `required-version` in `[tool.ruff]` (the same version, with
+   `==`; `tests/test_python_files.py` fails when the two differ).
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
    version finds, or explain in the pull request why it is noise. A new ruff

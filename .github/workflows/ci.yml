@@ -37,6 +37,9 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The token stays out of .git/config: nothing after the checkout uses git
+          # with it (zizmor's artipacked audit).
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Determine affected scope
@@ -118,6 +121,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The checkout belongs to root and the gates run as ci: without this, git
       # refuses to read it ("dubious ownership"), and the repository gate tests
@@ -156,7 +161,7 @@ jobs:
           retention-days: 7
 
       # Every fast gate, the same task people and agents run: validate, audit,
-      # test lint, test pylint, test types, test unit (invowkfile.cue).
+      # test lint, test pylint, test types, test workflows, test unit (invowkfile.cue).
       - name: Run the fast gates (invowk cmd check)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
@@ -172,6 +177,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk
@@ -218,6 +225,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup invowk
         uses: ./.github/actions/setup-invowk
