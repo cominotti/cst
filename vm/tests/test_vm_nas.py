@@ -1056,17 +1056,26 @@ class SharedRepositoryTest(Nas):
 
 class ConstantsTest(unittest.TestCase):
     def test_nas_default_paths_match_btrfs_snapshot(self) -> None:
-        # btrfs-snapshot's NAS backup is its Python runtime's (btrfs/snapshot_runtime): its paths
-        # outside the test seam (no CST_SNAPSHOT_ROOT) and its ssh alias.
+        # btrfs-snapshot's NAS backup is its Python runtime's (btrfs/snapshot_runtime): cst vm's
+        # paths are its paths outside the test seam (no CST_SNAPSHOT_ROOT). The ssh alias is
+        # compared by SharedRepositoryTest: both give restic the same RESTIC_REPOSITORY.
         from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
-        from btrfs.snapshot_runtime.domain import NAS_SSH_ALIAS
         from cst_core.adapters.runner import SubprocessCommandRunner
 
         run = SnapshotRun({}, SubprocessCommandRunner())
-        self.assertEqual(NAS_SSH_ALIAS, vm_domain.NAS_SSH_ALIAS)
-        self.assertEqual(run.restic_password, "/etc/btrfs-setup/restic-password")
-        self.assertEqual(run.restic_cache, "/var/cache/btrfs-snapshot-restic")
-        self.assertEqual(run.conf, "/etc/btrfs-setup/snapshots.conf")
+        vm = vm_wiring.vm_paths({})
+        self.assertEqual(
+            (vm.nas_conf, vm.restic_password, vm.restic_cache), (run.conf, run.restic_password, run.restic_cache)
+        )
+        # The machine's paths, which setup-snapshots.bash and the READMEs also name.
+        self.assertEqual(
+            (vm.nas_conf, vm.restic_password, vm.restic_cache),
+            (
+                "/etc/btrfs-setup/snapshots.conf",
+                "/etc/btrfs-setup/restic-password",
+                "/var/cache/btrfs-snapshot-restic",
+            ),
+        )
 
     def test_forget_args_are_scoped(self) -> None:
         a = vm_domain.forget_args("win", "sophia", 4, 3)
