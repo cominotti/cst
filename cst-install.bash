@@ -88,9 +88,9 @@ _cst_user_home() {
 # _cst_installer_home_as USER COMMAND ARGS...: the installer COMMAND as USER,
 # with --home USER's home (whose install record it keeps).
 _cst_installer_home_as() {
-    local home
-    home="$(_cst_user_home "$1")" || return 1
-    _cst_installer_as "$1" "$2" --home "${home}" "${@:3}"
+    local user="$1" command="$2" home
+    home="$(_cst_user_home "${user}")" || return 1
+    _cst_installer_as "${user}" "${command}" --home "${home}" "${@:3}"
 }
 
 # cst_mark_as USER COMPONENT / cst_remove_as USER (--component C | SRC...):

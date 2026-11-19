@@ -399,8 +399,9 @@ EOF
 # install_scrub_limit LIMIT: the drop-in written for a limit, removed for none
 # (listed in the install record under btrfs:core).
 install_scrub_limit() {
-    if [[ -n "$1" ]]; then
-        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644 root btrfs:core
+    local limit="$1"
+    if [[ -n "${limit}" ]]; then
+        scrub_limit_dropin "${limit}" | cst_install_text "${SCRUB_DROPIN}" 0644 root btrfs:core
     else
         # Through the installer, with its install record line (also when the file is gone already).
         cst_remove_text "${SCRUB_DROPIN}"

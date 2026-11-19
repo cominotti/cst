@@ -98,9 +98,9 @@ snap_toolchains_config_preview() {
 # btrfs/chrome-cache (the repo copy, like btrfs-bulk) as the user, never as
 # root: status|plan|apply|off for ~/.var/app/com.google.Chrome/config/chrome-flags.conf.
 snap_chrome() {   # action
-    local home
+    local action="$1" home
     home="$(snap_home)" || return 1
-    cst_as_user "${target_user}" python3 -I -B "${CHROME_TOOL}" "$1" --home "${home}"
+    cst_as_user "${target_user}" python3 -I -B "${CHROME_TOOL}" "${action}" --home "${home}"
 }
 
 snap_home() {

@@ -140,12 +140,13 @@ source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../cst-install.bash"
 # With --plan, the text is kept under etc_base and the installer only says
 # `unchanged: DEST` or `would write: DEST`.
 write_if_changed() {
+    local dest="$1" mode="$2"
     if (( plan )); then
-        mkdir -p "$(dirname "${etc_base}$1")"
-        cat >"${etc_base}$1"
-        cst_install_text_plan "$1" "$2" <"${etc_base}$1"
+        mkdir -p "$(dirname "${etc_base}${dest}")"
+        cat >"${etc_base}${dest}"
+        cst_install_text_plan "${dest}" "${mode}" <"${etc_base}${dest}"
     else
-        cst_install_text "$1" "$2" root btrfs:degraded-boot
+        cst_install_text "${dest}" "${mode}" root btrfs:degraded-boot
     fi
 }
 
