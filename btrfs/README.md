@@ -1220,8 +1220,8 @@ own checks:
   is listed in the install record under the component `btrfs:degraded-boot`,
   so `cst doctor` reports one that is missing or was changed by hand. The
   component is marked done only when every step ran: after a failed
-  self-test or a `files-only` run, `cst doctor` says its install did not
-  finish. Files of an install from before the record are adopted by the next
+  self-test, or a `files-only` run that wrote a file, `cst doctor` says its
+  install did not finish. Files of an install from before the record are adopted by the next
   install, without being written again.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
