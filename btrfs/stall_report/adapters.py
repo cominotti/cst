@@ -174,22 +174,18 @@ _CHECKS: Final[dict[str, Callable[[object], bool]]] = {
 def records_of(recs: Sequence[object], damaged: Sequence[float] = ()) -> Recorded:
     """The records by their kind ("t"), after DAMAGED (load's). One of a known kind without what the
     report reads is damaged too, at its own time (none: in no window). Another kind is not read."""
-    out = Recorded([], [], [], [], [], [*damaged])
-    for r in recs:  # one pass: each record's shape is checked once (again only for a damaged one)
-        match r.get("t") if json_object(r) else None:
-            case StallRecordTag.META if is_meta_record(r):
-                out.metas.append(r)
-            case StallRecordTag.SAMPLE if is_sample_record(r):
-                out.samples.append(r)
-            case StallRecordTag.EPISODE if is_episode_record(r):
-                out.episodes.append(r)
-            case StallRecordTag.EVENT if is_notice(r):
-                out.events.append(r)
-            case StallRecordTag.ALERT if is_notice(r):
-                out.alerts.append(r)
-            case _ if damaged_record(r):
-                out.damaged.append(_own_time(r))
-    return out
+    by_tag: dict[object, list[object]] = {}  # one pass over the records: each one's tag read once
+    for r in recs:
+        by_tag.setdefault(r.get("t") if json_object(r) else None, []).append(r)
+    tag = StallRecordTag
+    return Recorded(
+        metas=[r for r in by_tag.get(tag.META, []) if is_meta_record(r)],
+        samples=[r for r in by_tag.get(tag.SAMPLE, []) if is_sample_record(r)],
+        episodes=[r for r in by_tag.get(tag.EPISODE, []) if is_episode_record(r)],
+        events=[r for r in by_tag.get(tag.EVENT, []) if is_notice(r)],
+        alerts=[r for r in by_tag.get(tag.ALERT, []) if is_notice(r)],
+        damaged=[*damaged, *(_own_time(r) for r in recs if damaged_record(r))],
+    )
 
 
 def _own_time(r: object) -> float:
