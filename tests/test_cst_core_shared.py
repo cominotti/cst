@@ -1788,6 +1788,22 @@ class NotifierTest(unittest.TestCase):
                 self.assertEqual(outcome, "kept")
                 self.assertIn(f"alert not delivered ({why})", self.lines[0][1])
 
+    def test_the_journal_line_names_btrfs_notify_s_last_error_line(self) -> None:
+        # Only "exited 1" reached the journal: why btrfs-notify failed (its stderr) was dropped.
+        error = "btrfs-notify: cannot write /var/lib/cst-alerts/pending: Read-only file system"
+        long_line = "e" * 300
+        for stderr, why in (
+            (f"warning\n{error}\n\n", f"/x/btrfs-notify exited 1: {error}"),
+            ("", "/x/btrfs-notify exited 1"),
+            (" \n\n", "/x/btrfs-notify exited 1"),
+            (f"{long_line}\n", "/x/btrfs-notify exited 1: " + "e" * 200),
+        ):
+            with self.subTest(stderr=stderr[:40]):
+                self.lines.clear()
+                outcome, _ = self.send(core_ports.CommandResult(1, "", stderr))
+                self.assertEqual(outcome, "kept")
+                self.assertTrue(self.lines[0][1].startswith(f"alert not delivered ({why}): Disk: problem; kept in "))
+
     def test_a_repeat_is_merged_into_the_kept_alert(self) -> None:
         path = self.missing(body="first")
         with open(path, "r+") as f:

@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import time
+from typing import Final
 
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
@@ -39,6 +40,8 @@ _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
+# Characters of btrfs-notify's last error line that the journal line of a failed send quotes.
+_ERROR_LINE_MAX: Final = 200
 
 
 class NotifyOutcome(StrEnum):
@@ -129,6 +132,9 @@ class Notifier:
             why = f"{self.program} cannot run ({r.cause or r.fault})"
         else:
             why = f"{self.program} exited {r.returncode}"
+            said = [line.strip() for line in r.stderr.splitlines() if line.strip()]
+            if said:  # its last error line says why
+                why += f": {said[-1][:_ERROR_LINE_MAX]}"
         say = self.log or (lambda prio, msg: journal_log(prio, msg, tag=app))
         try:
             path = _keep_alert(self.pending, urgency, app, title, body)
