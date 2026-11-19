@@ -880,7 +880,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
 - the installed programs in `/usr/local/sbin` and `/usr/local/bin`, and the
   `~/.local/bin/btrfs-stall-report` launcher (only CST's: a file there without
   its "btrfs-setup.sh" line, or a link that leads nowhere, is kept, and dropped
-  from the install record);
+  from the install record; when the installer cannot change that user's
+  record, CST's launcher still goes, with a warning, and uninstall goes on);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
 - the writeback file. Then it restarts `tuned` so its own values come back. If

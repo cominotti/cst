@@ -552,13 +552,18 @@ install_report_launcher() {
 # remove_report_launcher: that launcher, with its record line, only when this
 # script wrote it; a file there without its marker (also a link that leads
 # nowhere) is kept, and its line dropped. No file: a line left over is dropped.
+# When the installer fails (no home, a record of a newer CST, a folder the user
+# cannot write), the record stays as it is, the launcher goes as before the
+# record (only when this script wrote it), and uninstall goes on.
 remove_report_launcher() {
     [[ -n "${shim}" ]] || return 0
     if [[ ! -e "${shim}" && ! -L "${shim}" ]] || grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
-        cst_remove_text_as "${target_user}" "${shim}"
+        cst_remove_text_as "${target_user}" "${shim}" && return 0
     else
-        cst_forget_text_as "${target_user}" "${shim}"
+        cst_forget_text_as "${target_user}" "${shim}" && return 0
     fi
+    echo "WARNING: the install record of ${target_user} was not changed (see above); ${shim} goes only if this script wrote it" >&2
+    if grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then rm -fv "${shim}"; fi
 }
 
 # ---- status ----------------------------------------------------------------------

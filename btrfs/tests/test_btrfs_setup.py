@@ -1424,6 +1424,38 @@ class ReportLauncherTest(unittest.TestCase):
         self.assertEqual(Path(self.shim).read_text(), "#!/bin/sh\necho mine\n")
         self.assertEqual(home_record(self.tmp)["files"], {})
 
+    def test_an_installer_that_fails_does_not_stop_the_removal(self) -> None:
+        # The user's install record was written by a newer CST: the installer refuses it. Uninstall
+        # goes on: our launcher goes as before the record, a file of the user stays, the record is
+        # left as it is.
+        newer = '{"format": 999, "files": {}, "components": {}}\n'
+        record = os.path.join(self.tmp, "home", ".local", "state", "cst", "installed.json")
+        for mine in (False, True):
+            with self.subTest(users_own_file=mine):
+                self.bash("install_report_launcher")
+                if mine:
+                    Path(self.shim).write_text("#!/bin/sh\necho mine\n")
+                Path(record).write_text(newer)
+                r = self.bash("remove_report_launcher", "echo went-on")
+                self.assertTrue(r.stdout.endswith("went-on\n"), r.stdout)
+                self.assertIn("written by a newer CST", r.stderr)
+                self.assertIn(f"was not changed (see above); {self.shim} goes only if this script wrote it\n", r.stderr)
+                self.assertEqual(os.path.exists(self.shim), mine)
+                self.assertEqual(Path(record).read_text(), newer)
+            os.unlink(record)
+            if mine:
+                os.unlink(self.shim)
+
+    def test_a_user_without_a_home_folder_does_not_stop_the_removal(self) -> None:
+        # The installer cannot run as the user (no home folder to keep the record in): our launcher
+        # goes as before the record, and uninstall goes on.
+        self.bash("install_report_launcher")
+        no_home = """_cst_user_home() { echo "cst-install.bash: no home folder for user '$1'" >&2; return 1; }"""
+        r = self.bash(no_home, "remove_report_launcher", "echo went-on")
+        self.assertEqual(r.stdout, f"removed '{self.shim}'\nwent-on\n")
+        self.assertIn("no home folder for user", r.stderr)
+        self.assertFalse(os.path.lexists(self.shim))
+
     def test_remove_keeps_a_link_of_the_user_that_leads_nowhere(self) -> None:
         # The user's own launcher, a link into a folder that is not mounted now: it is not "no file",
         # so it is kept (as before the record), and its line dropped.
