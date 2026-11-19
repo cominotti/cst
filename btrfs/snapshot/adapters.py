@@ -358,9 +358,9 @@ class Host:
         start raises (as subprocess.run did)."""
         r = RUNNER.run(argv, timeout=CMD_TIMEOUT, locale_c=True, stdin="inherit")
         if r.fault == CommandFault.MISSING:
-            return ExitStatus.NOT_FOUND, "", f"{argv[0]}: not found"
+            return int(ExitStatus.NOT_FOUND), "", f"{argv[0]}: not found"
         if r.fault == CommandFault.TIMEOUT:
-            return ExitStatus.TIMED_OUT, "", f"timed out after {CMD_TIMEOUT}s"
+            return int(ExitStatus.TIMED_OUT), "", f"timed out after {CMD_TIMEOUT}s"
         if r.cause is not None:
             raise r.cause
         return r.returncode, r.stdout, r.stderr
