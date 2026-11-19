@@ -24,7 +24,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from typing import ClassVar, Final
+from typing import ClassVar, Final, override
 import unittest
 
 REPO: Final = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,6 +122,7 @@ class _Copy(unittest.TestCase):
 
     module = ""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix=f"cst-route-{self.module}-"))
         self.addCleanup(shutil.rmtree, self.tmp)

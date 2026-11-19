@@ -28,7 +28,7 @@ import sys
 import tempfile
 import tomllib
 from types import ModuleType
-from typing import Any
+from typing import Any, override
 import unittest
 from unittest import mock
 
@@ -313,6 +313,7 @@ class RangesTest(unittest.TestCase):
 
 
 class FunctionRangesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         lines = HELPER_SOURCE.splitlines()
         self.assertTrue(lines[4].startswith("def double"))
@@ -598,6 +599,7 @@ class SessionCountsTest(unittest.TestCase):
 class RunTest(unittest.TestCase):
     """The whole run with a fake bwrap and fake cosmic-ray tools."""
 
+    @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-mutation-test-")
         self.addCleanup(tmp.cleanup)

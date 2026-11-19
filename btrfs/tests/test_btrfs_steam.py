@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 from unittest import mock
 import copy
 
@@ -62,6 +62,7 @@ def fixture(name: str) -> bytes:
 
 
 class SteamTest(tb.BulkBase):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.real_steam_running = self.host.steam_running
@@ -1271,6 +1272,7 @@ class RealBtrfsSteamTest(SteamTest):
     fakes. BTRFS_BULK_REAL_SCRATCH=~/Workspace/.e2e-x (must exist, on btrfs;
     /tmp is often tmpfs) python3 -I -B btrfs/tests/test_btrfs_steam.py RealBtrfsSteamTest"""
 
+    @override
     def setUp(self) -> None:
         scratch = os.environ["BTRFS_BULK_REAL_SCRATCH"]
         old, tempfile.tempdir = tempfile.tempdir, scratch

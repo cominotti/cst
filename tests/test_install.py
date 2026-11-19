@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 import zipfile
@@ -205,6 +206,7 @@ class DomainTest(unittest.TestCase):
 
 
 class InstallServiceTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.payloads = {"m/a": b"A\n", "m/t.in": b"uuid=@UUID@\n", "m/u": b"U\n"}
         self.a = entry("m/a", "/etc/a")
@@ -294,6 +296,7 @@ class InstallServiceTest(unittest.TestCase):
 
 
 class ZipappTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-install-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -383,6 +386,7 @@ class ZipappTest(unittest.TestCase):
 
 
 class LocalTargetTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-install-target-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -465,6 +469,7 @@ def _run(
 class InstallerCliTest(unittest.TestCase):
     """The installer on the real manifest, into a staging root: the full install cycle."""
 
+    @override
     def setUp(self) -> None:
         self.stage = tempfile.mkdtemp(prefix="cst-installer-cli-")
         self.addCleanup(shutil.rmtree, self.stage)
@@ -755,6 +760,7 @@ class InstallerCliTest(unittest.TestCase):
 class BashLibraryTest(unittest.TestCase):
     """cst-install.bash, with runuser and getent stubbed (no privilege change happens)."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-install-bash-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -836,6 +842,7 @@ class BashLibraryTest(unittest.TestCase):
 
 
 class RuntimeResolverTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-runtime-")
         self.addCleanup(shutil.rmtree, self.tmp)

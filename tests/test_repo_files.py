@@ -8,6 +8,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 import os
 import subprocess
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -15,6 +16,7 @@ from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 
 class RepoFilesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-repo-files-")
         self.addCleanup(tmp.cleanup)

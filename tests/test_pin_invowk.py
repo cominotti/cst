@@ -12,7 +12,7 @@ import re
 import shutil
 import tarfile
 import tempfile
-from typing import Protocol, cast
+from typing import Protocol, cast, override
 import unittest
 from unittest import mock
 
@@ -51,6 +51,7 @@ def make_tar(path: Path, members: Mapping[str, bytes]) -> None:
 
 
 class PinInvowkTests(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="pin-invowk-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)

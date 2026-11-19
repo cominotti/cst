@@ -58,7 +58,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import NoReturn, TextIO, override
 
 PROG = "cst-mutation"
 EXIT_FAILED = 1
@@ -151,6 +151,7 @@ class Counts:
 
 
 class _Parser(argparse.ArgumentParser):
+    @override
     def error(self, message: str) -> NoReturn:
         raise UsageError(message)
 

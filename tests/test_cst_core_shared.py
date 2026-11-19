@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import override
 import unittest
 from unittest import mock
 
@@ -206,6 +207,7 @@ class DomainTest(unittest.TestCase):
 
 
 class AdaptersTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-shared-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -412,6 +414,7 @@ class AdaptersTest(unittest.TestCase):
 class CounterFileTest(unittest.TestCase):
     """CounterFile: the boot counter of btrfs-bulk and docker-volumes-nocow."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-counter-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -451,6 +454,7 @@ class CounterFileTest(unittest.TestCase):
 class WriteBytesAtomicTest(unittest.TestCase):
     """write_bytes_atomic: the mode is exact, a link is replaced (not followed), restorecon as root."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-wba-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -536,6 +540,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
 class WriteAtomicTest(unittest.TestCase):
     """cst_core.adapters.files.write_atomic: unique temp, exact mode, fsync file then folder, temp gone on errors."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-wa-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -682,6 +687,7 @@ class WriteAtomicTest(unittest.TestCase):
 
 
 class ForceSymlinkAndRunnerTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-fsl-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1150,6 +1156,7 @@ class VirshAdapterTest(unittest.TestCase):
 
     def test_domains_and_dumpxml(self) -> None:
         class Answers(_RecordingRunner):
+            @override
             def run(self, argv: Sequence[str], **options: object) -> core_ports.CommandResult:
                 super().run(argv, **options)
                 if "list" in argv:
@@ -1223,6 +1230,7 @@ class PrintfQTest(unittest.TestCase):
 class ShellAssignmentsTest(unittest.TestCase):
     """parse_shell_assignments, the one KEY=VALUE reader (cpu, vm, doctor, toolchains, bluetooth, bulk), against bash."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-kv-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1471,6 +1479,7 @@ class _NotifyRunner:
 class NotifierTest(unittest.TestCase):
     """cst_core.adapters.notify: btrfs-notify's command line, and an alert it could not take kept for cst doctor."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-notify-test-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -1694,6 +1703,7 @@ class _RecordingSocket:
 class ServiceNotifierTest(unittest.TestCase):
     """cst_core.adapters.sd_notify: sd_notify(3) datagrams to systemd's NOTIFY_SOCKET, and nothing without it."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-sd-notify-test-")
         self.addCleanup(shutil.rmtree, self.tmp, True)

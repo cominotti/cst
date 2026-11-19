@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from typing import override
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,7 @@ def key(path: str) -> str:
 
 
 class UvDevTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="cst-uv-dev-")
         self.addCleanup(self.tmp.cleanup)

@@ -23,7 +23,7 @@ defines a name.
 """
 
 from types import ModuleType
-from typing import ClassVar, Self
+from typing import ClassVar, Self, override
 
 _MISSING = object()
 
@@ -48,6 +48,7 @@ class PackageView:
                 return value
         raise AttributeError(f"no module of this view defines {name}")
 
+    @override
     def __setattr__(self, name: str, value: object) -> None:
         saved: dict[tuple[int, str], tuple[ModuleType, object]] = object.__getattribute__(self, "_saved")
         previous: list[tuple[ModuleType, object]] = []
@@ -63,6 +64,7 @@ class PackageView:
         sets: dict[str, list[list[tuple[ModuleType, object]]]] = object.__getattribute__(self, "_sets")
         sets.setdefault(name, []).append(previous)
 
+    @override
     def __delattr__(self, name: str) -> None:
         """Undo the latest set of `name` (the end of a `mock.patch.object` block)."""
         sets: dict[str, list[list[tuple[ModuleType, object]]]] = object.__getattribute__(self, "_sets")

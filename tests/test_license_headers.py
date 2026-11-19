@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 
 from cst_core.domain.install import INSTALL_MANIFEST, render_template, template_keys
@@ -189,6 +190,7 @@ class RulesTest(unittest.TestCase):
 
 
 class FixerTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp(prefix="cst-license-fix-")
         self.addCleanup(shutil.rmtree, self.repo)

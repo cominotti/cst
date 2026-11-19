@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 import os
 import shlex
 import subprocess
-from typing import ClassVar
+from typing import ClassVar, override
 import time
 import unittest
 
@@ -741,6 +741,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
     SECURITY_OPTS = os.environ.get("CST_E2E_SECURITY_OPTS", "").split()
 
     @classmethod
+    @override
     def setUpClass(cls) -> None:
         # Provide a working writable copy of CST inside the container so symlink tests
         # and user-owned operations do not rely on mutating the read-only host repo.

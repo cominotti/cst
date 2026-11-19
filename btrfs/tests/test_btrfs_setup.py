@@ -22,7 +22,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from typing import TypedDict
+from typing import TypedDict, override
 import unittest
 import zipfile
 
@@ -75,6 +75,7 @@ def assignment(name: str) -> str:
 
 
 class TimerRemovalTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-setup-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -505,6 +506,7 @@ class ComponentInstallTest(unittest.TestCase):
     scripts, the real installer staged under the test's folder, systemctl
     and the other host commands as logging shell functions."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-component-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -742,6 +744,7 @@ class SnapshotsConfTest(unittest.TestCase):
     """snap_conf_set (btrfs/setup-snapshots.bash) writes snapshots.conf in quotes that bash and
     cst_core's strict reader read alike, and rewrites the printf %q lines an older CST wrote."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-conf-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1132,6 +1135,7 @@ class ScrubLimitTest(unittest.TestCase):
     """SCRUB_LIMIT (the weekly scrub's speed limit) in snapshots.conf: btrfs-setup.sh's
     reader, the drop-in install writes from it, and what status shows."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-scrub-limit-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1304,6 +1308,7 @@ class UserStepsTest(unittest.TestCase):
     a function that logs and runs the command as the current user; the programs are a fake
     that records what reached it; the user's runtime folder is in the test's folder."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-user-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)

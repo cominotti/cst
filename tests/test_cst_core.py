@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Final, Literal
+from typing import Final, Literal, override
 import unittest
 from unittest import mock
 
@@ -151,6 +151,7 @@ class ValueObjectsTest(unittest.TestCase):
 
 
 class ManagedFilesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.spec = MarkedLineSpec(
             desired_line="/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)",
@@ -753,9 +754,11 @@ class CstCommandTest(unittest.TestCase):
 
     tmp: str
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-cmd-")
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 

@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -294,6 +294,7 @@ class DegradedBootTest(unittest.TestCase):
     tmp: str
     root: str
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="degraded-boot-test-")
         self.addCleanup(shutil.rmtree, self.tmp)

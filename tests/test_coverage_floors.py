@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -116,6 +117,7 @@ class CoverageTaskOutTest(unittest.TestCase):
     as it is, in a scratch "checkout" that has no tests/uv-dev.
     """
 
+    @override
     def setUp(self) -> None:
         with open(os.path.join(REPO, INVOWKFILE), encoding="utf-8") as fh:
             script = task_script(fh.read(), "test coverage")

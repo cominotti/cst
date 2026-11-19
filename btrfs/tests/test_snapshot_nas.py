@@ -19,6 +19,7 @@ import json
 import os
 import signal
 import time
+from typing import override
 import unittest
 
 from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
@@ -30,6 +31,7 @@ DAY = 86400
 
 
 class Base(RuntimeTest):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_HOST="nas", NAS_USER="u", NAS_PORT="22")

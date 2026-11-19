@@ -31,7 +31,7 @@ import types
 import unittest
 import zoneinfo
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, Protocol, TypedDict, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_btrfs_snapshot_core.py): the checkout root holds the tests package.
@@ -770,6 +770,7 @@ foreach (sort { $a->{value} <=> $b->{value} } @$results) {
     "set BTRBK_SOURCE=/path/to/btrbk (0.32.7) and have perl to compare with btrbk itself",
 )
 class BtrbkOracleTests(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         with open(os.environ["BTRBK_SOURCE"]) as f:
             text = f.read()
@@ -783,6 +784,7 @@ class BtrbkOracleTests(unittest.TestCase):
         with open(self.harness, "w") as f:
             f.write(PERL_HARNESS)
 
+    @override
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -1034,12 +1036,14 @@ class FakeHost:
 
 
 class CliTestCase(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.state = os.path.join(self.tmp.name, "state")
         self.lock = os.path.join(self.tmp.name, "lock")
         self.pins = os.path.join(self.tmp.name, "pinned")
 
+    @override
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -1900,11 +1904,13 @@ def tag(root: str, rel: str, text: str = TAG_TEXT) -> str:
 class CacheWalkTests(unittest.TestCase):
     """walk_caches on real folders in a temporary directory."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = os.path.join(self.tmp.name, "root")
         os.makedirs(self.root)
 
+    @override
     def tearDown(self) -> None:
         for dirpath, dirnames, _ in os.walk(self.tmp.name):
             for d in dirnames:
@@ -2430,6 +2436,7 @@ class RealTreeHost(FakeHost):
         super().__init__(now)
         self.dirs = {top, os.path.join(top, "snapshots")}
 
+    @override
     def run(self, argv: Sequence[str]) -> tuple[int, str, str]:
         out = super().run(argv)
         if argv[:3] == ["btrfs", "subvolume", "snapshot"] and out[0] == 0:
@@ -2437,6 +2444,7 @@ class RealTreeHost(FakeHost):
             shutil.copytree(src, dest, symlinks=True)
         return out
 
+    @override
     def walk_caches(self, root: str, skips: Sequence[str], mode: str) -> _CacheWalkProto:
         self.calls.append(["walk", root, list(skips), mode])
         return core.walk_caches(root, skips, mode)
@@ -2445,6 +2453,7 @@ class RealTreeHost(FakeHost):
 class RealKindHost(FakeHost):
     """FakeHost that asks the real Host.kind (lstat, on the real file system) what a path is."""
 
+    @override
     def kind(self, path: str) -> str:
         return snap_adapters.Host().kind(path)
 

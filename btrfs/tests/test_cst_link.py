@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -33,10 +34,12 @@ class CstLinkTest(unittest.TestCase):
     home: str
     link: str
 
+    @override
     def setUp(self) -> None:
         self.home = tempfile.mkdtemp(prefix="cst-link-test-")
         self.link = os.path.join(self.home, ".local", "bin", "cst")
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.home)
 

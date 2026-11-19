@@ -38,7 +38,7 @@ import signal
 import stat
 import subprocess
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -321,6 +321,7 @@ class RuntimeTest(unittest.TestCase):
     calls_file: str
     env: dict[str, str]
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="btrfs-snapshot-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)

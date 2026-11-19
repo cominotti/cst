@@ -23,6 +23,7 @@ import re
 import stat
 import subprocess
 import time
+from typing import override
 import unittest
 
 from btrfs.tests.snapshot_fakes import SCRIPT, RuntimeTest, log, read
@@ -495,6 +496,7 @@ class EngineStepTest(Base):
                 timeout=120,
             )
 
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.ws = self.tree("Workspace")

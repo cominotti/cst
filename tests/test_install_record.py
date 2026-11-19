@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -129,6 +130,7 @@ class RecordDomainTest(unittest.TestCase):
 class InstallServiceRecordTest(unittest.TestCase):
     ROOT = "/var/lib/cst/installed.json"
 
+    @override
     def setUp(self) -> None:
         self.payloads = {"m/a": b"A\n", "m/t.in": b"uuid=@UUID@\n", "m/u": b"U\n", "m/s.service": b"[Unit]\n"}
         self.a = entry("m/a", "/usr/local/sbin/a", mode=0o755, kind=ArtifactKind.SHELL)
@@ -287,6 +289,7 @@ class _Verifier:
 
 
 class VerifyBeforeReplaceTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.payloads = {
             "m/p": b"P\n",
@@ -378,6 +381,7 @@ class SystemdUnitVerifierTest(unittest.TestCase):
 
 
 class JsonRecordTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-record-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -446,6 +450,7 @@ class JsonRecordTest(unittest.TestCase):
 
 
 class CheckoutCommitTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-commit-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -513,6 +518,7 @@ class CheckoutCommitTest(unittest.TestCase):
 class InstallerRecordCliTest(unittest.TestCase):
     """installer.py as the setup scripts run it, staged under --root (the record goes there too)."""
 
+    @override
     def setUp(self) -> None:
         self.stage = tempfile.mkdtemp(prefix="cst-record-cli-")
         self.addCleanup(shutil.rmtree, self.stage)
