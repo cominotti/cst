@@ -49,7 +49,8 @@ test, so say in the message why it cannot
 ## 2c. A typing refactor whose tests must pass members: two commits, A and B
 
 When production code starts to take a StrEnum member where it took a plain
-string, ty can then ask the tests to pass the member too. Split the change in two commits, each with its own proof:
+string, ty can then ask the tests to pass the member too. Split the change
+in two commits, each with its own proof:
 
 - **A**, production only: the tests are unchanged and pass on the old code
   and on the new (step 2). A `StrEnum` member equals its plain string, so

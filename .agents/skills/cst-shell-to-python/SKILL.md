@@ -25,10 +25,10 @@ and `swap/swap-status` into the `swap/` package. Read it with
   `test_sysctl_payload_matches_old_script` adopts the files the old script
   wrote (the upgrade path).
 
-The cpu port (commit 086c2c3, #60: cpu-setup.sh over `cpu/cpu-setup` and the `cpu.setup`
-package; `cpu/game-profile` as a python-entry zipapp of `cpu.game`) kept
-the installed bash copy working next to the new one: see the checklist's
-last items. Then commit b819032 (#66: `btrfs-health-check` and
+The cpu port (commit 086c2c3, #60: cpu-setup.sh over `cpu/cpu-setup` and the
+`cpu.setup` package; `cpu/game-profile` as a python-entry zipapp of
+`cpu.game`) kept the installed bash copy working next to the new one: see the
+checklist's last items. Then commit b819032 (#66: `btrfs-health-check` and
 `cst-pending-alerts`, installed programs that became zipapps of
 `btrfs/health_check` and `btrfs/pending_alerts`) and commit c94600a (#67:
 `bluetooth-setup.sh` over `bluetooth/bt-setup` and the `bluetooth.setup`

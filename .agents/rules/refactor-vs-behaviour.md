@@ -26,9 +26,10 @@ the checker on both sides: the rule's hits on the commit before it and none
 after, for example `tests/uv-dev ty check --error RULE FILE...` or
 `tests/uv-dev ruff check --select RULE FILE...` on each. Put the counts in
 the message. A typing refactor whose tests must then pass members (a
-StrEnum member where a plain string was) is two commits: production only, proved by the
-unchanged tests; then tests only, where each raw string becomes the member
-of the same value and nothing else changes (the skill's "A and B").
+StrEnum member where a plain string was) is two commits: production only,
+proved by the unchanged tests; then tests only, where each raw string
+becomes the member of the same value and nothing else changes (the skill's
+"A and B").
 
 The skill [cst-refactor-parity](../skills/cst-refactor-parity/SKILL.md) shows
 both. A refactor that finds a bug does not fix it on the way: write the bug
@@ -66,11 +67,10 @@ ty setting in `pyproject.toml`) follows the same rule:
 ## No behaviour at all: docs
 
 A commit that changes only documents, comments, agent rules or skills says
-so in its message ("docs, no behaviour
-change") and needs no new test ([AGENTS.md, "Rules"](../../AGENTS.md#rules));
-the docs gate (`invowk cmd test docs`) still runs. It changes no code CST
-installs or runs: a docs fix that finds a bug writes it down for a behaviour
-change of its own.
+so in its message ("docs, no behaviour change") and needs no new test
+([AGENTS.md, "Rules"](../../AGENTS.md#rules)); the docs gate
+(`invowk cmd test docs`) still runs. It changes no code CST installs or runs:
+a docs fix that finds a bug writes it down for a behaviour change of its own.
 
 ## Never mix the two
 

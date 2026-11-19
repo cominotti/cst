@@ -184,9 +184,9 @@ repository:
   apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which they may not go above.
   Production code has no `Any` left and one `cast` (in
   `cst_core.adapters.terminal`, for the standard streams); the other entries
-  are tests. Type the
-  value instead: a `TypedDict` for a record read from JSON, a frozen
-  dataclass for one built in code, `isinstance` narrowing instead of a cast.
+  are tests. Type the value instead: a `TypedDict` for a record read from
+  JSON, a frozen dataclass for one built in code, `isinstance` narrowing
+  instead of a cast.
 - **The magic values gate** (`tests/test_magic_values.py`, in the unit
   suite): in production code, a string compared with a word of a StrEnum
   (of the package or of cst_core), an if/elif chain or match with 3 or more

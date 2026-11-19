@@ -89,8 +89,9 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
 - [ ] Unit tests in the module's `tests/`, importing the package and injecting
       fakes (and closing what they open: `tests/run_unit.py` fails the run on
       a ResourceWarning,
-      [AGENTS.md, "Test gotchas"](../../../AGENTS.md#test-gotchas)): through cst_core's `CommandRunnerPort` / `FileSystemPort` (or
-      the adapter functions) in a light package, through its ports in a full
+      [AGENTS.md, "Test gotchas"](../../../AGENTS.md#test-gotchas)): through
+      cst_core's `CommandRunnerPort` / `FileSystemPort` (or the adapter
+      functions) in a light package, through its ports in a full
       one. A command that changes the machine: skill
       [cst-new-command](../cst-new-command/SKILL.md).
 - [ ] The module README's file table names the helper and where it is
