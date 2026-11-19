@@ -31,13 +31,18 @@ from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import DAY, MINUTE
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandResult, CommandRunnerPort
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
 
-# The report's commands (date, docker/podman ps, below dump): stdin left to the report's own, output
-# decoded strictly (output that is not UTF-8 raises), as subprocess.run(capture_output, text) did.
 RUNNER: CommandRunnerPort = SubprocessCommandRunner()
+
+
+def _run(argv: list[str], timeout: float | None = None) -> CommandResult:
+    """One of the report's commands (date, docker/podman ps, below dump): stdin left to the report's
+    own, output decoded strictly (output that is not UTF-8 raises), as subprocess.run(capture_output,
+    text) did."""
+    return RUNNER.run(argv, timeout=timeout, stdin="inherit", decode_errors="strict")
 
 
 def parse_time(s: str | None, default: float) -> float:
@@ -50,7 +55,7 @@ def parse_time(s: str | None, default: float) -> float:
         return float(s)
     except ValueError:
         pass
-    out = RUNNER.run(["date", "-d", s, "+%s"], stdin="inherit", decode_errors="strict")
+    out = _run(["date", "-d", s, "+%s"])
     if out.cause is not None:  # missing or cannot start: the error escapes, as it always did
         raise out.cause
     if out.returncode != 0:
@@ -231,12 +236,7 @@ def container_names() -> dict[str, str]:
     for tool, prefix in (("docker", "docker-"), ("podman", "libpod-")):
         if shutil.which(tool) is None:
             continue
-        out = RUNNER.run(
-            [tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
-            timeout=5,
-            stdin="inherit",
-            decode_errors="strict",
-        )
+        out = _run([tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"], timeout=5)
         if out.fault is not None:  # missing, cannot start or timed out
             continue
         for line in out.stdout.splitlines():
@@ -272,7 +272,7 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         "--top",
         str(top),
     ]
-    out = RUNNER.run(cmd, timeout=90, stdin="inherit", decode_errors="strict")
+    out = _run(cmd, timeout=90)
     if out.cause is not None:  # missing, cannot start or timed out
         return None, f"below dump failed: {out.cause}"
     if out.returncode != 0:
