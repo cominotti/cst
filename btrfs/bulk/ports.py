@@ -11,7 +11,7 @@ from collections.abc import Collection
 from collections.abc import Sequence
 from typing import Protocol
 
-from btrfs.bulk.domain import Ctx, Item, ItemJournal, TreeSize
+from btrfs.bulk.domain import BulkDirState, CacheTagState, Ctx, Item, ItemJournal, LstatKind, TreeSize
 from btrfs.bulk.domain.steam import FileRead, SteamJournal, SteamPart
 
 
@@ -108,8 +108,8 @@ class UserFilesPort(Protocol):
 class HomeTreePort(Protocol):
     """Looks at the home that never follow a link (safe as root)."""
 
-    def kind(self, path: str) -> str:
-        """LstatKind absent | link | dir | other (lstat)."""
+    def kind(self, path: str) -> LstatKind:
+        """absent | link | dir | other (lstat)."""
         ...
 
     def chain(self, base: str, rel: str) -> str:
@@ -154,12 +154,12 @@ class HomeTreePort(Protocol):
         """BulkTargetState absent | empty | data, or 'bad:<reason>'."""
         ...
 
-    def bulk_state(self, ctx: Ctx) -> str:
-        """BulkDirState."""
+    def bulk_state(self, ctx: Ctx) -> BulkDirState:
+        """ok | create | plain | bad: ~/Bulk itself."""
         ...
 
-    def tag_state(self, ctx: Ctx) -> str:
-        """CacheTagState."""
+    def tag_state(self, ctx: Ctx) -> CacheTagState:
+        """ok | create | bad: ~/Bulk/CACHEDIR.TAG."""
         ...
 
     def nocow_parents(self, ctx: Ctx, item: Item) -> list[str]: ...

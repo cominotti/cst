@@ -426,7 +426,7 @@ class HomeTree:
             return BulkTargetState.ABSENT
         return BulkTargetState.EMPTY if self.empty_dir(ctx.target(item)) else BulkTargetState.DATA
 
-    def bulk_state(self, ctx: Ctx) -> str:
+    def bulk_state(self, ctx: Ctx) -> BulkDirState:
         k = kind(ctx.bulk)
         if k == LstatKind.ABSENT:
             return BulkDirState.CREATE
@@ -434,7 +434,7 @@ class HomeTree:
             return BulkDirState.BAD
         return BulkDirState.OK if self.machine.is_subvol(ctx.bulk) else BulkDirState.PLAIN
 
-    def tag_state(self, ctx: Ctx) -> str:
+    def tag_state(self, ctx: Ctx) -> CacheTagState:
         p = os.path.join(ctx.bulk, "CACHEDIR.TAG")
         k = kind(p)
         if k == LstatKind.ABSENT:
