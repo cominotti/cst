@@ -72,8 +72,8 @@ export const meta = {
 //   fork computes the diff itself, always as "git diff main...<branch>". So the review agent drops findings on
 //   files outside this change's paths and, with a base other than main, findings that come only from the base's
 //   own commits; and a review of a range that is no branch (the fixer's commits, reviewed_head..head) is a review
-//   by hand, never code-review. Named lookup through .claude/workflows was not tried before the first merge
-//   (scriptPath was).
+//   by hand, never code-review. Named lookup through .claude/workflows did not find it
+//   in a session that started before it landed on main (scriptPath works); retry by name in a new session.
 // - Every agent pastes the output of GUARD_CMD for the main checkout (its HEAD, status lines, staged and unstaged
 //   contents and untracked files' contents) before and after; the script stops when an
 //   agent's two readings differ or when one agent's "before" differs from the previous agent's "after".
@@ -264,7 +264,7 @@ const DIFF_CMD = 'git -C ' + QWT + ' diff --name-status --no-renames ' + QBASE +
 const NUMSTAT_CMD = 'git -C ' + QWT + ' diff --numstat --no-renames ' + QBASE + '...HEAD'
 const GATE_TAIL = 'Then report gated_head (git -C ' + QWT + ' rev-parse HEAD) and worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing).'
 const shared = (stage, rereadBrief) => [
-  'Repository rules: AGENTS.md ("Rules", "Commands", "Test gotchas") and .agents/rules/*.md apply; the kind "' + A.kind + '" decides the proof (.agents/rules/refactor-vs-behaviour.md).',
+  'Repository rules: AGENTS.md ("Rules", "Commands", "Test gotchas") and .agents/rules/*.md apply; read them from the worktree (' + WT + '/AGENTS.md, ' + WT + '/.agents/rules/), since the copies loaded into your context can be older than the branch; the kind "' + A.kind + '" decides the proof (.agents/rules/refactor-vs-behaviour.md).',
   'Work only in the worktree ' + WT + ' (branch ' + BRANCH + '). Your shell starts in the main checkout on EVERY call: use git -C ' + QWT + ', absolute paths, or "cd ' + QWT + ' && ..." inside the same command. Never edit, commit or check out anything in ' + MAIN + '.',
   'Shared machine: a short TMPDIR for anything you run, TMPDIR=$(mktemp -d $HOME/.cache/cc.XXXXXX) (tests bind unix sockets below it, which allow 108 bytes; remove it when done), a timeout on every harness you write, no large files in /tmp; never sudo, never tier 2 E2E, never git stash, never push; repository text in English, with no personal or private names.',
   'Never end your turn or return while a command you started is still running: run gates in the foreground (a Bash timeout up to 600000 ms), or keep checking a backgrounded one in the foreground until it exits. Do not invoke the code-review or simplify skills unless this prompt says so.' + (rereadBrief ? ' Re-read the brief ' + A.brief + ' before your final check: it may have grown.' : ''),
