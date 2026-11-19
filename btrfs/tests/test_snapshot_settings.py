@@ -127,6 +127,9 @@ class GuardNumberTest(unittest.TestCase):
         # EMERGENCY_AT_OR_BELOW_GIB='2#10010110' the emergency purge never started).
         values += ["2**7", "2 ** 7", "-2**2", "2**3**2", "3*2**3", "2**-1", "0**0", "2#10010110", "8#377", "10#250"]
         values += ["16#fF", "36#Zz", "37#Aa", "64#@_", "1#0", "65#1", "2#2", "2#", "#1", "2#1#1", "2**63", "7**30"]
+        # 64-bit wrap-around of every way to a number, and a base with a leading 0 (an error in bash).
+        values += ["9223372036854775808", "0x8000000000000000", "-(2**63)", "2**63/-1", "0xffffffffffffffff"]
+        values += ["18446744073709551616", "-2**63%-1", "010#9", "08#1", "02#1"]
         for value in values:
             for free in (0, 7, 8, 16, 168, 249, 250, 251, 2**40):
                 with self.subTest(value=value, free=free):

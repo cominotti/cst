@@ -86,8 +86,9 @@ def _based(base: int, digits: str) -> int:
 
 class _Arith:
     """The part of bash arithmetic a setting can hold: integer constants (decimal, a leading 0
-    octal, 0x hexadecimal, BASE#DIGITS), unary + and -, ** (right to left, below unary -: -2**2 is 4),
-    * / %, + -, parentheses, blanks. A name is an unset variable (NOT_A_NUMBER): the file is read as
+    octal, 0x hexadecimal, BASE#DIGITS with no leading 0 in BASE), unary + and -, ** (right to left,
+    below unary -: -2**2 is 4), * / %, + -, parentheses, blanks. Every constant and every result
+    wraps around as bash's 64-bit integers do. A name is an unset variable (NOT_A_NUMBER): the file is read as
     data, a name is no value; anything else, a division by 0 or a negative exponent is an error
     (BAD_NUMBER)."""
 
@@ -122,7 +123,7 @@ class _Arith:
                 raise ValueError("division by 0")
             else:
                 q = bash_div(n, m)
-                n = q if op == "/" else n - q * m
+                n = _wrap(q if op == "/" else n - q * m)
         return n
 
     def power(self) -> int:
@@ -137,7 +138,7 @@ class _Arith:
 
     def unary(self) -> int:
         if self.peek() in ("+", "-"):
-            return -self.unary() if self.take() == "-" else self.unary()
+            return _wrap(-self.unary()) if self.take() == "-" else self.unary()
         return self.atom()
 
     def atom(self) -> int:
@@ -150,13 +151,15 @@ class _Arith:
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok):
             raise LookupError(tok)
         if re.fullmatch(r"0[xX][0-9a-fA-F]*", tok):
-            return int(tok[2:] or "0", 16)
+            return _wrap(int(tok[2:] or "0", 16))
         if m := re.fullmatch(r"([0-9]+)#([0-9A-Za-z@_]+)", tok):
+            if m.group(1).startswith("0"):
+                raise ValueError("invalid number")  # bash reads no base with a leading 0
             return _based(int(m.group(1)), m.group(2))
         n = bash_int(tok)
         if n is None:
             raise ValueError(tok)
-        return n
+        return _wrap(n)
 
 
 def guard_number(text: str) -> int | GuardError:
