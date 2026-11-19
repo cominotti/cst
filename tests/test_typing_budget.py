@@ -37,7 +37,6 @@ from tests.test_architecture import module_role
 ANY_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests": 5,
     "btrfs tests": 65,
-    "btrfs/stall_report adapters": 2,
     "tests tests": 6,
     "toolchains tests": 1,
     "vm tests": 5,
