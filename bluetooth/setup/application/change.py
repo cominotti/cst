@@ -422,12 +422,16 @@ class Change(Checks):
     def lw_install(self) -> None:
         """The watcher's program and unit (through the installer, as the user), enabled and started.
         The installer runs also for a current copy: it writes nothing then (`unchanged:`), but adds
-        a copy its record does not list yet (installed before the record existed)."""
+        a copy its record does not list yet (installed before the record existed). What it wrote
+        (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
+        that changed after plan (a git pull meanwhile) is still taken up."""
         p, unit = self.p, LDAC_UNIT
-        prog_changed = self.lw_prog_st != OwnedState.OK
-        if prog_changed:
+        if self.lw_prog_st != OwnedState.OK:
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
-        r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch")
+        r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
+        self.out(r.stdout)  # its lines, then its error, as it printed them
+        if r.stderr:
+            self.err(r.stderr)
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
         said = self.checked(
@@ -435,10 +439,10 @@ class Change(Checks):
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
-        unit_changed = self.lw_unit_st != OwnedState.OK
+        unit_changed = said.startswith("written:")
         if unit_changed:
             self.must(["systemctl", "--user", "daemon-reload"])
-        changed = prog_changed or unit_changed
+        changed = unit_changed or any(line.startswith("written:") for line in r.stdout.splitlines())
         if self.lw_enabled != "enabled":
             self.must(["systemctl", "--user", "enable", unit])
             self.out(f"enabled:   {unit} (starts with your session)\n")

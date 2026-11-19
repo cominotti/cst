@@ -30,6 +30,7 @@ from bluetooth.setup.domain import (
 )
 from bluetooth.tests.setup_fakes import ISO, MAC, REPO, Machine
 from bluetooth.tests.test_ldac_watch import pw_dump
+from cst_core.domain.files import OwnedState
 from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 
@@ -253,6 +254,48 @@ class ApplyDoneTest(unittest.TestCase):
         run, console, _ = change(m, "apply", "--yes", "--no-restart")  # no wp-roles answer: a warning
         self.assertEqual(run.apply(), 0)
         self.assertTrue(console.stdout.endswith("\nDone, with 1 warning(s). Details: cst-t status\n"), console.stdout)
+
+
+class WatcherInstallTest(unittest.TestCase):
+    """What the installer wrote, not what plan saw, decides the watcher's daemon-reload and restart."""
+
+    def test_files_that_changed_after_plan(self) -> None:
+        # plan found both files current and the watcher running; by the install they are not
+        # (a git pull meanwhile): the installer writes them, and the watcher is restarted.
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, console, _ = change(m, "apply", "--yes", settings={"LDAC_RATE": "48000"})
+        run.lw_prog_st = run.lw_unit_st = OwnedState.OK
+        run.lw_enabled, run.lw_active = "enabled", "active"
+        run.lw_install()
+        self.assertIn(f"written:   {m.lw_prog}\n", console.stdout)
+        self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", console.stdout)
+        self.assertIn("restarted: cst-bt-ldac48.service (new files)\n", console.stdout)
+        calls = m.read("log").splitlines()
+        self.assertIn("systemctl --user daemon-reload", calls)
+        self.assertIn("systemctl --user restart cst-bt-ldac48.service", calls)
+
+    def test_current_files_neither_reload_nor_restart(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, console, _ = change(m, "apply", "--yes", settings={"LDAC_RATE": "48000"})
+        run.lw_prog_st = run.lw_unit_st = OwnedState.MISSING
+        run.lw_enabled, run.lw_active = "enabled", ""  # only started (the fake's enable talks on stderr)
+        run.lw_install()
+        run, console, _ = change(m, "apply", "--yes", settings={"LDAC_RATE": "48000"})
+        run.lw_prog_st = run.lw_unit_st = OwnedState.OK
+        run.lw_enabled, run.lw_active = "enabled", "active"
+        before = len(m.read("log").splitlines())
+        run.lw_install()
+        self.assertIn(f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\n", console.stdout)
+        self.assertIn("unchanged: cst-bt-ldac48.service enabled and active\n", console.stdout)
+        self.assertEqual(
+            [c for c in m.read("log").splitlines()[before:] if c.startswith("systemctl --user") and "is-" not in c], []
+        )
 
 
 class WaitTest(unittest.TestCase):

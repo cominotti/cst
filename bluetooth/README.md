@@ -468,7 +468,9 @@ in your install record `~/.local/state/cst/installed.json` (component
 `bluetooth:ldac`), which `cst doctor` checks; removing the watcher takes them
 out of it. A copy already current but missing from the record (installed
 before the record existed) is added to it by the next `apply`, which prints
-`unchanged:` for it and neither rewrites nor restarts it.
+`unchanged:` for it and neither rewrites nor restarts it. What the installer
+writes (`written:`) decides the restart, also for a file that changed after
+`plan` looked at it.
 
 Why a copy, and not the file in this folder: the service then does not
 depend on this working copy. Moving or renaming the folder, editing the
