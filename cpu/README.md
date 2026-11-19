@@ -435,6 +435,10 @@ install copies the `gamemode` line from `/usr/lib/group` to `/etc/group` (and
 adds `gamemode:!::` to `/etc/gshadow`), then adds your user. If the group does
 not exist at all, it prints
 `no 'gamemode' group on this system (is the gamemode package installed?)`.
+If the system knows the group (through NSS, for example from a directory
+service) but neither `/etc/group` nor `/usr/lib/group` has its line, install
+stops with
+`the 'gamemode' group comes from NSS, not /etc/group or /usr/lib/group: add its line to /etc/group by hand, then run install again`.
 
 **polkit** decides which user may do which privileged action. Normally only
 root may start system services. The rule from 6.1 lets your user start or stop
@@ -1399,7 +1403,9 @@ above:
 **`status` shows `group: NOT a member`.** Your user is not in the `gamemode`
 group in `/etc/group`. Run `install` again. If it prints
 `no 'gamemode' group on this system (is the gamemode package installed?)`,
-install the `gamemode` package first.
+install the `gamemode` package first. If it stops with `the 'gamemode' group
+comes from NSS, not /etc/group or /usr/lib/group`, copy the group's line
+(`getent group gamemode`) into `/etc/group` by hand and run `install` again.
 
 **`status` shows `ini: own/absent`.** `~/.config/gamemode.ini` is missing or
 is your own file. If it is missing, run `install` again. If it is your own,

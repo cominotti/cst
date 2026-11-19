@@ -375,7 +375,11 @@ class CpuSetup:
         if not _line_starts(p.etc_group, "gamemode:"):
             found = [line for line in (read_text(p.lib_group) or "").split("\n") if line.startswith("gamemode:")]
             if not found:
-                raise Halt(1)  # the grep in an assignment failed under set -e
+                raise Halt(
+                    1,
+                    "cpu-setup.sh: the 'gamemode' group comes from NSS, not /etc/group or /usr/lib/group: "
+                    "add its line to /etc/group by hand, then run install again",
+                )
             _append(p.etc_group, "\n".join(found) + "\n")
             if not _line_starts(p.etc_gshadow, "gamemode:"):
                 _append(p.etc_gshadow, "gamemode:!::\n")

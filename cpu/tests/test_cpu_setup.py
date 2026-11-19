@@ -595,8 +595,17 @@ class InstallTest(CpuSetupCase):
         self.assertEqual(self.command("install")[0], 1)
 
     def test_a_group_missing_from_usr_lib_group_stops_install(self) -> None:
+        # NSS has the group, but neither /etc/group nor /usr/lib/group has its line: usermod cannot add
+        # the user, and install says why.
         self.write(self.paths.lib_group, "other:x:1:\n")
-        self.assertEqual(self.command("install")[0], 1)
+        rc, _, err = self.command("install")
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            err.splitlines()[-1],
+            "cpu-setup.sh: the 'gamemode' group comes from NSS, not /etc/group or /usr/lib/group: "
+            "add its line to /etc/group by hand, then run install again",
+        )
+        self.assertFalse([c for c in self.runner.joined() if c.startswith("usermod")])
         self.groups.clear()
         rc, _, err = self.command("install")
         self.assertEqual(rc, 0)
