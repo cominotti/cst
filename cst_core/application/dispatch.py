@@ -14,7 +14,6 @@ from typing import TextIO
 from cst_core.domain.dispatch import (
     MODULE_BY_NAME,
     MODULES,
-    HELP_WORDS,
     ModuleRouting,
     Privilege,
     RouteAction,
@@ -24,6 +23,7 @@ from cst_core.domain.dispatch import (
     script_help,
     step_down_argv,
 )
+from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CstDispatchPort, ModuleRoutePort
 

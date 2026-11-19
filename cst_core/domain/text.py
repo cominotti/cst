@@ -47,6 +47,10 @@ def is_yes(answer: str) -> bool:
     return answer.strip().lower().startswith(("y", "s"))
 
 
+# The words that ask a command for its help (cst and every module).
+HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
+
+
 def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
     """The member of cls whose value is word (a word from outside: argv, a file, another program's
     answer), or None for any other word: the caller keeps its own fall-through (never cls(word),

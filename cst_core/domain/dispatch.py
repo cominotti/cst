@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from cst_core.domain.text import HELP_WORDS
+
 
 @dataclass(frozen=True, slots=True)
 class ModuleSpec:
@@ -146,10 +148,6 @@ class RouteAction(StrEnum):
     USAGE = "usage"
     UNKNOWN = "unknown"
     RUN = "run"
-
-
-# What the help options of every module are.
-HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
 
 
 @dataclass(frozen=True, slots=True)

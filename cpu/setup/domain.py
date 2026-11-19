@@ -13,7 +13,7 @@ import json
 import re
 from typing import Final, TypedDict, TypeIs
 
-from cst_core.domain.dispatch import HELP_WORDS
+from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
 

@@ -12,7 +12,7 @@ from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
-from cst_core.domain.text import enum_member, parse_shell_assignments
+from cst_core.domain.text import HELP_WORDS, enum_member, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
@@ -75,12 +75,9 @@ class SwapCommand(StrEnum):
     HELP = "help"
 
 
-_HELP_ALIASES: Final[tuple[str, ...]] = ("-h", "--help")
-
-
 def parse_swap_command(word: str) -> SwapCommand | None:
     """The command a word on the command line names, or None for an unknown one."""
-    if word in _HELP_ALIASES:
+    if word in HELP_WORDS:
         return SwapCommand.HELP
     return enum_member(SwapCommand, word)
 

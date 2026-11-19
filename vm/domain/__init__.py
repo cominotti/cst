@@ -14,7 +14,7 @@ import shlex
 from typing import Final, Literal, TypedDict
 import xml.etree.ElementTree as ET
 
-from cst_core.domain.dispatch import HELP_WORDS
+from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
