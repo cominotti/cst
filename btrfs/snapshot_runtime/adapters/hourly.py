@@ -12,7 +12,6 @@ import sys
 from btrfs.health_check.domain import awk_field
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
 from btrfs.snapshot_runtime.domain import (
-    DAY_S,
     EXIT_USAGE,
     NOT_SET_UP,
     PURGE_BATCH,
@@ -22,7 +21,6 @@ from btrfs.snapshot_runtime.domain import (
     CoreExit,
     GuardError,
     Stderr,
-    Urgency,
     blocked_alert,
     core_reason,
     head_spaced,
@@ -32,7 +30,8 @@ from btrfs.snapshot_runtime.domain import (
     read_lines,
     source_args,
 )
-from cst_core.domain.values import GIB
+from cst_core.domain.contracts import Urgency
+from cst_core.domain.values import DAY, GIB
 
 NL = "\n"
 LOCK_BUSY = "another conversion/snapshot run is active; skipped"
@@ -48,7 +47,7 @@ def send_alert(m: SnapshotRun, kind: AlertKind, urgency: Urgency, title: str, bo
     m.log(4, f"{title}: {body}")
     if os.path.exists(stamp):
         made = m.mtime(stamp)
-        if made is not None and m.now() - made < DAY_S:
+        if made is not None and m.now() - made < DAY:
             return
     if m.desktop_alert(urgency, title, body):
         m.touch(stamp)
@@ -65,7 +64,7 @@ def waiting(m: SnapshotRun, kind: AlertKind, msg: str, title: str, body: str) ->
         m.touch(since)
     m.log(5, f"{msg}; no snapshot this hour")
     made = m.mtime(since)
-    if made is not None and m.now() - made > DAY_S:
+    if made is not None and m.now() - made > DAY:
         send_alert(m, kind, Urgency.NORMAL, title, body)
 
 

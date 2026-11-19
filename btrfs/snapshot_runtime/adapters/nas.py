@@ -22,9 +22,10 @@ from btrfs.health_check.domain import bash_div
 from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send_alert
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
+from cst_core.domain.contracts import Urgency
+from cst_core.domain.values import DAY
 from btrfs.snapshot_runtime.domain import (
     CHECK_FAILURES_ALERTED,
-    DAY_S,
     EXIT_STOPPED,
     MIN_LEFT_S,
     NAS_LOCK_WAIT_S,
@@ -38,7 +39,6 @@ from btrfs.snapshot_runtime.domain import (
     CoreCommand,
     GuardError,
     ResticExit,
-    Urgency,
     restic_time,
     duration_s,
     features_type,
@@ -116,7 +116,7 @@ class Nas:
         return self.deadline - self.m.now()
 
     def days_since(self, last: int) -> int:
-        return bash_div(self.m.now() - last, DAY_S)
+        return bash_div(self.m.now() - last, DAY)
 
     def due(self, path: str, key: str) -> bool:
         """The epoch in PATH is missing, no number, or KEY days old."""
@@ -126,7 +126,7 @@ class Nas:
         days, n = self.number(key), guard_number(last)
         if days is None or not isinstance(n, int):
             return False
-        return self.m.now() - n >= days * DAY_S
+        return self.m.now() - n >= days * DAY
 
     # ---- staleness -------------------------------------------------------------------------
     def since(self) -> int:

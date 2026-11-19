@@ -11,7 +11,9 @@ import re
 from typing import Final
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.text import read_fields
+from cst_core.domain.values import DAY, HOUR, MINUTE
 
 TAG: Final = "btrfs-snapshot"
 USAGE: Final = (
@@ -25,7 +27,6 @@ EXIT_STOPPED: Final = 143  # bash's trap 'exit 143' TERM INT HUP (nas)
 SUBVOL_ROOT_INODE: Final = "256"
 
 
-DAY_S: Final = 86400
 PURGE_BATCH: Final = 10
 # How many paths an alert names (head -n 3).
 SHOWN: Final = 3
@@ -56,10 +57,16 @@ def _wrap(n: int) -> int:
     return n - (1 << 64) if n >= 1 << 63 else n
 
 
+# BASE#DIGITS: the bases bash takes, and the digits 0-9 and a-z (A-Z read as a-z up to that base).
+_MIN_BASE: Final = 2
+_MAX_BASE: Final = 64
+_ONE_CASE_DIGITS: Final = 36
+
+
 def _based(base: int, digits: str) -> int:
     """BASE#DIGITS as bash reads it: base 2 to 64; digits 0-9, then a-z, A-Z, @ and _ (a-z and A-Z
     alike up to base 36); a digit not below the base is an error."""
-    if not 2 <= base <= 64:
+    if not _MIN_BASE <= base <= _MAX_BASE:
         raise ValueError("invalid arithmetic base")
     n = 0
     for c in digits:
@@ -68,7 +75,7 @@ def _based(base: int, digits: str) -> int:
         elif c.islower():
             d = ord(c) - ord("a") + 10
         elif c.isupper():
-            d = ord(c) - ord("A") + (10 if base <= 36 else 36)
+            d = ord(c) - ord("A") + (10 if base <= _ONE_CASE_DIGITS else _ONE_CASE_DIGITS)
         else:
             d = 62 if c == "@" else 63
         if d >= base:
@@ -167,13 +174,6 @@ def guard_number(text: str) -> int | GuardError:
     except ValueError:
         return GuardError.BAD_NUMBER
     return n
-
-
-class Urgency(StrEnum):
-    """btrfs-notify's -u."""
-
-    NORMAL = "normal"
-    CRITICAL = "critical"
 
 
 class AlertKind(StrEnum):
@@ -413,9 +413,9 @@ class ResticExit(IntEnum):
     NO_REPOSITORY = 10
     LOCKED = 11
     WRONG_PASSWORD = 12
-    TIMED_OUT = 124
+    TIMED_OUT = ExitStatus.TIMED_OUT
     INTERRUPTED = 130
-    KILLED = 137
+    KILLED = ExitStatus.KILLED
 
 
 # Messages of restic check (0.19) that name damaged data, not a transport problem.
@@ -424,7 +424,7 @@ RESTIC_DAMAGE_RE: Final = re.compile(
     r"without subtree|decompression failed|invalid compression|contains [0-9]+ errors|no such file|does not exist",
     re.IGNORECASE,
 )
-_UNITS: Final[Mapping[str, int]] = {"": 1, "s": 1, "m": 60, "h": 3600, "d": DAY_S}
+_UNITS: Final[Mapping[str, int]] = {"": 1, "s": 1, "m": MINUTE, "h": HOUR, "d": DAY}
 
 
 def duration_s(text: str) -> int | None:

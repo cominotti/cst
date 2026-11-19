@@ -20,7 +20,6 @@ from btrfs.snapshot_runtime.domain import (
     SUBVOL_ROOT_INODE,
     TAG,
     Stderr,
-    Urgency,
     CacheArgs,
     Sources,
     cache_args,
@@ -32,7 +31,7 @@ from cst_core.adapters.journal import log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import PENDING_ALERTS, Notifier
 from cst_core.adapters.runtime import beside_program
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency as NotifyUrgency, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
@@ -183,8 +182,7 @@ class SnapshotRun:
         does not answer within 60 s, the Notifier keeps the alert in the pending alerts folder (cst
         doctor and the next login show it) and says so in the journal; False then."""
         notifier = Notifier(self.runner, self.notify, self.pending_alerts, log=self.log)
-        level = NotifyUrgency.CRITICAL if urgency is Urgency.CRITICAL else NotifyUrgency.NORMAL
-        return self._call(lambda: notifier.send(level, TAG, title, body)) == "sent"
+        return self._call(lambda: notifier.send(urgency, TAG, title, body)) == "sent"
 
     def _call[T](self, call: Callable[[], T]) -> T:
         """One command; a signal trap_stop caught while it ran ends the run once it is done (bash
