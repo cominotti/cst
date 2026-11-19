@@ -2346,12 +2346,13 @@ class SwapWiringTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(
                     self._seam_output(cmd, both).splitlines()[0],
-                    "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in TMP/proc, /sys in TMP/sys;"
-                    " the kernel's own settings are neither read nor changed",
+                    "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in TMP/proc, /sys in TMP/sys, not the kernel's;"
+                    " /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them",
                 )
         self.assertEqual(
             self._seam_output(D.SwapCommand.PLAN, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": "TMP/sys"}).splitlines()[0],
-            "test seam (CST_SWAP_SYS): /sys in TMP/sys; the kernel's own settings are neither read nor changed",
+            "test seam (CST_SWAP_SYS): /sys in TMP/sys, not the kernel's; /etc is the real one, and sysctl,"
+            " modprobe and zramctl run as PATH finds them",
         )
 
     def test_without_a_test_seam_there_is_no_such_line(self) -> None:

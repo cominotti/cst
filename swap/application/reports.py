@@ -186,13 +186,15 @@ class SwapReports:
     @property
     def test_seam_note(self) -> str:
         """The line plan, status and apply print first when a test seam moved /proc or /sys ("": none), so
-        a stale export in a root shell cannot pass for the kernel's state."""
+        a stale export in a root shell cannot pass for the kernel's state. The seam moves only those
+        folders: /etc stays the real one, and apply's commands (sysctl, modprobe, zramctl) are the ones
+        on PATH, so the line says that too."""
         seam = self._env.test_seam
         if not seam:
             return ""
         names = ", ".join(name for name, _kernel, _path in seam)
         moved = ", ".join(f"{kernel} in {path}" for _name, kernel, path in seam)
-        return f"test seam ({names}): {moved}; the kernel's own settings are neither read nor changed"
+        return f"test seam ({names}): {moved}, not the kernel's; /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them"
 
     def _desired_text(self, path: str) -> str:
         text = self._fs.read_text(path)
