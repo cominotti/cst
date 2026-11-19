@@ -11,7 +11,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import OwnedState, UnitFileState
-from cst_core.domain.install import GeneratedKind, Owner, manifest_by_src
+from cst_core.domain.install import GeneratedKind, InstallEntry, Owner, manifest_by_src
 from cst_core.domain.values import MINUTE
 from vm.adapters import TIMER_COMPONENT
 from vm.domain import (
@@ -52,12 +52,19 @@ def stop_timeout(s: VmSettings) -> str:
     return f"{(stop + MINUTE - 1) // MINUTE}min"
 
 
+def program_entry() -> InstallEntry:
+    """cst-vm's row of the install manifest: what its copy at sbin_copy is written from, and its mode."""
+    return manifest_by_src()["vm/cst-vm"]
+
+
 def timer_files(s: VmSettings, entry_file: str) -> dict[str, tuple[bytes, int]]:
     """{path: (wanted bytes, mode)}: the program as `install` writes it (a
-    zipapp; entry_file is the running cst-vm), the service and the timer."""
+    zipapp; entry_file is the running cst-vm; its mode from the manifest), the
+    service and the timer."""
     p = s.paths
+    program = program_entry()
     return {
-        p.sbin_copy: (install_payload("vm/cst-vm", entry_file), 0o755),
+        p.sbin_copy: (install_payload(program.src, entry_file), program.mode.bits),
         os.path.join(p.unit_dir, SERVICE): (render_service(p.sbin_copy, stop_timeout(s)).encode(), 0o644),
         os.path.join(p.unit_dir, TIMER): (render_timer().encode(), 0o644),
     }
@@ -80,10 +87,10 @@ def install_timer_files(
     Its own refusals (a foreign or masked file) come first, in vm.application.timer_on."""
     svc = timer_installer(entry_file)
     as_root = os.geteuid() == 0
-    program_entry = manifest_by_src()["vm/cst-vm"]
+    program = program_entry()
     for p, (text, mode) in files.items():
         place = (
-            Placement.of(program_entry, path=p, dest=p, record=paths.install_record)
+            Placement.of(program, path=p, dest=p, record=paths.install_record)
             if p == paths.sbin_copy
             else Placement(
                 path=p,
