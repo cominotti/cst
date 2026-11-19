@@ -181,6 +181,16 @@ class C(unittest.TestCase):
     def test_b_collects(self):
         gc.collect()
         gc.enable()
+class H(unittest.TestCase):
+    def test_a_replaces_the_unraisable_hook(self):
+        import sys
+        sys.unraisablehook = lambda unraisable: None  # and does not restore it
+    def test_b_a_weakref_callback_raises(self):
+        U.test_a_weakref_callback_raises(self)
+class K(unittest.TestCase):
+    def test_ignores_every_warning_and_keeps_a_file(self):
+        warnings.simplefilter("ignore")  # outside a catch_warnings block
+        self.f = open(os.devnull)  # freed when the suite drops the test case, after stopTest
 class F(unittest.TestCase):
     def test_a_ignores_every_warning(self):
         warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
@@ -193,9 +203,11 @@ class F(unittest.TestCase):
 class ResourceWarningGateTest(unittest.TestCase):
     """A test that leaves a file or socket open fails the run, even though unittest says OK."""
 
-    def run_probe(self, name: str, *options: str, cls: str = "T") -> subprocess.CompletedProcess[str]:
+    def run_probe(
+        self, name: str, *options: str, cls: str = "T", runner: str = os.path.join(REPO, "tests", "run_unit.py")
+    ) -> subprocess.CompletedProcess[str]:
         """The runner in a child (with these interpreter options) on one test of _LEAKS (or the
-        whole class, for an empty name)."""
+        whole class, for an empty name). runner: another copy of tests/run_unit.py (an old one)."""
         tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
         with open(os.path.join(tmp, "probe_leaks.py"), "w", encoding="utf-8") as f:
             f.write(_LEAKS)
@@ -204,7 +216,7 @@ class ResourceWarningGateTest(unittest.TestCase):
                 sys.executable,
                 "-B",
                 *options,
-                os.path.join(REPO, "tests", "run_unit.py"),
+                runner,
                 ".".join(part for part in ("probe_leaks", cls, name) if part),
             ],
             capture_output=True,
@@ -279,6 +291,23 @@ class ResourceWarningGateTest(unittest.TestCase):
         self.assertTrue(error[0].endswith(": ZeroDivisionError('boom')"), error)
         self.assertIn(LOST_EXCEPTION_HINT, done.stderr)
         self.assertNotIn(LEAK_HINT, done.stderr)
+
+    def test_a_replaced_unraisable_hook_fails_the_run_and_later_exceptions_still_count(self) -> None:
+        done = self.run_probe("", cls="H")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by probe_leaks.H.test_a_replaces_the_unraisable_hook",
+            done.stderr,
+        )
+        self.assertIn("error: exception in probe_leaks.H.test_b_a_weakref_callback_raises: ", done.stderr)
+
+    def test_a_leak_freed_between_two_tests_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="K")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.K.test_ignores_every_warning_and_keeps_a_file: unclosed file",
+            done.stderr,
+        )
 
     def test_a_warning_the_test_records_itself_is_its_own(self) -> None:
         done = self.run_probe("test_records_its_own_warning")

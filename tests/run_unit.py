@@ -69,7 +69,12 @@ ResourceWarning, run the test again with -X tracemalloc=8 to see where the
 resource was opened; for an exception, its traceback is printed above the
 test results. A test that records warnings itself
 (warnings.catch_warnings(record=True)) keeps them. Code that runs in a
-child process (a helper started with python3 -I) is not seen.
+child process (a helper started with python3 -I) is not seen. The filters
+are put back at the end of each test too, so an object freed after a test
+that changed them for good, before the next one starts, is still recorded.
+A test (or a class or module set-up) that replaces sys.unraisablehook and
+does not restore it fails the run, with the place it was found, and the
+runner's hook is put back.
 
 No test may write bytecode into the checkout. `python3 -I` ignores
 PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
@@ -297,12 +302,14 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     leaks: list[str]
     lost_exceptions: list[str]
+    hook_problems: list[str]
 
     @override
     def startTestRun(self) -> None:
         super().startTestRun()
         self.leaks = []
         self.lost_exceptions = []
+        self.hook_problems = []
         self._running = "before the first test"
         # A leak the garbage collector frees (an object in a reference cycle) may come from any
         # test before the one running: _where says so (gc.callbacks tell when it collects).
@@ -332,15 +339,24 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     @override
     def startTest(self, test: unittest.TestCase) -> None:
+        self._keep_hook(f"a class or module set-up or tear-down before {test.id()}")
         self._running = test.id()
         self._keep_recording()
         super().startTest(test)
+
+    @override
+    def stopTest(self, test: unittest.TestCase) -> None:
+        # The suite drops the test case after this: what it held is freed before the next startTest.
+        self._keep_hook(test.id())
+        self._keep_recording()
+        super().stopTest(test)
 
     @override
     def stopTestRun(self) -> None:
         # An object in a reference cycle is freed only by the collector: run it now, while the
         # hooks still record, instead of at exit.
         self._found_by = "the last garbage collection"
+        self._keep_hook("a class or module tear-down after the last test")
         self._keep_recording()
         gc.collect()
         gc.callbacks.remove(self._gc_phase)
@@ -355,6 +371,12 @@ class LeakRecordingResult(unittest.TextTestResult):
         would otherwise hide the leaks of every test after it."""
         if warnings.filters[:1] != [self._always]:
             warnings.simplefilter("always", ResourceWarning)
+
+    def _keep_hook(self, where: str) -> None:
+        """Put the runner's sys.unraisablehook back when something replaced it, and say where."""
+        if sys.unraisablehook != self._unraisable:  # a bound method: equal, not the same object
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {where}")
+            sys.unraisablehook = self._unraisable
 
     def _gc_phase(self, phase: str, _info: dict[str, int]) -> None:
         self._collecting = phase == "start"
@@ -455,8 +477,8 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    leaks, lost = result.leaks, result.lost_exceptions
-    for line in [*problems, *leaks, *lost, *bytecode]:
+    leaks, lost, hooks = result.leaks, result.lost_exceptions, result.hook_problems
+    for line in [*problems, *leaks, *lost, *hooks, *bytecode]:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
         print(LEAK_HINT, file=sys.stderr)
@@ -464,7 +486,7 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
         print(LOST_EXCEPTION_HINT, file=sys.stderr)
     if bytecode:
         print(BYTECODE_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems and not leaks and not lost and not bytecode else 1
+    return 0 if result.wasSuccessful() and not problems and not leaks and not lost and not hooks and not bytecode else 1
 
 
 if __name__ == "__main__":
