@@ -19,6 +19,7 @@ from typing import TextIO
 from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.domain import (
@@ -145,7 +146,7 @@ class GameProfile:
 
     # ---- output ----------------------------------------------------------------------
     def _stream(self) -> TextIO:
-        return sys.stdout if self._out is None else self._out
+        return stdout() if self._out is None else self._out
 
     def log(self, prio: int, msg: str) -> None:
         """A journal line (<prio>game-profile: msg) on stdout."""

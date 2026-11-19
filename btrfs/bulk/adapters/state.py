@@ -20,7 +20,7 @@ from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format
-from cst_core.domain.shapes import KeyTypes, has_shape
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
@@ -79,7 +79,7 @@ def is_item_journal(obj: object) -> TypeIs[ItemJournal]:
 def is_steam_journal(obj: object) -> TypeIs[SteamJournal]:
     """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
     phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
-    if not isinstance(obj, dict) or not has_shape(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
+    if not json_object(obj) or not has_shape(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
         return False
     appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
     return (

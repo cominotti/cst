@@ -640,7 +640,7 @@ def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
         return [f"{head}: not present"]
     if d.btrfs is False:
         return [f"{head}: not on btrfs (NOCOW does not apply)"]
-    out = [head]
+    out: list[str] = [head]
     root_hint = f"{prog} nocow plan --root"
     if d.nocow is None:
         out.append(f"  NOCOW mark (+C): not readable as your user (root-only folder): {root_hint}")

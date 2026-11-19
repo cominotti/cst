@@ -195,7 +195,9 @@ def newest_vm_backup(host: DoctorHostPort) -> float | None:
 def nas_configured(host: DoctorHostPort) -> bool:
     """The /home NAS backup is set up (snapshots.conf is world-readable; read as btrfs-snapshot reads it)."""
     parsed = settings_of(host, SNAP_CONF)
-    values = parsed.values if parsed else {}
+    if not parsed:
+        return False
+    values = parsed.values
     return values.get("NAS_ENABLED") == "1" and bool(values.get("NAS_PATH"))
 
 

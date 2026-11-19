@@ -12,7 +12,7 @@ import re
 from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
-from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, split
+from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, group, split
 from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
@@ -129,8 +129,9 @@ def current_values(text: str) -> dict[str, str | None]:
     """{key: value of the line that counts, or None} for KEYS in [General]."""
     lines = split_lines(text)[0]
     ranges = general_ranges(lines)
-    out: dict[str, str | None] = dict.fromkeys(KEYS)
+    out: dict[str, str | None] = {}
     for key in KEYS:
+        out[key] = None
         active, _ = key_lines(lines, ranges, key)
         if active:
             m = key_pattern(key).match(lines[active[-1]])
@@ -411,7 +412,7 @@ def line_key(line: str) -> str | None:
     (`KEY=$X`, which sets nothing), so settings_set replaces it; None for a
     comment or any other line."""
     m = _LINE_KEY.match(line)
-    return m.group(1) if m else None
+    return group(m, 1) if m else None
 
 
 def set_keys(text: str) -> list[str]:
@@ -659,7 +660,7 @@ def lw_failure(text: str) -> tuple[str, str, str] | None:
         m = JOURNAL_LINE.match(line)
         if not m:
             continue
-        when, ident, msg = m.groups()
+        when, ident, msg = group(m, 1), group(m, 2), group(m, 3)
         if msg.startswith("fixed: "):
             last = None
         elif msg.startswith("failed: "):

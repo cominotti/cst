@@ -114,8 +114,8 @@ def wp_effective_roles() -> tuple[bool, str | None]:
             return False, "WirePlumber could not open wireplumber.conf"
         props = lib.wp_properties_new_empty()
         lib.wp_conf_section_update_props(conf, LE_SECTION.encode(), props)
-        v: bytes | None = lib.wp_properties_get(props, b"bluez5.roles")
-        return True, None if v is None else v.decode("utf-8", "replace")
+        v: object = lib.wp_properties_get(props, b"bluez5.roles")  # restype c_char_p: bytes or None
+        return True, v.decode("utf-8", "replace") if isinstance(v, bytes) else None
     except (OSError, AttributeError) as exc:
         return False, str(exc)
 

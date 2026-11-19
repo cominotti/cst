@@ -56,7 +56,8 @@ def peer_pid(path: str) -> int | None:
     s.settimeout(1)
     try:
         s.connect(path)
-        return UCRED.unpack(s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, UCRED.size))[0]
+        pid: object = UCRED.unpack(s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, UCRED.size))[0]
+        return pid if isinstance(pid, int) else None  # "3i": always an int
     except OSError:
         return None
     finally:

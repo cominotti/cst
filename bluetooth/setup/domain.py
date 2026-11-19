@@ -15,7 +15,7 @@ import re
 from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
-from cst_core.domain.text import HELP_WORDS, enum_member
+from cst_core.domain.text import HELP_WORDS, enum_member, group
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).
@@ -376,7 +376,7 @@ def rule_device(name: str) -> str | None:
     """The headset a rule's file name is for (AA:BB:...), or None (another name, a .bak copy, an
     address in lower case, which is not CST's name for it)."""
     m = RULE_NAME.fullmatch(name)
-    return m.group(1).replace("_", ":") if m else None
+    return group(m, 1).replace("_", ":") if m else None
 
 
 def no_headset_note(rules: Sequence[str], settings: str) -> str:
@@ -439,7 +439,7 @@ def preferred_bearer(info: str) -> str:
     for line in info.split("\n"):
         m = re.match(r"^[ \t\n\r\f\v]*PreferredBearer:[ \t\n\r\f\v]*([^ \t\n\r\f\v]*)", line)
         if m:
-            return m.group(1)
+            return group(m, 1)
     return ""
 
 

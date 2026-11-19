@@ -38,6 +38,7 @@ from btrfs.docker_gc.ports import EventSink
 from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.terminal import stdin
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -442,7 +443,7 @@ class TerminalConsole:
         gc_log(prio, msg)
 
     def interactive(self) -> bool:
-        return sys.stdin.isatty()
+        return stdin().isatty()
 
     def ask(self, question: str) -> bool:
         try:

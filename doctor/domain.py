@@ -290,9 +290,8 @@ def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, n
       "inactive"      looks like a pin, but no installed package matches
                       (an inactive request, for example one the base image
                       now provides): spec is "", nothing to install back."""
-    names: set[str]
-    versioned: dict[str, list[tuple[str, str, bool]]]
-    names, versioned = set(), {}
+    names: set[str] = set()
+    versioned: dict[str, list[tuple[str, str, bool]]] = {}
     for p in packages or ():
         parsed = parse_nevra(p)
         if not parsed:

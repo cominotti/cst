@@ -11,7 +11,7 @@ import re
 from typing import Final
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int
-from cst_core.domain.text import read_fields
+from cst_core.domain.text import group, read_fields
 from cst_core.domain.values import DAY, HOUR, MINUTE
 
 TAG: Final = "btrfs-snapshot"
@@ -92,7 +92,7 @@ class _Arith:
     (BAD_NUMBER)."""
 
     def __init__(self, text: str) -> None:
-        self.tokens = re.findall(r"\s*(\*\*|[0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)
+        self.tokens = [group(m, 1) for m in re.finditer(r"\s*(\*\*|[0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)]
         self.pos = 0
 
     def peek(self) -> str:
@@ -436,7 +436,7 @@ def restic_line(line: str) -> str:
 def repo_id(out: str) -> str:
     """The repository id in restic cat config's JSON ("" when there is none)."""
     m = re.search(r'"id": *"([0-9a-f]{64})"', out)
-    return "" if m is None else m.group(1)
+    return "" if m is None else group(m, 1)
 
 
 def restic_time(name: str, entry: str) -> str:

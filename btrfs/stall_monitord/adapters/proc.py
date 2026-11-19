@@ -123,7 +123,7 @@ def block_parents(name: str, seen: set[str] | None = None) -> list[str]:
     seen.add(name)
     slaves = glob.glob(f"/sys/class/block/{name}/slaves/*")
     if slaves:
-        out = []
+        out: list[str] = []
         for s in slaves:
             out += block_parents(os.path.basename(s), seen)
         return out

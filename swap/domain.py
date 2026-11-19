@@ -12,7 +12,7 @@ from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
-from cst_core.domain.text import HELP_WORDS, enum_member, parse_shell_assignments
+from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
@@ -392,7 +392,7 @@ def psi_value(text: str, kind: str = "some", key: str = "avg60") -> str | None:
         if line.startswith(kind + " "):
             m = re.search(rf"{key}=(\S+)", line)
             if m:
-                return m.group(1)
+                return group(m, 1)
     return None
 
 

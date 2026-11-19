@@ -133,7 +133,9 @@ class InstallService:
     ) -> list[tuple[bytes, Mapping[str, str] | None]]:
         """Every entry's bytes, and a template's values (the --set values it uses); a --set value no
         template of the call uses is an error (a misspelt KEY)."""
-        values = values or {}
+        given: Mapping[str, str] = {}
+        if values is not None:
+            given = values
         used: set[str] = set()
         out: list[tuple[bytes, Mapping[str, str] | None]] = []
         for e in entries:
@@ -144,12 +146,12 @@ class InstallService:
                 keys = template_keys(text)
                 used |= keys
                 try:
-                    data = render_template(text, values).encode("utf-8")
+                    data = render_template(text, given).encode("utf-8")
                 except DomainValidationError as exc:
                     raise DomainValidationError(f"{e.src}: {exc}") from None
-                mine = {k: values[k] for k in sorted(keys)}
+                mine = {k: given[k] for k in sorted(keys)}
             out.append((data, mine))
-        unused = sorted(values.keys() - used)
+        unused = sorted(given.keys() - used)
         if unused:
             raise DomainValidationError(
                 "--set "

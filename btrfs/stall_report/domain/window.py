@@ -122,10 +122,9 @@ def summarise(
         ),
         0,
     )
-    fs: dict[str, FsTotals]
-    disks: dict[str, DiskTotals]
-    cg: dict[str, CgroupTotals]
-    fs, disks, cg = {}, {}, {}
+    fs: dict[str, FsTotals] = {}
+    disks: dict[str, DiskTotals] = {}
+    cg: dict[str, CgroupTotals] = {}
     gaps = 0
     # (ts, d, v5+) of samples of daemons v3-v7: their "d" also counted memory
     # waits (and, before v5, btrfs maintenance); corrected after the episodes.
@@ -230,8 +229,8 @@ def summarise(
                     "peak_at": None,
                 },
             )
-            for k, v in delta.items():
-                d[k] += v
+            for k in DISK_SUM:  # the keys of delta, in its order
+                d[k] += delta[k]
             util = min(delta["io_ticks"] / (dt * 1000) * 100, 100.0)
             if util > d["peak_util_pct"]:
                 d["peak_util_pct"], d["peak_at"] = util, b["ts"]

@@ -12,7 +12,7 @@ from enum import StrEnum
 import re
 from typing import Final
 
-from cst_core.domain.text import file_lines, read_fields
+from cst_core.domain.text import file_lines, read_fields, split
 from cst_core.domain.values import GIB, HOUR, MIB, MINUTE
 
 TAG: Final = "btrfs-health-check"
@@ -91,7 +91,7 @@ def bash_div(a: int, b: int) -> int:
 def fields(line: str) -> list[str]:
     """The words of a line as awk splits it by default."""
     s = line.strip(" \t\n")
-    return _BLANKS.split(s) if s else []
+    return split(_BLANKS, s) if s else []
 
 
 def awk_field(line: str, n: int) -> str:

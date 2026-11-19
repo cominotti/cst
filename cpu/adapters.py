@@ -289,7 +289,8 @@ def record_run(
     end = time.time()
     if proc and proc.poll() is None:
         proc.terminate()
-    rc = proc.returncode if proc else None
+    code = proc.returncode if proc else None
+    rc = code if isinstance(code, int) else None
     meta: RunMeta = {"label": label, "start": start, "end": end, "cmd": list(cmd), "game": game, "rc": rc}
     if mangohud:
         newest = newest_mangohud_log(os.path.expanduser(mangohud), start, end)

@@ -161,7 +161,7 @@ def _value(raw: str, *, bash_sourced: bool, exported: bool = False) -> tuple[str
         if _EXPANDING.isdisjoint(word) and not _rest_is_comment(after, _BLANKS):
             return None, "a blank in an unquoted value: bash runs the rest as a command (quote the value)"
     else:
-        word = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+        word = split(r"\s+#", raw, maxsplit=1)[0].strip()
     if not _EXPANDING.isdisjoint(word):
         return None, "$, ` or \\ outside single quotes: bash would expand it (use single quotes)"
     if "'" in word or '"' in word:

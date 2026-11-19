@@ -14,6 +14,7 @@ from types import FrameType
 from typing import NoReturn
 
 from cst_core.adapters.files import LocalFileSystemAdapter, write_atomic
+from cst_core.adapters.terminal import stdin
 
 
 class SetupTerminal:
@@ -33,10 +34,10 @@ class SetupTerminal:
 
     def ask(self, prompt: str) -> str | None:
         """bash's read -rp: the prompt on stderr, one line, blanks around it dropped; None without a terminal."""
-        if not sys.stdin.isatty():
+        if not stdin().isatty():
             return None
         self.err(prompt)
-        return sys.stdin.readline().rstrip("\n").strip(" \t")
+        return stdin().readline().rstrip("\n").strip(" \t")
 
 
 class LocalSetupFiles(LocalFileSystemAdapter):
