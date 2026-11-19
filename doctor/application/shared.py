@@ -9,7 +9,17 @@ from dataclasses import dataclass, field
 from cst_core.domain.install import COMPONENTS
 from cst_core.domain.ostree import OstreeStatus, query_status
 from cst_core.domain.text import SettingsProblem, ShellAssignments, parse_shell_assignments, parse_snapshots_conf
-from doctor.domain import SNAP_CONF, WARN, Deployment, HostPath, OstreeAnswer, Result, ViewPath, is_deployment
+from doctor.domain import (
+    SNAP_CONF,
+    WARN,
+    Deployment,
+    HostPath,
+    OstreeAnswer,
+    Result,
+    ViewPath,
+    is_deployment,
+    universal_newlines,
+)
 from doctor.ports import CheckFn, DoctorHostPort
 
 
@@ -33,6 +43,9 @@ class DoctorFacts:
     ostree: tuple[OstreeAnswer, list[Deployment]] | None = None
     domains: tuple[list[str] | None, str] | None = None
     dumpxml: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    # Read once, boxed (None: not read yet): snapshots.conf's text with its line ends, None when it
+    # cannot be read (snapshots_conf_text).
+    snap_conf: tuple[str | None] | None = None
 
 
 # host -> its facts. A host hashes by identity, so a new Host starts with none.
@@ -96,16 +109,31 @@ def read_text(host: DoctorHostPort, path: ViewPath, limit: int = 256) -> str:
         return ""
 
 
+def snapshots_conf_text(host: DoctorHostPort) -> str | None:
+    """snapshots.conf as UTF-8 (bad bytes replaced) with its line ends as they are, read once per
+    check-up (several rows read it, and each must judge the same text); None when it cannot be read."""
+    known = facts(host)
+    if known.snap_conf is None:
+        try:
+            with host.open_bytes(host.path(SNAP_CONF)) as f:
+                text: str | None = f.read().decode("utf-8", "replace")
+        except OSError:
+            text = None
+        known.snap_conf = (text,)
+    return known.snap_conf[0]
+
+
 def settings_of(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
-    bash_sourced), or None when it cannot be read. snapshots.conf also takes the
-    lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
+    bash_sourced), or None when it cannot be read. Read as text, as cst vm reads them (each
+    line end a newline). snapshots.conf also takes the lines an older CST wrote there with
+    printf %q (parse_snapshots_conf)."""
+    if path == SNAP_CONF:
+        text = snapshots_conf_text(host)
+        return None if text is None else parse_snapshots_conf(universal_newlines(text))
     try:
         with host.open_text(host.path(path)) as f:
-            text = f.read()
-        if path == SNAP_CONF:
-            return parse_snapshots_conf(text)
-        return parse_shell_assignments(text, bash_sourced=bash_sourced)
+            return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
     except OSError:
         return None
 

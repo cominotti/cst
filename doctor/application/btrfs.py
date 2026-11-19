@@ -12,7 +12,7 @@ from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
-from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
+from doctor.application.shared import check, conf_value, read_text, settings_file_warnings, snapshots_conf_text
 from doctor.domain import (
     BTRFS_SYSFS,
     ERROR,
@@ -376,12 +376,7 @@ def live_scrub_limits(host: DoctorHostPort) -> str:
 def scrub_settings(host: DoctorHostPort) -> ShellAssignments:
     """The btrfs settings file as `cst btrfs install` reads SCRUB_LIMIT from it: the whole file with its
     line ends, as bash reads it ("\r" is part of a value there)."""
-    try:
-        with host.open_bytes(host.path(SNAP_CONF)) as f:
-            conf = f.read().decode("utf-8", "replace")
-    except OSError:
-        conf = ""
-    return parse_shell_assignments(conf)
+    return parse_shell_assignments(snapshots_conf_text(host) or "")
 
 
 @check(CHECKS, "btrfs")

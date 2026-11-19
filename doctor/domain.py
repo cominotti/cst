@@ -577,6 +577,11 @@ def parse_args(argv: Sequence[str]) -> tuple[DoctorCommand, bool]:
     return DoctorCommand.RUN, brief
 
 
+def universal_newlines(text: str) -> str:
+    """text as Python's text mode reads a file: each "\r\n" and each lone "\r" a "\n"."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def scrub_limit_lines(settings: ShellAssignments) -> tuple[SettingsProblem, ...]:
     """The problem lines of the btrfs settings file that set SCRUB_LIMIT: each one makes
     `cst btrfs install` refuse to run."""
