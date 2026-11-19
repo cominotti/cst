@@ -147,12 +147,13 @@ function reReviewOutcome(findings) {
 // The largest change (added plus deleted lines) the fast lane takes.
 const FAST_LINES = 150
 // The changed lines (added plus deleted) that git diff --numstat prints; null when a file is binary ("-") or a line
-// does not parse: such a change never takes the fast lane. Pure: tested below.
+// does not parse: such a change never takes the fast lane. Any blanks separate the fields: an agent that pastes the
+// output may turn its tabs into spaces. Pure: tested below.
 function numstatLines(text) {
   let n = 0
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
-    const m = /^(\d+)\t(\d+)\t./.exec(line)
+    const m = /^(\d+)\s+(\d+)\s+\S/.exec(line)
     if (!m) return null
     n += Number(m[1]) + Number(m[2])
   }
@@ -219,7 +220,7 @@ function selftest() {
   eq([isReady(F, false), isReady({ ...F, final_head: 'h2' }, false), isReady({ ...F, gated_head: '', final_head: '' }, false), isReady(F, true), isReady({ ...F, worktree_clean: false }, false)], [true, false, false, false, false], 'ready')
   eq([shq('/a/b-c_d.e'), shq('/a b'), shq("/it's")], ['/a/b-c_d.e', "'/a b'", "'/it'\\''s'"], 'shell quoting')
   eq([worktreeProblem('/r/cst', '/r/cst-wt-x'), worktreeProblem('/r/cst', '/r/cst/.wt/x'), worktreeProblem('/r/cst', '/r/cst'), worktreeProblem('/r/cst', 'wt')], ['', 'must be outside the main checkout /r/cst', 'must be outside the main checkout /r/cst', 'must be an absolute path'], 'worktree path')
-  eq([numstatLines('3\t4\ta.md\n10\t0\tb/c.js\n'), numstatLines(''), numstatLines('-\t-\timg.png\n1\t1\ta.md'), numstatLines('x')], [17, 0, null, null], 'numstat lines')
+  eq([numstatLines('3\t4\ta.md\n10\t0\tb/c.js\n'), numstatLines(''), numstatLines('-\t-\timg.png\n1\t1\ta.md'), numstatLines('x'), numstatLines('3 4  a.md\n2\t1 b c.md')], [17, 0, null, null, 10], 'numstat lines')
   const doc = [M('.agents/workflows/cst-change.js'), M('AGENTS.md'), M('vm/tests/test_vm.py'), M('btrfs/README.md')]
   eq([fullReviewReason(doc, 150, []), fullReviewReason(doc, 0, ['primitives']), fullReviewReason(doc, 151, []), fullReviewReason(doc, null, [])], ['', '', '151 changed lines (more than 150)', 'a binary file or a numstat line that does not parse'], 'fast lane by size')
   eq([fullReviewReason([M('swap/domain.py')], 10, ['primitives']), fullReviewReason([M('tests/e2e/suites/suite_tier1_systemd.py')], 10, []), fullReviewReason([M('vm/tests/test_vm.py')], 10, ['parity'])], ['paths beyond docs, unit tests and repository tooling: swap/domain.py', 'paths beyond docs, unit tests and repository tooling: tests/e2e/suites/suite_tier1_systemd.py', 'lenses beyond primitives: parity'], 'full review by path and lens')
