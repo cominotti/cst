@@ -1321,6 +1321,25 @@ class DockerNocowPostponedTest(Scratch):
         self.assertIn("fix: journalctl -b -u docker-volumes-nocow", r.stdout)
         self.assert_read_only()
 
+    def test_two_boots_held_back_by_daemon_json_say_to_fix_it(self) -> None:
+        # Not "until a boot where nothing uses them": no quiet boot helps, only a fixed file.
+        reason = "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown"
+        self.record(json.dumps({"reason": reason, "boots": 2, "first": NOW - 86400, "last": NOW, "boot_id": "c"}))
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        got = self.lines(r.stdout)
+        self.assertEqual(len(got), 1, r.stdout)
+        self.assertTrue(
+            got[0].endswith(
+                f": {reason}; fix /etc/docker/daemon.json (the fix line checks it as dockerd reads it), "
+                "and the next boot runs it"
+            ),
+            got[0],
+        )
+        self.assertIn("fix: sudo dockerd --validate --config-file /etc/docker/daemon.json", r.stdout)
+        self.assertNotIn("until a boot where nothing uses them", r.stdout)
+        self.assert_read_only()
+
     def test_odd_fields(self) -> None:
         self.record(json.dumps({"boots": "7", "last": "yesterday"}))
         r = self.run_tool()

@@ -2128,7 +2128,12 @@ to wait, with the reason of the last boot:
 - `docker.service state unknown (...)` or `cannot ask systemd ...`: systemd
   gave no clear answer; the journal of that boot says more;
 - `dockerd (pid N) uses ... outside docker.service`: a dockerd started by
-  hand or by another unit uses the same data folder.
+  hand or by another unit uses the same data folder;
+- `/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is
+  unknown` (or `not a JSON object`, `data-root is not a folder name`,
+  `cannot be read (...)`): no quiet boot helps here. Fix the file
+  (`sudo dockerd --validate --config-file /etc/docker/daemon.json` checks it
+  and changes nothing); the next boot runs the migration (section 4.10).
 
 ```
 journalctl -b -u docker-volumes-nocow

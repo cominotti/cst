@@ -71,7 +71,7 @@ cst doctor help
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of the installed `btrfs-health-check`, the one that alerts (its `btrfs/health_check/domain.py` inside the zipapp, or the text of a bash version), else of this checkout's `btrfs/health_check/domain.py`; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
-| `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks); `info` for one boot, or when the record cannot be read; nothing when there is no record |
+| `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks), or for a `/etc/docker/daemon.json` that cannot be read `sudo dockerd --validate --config-file /etc/docker/daemon.json` (it only checks the file); `info` for one boot, or when the record cannot be read; nothing when there is no record |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
 The **booted** one is running now; a **staged** one was prepared by an
@@ -313,7 +313,9 @@ Docker volumes that still hold copy-on-write data
 ([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
 It waits, and tries again at the next boot, when it cannot be sure nothing
 uses the volumes: Docker is running, systemd gives no clear state for
-`docker.service`, or another `dockerd` uses the same data folder. Such a boot
+`docker.service`, or another `dockerd` uses the same data folder. It waits too
+when `/etc/docker/daemon.json` cannot be read (not JSON, for example): then
+which volumes folder Docker uses is unknown. Such a boot
 is not counted as a failed attempt and sends no alert, so a migration could
 wait forever without a word. The helper records it instead, in
 `/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
@@ -323,7 +325,10 @@ volumes folder (Docker removed, or its `data-root` moved).
 
 One boot is `info`: it can happen once (Docker started by hand early, for
 example). From two boots on it is a `WARN`: something holds the migration
-back at every boot. The fix line only shows that boot's journal; the reasons
+back at every boot. The fix line only shows that boot's journal; for a
+`daemon.json` that cannot be read the warning says to fix the file instead, and
+the fix line is `sudo dockerd --validate --config-file /etc/docker/daemon.json`,
+which checks it as dockerd reads it and changes nothing. The reasons
 and what to do are in
 [btrfs/README.md, section 13](../btrfs/README.md#docker-volumes-migration-postponed-at-n-boots-in-a-row).
 

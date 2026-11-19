@@ -8,7 +8,7 @@ import re
 import shlex
 import time
 
-from btrfs.docker_volumes_nocow.domain import is_stored_postponed
+from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
@@ -460,7 +460,14 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "at an unknown time"
     reason = str(rec.get("reason") or "no reason recorded")
     msg = f"Docker volumes NOCOW: the boot-time migration was postponed at {boots} boot(s) in a row, last {when}: {reason}"
-    if boots >= NOCOW_WARN_BOOTS:
+    if boots >= NOCOW_WARN_BOOTS and is_config_reason(reason):
+        # Waiting for a quiet boot does not help: only a fixed file lets the migration run.
+        yield Result(
+            WARN,
+            f"{msg}; fix {DAEMON_JSON} (the fix line checks it as dockerd reads it), and the next boot runs it",
+            f"sudo dockerd --validate --config-file {DAEMON_JSON}",
+        )
+    elif boots >= NOCOW_WARN_BOOTS:
         yield Result(
             WARN,
             f"{msg}; the volumes keep copy-on-write data (and new ones may too) until a boot where nothing uses them",
