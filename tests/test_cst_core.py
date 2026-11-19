@@ -526,6 +526,17 @@ class AdaptersTest(unittest.TestCase):
         every_call(SystemctlAdapter(plain))
         self.assertEqual(plain.calls, words(["systemctl"]))
         self.assertEqual(plain.options, [{"timeout": None, "locale_c": False}] * 12 + [user.options[-1]])
+        # show(user=True) (bluetooth's per-call scope) on an adapter whose scope is already user: one --user.
+        both = FakeRunner()
+        SystemctlAdapter(both, user=True).show(unit, ("Result",), user=True)
+        SystemctlAdapter(both, program="/stub/systemctl").show(unit, ("Result",), user=True)
+        self.assertEqual(
+            both.calls,
+            [
+                ["systemctl", "--user", "show", "-p", "Result", unit],
+                ["/stub/systemctl", "--user", "show", "-p", "Result", unit],
+            ],
+        )
 
     def test_systemctl_adapter_user_scope_over_the_real_runner(self) -> None:
         # is-active exits 3 for a unit that is not active: its state and status come back, nothing raised.
