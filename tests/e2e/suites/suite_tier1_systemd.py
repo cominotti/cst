@@ -788,6 +788,72 @@ echo E2E-OK
 )
 
 
+# test_83, test_133, for a test that has set $w and $st: scc_setup writes the fake sccache
+# ($w/bin/sccache, its records in $SCCACHE_E2E_STATE) and a crate with six path dependencies
+# ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts.
+SCCACHE_FAKE_STEPS = r"""
+scc_setup() {
+    # The fake sccache. --start-server: a daemon (setsid, stdio closed)
+    # that records its cgroup, then the socket 0.3 s later. A compile
+    # with no live server starts one in its own cgroup, as the real
+    # client does.
+    cat >"$w/bin/sccache" <<'EOF'
+#!/bin/sh
+st=$SCCACHE_E2E_STATE
+serve() {
+    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"; exec sleep 300' \
+        sh "$st" </dev/null >/dev/null 2>&1 &
+    for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
+}
+sock() { python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"; }
+live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
+if [ "${1:-}" = --start-server ]; then
+    echo start >>"$st/starts"
+    rm -f "$st/live"
+    serve
+    sleep 0.3
+    [ -e "$SCCACHE_SERVER_UDS" ] || sock
+    exit 0
+fi
+if ! live || [ ! -e "$SCCACHE_SERVER_UDS" ]; then
+    echo auto >>"$st/starts"
+    rm -f "$st/live"
+    serve
+    [ -e "$SCCACHE_SERVER_UDS" ] || sock
+fi
+cat /proc/self/cgroup >>"$st/compiles"
+exec "$@"
+EOF
+    chmod 755 "$w/bin/sccache"
+    # A crate with six path dependencies: cargo compiles them in parallel.
+    printf '[package]\nname = "e2escc"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' \
+        >"$w/crate/Cargo.toml"
+    for i in 1 2 3 4 5 6; do
+        mkdir -p "$w/crate/d$i/src"
+        printf '[package]\nname = "d%s"\nversion = "0.1.0"\nedition = "2021"\n' "$i" >"$w/crate/d$i/Cargo.toml"
+        echo "pub fn f() -> u32 { $i }" >"$w/crate/d$i/src/lib.rs"
+        printf 'd%s = { path = "d%s" }\n' "$i" "$i" >>"$w/crate/Cargo.toml"
+    done
+    echo 'pub fn all() -> u32 { d1::f() + d2::f() + d3::f() + d4::f() + d5::f() + d6::f() }' \
+        >"$w/crate/src/lib.rs"
+}
+
+# build N: cargo build from scratch inside a capped transient scope
+# (MemoryMax=1G), started from a user service: a --user --scope
+# needs a caller that the user manager may move.
+build() {
+    local n=$1 jobs=${2:-8}
+    systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
+        -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
+        -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
+        -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
+        systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
+        cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
+}
+starts() { tr '\n' ' ' <"$st/starts"; }
+"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
@@ -3965,7 +4031,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         )
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            r"""
+            SCCACHE_FAKE_STEPS
+            + r"""
             set -E
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
@@ -3978,67 +4045,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             rm -rf "$w" "$sock" "$sock.lock"
             mkdir -p "$w/bin" "$w/crate/src" "$st"
             printf 'name="e2ebox"\n' >"$w/containerenv"
-            # The fake sccache. --start-server: a daemon (setsid, stdio closed)
-            # that records its cgroup, then the socket 0.3 s later. A compile
-            # with no live server starts one in its own cgroup, as the real
-            # client does.
-            cat >"$w/bin/sccache" <<'EOF'
-#!/bin/sh
-st=$SCCACHE_E2E_STATE
-serve() {
-    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"; exec sleep 300' \
-        sh "$st" </dev/null >/dev/null 2>&1 &
-    for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
-}
-sock() { python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"; }
-live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
-if [ "${1:-}" = --start-server ]; then
-    echo start >>"$st/starts"
-    rm -f "$st/live"
-    serve
-    sleep 0.3
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
-    exit 0
-fi
-if ! live || [ ! -e "$SCCACHE_SERVER_UDS" ]; then
-    echo auto >>"$st/starts"
-    rm -f "$st/live"
-    serve
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
-fi
-cat /proc/self/cgroup >>"$st/compiles"
-exec "$@"
-EOF
-            chmod 755 "$w/bin/sccache"
-            # A crate with six path dependencies: cargo compiles them in parallel.
-            printf '[package]\nname = "e2escc"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' \
-                >"$w/crate/Cargo.toml"
-            for i in 1 2 3 4 5 6; do
-                mkdir -p "$w/crate/d$i/src"
-                printf '[package]\nname = "d%s"\nversion = "0.1.0"\nedition = "2021"\n' "$i" >"$w/crate/d$i/Cargo.toml"
-                echo "pub fn f() -> u32 { $i }" >"$w/crate/d$i/src/lib.rs"
-                printf 'd%s = { path = "d%s" }\n' "$i" "$i" >>"$w/crate/Cargo.toml"
-            done
-            echo 'pub fn all() -> u32 { d1::f() + d2::f() + d3::f() + d4::f() + d5::f() + d6::f() }' \
-                >"$w/crate/src/lib.rs"
+            scc_setup
 
             "$cst" toolchains config apply --sccache >/dev/null
             wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
-
-            # build N: cargo build from scratch inside a capped transient scope
-            # (MemoryMax=1G), started from a user service: a --user --scope
-            # needs a caller that the user manager may move.
-            build() {
-                local n=$1 jobs=${2:-8}
-                systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
-                    -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
-                    -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
-                    -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
-                    systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
-                    cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
-            }
-            starts() { tr '\n' ' ' <"$st/starts"; }
 
             build 1
             # One start, by the wrapper; no compile found the server missing.
