@@ -764,6 +764,9 @@ later) first removes it, so the two never glue into one line `off` would
 read as whole; the journal names it (`<4>... line N: a record cut short
 (its change was never made), removed before the next record: TEXT`). The
 same holds for `game.intended`, whose cut line the drift repair never read.
+A cut line is no record of a box handled either: a box whose own record was
+cut short (a Docker container, a Steam scope, a box next to the game) is set
+by the next tick, whose record of it removes the cut line first.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.

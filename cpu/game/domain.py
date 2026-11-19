@@ -332,8 +332,10 @@ def state_uid(recs: Sequence[Record]) -> str | None:
 
 
 def has_record_part(text: str, part: str) -> bool:
-    """A line of the file holds part (bash: grep -F on the file)."""
-    return any(part in line for line in file_lines(text))
+    """A whole line of the file holds part (bash: grep -F on the file); a last line cut short (no
+    newline at its end) holds none: its change was never made (records())."""
+    lines = file_lines(text)
+    return any(part in line for number, line in enumerate(lines, 1) if not _cut_short(text, lines, number))
 
 
 def escaped_unit(name: str) -> str | None:

@@ -39,6 +39,7 @@ from cpu.game.domain import (
     cut_tail,
     escapes_in_state,
     expand_cpus,
+    has_record_part,
     intended_records,
     records,
     game_settings,
@@ -261,6 +262,14 @@ class PureRulesTest(unittest.TestCase):
         self.assertIsNone(cut_tail(b"a\n"))
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
+
+    def test_a_record_part_of_a_last_line_cut_short_is_none(self) -> None:
+        part = " S MemoryLow "
+        self.assertFalse(has_record_part("prop usr S MemoryLow existed 1", part))
+        self.assertTrue(has_record_part("prop usr S MemoryLow existed 1\n", part))
+        self.assertTrue(has_record_part("prop usr S MemoryLow new -\nepp 0 x", part))  # a whole line before it
+        self.assertFalse(has_record_part("prop usr S MemoryLow new -\nprop usr T MemoryLow", " T MemoryLow "))
+        self.assertFalse(has_record_part("", part))
 
     def test_intended_records(self) -> None:
         text = (
@@ -832,6 +841,45 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertIn(f"e2e.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n", out)
         self.assertEqual([a for a in self.sets(actions) if "e2e.slice" in a], [])
         self.assertTrue(self.read(self.state).endswith(f"\n{self.CUT}"))
+
+    def tick_after_a_cut_record(self, record: str, mgr: str, unit: str, setting: str) -> None:
+        """After 'on': record cut short at the end of game.state (on died while it wrote it, before it
+        set the box). The tick sets the box (the cut line is no record of a box handled), removes the
+        cut line first and writes the whole record; 'off' undoes it."""
+        self.write(self.manual, "")
+        with open(self.state, "a") as f:
+            f.write(record)
+        n = len(self.read(self.state).split("\n"))
+        out, actions = self.run_profile("tick")
+        prefix = USR if mgr == "usr" else SYS
+        self.assertIn(f"{prefix} set-property --runtime {unit} {setting}", actions)
+        self.assertIn(f"{self.state} line {n}: a record cut short (its change was never made)", out)
+        state = self.read(self.state)
+        self.assertTrue(state.endswith(f"\n{record}\n"), state)
+        self.assertEqual(state.count(record), 1)
+        override = self.ctrl(mgr, unit, setting.partition("=")[0])
+        self.assertTrue(os.path.exists(override))
+        _, actions = self.run_profile("tick")  # handled now: nothing more
+        self.assertEqual([a for a in self.sets(actions) if f" {unit} " in a], [])
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(override))
+
+    def test_a_box_next_to_the_game_whose_record_was_cut_short_is_set(self) -> None:
+        self.run_profile("on")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        self.tick_after_a_cut_record("prop usr e2e.slice CPUWeight new -", "usr", "e2e.slice", "CPUWeight=idle")
+
+    def test_a_steam_scope_whose_record_was_cut_short_is_protected(self) -> None:
+        steam = "app-flatpak-com.valvesoftware.Steam-7.scope"
+        self.run_profile("on")
+        self.systemd.units["usr"] = [steam]  # started after 'on'
+        self.tick_after_a_cut_record(f"prop usr {steam} MemoryLow new -", "usr", steam, "MemoryLow=16G")
+
+    def test_a_docker_container_whose_record_was_cut_short_is_pinned(self) -> None:
+        scope = "docker-abc.scope"
+        self.run_profile("on")
+        self.systemd.units["sys"] = [scope]  # started after 'on', outside builds.slice
+        self.tick_after_a_cut_record(f"prop sys {scope} AllowedCPUs new -", "sys", scope, "AllowedCPUs=12-23")
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")
