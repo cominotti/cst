@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Final
 
 from btrfs.docker_gc.domain import (
     BAD_SETTINGS_EXIT,
+    DOCKER_TIMEOUT,
     HEARTBEAT_SECONDS,
     MIN_UPTIME,
+    RECENT_USE,
     NEWER_STATE_EXIT,
     NOT_RECORDED,
     UnknownProtection,
@@ -40,8 +43,8 @@ from btrfs.docker_gc.ports import ConsolePort, DockerPort, GcHostPort, GcSetting
 from cst_core.domain.values import MINUTE
 from cst_core.ports import ClockPort
 
-RESOLVE_TIMEOUT = 30  # seconds for the image inspect behind one event
-RESOLVED_FOR = MINUTE  # seconds a reference -> ID answer is reused
+RESOLVE_TIMEOUT: Final = 30  # seconds for the image inspect behind one event
+RESOLVED_FOR: Final = MINUTE  # seconds a reference -> ID answer is reused
 RESOLVED_MAX = 2000  # answers kept before the cache starts over
 
 
@@ -234,10 +237,10 @@ class DockerGc:
         recorder state), and each tag still pointing at this very image. Why it was kept, or ""."""
         if img.id in {c.image_id for c in self.docker.containers()}:
             return "now used by a container"
-        if self.state.load_state().images.get(img.id, 0) > plan_at - MINUTE:
+        if self.state.load_state().images.get(img.id, 0) > plan_at - RECENT_USE:
             return "used meanwhile"
         for t in img.tags:
-            if self.docker.image_id(t, timeout=10 * MINUTE) != img.id:
+            if self.docker.image_id(t, timeout=DOCKER_TIMEOUT) != img.id:
                 continue  # re-pulled or retagged meanwhile: that tag is not ours
             r = self.docker.remove_image(t)
             if r.returncode != 0:

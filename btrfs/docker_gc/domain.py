@@ -11,6 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 import os
 import re
+from typing import Final
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
 from cst_core.domain.text import describe_problems, parse_shell_assignments
@@ -54,8 +55,10 @@ def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
     return version_of(data, "v")
 
 
-HEARTBEAT_SECONDS = 5 * MINUTE
-MIN_UPTIME = 10 * MINUTE  # after boot, restart-policy containers are still coming up
+HEARTBEAT_SECONDS: Final = 5 * MINUTE
+MIN_UPTIME: Final = 10 * MINUTE  # after boot, restart-policy containers are still coming up
+DOCKER_TIMEOUT: Final = 10 * MINUTE  # seconds a docker command may take (every call but the event's inspect)
+RECENT_USE: Final = MINUTE  # an image used this long before the plan was made counts as used meanwhile
 # What a failed `docker info` prints when nothing answers on the daemon's socket:
 # the socket is not there or nobody listens (the errno text of the dial, in every
 # version), or the question older CLIs print instead. Anything else (permission

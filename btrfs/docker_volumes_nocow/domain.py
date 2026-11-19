@@ -8,12 +8,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import time
-from typing import TypedDict, TypeIs
+from typing import Final, TypedDict, TypeIs
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.values import GIB
 
-MARGIN = 20 * GIB  # free space kept besides the copy itself
+MARGIN: Final = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
 GAVE_UP = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
 DAEMON_JSON = "/etc/docker/daemon.json"

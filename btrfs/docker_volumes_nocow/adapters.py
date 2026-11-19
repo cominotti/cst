@@ -295,7 +295,7 @@ class NocowStateFiles:
         os.makedirs(os.path.dirname(self.paths.postponed), exist_ok=True)
         # 0644: cst doctor reads it as the user. Durable (file and folder fsynced): a
         # boot counter, like the attempts counter; a reset must not lose a boot.
-        write_atomic(self.paths.postponed, json.dumps(dict(record)) + "\n", mode=0o644, relabel=False)
+        write_atomic(self.paths.postponed, json.dumps(record) + "\n", mode=0o644, relabel=False)
 
     def clear_postponed(self) -> None:
         with contextlib.suppress(FileNotFoundError):  # nothing postponed

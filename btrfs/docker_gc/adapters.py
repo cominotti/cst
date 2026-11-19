@@ -18,6 +18,7 @@ import zipfile
 import zlib
 
 from btrfs.docker_gc.domain import (
+    DOCKER_TIMEOUT,
     UnknownProtection,
     Container,
     DockerEvent,
@@ -159,7 +160,7 @@ class DockerCli:
     def __init__(self, runner: CommandRunnerPort) -> None:
         self._runner = runner
 
-    def run(self, *args: str, timeout: int = 10 * MINUTE, check: bool = True) -> CommandResult:
+    def run(self, *args: str, timeout: int = DOCKER_TIMEOUT, check: bool = True) -> CommandResult:
         """docker ARGS. No answer within timeout, or a failure with check: RuntimeError.
         A docker that cannot be started raises (as subprocess.run did)."""
         r = self._runner.run(["docker", *args], timeout=timeout, stdin="inherit")
