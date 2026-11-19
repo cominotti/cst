@@ -430,7 +430,7 @@ class ShortCgroupTest(unittest.TestCase):
     (cst_core cgroup_v2_path), a docker or podman scope cut to its id's first 12 characters."""
 
     def short(self, text: str | None) -> str:
-        with mock.patch.object(md_proc, "read_text", lambda _path: text):
+        with mock.patch.object(md_proc, "read_text", return_value=text):
             return md_proc.short_cgroup(4242)
 
     def test_the_leaf_of_the_0_line(self) -> None:
@@ -445,13 +445,13 @@ class ShortCgroupTest(unittest.TestCase):
 
     def test_a_carriage_return_in_the_real_file_is_kept(self) -> None:
         # The daemon's own read_text decodes the file's bytes (no universal newlines), so a "\r"
-        # in a cgroup's name reaches cgroup_v2_path as it is. Only the path is redirected.
+        # in a cgroup's name reaches cgroup_v2_path as it is. It reads the planted file; the stub hands that on.
         real = md_proc.read_text
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "cgroup")
             with open(path, "wb") as f:
                 f.write(b"0::/user.slice/a\rb.scope\n")
-            with mock.patch.object(md_proc, "read_text", lambda _path: real(path)):
+            with mock.patch.object(md_proc, "read_text", return_value=real(path)):
                 self.assertEqual(md_proc.short_cgroup(4242), "a\\rb.scope")  # kept, and shown escaped
 
     def test_a_character_that_is_not_printable_is_shown_escaped(self) -> None:

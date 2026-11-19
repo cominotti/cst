@@ -880,7 +880,7 @@ class LenientMessagesTest(unittest.TestCase):
 
     def test_a_chcon_message_with_bytes_that_are_not_utf8(self) -> None:
         with (
-            mock.patch.object(nocow_adapters, "label", lambda _p: b"system_u:object_r:container_file_t:s0"),
+            mock.patch.object(nocow_adapters, "label", return_value=b"system_u:object_r:container_file_t:s0"),
             self.assertRaises(RuntimeError) as cm,
         ):
             self.tree.reference_label(self.data, self.new)
