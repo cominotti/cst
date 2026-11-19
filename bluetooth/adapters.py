@@ -31,7 +31,7 @@ from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandFault, CommandRunnerPort
 
 
 def one_line_errors[**P](main: Callable[P, int]) -> Callable[P, int]:
@@ -168,7 +168,7 @@ def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
     stdin is ours; bytes that are not UTF-8 become U+FFFD; a command that
     cannot start raises (as subprocess.run did)."""
     r = RUNNER.run(cmd, timeout=timeout, stdin="inherit")
-    if r.fault in ("missing", "timeout"):
+    if r.fault in (CommandFault.MISSING, CommandFault.TIMEOUT):
         return r.returncode, ""
     if r.cause is not None:
         raise r.cause

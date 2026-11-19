@@ -34,7 +34,7 @@ from cpu.setup.domain import (
 from cpu.setup.wiring import Handed
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON
-from cst_core.ports import CommandResult, CommandRunnerPort
+from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from tests.repo_files import REPO
 
 # What cpu-setup.sh reads or runs for these commands (a module that is not there fails the copy).
@@ -732,7 +732,7 @@ class StagedInstaller:
 
     def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
         if argv[:1] == [SYSTEM_PYTHON]:
-            return self.real.run([*argv[:5], "--root", self.stage, *argv[5:]], output="capture")
+            return self.real.run([*argv[:5], "--root", self.stage, *argv[5:]], output=OutputMode.CAPTURE)
         return CommandResult(0, "", "")
 
 

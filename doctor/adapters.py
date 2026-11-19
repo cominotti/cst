@@ -17,7 +17,7 @@ from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
 from cst_core.domain.record import InstallRecord
 from cst_core.domain.values import DomainValidationError
-from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
 from vm.adapters import images as vm_images
@@ -206,9 +206,9 @@ def host_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> 
     """The doctor's text for a query that could not run (SubprocessCommandRunner's words); no output kept."""
     spawned = r.argv[0] if r.argv else argv[0]
     reason = r.cause.strerror if isinstance(r.cause, OSError) else ""
-    if r.fault == "missing":
+    if r.fault == CommandFault.MISSING:
         text = f"{spawned}: not found ({reason})"
-    elif r.fault == "timeout":
+    elif r.fault == CommandFault.TIMEOUT:
         text = f"{' '.join(argv)}: no answer within {timeout} s"
     else:
         text = f"{spawned}: {reason}"

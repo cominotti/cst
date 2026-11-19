@@ -26,7 +26,7 @@ from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.domain.values import ROOT_ACCOUNT
-from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters import holds, read_stripped
 from cpu.game.domain import GAME_DROPIN, cpuset_in
 from cpu.setup.domain import (
@@ -174,20 +174,20 @@ class CpuSetup:
         a failure ends the command with the command's exit status."""
         self._o().flush()
         self._e().flush()
-        output: OutputMode = "inherit"
+        output: OutputMode = OutputMode.INHERIT
         if merge:
-            output = "merge"
+            output = OutputMode.MERGE
         elif quiet:
-            output = "stdout"
+            output = OutputMode.STDOUT
         elif capture:
-            output = "capture"
+            output = OutputMode.CAPTURE
         res = self._runner.run(argv, output=output, input_text=input_text, env=env)
         if quiet and not capture:
             self.write(res.stdout)
         if capture and not quiet and not merge and res.stderr:
             self._e().write(res.stderr)
             self._e().flush()
-        if res.fault == "missing":
+        if res.fault == CommandFault.MISSING:
             self.warn(f"{argv[0]}: command not found")
         elif res.fault is not None:
             self.warn(f"{argv[0]}: {res.stderr}")

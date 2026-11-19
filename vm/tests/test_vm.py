@@ -2067,7 +2067,7 @@ class DetachedTest(unittest.TestCase):
                 new_session: bool = False,
                 on_host: bool = False,
                 stdin: StdinMode = "devnull",
-                output: OutputMode = "capture",
+                output: OutputMode = OutputMode.CAPTURE,
                 decode_errors: DecodeErrors = "replace",
                 nice: int | None = None,
                 pass_fds: Sequence[int] = (),

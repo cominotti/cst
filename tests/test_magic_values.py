@@ -96,6 +96,10 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
     ),
+    "cst_core/ports/__init__.py:DecodeErrors": (
+        "the error handler names of Python's codecs, passed on as they are to subprocess (errors=):"
+        " an outside vocabulary, not one of CST's"
+    ),
     # Loose records with no fixed format to describe.
     "btrfs/bulk/adapters/user.py:u_read": (
         "its answer crosses as_user's JSON pipe, whose result type is bound to Json: a TypedDict does not meet that bound"

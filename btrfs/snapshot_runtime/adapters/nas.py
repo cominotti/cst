@@ -47,6 +47,7 @@ from btrfs.snapshot_runtime.domain import (
     restic_line,
     summary_text,
 )
+from cst_core.ports import OutputMode
 
 UMOUNT_TRIES = 5
 
@@ -170,7 +171,7 @@ class Nas:
         argv = ["timeout", "--kill-after=5m", str(limit), "env", *env, "restic", *args]
         extra = {"RESTIC_CAPTURE": capture} if capture else None
         try:
-            return m.rc(m.run(argv, output="merge", on_line=relay, env=extra))
+            return m.rc(m.run(argv, output=OutputMode.MERGE, on_line=relay, env=extra))
         finally:
             if sink is not None:
                 sink.close()
@@ -180,7 +181,7 @@ class Nas:
         return self.m.ok(["timeout", str(SFTP_TIMEOUT_S), "sftp", "-q", "-b", "-", NAS_SSH_ALIAS], input_text="pwd\n")
 
     def cat_config(self) -> tuple[int, str]:
-        res = self.m.run(["timeout", str(RESTIC_SHORT_S), "restic", "cat", "config"], output="merge")
+        res = self.m.run(["timeout", str(RESTIC_SHORT_S), "restic", "cat", "config"], output=OutputMode.MERGE)
         return self.m.rc(res), res.stdout.rstrip("\n")
 
     # ---- the repository ----------------------------------------------------------------------
@@ -295,7 +296,7 @@ class Nas:
             src = m.sources()
             for name, path in zip(src.names, src.paths, strict=True):
                 argv = [m.core, CoreCommand.LATEST, "--snapdir", m.snapdir, "--name", name, "--source-path", path]
-                res = m.run(argv, output="stdout-show-stderr")
+                res = m.run(argv, output=OutputMode.STDOUT_SHOW_STDERR)
                 snap = res.stdout.rstrip("\n")
                 if res.fault is None and res.returncode == 0 and snap:
                     self.names.append(name)
@@ -385,7 +386,7 @@ class Nas:
         left = self.time_left()
         if left <= MIN_LEFT_S:
             return
-        made = m.run(["mktemp"], output="stdout-show-stderr")
+        made = m.run(["mktemp"], output=OutputMode.STDOUT_SHOW_STDERR)
         out = made.stdout.rstrip("\n")
         if made.fault is not None or made.returncode != 0:
             return
@@ -473,7 +474,7 @@ class Nas:
         while connected; status stays offline)."""
         m = self.m
         argv = ["timeout", str(RESTIC_SHORT_S), "restic", "snapshots", "--json", "--latest", "1"]
-        res = m.run([*argv, "--host", m.settings["NAS_RESTIC_HOST"], "--tag", "btrfs-setup"], output="stdout")
+        res = m.run([*argv, "--host", m.settings["NAS_RESTIC_HOST"], "--tag", "btrfs-setup"], output=OutputMode.STDOUT)
         if res.fault is not None or res.returncode != 0:
             return
         try:

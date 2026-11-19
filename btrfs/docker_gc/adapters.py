@@ -39,7 +39,7 @@ from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
-from cst_core.ports import CommandResult, CommandRunnerPort
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 
 SYSTEMCTL_TIMEOUT = 10  # seconds for systemctl is-active
 # The counts of last-run.json, in RunSummary's order after its time.
@@ -163,7 +163,7 @@ class DockerCli:
         """docker ARGS. No answer within timeout, or a failure with check: RuntimeError.
         A docker that cannot be started raises (as subprocess.run did)."""
         r = self._runner.run(["docker", *args], timeout=timeout, stdin="inherit")
-        if r.fault == "timeout":
+        if r.fault == CommandFault.TIMEOUT:
             raise RuntimeError(f"docker {' '.join(args[:2])}: no answer in {timeout}s") from r.cause
         if r.cause is not None:
             raise r.cause
@@ -413,9 +413,11 @@ class GcHost:
     def recorder_active(self) -> bool:
         """A systemctl that does not answer counts as a recorder that is not running: images are held back."""
         done = self._runner.run(
-            ["systemctl", "-q", "is-active", "docker-gc-recorder.service"], timeout=SYSTEMCTL_TIMEOUT, output="inherit"
+            ["systemctl", "-q", "is-active", "docker-gc-recorder.service"],
+            timeout=SYSTEMCTL_TIMEOUT,
+            output=OutputMode.INHERIT,
         )
-        if done.fault == "timeout":
+        if done.fault == CommandFault.TIMEOUT:
             gc_log(
                 4,
                 f"systemctl is-active docker-gc-recorder.service: no answer in {SYSTEMCTL_TIMEOUT}s; images are held back",

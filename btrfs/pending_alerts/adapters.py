@@ -28,7 +28,7 @@ from btrfs.pending_alerts.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.domain.values import DAY
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandRunnerPort, OutputMode
 
 
 def pass_bytes_through() -> None:
@@ -165,5 +165,5 @@ def wait_for_notification_server(runner: CommandRunnerPort, wait: int) -> bool:
 def show_notification(runner: CommandRunnerPort, urgency: AlertUrgency, app: str, title: str, body: str) -> bool:
     """One desktop notification (notify-send); True when it was shown."""
     argv: Sequence[str] = ["notify-send", "-u", urgency, "-a", app, "-i", ICON, "--", title, body]
-    r = runner.run(argv, output="inherit")
+    r = runner.run(argv, output=OutputMode.INHERIT)
     return r.fault is None and r.returncode == 0

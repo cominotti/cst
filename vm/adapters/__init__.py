@@ -25,7 +25,7 @@ from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
-from cst_core.ports import CommandResult, CommandRunnerPort, VirshPort
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode, VirshPort
 from cst_core.domain.text import (
     ShellAssignments,
     describe_problems,
@@ -62,11 +62,11 @@ TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
 def fault_words(argv: Sequence[str], r: CommandResult, timeout: float | None) -> CommandResult:
     """r with cst-vm's own words for a command that is missing (127) or does not answer (124);
     one that cannot start raises (as subprocess.run did). The runner's words= for systemctl."""
-    if r.fault == "missing":
+    if r.fault == CommandFault.MISSING:
         return CommandResult(
             ExitStatus.NOT_FOUND, "", f"{argv[0]}: not found", argv=r.argv, fault=r.fault, cause=r.cause
         )
-    if r.fault == "timeout":
+    if r.fault == CommandFault.TIMEOUT:
         return CommandResult(
             ExitStatus.TIMED_OUT,
             "",
@@ -121,7 +121,7 @@ class VmCommands:
         return _triple(r, cmd[0], timeout)
 
     def on_terminal(self, cmd: Sequence[str]) -> int:
-        r = self.runner.run(cmd, locale_c=True, stdin="inherit", output="inherit")
+        r = self.runner.run(cmd, locale_c=True, stdin="inherit", output=OutputMode.INHERIT)
         if r.cause is not None:
             raise r.cause
         return r.returncode

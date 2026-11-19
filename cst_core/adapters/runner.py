@@ -6,8 +6,9 @@ import functools
 import os
 import shutil
 import subprocess
-from typing import TypedDict
+from typing import Final, TypedDict
 
+from cst_core.domain.errors import ExitStatus
 from cst_core.ports import (
     CommandFailed,
     CommandFault,
@@ -89,25 +90,36 @@ def _stream_kwargs(
         kw["input"] = input_text
     elif stdin == "devnull":
         kw["stdin"] = subprocess.DEVNULL
-    if output == "capture":
-        kw["capture_output"] = True
-    elif output == "merge":
-        kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.STDOUT
-    elif output == "stdout":
-        kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.DEVNULL
-    elif output == "stdout-show-stderr":
-        kw["stdout"] = subprocess.PIPE
-    if output != "inherit" or input_text is not None:
+    match output:
+        case OutputMode.CAPTURE:
+            kw["capture_output"] = True
+        case OutputMode.MERGE:
+            kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.STDOUT
+        case OutputMode.STDOUT:
+            kw["stdout"], kw["stderr"] = subprocess.PIPE, subprocess.DEVNULL
+        case OutputMode.STDOUT_SHOW_STDERR:
+            kw["stdout"] = subprocess.PIPE
+        case _:
+            pass  # inherit: both stay ours
+    if output != OutputMode.INHERIT or input_text is not None:
         kw["text"] = True
         if decode_errors != "strict":
             kw["errors"] = decode_errors
     return kw
 
 
+# The exit status a fault gives (plain ints, as before).
+_FAULT_STATUS: Final[Mapping[CommandFault, int]] = {
+    CommandFault.MISSING: int(ExitStatus.NOT_FOUND),
+    CommandFault.UNSTARTABLE: int(ExitStatus.CANNOT_RUN),
+    CommandFault.TIMEOUT: int(ExitStatus.TIMED_OUT),
+}
+
+
 def _fault_result(
     cmd: Sequence[str], fault: CommandFault, cause: Exception, stdout: str = "", stderr: str = ""
 ) -> CommandResult:
-    rc = {"missing": 127, "unstartable": 126, "timeout": 124}[fault]
+    rc = _FAULT_STATUS[fault]
     return CommandResult(rc, stdout, stderr or str(cause), argv=tuple(cmd), fault=fault, cause=cause)
 
 
@@ -184,7 +196,7 @@ class SubprocessCommandRunner:
         new_session: bool = False,
         on_host: bool = False,
         stdin: StdinMode = "devnull",
-        output: OutputMode = "capture",
+        output: OutputMode = OutputMode.CAPTURE,
         decode_errors: DecodeErrors = "replace",
         nice: int | None = None,
         pass_fds: Sequence[int] = (),
@@ -215,7 +227,7 @@ class SubprocessCommandRunner:
         if self._keep_signals:
             kw["restore_signals"] = False
         if on_line is not None:
-            if timeout is not None or input_text is not None or output in ("inherit", "capture"):
+            if timeout is not None or input_text is not None or output in (OutputMode.INHERIT, OutputMode.CAPTURE):
                 # capture: a command that fills the stderr pipe while stdout is read to its end would
                 # never end; merge or stdout-show-stderr instead.
                 raise ValueError(
@@ -236,15 +248,19 @@ class SubprocessCommandRunner:
             proc = subprocess.run(cmd, check=False, **kw)
         except FileNotFoundError as exc:
             # The cwd folder is missing (subprocess names it): the program may exist, it could not start there.
-            fault: CommandFault = (
-                "unstartable" if exc.filename is not None and exc.filename == kw.get("cwd") else "missing"
+            fault = (
+                CommandFault.UNSTARTABLE
+                if exc.filename is not None and exc.filename == kw.get("cwd")
+                else CommandFault.MISSING
             )
             return _fault_result(cmd, fault, exc)
         except subprocess.TimeoutExpired as exc:
             msg = f"timed out after {timeout}s" if timeout is not None else "command timed out"
-            return _fault_result(cmd, "timeout", exc, _decode_stream(exc.stdout), _decode_stream(exc.stderr) or msg)
+            return _fault_result(
+                cmd, CommandFault.TIMEOUT, exc, _decode_stream(exc.stdout), _decode_stream(exc.stderr) or msg
+            )
         except OSError as exc:
-            return _fault_result(cmd, "unstartable", exc)
+            return _fault_result(cmd, CommandFault.UNSTARTABLE, exc)
         return CommandResult(proc.returncode, _decode_stream(proc.stdout), _decode_stream(proc.stderr), argv=tuple(cmd))
 
     @staticmethod
@@ -266,12 +282,14 @@ class SubprocessCommandRunner:
                 restore_signals=kw.get("restore_signals", True),
             )
         except FileNotFoundError as exc:
-            fault: CommandFault = (
-                "unstartable" if exc.filename is not None and exc.filename == kw.get("cwd") else "missing"
+            fault = (
+                CommandFault.UNSTARTABLE
+                if exc.filename is not None and exc.filename == kw.get("cwd")
+                else CommandFault.MISSING
             )
             return _fault_result(cmd, fault, exc)
         except OSError as exc:
-            return _fault_result(cmd, "unstartable", exc)
+            return _fault_result(cmd, CommandFault.UNSTARTABLE, exc)
         errors = kw.get("errors", "strict")
         out: list[str] = []
         assert proc.stdout is not None

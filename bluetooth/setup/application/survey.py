@@ -192,14 +192,19 @@ class Survey:
         self.m.console.err(text)
 
     def run(
-        self, argv: Sequence[str], *, host: bool = False, output: OutputMode = "capture", input_text: str | None = None
+        self,
+        argv: Sequence[str],
+        *,
+        host: bool = False,
+        output: OutputMode = OutputMode.CAPTURE,
+        input_text: str | None = None,
     ) -> CommandResult:
         """argv (host: on the host from a toolbox, as hostcmd); stdin is /dev/null unless input_text."""
         return self.m.runner.run(argv, on_host=host and self.m.container, output=output, input_text=input_text)
 
     def quiet(self, argv: Sequence[str], *, host: bool = False) -> str:
         """The stdout of argv, stderr dropped, whatever its exit status ($(CMD 2>/dev/null || true))."""
-        return self.run(argv, host=host, output="stdout").stdout.rstrip("\n")
+        return self.run(argv, host=host, output=OutputMode.STDOUT).stdout.rstrip("\n")
 
     def ok(self, argv: Sequence[str], *, host: bool = False) -> bool:
         """argv succeeded (its output dropped)."""
@@ -207,11 +212,13 @@ class Survey:
 
     def must(self, argv: Sequence[str], *, host: bool = False, env: dict[str, str] | None = None) -> None:
         """argv with our stdout and stderr; a failure stops the run (set -e)."""
-        r = self.m.runner.run(argv, on_host=host and self.m.container, output="inherit", env=env)
+        r = self.m.runner.run(argv, on_host=host and self.m.container, output=OutputMode.INHERIT, env=env)
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
 
-    def installer(self, *args: str, output: OutputMode = "inherit", input_text: str | None = None) -> CommandResult:
+    def installer(
+        self, *args: str, output: OutputMode = OutputMode.INHERIT, input_text: str | None = None
+    ) -> CommandResult:
         """cst_core/installer.py as this user (cst-install.bash's cst_installer)."""
         return self.m.runner.run(
             [self.m.python, "-I", "-B", self.p.installer, *args],
@@ -319,7 +326,7 @@ class Survey:
                 "GetManagedObjects",
             ],
             host=True,
-            output="stdout",
+            output=OutputMode.STDOUT,
         )
         try:
             path = adapter_path(json.loads(r.stdout))
@@ -337,7 +344,9 @@ class Survey:
         if not senders:
             return BapState.UNKNOWN
         journal = self.run(
-            ["journalctl", f"_SYSTEMD_INVOCATION_ID={inv}", "--no-pager", "-o", "cat"], host=True, output="stdout"
+            ["journalctl", f"_SYSTEMD_INVOCATION_ID={inv}", "--no-pager", "-o", "cat"],
+            host=True,
+            output=OutputMode.STDOUT,
         ).stdout
         return bap_state(journal, senders)
 
@@ -347,7 +356,7 @@ class Survey:
             return None
         parts: list[str] = []
         for what in (["list", "cards"], ["list", "short", "sources"], ["list", "source-outputs"]):
-            r = self.run(["pactl", "-f", "json", *what], output="stdout")
+            r = self.run(["pactl", "-f", "json", *what], output=OutputMode.STDOUT)
             if r.returncode != 0:
                 return None
             parts.append(r.stdout.rstrip("\n"))
@@ -650,7 +659,7 @@ class Survey:
         log = self.run(
             ["journalctl", "--user", "-u", LDAC_UNIT, "-o", "short-iso", "--no-pager", "-n", "2000"],
             host=True,
-            output="stdout",
+            output=OutputMode.STDOUT,
         ).stdout
         failure = lw_failure(log)
         if failure is None:

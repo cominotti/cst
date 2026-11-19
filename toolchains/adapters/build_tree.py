@@ -46,6 +46,7 @@ from toolchains.domain.common import tilde
 from toolchains.adapters.cargo import cargo_users, claimed_folders
 from toolchains.adapters.processes import cargo_procs, proc_users
 from toolchains.adapters.program import RUNNER
+from cst_core.ports import CommandFault, OutputMode
 
 
 def cargo_config_path(home: str) -> str:
@@ -268,9 +269,9 @@ def remove_tree(path: str, timeout: float | None = None) -> tuple[bool, str]:
         ["rm", "-rf", "--one-file-system", "--", path],
         timeout=effective_timeout,
         stdin="inherit",
-        output="merge",
+        output=OutputMode.MERGE,
     )
-    if r.fault == "timeout":
+    if r.fault == CommandFault.TIMEOUT:
         secs = int(effective_timeout) if effective_timeout is not None else 0
         return False, f"stopped after {secs}s (the run's time budget); the next run deletes the rest"
     if r.cause is not None:

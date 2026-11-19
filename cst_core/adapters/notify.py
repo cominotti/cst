@@ -25,7 +25,7 @@ from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandFault, CommandRunnerPort
 
 _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
@@ -117,9 +117,9 @@ class Notifier:
         r = self.runner.run([self.program, "-u", urgency, "-a", app, title, body], timeout=_TIMEOUT, new_session=True)
         if r.fault is None and r.returncode == 0:
             return _Outcome.SENT
-        if r.fault == "missing":
+        if r.fault == CommandFault.MISSING:
             why = f"{self.program} is not installed"
-        elif r.fault == "timeout":
+        elif r.fault == CommandFault.TIMEOUT:
             why = f"{self.program} did not answer within {_TIMEOUT} s"
         elif r.fault is not None:
             why = f"{self.program} cannot run ({r.cause or r.fault})"

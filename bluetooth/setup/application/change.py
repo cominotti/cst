@@ -36,6 +36,7 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
+from cst_core.ports import OutputMode
 
 SPACE = r"[ \t\n\r\f\v]"
 
@@ -91,7 +92,7 @@ class Change(Checks):
 
     def checked(self, args: list[str], input_text: str | None = None) -> str:
         """The installer's stdout; its stderr shown; a failure stops the run (out="$(cst_installer ...)" under set -e)."""
-        r = self.installer(*args, output="capture", input_text=input_text)
+        r = self.installer(*args, output=OutputMode.CAPTURE, input_text=input_text)
         if r.stderr:
             self.err(r.stderr)
         if r.returncode != 0:
@@ -104,7 +105,10 @@ class Change(Checks):
         mc = self.p.main_conf
         bak = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
         z: list[str] = []
-        if self.m.files.which("selinuxenabled") and self.run(["selinuxenabled"], output="inherit").returncode == 0:
+        if (
+            self.m.files.which("selinuxenabled")
+            and self.run(["selinuxenabled"], output=OutputMode.INHERIT).returncode == 0
+        ):
             self.must(["sudo", "cp", "-p", "--preserve=context", mc, bak])
             z = ["-Z"]
         else:
@@ -127,7 +131,7 @@ class Change(Checks):
     # ---- restarts --------------------------------------------------------------------------
     def restart_bluetooth(self) -> bool:
         self.out("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n")
-        if self.run(["sudo", "systemctl", "restart", "bluetooth"], output="inherit").returncode != 0:
+        if self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode != 0:
             self.err(f"{self.c.prog}: ERROR: bluetooth.service was not restarted. To finish: {self.restart_hint()}\n")
             return False
         path, found = self.adapter()
@@ -139,7 +143,7 @@ class Change(Checks):
 
     def restart_wireplumber(self) -> bool:
         self.out("restart:   wireplumber (your session; audio stops for a moment)\n")
-        if self.run(["systemctl", "--user", "restart", "wireplumber"], output="inherit").returncode != 0:
+        if self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode != 0:
             self.err(
                 f"{self.c.prog}: ERROR: wireplumber was not restarted. To finish: systemctl --user restart wireplumber\n"
             )
@@ -183,7 +187,9 @@ class Change(Checks):
                 self.err("WARNING: A2DP did not come back; switch the headset off and on\n")
                 return
         if not prof.startswith("a2dp-sink"):
-            r = self.run(["pactl", "set-card-profile", f"bluez_card.{self.c.device_id}", "a2dp-sink"], output="stdout")
+            r = self.run(
+                ["pactl", "set-card-profile", f"bluez_card.{self.c.device_id}", "a2dp-sink"], output=OutputMode.STDOUT
+            )
             self.out(r.stdout)
             if r.returncode != 0:
                 self.err("WARNING: could not switch the profile to a2dp-sink\n")
@@ -329,7 +335,7 @@ class Change(Checks):
                 cmd = ["bluetoothctl", "bearer", c.device, c.bearer]
                 if self.m.bt_timeout > 0:
                     cmd = ["timeout", str(self.m.bt_timeout), *cmd]
-                said = self.run(cmd, output="merge").stdout.rstrip("\n")
+                said = self.run(cmd, output=OutputMode.MERGE).stdout.rstrip("\n")
                 if bearer_matches(self.bt_info(), c.bearer):
                     self.out(
                         f"set:       PreferredBearer = {c.bearer} (for connections the PC starts; disconnect and reconnect)\n"
@@ -441,7 +447,7 @@ class Change(Checks):
             self.out(f"would stop, disable and remove {unit} and {p.lw_prog}\n")
             return
         if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
-            self.out(self.run(["systemctl", "--user", "disable", "--now", unit], output="stdout").stdout)
+            self.out(self.run(["systemctl", "--user", "disable", "--now", unit], output=OutputMode.STDOUT).stdout)
             self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
             self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
             self.must(["systemctl", "--user", "daemon-reload"])

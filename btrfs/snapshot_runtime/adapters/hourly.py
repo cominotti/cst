@@ -32,6 +32,7 @@ from btrfs.snapshot_runtime.domain import (
 )
 from cst_core.domain.contracts import Urgency
 from cst_core.domain.values import DAY, GIB
+from cst_core.ports import OutputMode
 
 NL = "\n"
 LOCK_BUSY = "another conversion/snapshot run is active; skipped"
@@ -80,7 +81,7 @@ class CoreRun:
             lines.append(line)
             m.say(line)
 
-        res = m.run([*m.core_common(cmd), *args], output="stdout-show-stderr", on_line=relay)
+        res = m.run([*m.core_common(cmd), *args], output=OutputMode.STDOUT_SHOW_STDERR, on_line=relay)
         self.rc = m.rc(res)
         self.reason = core_reason(lines)
 
@@ -406,7 +407,7 @@ def purge(m: SnapshotRun, args: Sequence[str]) -> int:
     if m.non_empty(f"{m.state}/core-unfinished") and CoreRun(m, CoreCommand.FINISH, sources).rc != 0:
         m.log(4, "purge: finishing interrupted snapshots failed")
     listing = [m.core, "list", "--json", "--snapdir", m.snapdir, "--pin-file", m.pin_file, "--state-dir", m.state]
-    res = m.run([*listing, *sources], output="stdout-show-stderr")
+    res = m.run([*listing, *sources], output=OutputMode.STDOUT_SHOW_STDERR)
     if res.fault is not None or res.returncode != 0:
         m.log(3, "purge: cannot list the snapshots; nothing deleted")
         return 1
@@ -422,7 +423,7 @@ def purge(m: SnapshotRun, args: Sequence[str]) -> int:
         paths.append(p)
     m.say(f"Deleting {len(paths)} snapshot(s) in batches of {PURGE_BATCH}...")
     for i in range(0, len(paths), PURGE_BATCH):
-        res = m.run(["btrfs", "subvolume", "delete", *paths[i : i + PURGE_BATCH]], output="stdout-show-stderr")
+        res = m.run(["btrfs", "subvolume", "delete", *paths[i : i + PURGE_BATCH]], output=OutputMode.STDOUT_SHOW_STDERR)
         if res.fault is not None or res.returncode != 0:
             m.log(3, "purge: a deletion failed")
         m.ok(["btrfs", "subvolume", "sync", "/var"])

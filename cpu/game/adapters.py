@@ -20,7 +20,7 @@ from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_ato
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
-from cst_core.ports import CommandResult, CommandRunnerPort
+from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.domain import (
     DOCKER_SCOPES,
     GAME_DROPIN,
@@ -180,14 +180,14 @@ class GameProfile:
         argv = self._argv(mgr, args)
         if not quiet:
             self._stream().flush()
-            return self._runner.run(argv, output="inherit").returncode
-        res = self._runner.run(argv, output="stdout")
+            return self._runner.run(argv, output=OutputMode.INHERIT).returncode
+        res = self._runner.run(argv, output=OutputMode.STDOUT)
         self._relay(res)
         return res.returncode
 
     def ask(self, mgr: Manager, *args: str, keep_stderr: bool = False) -> CommandResult:
         """systemctl ARGS, its output captured (its stderr dropped, or shown with keep_stderr)."""
-        res = self._runner.run(self._argv(mgr, args), output="capture" if keep_stderr else "stdout")
+        res = self._runner.run(self._argv(mgr, args), output=OutputMode.CAPTURE if keep_stderr else OutputMode.STDOUT)
         if keep_stderr and res.stderr:
             sys.stderr.write(res.stderr)
             sys.stderr.flush()

@@ -3,25 +3,38 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Literal, NewType, Protocol
 
 from cst_core.domain.install import OnDisk
 from cst_core.domain.record import InstallRecord
 
 
-# Why a command did not run to its end: not found (exit status 127), found
-# but could not start (126: no permission, not an executable, its cwd
-# folder missing), or stopped at its timeout (124).
-type CommandFault = Literal["missing", "unstartable", "timeout"]
+class CommandFault(StrEnum):
+    """Why a command did not run to its end (CommandResult.fault): not found (exit status 127),
+    found but could not start (126: no permission, not an executable, its cwd folder missing), or
+    stopped at its timeout (124)."""
+
+    MISSING = "missing"
+    UNSTARTABLE = "unstartable"
+    TIMEOUT = "timeout"
+
 
 # The command's stdin: /dev/null (nothing of ours leaks into it), or ours.
 type StdinMode = Literal["devnull", "inherit"]
 
-# Its stdout and stderr: both captured; stderr merged into the captured
-# stdout; stdout captured and stderr discarded; stdout captured and stderr
-# left on ours ("stdout-show-stderr": a shell's $(cmd)); or both left on ours
-# (the result's stdout and stderr are then empty).
-type OutputMode = Literal["capture", "merge", "stdout", "stdout-show-stderr", "inherit"]
+
+class OutputMode(StrEnum):
+    """The command's stdout and stderr: both captured; stderr merged into the captured stdout;
+    stdout captured and stderr discarded; stdout captured and stderr left on ours (a shell's
+    $(cmd)); or both left on ours (the result's stdout and stderr are then empty)."""
+
+    CAPTURE = "capture"
+    MERGE = "merge"
+    STDOUT = "stdout"
+    STDOUT_SHOW_STDERR = "stdout-show-stderr"
+    INHERIT = "inherit"
+
 
 # Captured output that is not UTF-8: U+FFFD for the bad bytes (every CST
 # caller), a UnicodeDecodeError out of run(), or the bad bytes kept as lone
@@ -122,7 +135,7 @@ class CommandRunnerPort(Protocol):
         new_session: bool = False,
         on_host: bool = False,
         stdin: StdinMode = "devnull",
-        output: OutputMode = "capture",
+        output: OutputMode = OutputMode.CAPTURE,
         decode_errors: DecodeErrors = "replace",
         nice: int | None = None,
         pass_fds: Sequence[int] = (),

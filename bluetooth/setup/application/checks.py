@@ -7,6 +7,7 @@ import json
 from bluetooth.domain import ISO_UUID, LDAC_UNIT, RolesState, parse_roles_state, pw_state
 from bluetooth.setup.application.survey import Survey
 from bluetooth.setup.domain import BapState, LeState, WpState, preferred_bearer
+from cst_core.ports import OutputMode
 
 
 class Checks(Survey):
@@ -18,7 +19,7 @@ class Checks(Survey):
         r = self.run(
             ["env", f"XDG_CONFIG_HOME={self.p.config}", "python3", "-I", "-B", self.p.helper, "wp-roles"],
             host=True,
-            output="stdout",
+            output=OutputMode.STDOUT,
         )
         return r.stdout.rstrip("\n") if r.returncode == 0 else None
 
@@ -128,7 +129,7 @@ class Checks(Survey):
                 )
             # AF_BLUETOOTH=31, SOCK_SEQPACKET=5, BTPROTO_ISO=8: global, until reboot (hence the adapter check).
             probe = ["/usr/bin/python3", "-I", "-c", "import socket; socket.socket(31, 5, 8).close()"]
-            if self.run(probe, host=True, output="stdout").returncode == 0:
+            if self.run(probe, host=True, output=OutputMode.STDOUT).returncode == 0:
                 self.check_ok("kernel ISO socket", "opens")
             else:
                 self.check_bad("kernel ISO socket", "not available")

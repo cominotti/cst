@@ -16,7 +16,7 @@ from cst_core.application.install import InstallService
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import OnDisk
 from cst_core.domain.record import EMPTY_RECORD, InstallRecord, RecordFormatError, parse_record, render_record
-from cst_core.ports import CommandResult, CommandRunnerPort, UnitVerdict, WriteFailed
+from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, UnitVerdict, WriteFailed
 
 
 class LocalInstallTarget:
@@ -129,7 +129,7 @@ class CheckoutSettingsStep:
 
     def run(self, src: str, args: Sequence[str], env: Mapping[str, str]) -> CommandResult:
         argv = [self._python, "-I", "-B", os.path.join(self._checkout, src), *args]
-        return self._runner.run(argv, env=env, timeout=120, output="merge")
+        return self._runner.run(argv, env=env, timeout=120, output=OutputMode.MERGE)
 
 
 class SystemdUnitVerifier:
@@ -170,7 +170,9 @@ class SystemdUnitVerifier:
                     fh.write(data)
                 paths.append(p)
             r = self._runner.run(
-                ["systemd-analyze", "verify", "--man=no", "--recursive-errors=no", *paths], timeout=120, output="merge"
+                ["systemd-analyze", "verify", "--man=no", "--recursive-errors=no", *paths],
+                timeout=120,
+                output=OutputMode.MERGE,
             )
             if r.returncode == 0:
                 return UnitVerdict(ok=True)

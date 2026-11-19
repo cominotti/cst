@@ -60,7 +60,7 @@ from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
 from cst_core.domain.values import DAY
-from cst_core.ports import CommandResult, CommandRunnerPort
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 
 NOTIFY = NOTIFY_PROGRAM
 RECLAIM_CONF = manifest_by_src()["btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"].dest
@@ -96,9 +96,9 @@ class Probe:
 
     def run(self, argv: Sequence[str], stderr: StderrRoute) -> CommandResult:
         """Run argv; its stderr passed on, dropped or merged into its output."""
-        r = self.runner.run(argv, output="merge" if stderr == StderrRoute.MERGE else "capture")
+        r = self.runner.run(argv, output=OutputMode.MERGE if stderr == StderrRoute.MERGE else OutputMode.CAPTURE)
         if r.fault is not None:
-            why = "command not found" if r.fault == "missing" else str(r.cause or r.fault)
+            why = "command not found" if r.fault == CommandFault.MISSING else str(r.cause or r.fault)
             note = f"{TAG}: {argv[0]}: {why}\n"
             if stderr == StderrRoute.MERGE:
                 return CommandResult(r.returncode, note, "", r.argv, r.fault, r.cause)
@@ -166,10 +166,10 @@ def housekeeping(m: Probe) -> None:
     otherwise wait for the next stall alert."""
     if not os.access(m.notify, os.X_OK):
         return
-    m.runner.run([m.notify, "--prune"], output="inherit")
+    m.runner.run([m.notify, "--prune"], output=OutputMode.INHERIT)
     queue = m.path("/run/btrfs-stall-monitor")
     if os.path.isdir(queue):
-        m.runner.run([m.notify, "--queue", queue], output="inherit")
+        m.runner.run([m.notify, "--queue", queue], output=OutputMode.INHERIT)
 
 
 def mounts(m: Probe) -> list[str]:
@@ -530,7 +530,9 @@ def swap_disks(m: Probe, members: Sequence[str]) -> list[str]:
 
 def alert(m: Probe, problems: Sequence[str]) -> None:
     """The alert through btrfs-notify (shown on the desktop, or kept for the next login)."""
-    r = m.runner.run([m.notify, "-u", "critical", "-a", TAG, ALERT_TITLE, alert_body(problems)], output="inherit")
+    r = m.runner.run(
+        [m.notify, "-u", "critical", "-a", TAG, ALERT_TITLE, alert_body(problems)], output=OutputMode.INHERIT
+    )
     if r.fault is not None:
         sys.stderr.write(f"{TAG}: {m.notify}: {getattr(r.cause, 'strerror', None) or r.fault}\n")
         sys.stderr.flush()

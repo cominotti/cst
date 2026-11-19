@@ -42,7 +42,7 @@ from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import CpuSet
-from cst_core.ports import VirshPort
+from cst_core.ports import CommandFault, VirshPort
 
 CG = "/sys/fs/cgroup"
 PROC = "/proc"
@@ -101,7 +101,7 @@ def virsh(*args: str, check: bool = True) -> str:
     virsh that cannot be started raises (as subprocess.run did).
     """
     r = VIRSH.call(*args, timeout=VIRSH_TIMEOUT)
-    if r.fault == "timeout":
+    if r.fault == CommandFault.TIMEOUT:
         if check:
             raise Refused(f"virsh {' '.join(args)}: no answer within {VIRSH_TIMEOUT} s")
         return ""

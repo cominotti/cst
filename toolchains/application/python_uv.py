@@ -21,6 +21,7 @@ from toolchains.domain.uv import (
     UvCacheKind,
     UvPolicy,
 )
+from cst_core.ports import CommandFault
 
 
 class PythonUv(BaseTarget[UvPolicy]):
@@ -112,7 +113,7 @@ class PythonUv(BaseTarget[UvPolicy]):
                 return 0
             timeout = min(timeout, left)
         r = self.machine.uv.prune(uv, c, timeout)
-        if r.fault == "timeout":
+        if r.fault == CommandFault.TIMEOUT:
             self.tsay(f"uv cache prune took longer than {ago(timeout)}: stopped", 3)
             return 1
         if r.cause is not None:

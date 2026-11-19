@@ -62,7 +62,7 @@ from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from cst_core.adapters import nocow as core_nocow
-from cst_core.ports import CommandResult
+from cst_core.ports import CommandFault, CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
@@ -326,7 +326,7 @@ class FakeSystem:
         if args[0] not in self.missing:
             return None
         missing = FileNotFoundError(2, "No such file or directory", args[0])
-        return CommandResult(127, "", str(missing), argv=tuple(args), fault="missing", cause=missing)
+        return CommandResult(127, "", str(missing), argv=tuple(args), fault=CommandFault.MISSING, cause=missing)
 
     def sync(self) -> None:
         self.syncs += 1

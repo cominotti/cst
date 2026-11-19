@@ -18,12 +18,13 @@ from cst_core.adapters.files import read_bytes, read_text
 from toolchains.domain.config import SCCACHE_DIR_REL, SCCACHE_STATS, ScopeFacts, server_place
 from toolchains.adapters.build_tree import tree_size
 from toolchains.adapters.program import RUNNER, where_text
+from cst_core.ports import OutputMode
 
 
 def sccache_stats(exe: str, env: Mapping[str, str]) -> dict[str, str]:
     """The fields of `EXE --show-stats` in ENV (stderr dropped, within 5 s);
     {} when it did not run or failed. Bytes that are not UTF-8 become U+FFFD."""
-    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output="stdout")
+    r = RUNNER.run([exe, "--show-stats"], base_env=env, timeout=5, output=OutputMode.STDOUT)
     return dict(SCCACHE_STATS.findall(r.stdout)) if r.cause is None and r.returncode == 0 else {}
 
 

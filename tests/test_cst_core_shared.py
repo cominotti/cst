@@ -70,6 +70,7 @@ from tests.probes import assert_replaced_durably, recorded_fsyncs
 from toolchains.domain import auto as tcd_auto
 from toolchains.domain import common as tcd_common
 from vm import domain as vm_domain
+from cst_core.ports import CommandFault, OutputMode
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -818,7 +819,7 @@ class CommandRunnerTest(unittest.TestCase):
         def pipe_ignored(
             runner: core_runner.SubprocessCommandRunner, on_line: Callable[[str], None] | None = None
         ) -> bool:
-            res = runner.run(["grep", "^SigIgn:", "/proc/self/status"], output="stdout", on_line=on_line)
+            res = runner.run(["grep", "^SigIgn:", "/proc/self/status"], output=OutputMode.STDOUT, on_line=on_line)
             mask = int(res.stdout.split()[1], 16)
             return bool(mask & (1 << (signal.SIGPIPE - 1)))
 
@@ -838,7 +839,9 @@ class CommandRunnerTest(unittest.TestCase):
             "import sys, time\nprint('one', flush=True)\ntime.sleep(0.6)\nprint('two')\nsys.stdout.write('three')\n"
         )
         res = runner.run(
-            [self.py, "-I", "-c", script], output="stdout", on_line=lambda ln: seen.append((ln, time.monotonic()))
+            [self.py, "-I", "-c", script],
+            output=OutputMode.STDOUT,
+            on_line=lambda ln: seen.append((ln, time.monotonic())),
         )
         self.assertEqual((res.returncode, res.stdout), (0, "one\ntwo\nthree"))
         self.assertEqual([ln for ln, _ in seen], ["one", "two", "three"])
@@ -846,29 +849,31 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertGreater(seen[1][1] - seen[0][1], 0.4)
         merged = runner.run(
             [self.py, "-I", "-c", "import sys; print('out', flush=True); print('err', file=sys.stderr)"],
-            output="merge",
+            output=OutputMode.MERGE,
             on_line=lambda ln: None,
         )
         self.assertEqual(sorted(merged.stdout.splitlines()), ["err", "out"])
         failed = runner.run(
-            [self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"], output="stdout", on_line=lambda ln: None
+            [self.py, "-I", "-c", "import sys; print('x'); sys.exit(3)"],
+            output=OutputMode.STDOUT,
+            on_line=lambda ln: None,
         )
         self.assertEqual((failed.returncode, failed.stdout), (3, "x\n"))
-        missing = runner.run(["/nonexistent/cst-test-cmd"], output="stdout", on_line=lambda ln: None)
+        missing = runner.run(["/nonexistent/cst-test-cmd"], output=OutputMode.STDOUT, on_line=lambda ln: None)
         self.assertEqual((missing.returncode, missing.fault), (127, "missing"))
         with self.assertRaises(ValueError):
-            runner.run(["true"], output="stdout", on_line=lambda ln: None, timeout=1)
+            runner.run(["true"], output=OutputMode.STDOUT, on_line=lambda ln: None, timeout=1)
 
     def test_on_line_splits_at_newlines_only(self) -> None:
         # As a shell's read: a carriage return stays in its line (text mode would make it a line end).
         runner = core_runner.SubprocessCommandRunner()
         seen: list[str] = []
         probe = [self.py, "-I", "-c", "import sys; sys.stdout.buffer.write(b'a\\rb\\r\\nc\\xff\\n')"]
-        res = runner.run(probe, output="stdout", on_line=seen.append)
+        res = runner.run(probe, output=OutputMode.STDOUT, on_line=seen.append)
         self.assertEqual(seen, ["a\rb\r", "c\ufffd"])
         self.assertEqual(res.stdout, "a\rb\r\nc\ufffd\n")
         with self.assertRaises(UnicodeDecodeError):
-            runner.run(probe, output="stdout", on_line=seen.append, decode_errors="strict")
+            runner.run(probe, output=OutputMode.STDOUT, on_line=seen.append, decode_errors="strict")
 
     def test_on_line_refuses_capture_whose_stderr_could_fill_and_hang(self) -> None:
         # With stderr captured, a command that writes more than the pipe holds to stderr while its
@@ -877,7 +882,7 @@ class CommandRunnerTest(unittest.TestCase):
         noisy = [self.py, "-I", "-c", "import sys; sys.stderr.write('e' * 300000); print('done')"]
         with self.assertRaises(ValueError):
             runner.run(noisy, on_line=lambda ln: None)
-        res = runner.run(noisy, output="merge", on_line=lambda ln: None)
+        res = runner.run(noisy, output=OutputMode.MERGE, on_line=lambda ln: None)
         self.assertEqual((res.returncode, res.stdout.endswith("done\n")), (0, True))
 
     def test_stdout_show_stderr_captures_stdout_and_leaves_stderr_on_ours(self) -> None:
@@ -906,7 +911,7 @@ class CommandRunnerTest(unittest.TestCase):
             err.seek(0)
             self.assertEqual(err.read(), "err\nerr\n")
         self.assertEqual(out.stdout, repr(("out\n", "", "out\n", "")) + "\n")
-        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], output="stdout-show-stderr"))
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd"], output=OutputMode.STDOUT_SHOW_STDERR))
         self.assertEqual((kw["stdout"], "stderr" in kw, "capture_output" in kw), (subprocess.PIPE, False, False))
 
     def test_strict_decoding_raises_as_text_true_did(self) -> None:
@@ -923,7 +928,7 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(got.stdout.encode("utf-8", "surrogateescape"), b"caf\xe9\n")
         lines: list[str] = []
         streamed = runner.run(
-            ["printf", "a\\377\\nb\\n"], output="stdout", on_line=lines.append, decode_errors="surrogateescape"
+            ["printf", "a\\377\\nb\\n"], output=OutputMode.STDOUT, on_line=lines.append, decode_errors="surrogateescape"
         )
         self.assertEqual((lines, streamed.stdout), (["a\udcff", "b"], "a\udcff\nb\n"))
         # The default stays U+FFFD.
@@ -997,11 +1002,11 @@ class CommandRunnerTest(unittest.TestCase):
         runner = core_runner.SubprocessCommandRunner()
         both = [self.py, "-c", "import sys; print('o'); print('e', file=sys.stderr)"]
         self.assertEqual((runner.run(both).stdout, runner.run(both).stderr), ("o\n", "e\n"))
-        merged = runner.run(both, output="merge")
+        merged = runner.run(both, output=OutputMode.MERGE)
         self.assertEqual((sorted(merged.stdout.split()), merged.stderr), (["e", "o"], ""))
-        only = runner.run(both, output="stdout")
+        only = runner.run(both, output=OutputMode.STDOUT)
         self.assertEqual((only.stdout, only.stderr), ("o\n", ""))
-        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], output="inherit", stdin="inherit"))
+        _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], output=OutputMode.INHERIT, stdin="inherit"))
         self.assertEqual(kw, {"check": False}, "both left on ours: nothing captured, no stdin given")
         _, kw = self.recorded(runner, lambda r: r.run(["cmd", "arg"], input_text="abc"))
         self.assertEqual((kw["input"], "stdin" in kw), ("abc", False))
@@ -1450,7 +1455,7 @@ class NotifierTest(unittest.TestCase):
         """Send with btrfs-notify missing; the file the alert was kept in."""
         cause = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
         outcome, _ = self.send(
-            core_ports.CommandResult(127, "", "", fault="missing", cause=cause), title, app=app, body=body
+            core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=cause), title, app=app, body=body
         )
         self.assertEqual(outcome, "kept")
         return self.lines[-1][1].split("; kept in ", 1)[1].removesuffix(" (cst doctor shows it)")
@@ -1474,7 +1479,7 @@ class NotifierTest(unittest.TestCase):
 
     def test_without_btrfs_notify_the_alert_is_kept_and_the_journal_says_so(self) -> None:
         missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
-        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=missing))
         self.assertEqual(outcome, "kept")
         [name] = self.kept()
         path = os.path.join(self.pending, name)
@@ -1499,7 +1504,10 @@ class NotifierTest(unittest.TestCase):
     def test_a_failure_or_no_answer_keeps_the_alert_too(self) -> None:
         for result, why in (
             (core_ports.CommandResult(1, "", ""), "/x/btrfs-notify exited 1"),
-            (core_ports.CommandResult(124, "", "", fault="timeout"), "/x/btrfs-notify did not answer within 60 s"),
+            (
+                core_ports.CommandResult(124, "", "", fault=CommandFault.TIMEOUT),
+                "/x/btrfs-notify did not answer within 60 s",
+            ),
         ):
             with self.subTest(why):
                 self.lines.clear()
@@ -1538,7 +1546,7 @@ class NotifierTest(unittest.TestCase):
         with open(os.path.join(self.tmp, "alerts"), "w"):
             pass  # a file where the folder should be
         missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
-        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+        outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=missing))
         self.assertEqual(outcome, "lost")
         [(prio, msg)] = self.lines
         self.assertEqual(prio, 3)
@@ -1549,7 +1557,7 @@ class NotifierTest(unittest.TestCase):
         # A caller's error handler sends this alert: a ValueError (a folder from an override that is no
         # plain path, a title with a lone surrogate) must end as "lost" with its line, not as a traceback.
         missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
-        result = core_ports.CommandResult(127, "", "", fault="missing", cause=missing)
+        result = core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=missing)
         for pending, title in (
             (os.path.join(self.tmp, "x", "..", "alerts", "pending"), "Disk"),
             (self.pending, "VM \udcff"),
@@ -1574,7 +1582,7 @@ class NotifierTest(unittest.TestCase):
         missing = FileNotFoundError(2, "No such file or directory", "/x/btrfs-notify")
         with mock.patch.object(core_notify, "_LOCK_WAIT", 0.3):
             start = time.monotonic()
-            outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault="missing", cause=missing))
+            outcome, _ = self.send(core_ports.CommandResult(127, "", "", fault=CommandFault.MISSING, cause=missing))
         self.assertGreaterEqual(time.monotonic() - start, 0.3)
         self.assertEqual((outcome, self.kept()), ("lost", []))
         self.assertIn(

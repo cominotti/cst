@@ -39,7 +39,8 @@ from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import locale_bytes, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
-from cst_core.ports import CommandRunnerPort
+from cst_core.ports import CommandFault, CommandRunnerPort
+from cst_core.domain.errors import ExitStatus
 
 
 # ---- time ----------------------------------------------------------------------------
@@ -355,10 +356,10 @@ class Host:
         is ours; bytes that are not UTF-8 become U+FFFD. A command that cannot
         start raises (as subprocess.run did)."""
         r = RUNNER.run(argv, timeout=CMD_TIMEOUT, locale_c=True, stdin="inherit")
-        if r.fault == "missing":
-            return 127, "", f"{argv[0]}: not found"
-        if r.fault == "timeout":
-            return 124, "", f"timed out after {CMD_TIMEOUT}s"
+        if r.fault == CommandFault.MISSING:
+            return ExitStatus.NOT_FOUND, "", f"{argv[0]}: not found"
+        if r.fault == CommandFault.TIMEOUT:
+            return ExitStatus.TIMED_OUT, "", f"timed out after {CMD_TIMEOUT}s"
         if r.cause is not None:
             raise r.cause
         return r.returncode, r.stdout, r.stderr

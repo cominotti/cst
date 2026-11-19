@@ -34,7 +34,7 @@ from cst_core.adapters.runtime import beside_program
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.text import parse_snapshots_conf
-from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 
 
 _BULK_JOURNAL = state_format(StateFormatKey.BULK_JOURNAL)
@@ -127,7 +127,7 @@ class SnapshotRun:
         self,
         argv: Sequence[str],
         *,
-        output: OutputMode = "inherit",
+        output: OutputMode = OutputMode.INHERIT,
         input_text: str | None = None,
         pass_fds: Sequence[int] = (),
         on_line: Callable[[str], None] | None = None,
@@ -149,7 +149,7 @@ class SnapshotRun:
         )
         if res.fault is not None:
             # As bash says it (without its line number).
-            if res.fault != "missing":
+            if res.fault != CommandFault.MISSING:
                 what = "Permission denied"
             elif "/" in argv[0]:
                 what = "No such file or directory"
@@ -164,14 +164,18 @@ class SnapshotRun:
 
     def capture(self, argv: Sequence[str], *, stderr: Stderr = Stderr.DROP, input_text: str | None = None) -> str:
         """$(argv): its stdout (stderr shown, or dropped as 2>/dev/null)."""
-        output: OutputMode = "stdout-show-stderr" if stderr is Stderr.SHOW else "stdout"
+        output = OutputMode.STDOUT_SHOW_STDERR if stderr is Stderr.SHOW else OutputMode.STDOUT
         return self.run(argv, output=output, input_text=input_text).stdout
 
     def ok(self, argv: Sequence[str], *, input_text: str | None = None) -> bool:
         """argv >/dev/null 2>&1 succeeded."""
         res = self._call(
             lambda: self.runner.run(
-                argv, output="capture", input_text=input_text, pass_fds=self.fds, decode_errors="surrogateescape"
+                argv,
+                output=OutputMode.CAPTURE,
+                input_text=input_text,
+                pass_fds=self.fds,
+                decode_errors="surrogateescape",
             )
         )
         return res.fault is None and res.returncode == 0
