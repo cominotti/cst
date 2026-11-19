@@ -86,6 +86,7 @@ from cst_core.application.install import (
 )
 from cst_core.domain.install import (
     COMPONENTS,
+    GENERATED_COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
     GeneratedKind,
@@ -224,11 +225,18 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     return f"unchanged: {place.path}" if current else f"would write: {place.path}"
 
 
+def _component_owner(component: str) -> Owner:
+    """Whose record lists the component: its manifest files' owner, or GENERATED_COMPONENTS' for one whose
+    files are all generated text."""
+    owners = {e.owner for e in INSTALL_MANIFEST if e.component == component}
+    return owners.pop() if owners else GENERATED_COMPONENTS[component]
+
+
 def _mark(service: InstallService, a: argparse.Namespace) -> int:
     """mark --component C done: the record of C's owner says done."""
     if a.args != ["done"] or a.component not in COMPONENTS:
         raise _UsageError("mark --component C done")
-    owner = next(e.owner for e in INSTALL_MANIFEST if e.component == a.component)
+    owner = _component_owner(a.component)
     _, home, as_root = _own()
     if owner == Owner.USER and as_root and not a.root:
         raise InstallRefused(f"{a.component}: belongs to the user; mark it as the user, not as root")

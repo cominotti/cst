@@ -1209,7 +1209,14 @@ own checks:
   would apply to them). A problem such as a typo (an
   unknown key) stops the install before it writes anything: the files of a
   previous install stay as they are, and the initramfs is **not** changed.
-  Only then it writes each file, atomically.
+  Only then it writes each file, atomically. Each file it writes (the rule,
+  the two units, the record unit, the helper and `initramfs-synced.sha256`)
+  is listed in the install record under the component `btrfs:degraded-boot`,
+  so `cst doctor` reports one that is missing or was changed by hand. The
+  component is marked done only when every step ran: after a failed
+  self-test or a `files-only` run, `cst doctor` says its install did not
+  finish. Files of an install from before the record are adopted by the next
+  install, without being written again.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
@@ -1234,7 +1241,8 @@ on every run; `plan` does not list that.
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.
 
-**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It
+**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It removes
+the files with their install record lines (`removed:   PATH` for each). It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
 

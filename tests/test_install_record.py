@@ -643,6 +643,49 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertIn("files of the user are forgotten as the user, not as root", err.getvalue())
         service.return_value.forget.assert_not_called()
 
+    def test_mark_of_a_component_of_generated_files_only(self) -> None:
+        # btrfs:degraded-boot has no manifest file: its owner (root) comes from GENERATED_COMPONENTS.
+        dest = "/etc/systemd/system/btrfs-degraded-boot-record.service"
+        f = RecordedFile(None, "btrfs:degraded-boot", GeneratedKind.TEXT, "aa", 0o644, Owner.ROOT, None, "c1", "aa")
+        os.makedirs(os.path.dirname(self.record))
+        Path(self.record).write_text(render_record(with_files(EMPTY_RECORD, {dest: (f, True)})))
+        self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "pending"})
+        r = self.cli("mark", "--component", "btrfs:degraded-boot", "done")
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "done"})
+
+    def test_mark_of_a_user_component_of_generated_files_only(self) -> None:
+        # A user's: refused as root on the real root; as the user, the user's record says done.
+        home = os.path.join(self.stage, "home", "u")
+        user_record = Path(self.stage + home + "/.local/state/cst/installed.json")
+        with (
+            mock.patch.dict("cst_core.domain.install.COMPONENTS", {"m:gen": "cst m install"}),
+            mock.patch.dict("cst_core.domain.install.GENERATED_COMPONENTS", {"m:gen": Owner.USER}),
+            mock.patch("cst_core.wiring.start_installer"),
+        ):
+            err = io.StringIO()
+            with (
+                mock.patch("cst_core.wiring.installer_identity", return_value=(True, "/root")),
+                contextlib.redirect_stderr(err),
+            ):
+                rc = installer.main(["mark", "--home", home, "--component", "m:gen", "done"])
+            self.assertEqual(rc, 1)
+            self.assertIn("m:gen: belongs to the user; mark it as the user, not as root", err.getvalue())
+            stdin = io.TextIOWrapper(io.BytesIO(b"x\n"))
+            self.addCleanup(stdin.close)
+            with (
+                mock.patch("cst_core.wiring.installer_identity", return_value=(False, home)),
+                mock.patch("sys.stdin", stdin),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    installer.main(["text", "/etc/x.conf", "0644", "--component", "m:gen", "--root", self.stage]), 0
+                )
+                self.assertEqual(parse_record(user_record.read_text()).components, {"m:gen": "pending"})
+                rc = installer.main(["mark", "--home", home, "--component", "m:gen", "done", "--root", self.stage])
+            self.assertEqual(rc, 0)
+            self.assertEqual(parse_record(user_record.read_text()).components, {"m:gen": "done"})
+
     def test_mark_needs_a_known_component_and_the_word_done(self) -> None:
         for args in (("mark", "--component", "btrfs:nope", "done"), ("mark", "--component", "btrfs:core")):
             with self.subTest(args=args):

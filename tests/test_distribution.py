@@ -45,6 +45,7 @@ from cst_core.domain.install import (
     CHECKOUT_ONLY_EXECUTABLES,
     CHECKOUT_ONLY_FILES,
     COMPONENTS,
+    GENERATED_COMPONENTS,
     INSTALL_MANIFEST,
     SETUP_ENTRYPOINTS,
     ArtifactKind,
@@ -128,20 +129,29 @@ def mode_problems(e: InstallEntry) -> list[str]:
     return []
 
 
-def component_problems(manifest: Sequence[InstallEntry], components: Mapping[str, str]) -> list[str]:
-    """What is wrong with the components: every entry's is known, every one has a file, all of one
-    module with that module's refresh command, and one owner each."""
+def component_problems(
+    manifest: Sequence[InstallEntry], components: Mapping[str, str], generated: Mapping[str, Owner]
+) -> list[str]:
+    """What is wrong with the components: every entry's is known, every one has a file (or is declared
+    in generated, the components of generated text only, and then has none), all of one module with
+    that module's refresh command, and one owner each."""
     used = {e.component for e in manifest}
     problems = [f"{c}: a manifest component COMPONENTS does not know" for c in sorted(used - set(components))]
-    problems += [f"{c}: a component no manifest entry belongs to" for c in sorted(set(components) - used)]
+    problems += [
+        f"{c}: a component no manifest entry belongs to" for c in sorted(set(components) - used - set(generated))
+    ]
+    problems += [f"{c}: generated only, but not in COMPONENTS" for c in sorted(set(generated) - set(components))]
+    problems += [f"{c}: generated only, but the manifest has files of it" for c in sorted(set(generated) & used)]
     for name, refresh in components.items():
         module = name.split(":", 1)[0]
         entries = [e for e in manifest if e.component == name]
+        if not refresh.startswith(f"cst {module} "):
+            problems.append(f"{name}: refreshed by {refresh!r}, not a command of {module}")
+        if name in generated and not entries:
+            continue  # no manifest file to check: its owner is the declared one
         # The component is a part of one module, and the command that refreshes it is that module's.
         if {e.module for e in entries} != {module}:
             problems.append(f"{name}: files of {sorted({e.module for e in entries})}, not of {module}")
-        if not refresh.startswith(f"cst {module} "):
-            problems.append(f"{name}: refreshed by {refresh!r}, not a command of {module}")
         # One installer call per component: root and user files never share one (the user's are
         # written by a process running as the user).
         if len({e.owner for e in entries}) != 1:
@@ -246,8 +256,39 @@ class DistributionGateTest(unittest.TestCase):
         self.assertTrue(mode_problems(bad))
 
     def test_every_entry_has_a_known_component_and_every_component_a_refresh_command(self) -> None:
-        problems = component_problems(INSTALL_MANIFEST, COMPONENTS)
+        problems = component_problems(INSTALL_MANIFEST, COMPONENTS, GENERATED_COMPONENTS)
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_component_problems_reports_planted_components(self) -> None:
+        # The gate on planted inputs: one manifest file of m:x, and components around it.
+        manifest = (
+            InstallEntry(
+                "m/x", "/usr/local/bin/x", OctalMode(0o755), Owner.ROOT, ArtifactKind.SHELL, Owner.ROOT, "m:x"
+            ),
+        )
+        known = {"m:x": "cst m install"}
+        cases: dict[str, tuple[dict[str, str], dict[str, Owner], str | None]] = {
+            "a component of generated files only, declared": ({"m:gen": "cst m install"}, {"m:gen": Owner.USER}, None),
+            "a component with no file, not declared": (
+                {"m:gen": "cst m install"},
+                {},
+                "m:gen: a component no manifest",
+            ),
+            "declared, but it has a manifest file": ({}, {"m:x": Owner.ROOT}, "m:x: generated only, but the manifest"),
+            "declared, but not in COMPONENTS": ({}, {"m:gen": Owner.ROOT}, "m:gen: generated only, but not in"),
+            "declared, refreshed by another module": (
+                {"m:gen": "cst n install"},
+                {"m:gen": Owner.ROOT},
+                "m:gen: refreshed",
+            ),
+        }
+        for label, (more, generated, want) in cases.items():
+            with self.subTest(label):
+                problems = component_problems(manifest, {**known, **more}, generated)
+                if want is None:
+                    self.assertEqual(problems, [])
+                else:
+                    self.assertTrue(any(p.startswith(want) for p in problems), problems)
 
     def test_help_modes_name_python_entries(self) -> None:
         self.assertLessEqual(set(HELP_MODES), {e.src for e in python_entry_srcs()})

@@ -63,6 +63,20 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
 DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+# RECORD_COMPONENT RECORD COMPONENT: the destinations a record lists under the component, sorted, then its
+# state ("-": none; no record: "- -"). RECORD_STRIP RECORD COMPONENT: the record as an install from before
+# the component was recorded left it (its lines and its state taken out).
+RECORD_COMPONENT = r"""import json, os, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p)) if os.path.exists(p) else {"files": {}, "components": {}}
+files = sorted(k for k, v in d["files"].items() if v["component"] == comp)
+print(" ".join(files) or "-", d["components"].get(comp, "-"))"""
+RECORD_STRIP = r"""import json, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p))
+d["files"] = {k: v for k, v in d["files"].items() if v["component"] != comp}
+d["components"].pop(comp, None)
+open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\n")"""
 DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DEGRADED_BOOT_FAKES = (
     f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
@@ -2103,7 +2117,13 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         made_stub = exec_bash(c, f"[[ -e {stub} ]] || {{ install -m 0755 /dev/null {stub}; echo made; }}").stdout
         if "made" in made_stub:
             self.addCleanup(exec_bash, c, f"rm -f {stub}", check=False)
-        script = 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.domain.install import COMPONENTS; print(" ".join(COMPONENTS))'
+        # The components of generated files only have no manifest file to install: test_13 (degraded-boot),
+        # test_119 (the stall-report launcher) and test_84 (cpu's toolbox drop-ins) run their cycles.
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import COMPONENTS, GENERATED_COMPONENTS; "
+            'print(" ".join(c for c in COMPONENTS if c not in GENERATED_COMPONENTS))'
+        )
         components = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
         self.assertIn("btrfs:core", components)
         for comp in components:
@@ -2327,7 +2347,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         reads with the copy) stops plan and an install at their
         `systemd-analyze verify`, before they write anything (a hand edit of
         the timer stays) and before any rpm-ostree change; uninstall removes
-        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        everything and untracks it. The install record lists the six files under
+        btrfs:degraded-boot, done, doctor warns of none, a second install keeps
+        the record's bytes, an install whose record lacks them (an older CST's)
+        adopts them without writing, and uninstall drops their lines. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -2351,6 +2374,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
             rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
                 /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record} {typo}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py forget-text {" ".join(files)} {record} {synced}
             systemctl daemon-reload
             """,
             check=False,
@@ -2390,6 +2414,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         modes = step(f"stat -c '%a %U %n' {' '.join(files)} {record}").splitlines()
         self.assertEqual(modes, [f"{'755' if f.endswith('last-resort') else '644'} root {f}" for f in (*files, record)])
         self.assertEqual(step("systemctl is-enabled btrfs-degraded-boot-record.service").strip(), "enabled")
+        # Every file is in root's install record, the component done; cst doctor has nothing to say of it.
+        root_record = "/var/lib/cst/installed.json"
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {root_record} btrfs:degraded-boot"
+        six = " ".join(sorted((*files, record, synced)))
+        self.assertEqual(step(lines), f"{six} done\n")
+        doc = step("env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true")
+        inst = doc.split("== install", 1)[1].split("\n== ", 1)[0] if "== install" in doc else ""
+        self.assertEqual([x for x in inst.splitlines() if "WARN" in x and "degraded" in x], [], doc)
 
         # The install already ran the real `udevadm verify` on the rule it
         # wrote (it stops when verify fails), so this needs no skip.
@@ -2406,10 +2438,19 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             )
 
         n = len(calls())
+        recorded = step(f"sha256sum {root_record}")
         second = step("/opt/cst-rw/cst btrfs degraded-boot")
         self.assertNotIn("written:", second)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
         self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        self.assertEqual(step(f"sha256sum {root_record}"), recorded)
+        # The upgrade: an install from before the record listed these files left the same bytes and no
+        # line of them; the next install adopts them, writing nothing.
+        step(f"/usr/bin/python3 -I -c {shlex.quote(RECORD_STRIP)} {root_record} btrfs:degraded-boot")
+        self.assertEqual(step(lines), "- -\n")
+        adopted = step("/opt/cst-rw/cst btrfs degraded-boot")
+        self.assertNotIn("written:", adopted)
+        self.assertEqual(step(lines), f"{six} done\n")
         again = step("/opt/cst-rw/cst btrfs degraded-boot plan")
         self.assertNotIn("would ", again)
         self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", again)
@@ -2494,6 +2535,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
         self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
+        self.assertEqual(step(lines), "- -\n")
         self.assertEqual(step(exists), "")
         self.assertEqual(step(f"cat {w}/tracked"), "")
         self.assertNotEqual(
