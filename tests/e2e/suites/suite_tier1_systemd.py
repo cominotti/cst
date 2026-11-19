@@ -4158,7 +4158,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         socket (SCCACHE_FAKE_STEPS, $st/listen), so that `cst toolchains status` asks the real
         socket who listens (SO_PEERCRED), reads that process's real /proc/PID/cgroup and says the
         server is in its own scope. A second build starts nothing; the scope goes away when the
-        server stops."""
+        server stops, and a build after that, with the stopped server's socket file still there,
+        starts a new server in the same scope."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -4219,11 +4220,24 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             build 2
             [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
 
-            # The server stops: the scope goes away.
+            # The server stops: the scope goes away; its socket file stays behind.
             kill "$server"
             for _ in $(seq 50); do [ -d "$ucg/app.slice/$scope" ] || break; sleep 0.1; done
             test ! -d "$ucg/app.slice/$scope"
             [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
+            test -S "$sock"
+
+            # A build after that: the stale socket is no server, so the wrapper starts a new one,
+            # again in its own scope in app.slice.
+            build 3
+            [ "$(starts)" = "start start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+            server=$(cat "$st/live")
+            got=$(cat "$st/server-$server.cgroup")
+            [ "$got" = "$want" ] || { echo "e2e: the new server's cgroup: '$got'" >&2; exit 1; }
+            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            kill "$server"
+            for _ in $(seq 50); do [ -d "$ucg/app.slice/$scope" ] || break; sleep 0.1; done
+            test ! -d "$ucg/app.slice/$scope"
 
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
