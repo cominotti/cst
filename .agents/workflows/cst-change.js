@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Simplify', detail: 'quality pass by hand, in the worktree' },
     { title: 'Review', detail: 'findings only: code-review high <branch> + checklist lenses by path' },
     { title: 'Fix', detail: 'one independent agent applies confirmed findings, runs the gates once' },
+    { title: 'Fast lane', detail: 'instead of Review and Fix for a small change of docs, tests and tooling: one agent reviews by hand and fixes' },
   ],
 }
 //
@@ -29,6 +30,13 @@ export const meta = {
 //   tier1     "run" (default) | "defer": a batch runs tier 1 once on its integration branch; the result says so
 //   mode      "new" (default) | "continue" (the worktree exists) | "review" (review + fix of an existing branch)
 //             | "selftest" (only the self-tests below)
+//
+// The lane is the script's choice, not an argument (fullReviewReason): a change of at most FAST_LINES changed lines
+// (git diff --numstat) that touches only Markdown, unit tests and repository tooling (REPO_ONLY), with no checklist
+// lens beyond primitives, takes the fast lane: one agent that did not write it reviews it by hand, fixes and runs
+// the gates once; no code-review fork, no lens agents. Anything else takes the full review. In both lanes the
+// result's needs_review is true when the fixer says its commits change code outside tests or when a path it
+// changed is neither Markdown nor a test: in the fast lane the reviewer is the fixer, so its word is not enough.
 //
 // Facts this script is built on (checked 2026-11-18; recheck after a Claude Code upgrade):
 // - A workflow agent has the Skill tool (and the advisor) but not Agent or Workflow; it loads AGENTS.md and the
@@ -113,6 +121,38 @@ function isReady(fix, tier1) {
   return !!(fix.gates_ok && fix.worktree_clean && (!tier1 || fix.tier1_ran) && fix.gated_head && String(fix.final_head).trim() === String(fix.gated_head).trim())
 }
 
+// The largest change (added plus deleted lines) the fast lane takes.
+const FAST_LINES = 150
+// The changed lines (added plus deleted) that git diff --numstat prints; null when a file is binary ("-") or a line
+// does not parse: such a change never takes the fast lane. Pure: tested below.
+function numstatLines(text) {
+  let n = 0
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue
+    const m = /^(\d+)\t(\d+)\t./.exec(line)
+    if (!m) return null
+    n += Number(m[1]) + Number(m[2])
+  }
+  return n
+}
+// Why a change needs the full review ('' when the fast lane is enough): too many changed lines, a path beyond
+// Markdown, unit tests and repository tooling (an E2E test needs tier 1), or a checklist lens beyond primitives.
+// Pure: tested below.
+function fullReviewReason(changed, lines, lenses) {
+  if (lines === null) return 'a binary file or a numstat line that does not parse'
+  if (lines > FAST_LINES) return lines + ' changed lines (more than ' + FAST_LINES + ')'
+  const other = changed.filter((p) => !MD.test(p.path) && !REPO_ONLY.test(p.path) && (!UNIT_TEST.test(p.path) || E2E.test(p.path)))
+  if (other.length) return 'paths beyond docs, unit tests and repository tooling: ' + other.map((p) => p.path).join(', ')
+  const lens = lenses.filter((l) => l !== 'primitives')
+  if (lens.length) return 'lenses beyond primitives: ' + lens.join(', ')
+  return ''
+}
+// Whether the fixer's commits change code outside tests: its own word, or a path it changed that is neither
+// Markdown nor a test. Pure: tested below.
+function fixerChangedCode(fix) {
+  return fix.needs_review === true || (fix.fix_paths || []).some((p) => !MD.test(p) && !UNIT_TEST.test(p))
+}
+
 // A path as one shell word: as it is when it needs no quoting. Pure: tested below.
 function shq(s) { return /^[A-Za-z0-9_\/.,+:@%=-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'" }
 // Why the worktree path cannot work ('' when it can): inside the main checkout, its folder shows up in the guard's
@@ -156,6 +196,11 @@ function selftest() {
   eq([isReady(F, false), isReady({ ...F, final_head: 'h2' }, false), isReady({ ...F, gated_head: '', final_head: '' }, false), isReady(F, true), isReady({ ...F, worktree_clean: false }, false)], [true, false, false, false, false], 'ready')
   eq([shq('/a/b-c_d.e'), shq('/a b'), shq("/it's")], ['/a/b-c_d.e', "'/a b'", "'/it'\\''s'"], 'shell quoting')
   eq([worktreeProblem('/r/cst', '/r/cst-wt-x'), worktreeProblem('/r/cst', '/r/cst/.wt/x'), worktreeProblem('/r/cst', '/r/cst'), worktreeProblem('/r/cst', 'wt')], ['', 'must be outside the main checkout /r/cst', 'must be outside the main checkout /r/cst', 'must be an absolute path'], 'worktree path')
+  eq([numstatLines('3\t4\ta.md\n10\t0\tb/c.js\n'), numstatLines(''), numstatLines('-\t-\timg.png\n1\t1\ta.md'), numstatLines('x')], [17, 0, null, null], 'numstat lines')
+  const doc = [M('.agents/workflows/cst-change.js'), M('AGENTS.md'), M('vm/tests/test_vm.py'), M('btrfs/README.md')]
+  eq([fullReviewReason(doc, 150, []), fullReviewReason(doc, 0, ['primitives']), fullReviewReason(doc, 151, []), fullReviewReason(doc, null, [])], ['', '', '151 changed lines (more than 150)', 'a binary file or a numstat line that does not parse'], 'fast lane by size')
+  eq([fullReviewReason([M('swap/domain.py')], 10, ['primitives']), fullReviewReason([M('tests/e2e/suites/suite_tier1_systemd.py')], 10, []), fullReviewReason([M('vm/tests/test_vm.py')], 10, ['parity'])], ['paths beyond docs, unit tests and repository tooling: swap/domain.py', 'paths beyond docs, unit tests and repository tooling: tests/e2e/suites/suite_tier1_systemd.py', 'lenses beyond primitives: parity'], 'full review by path and lens')
+  eq([fixerChangedCode({ needs_review: false, fix_paths: [] }), fixerChangedCode({ needs_review: false, fix_paths: ['vm/tests/test_vm.py', 'AGENTS.md'] }), fixerChangedCode({ needs_review: false, fix_paths: ['.agents/workflows/cst-change.js'] }), fixerChangedCode({ needs_review: true, fix_paths: [] }), fixerChangedCode({ needs_review: false })], [false, false, true, true, false], 'the fixer changed code')
   return 'ok'
 }
 
@@ -181,6 +226,7 @@ const QM = shq(MAIN), QWT = shq(WT), QBASE = shq(BASE), QBRANCH = shq(BRANCH)
 // The main checkout's state: HEAD, the status lines, the staged and unstaged contents, the untracked files' contents.
 const GUARD_CMD = 'git -C ' + QM + ' rev-parse HEAD; git -C ' + QM + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + QM + ' diff HEAD | sha256sum; (cd ' + QM + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
 const DIFF_CMD = 'git -C ' + QWT + ' diff --name-status --no-renames ' + QBASE + '...HEAD'
+const NUMSTAT_CMD = 'git -C ' + QWT + ' diff --numstat --no-renames ' + QBASE + '...HEAD'
 const GATE_TAIL = 'Then report gated_head (git -C ' + QWT + ' rev-parse HEAD) and worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing).'
 const shared = (stage, rereadBrief) => [
   'Repository rules: AGENTS.md ("Rules", "Commands", "Test gotchas") and .agents/rules/*.md apply; the kind "' + A.kind + '" decides the proof (.agents/rules/refactor-vs-behaviour.md).',
@@ -217,7 +263,7 @@ if (MODE === 'new' && A.kind !== 'docs') {
   if (!design.advisor_called) log('design: the advisor was not called; the note is unreviewed')
 }
 
-let impl = null, simp = null, changed = [], HEAD = ''
+let impl = null, simp = null, changed = [], numstat = '', HEAD = ''
 if (MODE === 'new' || MODE === 'continue') {
   phase('Implement')
   const start = MODE === 'new'
@@ -229,18 +275,20 @@ if (MODE === 'new' || MODE === 'continue') {
   if (!impl.check_ok || !impl.worktree_clean) return stopped('implement', { impl })
 
   phase('Simplify')
-  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + QWT + ' diff ' + QBASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + QWT + ' && invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits. Commit every edit you keep: the review sees only commits. ' + GATE_TAIL,
-    { commits: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, changed_paths: CHANGED, ...GATED }, ['commits', 'summary', 'changed_paths', 'gated_head', 'worktree_clean'])
+  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + QWT + ' diff ' + QBASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + QWT + ' && invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits, and numstat, the verbatim output of "' + NUMSTAT_CMD + '". Commit every edit you keep: the review sees only commits. ' + GATE_TAIL,
+    { commits: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, changed_paths: CHANGED, numstat: { type: 'string' }, ...GATED }, ['commits', 'summary', 'changed_paths', 'numstat', 'gated_head', 'worktree_clean'])
   if (!simp) return stopped('simplify', { impl })
   if (!simp.worktree_clean) { log('simplify: the worktree has uncommitted edits: stopping'); return stopped('simplify', { impl, simp }) }
   changed = simp.changed_paths
+  numstat = simp.numstat
   HEAD = String(simp.gated_head).trim()
 } else {
   phase('Review')
-  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + QWT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing), head (git -C ' + QWT + ' rev-parse HEAD), and changed_paths exactly as "' + DIFF_CMD + '" prints them.',
-    { worktree_exists: { type: 'boolean' }, worktree_clean: { type: 'boolean' }, head: { type: 'string' }, changed_paths: CHANGED }, ['worktree_exists', 'worktree_clean', 'head', 'changed_paths'])
+  const survey = await guarded('survey', 'Review', shared('survey', false) + '\n\nStage: survey for a review of an existing branch (edit nothing). Report worktree_exists (the folder ' + WT + ' exists and git -C ' + QWT + ' rev-parse --abbrev-ref HEAD prints ' + BRANCH + '), worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing), head (git -C ' + QWT + ' rev-parse HEAD), changed_paths exactly as "' + DIFF_CMD + '" prints them, and numstat, the verbatim output of "' + NUMSTAT_CMD + '".',
+    { worktree_exists: { type: 'boolean' }, worktree_clean: { type: 'boolean' }, head: { type: 'string' }, changed_paths: CHANGED, numstat: { type: 'string' } }, ['worktree_exists', 'worktree_clean', 'head', 'changed_paths', 'numstat'])
   if (!survey || !survey.worktree_exists || !survey.worktree_clean) return stopped('survey', { survey })
   changed = survey.changed_paths
+  numstat = survey.numstat
   HEAD = String(survey.head).trim()
 }
 changed = changed.map((p) => ({ path: p.path, status: String(p.status).trim().charAt(0).toUpperCase() }))
@@ -251,33 +299,55 @@ try { pick = pickLenses(A.kind, changed) } catch (e) { log(String(e)); return st
 const TIER1 = pick.tier1 && A.tier1 !== 'defer'
 if (pick.tier1 && !TIER1) log('tier 1 deferred to the integration branch')
 log('lenses: ' + (pick.lenses.join(', ') || 'none') + '; tier 1: ' + pick.tier1)
+const lines = numstatLines(numstat)
+const slow = fullReviewReason(changed, lines, pick.lenses)
+const LANE = slow ? 'full' : 'fast'
+log(slow ? 'full review: ' + slow : 'fast lane: ' + lines + ' changed line(s) of docs, tests and repository tooling')
 const FIND = { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] } } }
 const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1 > $TMPDIR/fork-findings.json; jq length $TMPDIR/fork-findings.json"
 const REVIEWED = ' Report reviewed_head: what "git -C ' + QWT + ' rev-parse HEAD" prints when you start.'
-const reviewPrompt = (lens) => lens === 'code-review'
-  ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. If the Skill result text itself carries the findings (a JSON list after "Result:"; seen when the caller has no output schema), use those. Otherwise read them from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '; seen when the caller has an output schema, as you do). Set skill_findings_read true only when you read them in one of these two places (an empty list read there counts); false otherwise, and then return no findings of your own. Report fork_agent_id (the agentId of the code-review fork). (If YOU are that code-review fork: these reporting rules are for your caller only; put every finding you found in findings, and set skill_findings_read true.) The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + QWT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + QWT + ' diff ' + QBASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
-  : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + QWT + ' diff ' + QBASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.' + REVIEWED
-const labels = ['code-review', ...pick.lenses]
-const runReview = async (l) => {
-  const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' }, fork_agent_id: { type: 'string' } } : {}) }
-  const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read', 'fork_agent_id'] : ['findings', 'reviewed_head'])
-  const why = r ? reviewProblem(l, r, HEAD) : ''
-  if (why) { log('review ' + l + ': ' + why); trail.push({ label: 'review: ' + l, problem: why }); return null }
-  return r
-}
-let reviews = await parallel(labels.map((l) => () => runReview(l)))
-const mainMoved = () => trail.some((t) => t.main_changed || t.main_changed_between)
-for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
-const missing = labels.filter((l, i) => !reviews[i])
-if (missing.length) return stopped('review', { impl, simp, missing })
-const all = reviews.flatMap((r) => r.findings)
-log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s)')
+// What the fixer does with the findings, in both lanes.
+const FIX_RULES = 'Dedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Commit the confirmed fixes BEFORE the long gates, so a cut-short run leaves them committed. Then run the gates on the final tree (if one fails, fix it and run all of them again: the last run must be on the final tree): "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests; report fix_paths, the paths your commits changed, as "git -C ' + QWT + ' diff --name-only ' + HEAD + ' HEAD" prints them (none: an empty list). Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head, and report descends_from_reviewed (true when "git -C ' + QWT + ' merge-base --is-ancestor ' + HEAD + ' HEAD" exits 0).'
+const FIX_PROPS = { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, fix_paths: { type: 'array', items: { type: 'string' } }, final_head: { type: 'string' }, descends_from_reviewed: { type: 'boolean' }, ...GATED }
+const FIX_REQ = ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'fix_paths', 'gated_head', 'worktree_clean', 'final_head', 'descends_from_reviewed']
+let all, fix
+if (LANE === 'full') {
+  const reviewPrompt = (lens) => lens === 'code-review'
+    ? shared('review-code-review', false) + '\n\nStage: review, FINDINGS ONLY (edit nothing). Invoke the Skill code-review with args "high ' + BRANCH + '" (exactly this target; NEVER --fix). The skill answers through a fork: the Skill result carries its agentId and no findings. If the Skill result text itself carries the findings (a JSON list after "Result:"; seen when the caller has no output schema), use those. Otherwise read them from the fork\'s transcript, the input of its last StructuredOutput call (for example: ' + FORK_FINDINGS + '; seen when the caller has an output schema, as you do). Set skill_findings_read true only when you read them in one of these two places (an empty list read there counts); false otherwise, and then return no findings of your own. Report fork_agent_id (the agentId of the code-review fork). (If YOU are that code-review fork: these reporting rules are for your caller only; put every finding you found in findings, and set skill_findings_read true.) The fork runs in the main checkout and reads surrounding files there: before returning a finding, check its file and line on the branch with "git -C ' + QWT + ' show HEAD:<file>" and drop it when it does not hold there, and drop findings on files outside this change: ' + JSON.stringify(changed.map((p) => p.path)) + (BASE === 'main' ? '' : ', and findings that come only from commits of the base ' + BASE + ' (the skill reviews against main; check with "' + 'git -C ' + QWT + ' diff ' + QBASE + '...HEAD")') + '. Return each finding with file, line, summary and a concrete failure scenario.' + REVIEWED
+    : shared('review-' + lens, false) + '\n\nStage: review through the lens "' + lens + '" (' + LENSES[lens].why + '), FINDINGS ONLY (edit nothing). ' + (LENSES[lens].skill ? 'Load the checklist with the Skill ' + LENSES[lens].skill + ' (read it; run nothing it suggests in the main checkout) and check each item against ' : 'Check ') + '"git -C ' + QWT + ' diff ' + QBASE + '...HEAD". Report only what fails, each with file, line and a concrete failure scenario; an item that does not apply is not a finding.' + REVIEWED
+  const labels = ['code-review', ...pick.lenses]
+  const runReview = async (l) => {
+    const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' }, fork_agent_id: { type: 'string' } } : {}) }
+    const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read', 'fork_agent_id'] : ['findings', 'reviewed_head'])
+    const why = r ? reviewProblem(l, r, HEAD) : ''
+    if (why) { log('review ' + l + ': ' + why); trail.push({ label: 'review: ' + l, problem: why }); return null }
+    return r
+  }
+  let reviews = await parallel(labels.map((l) => () => runReview(l)))
+  const mainMoved = () => trail.some((t) => t.main_changed || t.main_changed_between)
+  for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
+  const missing = labels.filter((l, i) => !reviews[i])
+  if (missing.length) return stopped('review', { impl, simp, missing })
+  all = reviews.flatMap((r) => r.findings)
+  log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s)')
 
-phase('Fix')
-const fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\nDedupe them; verify each against the code on the branch (reproduce where you can); apply the confirmed ones in the worktree, each in a commit of its own kind with its proof (a bug fix gets a test that fails without it); record every rejected one with the reason. Commit the confirmed fixes BEFORE the long gates, so a cut-short run leaves them committed. Then run the gates on the final tree (if one fails, fix it and run all of them again: the last run must be on the final tree): "cd ' + QWT + ' && invowk cmd check"' + (TIER1 ? ' and "cd ' + QWT + ' && invowk cmd test e2e tier1" (if its container does not start, say so in gates and set tier1_ran false; never skip or loosen a test)' : '') + '. gates_ok is true only when every gate you ran passed. ' + GATE_TAIL + ' needs_review is true when your commits change code outside tests. Nothing edits after you. Just before your last guard command, run "git -C ' + QWT + ' rev-parse HEAD" and report its output as final_head, and report descends_from_reviewed (true when "git -C ' + QWT + ' merge-base --is-ancestor ' + HEAD + ' HEAD" exits 0).',
-  { applied: { type: 'array', items: { type: 'string' } }, rejected: { type: 'array', items: { type: 'string' } }, commits: { type: 'array', items: { type: 'string' } }, gates_ok: { type: 'boolean' }, tier1_ran: { type: 'boolean' }, gates: { type: 'string' }, needs_review: { type: 'boolean' }, final_head: { type: 'string' }, descends_from_reviewed: { type: 'boolean' }, ...GATED }, ['applied', 'rejected', 'commits', 'gates_ok', 'tier1_ran', 'gates', 'needs_review', 'gated_head', 'worktree_clean', 'final_head', 'descends_from_reviewed'])
-if (!fix) return stopped('fix', { impl, simp, findings: all })
+  phase('Fix')
+  fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\n' + FIX_RULES, FIX_PROPS, FIX_REQ)
+  if (!fix) return stopped('fix', { impl, simp, findings: all })
+} else {
+  // The fast lane: no code-review fork and no lens agents; one agent that did not write the change reviews it by
+  // hand, then fixes what it confirmed, as the fixer does.
+  phase('Fast lane')
+  fix = await guarded('review+fix', 'Fast lane', shared('review+fix', true) + '\n\nStage: review and fix, the fast lane (a change of at most ' + FAST_LINES + ' lines of docs, tests and repository tooling: one agent reviews it and fixes it). You wrote none of this code. Do not invoke the code-review or simplify skills. First review "git -C ' + QWT + ' diff ' + QBASE + '...HEAD" by hand, FINDINGS ONLY until your list is done: correctness, the repository rules, the proof the kind "' + A.kind + '" asks for, tests that would catch a regression, docs that follow the change. Report each finding in findings with file, line, summary and a concrete failure scenario.' + REVIEWED + ' Then take your findings as the fixer does. ' + FIX_RULES,
+    { ...FIND, reviewed_head: { type: 'string' }, ...FIX_PROPS }, ['findings', 'reviewed_head', ...FIX_REQ])
+  if (!fix) return stopped('review+fix', { impl, simp })
+  const why = reviewProblem('review+fix', fix, HEAD)
+  if (why) { log('review+fix: ' + why); trail.push({ label: 'review+fix', problem: why }); return stopped('review+fix', { impl, simp, fix }) }
+  all = fix.findings
+  log(all.length + ' finding(s) from the fast-lane review')
+}
 const ready = isReady(fix, TIER1)
 if (fix.gates_ok && String(fix.final_head).trim() !== String(fix.gated_head).trim()) log('fix: HEAD moved after the gates (' + fix.gated_head + ' -> ' + fix.final_head + '): not ready')
-// needs_review: the fixer changed code outside tests; the orchestrator reviews reviewed_head..head before it integrates.
-return { ready: ready && fix.descends_from_reviewed === true, tier1_deferred: pick.tier1 && !TIER1, needs_review: fix.needs_review, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail }
+// needs_review: the fixer changed code outside tests (its own word, or a path it changed); the orchestrator reviews
+// reviewed_head..head before it integrates. In the fast lane the reviewer is the fixer, so the paths decide.
+return { ready: ready && fix.descends_from_reviewed === true, lane: LANE, tier1_deferred: pick.tier1 && !TIER1, needs_review: fixerChangedCode(fix), reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail }
