@@ -463,6 +463,16 @@ class CpuSetupCase(unittest.TestCase):
 INSTALLER = [SYSTEM_PYTHON, "-I", "-B", os.path.join(REPO, "cst_core", "installer.py")]
 
 
+def remove_text_files(argv: list[str]) -> None:
+    """For FakeRunner.on_call: what the installer's remove-text does to the files it names."""
+    if "remove-text" not in argv:
+        return
+    words = argv[argv.index("remove-text") + 1 :]
+    for i, w in enumerate(words):
+        if not w.startswith("--") and (i == 0 or words[i - 1] != "--home") and os.path.lexists(w):
+            os.remove(w)
+
+
 class InstallTest(CpuSetupCase):
     def test_install_writes_in_order_and_reloads_after_the_old_names_are_gone(self) -> None:
         old = [
@@ -486,9 +496,9 @@ class InstallTest(CpuSetupCase):
         expected = [
             f"{inst} text {self.paths.conf} 0644",
             f"{inst} install --set USER=tester --component cpu:core",
-            f"{inst} text {self.paths.hwp_tmpfiles} 0644",
-            f"{runuser} text {toolbox_dropin(self.home)} 0644",
-            f"{runuser} text {helper_dropin(self.home)} 0644",
+            f"{inst} text {self.paths.hwp_tmpfiles} 0644 --component cpu:core",
+            f"{runuser} text {toolbox_dropin(self.home)} 0644 --component cpu:toolbox",
+            f"{runuser} text {helper_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} install --home {self.home} --component cpu:gamemode",
             "id -nG tester",
             "usermod -aG gamemode tester",
@@ -496,6 +506,7 @@ class InstallTest(CpuSetupCase):
             "systemctl --user -M tester@ daemon-reload",
             "systemctl enable --now cpu-game-watchdog.timer",
             f"{inst} mark --component cpu:core done",
+            f"{runuser} mark --home {self.home} --component cpu:toolbox done",
             f"{runuser} mark --home {self.home} --component cpu:gamemode done",
         ]
         got = [c for c in calls if not c.startswith(("python3 -I -c", "bash "))]
@@ -548,11 +559,16 @@ class InstallTest(CpuSetupCase):
             f"NOTE: {gamemode_ini(self.home)} is your own: add [custom] start/end from {REPO}/cpu/gamemode.ini by hand",
             err,
         )
-        self.assertIn(f"removed '{helper_dropin(self.home)}'\n", out)
         calls = self.runner.joined()
+        runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
+        # The helper's drop-in, which only E-cores need, goes with its install record line.
+        self.assertIn(f"{runuser} remove-text --home {self.home} {helper_dropin(self.home)}", calls)
+        self.assertNotIn("removed '", out)
         self.assertFalse(
             [c for c in calls if "cpu:gamemode" in c or "usermod" in c or f"text {self.paths.conf}" in c], calls
         )
+        # The toolboxes' drop-in is marked whatever happened to gamemode.ini.
+        self.assertEqual(calls[-1], f"{runuser} mark --home {self.home} --component cpu:toolbox done")
 
     def test_install_refuses_without_a_user_to_install_for(self) -> None:
         for user in ("", "root"):
@@ -622,6 +638,7 @@ class UninstallTest(CpuSetupCase):
         for f in [*left, *old, keep, self.paths.hwp_tmpfiles, toolbox_dropin(self.home), helper_dropin(self.home)]:
             self.write(f, "")
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
+        self.runner.on_call = remove_text_files
         rc, out, err = self.command("uninstall")
         self.assertEqual((rc, err), (0, ""))
         for f in left:
@@ -635,6 +652,7 @@ class UninstallTest(CpuSetupCase):
         self.assertEqual(self.read(self.paths.hwp_boost), "0\n")
         self.assertFalse(os.path.exists(os.path.dirname(toolbox_dropin(self.home))))
         inst = " ".join(INSTALLER)
+        dropins = f"{toolbox_dropin(self.home)} {helper_dropin(self.home)}"
         self.assertEqual(
             self.runner.joined(),
             [
@@ -643,6 +661,9 @@ class UninstallTest(CpuSetupCase):
                 "systemctl disable --now cpu-game-watchdog.timer",
                 "systemctl stop cpu-game.service",
                 f"{inst} remove --component cpu:core",
+                # Through the installer, with their install record lines (the hwp file also when gone).
+                f"{inst} remove-text {self.paths.hwp_tmpfiles}",
+                f"runuser -u tester -- {inst} remove-text --home {self.home} {dropins}",
                 f"runuser -u tester -- {inst} remove --home {self.home} --component cpu:gamemode",
                 "systemctl --user -M tester@ daemon-reload",
                 "systemctl daemon-reload",
@@ -651,8 +672,11 @@ class UninstallTest(CpuSetupCase):
         self.assertTrue(out.endswith("the previous one is in /etc/cpu-setup/*.xml.before-vm-pin).\n"), out)
         self.assertIn("('cst cpu docker-slice uninstall')", out)
         # Again: nothing left to remove, the same reloads; without a user, only the system side.
+        self.write(self.paths.hwp_boost, "1\n")
         _, out, _ = self.command("uninstall")
         self.assertNotIn("removed", out)
+        self.assertEqual(self.read(self.paths.hwp_boost), "1\n", "no hwp file: the boost is left as it is")
+        self.assertIn(f"{inst} remove-text {self.paths.hwp_tmpfiles}", self.runner.joined())
         self.runner.calls.clear()
         self.command("uninstall", user="")
         self.assertNotIn("systemctl --user -M @ daemon-reload", self.runner.joined())

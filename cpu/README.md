@@ -276,6 +276,14 @@ The three programs say `Installed by ...` or `Installed as ...` instead.
 comment. `uninstall` uses the marker only for one decision: whether
 `~/.config/gamemode.ini` is the script's file (and may be deleted).
 
+Every file in the table but the settings file (which you may edit) and the
+group lines is listed in the install record, so `cst doctor` reports one
+that is missing or was changed by hand: root's files in
+`/var/lib/cst/installed.json` (the hwp file under the component `cpu:core`),
+the two user drop-ins in your `~/.local/state/cst/installed.json` (component
+`cpu:toolbox`, marked done at the end of every `install`). A file an older
+CST installed is adopted by the next `install`, without being written again.
+
 ### 6.2 Settings file
 
 `/etc/cpu-setup/cpu-setup.conf`, exactly as `install` writes it:
@@ -1331,7 +1339,9 @@ cst cpu uninstall
 - removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
   and `~/.config/gamemode.ini` (only if it is the script's file);
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
-  boost back to `0`;
+  boost back to `0` (only when the file was there);
+- drops the install record lines of what it removed (`removed:   PATH` for
+  each file the installer removed), also of a file deleted by hand;
 - reloads systemd.
 
 It **keeps**: `/etc/cpu-setup/cpu-setup.conf`, your `gamemode` group

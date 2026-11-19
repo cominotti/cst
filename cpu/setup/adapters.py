@@ -210,9 +210,17 @@ class CpuSetup:
         handover = lc_ctype_handover().partition("=")
         self.run(argv, input_text=input_text, env={handover[0]: handover[2]})
 
-    def install_text(self, dest: str, text: str, owner: str = ROOT_ACCOUNT) -> None:
-        """cst_install_text DEST 0644 [OWNER]."""
-        self.installer("text", dest, "0644", as_user="" if owner == ROOT_ACCOUNT else owner, input_text=text)
+    def install_text(self, dest: str, text: str, owner: str = ROOT_ACCOUNT, component: str = "") -> None:
+        """cst_install_text DEST 0644 [OWNER [COMPONENT]]: with a component, listed in the install record."""
+        listed = ["--component", component] if component else []
+        self.installer("text", dest, "0644", *listed, as_user="" if owner == ROOT_ACCOUNT else owner, input_text=text)
+
+    def remove_user_text(self, *dests: str) -> None:
+        """cst_remove_text_as USER DEST...: generated files of the target user removed with their record
+        lines, as that user ('removed:' for each that was there); without a home there is none."""
+        home = self._home_of(self.user)
+        if home:
+            self.installer("remove-text", "--home", home, *dests, as_user=self.user)
 
     def required_home(self, user: str, who: str) -> str:
         """The user's home for a step in it (who: the helper that says so), or Halt(1)."""
@@ -307,19 +315,19 @@ class CpuSetup:
             self.install_text(p.conf, conf_lines(user))
         self.installer("install", "--set", f"USER={user}", "--component", "cpu:core")
         if os.access(p.hwp_boost, os.W_OK):
-            self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost))
+            self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost), component="cpu:core")
             if self._echo_to(p.hwp_boost, "1"):
                 self.say(f"set:       {p.hwp_boost} = 1")
         else:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
         ecores = self.e_cores()
         if ecores:
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user)
-            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user)
+            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, "cpu:toolbox")
+            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user, "cpu:toolbox")
         else:
             self.warn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped")
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user)
-            self.rm_v(self.helper_dropin())
+            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user, "cpu:toolbox")
+            self.remove_user_text(self.helper_dropin())
         self.remove_old_dropins()  # the daemon-reloads below then read without them
         link = os.path.join(self.root, "cst-link.bash")
         self.run(["bash", "-c", 'set -Eeuo pipefail; source "$1"; link_cst_command "$2"', "cpu-setup.sh", link, user])
@@ -329,8 +337,9 @@ class CpuSetup:
         self.usys("daemon-reload")
         self.run(["systemctl", "enable", "--now", "cpu-game-watchdog.timer"])
         self.installer("mark", "--component", "cpu:core", "done")
+        home = self.required_home(user, "cst-install.bash")
+        self.installer("mark", "--home", home, "--component", "cpu:toolbox", "done", as_user=user)
         if gamemode:
-            home = self.required_home(user, "cst-install.bash")
             self.installer("mark", "--home", home, "--component", "cpu:gamemode", "done", as_user=user)
         for line in install_done_lines(self.prog):
             self.say(line)
@@ -386,13 +395,14 @@ class CpuSetup:
         self.remove_game_dropins()
         self.installer("remove", "--component", "cpu:core")
         self.remove_old_dropins()
-        if os.path.isfile(p.hwp_tmpfiles):
-            self.rm_v(p.hwp_tmpfiles)
-            if os.access(p.hwp_boost, os.W_OK) and self._echo_to(p.hwp_boost, "0"):
-                self.say(f"set:       {p.hwp_boost} = 0")
+        had_hwp = os.path.isfile(p.hwp_tmpfiles)
+        # Also when it is gone already: its install record line goes too.
+        self.installer("remove-text", p.hwp_tmpfiles)
+        if had_hwp and os.access(p.hwp_boost, os.W_OK) and self._echo_to(p.hwp_boost, "0"):
+            self.say(f"set:       {p.hwp_boost} = 0")
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
-            self.rm_v(self.toolbox_dropin(), self.helper_dropin())
+            self.remove_user_text(self.toolbox_dropin(), self.helper_dropin())
             self.rmdir(os.path.dirname(self.toolbox_dropin()), os.path.dirname(self.helper_dropin()))
             if holds(gamemode_ini(self._home_of(self.user)), MANAGED_MARK):
                 home = self.required_home(self.user, "cst-install.bash")

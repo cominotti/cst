@@ -4328,9 +4328,12 @@ EOF
         """`cst cpu install` as root for tester with the real systemd, over what the bash
         cpu-setup.sh (main before the port) installed: only the programs are written again (the game
         profile becomes a zipapp; the other zipapps carry the new cst_core), every unit, drop-in, rule
-        and setting stays as it was; `status` runs; a second install writes nothing; `uninstall`
+        and setting stays as it was; the toolboxes' drop-ins are adopted into tester's install record
+        (cpu:toolbox, done; no doctor WARN), the hwp file into root's where the knob exists; `status`
+        runs; a second install writes nothing; `uninstall`
         removes the units, programs, rule and drop-ins (and their record lines) and stops the timer; a
-        second uninstall works too. The bash version's uninstall then finds nothing left."""
+        second uninstall works too, and no record line of them is left. The bash version's uninstall then
+        finds nothing left."""
         old = self.legacy_cpu_tree()
         self.addCleanup(
             exec_bash,
@@ -4365,6 +4368,24 @@ EOF
             grep -q 'unchanged: /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf' /tmp/e2e-84-new.txt
             systemctl is-active cpu-game-watchdog.timer
             grep -q 'cpu-game-profile' /var/lib/cst/installed.json
+            # The toolboxes' drop-ins (unchanged above: adopted) are in tester's install record under
+            # cpu:toolbox, done; the hwp file is in root's only where the container has the boost knob.
+            U=/home/tester/.local/state/cst/installed.json
+            hwp=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
+            toolbox_lines() {{ runuser -u tester -- /usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} "$U" cpu:toolbox; }}
+            want=/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf
+            helper=/home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf
+            [[ ! -e "$helper" ]] || want="$helper $want"
+            [[ "$(toolbox_lines)" == "$want done" ]] || {{ echo "tester's record: $(toolbox_lines)" >&2; exit 1; }}
+            if [[ -e "$hwp" ]]; then
+                grep -qF "\"$hwp\"" /var/lib/cst/installed.json
+            elif grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then
+                echo "root's record lists a hwp file that is not there" >&2; exit 1
+            fi
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            if sed -n '/^== install/,/^== /p' <<<"$doc" | grep -E '^ *WARN' | grep -F -e cpu:toolbox -e 10-cpu-setup.conf; then
+                echo "doctor warns about the toolbox drop-ins" >&2; exit 1
+            fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
             for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
@@ -4380,6 +4401,8 @@ EOF
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
             if grep -q 'cpu-game-profile' /var/lib/cst/installed.json; then echo "the record still lists the game profile" >&2; exit 1; fi
+            [[ "$(toolbox_lines)" == "- -" ]] || {{ echo "tester's record after uninstall: $(toolbox_lines)" >&2; exit 1; }}
+            if grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then echo "the record still lists the hwp file" >&2; exit 1; fi
             as_root /opt/cst-rw/cst cpu uninstall >/dev/null
             as_root bash {old}/cpu-setup.sh uninstall >/dev/null
             rm -f /etc/cpu-setup/cpu-setup.conf

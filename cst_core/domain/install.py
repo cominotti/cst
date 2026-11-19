@@ -173,6 +173,7 @@ COMPONENTS: Final[Mapping[str, str]] = {
     "cpu:core": "cst cpu install",
     "cpu:gamemode": "cst cpu install",
     "cpu:docker-slice": "cst cpu docker-slice install",
+    "cpu:toolbox": "cst cpu install",
     "bluetooth:ldac": "cst bluetooth apply",
     "swap:core": "cst swap apply",
     "toolchains:auto": "cst toolchains auto on",
@@ -186,6 +187,7 @@ COMPONENTS: Final[Mapping[str, str]] = {
 GENERATED_COMPONENTS: Final[Mapping[str, Owner]] = {
     "btrfs:degraded-boot": Owner.ROOT,
     "btrfs:report-launcher": Owner.USER,
+    "cpu:toolbox": Owner.USER,
 }
 
 
