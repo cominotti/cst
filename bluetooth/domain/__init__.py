@@ -12,6 +12,7 @@ import re
 from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, group, split
 from cst_core.domain.values import Json
 
@@ -681,10 +682,10 @@ def parse_pending(text: str | None) -> dict[str, str]:
     """unit -> invocation ID from the pending-restart file (JSON); {} when absent or unreadable,
     and only the known units with a non-empty ID."""
     try:
-        data = json.loads(text or "{}")
+        data = parse_json(text or "{}")
     except ValueError:
         return {}
-    if not isinstance(data, dict):
+    if not json_object(data):
         return {}
     return {u: i for u, i in data.items() if u in RESTART_UNITS and isinstance(i, str) and i}
 

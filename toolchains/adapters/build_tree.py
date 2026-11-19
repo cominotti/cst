@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from toolchains.ports import Scan, Users
 
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import json_object, parse_toml
 from toolchains.domain.build import (
     TRASH_PREFIX,
     BuildTreeResult,
@@ -65,12 +66,12 @@ def resolve_root(home: str, prog: str) -> str | None:
     want = expected_template(home)
     try:
         with open(cfg, "rb") as f:
-            data = tomllib.load(f)
+            data = parse_toml(f.read())
     except FileNotFoundError:
         raise Refused(f"{tilde(cfg, home)} not found: build-dir is not set ({prog} config apply sets it)") from None
     except (tomllib.TOMLDecodeError, OSError) as e:
         raise Refused(f"cannot read {tilde(cfg, home)}: {e}") from None
-    build = data.get("build")
+    build = data.get("build") if json_object(data) else None  # tomllib gives a table
     value = build.get("build-dir") if isinstance(build, dict) else None
     if value != want:
         raise Refused(

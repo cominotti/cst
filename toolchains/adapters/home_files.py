@@ -24,6 +24,7 @@ from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner, expand_dest, manifest_by_src
 from toolchains.adapters.program import program_folder
@@ -207,7 +208,7 @@ def write_state(home: str, tid: str, data: RunRecord, out: RunOutputPort) -> Non
 def read_state(home: str, tid: str) -> SavedRun | None:
     try:
         with open(state_path(home, tid)) as f:
-            data: object = json.load(f)
+            data = parse_json(f.read())
             return data if is_saved_run(data) else None
     except OSError, ValueError:
         return None
@@ -365,10 +366,11 @@ def stale_files(home: str) -> list[tuple[str, bool]]:
 def cargo_build_dir_is_csts(home: str) -> bool:
     try:
         with open(os.path.join(home, CARGO_CFG_REL), "rb") as f:
-            build = tomllib.load(f).get("build")
+            data = parse_toml(f.read())
+        build = data.get("build") if json_object(data) else None  # tomllib gives a table
     except OSError, tomllib.TOMLDecodeError:
         return False
-    return isinstance(build, dict) and build.get("build-dir") == expected_template(home)
+    return json_object(build) and build.get("build-dir") == expected_template(home)
 
 
 def wrapper_text(values: WrapperValues, entry_file: str) -> str | None:

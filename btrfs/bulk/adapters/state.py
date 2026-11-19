@@ -20,7 +20,7 @@ from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format
-from cst_core.domain.shapes import KeyTypes, has_shape, json_object
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object, parse_json
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
@@ -121,7 +121,7 @@ class StateFiles:
         """The journal's JSON; None when it is missing or not JSON."""
         try:
             with open(self.jpath(ident)) as f:
-                return json.load(f)
+                return parse_json(f.read())
         except OSError, ValueError:
             return None
 

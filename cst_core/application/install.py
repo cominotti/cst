@@ -133,9 +133,7 @@ class InstallService:
     ) -> list[tuple[bytes, Mapping[str, str] | None]]:
         """Every entry's bytes, and a template's values (the --set values it uses); a --set value no
         template of the call uses is an error (a misspelt KEY)."""
-        given: Mapping[str, str] = {}
-        if values is not None:
-            given = values
+        given: Mapping[str, str] = values if values is not None else dict[str, str]()
         used: set[str] = set()
         out: list[tuple[bytes, Mapping[str, str] | None]] = []
         for e in entries:

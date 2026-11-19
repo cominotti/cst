@@ -28,6 +28,7 @@ from cst_core.adapters.files import CounterFile, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
+from cst_core.domain.shapes import parse_json
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
 
@@ -286,7 +287,7 @@ class NocowStateFiles:
     def read_postponed(self) -> StoredPostponed | None:
         try:
             with open(self.paths.postponed) as f:
-                rec = json.load(f)
+                rec = parse_json(f.read())
         except OSError, ValueError:
             return None
         return rec if is_stored_postponed(rec) else None

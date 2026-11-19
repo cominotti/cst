@@ -18,6 +18,7 @@ from btrfs.stall_monitord.domain import StallRecordTag
 from btrfs.stall_report.domain.records import AnalyseResult, BelowItem, BelowSection, MetaRecord, Recorded
 from btrfs.stall_report.domain.window import summarise
 from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import DAY, MINUTE
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
@@ -175,12 +176,12 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
     if out.returncode != 0:
         return None, f"below dump failed: {(out.stderr or out.stdout).strip()[:200]}"
     try:
-        rows = json.loads(out.stdout or "[]")
+        rows = parse_json(out.stdout or "[]")
     except ValueError:
         rows = []
         for chunk in re.split(r"\n(?=[\[{])", out.stdout.strip()):
             try:
-                v = json.loads(chunk)
+                v = parse_json(chunk)
             except ValueError:
                 continue
             rows += v if isinstance(v, list) else [v]

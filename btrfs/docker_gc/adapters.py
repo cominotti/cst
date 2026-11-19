@@ -39,6 +39,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdin
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -71,7 +72,7 @@ class InspectedObject(TypedDict, total=False):
 
 def _obj(value: object) -> dict[str, object]:
     """value when it is a JSON object, else an empty one (Docker's null)."""
-    return value if isinstance(value, dict) else {}
+    return value if json_object(value) else {}
 
 
 def _is_inspected(value: object) -> TypeIs[InspectedObject]:
@@ -140,12 +141,11 @@ def image_of(o: InspectedObject) -> Image:
 def event_of(line: str) -> DockerEvent | None:
     """One line of `docker events --format '{{json .}}'`; None for a line that is not an event."""
     try:
-        ev = json.loads(line)
+        ev = parse_json(line)
     except ValueError:
         return None
-    if not isinstance(ev, dict):
+    if not json_object(ev):
         return None
-    ev = _obj(ev)
     actor = _obj(ev.get("Actor"))
     return DockerEvent(
         kind=_str(ev.get("Type")),
@@ -246,7 +246,7 @@ class DockerCli:
         out: dict[str, str] = {}
         for line in r.stdout.splitlines():
             try:
-                d = _obj(json.loads(line))
+                d = _obj(parse_json(line))
             except ValueError:
                 continue
             out[str(d.get("Type", "?"))] = str(d.get("Size", "?"))
@@ -300,10 +300,10 @@ class GcStateFiles:
     def load_state(self) -> GcState:
         try:
             with open(self.paths.last_used) as f:
-                st = json.load(f)
+                st = parse_json(f.read())
         except OSError, ValueError:
             st = None
-        if isinstance(st, dict) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
+        if json_object(st) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
             images, since = st.get("images"), _num(st.get("since"))
             heartbeat = _num(st.get("heartbeat", 0))
             # a value that is not a time: not a state docker-gc wrote
@@ -326,7 +326,7 @@ class GcStateFiles:
     def load_summary(self) -> RunSummary | None:
         try:
             with open(self.paths.last_run) as f:
-                lr = json.load(f)
+                lr = parse_json(f.read())
         except OSError, ValueError:
             return None
         lr = _obj(lr)

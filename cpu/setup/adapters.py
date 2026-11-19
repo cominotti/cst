@@ -14,7 +14,6 @@ import contextlib
 import fnmatch
 import glob
 import grp
-import json
 import locale
 import os
 import pwd
@@ -25,6 +24,7 @@ from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters import holds, read_stripped
@@ -434,7 +434,7 @@ class CpuSetup:
         path = self.paths.daemon_json
         try:
             with open(path, encoding="utf-8") as fh:
-                current = json.load(fh)
+                current = parse_json(fh.read())
         except FileNotFoundError:
             if missing_ok:
                 return {}
@@ -474,7 +474,7 @@ class CpuSetup:
         active = self.run(["systemctl", "is-active", "builds.slice"], check=False, quiet=True, capture=True)
         try:
             with open(self.paths.daemon_json, encoding="utf-8") as fh:
-                parent = cgroup_parent_shown(json.load(fh))
+                parent = cgroup_parent_shown(parse_json(fh.read()))
         except OSError, ValueError, TypeError:
             parent = "-"
         try:

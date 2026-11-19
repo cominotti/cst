@@ -3,13 +3,13 @@
 snapshots left writable, Docker's postponed NOCOW."""
 
 from collections.abc import Iterator, Mapping
-import json
 import os
 import re
 import shlex
 import time
 
 from btrfs.docker_volumes_nocow.domain import is_stored_postponed
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
@@ -446,7 +446,7 @@ def check_snapshots_writable(host: DoctorHostPort) -> Iterator[Result]:
 def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
     try:
         with host.open_text(host.path(NOCOW_POSTPONED)) as f:
-            rec = json.loads(f.read(65536))
+            rec = parse_json(f.read(65536))
     except FileNotFoundError:
         return  # never postponed, or not set up
     except OSError, ValueError:

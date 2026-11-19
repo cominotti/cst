@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 from cst_core.domain.install import manifest_by_src
+from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from toolchains.domain.build import HASH_VAR, ROOT_REL
 from toolchains.domain.common import parses_as, plain
 
@@ -128,6 +129,21 @@ class LeanState(TypedDict):
     error: str
 
 
+def _table(d: object, key: str) -> object:
+    """d.setdefault(key, {}) of a JSON object; for any other value the AttributeError calling
+    it raised."""
+    if not json_object(d):
+        raise AttributeError(f"{type(d).__name__!r} object has no attribute 'setdefault'")
+    return d.setdefault(key, {})
+
+
+def _set_item(d: object, key: str, value: object) -> None:
+    """d[key] = value of a JSON object; for any other value the TypeError the assignment raised."""
+    if not json_object(d):
+        raise TypeError(f"{type(d).__name__!r} object does not support item assignment")
+    d[key] = value
+
+
 def dig(data: object, path: Sequence[str]) -> object:
     for k in path:
         if not isinstance(data, dict) or k not in data:
@@ -151,7 +167,7 @@ def lean_state(path: str, text: str | None) -> LeanState:
         st["error"] = CANNOT_READ
         return st
     try:
-        data = tomllib.loads(text)
+        data = parse_toml(text)
     except tomllib.TOMLDecodeError as e:
         st["error"] = f"is not valid TOML ({e})"
         return st
@@ -170,17 +186,17 @@ def lean_state(path: str, text: str | None) -> LeanState:
         # Appended tables must not clash with the file's (TOML forbids a
         # table twice): parse the result and compare.
         try:
-            nd = tomllib.loads(new)
+            nd = parse_toml(new)
         except tomllib.TOMLDecodeError:
             nd = None
-        expect = json.loads(json.dumps(data))
+        expect = parse_json(json.dumps(data))
         for label_, tpath, want, _ in LEAN_KEYS:
             if any(label_ == a for a, _ in st["add"]):
                 d = expect
                 for k in tpath:
-                    d = d.setdefault(k, {})
-                d["debug"] = want
-        if nd is not None and json.loads(json.dumps(nd)) == expect:
+                    d = _table(d, k)
+                _set_item(d, "debug", want)
+        if nd is not None and parse_json(json.dumps(nd)) == expect:
             st["append"] = extra
     return st
 
@@ -314,7 +330,8 @@ def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
         st["error"] = CANNOT_READ
         return st
     try:
-        data = plain(tomllib.loads(text))
+        parsed = parse_toml(text)
+        data = plain(parsed if json_object(parsed) else {})  # tomllib gives a table
     except tomllib.TOMLDecodeError as e:
         st["error"] = f"is not valid TOML ({e})"
         return st

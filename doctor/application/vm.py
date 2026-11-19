@@ -3,13 +3,13 @@
 the backup timer, the virtual hardware, the image folders, the backup alerts)."""
 
 from collections.abc import Callable, Iterator
-import json
 import shlex
 import time
 import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.errors import ExitStatus
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from doctor.application.shared import (
@@ -174,7 +174,7 @@ def vm_index_data(host: DoctorHostPort) -> object:
     """cst vm's backup index as read, None when it is missing or unreadable."""
     try:
         with host.open_text(host.path(VM_INDEX)) as f:
-            return json.load(f)
+            return parse_json(f.read())
     except OSError, ValueError:
         return None
 
