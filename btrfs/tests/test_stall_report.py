@@ -874,6 +874,19 @@ class MalformedLineTest(unittest.TestCase):
         self.assertNotIn("damaged", out)
         self.assertIn("episodes 1", out)
 
+    def test_a_meta_whose_dirty_bytes_is_null_is_read(self) -> None:
+        # The daemon writes read_int's None when it cannot read /proc/sys/vm/dirty_bytes (a
+        # container, a restricted /proc): the meta still counts, with its vm_keys, disks and kernel,
+        # and the limit reads as 0, as for a meta without the key. Before: the meta was damaged.
+        now = time.time()
+        rest = [*(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        null, zero = ({**meta(now - 30, 7), "dirty_bytes": d} for d in (None, 0))
+        out = self.report({now: self.lines([null, *rest])}, now - 60, now)
+        self.assertNotIn("damaged", out)
+        self.assertEqual(out, self.report({now: self.lines([zero, *rest])}, now - 60, now))
+        report = json.loads(self.report({now: self.lines([null, *rest])}, now - 60, now, "--json"))
+        self.assertEqual((report["coverage"]["skipped"], report["vm"]["dirty_limit_bytes"]), (0, 0))
+
     def test_no_data_says_what_was_damaged(self) -> None:
         now = time.time()
         out = self.report({now: self.lines([meta(now - 30, 7), "not json", sample(now - 20, 1000, 0)])}, now - 60, now)

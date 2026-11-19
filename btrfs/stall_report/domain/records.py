@@ -90,7 +90,7 @@ class MetaRecord(TypedDict, total=False):
     kernel: str
     base_interval: float  # s between full samples
     vm_keys: list[str]  # the /proc/vmstat names of each sample's "vm" list
-    dirty_bytes: int  # vm.dirty_bytes
+    dirty_bytes: int | None  # vm.dirty_bytes; None when the daemon could not read it
     disks: dict[str, str]  # block device name -> role ("btrfs ...", "swap", ...)
     fs: dict[str, FsInfo]
     stacks: bool  # the daemon could read kernel stacks
@@ -342,7 +342,7 @@ _META_KEYS: KeyTypes = {
     "kernel": (str,),
     "base_interval": _NUM,
     "vm_keys": (list,),
-    "dirty_bytes": (int,),
+    "dirty_bytes": (int, type(None)),  # null: the daemon could not read vm.dirty_bytes
     "disks": (dict,),
     "fs": (dict,),
     "stacks": (bool,),

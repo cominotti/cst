@@ -281,7 +281,7 @@ def summarise(
         "zswap_counted_from": counted_from,
         "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
         "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
-        "dirty_limit_bytes": meta.get("dirty_bytes", 0),
+        "dirty_limit_bytes": meta.get("dirty_bytes") or 0,
     }
     for f in fs.values():
         f["avg_commit_ms"] = f["commit_ms"] / f["commits"] if f["commits"] else 0
