@@ -267,8 +267,9 @@ class SwapReports:
         path = self._env.settings_path
         if not self._fs.is_file(path):
             return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
-        if not self._fs.is_readable(path):
+        if not self._fs.is_readable(path) and not self._env.as_root:
             return SpecResolution(None, SwapSpecState.UNREADABLE)
+        # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
         return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
 
     def _spec_from_older_install(self) -> SpecResolution:

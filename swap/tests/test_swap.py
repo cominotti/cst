@@ -1685,6 +1685,26 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
         self.assertEqual(_tree(self.tmp), before)
 
+    def test_a_settings_file_root_may_not_read_refuses_and_does_not_ask_for_root(self) -> None:
+        # Root, and access refuses (a security policy, a root-squashed mount): --root cannot help.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        self.env = dataclasses.replace(self.env, as_root=True)
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+                rc, out, err, _ = self._run_on(cmd, fs)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("  REFUSE    cst/swap.conf                          cannot be read: apply stops\n", out)
+                self.assertNotIn("--root", out)
+        fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
+        self.assertEqual(_tree(self.tmp), before)
+
     def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
         self._write(self.env.fstab, OLD_FSTAB + "\n")
