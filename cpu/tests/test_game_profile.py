@@ -1311,9 +1311,47 @@ class TickTargetUserWithoutAccountTest(GameProfileCase):
         self.assertEqual(p.tick(), 0)
         self.assertIn("line 2: BUILD_CPUS=$(nproc)", out.getvalue())  # the line first: 'on' refuses for it
         self.assertNotIn("names no account", out.getvalue())
-        # The line fixed, the name still without an account: the mark stays, and the name is said.
+        # The line fixed, the name still without an account: the line's word is forgotten, the name is said.
         out, err, actions = self.tick(self.NOBODY)
         self.assertEqual((out.count("TARGET_USER names no account"), err, actions), (1, "", []))
+
+    def test_a_fixed_line_is_forgotten_while_the_name_still_has_no_account(self) -> None:
+        # The tick forgets its word on a settings line once the line is fixed, also while TARGET_USER still
+        # names no account: the same line broken again is said again (and not hidden by the old mark).
+        def tick_with(conf: str) -> str:
+            self.write(self.paths.conf, conf)
+            settings, problems = read_settings(self.paths.conf)
+            out = io.StringIO()
+            p = GameProfile(self.paths, settings, self.systemd, uid_of=user_id, problems=problems, out=out)
+            self.assertEqual(p.tick(), 0)
+            return out.getvalue()
+
+        broken = f"TARGET_USER='{self.NOBODY}'\nBUILD_CPUS=$(nproc)\n"
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", tick_with(broken))
+        self.no_game()
+        self.assertEqual(tick_with(f"TARGET_USER='{self.NOBODY}'\n"), "")  # fixed, and no game runs
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+        self.gamemode_pid("1")
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", tick_with(broken))
+
+    def test_a_tick_looks_up_the_name_only_when_it_needs_it(self) -> None:
+        # No GameMode client, or the profile switched off by hand during this game: the tick has nothing to
+        # start, so no lookup (NSS, sssd or LDAP every 30 s for nothing).
+        names: list[str] = []
+
+        def uid_of(user: str) -> str:
+            names.append(user)
+            return user_id(user)
+
+        self.no_game()
+        self.assertEqual(self.tick(self.NOBODY, uid_of), ("", "", []))
+        self.gamemode_pid("1")
+        self.write(self.paths.suppress, "")
+        self.assertEqual(self.tick(self.NOBODY, uid_of), ("", "", []))
+        self.assertEqual(names, [])
+        os.remove(self.paths.suppress)  # a client runs and the profile is off: 'on' would need the name
+        self.assertIn("TARGET_USER names no account", self.tick(self.NOBODY, uid_of)[0])
+        self.assertEqual(names, [self.NOBODY])
 
     def test_a_link_at_the_mark_is_replaced_and_never_followed(self) -> None:
         victim = os.path.join(self.tmp, "victim")

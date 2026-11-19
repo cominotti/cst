@@ -340,8 +340,12 @@ switched the profile on for no user: it set `user@.service` and
 for such a `TARGET_USER` while a game runs either (it would fail again every
 30 s): it says why in the journal once per boot (`GameMode client running,
 profile not switched on: ...`; again after a tick found the name fixed; the
-same mark as for a settings line, `/run/cpu-setup/settings-warned`), and its
-unit does not fail.
+same mark as for a settings line, `/run/cpu-setup/settings-warned`, whose
+word on a line is still forgotten once the line is fixed), and its unit does
+not fail. It looks the name up only when it needs the answer: when it would
+switch the profile on, while that mark is there, and with the profile on; not
+at every run (on a machine whose accounts come from sssd or LDAP, each lookup
+can be slow).
 
 | Key | Meaning | Read by |
 |-----|---------|---------|

@@ -14,7 +14,7 @@ import locale
 import os
 import pwd
 import sys
-from typing import TextIO
+from typing import Final, TextIO
 
 from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
@@ -67,6 +67,10 @@ from cpu.game.domain import (
     unheld_text,
     vm_io_weight,
 )
+
+
+# How the watchdog's words on the settings end: it says them once per boot (GameProfile._say_once).
+_ONCE: Final = " (fix it; said once per boot)"
 
 
 def collate_as_bash() -> None:
@@ -663,10 +667,8 @@ class GameProfile:
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
         p = self.paths
-        why = None if self.problems else self._target_refusal()  # 'on' would refuse for TARGET_USER
-        if not self.problems and why is None:  # fixed: a line or a name that breaks again is said again
-            with contextlib.suppress(OSError):
-                os.unlink(p.settings_warned)
+        if not self.problems:  # fixed: a line or a name that breaks again is said again
+            self._forget_fixed_settings()
         if not os.path.exists(p.state):
             self.remove_leftover_dropins()
             if not self.gamemode_client():
@@ -676,9 +678,9 @@ class GameProfile:
                 if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
                     self.warn_once("GameMode client running, profile not switched on")
                     return 0
-                if why is not None:  # the same for TARGET_USER, with the same mark
-                    said = f"GameMode client running, profile not switched on: {why} (fix it; said once per boot)"
-                    self._say_once(p.settings_warned, said, lambda: self.log(4, said))
+                why = self._target_refusal()  # the same for TARGET_USER, with the same mark
+                if why is not None:
+                    self._say_refusal("GameMode client running, profile not switched on", why)
                 else:
                     self.log(5, "GameMode client running but profile off: switching on")
                     self.ctl("sys", "start", "--no-block", "cpu-game.service")
@@ -696,6 +698,25 @@ class GameProfile:
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
+
+    def _say_refusal(self, what: str, why: str) -> None:
+        """The watchdog's word on a TARGET_USER 'on' refuses (_target_refusal's why), once per boot, in the
+        mark of the settings file's problem lines (_forget_fixed_settings)."""
+        said = f"{what}: {why}{_ONCE}"
+        self._say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
+
+    def _forget_fixed_settings(self) -> None:
+        """With no problem line: forget what the watchdog said about the settings (a line or a name that
+        breaks again is then said again), unless it is about a TARGET_USER 'on' still refuses for. The
+        name is looked up only when there is such a mark."""
+        mark = self.paths.settings_warned
+        said = read_text(mark)
+        if said is not None:
+            why = self._target_refusal()
+            if why is not None and said.endswith(f": {why}{_ONCE}"):
+                return
+        with contextlib.suppress(OSError):
+            os.unlink(mark)
 
     def _problem_lines(self) -> list[str]:
         """The settings file's problem lines, one message each (none when it has none)."""
