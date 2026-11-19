@@ -984,7 +984,7 @@ class NotifyLoopTest(unittest.TestCase):
             + ["log:stopped"],
         )
 
-    def test_a_duration_of_zero_stops_after_the_first_pass(self) -> None:
+    def test_a_duration_of_zero_stops_before_the_first_sample(self) -> None:
         mon = self.monitor(_FakeNotifier(self.events, pings=3))
         mon.duration = 0
         mon.run()
