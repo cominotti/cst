@@ -1493,6 +1493,25 @@ class SccacheConfigTest(RulesBase):
         shutil.rmtree(root)
         self.assertEqual(tc_sccache.missing_programs(42, proc), ())
 
+    def test_server_cgroup_keeps_a_carriage_return_of_the_real_file(self) -> None:
+        # Read through cst_core's read_text from a real file: in universal-newlines mode a "\r" in
+        # a cgroup's name became a newline, cgroup_v2_path cut the path there and status said
+        # the server was outside its scope.
+        proc = os.path.join(self.tmp, "proc")
+        os.makedirs(os.path.join(proc, "42"))
+        text = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/a\rb.slice/cst-sccache-host.scope\n"
+        with open(os.path.join(proc, "42", "cgroup"), "wb") as f:
+            f.write(text.encode())
+        with mock.patch.object(tc_sccache, "PROC", proc):
+            got = tc_sccache.server_cgroup(42)
+            self.assertIsNone(tc_sccache.server_cgroup(None))
+            self.assertIsNone(tc_sccache.server_cgroup(7))  # no such process
+        self.assertEqual(got, text)
+        self.assertEqual(
+            tcd_config.server_place("host", got, "/run/user/1000/cst-sccache-host.sock"),
+            "sccache server host: in its own scope (app.slice/a\rb.slice/cst-sccache-host.scope)",
+        )
+
     def test_server_place(self) -> None:
         sock = "/run/user/1000/cst-sccache-h.sock"
         place = tcd_config.server_place

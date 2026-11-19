@@ -178,8 +178,8 @@ def find_game(name: str | None) -> int | None:
     return best
 
 
-def game_cgroup(pid: int) -> str:
-    return (cgroup_v2_path(read_text(f"/proc/{pid}/cgroup", "")) or "").lstrip("/")
+def game_cgroup(pid: int, proc: str = PROC) -> str:
+    return (cgroup_v2_path(read_text(f"{proc}/{pid}/cgroup", "", keep_line_ends=True)) or "").lstrip("/")
 
 
 def invol(pid: int) -> int:
