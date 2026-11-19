@@ -82,11 +82,6 @@ def ostree_facts(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deployment]]:
     return known.ostree
 
 
-def deployments(host: DoctorHostPort) -> OstreeAnswer:
-    """(booted, pending, error) of ostree_facts."""
-    return ostree_facts(host)[0]
-
-
 def runs(host: DoctorHostPort, program: HostPath) -> bool:
     """program is installed and executable."""
     view = host.path(program)
