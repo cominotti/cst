@@ -14,6 +14,7 @@ from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
+from cst_core.ports import ActiveState
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
 SWAP_OLD_MARKERS: Final[tuple[str, ...]] = (
@@ -554,23 +555,14 @@ class SettingState(StrEnum):
     LATER = "later"
 
 
-class SliceActiveState(StrEnum):
-    """machine.slice's ActiveState as `systemctl show` prints it (systemd's words)."""
-
-    ACTIVE = "active"
-    RELOADING = "reloading"
-    INACTIVE = "inactive"
-    FAILED = "failed"
-    ACTIVATING = "activating"
-    DEACTIVATING = "deactivating"
-    MAINTENANCE = "maintenance"
-    REFRESHING = "refreshing"
+# The ActiveStates in which swap reads machine.slice as active (systemd's words: cst_core's ActiveState).
+SLICE_ACTIVE_STATES: Final = frozenset({ActiveState.ACTIVE})
 
 
 def slice_not_active(active_state: str) -> bool:
     """systemd says the slice is not active: an ActiveState other than "active" (any word, known or not).
     "" (systemd gave no answer) is False: not known, so the cgroup is read as before."""
-    return active_state not in ("", SliceActiveState.ACTIVE)
+    return active_state != "" and active_state not in SLICE_ACTIVE_STATES
 
 
 # The width of the state column of the settings rows and of apply's verification notes under them:

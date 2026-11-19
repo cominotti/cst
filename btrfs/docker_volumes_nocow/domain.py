@@ -12,6 +12,7 @@ from typing import Final, TypedDict, TypeIs
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.values import GIB
+from cst_core.ports import ActiveState
 
 MARGIN: Final = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
@@ -111,12 +112,20 @@ def label_mismatch(old: Mapping[str, bytes | None], new: Mapping[str, bytes | No
     return f"copy check failed (SELinux label of {rel}: {label_text(old.get(rel))} vs {label_text(new.get(rel))})"
 
 
+# docker.service's ActiveStates in which the migration may run (it is stopped), and those in which it
+# waits because Docker is running; any other word is "state unknown", and it waits too.
+DOCKER_STOPPED_STATES: Final = frozenset({ActiveState.INACTIVE, ActiveState.FAILED})
+DOCKER_BUSY_STATES: Final = frozenset(
+    {ActiveState.ACTIVE, ActiveState.ACTIVATING, ActiveState.RELOADING, ActiveState.DEACTIVATING}
+)
+
+
 def service_wait_reason(returncode: int, state: str) -> str | None:
     """None when docker.service is known to be stopped, else why the migration waits.
     Fails closed: only a clear "inactive" or "failed" lets it run."""
-    if returncode == 0 and state in ("inactive", "failed"):
+    if returncode == 0 and state in DOCKER_STOPPED_STATES:
         return None
-    if returncode == 0 and state in ("active", "activating", "reloading", "deactivating"):
+    if returncode == 0 and state in DOCKER_BUSY_STATES:
         return "Docker is running"
     return f"docker.service state unknown (systemctl exit {returncode}, ActiveState {state!r})"
 
