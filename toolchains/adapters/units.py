@@ -13,24 +13,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from cst_core.ports import CommandResult
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.runner import on_host_argv
+from cst_core.adapters import SystemctlAdapter
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
-from toolchains.domain.auto import TimerFacts, UnitActiveState, own_session_env
+from toolchains.domain.auto import TimerFacts, UnitActiveState, UserManagerVerb, own_session_env
 from toolchains.domain.common import NAME
-from toolchains.adapters.program import RUNNER, in_container
-
-
-def systemctl_cmd(*args: str, program: str | None) -> list[str]:
-    # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), None for the real
-    # systemctl. No default: every caller says which, so that no test reaches the real user
-    # manager by leaving it out.
-    if program is not None:
-        return [program, "--user", *args]
-    cmd = ["systemctl", "--user", *args]
-    return on_host_argv(cmd, {}) if in_container() else cmd
+from toolchains.adapters.program import RUNNER
 
 
 def systemctl_env() -> dict[str, str]:
@@ -40,10 +31,49 @@ def systemctl_env() -> dict[str, str]:
     return own_session_env(os.environ, uid, owner, own_exists=os.path.isdir(f"/run/user/{uid}"))
 
 
+def user_systemctl(program: str | None) -> SystemctlAdapter:
+    """cst_core's systemctl adapter for the user manager: systemctl --user, on the host from a
+    toolbox, this user's session (systemctl_env, read at each call), one minute at most, stdin
+    inherited. PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), never on the
+    host; None for the real systemctl. No default: every caller says which, so that no test
+    reaches the real user manager by leaving it out."""
+    return SystemctlAdapter(
+        RUNNER, timeout=MINUTE, user=True, program=program, on_host=True, base_env=systemctl_env(), stdin="inherit"
+    )
+
+
+def _result(manager: SystemctlAdapter, args: Sequence[str]) -> CommandResult:
+    """The adapter's call for one systemctl command line (ARGS without systemctl --user)."""
+    match args:
+        case (UserManagerVerb.IS_ACTIVE, unit):
+            res = manager.is_active(unit)
+        case (UserManagerVerb.IS_ENABLED, unit):
+            res = manager.is_enabled(unit)
+        case (UserManagerVerb.SHOW, "-p", prop, "--value", unit):
+            res = manager.show_value(unit, prop)
+        case (UserManagerVerb.SHOW_ENVIRONMENT,):
+            res = manager.show_environment()
+        case (UserManagerVerb.START, unit):
+            res = manager.start(unit)
+        case (UserManagerVerb.STOP, unit):
+            res = manager.stop(unit)
+        case (UserManagerVerb.ENABLE, "--now", unit):
+            res = manager.enable(unit, now=True)
+        case (UserManagerVerb.DISABLE, "--now", unit):
+            res = manager.disable(unit, now=True)
+        case (UserManagerVerb.CLEAN, flag, unit) if flag.startswith("--what="):
+            res = manager.clean(unit, what=flag.removeprefix("--what="))
+        case (UserManagerVerb.DAEMON_RELOAD,):
+            res = manager.daemon_reload_result()
+        case _:
+            raise ValueError(f"systemctl --user {' '.join(args)}: not a call cst-toolchains makes")
+    return res
+
+
 def systemctl(*args: str, program: str | None, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=MINUTE, stdin="inherit")
+    r = _result(user_systemctl(program), args)
     if r.cause is not None:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None

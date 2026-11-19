@@ -1408,13 +1408,11 @@ class PackageLayersTest(Scratch):
         # Left out, the real systemctl would run: every caller must name the stub (or None).
         none: dict[str, str | None] = {}  # no program= (a call the type checker cannot see as one)
         with self.assertRaises(TypeError):
-            tc_units.systemctl_cmd("is-active", "cst-toolchains-prune.timer", **none)
+            tc_units.systemctl("is-active", "cst-toolchains-prune.timer", check=False, ok=(0,), **none)
+        with self.assertRaises(TypeError):
+            tc_units.user_systemctl(**none)
         with self.assertRaises(TypeError):
             tc_units.UserUnits(tc_program.RunOutput(self.home, journal=False), **none)
-        self.assertEqual(
-            tc_units.systemctl_cmd("is-active", "x.timer", program="/nonexistent/systemctl"),
-            ["/nonexistent/systemctl", "--user", "is-active", "x.timer"],
-        )
 
 
 class ParseSizeTest(unittest.TestCase):
