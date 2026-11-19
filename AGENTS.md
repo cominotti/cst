@@ -157,7 +157,8 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   standard library. `test pylint`, `test types` and `test mutation` use uv,
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
-- Every Python file, tests included, is ty-clean and strictly annotated: it is
+- Every Python file, tests included, is ty-clean, with every ty rule an error
+  (`[tool.ty.rules] all = "error"`), and strictly annotated: it is
   in `[tool.ty.src] include` of `pyproject.toml` (a `*.py` file through its
   folder; an extensionless helper by name, there and in `extend-include`). ruff's annotation rules
   (ANN) apply to every file: no per-file-ignores entry ignores them.
@@ -165,7 +166,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   setting that switches a file or a rule off: fix the code.
   `tests/test_python_files.py` fails on each
   ([docs/dev-tools.md, "What each gate checks"](docs/dev-tools.md#what-each-gate-checks)).
-- Run one module with `invowk cmd test module NAME`: a bare `python3 -m unittest NAME` skips the socket-stdin and no-sudo gates (see "Test gotchas"). Either way the full suite still has to pass.
+- Run one module with `invowk cmd test module NAME`: a bare `python3 -m unittest NAME` skips the runner's gates (socket stdin, no sudo, the host command stubs, unclosed files and sockets; see "Test gotchas"). Either way the full suite still has to pass.
 - Don't run E2E tier 2 on a workstation. It starts a `--privileged` container that can see the machine's disks (`CST_E2E_ALLOW_PRIVILEGED=1`). CI runs it.
 - CI runs the unit tests as a non-root user named `ci`. Tests must not depend on the developer's home or groups.
 
