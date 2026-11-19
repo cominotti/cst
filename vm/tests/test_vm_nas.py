@@ -1371,7 +1371,10 @@ class TornRecordTest(Nas):
         # under the host it was made on.
         self.write_torn([self.torn_entry(host="oldhost")])
         self.restic_cfg(
-            snapshots_by_host={"sophia": self.listed((SNAP_ID, BOTH_TAGS)), "oldhost": self.listed((TORN_ID, BOTH_TAGS))}
+            snapshots_by_host={
+                "sophia": self.listed((SNAP_ID, BOTH_TAGS)),
+                "oldhost": self.listed((TORN_ID, BOTH_TAGS)),
+            }
         )
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

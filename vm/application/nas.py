@@ -612,7 +612,15 @@ def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = 
     or None when not readable."""
     rc, so, _ = restic.run(
         nas["env"],
-        ["snapshots", "--json", "--no-lock", "--host", nas["host"] if host is None else host, "--tag", f"{TAG},vm:{vm}"],
+        [
+            "snapshots",
+            "--json",
+            "--no-lock",
+            "--host",
+            nas["host"] if host is None else host,
+            "--tag",
+            f"{TAG},vm:{vm}",
+        ],
         RESTIC_CHECK_TIMEOUT,
     )
     if rc != 0:
@@ -655,7 +663,7 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
         raise Stop(
             f"{e}; restic snapshot {snap[:8]} is no backup and could NOT be recorded ({unrecorded}) or forgotten: "
             f"forget it by hand before the next backup of {vm}, whose retention would count it: restic forget "
-            f"{snap}, with the repository's variables of vm/README.md, section \"Restore from the NAS\""
+            f'{snap}, with the repository\'s variables of vm/README.md, section "Restore from the NAS"'
         ) from None
     if failed is None:
         if unrecorded is None:
