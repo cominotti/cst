@@ -60,10 +60,13 @@ ty setting in `pyproject.toml`) follows the same rule:
 - A change in what a gate reports is a behaviour change of the gate. Its test
   plants a source the gate must report (or must not) and fails on the old
   gate.
-- A checker rule is turned on in two steps: first the refactors that clear
-  its hits, each with its proof; then the settings commit, whose proof is the
+- The exception: turning a ruff or ty rule on in `pyproject.toml` needs no
+  planted source. It goes in two steps: first the refactors that clear its
+  hits, each with its proof; then the settings commit, whose proof is the
   checker passing on the whole tree (`invowk cmd test pylint` or
-  `invowk cmd test types`).
+  `invowk cmd test types`). A change to a test that checks those settings
+  (such as `tests/test_python_files.py`) is a gate change under the first
+  bullet.
 
 ## No behaviour at all: docs
 
