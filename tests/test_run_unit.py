@@ -181,6 +181,11 @@ class C(unittest.TestCase):
     def test_b_collects(self):
         gc.collect()
         gc.enable()
+class P(unittest.TestCase):
+    def test_replaces_showwarning_with_one_that_calls_the_original_then_leaks(self):
+        warnings.showwarning = lambda *args, **kwargs: warnings._showwarning_orig(*args, **kwargs)
+        f = open(os.devnull)
+        del f
 class H(unittest.TestCase):
     def test_a_replaces_the_unraisable_hook(self):
         import sys
@@ -272,6 +277,19 @@ class ResourceWarningGateTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn(
             "error: ResourceWarning in probe_leaks.S.test_replaces_showwarning_then_leaks: unclosed file", done.stderr
+        )
+
+    def test_a_leak_seen_by_a_showwarning_that_calls_the_original_is_one_line(self) -> None:
+        done = self.run_probe("", cls="P")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 1, done.stderr)
+        self.assertTrue(
+            error[0].startswith(
+                "error: ResourceWarning in "
+                "probe_leaks.P.test_replaces_showwarning_with_one_that_calls_the_original_then_leaks: unclosed file"
+            ),
+            error,
         )
 
     def test_a_leak_after_a_test_that_ignored_every_warning_fails_the_run(self) -> None:

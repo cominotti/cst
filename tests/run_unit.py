@@ -310,6 +310,7 @@ class LeakRecordingResult(unittest.TextTestResult):
         self.leaks = []
         self.lost_exceptions = []
         self.hook_problems = []
+        self._in_replaced = False
         self._running = "before the first test"
         # A leak the garbage collector frees (an object in a reference cycle) may come from any
         # test before the one running: _where says so (gc.callbacks tell when it collects).
@@ -389,12 +390,21 @@ class LeakRecordingResult(unittest.TextTestResult):
         return self._running
 
     def _entered(self, msg: warnings.WarningMessage) -> None:
-        if warnings.showwarning is not self._showwarning_orig:
-            self._record(msg)  # the replacement gets it, not _warned
-        self._show_entry(msg)
+        if warnings.showwarning is self._showwarning_orig:
+            self._show_entry(msg)
+            return
+        self._record(msg)  # the replacement gets it, not _warned
+        # A replacement that hands the warning on to the original (warnings._showwarning_orig)
+        # reaches _warned: that is the same warning, already recorded.
+        self._in_replaced = True
+        try:
+            self._show_entry(msg)
+        finally:
+            self._in_replaced = False
 
     def _warned(self, msg: warnings.WarningMessage) -> None:
-        self._record(msg)
+        if not self._in_replaced:
+            self._record(msg)
         self._show(msg)
 
     def _record(self, msg: warnings.WarningMessage) -> None:
