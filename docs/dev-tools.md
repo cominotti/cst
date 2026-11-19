@@ -263,8 +263,11 @@ repository:
 - **`[tool.ty.rules]`** raises rules that are warnings or off by default to
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import`, `possibly-unresolved-reference`,
-  `unused-ignore-comment` (an ignore comment that suppresses nothing) and
-  `redundant-cast` (a `cast()` to the type the value already has). A rule
+  `unused-ignore-comment` (an ignore comment that suppresses nothing),
+  `redundant-cast` (a `cast()` to the type the value already has) and
+  `missing-override-decorator` (a method that overrides one of a base class,
+  `setUp` included, says so with `@override` from `typing`: a base method
+  renamed or removed is then an error, not a method nobody calls). A rule
   may be added there only at `"error"`.
 
 ## The workflow audit (zizmor)

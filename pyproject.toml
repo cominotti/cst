@@ -319,6 +319,9 @@ possibly-unresolved-reference = "error"
 # to the type the value already has.
 unused-ignore-comment = "error"
 redundant-cast = "error"
+# A method that overrides one of a base class says so with @override
+# (typing.override), unittest's setUp included.
+missing-override-decorator = "error"
 
 [tool.ty.src]
 # The ty gate: every Python file of the repository, by folder. ty finds the
