@@ -32,6 +32,12 @@ def parse_toml(data: str | bytes) -> object:
     return tomllib.loads(data.decode() if isinstance(data, bytes) else data)
 
 
+def number_or_none(value: object) -> int | float | None:
+    """value when it is a JSON number (an int or a float; a bool is no number, as JSON tells them
+    apart), else None."""
+    return value if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
 def json_object(value: object) -> TypeIs[dict[str, object]]:
     """value is a JSON object: a dict whose keys are all strings."""
     return isinstance(value, dict) and all(isinstance(k, str) for k in value)

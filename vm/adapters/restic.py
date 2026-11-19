@@ -14,7 +14,7 @@ from typing import Protocol
 
 from cst_core.adapters.runner import c_locale
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.shapes import json_object, number_or_none, parse_json
 from cst_core.domain.values import MINUTE, format_bytes_gib_mib
 from vm.domain.backup import ResticMessage, ResticSummary, is_restic_summary
 
@@ -36,19 +36,14 @@ def restic_env(extra: Mapping[str, str]) -> dict[str, str]:
     return {**c_locale(os.environ), **extra}
 
 
-def _number(value: object) -> int | float | None:
-    """A JSON number (not a bool), else None."""
-    return value if isinstance(value, int | float) and not isinstance(value, bool) else None
-
-
 def progress_text(status: object) -> str:
     """One status line of restic backup --json as shown: "50 % (5 MiB of 10 MiB read)"; a field
     that is missing or null counts as 0, one of another type shows as "?"."""
     line = status if json_object(status) else {}
     pct, done, total = (line.get(k) or 0 for k in ("percent_done", "bytes_done", "total_bytes"))
-    shown_pct = f"{100 * p:.0f}" if (p := _number(pct)) is not None else "?"
+    shown_pct = f"{100 * p:.0f}" if (p := number_or_none(pct)) is not None else "?"
     done_text, total_text = (
-        format_bytes_gib_mib(n, mib_decimals=1) if (n := _number(v)) is not None else "?" for v in (done, total)
+        format_bytes_gib_mib(n, mib_decimals=1) if (n := number_or_none(v)) is not None else "?" for v in (done, total)
     )
     return f"{shown_pct} % ({done_text} of {total_text} read)"
 

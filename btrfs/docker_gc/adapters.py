@@ -40,7 +40,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdin
-from cst_core.domain.shapes import KeyTypes, json_object, parse_json
+from cst_core.domain.shapes import KeyTypes, json_object, number_or_none, parse_json
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -132,10 +132,6 @@ def _strs(value: object) -> tuple[str, ...]:
     return tuple(v for v in value if isinstance(v, str)) if isinstance(value, list) else ()
 
 
-def _num(value: object) -> float | None:
-    return value if isinstance(value, int | float) and not isinstance(value, bool) else None
-
-
 def _time(value: object) -> float:
     return ts(value if isinstance(value, str) else None)
 
@@ -167,7 +163,7 @@ def volume_of(o: InspectedObject) -> Volume:
 
 
 def image_of(o: InspectedObject) -> Image:
-    size = _num(o.get("Size")) or 0
+    size = number_or_none(o.get("Size")) or 0
     return Image(
         id=_str(o.get("Id")),
         tags=_strs(o.get("RepoTags")),
@@ -346,14 +342,14 @@ class GcStateFiles:
         except OSError, ValueError:
             st = None
         if json_object(st) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
-            images, since = st.get("images"), _num(st.get("since"))
-            heartbeat = _num(st.get("heartbeat", 0))
+            images, since = st.get("images"), number_or_none(st.get("since"))
+            heartbeat = number_or_none(st.get("heartbeat", 0))
             # a value that is not a time: not a state docker-gc wrote
             if (
                 isinstance(images, dict)
                 and since is not None
                 and heartbeat is not None
-                and all(_num(v) is not None for v in images.values())
+                and all(number_or_none(v) is not None for v in images.values())
             ):
                 return GcState(since=since, images=images, heartbeat=heartbeat)
         return GcState(since=time.time(), images={}, heartbeat=0)
@@ -374,8 +370,8 @@ class GcStateFiles:
         lr = _obj(lr)
         if stored_version(LAST_RUN_FORMAT, self.paths.last_run, lr) is None:
             return None
-        at = _num(lr.get("at"))
-        counts = [n for k in SUMMARY_COUNTS if (n := _num(lr.get(k))) is not None]
+        at = number_or_none(lr.get("at"))
+        counts = [n for k in SUMMARY_COUNTS if (n := number_or_none(lr.get(k))) is not None]
         if at is None or len(counts) < len(SUMMARY_COUNTS):
             return None
         containers, volumes, images, image_bytes, failed = (int(n) for n in counts)

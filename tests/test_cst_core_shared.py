@@ -66,6 +66,7 @@ from cst_core.domain.shapes import (
     items_of,
     json_object,
     list_of,
+    number_or_none,
     object_of,
     object_or_empty,
     parse_json,
@@ -1470,6 +1471,14 @@ class ShapesTest(unittest.TestCase):
         for value in ([], "x", None, 3, {1: "a"}, {"a": 1, 2: "b"}):
             with self.subTest(value=value):
                 self.assertFalse(json_object(value))
+
+    def test_number_or_none(self) -> None:
+        for value in (0, 3, -1.5, 2.0):
+            with self.subTest(value=value):
+                self.assertIs(number_or_none(value), value)
+        for value in (True, False, None, "3", [1], {"a": 1}):
+            with self.subTest(value=value):
+                self.assertIsNone(number_or_none(value))
 
     def test_has_shape(self) -> None:
         required = {"kind": (str,), "n": (int,)}

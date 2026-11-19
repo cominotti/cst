@@ -8,7 +8,7 @@ from typing import Required
 from typing import TypedDict
 from typing import TypeIs
 
-from cst_core.domain.shapes import KeyTypes, has_shape, json_object
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object, number_or_none
 
 GAP_MAX = 30.0  # s; a larger gap between samples means the daemon was not running
 FRESH_MAX = 25.0  # s; newer data may still be buffered in the daemon
@@ -399,5 +399,4 @@ def is_notice(r: object) -> TypeIs[Notice]:
 
 def record_ts(r: object) -> float | None:
     """A record's own time ("ts"), when it is a number."""
-    ts = r.get("ts") if json_object(r) else None
-    return ts if isinstance(ts, int | float) and not isinstance(ts, bool) else None
+    return number_or_none(r.get("ts")) if json_object(r) else None
