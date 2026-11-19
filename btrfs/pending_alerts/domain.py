@@ -208,7 +208,7 @@ def seen_as(rec: Mapping[str, Seen], name: str, mtime: str) -> SeenHow | None:
         return None
     # Full precision: a repeat kept within the same second is a new version.
     # Records of the first version had whole seconds only.
-    same = seen.mtime == mtime if "." in seen.mtime else seen.mtime == mtime.split(".")[0]
+    same = seen.mtime == mtime if "." in seen.mtime else seen.mtime == mtime.split(".", maxsplit=1)[0]
     return seen.how if same else None
 
 

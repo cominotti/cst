@@ -201,7 +201,7 @@ def app_in_main_library(b: Bulk, pair: VdfPair, appid: str, app: SteamApp) -> di
     m_src = os.path.join(src, "steamapps", f"appmanifest_{appid}.acf")
     m_dst = os.path.join(T, "steamapps", f"appmanifest_{appid}.acf")
     ks, kd = t.kind(m_src), t.kind(m_dst)
-    if ks != LstatKind.ABSENT and kd != LstatKind.ABSENT:
+    if LstatKind.ABSENT not in (ks, kd):
         app["why"] = "a manifest in both libraries"
         return None
     mpath = m_dst if kd != LstatKind.ABSENT else m_src

@@ -778,7 +778,7 @@ class WatcherFailureTest(unittest.TestCase):
     def test_fixed_afterwards_or_never_failed(self) -> None:
         later = "2026-11-12T09:00:05-03:00 sophia python3[999]: fixed: LDAC now at 48000 Hz\n"
         self.assertIsNone(self.m.lw_failure(JOURNAL + later))
-        self.assertIsNone(self.m.lw_failure(JOURNAL.split("-- Boot")[0]))
+        self.assertIsNone(self.m.lw_failure(JOURNAL.split("-- Boot", maxsplit=1)[0]))
         self.assertIsNone(self.m.lw_failure(""))
 
     def test_detail_only_from_the_same_attempt(self) -> None:

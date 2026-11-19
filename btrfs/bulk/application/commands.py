@@ -186,7 +186,7 @@ def print_library(b: Bulk, sv: SteamSurvey, pair: VdfPair) -> None:
 def print_apps(b: Bulk, sv: SteamSurvey) -> None:
     """steam_print's line (or lines) on each app."""
     texts = {
-        SteamAppState.OK: lambda a: "ok (in ~/Bulk/steam)",
+        SteamAppState.OK: lambda _a: "ok (in ~/Bulk/steam)",
         SteamAppState.SKIP: lambda a: f"skipped: a tool, not a game; move it with --app {a['id']}",
         SteamAppState.UPDATE: lambda a: f"NEEDS A LOOK: mid-update ({a['why']}): let Steam finish, close it, run again",
         SteamAppState.LOOK: lambda a: f"NEEDS A LOOK: {a['why']} (nothing touched)",

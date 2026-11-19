@@ -180,7 +180,7 @@ def main(
 
 def ldac_watch(argv: Sequence[str], doc: str = "") -> int:
     """The command line of `bt-ldac-watch` (DOC: its help, the program's docstring)."""
-    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=doc.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="bt-ldac-watch", description=doc.split("\n\n", maxsplit=1)[0])
     ap.add_argument("--device", required=True)
     ap.add_argument("--rate", type=int, default=48000)
     ap.add_argument("--dry-run", action="store_true")

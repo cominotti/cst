@@ -1731,7 +1731,9 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(vm_domain.overlay_kind("running", "/base.qcow2", "/base.qcow2"), "definition")
         # Equal paths, not the same object or ordering: an overlay path sorting before the image is still live.
         self.assertEqual(vm_domain.overlay_kind("running", "/a-overlay.qcow2", "/base.qcow2"), "live")
-        self.assertEqual(vm_domain.overlay_kind("running", "".join(["/base", ".qcow2"]), "/base.qcow2"), "definition")
+        self.assertEqual(
+            vm_domain.overlay_kind("running", os.path.join("/", "base.qcow2"), "/base.qcow2"), "definition"
+        )
         self.assertEqual(vm_domain.overlay_kind("shut off", "/live.qcow2", "/base.qcow2"), "offline")
         self.assertEqual(vm_domain.overlay_kind("weird", "/live.qcow2", "/base.qcow2"), "unknown")
         args = vm_domain.forget_args("win", "workstation", 4, 3)

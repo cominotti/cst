@@ -116,8 +116,8 @@ TEST_SETTINGS = "SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_B
 # Its first line, split: the license gate wants that line on line 1 of this file only.
 MAIN_DROPIN = (
     "# SPDX-"
-    + "License-Identifier: MPL-2.0\n"
-    + """\
+    "License-Identifier: MPL-2.0\n"
+    """\
 # Managed by swap-setup.sh (CST): protect libvirt guests from reclaim.
 # Soft floor: reclaim prefers unprotected cgroups while they have anything
 # reclaimable; ignored when they don't. Propagates to the VM scope via the

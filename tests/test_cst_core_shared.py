@@ -1104,7 +1104,10 @@ class CommandRunnerTest(unittest.TestCase):
         env = kw["env"]
         assert isinstance(env, dict)
         self.assertEqual((env["LC_ALL"], env["K"]), ("C", "v"))
-        on_host: Callable[[core_runner.SubprocessCommandRunner], object] = lambda r: r.run(["cmd", "arg"], on_host=True)
+
+        def on_host(r: core_runner.SubprocessCommandRunner) -> object:
+            return r.run(["cmd", "arg"], on_host=True)
+
         self.assertEqual(self.recorded(inside, on_host)[0], ["flatpak-spawn", "--host", "cmd", "arg"])
         self.assertEqual(self.recorded(inside, lambda r: r.run(["cmd", "arg"]))[0], ["cmd", "arg"], "on_host is opt-in")
         self.assertEqual(self.recorded(outside, on_host)[0], ["cmd", "arg"])

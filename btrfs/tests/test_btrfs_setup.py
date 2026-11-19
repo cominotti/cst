@@ -266,7 +266,7 @@ disable_timers x.service
         self.touch(os.path.join(state, "last-used.json"))
         stage = os.path.join(self.tmp, "stage")
         # Installed first (staged), so the record lists the component.
-        self.run_bash("\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"]))
+        self.run_bash(f"{STAGED_INSTALLER}\ncst_install --component btrfs:docker-gc >/dev/null")
         r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
         units = ["docker-gc-recorder.service", "docker-gc.service", "docker-gc.timer"]
         self.assertEqual(
@@ -349,14 +349,10 @@ disable_timers x.service
         # Sourced the way the frontend does; the paths it writes point into the test's folder.
         self.touch(*(os.path.join(self.units, t) for t in ("btrfs-snapshot.timer", "btrfs-snapshot-nas.timer")))
         self.run_bash(
-            "\n".join(
-                [
-                    '. "$SRC/setup-snapshots.bash"',
-                    'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"; SNAP_CONF="$T/snapshots.conf"',
-                    "target_user=u",
-                    call,
-                ]
-            )
+            '. "$SRC/setup-snapshots.bash"\n'
+            'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"; SNAP_CONF="$T/snapshots.conf"\n'
+            "target_user=u\n"
+            f"{call}"
         )
         return [c for c in self.calls() if not c.startswith("rm ")]
 
@@ -659,7 +655,7 @@ class ComponentInstallTest(unittest.TestCase):
         # systemctl enable fails (set -e stops docker_gc there): the files are written and listed,
         # but the record says pending, which cst doctor reports as a partial install.
         r = subprocess.run(
-            ["bash", "-c", "\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"])],
+            ["bash", "-c", f"{STAGED_INSTALLER}\ncst_install --component btrfs:docker-gc >/dev/null"],
             check=False,
             capture_output=True,
             text=True,
@@ -680,9 +676,7 @@ class ComponentInstallTest(unittest.TestCase):
 
     def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
         # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
-        script = "\n".join(
-            [STAGED_INSTALLER, DOCKER_GC_STAGED, "cst_component_units() { return 1; }", "docker_gc disable"]
-        )
+        script = f"{STAGED_INSTALLER}\n{DOCKER_GC_STAGED}\ncst_component_units() {{ return 1; }}\ndocker_gc disable"
         r = subprocess.run(
             [
                 "bash",

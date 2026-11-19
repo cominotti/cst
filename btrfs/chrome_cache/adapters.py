@@ -122,7 +122,7 @@ def allocated_bytes(path: str) -> int:
         total += os.lstat(path).st_blocks * 512
     except OSError:
         return 0
-    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+    for root, dirs, files in os.walk(path, onerror=lambda _e: None):
         for n in dirs + files:
             with contextlib.suppress(OSError):
                 total += os.lstat(os.path.join(root, n)).st_blocks * 512

@@ -65,7 +65,7 @@ DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
 DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DEGRADED_BOOT_FAKES = (
     f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
-    + r"""export E2E_CSUM=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    r"""export E2E_CSUM=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 # The fakes are exported bash functions: the setup script resets PATH, and
 # nothing in /usr/bin is replaced. rpm-ostree keeps its tracked list in
@@ -128,7 +128,7 @@ export -f rpm-ostree cpio findmnt btrfs lsblk udevadm
 
 DEGRADED_BOOT_PREPARE = (
     f". {DEGRADED_BOOT_DIR}/fakes.bash\n"
-    + r"""D="/ostree/deploy/e2e/deploy/$E2E_CSUM.0"
+    r"""D="/ostree/deploy/e2e/deploy/$E2E_CSUM.0"
 mkdir -p "$D/usr/lib/udev/rules.d" "/ostree/boot.1/e2e/$E2E_CSUM" /boot/loader/entries /boot/ostree/initramfs-overlays
 cp /usr/lib/udev/rules.d/64-btrfs.rules "$D/usr/lib/udev/rules.d/"
 ln -sfn "../../../deploy/e2e/deploy/$E2E_CSUM.0" "/ostree/boot.1/e2e/$E2E_CSUM/0"
@@ -152,7 +152,7 @@ touch /run/ostree-booted
 SWAP_E2E_DIR = "/var/tmp/e2e-swap"
 SWAP_E2E_LIB = (
     f"W={SWAP_E2E_DIR}\n"
-    + r"""PU=0e2e5a5a-1111-4222-8333-944455556666
+    r"""PU=0e2e5a5a-1111-4222-8333-944455556666
 SIZE=1073741824
 CST=/opt/cst-rw/cst
 SRC=/opt/cst-rw/swap

@@ -821,9 +821,9 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
             f'else d="{self.tmp}/elsewhere/aa/0123456789abcd"; fi\n'
             'echo "{\\"packages\\": [], \\"build_directory\\": \\"$d\\"}"\n'
         )
-        for name, data in (("comm", b"cargo\n"), ("cmdline", cmdline), ("environ", environ)):
+        for entry, data in (("comm", b"cargo\n"), ("cmdline", cmdline), ("environ", environ)):
             if data is not None:
-                with open(os.path.join(base, name), "wb") as f:
+                with open(os.path.join(base, entry), "wb") as f:
                     f.write(data)
         os.symlink(self.tmp, os.path.join(base, "cwd"))
         os.symlink(exe, os.path.join(base, "exe"))

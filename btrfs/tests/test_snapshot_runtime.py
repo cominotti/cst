@@ -39,14 +39,12 @@ def shell_function(path: str, name: str) -> str:
 class SnapStatusCachesTest(unittest.TestCase):
     """The cache line of snap_status, with stubs for everything that reads the machine."""
 
-    STUBS = "\n".join(
-        [
-            "snap_home() { echo /nonexistent/home; }",
-            "systemctl() { return 1; }",
-            "snap_entry_state() { echo -; }",
-            "snap_plan_stale() { :; }",
-            "snap_chrome() { :; }",
-        ]
+    STUBS = (
+        "snap_home() { echo /nonexistent/home; }\n"
+        "systemctl() { return 1; }\n"
+        "snap_entry_state() { echo -; }\n"
+        "snap_plan_stale() { :; }\n"
+        "snap_chrome() { :; }"
     )
 
     def status(self, text: str | None) -> list[str]:
@@ -55,14 +53,12 @@ class SnapStatusCachesTest(unittest.TestCase):
             if text is not None:
                 with open(conf, "w") as f:
                     f.write(text)
-            script = "\n".join(
-                [
-                    'SRC="$1"; . "$1/setup-snapshots.bash"',
-                    self.STUBS,
-                    'PROG="cst btrfs"; SNAP_CONF="$2"; SNAP_STATE="$3/state"; SNAP_TOP="$3/top"',
-                    'SNAP_BOOT_FLAG="$3/boot-flag"; BULK_FLAG="$3/bulk-flag"',
-                    "snap_status",
-                ]
+            script = (
+                'SRC="$1"; . "$1/setup-snapshots.bash"\n'
+                f"{self.STUBS}\n"
+                'PROG="cst btrfs"; SNAP_CONF="$2"; SNAP_STATE="$3/state"; SNAP_TOP="$3/top"\n'
+                'SNAP_BOOT_FLAG="$3/boot-flag"; BULK_FLAG="$3/bulk-flag"\n'
+                "snap_status"
             )
             r = subprocess.run(
                 ["bash", "-c", script, "_", BTRFS, conf, d],
@@ -114,18 +110,16 @@ class SetupHandsNoSeamTest(unittest.TestCase):
             with open(fake, "w", encoding="utf-8") as f:
                 f.write('#!/bin/bash\nprintf "%s|%s\\n" "$*" "${CST_SNAPSHOT_ROOT-unset}" >>"$T/seen"\n')
             os.chmod(fake, 0o755)
-            script = "\n".join(
-                [
-                    'SRC="$1"; . "$1/setup-snapshots.bash"',
-                    'SNAP_RUNTIME="$T/btrfs-snapshot"; PROG=cst-btrfs-test',
-                    # What snap_disable does besides the purge (units, mounts, the btrbk configs of an
-                    # older version in the host's /etc/btrbk) is not this test's, and stays off the host.
-                    "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }; cst_remove() { :; }",
-                    """grep() { [[ " $* " == *" /etc/btrbk/"* ]] && return 1; command grep "$@"; }""",
-                    'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"',
-                    "export CST_SNAPSHOT_ROOT=/elsewhere",
-                    body,
-                ]
+            script = (
+                'SRC="$1"; . "$1/setup-snapshots.bash"\n'
+                'SNAP_RUNTIME="$T/btrfs-snapshot"; PROG=cst-btrfs-test\n'
+                # What snap_disable does besides the purge (units, mounts, the btrbk configs of an
+                # older version in the host's /etc/btrbk) is not this test's, and stays off the host.
+                "disable_timers() { :; }; systemctl() { :; }; systemd-escape() { echo top; }; cst_remove() { :; }\n"
+                """grep() { [[ " $* " == *" /etc/btrbk/"* ]] && return 1; command grep "$@"; }\n"""
+                'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"\n'
+                "export CST_SNAPSHOT_ROOT=/elsewhere\n"
+                f"{body}"
             )
             r = subprocess.run(
                 ["bash", "-c", script, "_", BTRFS],

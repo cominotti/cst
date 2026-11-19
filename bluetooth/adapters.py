@@ -296,7 +296,7 @@ class Stop:
     asked: bool = False
 
     @classmethod
-    def handler(cls, signum: int, frame: FrameType | None) -> None:
+    def handler(cls, _signum: int, _frame: FrameType | None) -> None:
         """Handle SIGTERM/SIGINT: defer exit while a profile bounce is active."""
         if cls.busy:
             cls.asked = True  # the sleeps and pactl calls carry on (PEP 475)

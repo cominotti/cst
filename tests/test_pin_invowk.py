@@ -93,7 +93,7 @@ class PinInvowkTests(unittest.TestCase):
         line = pin.case_line("v0.16.0", "amd64", "1" * 64, "2" * 64)
         self.assertRegex(line, r'^ {10}v0\.16\.0/amd64\) pinned="1{64}"; pinned_bin="2{64}" ;;$')
         # Every pin line in the action has exactly that shape.
-        rows = [l for l in ACTION.read_text(encoding="utf-8").splitlines() if 'pinned_bin="' in l and "/" in l]
+        rows = [row for row in ACTION.read_text(encoding="utf-8").splitlines() if 'pinned_bin="' in row and "/" in row]
         self.assertTrue(rows)
         shape = re.compile(
             r'^ {10}(v[0-9.]+[^/]*)/(amd64|arm64)\) pinned="([0-9a-f]{64})"; pinned_bin="([0-9a-f]{64})" ;;$'

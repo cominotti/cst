@@ -67,7 +67,7 @@ def entry(
         owner=owner,
         kind=kind,
         runner=owner,
-        component=f"{src.split('/')[0]}:t",
+        component=f"{src.split('/', maxsplit=1)[0]}:t",
     )
 
 
