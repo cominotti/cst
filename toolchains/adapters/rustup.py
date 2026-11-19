@@ -59,7 +59,7 @@ def rustup_default(home: str, rh: str) -> str:
     except OSError, tomllib.TOMLDecodeError:
         pass
     rustup = shutil.which("rustup")
-    if not rustup:
+    if rustup is None:
         return ""
     env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
     env.pop("RUSTUP_TOOLCHAIN", None)

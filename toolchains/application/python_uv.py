@@ -34,7 +34,7 @@ class PythonUv(BaseTarget[UvPolicy]):
 
     def uv(self) -> str:
         uv = self.machine.uv.find(self.path)
-        if not uv:
+        if uv is None:
             raise Refused("uv not found on PATH: nothing is done (install uv, or PYTHON_UV_ENABLED=no)")
         return uv
 
@@ -148,7 +148,7 @@ class PythonUv(BaseTarget[UvPolicy]):
             return [f"size:     ~/{UV_CACHE_REL} does not exist"]
         out = [f"size:     {gib(self.machine.uv.size(c))} (as du shows it)"]
         uv = self.machine.uv.find(None)
-        out.append(f"uv:       {uv}" if uv else "uv:       not found on PATH (prune refuses)")
+        out.append(f"uv:       {uv}" if uv is not None else "uv:       not found on PATH (prune refuses)")
         if self.machine.uv.lock_busy(c):
             out.append("in use:   a uv command holds the cache lock now")
         return out

@@ -174,12 +174,12 @@ class Tracker:
             self.since = None
             return what, why
         assert snap is not None
-        if not self.failed and self.fixed is not None and now - self.fixed < RELAPSE:
+        if self.failed is None and self.fixed is not None and now - self.fixed < RELAPSE:
             # The wrong rate is back soon after a fix, on the same connection:
             # the headset set the stream up again by itself. Another bounce
             # would not hold either and would only repeat the dropout.
             self.failed = f"the headset went back to {snap['rate']} Hz by itself {now - self.fixed:.0f} s after the fix"
-        if self.failed:
+        if self.failed is not None:
             return WatchVerdict.DONE, f"{self.failed}: given up until it connects again"
         if self.tries >= MAX_TRIES:
             return (

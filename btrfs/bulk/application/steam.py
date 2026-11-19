@@ -94,7 +94,8 @@ def steam_read_pair(b: Bulk, settle: Callable[[Vdf], Vdf] | None = None) -> VdfP
             bak = b.tree.newest_backup(files[0])
             raise Unexpected(
                 f"the two copies of libraryfolders.vdf ({ctx.short(files[0])} and steamapps/) differ: with Steam "
-                f"closed, copy the right one over the other" + (f" (newest backup: {ctx.short(bak)})" if bak else "")
+                f"closed, copy the right one over the other"
+                + (f" (newest backup: {ctx.short(bak)})" if bak is not None else "")
             )
     return {
         "files": files,

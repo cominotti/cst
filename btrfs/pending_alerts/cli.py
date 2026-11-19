@@ -77,7 +77,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
 
     todo: list[tuple[str, str, Alert]] = []  # oldest first: (mtime, name, alert as first read)
     for mtime, name in pending_files(s):
-        if seen_as(rec, name, mtime):
+        if seen_as(rec, name, mtime) is not None:
             continue
         alert = read_pending(s, name)
         if alert is None:

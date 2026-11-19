@@ -111,7 +111,7 @@ def analyse(
 
 def below_section(since: float, until: float) -> BelowSection:
     """below's top writers and readers of the window, both at once, or why there are none."""
-    if not shutil.which("below"):
+    if shutil.which("below") is None:
         return {"error": "below not installed (no per-process attribution)"}
     with ThreadPoolExecutor(2) as ex:
         fw = ex.submit(below_top, since, until, "io.wbytes_per_sec")
@@ -123,7 +123,7 @@ def below_section(since: float, until: float) -> BelowSection:
 def container_names() -> dict[str, str]:
     names: dict[str, str] = {}
     for tool, prefix in (("docker", "docker-"), ("podman", "libpod-")):
-        if not shutil.which(tool):
+        if shutil.which(tool) is None:
             continue
         try:
             out = subprocess.run(

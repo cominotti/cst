@@ -158,12 +158,12 @@ def _entries(
     component: str | None = None,
 ) -> tuple[InstallEntry, ...]:
     by_src = {e.src: e for e in INSTALL_MANIFEST}
-    if srcs and (module or kind or owner or component):
+    if srcs and (module or kind is not None or owner is not None or component):
         raise _UsageError("name the files (SRC...) or select them (--module/--kind/--owner/--component), not both")
     if component is not None and component not in COMPONENTS:
         raise _UsageError(f"--component {component!r}: no such component (known: {', '.join(COMPONENTS)})")
     if not srcs:
-        if not (module or kind or owner or component):
+        if not (module or kind is not None or owner is not None or component):
             raise _UsageError("no file named")
         return tuple(
             e

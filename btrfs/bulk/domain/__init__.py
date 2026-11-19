@@ -248,7 +248,7 @@ def du_text(size: TreeSize) -> str:
 
 
 def kept_text(item: Item, detail: str) -> str:
-    where = "kept in /home (by choice)" if item.link else "left out (by choice)"
+    where = "kept in /home (by choice)" if item.link is not None else "left out (by choice)"
     if detail == BulkItemDetail.LINKED:
         return (
             f"{where}, but still a link into ~/Bulk: move the data back "
@@ -304,7 +304,7 @@ class Ctx:
         return os.path.join(self.bulk, item.target)
 
     def link(self, item: Item) -> str | None:
-        return os.path.join(self.home, item.link) if item.link else None
+        return os.path.join(self.home, item.link) if item.link is not None else None
 
     def short(self, path: str) -> str:
         return "~" + path[len(self.home) :] if path.startswith(self.home + "/") else path
@@ -390,7 +390,7 @@ def row_text(name: str, text: str) -> str:
 
 def describe_paths(ctx: Ctx, item: Item) -> str:
     t = ctx.short(ctx.target(item))
-    return f"~/{item.link} -> {t}" if item.link else t
+    return f"~/{item.link} -> {t}" if item.link is not None else t
 
 
 def conflict_text(ctx: Ctx, j: ItemJournal) -> str:

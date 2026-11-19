@@ -338,7 +338,7 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
         for disk in disks:
             src, tgt = disk.find("source"), disk.find("target")
             path = src.get("file") if src is not None else None
-            if path and VM_OVERLAY_MARK in path:
+            if path is not None and VM_OVERLAY_MARK in path:
                 target = (tgt.get("dev") if tgt is not None else None) or "?"
                 defined.setdefault(target, path)
         if not live and not defined:

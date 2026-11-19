@@ -228,7 +228,7 @@ def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | 
     problems: list[str] = []
     meta_free = _sysfs_number(m, f"{alloc}/metadata/total_bytes") - _sysfs_number(m, f"{alloc}/metadata/bytes_used")
     found = metadata_problem(mnt, meta_free, _sysfs_number(m, f"{alloc}/global_rsv_size"), least)
-    if found:
+    if found is not None:
         problems.append(found)
     # Automatic reclaim installed by btrfs-setup.sh, but not active (e.g. the knob was reset). Both
     # knobs are needed.
@@ -440,7 +440,7 @@ def kernel_log(m: Probe, ours: Sequence[str]) -> list[str]:
             problems.append(f"kernel log scan failed: {klog[:200]}")
         m.run(["journalctl", "-k", "-q", "-n", "1", "-o", "short-iso", f"--cursor-file={cursor}"], StderrRoute.DROP)
     found = kernel_problem(klog, ours)
-    return problems + ([found] if found else [])
+    return problems + ([found] if found is not None else [])
 
 
 def _size(p: str) -> int:
@@ -508,7 +508,7 @@ def snapshot_problems(m: Probe) -> list[str]:
 def md_problems(m: Probe) -> list[str]:
     mdstat = m.path("/proc/mdstat")
     found = md_problem(m.text(mdstat) or "") if os.access(mdstat, os.R_OK) else None
-    return [found] if found else []
+    return [found] if found is not None else []
 
 
 def smart(m: Probe, disk: str, role: str = "") -> list[str]:

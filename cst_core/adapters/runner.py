@@ -220,7 +220,7 @@ class SubprocessCommandRunner:
             kw["cwd"] = cwd
         if new_session:
             kw["start_new_session"] = True
-        if nice:
+        if nice is not None and nice != 0:
             kw["preexec_fn"] = functools.partial(_renice, nice)
         if pass_fds:
             kw["pass_fds"] = tuple(pass_fds)

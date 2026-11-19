@@ -140,7 +140,7 @@ def btrfs_device_bytes(host: DoctorHostPort, mnt: str, profiles: Mapping[str, Ma
     profile is not one known value."""
     data = list(profiles.get("data", {}))
     factor = {**ONE_DEVICE_FACTOR, **MIRROR_COPIES}.get(data[0]) if len(data) == 1 else None
-    if not mnt or not factor:
+    if not mnt or factor is None:
         return None
     rc, out, _ = host.run(["stat", "-f", "-c", "%S %b", mnt], timeout=15)
     f = out.split() if rc == 0 else []

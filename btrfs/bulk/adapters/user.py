@@ -102,7 +102,7 @@ def idle_priority() -> None:
     idle IO class (the IO class only counts with the BFQ IO scheduler)."""
     with contextlib.suppress(OSError):
         os.nice(19)
-    if shutil.which("ionice"):
+    if shutil.which("ionice") is not None:
         subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
 
 

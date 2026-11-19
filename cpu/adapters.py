@@ -203,7 +203,7 @@ def watch_counters(pid: int | None, cg: str) -> WatchCounters:
     vm = usage_usec("machine.slice")
     builds = sum(usage_usec(c) for c in build_cgroups())
     game = None
-    if pid and cg:
+    if pid is not None and cg:
         game = (
             pressure_total(os.path.join(CG, cg, "cpu.pressure"), "some") or 0,
             pressure_total(os.path.join(CG, cg, "memory.pressure"), "full") or 0,
@@ -220,7 +220,7 @@ def run_over(proc: subprocess.Popen[bytes] | None, seconds: int | None, start: f
 def game_and_cgroup(game: str | None) -> tuple[int | None, str]:
     """The game's PID (find_game) and its cgroup, or (None, "")."""
     pid = find_game(game)
-    return pid, game_cgroup(pid) if pid else ""
+    return pid, game_cgroup(pid) if pid is not None else ""
 
 
 def sample_until_stopped(
@@ -243,7 +243,7 @@ def sample_until_stopped(
     pid: int | None = None
     cg = ""
     while not stop and not run_over(proc, seconds, start):
-        if not pid or not os.path.exists(f"/proc/{pid}"):
+        if pid is None or not os.path.exists(f"/proc/{pid}"):
             pid, cg = game_and_cgroup(game)
             # A new game (or none): its counters start again.
             prev = None if prev is None else replace(prev, game=None)
@@ -293,7 +293,7 @@ def record_run(
     meta: RunMeta = {"label": label, "start": start, "end": end, "cmd": list(cmd), "game": game, "rc": rc}
     if mangohud:
         newest = newest_mangohud_log(os.path.expanduser(mangohud), start, end)
-        if newest:
+        if newest is not None:
             shutil.copy2(newest, os.path.join(run_dir, "mangohud.csv"))
             meta["mangohud"] = newest
     with open(os.path.join(run_dir, "meta.json"), "w") as f:

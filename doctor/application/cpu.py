@@ -141,7 +141,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
     unknown: list[str] = []
     for (mgr, unit), props in wanted.items():
         base, why = managers[mgr]
-        vals = unit_props(host, base, unit, props) if base else None
+        vals = unit_props(host, base, unit, props) if base is not None and len(base) > 0 else None
         if vals is None:
             unknown.append(f"{unit} ({why or 'not loaded, or systemd did not answer'})")
             continue

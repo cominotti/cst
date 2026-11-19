@@ -340,8 +340,8 @@ class Monitor:
             cg[sl] = [
                 p[1],
                 p[3],
-                m[1] if m else 0,
-                m[3] if m else 0,
+                m[1] if m is not None else 0,
+                m[3] if m is not None else 0,
                 *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0]),
             ]
         self.topo.scan_cgroups(time.monotonic())
@@ -504,7 +504,7 @@ class Monitor:
         io = rec["psi"]["io"] or [0, 0, 0, 0]
         if self.episode is None:
             reason = episode_reason(self.want_episode, io_pct, rec["d"], cmax)
-            if reason:
+            if reason is not None:
                 self.start_episode(rec["ts"], reason)
         self.want_episode = None
         ep = self.episode
@@ -641,8 +641,8 @@ class Monitor:
             if now >= next_probe:
                 self.probe_commits()
                 next_probe = now + PROBE_INTERVAL
-            if self.episode is None and (triggered or self.want_episode):
-                if triggered and not self.want_episode:
+            if self.episode is None and (triggered or self.want_episode is not None):
+                if triggered and self.want_episode is None:
                     self.want_episode = "psi trigger"
                 next_sample = now
             if now >= next_sample:

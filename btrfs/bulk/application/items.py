@@ -74,12 +74,12 @@ def classify_kept(b: Bulk, item: Item, done: set[str], kept: set[str]) -> tuple[
         L = ctx.link(item)
         linked = L is not None and t.kind(L) == LstatKind.LINK and t.link_target(L) == ctx.target(item)
         return BulkItemState.KEPT, BulkItemDetail.LINKED if linked else ""
-    if item.after and item.after in kept:
+    if item.after is not None and item.after in kept:
         why = f"~/{BY_ID[item.after].link} is kept in /home (by choice)"
         L = ctx.link(item)
         if (
-            L
-            and item.link
+            L is not None
+            and item.link is not None
             and t.chain(ctx.home, item.link) == PathChain.OK
             and not t.is_subvol(L)
             and not t.empty_dir(L)
@@ -90,7 +90,7 @@ def classify_kept(b: Bulk, item: Item, done: set[str], kept: set[str]) -> tuple[
                 f"'bulk keep {item.id}' too, or 'bulk unkeep {item.after}'"
             )
         return BulkItemState.WAIT, f"{why}: keep {item.id} too, or 'bulk unkeep {item.after}'"
-    if item.after and item.after not in done:
+    if item.after is not None and item.after not in done:
         return BulkItemState.WAIT, f"after ~/{BY_ID[item.after].link} is in place"
     return None
 
@@ -533,7 +533,7 @@ def apply_item(
         log(f"{'kept:':<10} {describe_paths(b.ctx, item)}: {kept_text(item, detail)}")
         return
     record_result(b, item, (state, detail), res, done, kept, deferred, problems)
-    if item.flatpak and b.tree.kind(b.ctx.target(item)) == LstatKind.DIR:
+    if item.flatpak is not None and b.tree.kind(b.ctx.target(item)) == LstatKind.DIR:
         allow_flatpak(b, item, item.flatpak, problems)
 
 
@@ -616,7 +616,7 @@ def item_text(b: Bulk, item: Item, state: str, detail: str) -> str:
     if state == BulkItemState.NOCOW:
         return f"rewrite without copy-on-write ({detail}, {du_text(du(T))})"
     if state == BulkItemState.UNEXPECTED:
-        size = du(L) if L and b.tree.kind(L) == LstatKind.DIR else TreeSize(0, True)
+        size = du(L) if L is not None and b.tree.kind(L) == LstatKind.DIR else TreeSize(0, True)
         there = f"; {du_text(size)} there, still in /home snapshots" if size.total >= BIG else ""
         return f"NEEDS A LOOK: {detail} (nothing touched{there})"
     return STATE_TEXT.get(state, state) + (f" ({detail})" if detail else "")
@@ -740,7 +740,7 @@ def report_item(b: Bulk, item: Item, mode: str, seen: tuple[set[str], set[str], 
     T = ctx.target(item)
     if item.nocow and mode == BulkCommand.STATUS and b.tree.chain(ctx.bulk, item.target) == PathChain.OK:
         report_nocow(b, item, T)
-    if item.flatpak:
+    if item.flatpak is not None:
         report_flatpak(b, item.flatpak, T, mode)
     return int(st != BulkItemState.OK)
 

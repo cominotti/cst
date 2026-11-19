@@ -655,7 +655,7 @@ def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
         return out
     cow = [i for i in d.images if i.nocow is False]
     unknown = [i for i in d.images if i.nocow is None]
-    ok = [i for i in d.images if i.nocow]
+    ok = [i for i in d.images if i.nocow is True]
     if not d.images:
         out.append("  images: none")
     if ok:

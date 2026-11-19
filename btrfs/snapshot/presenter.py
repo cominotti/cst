@@ -117,7 +117,7 @@ def render_listing(listing: Listing, *, as_json: bool) -> None:
         n_del = sum(1 for d in s.decisions if d.action == "delete")
         print(
             f"  {len(s.decisions)} snapshot(s), {n_del} due for deletion"
-            + (f"; deletions would be blocked: {s.deletions_blocked}" if s.deletions_blocked else "")
+            + (f"; deletions would be blocked: {s.deletions_blocked}" if s.deletions_blocked is not None else "")
         )
 
 

@@ -19,7 +19,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         f"  kernel {res.get('kernel') or '?'}"
     )
     cov = res["coverage"]
-    if cov.get("first_sample"):
+    if (first := cov.get("first_sample")) is not None and first != 0:
         print(
             f"recorded {fmt_ts(cov['first_sample'])} -> {fmt_ts(cov['last_sample'])} "
             f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps') else ''})"

@@ -246,7 +246,7 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
         c = live.cards()
         return c is not None and profiles(live.dev, c)[0] == alt
 
-    if not wait_until(on_alt, SBC_WAIT):
+    if wait_until(on_alt, SBC_WAIT) is None:
         log(4, f"{alt} did not become active within {SBC_WAIT:.0f} s")
     time.sleep(SBC_HOLD)
     # Look again before forcing LDAC back: in the meantime WirePlumber (its

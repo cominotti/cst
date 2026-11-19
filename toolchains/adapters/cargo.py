@@ -75,7 +75,7 @@ def cargo_binary(p: CargoProc, home: str) -> str:
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
     ):
-        if c and os.access(c, os.X_OK):
+        if c is not None and os.access(c, os.X_OK):
             return c
     return ""
 
@@ -194,7 +194,7 @@ def git_worktrees(wt: str, deadline: float, cmd_timeout: float) -> list[str]:
     repository of WT (CMD_TIMEOUT: the most seconds git may take). Raises
     Incomplete when git fails."""
     git = shutil.which("git")
-    if not git:
+    if git is None:
         raise Incomplete("git not found on PATH")
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
     try:
@@ -290,7 +290,7 @@ def user_cargo(home: str) -> str:
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
     ):
-        if c and os.access(c, os.X_OK):
+        if c is not None and os.access(c, os.X_OK):
             return c
     return ""
 
@@ -350,7 +350,7 @@ def cargo_users(
         if q.key not in cache:
             cache[q.key] = ask_cargo(q.cmd, q.env, q.cwd)
         bd, why = cache[q.key]
-        if why or bd is None:
+        if why is not None or bd is None:
             unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
             continue
         for pr in pre:
@@ -391,7 +391,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
                     continue
                 data, why = workspace_metadata(cargo, m, env, deadline, limits.cmd_timeout)
                 ws.asked += 1
-                if why or data is None:
+                if why is not None or data is None:
                     ws.failures.append((m, why or "unknown"))
                     continue
                 covered.add(m)
