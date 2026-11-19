@@ -60,7 +60,7 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowPaths
+from btrfs.docker_volumes_nocow.domain import NocowPaths, postponed_line
 from cst_core.adapters import nocow as core_nocow
 from cst_core.ports import CommandFault, CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
@@ -1958,6 +1958,24 @@ class PostponedDurableTest(PostponeBase):
             self.call(self.cli.migrate)
         assert_replaced_durably(self, self.postponed, synced)
         self.assertTrue(os.path.exists(self.postponed))
+
+
+class PostponedLineTest(unittest.TestCase):
+    """status's line of a postponed migration: a "last" that is no integer reads as "?"."""
+
+    def test_last_must_be_an_integer(self) -> None:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(3000))
+        self.assertEqual(
+            postponed_line({"boots": 2, "last": 3000, "reason": "r"}),
+            f"  migration postponed at 2 boot(s) in a row, last {when}: r",
+        )
+        # A bool is no time (next_postponed and cst doctor refuse it too); before, True read as 1970.
+        for last in (True, False, "3000", None):
+            with self.subTest(last=last):
+                self.assertEqual(
+                    postponed_line({"boots": 2, "last": last, "reason": "r"}),
+                    "  migration postponed at 2 boot(s) in a row, last ?: r",
+                )
 
 
 if __name__ == "__main__":

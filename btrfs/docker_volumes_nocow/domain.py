@@ -175,5 +175,5 @@ def postponed_line(rec: StoredPostponed | None) -> str:
     if not rec:
         return ""
     last = rec.get("last")
-    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if isinstance(last, int) else "?"
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "?"
     return f"  migration postponed at {rec.get('boots', '?')} boot(s) in a row, last {when}: {rec.get('reason', '?')}"
