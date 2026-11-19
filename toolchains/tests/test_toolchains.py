@@ -973,6 +973,41 @@ class AutoTest(Scratch):
         self.assertIn("removed:   ~/.local/share/systemd/timers/stamp-cst-cargo-build-gc.timer", out)
         self.assertFalse(os.path.lexists(os.path.join(self.home, self.OLD_STAMP)))
 
+    def test_auto_on_stops_the_earlier_timer_left_running_before_it_removes_its_stamp(self) -> None:
+        # Its file is gone, its stamp says it ran: it may still run. Stopped, checked, first.
+        self.csts_cargo_config()
+        self.write(self.OLD_STAMP, "")
+        with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
+            rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("stopped:   cst-cargo-build-gc.timer (it was still running although its file was gone)", out)
+        self.assertIn("--user stop cst-cargo-build-gc.timer", self.calls())
+        self.assertLess(out.index("stopped:   cst-cargo-build-gc.timer"), out.index("stamp-cst-cargo-build-gc.timer"))
+        self.assertFalse(os.path.lexists(os.path.join(self.home, self.OLD_STAMP)))
+        # Run again: nothing more to do, and the manager is not asked about it.
+        open(self.log, "w").close()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("stamp-", out)
+        self.assertNotIn("cst-cargo-build-gc", " ".join(self.raw_calls()))
+
+    def test_auto_on_keeps_the_stamp_of_the_earlier_timer_when_the_manager_does_not_answer(self) -> None:
+        self.csts_cargo_config()
+        self.write(self.OLD_STAMP, "")
+        with self.failing("is-active"):
+            rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user is-active cst-cargo-build-gc.timer failed", out)
+        self.assertIn("nothing was removed", out)
+        self.assertNotIn("removed:", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.OLD_STAMP)))
+
+    def test_auto_on_does_not_ask_about_the_earlier_timer_without_its_stamp(self) -> None:
+        self.csts_cargo_config()
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("cst-cargo-build-gc", " ".join(self.raw_calls()))
+
     def test_the_stamp_of_the_earlier_timer_stays_while_its_file_is_there(self) -> None:
         # Its file is there: disable and clean (systemd removes the stamp), or not CST's: left alone.
         self.csts_cargo_config()

@@ -62,7 +62,11 @@ class AutoTimer:
         timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
-        elif timer not in (path for path, _ in found):
+        elif timer not in (path for path, _ in found) and self.files.present(
+            os.path.join(home, timer_stamp_rel(OLD_TIMER))
+        ):
+            # Its stamp says it ran: it may still run although its file is gone.
+            self.stop_orphan_timer(OLD_TIMER)
             self.forget_stamp(OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone")
         if not found:
             return True
@@ -145,13 +149,13 @@ class AutoTimer:
         self.old_conf_note()
         return rc
 
-    def stop_orphan_timer(self) -> None:
-        """The timer file is gone, but the user manager may still run the
-        timer: what `auto off` left before it checked its `disable` (it removed
-        the files anyway). Stopped when the manager does not say it is stopped;
-        Refused when the manager gives no answer."""
-        if self.units.stop_if_running(TIMER):
-            self.out.say(f"stopped:   {TIMER} (it was still running although its file was gone)")
+    def stop_orphan_timer(self, name: str = TIMER) -> None:
+        """The file of timer NAME is gone, but the user manager may still run
+        the timer: what `auto off` left before it checked its `disable` (it
+        removed the files anyway). Stopped when the manager does not say it is
+        stopped; Refused when the manager gives no answer."""
+        if self.units.stop_if_running(name):
+            self.out.say(f"stopped:   {name} (it was still running although its file was gone)")
 
     def forget_stamp(self, name: str, why: str) -> None:
         """Remove the stamp of timer NAME (its last run, which systemd keeps for a Persistent= timer)

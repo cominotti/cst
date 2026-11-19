@@ -842,7 +842,8 @@ the timer of the earlier `cst btrfs cargo-gc`. When the timer file is already
 gone (removed by hand, or by an older `auto off`), `clean` cannot work (systemd
 needs the unit loaded): `auto off` then stops the timer if it still runs and
 removes that stamp itself (`removed:`); `auto on` and `auto off` do the same
-for the stamp of the earlier `cst-cargo-build-gc.timer`. (If your user manager
+for the earlier `cst-cargo-build-gc.timer` when its stamp is there (they ask
+the manager first, and stop that timer if it still runs). (If your user manager
 sets `XDG_DATA_HOME`, systemd keeps the stamps there instead, and CST does not
 look for them.) Your `~/.config/cst/toolchains.conf` stays. `auto off` also writes
 `~/.config/cst/toolchains-auto.off`, so that a later `snapshots setup` does

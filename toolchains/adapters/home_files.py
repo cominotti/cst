@@ -399,6 +399,9 @@ class HomeFiles:
     def remove(self, path: str) -> None:
         os.unlink(path)
 
+    def present(self, path: str) -> bool:
+        return os.path.lexists(path)
+
     def remove_if_present(self, path: str) -> bool:
         try:
             os.unlink(path)

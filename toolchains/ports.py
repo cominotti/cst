@@ -248,6 +248,10 @@ class HomeFilesPort(Protocol):
         """Remove the file (or link) PATH; OSError when that fails."""
         ...
 
+    def present(self, path: str) -> bool:
+        """Something is at PATH (a link to nothing counts)."""
+        ...
+
     def remove_if_present(self, path: str) -> bool:
         """Remove the file (or link) PATH; False when nothing was there; OSError when that fails."""
         ...
