@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 import contextlib
 import ctypes
 import io
-import json
 import os
 import select
 import signal
@@ -26,12 +25,22 @@ from bluetooth.domain import (
     render_pending,
     still_pending,
 )
-from bluetooth.domain.watch import Snapshot, Tracker, WatchNote, WatchVerdict, profiles, relevant, snapshot
+from bluetooth.domain.watch import (
+    Snapshot,
+    Tracker,
+    WatchNote,
+    WatchVerdict,
+    is_pactl_card,
+    profiles,
+    relevant,
+    snapshot,
+)
 from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.adapters.terminal import stdin
+from cst_core.domain.shapes import parse_json
 from cst_core.ports import CommandFault, CommandRunnerPort
 
 
@@ -189,8 +198,8 @@ class Live(LiveAudioPort):
         if rc != 0:
             return None
         try:
-            return snapshot(self.dev, json.loads(out))
-        except ValueError:
+            return snapshot(self.dev, parse_json(out))
+        except ValueError, RecursionError:
             return None
 
     @override
@@ -200,10 +209,11 @@ class Live(LiveAudioPort):
         if rc != 0:
             return None
         try:
-            data = json.loads(out)
-        except ValueError:
+            data = parse_json(out)
+        except ValueError, RecursionError:
             return None
-        return data if isinstance(data, list) else None
+        # A card of another shape is skipped: every action needs a card that matches.
+        return [c for c in data if is_pactl_card(c)] if isinstance(data, list) else None
 
     @override
     def set_profile(self, prof: str) -> bool:
@@ -453,8 +463,8 @@ def stdin_snapshot(dev: str) -> Snapshot | None:
     """`bt-ldac-watch --snapshot`: what the watcher sees of headset DEV in the pw-dump on
     standard input; None when that is not JSON."""
     try:
-        return snapshot(dev, json.load(sys.stdin))
-    except ValueError:
+        return snapshot(dev, parse_json(stdin().read()))
+    except ValueError, RecursionError:
         return None
 
 
