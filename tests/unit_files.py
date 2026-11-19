@@ -123,11 +123,11 @@ def _shell_value(path: str, name: str) -> str:
     return group(found, 1)
 
 
-def scrub_limit_dropin(limit: str) -> str:
+def scrub_limit_dropin(limit: str, setup: str = BTRFS_SETUP) -> str:
     """btrfs-setup.sh's scrub limit drop-in, as its function scrub_limit_dropin prints it."""
     script = (
-        f"BTRFS_CONF={_shell_value(BTRFS_SETUP, 'BTRFS_CONF')}\n"
-        f"{shell_function(BTRFS_SETUP, 'scrub_limit_dropin')}"
+        f"BTRFS_CONF={_shell_value(setup, 'BTRFS_CONF')}\n"
+        f"{shell_function(setup, 'scrub_limit_dropin')}"
         f'scrub_limit_dropin "$1"\n'
     )
     done = subprocess.run(
@@ -142,17 +142,22 @@ def scrub_limit_dropin(limit: str) -> str:
     return done.stdout
 
 
+def scrub_dropin(setup: str = BTRFS_SETUP) -> UnitText:
+    """btrfs-setup.sh's scrub limit drop-in, for SCRUB_LIMIT, in the folder of the unit it extends."""
+    return UnitText(
+        "10-cst-limit.conf",
+        scrub_limit_dropin(SCRUB_LIMIT, setup),
+        "system",
+        "btrfs-setup.sh",
+        _shell_value(setup, "SCRUB_SERVICE"),
+    )
+
+
 def generated_dropins() -> list[UnitText]:
     """The drop-ins CST's programs write, rendered by their own code."""
     chain = (f"user-{GAME_UID}.slice", f"user@{GAME_UID}.service")  # a slice and a service of its memory chain
     return [
-        UnitText(
-            "10-cst-limit.conf",
-            scrub_limit_dropin(SCRUB_LIMIT),
-            "system",
-            "btrfs-setup.sh",
-            _shell_value(BTRFS_SETUP, "SCRUB_SERVICE"),
-        ),
+        scrub_dropin(),
         UnitText(
             cpu_domain.DROPIN_NAME, cpu_domain.toolbox_dropin_text(E_CORES), "user", "cpu/cpu-setup", "user.slice"
         ),
