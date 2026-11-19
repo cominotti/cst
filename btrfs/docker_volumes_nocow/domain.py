@@ -17,6 +17,14 @@ MARGIN: Final = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
 GAVE_UP = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
 DAEMON_JSON = "/etc/docker/daemon.json"
+# How the reason a boot records ends when the dockerd config file cannot be read (config_reason).
+CONFIG_UNKNOWN: Final = ", so the volumes folder Docker uses is unknown"
+
+
+def config_reason(problem: str) -> str:
+    """The postponed reason of a boot whose dockerd config file cannot be read (NocowPaths.config_problem)."""
+    return f"{problem}{CONFIG_UNKNOWN}"
+
 # Beside a volume's _data during its migration: the NOCOW copy being made, and the
 # original between the two renames (followed by the time it was moved aside).
 NEW_SUFFIX = ".nocow-new"

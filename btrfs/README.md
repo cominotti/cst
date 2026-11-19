@@ -746,7 +746,8 @@ docker volume rm <name>         # or one volume by name
   name, or a read error; a UTF-8 byte order mark at its start is skipped, as
   dockerd skips it) leaves
   unknown which volumes folder Docker uses, so the boot's migration waits too:
-  it is recorded as postponed with that reason (`status` shows it, `cst doctor`
+  it is recorded as postponed with that reason, even when nothing is scheduled
+  and the default folder is absent or already `+C` (`status` shows it, `cst doctor`
   from two boots on), and the first boot after the file is fixed runs it. `mark`
   (what `install` runs) changes nothing then and exits 2, so `install` leaves the
   request to that boot. Another dockerd whose config file cannot be read that way
