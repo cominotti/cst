@@ -1676,6 +1676,21 @@ class _FailingSocket:
         self.closed = True
 
 
+class _RecordingSocket:
+    """A socket whose sends work, and which counts its closes."""
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self.closes = 0
+
+    def sendto(self, data: bytes, _address: str) -> int:
+        self.sent.append(data)
+        return len(data)
+
+    def close(self) -> None:
+        self.closes += 1
+
+
 class ServiceNotifierTest(unittest.TestCase):
     """cst_core.adapters.sd_notify: sd_notify(3) datagrams to systemd's NOTIFY_SOCKET, and nothing without it."""
 
@@ -1695,6 +1710,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")
         sock = self.listener(path)
         notifier = ServiceNotifier.from_environ({"NOTIFY_SOCKET": path, "PATH": "/usr/bin"})
+        self.addCleanup(notifier.close)
         self.assertTrue(notifier.ready())
         self.assertTrue(notifier.watchdog())
         self.assertTrue(notifier.watchdog())
@@ -1703,7 +1719,8 @@ class ServiceNotifierTest(unittest.TestCase):
     def test_an_abstract_socket_name_starts_with_at(self) -> None:
         name = f"cst-sd-notify-test-{os.getpid()}-{time.monotonic_ns()}"
         sock = self.listener("\0" + name)
-        self.assertTrue(ServiceNotifier.from_environ({"NOTIFY_SOCKET": "@" + name}).ready())
+        with ServiceNotifier.from_environ({"NOTIFY_SOCKET": "@" + name}) as notifier:
+            self.assertTrue(notifier.ready())
         self.assertEqual(sock.recv(64), b"READY=1")
 
     def test_without_a_usable_notify_socket_nothing_is_opened_or_sent(self) -> None:
@@ -1722,6 +1739,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")  # nothing bound there yet: ENOENT
         out = io.StringIO()
         notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
         with contextlib.redirect_stdout(out):
             self.assertFalse(notifier.ready())
             self.assertFalse(notifier.watchdog())
@@ -1758,6 +1776,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")
         sock = self.listener(path)  # bound, never read
         notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
         sent: list[bool] = []
         out = io.StringIO()
 
@@ -1777,6 +1796,62 @@ class ServiceNotifierTest(unittest.TestCase):
         self.assertFalse(sent[-1])
         [warning] = out.getvalue().splitlines()
         self.assertTrue(warning.startswith("<4>cannot notify systemd (WATCHDOG): [Errno 11]"), warning)
+
+    def test_close_closes_the_socket_once(self) -> None:
+        made: list[_RecordingSocket] = []
+
+        def recording() -> _RecordingSocket:
+            made.append(_RecordingSocket())
+            return made[-1]
+
+        notifier = ServiceNotifier("/run/systemd/notify", open_socket=recording)
+        self.assertTrue(notifier.ready())
+        notifier.close()
+        notifier.close()
+        self.assertEqual([(s.sent, s.closes) for s in made], [([b"READY=1"], 1)])
+        # A send after close opens a new socket.
+        self.assertTrue(notifier.watchdog())
+        self.assertEqual([(s.sent, s.closes) for s in made], [([b"READY=1"], 1), ([b"WATCHDOG=1"], 0)])
+        notifier.close()
+        self.assertEqual(made[1].closes, 1)
+
+    def test_close_without_a_socket_opens_none(self) -> None:
+        def no_socket() -> _RecordingSocket:
+            raise AssertionError("no socket may be opened")
+
+        ServiceNotifier("/run/systemd/notify", open_socket=no_socket).close()
+        ServiceNotifier(None, open_socket=no_socket).close()
+        with ServiceNotifier(None, open_socket=no_socket) as notifier:
+            self.assertFalse(notifier.ready())
+
+    def test_a_with_block_closes_the_socket_at_its_end_and_on_an_exception(self) -> None:
+        made: list[_RecordingSocket] = []
+
+        def recording() -> _RecordingSocket:
+            made.append(_RecordingSocket())
+            return made[-1]
+
+        with ServiceNotifier("/run/systemd/notify", open_socket=recording) as notifier:
+            self.assertTrue(notifier.ready())
+            self.assertEqual(made[0].closes, 0)
+        self.assertEqual(made[0].closes, 1)
+        with (
+            self.assertRaisesRegex(RuntimeError, "boom"),
+            ServiceNotifier("/run/systemd/notify", open_socket=recording) as notifier,
+        ):
+            notifier.watchdog()
+            raise RuntimeError("boom")
+        self.assertEqual([s.closes for s in made], [1, 1])
+
+    def test_a_send_after_close_reaches_the_socket_again(self) -> None:
+        path = os.path.join(self.tmp, "notify")
+        sock = self.listener(path)
+        notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
+        self.assertTrue(notifier.ready())
+        notifier.close()
+        self.assertTrue(notifier.watchdog())
+        self.assertEqual([sock.recv(64), sock.recv(64)], [b"READY=1", b"WATCHDOG=1"])
 
     def test_a_socket_that_cannot_be_opened_is_a_failed_send(self) -> None:
         def no_socket() -> socket.socket:

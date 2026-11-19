@@ -10,11 +10,14 @@ goes on, and one journal line (a warning) says so, until a send works again.
 The socket does not block: when systemd's queue is full (PID 1 busy or stuck),
 the send fails at once instead of stopping the service until PID 1 reads again.
 With WatchdogSec= in the unit, systemd restarts the service when the
-WATCHDOG=1 messages stop for that long.
+WATCHDOG=1 messages stop for that long. close() closes the socket (a
+later send opens a new one); `with ServiceNotifier.from_environ(...) as n`
+closes it at the end of the block.
 """
 
 from collections.abc import Callable, Mapping
 import socket
+from types import TracebackType
 from typing import Protocol, Self
 
 from cst_core.adapters.journal import log as journal_log
@@ -82,3 +85,17 @@ class ServiceNotifier:
     def watchdog(self) -> bool:
         """WATCHDOG=1: the service is still working (resets systemd's WatchdogSec= timer)."""
         return self.send("WATCHDOG=1")
+
+    def close(self) -> None:
+        """Close the socket if one is open; a second close does nothing, and a later send opens a new socket."""
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        self.close()

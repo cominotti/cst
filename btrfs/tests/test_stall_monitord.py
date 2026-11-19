@@ -889,6 +889,11 @@ class _FakeNotifier(ServiceNotifier):
         self.pings = pings
         self.ready_fails = ready_fails  # this many READY=1 sends fail first (systemd's queue full)
         self.monitor: md_monitor.Monitor | None = None
+        self.closes = 0
+
+    @override
+    def close(self) -> None:
+        self.closes += 1
 
     @override
     def ready(self) -> bool:
@@ -979,6 +984,23 @@ class NotifyLoopTest(unittest.TestCase):
             self.events,
             ["psi", "kmsg", term, intr, "log:started", "READY=1"] + ["WATCHDOG=1", "poll"] * 3 + ["log:stopped"],
         )
+
+    def test_the_notifier_is_closed_when_the_loop_ends(self) -> None:
+        notifier = _FakeNotifier(self.events, pings=3)
+        self.monitor(notifier).run()
+        self.assertEqual((self.events[-1], notifier.closes), ("log:stopped", 1))
+
+    def test_the_notifier_is_closed_when_the_loop_raises(self) -> None:
+        notifier = _FakeNotifier(self.events, pings=3)
+        mon = self.monitor(notifier)
+
+        def fails(d_tasks: Sequence[tuple[str, str, str]]) -> list[md_domain.DTask]:
+            raise RuntimeError("a read failed")
+
+        mon.describe_all = fails
+        with self.assertRaisesRegex(RuntimeError, "a read failed"):
+            mon.run()
+        self.assertEqual(notifier.closes, 1)
 
     def test_a_ready_that_could_not_be_sent_is_sent_again(self) -> None:
         self.monitor(_FakeNotifier(self.events, pings=3, ready_fails=2)).run()
