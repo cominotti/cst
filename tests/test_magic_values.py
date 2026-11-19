@@ -84,6 +84,9 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     "btrfs/bulk/adapters/child.py:is_user_read": (
         "the guard of u_read's answer as it crosses back from as_user's child: R is bound to Json, which no TypedDict is"
     ),
+    "cst_core/domain/shapes.py:json_dict": (
+        "the generic guard of a JSON object whose values are JSON (a parsed one always is); no record type"
+    ),
     "cst_core/domain/shapes.py:object_of": (
         "the generic reader of a JSON object of any shape (where Python raised on .get); no record type"
     ),

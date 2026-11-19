@@ -60,8 +60,9 @@ from cst_core.domain.install import Owner
 from cst_core.domain.shapes import (
     ShapeError,
     first_item,
-    has_shape,
     has_item,
+    has_shape,
+    json_dict,
     items_of,
     json_object,
     list_of,
@@ -1486,6 +1487,20 @@ class ShapesTest(unittest.TestCase):
         ):
             with self.subTest(obj=obj):
                 self.assertFalse(has_shape(obj, required, optional))
+
+
+class JsonValueTest(unittest.TestCase):
+    """cst_core.domain.shapes.json_dict: a JSON object whose values are JSON values, as Json."""
+
+    def test_json_dict(self) -> None:
+        for value in (None, True, 1, 1.5, "x", [], [1, {"a": [None]}], {"a": {"b": [1, "c"]}}):
+            with self.subTest(value=value):
+                self.assertTrue(json_dict({"k": value}))
+        for value in ((1,), {1: "a"}, [object()], {"a": {1, 2}}, b"x"):
+            with self.subTest(value=value):
+                self.assertFalse(json_dict({"k": value}))
+        self.assertTrue(json_dict({}))
+        self.assertFalse(json_dict([{"a": 1}]) or json_dict({1: "a"}))
 
 
 class ListOfTest(unittest.TestCase):

@@ -1044,8 +1044,11 @@ class OstreeQueryTest(unittest.TestCase):
         for out, why in (
             ("{", "(Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"),
             ("{}", "('deployments')"),
-            ("[]", "(list indices must be integers or slices, not str)"),
-            ('"x"', "(string indices must be integers, not 'str')"),
+            # Another JSON value than an object: one reason, not the text Python gave each type.
+            ("[]", "(not a JSON object)"),
+            ('"x"', "(not a JSON object)"),
+            ("5", "(not a JSON object)"),
+            ("null", "(not a JSON object)"),
             ('{"deployments": null}', "('NoneType' object is not iterable)"),
             ('{"deployments": 5}', "('int' object is not iterable)"),
         ):

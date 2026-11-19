@@ -12,6 +12,8 @@ import json
 import tomllib
 from typing import TypeIs
 
+from cst_core.domain.values import Json
+
 # A shape's keys -> the types each may hold (has_shape).
 type KeyTypes = Mapping[str, tuple[type, ...]]
 
@@ -39,6 +41,21 @@ class ShapeError(TypeError):
     """A parsed JSON value is not of the shape a reader needs. Raised where Python's own
     TypeError, AttributeError, KeyError or IndexError came before (a .get on a list, a
     subscript of a number): a TypeError, so a caller that catches TypeError still does."""
+
+
+def _is_json(value: object) -> TypeIs[Json]:
+    """value is a JSON value (what parse_json gives always is): null, a bool, a number, a string,
+    a list of JSON values or an object of them."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return True
+    if isinstance(value, list):
+        return all(_is_json(v) for v in value)
+    return json_object(value) and all(_is_json(v) for v in value.values())
+
+
+def json_dict(value: object) -> TypeIs[dict[str, Json]]:
+    """value is a JSON object whose values are JSON values (as a parsed object's are)."""
+    return json_object(value) and all(_is_json(v) for v in value.values())
 
 
 def object_of(value: object) -> dict[str, object]:
