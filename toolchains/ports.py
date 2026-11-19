@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from cst_core.ports import CommandResult
     from cst_core.domain.files import UnitFileState, WholeFileState
     from toolchains.domain.auto import TimerFacts
-    from toolchains.domain.build import CargoCache, Folder, Workspaces
+    from toolchains.domain.build import BuildTreeResult, CargoCache, Folder, Workspaces
     from toolchains.domain.config import WrapperValues
     from toolchains.domain.prune import RunRecord, SavedRun
     from toolchains.domain.uv import UvCacheKind
@@ -64,7 +64,7 @@ class BuildTreePort(Protocol):
         cache: CargoCache,
         recheck: Callable[[], str] | None,
         deadline: float | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[BuildTreeResult, str]:
         """Delete FOLDER while no process uses it and RECHECK() says '' (deleted, busy,
         changed, stop or failed, with the detail)."""
         ...
@@ -77,7 +77,7 @@ class BuildTreePort(Protocol):
         cache: CargoCache,
         recheck: Callable[[], str] | None,
         deadline: float | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[BuildTreeResult, str]:
         """Delete only FOLDER's incremental folders, with the same checks as delete
         (trimmed, busy, changed, stop or failed, with the detail)."""
         ...

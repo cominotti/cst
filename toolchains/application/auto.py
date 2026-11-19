@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
 from cst_core.domain.units import masked_refusal
-from toolchains.domain.auto import AUTO_UNITS, label
+from toolchains.domain.auto import AUTO_UNITS, UnitActiveState, label
 from toolchains.domain.common import (
     CONF_REL,
     LIB_REL,
@@ -197,7 +197,7 @@ class AutoTimer:
     def timer_text(self) -> str:
         """The timer's line of status."""
         if self.files.timer_missing():
-            if self.units.active_state(TIMER) == "active":
+            if self.units.active_state(TIMER) == UnitActiveState.ACTIVE:
                 return (
                     f"timer {TIMER}: still running although its file is gone (left by an earlier auto off); "
                     f"{self.prog} auto off stops it"
@@ -210,7 +210,7 @@ class AutoTimer:
             return f"timer {TIMER}: not installed ({self.prog} auto on)"
         facts = self.units.timer_facts(TIMER)
         txt = f"timer {TIMER}: {facts.enabled or 'unknown'}, {facts.active or 'unknown'}"
-        if facts.active == "active" and facts.next_elapse not in ("", "n/a", "0"):
+        if facts.active == UnitActiveState.ACTIVE and facts.next_elapse not in ("", "n/a", "0"):
             txt += f", next {facts.next_elapse}"
         return txt
 

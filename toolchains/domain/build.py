@@ -302,6 +302,19 @@ class FolderAction(StrEnum):
     KEEP = "keep"
 
 
+class BuildTreeResult(StrEnum):
+    """What BuildTreePort.delete and trim did with one build folder (with a detail): moved is the
+    inner step's (renamed away, not yet removed)."""
+
+    MOVED = "moved"
+    DELETED = "deleted"
+    TRIMMED = "trimmed"
+    CHANGED = "changed"  # the rule that chose the action no longer holds (measured again)
+    BUSY = "busy"
+    STOP = "stop"  # a cargo process with an unknown build folder runs: nothing more this run
+    FAILED = "failed"
+
+
 def decide(
     folders: Sequence[Folder],
     pol: RustPolicy,

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.adapters.runner import on_host_argv
 from cst_core.domain.errors import Refused
-from toolchains.domain.auto import TimerFacts, own_session_env
+from toolchains.domain.auto import TimerFacts, UnitActiveState, own_session_env
 from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER, in_container
 
@@ -71,14 +71,14 @@ class UserUnits:
     def timer_facts(self, name: str) -> TimerFacts:
         enabled = self.systemctl("is-enabled", name)
         active = self.systemctl("is-active", name)
-        if active != "active":
+        if active != UnitActiveState.ACTIVE:
             return TimerFacts(enabled, active)
         return TimerFacts(enabled, active, self.systemctl("show", "-p", "NextElapseUSecRealtime", "--value", name))
 
     def stop_if_running(self, name: str) -> bool:
         # is-active prints the state; it exits 3 when the unit is not active,
         # and 4 when the manager does not know it (nothing loaded it).
-        if self.before_removal(name, "is-active", ok=(0, 3, 4)) in ("inactive", "failed"):
+        if self.before_removal(name, "is-active", ok=(0, 3, 4)) in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
             return False
         self.before_removal(name, "stop")
         return True

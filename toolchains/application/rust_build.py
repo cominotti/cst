@@ -15,6 +15,7 @@ from toolchains.application.prune import BaseTarget
 from toolchains.domain.build import (
     ROOT_REL,
     WORKSPACE_REL,
+    BuildTreeResult,
     CargoCache,
     Folder,
     FolderAction,
@@ -236,22 +237,22 @@ class RustBuild(BaseTarget[RustPolicy]):
                 result, detail = self.machine.tree.delete(root_dir, f, now, cache, recheck(f, a), self.deadline)
             else:
                 result, detail = self.machine.tree.trim(root_dir, f, now, cache, recheck(f, a), self.deadline)
-            if result == "changed":
+            if result == BuildTreeResult.CHANGED:
                 # Planned again with the fresh measurement; a folder that keeps
                 # changing is left for the next run.
                 rechecked[f.key] = rechecked.get(f.key, 0) + 1
                 self.tsay(f"not {'deleted' if a == FolderAction.DELETE else 'trimmed'}: {f.key}: {detail}", 5)
                 if rechecked[f.key] < 3:
                     continue
-                result = "busy"
-            if result == "deleted":
+                result = BuildTreeResult.BUSY
+            if result == BuildTreeResult.DELETED:
                 left.remove(f)
                 deleted[f.key] = f
                 self.tsay(f"deleted {f.key} ({gib(f.size)}, last active {when(f.activity)}): {why}")
                 if detail:
                     self.tsay(f"note: {f.key}: {detail}", 5)
                 continue
-            if result == "trimmed":
+            if result == BuildTreeResult.TRIMMED:
                 trimmed[f.key] = f.inc_size
                 self.tsay(
                     f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active "
@@ -260,11 +261,11 @@ class RustBuild(BaseTarget[RustPolicy]):
                 f.size -= f.inc_size  # planned again without them (the cap counts what is left)
                 f.inc = []
                 continue
-            if result == "stop":
+            if result == BuildTreeResult.STOP:
                 nbusy += 1
                 self.tsay(f"stopped before {f.key}: {detail}; nothing more is deleted in this run", 5)
                 break
-            if result == "busy":
+            if result == BuildTreeResult.BUSY:
                 nbusy += 1
                 self.tsay(f"skipped {f.key}: {detail}", 5)
             else:

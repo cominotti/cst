@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from cst_core.domain.errors import Refused
 from toolchains.domain.build import (
     TRASH_PREFIX,
+    BuildTreeResult,
     CargoCache,
     CargoProc,
     Workspaces,
@@ -347,9 +348,9 @@ class CargoBuildTree:
         root: str,
         folder: Folder,
         cache: CargoCache,
-        step: Callable[[], tuple[str, str]],
+        step: Callable[[], tuple[BuildTreeResult, str]],
         recheck: Callable[[], str] | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[BuildTreeResult, str]:
         """Run STEP() while holding every cargo lock of FOLDER, after checking
         that no process uses it and, with RECHECK, that the rule that chose the
         action still holds (RECHECK() measures the folder again and returns ''
@@ -359,25 +360,25 @@ class CargoBuildTree:
         this run."""
         fds, busy = take_locks(folder.path)
         if busy is not None:
-            return "busy", f"cargo lock held: {os.path.relpath(busy, folder.path)}"
+            return BuildTreeResult.BUSY, f"cargo lock held: {os.path.relpath(busy, folder.path)}"
         # The users are checked while the locks are held: a cargo that starts
         # after this check must first compile, and that waits for the lock.
         try:
             users = self.open_by(root)[0].get(folder.key)
             if users:
-                return "busy", "in use: " + users_text(users)
+                return BuildTreeResult.BUSY, "in use: " + users_text(users)
             ties, unknown = self.cargo_runs(root, cache)
             if ties.get(folder.key):
-                return "busy", "cargo runs on it: " + users_text(ties[folder.key])
+                return BuildTreeResult.BUSY, "cargo runs on it: " + users_text(ties[folder.key])
             if unknown:
-                return "stop", unknown_text(unknown)
+                return BuildTreeResult.STOP, unknown_text(unknown)
             # The plan was made from the activity measured when the run started;
             # a build may have written there since (and ended: no lock, no
             # process). Measured again here, while the locks are held: a cargo
             # that starts now waits for them.
             why = recheck() if recheck else ""
             if why:
-                return "changed", why
+                return BuildTreeResult.CHANGED, why
             return step()
         finally:
             release(fds)
@@ -390,39 +391,39 @@ class CargoBuildTree:
         cache: CargoCache,
         recheck: Callable[[], str] | None,
         deadline: float | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[BuildTreeResult, str]:
         """Lock, check for users (and RECHECK, see guarded), rename away,
         unlock, delete (the rm stopped at DEADLINE, the clock's monotonic time).
         ('deleted'|'busy'|'changed'|'stop'|'failed', detail)."""
         try:
             st = os.lstat(folder.path)
         except FileNotFoundError:
-            return "failed", "already gone"
+            return BuildTreeResult.FAILED, "already gone"
         if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-            return "failed", "no longer a folder (refused)"
+            return BuildTreeResult.FAILED, "no longer a folder (refused)"
         top = os.path.dirname(folder.path)
         trash = os.path.join(root, f"{TRASH_PREFIX}{folder.key.replace('/', '')}-{int(now)}")
 
-        def step() -> tuple[str, str]:
+        def step() -> tuple[BuildTreeResult, str]:
             try:
                 os.rename(folder.path, trash)
             except OSError as e:
-                return "failed", f"rename: {e.strerror}"
-            return "moved", ""
+                return BuildTreeResult.FAILED, f"rename: {e.strerror}"
+            return BuildTreeResult.MOVED, ""
 
         result, detail = self.guarded(root, folder, cache, step, recheck)
-        if result != "moved":
+        if result != BuildTreeResult.MOVED:
             return result, detail
         with contextlib.suppress(OSError):
             os.rmdir(top)  # the XX folder, when this was its last hash
         ok, msg = self.remove(trash, self.time_left(deadline))
         if not ok:
-            return "failed", f"rm: {msg}"
+            return BuildTreeResult.FAILED, f"rm: {msg}"
         # A cargo that was waiting for the lock during the rename builds again,
         # from scratch, into a new folder at the same path (it does not fail).
         if os.path.lexists(folder.path):
-            return "deleted", "a build started meanwhile and is filling a new folder at the same path"
-        return "deleted", ""
+            return BuildTreeResult.DELETED, "a build started meanwhile and is filling a new folder at the same path"
+        return BuildTreeResult.DELETED, ""
 
     def trim(
         self,
@@ -432,7 +433,7 @@ class CargoBuildTree:
         cache: CargoCache,
         recheck: Callable[[], str] | None,
         deadline: float | None,
-    ) -> tuple[str, str]:
+    ) -> tuple[BuildTreeResult, str]:
         """Delete only the incremental folders of FOLDER, with the same locks and
         checks as delete (RECHECK may update folder.inc). Each is renamed away while the locks are held;
         the modification time of its parent is put back afterwards, so that the
@@ -441,7 +442,7 @@ class CargoBuildTree:
         moved: list[str] = []
         base = folder.key.replace("/", "")
 
-        def step() -> tuple[str, str]:
+        def step() -> tuple[BuildTreeResult, str]:
             for i, d in enumerate(folder.inc):
                 path = d.path
                 parent = os.path.dirname(path)
@@ -456,11 +457,11 @@ class CargoBuildTree:
                 try:
                     os.rename(path, trash)
                 except OSError as e:
-                    return "failed", f"rename {os.path.relpath(path, folder.path)}: {e.strerror}"
+                    return BuildTreeResult.FAILED, f"rename {os.path.relpath(path, folder.path)}: {e.strerror}"
                 moved.append(trash)
                 with contextlib.suppress(OSError):
                     os.utime(parent, ns=(pst.st_atime_ns, pst.st_mtime_ns), follow_symlinks=False)
-            return "moved", ""
+            return BuildTreeResult.MOVED, ""
 
         result, detail = self.guarded(root, folder, cache, step, recheck)
         # What was renamed away is deleted also after a later failure (else the
@@ -470,8 +471,8 @@ class CargoBuildTree:
             ok, msg = self.remove(t, self.time_left(deadline))
             if not ok:
                 errors.append(msg)
-        if result != "moved":
+        if result != BuildTreeResult.MOVED:
             return result, detail
         if errors:
-            return "failed", f"rm: {errors[0]}"
-        return "trimmed", ""
+            return BuildTreeResult.FAILED, f"rm: {errors[0]}"
+        return BuildTreeResult.TRIMMED, ""

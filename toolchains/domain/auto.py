@@ -5,6 +5,7 @@ environment systemctl --user gets to reach this user's own manager; no I/O."""
 from __future__ import annotations
 
 import dataclasses
+from enum import StrEnum
 import re
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,14 @@ from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TI
 
 
 UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
+
+
+class UnitActiveState(StrEnum):
+    """The words of systemctl is-active (a unit's ActiveState) that the timer's code tells apart."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    FAILED = "failed"
 
 
 def render_service() -> str:
