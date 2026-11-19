@@ -606,11 +606,12 @@ def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | No
     return None if snaps is None else {s["id"] for s in snaps}
 
 
-def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo) -> list[ResticSnapshot] | None:
-    """The VM's restic snapshots (restic snapshots --json of its tags), or None when not readable."""
+def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = None) -> list[ResticSnapshot] | None:
+    """The VM's restic snapshots (restic snapshots --json of its tags, made on host: nas's by default),
+    or None when not readable."""
     rc, so, _ = restic.run(
         nas["env"],
-        ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"],
+        ["snapshots", "--json", "--no-lock", "--host", nas["host"] if host is None else host, "--tag", f"{TAG},vm:{vm}"],
         RESTIC_CHECK_TIMEOUT,
     )
     if rc != 0:
@@ -669,27 +670,33 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
 def retry_torn(p: NasBackup, vm: str, nas: NasRepo) -> str | None:
     """Forget the torn snapshots of vm in this repository that an earlier run recorded and could not
     forget, before the retention. A recorded id alone is never enough: restic must still list exactly
-    one snapshot of vm's tags that it names (prefix either way), and that one is forgotten by its listed
-    id. One that restic no longer lists that way is left alone and dropped from the record. Returns why
-    the retention must wait (an entry kept, the listing or the record not usable), else None. With no
-    such entry it runs nothing."""
+    one snapshot of vm's tags that it names (prefix either way), made on the host the entry recorded
+    (restic lists a snapshot only under its own host, and NAS_RESTIC_HOST can change), and that one is
+    forgotten by its listed id. One that restic no longer lists that way is left alone and dropped from
+    the record. Returns why the retention must wait (an entry kept, the listing or the record not
+    usable), else None. With no such entry it runs nothing."""
     try:
         mine = [e for e in p.store.read_torn() if e["vm"] == vm and e["repository"] == nas["repo"]]
     except (OSError, Refused) as e:
         return f"the record of torn snapshots cannot be read ({e})"
     if not mine:
         return None
-    listed = nas_snapshots(p.restic, vm, nas)
-    if listed is None:
-        return f"restic snapshots did not list the snapshots of {vm}, so the torn ones were not forgotten"
     kept: list[str] = []
     done: list[TornEntry] = []
-    for e in mine:
-        why = forget_listed(p, vm, nas, e, listed)
-        if why is None:
-            done.append(e)
-        else:
-            kept.append(why)
+    for host in sorted({e["host"] for e in mine}):
+        listed = nas_snapshots(p.restic, vm, nas, host)
+        if listed is None:
+            on = "" if host == nas["host"] else f" made on host {host}"
+            kept.append(f"restic snapshots did not list the snapshots of {vm}{on}, so the torn ones were not forgotten")
+            continue
+        for e in mine:
+            if e["host"] != host:
+                continue
+            why = forget_listed(p, vm, nas, e, listed)
+            if why is None:
+                done.append(e)
+            else:
+                kept.append(why)
     if done:
         try:
             p.store.drop_torn(done)

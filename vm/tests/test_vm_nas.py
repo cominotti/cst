@@ -214,7 +214,11 @@ if cmd == "forget":
         print(cfg["forget_err"], file=sys.stderr)
     sys.exit(cfg.get("forget_rc_by_id", {}).get(args[-1], cfg.get("forget_rc", 0)))
 if cmd == "snapshots":
-    print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
+    host = args[args.index("--host") + 1] if "--host" in args else None
+    if "snapshots_by_host" in cfg:  # {host: answer}: restic lists only the snapshots made on --host
+        print(cfg["snapshots_by_host"].get(host, "[]"))
+    else:
+        print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
     sys.exit(cfg.get("snapshots_rc", 0))
 sys.exit(1)
 """
@@ -1167,6 +1171,7 @@ class TornRecordTest(Nas):
         *,
         vm: str = "win",
         repository: str = REPO_URL,
+        host: str = "sophia",
         timestamp: str = "20261101T010000Z",
         why: str = "incomplete",
     ) -> vm_domain_backup.TornEntry:
@@ -1174,7 +1179,7 @@ class TornRecordTest(Nas):
             "snapshot": snapshot,
             "vm": vm,
             "repository": repository,
-            "host": "sophia",
+            "host": host,
             "timestamp": timestamp,
             "why": why,
         }
@@ -1303,6 +1308,34 @@ class TornRecordTest(Nas):
                 self.assertIn("--keep-weekly", calls[4])
                 self.assertIn(f"torn restic snapshot {TORN_ID[:8]} of an earlier run forgotten", r.stdout)
                 self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
+
+    def test_a_recorded_snapshot_of_another_host_is_listed_and_forgotten_under_that_host(self) -> None:
+        # NAS_RESTIC_HOST (or the hostname) changed since the torn run: restic lists that snapshot only
+        # under the host it was made on.
+        self.write_torn([self.torn_entry(host="oldhost")])
+        self.restic_cfg(
+            snapshots_by_host={"sophia": self.listed((SNAP_ID, BOTH_TAGS)), "oldhost": self.listed((TORN_ID, BOTH_TAGS))}
+        )
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = [c["args"] for c in self.restic_calls()]
+        self.assertEqual(calls[2], ["snapshots", "--json", "--no-lock", "--host", "oldhost", "--tag", "cst-vm,vm:win"])
+        self.assertEqual(self.forgets()[0], ["forget", "--retry-lock", "30m", TORN_ID])
+        self.assertIn("--keep-weekly", self.forgets()[1], "then the retention")
+        self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
+        # Its listing fails: the entry stays and the retention waits.
+        self.write_torn([self.torn_entry(host="oldhost")])
+        self.restic_cfg(snapshots_rc=1)
+        os.unlink(os.path.join(self.fix, "restic.log"))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.forgets(), [])
+        self.assertIn(
+            "retention skipped: restic snapshots did not list the snapshots of win made on host oldhost, so the "
+            "torn ones were not forgotten",
+            r.stdout,
+        )
+        self.assertEqual(self.torn_list(), [self.torn_entry(host="oldhost")])
 
     def test_a_retry_that_fails_skips_the_retention(self) -> None:
         self.write_torn([self.torn_entry()])

@@ -615,7 +615,9 @@ adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
 forgets it before its retention". If the record cannot be written either,
 the message says so: then forget it by hand before the next backup. The
 next NAS backup of that VM forgets the recorded snapshots first, and only
-those restic still lists with the tags `cst-vm` and `vm:<name>` (one
+those restic still lists with the tags `cst-vm` and `vm:<name>`, under
+the host recorded with them (restic lists a snapshot only under the host it
+was made on, so a changed `NAS_RESTIC_HOST` or hostname hides none; one
 listed snapshot per recorded ID, forgotten by its listed ID): never by the
 recorded ID alone. A recorded ID that restic no longer lists that way is
 left alone and dropped from the record. The record is shared by every VM
@@ -1038,8 +1040,8 @@ scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
 is recorded (once, 0644, atomically), one it forgets leaves no entry, a
 record that cannot be written or updated is said, a stop while forget waits
 leaves the entry; the next run forgets a recorded snapshot restic lists with
-both tags by its listed ID, skips the retention when that forget fails, a
-listing fails or an ID is ambiguous, drops one restic no longer lists that
+both tags by its listed ID (under the host it recorded), skips the retention
+when that forget fails, a listing fails or an ID is ambiguous, drops one restic no longer lists that
 way without forgetting it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
 the record's lock gives up after its timeout. No E2E test covers the NAS
