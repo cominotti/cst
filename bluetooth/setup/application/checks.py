@@ -2,11 +2,10 @@
 """The live checks of `cst bluetooth status` (and the end of apply): the services, LE Audio,
 the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
-import json
-
 from bluetooth.domain import ISO_UUID, LDAC_UNIT, RolesState, parse_roles_state, pw_state
 from bluetooth.setup.application.survey import Survey
 from bluetooth.setup.domain import BapState, LeState, WpState, preferred_bearer
+from cst_core.domain.shapes import parse_json
 from cst_core.ports import OutputMode
 
 
@@ -181,7 +180,7 @@ class Checks(Survey):
             self.check_warn("pw-dump", "no answer: PipeWire stuck? (systemctl --user restart pipewire wireplumber)")
             return
         try:
-            st = pw_state(self.c.device_id, json.loads(dump + "\n"))
+            st = pw_state(self.c.device_id, parse_json(dump + "\n"))
         except ValueError:
             self.check_warn("pw-dump", "could not read its output (rc=3)")
             return

@@ -81,6 +81,12 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/shapes.py:json_object": (
         "the one generic JSON-object guard; every record type is a TypedDict narrowed from it"
     ),
+    "cst_core/domain/shapes.py:object_of": (
+        "the generic reader of a JSON object of any shape (where Python raised on .get); no record type"
+    ),
+    "cst_core/domain/shapes.py:object_or_empty": (
+        "the generic reader of `x or {}` for a JSON object of any shape; no record type"
+    ),
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
     ),

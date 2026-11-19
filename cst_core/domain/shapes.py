@@ -35,6 +35,49 @@ def json_object(value: object) -> TypeIs[dict[str, object]]:
     return isinstance(value, dict) and all(isinstance(k, str) for k in value)
 
 
+class ShapeError(TypeError):
+    """A parsed JSON value is not of the shape a reader needs. Raised where Python's own
+    TypeError, AttributeError, KeyError or IndexError came before (a .get on a list, a
+    subscript of a number): a TypeError, so a caller that catches TypeError still does."""
+
+
+def object_of(value: object) -> dict[str, object]:
+    """value as a JSON object, for its .get and its keys; ShapeError for anything else."""
+    if json_object(value):
+        return value
+    raise ShapeError(f"not a JSON object: {type(value).__name__}")
+
+
+def object_or_empty(value: object) -> dict[str, object]:
+    """`value or {}` as a JSON object: {} for a falsy value (null, false, 0, "", []);
+    ShapeError for any other value that is not an object."""
+    return object_of(value) if value else {}
+
+
+def items_of(value: object) -> list[object]:
+    """What `for x in value` gives for a JSON value: a list's items, a string's characters, an
+    object's keys; ShapeError for a number, a bool or null."""
+    if isinstance(value, list | str | dict):
+        return list(value)
+    raise ShapeError(f"cannot iterate over {type(value).__name__}")
+
+
+def first_item(value: object) -> object:
+    """value[0] of a JSON value: a list's first item, a string's first character; ShapeError
+    for an empty one, an object (its keys are strings), a number, a bool or null."""
+    if isinstance(value, list | str) and len(value) > 0:
+        return value[0]
+    raise ShapeError(f"no first item in {type(value).__name__}")
+
+
+def has_item(container: object, item: str) -> bool:
+    """`item in container` for a JSON value: an object's key, a list's item, a substring of a
+    string; ShapeError for a number, a bool or null."""
+    if isinstance(container, list | str | dict):
+        return item in container
+    raise ShapeError(f"cannot look into {type(container).__name__}")
+
+
 def has_shape(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
     """obj is a JSON object with every required key and each known key of its type (a bool
     is no int here, as JSON tells them apart). Keys it does not name are not checked."""

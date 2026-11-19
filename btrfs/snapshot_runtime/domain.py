@@ -6,11 +6,11 @@ defaults, btrfs-snapshot-core's command lines, and the texts of the journal line
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-import json
 import re
 from typing import Final
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int
+from cst_core.domain.shapes import ShapeError, first_item, items_of, object_of, object_or_empty, parse_json
 from cst_core.domain.text import group, read_fields
 from cst_core.domain.values import DAY, HOUR, MINUTE
 
@@ -455,14 +455,52 @@ def features_type(out: str) -> str:
 
 def summary_text(out: str) -> str:
     """One line per source about its latest restic snapshot (restic snapshots --json), for
-    snapshots status; raises on output that is not restic's JSON."""
+    snapshots status; raises on output that is not restic's JSON (ShapeError, a TypeError,
+    where a part it reads is of another shape)."""
     lines: list[str] = []
-    for snap in sorted(json.loads(out), key=lambda s: (s.get("paths") or [""])[0]):
-        summary = snap.get("summary") or {}
-        name = (snap.get("paths") or ["?"])[0].rsplit("/", 1)[-1]
-        when = snap.get("time", "")[:16].replace("T", " ")
-        size = summary.get("total_bytes_processed", 0) / 2**30
+    # A first path that is not text failed the name below, if not the sort: text only.
+    snaps = [object_of(s) for s in _restic_snapshots(parse_json(out))]
+    keyed = [(_restic_text(_first_or(s.get("paths"), "")), s) for s in snaps]
+    for _, snap in sorted(keyed, key=lambda k: k[0]):
+        summary = object_or_empty(snap.get("summary"))
+        name = _first_or(snap.get("paths"), "?")
+        when = snap.get("time", "")
+        if not isinstance(name, str) or not isinstance(when, str):
+            raise ShapeError("a path or a time that is not text")
+        size = _restic_number(summary.get("total_bytes_processed", 0)) / 2**30
         files = summary.get("total_files_processed", 0)
-        added = summary.get("data_added_packed", 0) / 2**20
+        added = _restic_number(summary.get("data_added_packed", 0)) / 2**20
+        name = name.rsplit("/", 1)[-1]
+        when = when[:16].replace("T", " ")
         lines.append(f"{name}: {when}, {size:.1f} GiB in {files} files, {added:.0f} MiB new on the NAS\n")
     return "".join(lines)
+
+
+def _restic_snapshots(data: object) -> list[object]:
+    """The snapshots of restic snapshots --json (a list of objects; an empty string or object
+    has none); ShapeError for any other value."""
+    if isinstance(data, str | dict) and not data:
+        return []
+    if not isinstance(data, list):
+        raise ShapeError(f"not a list: {type(data).__name__}")
+    return items_of(data)
+
+
+def _first_or(value: object, default: str) -> object:
+    """(value or [default])[0]: a list's first item, a string's first character, default for a
+    falsy value; ShapeError for any other value."""
+    return first_item(value) if value else default
+
+
+def _restic_text(value: object) -> str:
+    """value when it is a string; ShapeError for any other value."""
+    if isinstance(value, str):
+        return value
+    raise ShapeError(f"not text: {type(value).__name__}")
+
+
+def _restic_number(value: object) -> int | float:
+    """A JSON number (a bool counts, as arithmetic on it did); ShapeError for any other value."""
+    if isinstance(value, int | float):
+        return value
+    raise ShapeError(f"not a number: {type(value).__name__}")

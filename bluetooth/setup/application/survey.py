@@ -9,17 +9,17 @@ runs, their arguments and where their output goes are bluetooth-setup.sh's.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-import json
 import re
 from typing import Literal
 
+from cst_core.domain.shapes import parse_json
 from bluetooth.domain import (
     ISO_UUID,
     LDAC_UNIT,
     MARKER,
     WholeFileState,
     adapter_path,
-    card_state,
+    card_state_of,
     current_values,
     edit_general,
     lw_failure,
@@ -330,7 +330,7 @@ class Survey:
             output=OutputMode.STDOUT,
         )
         try:
-            path = adapter_path(json.loads(r.stdout))
+            path = adapter_path(parse_json(r.stdout))
         except ValueError, TypeError, AttributeError, KeyError, IndexError:
             path = None
         return path or "", r.returncode == 0 and path is not None
@@ -362,7 +362,7 @@ class Survey:
                 return None
             parts.append(r.stdout.rstrip("\n"))
         try:
-            st = card_state(self.c.device_id, *json.loads(f"[{parts[0]},{parts[1]},{parts[2]}]"))
+            st = card_state_of(self.c.device_id, parse_json(f"[{parts[0]},{parts[1]},{parts[2]}]"))
         except ValueError, TypeError, AttributeError, KeyError, IndexError:
             return None
         if st is None:

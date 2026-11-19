@@ -57,7 +57,18 @@ from doctor.domain import parse_alert_text
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import Owner
-from cst_core.domain.shapes import has_shape, json_object, parse_json, parse_toml
+from cst_core.domain.shapes import (
+    ShapeError,
+    first_item,
+    has_shape,
+    has_item,
+    items_of,
+    json_object,
+    object_of,
+    object_or_empty,
+    parse_json,
+    parse_toml,
+)
 from cst_core.domain.text import (
     describe_problems,
     enum_member,
@@ -1474,6 +1485,46 @@ class ShapesTest(unittest.TestCase):
         ):
             with self.subTest(obj=obj):
                 self.assertFalse(has_shape(obj, required, optional))
+
+
+class ShapeReadersTest(unittest.TestCase):
+    """cst_core.domain.shapes: reading a part of parsed JSON as Python's own operations did, with
+    ShapeError (a TypeError) where they raised TypeError, AttributeError, KeyError or IndexError."""
+
+    SCALARS: tuple[object, ...] = (None, True, 0, 2, 1.5)
+
+    def test_shape_error_is_a_type_error(self) -> None:
+        self.assertTrue(issubclass(ShapeError, TypeError))
+        self.assertFalse(issubclass(ShapeError, ValueError))  # a caller tells bad JSON from a bad shape
+
+    def test_object_of_and_object_or_empty(self) -> None:
+        self.assertEqual(object_of({"k": 1}), {"k": 1})
+        self.assertEqual(object_or_empty({"k": 1}), {"k": 1})
+        for falsy in (None, False, 0, 0.0, "", [], {}):
+            with self.subTest(falsy=falsy):
+                self.assertEqual(object_or_empty(falsy), {})  # value or {}
+        for value in (*self.SCALARS, "", "ab", [], [1], {1: "a"}):
+            with self.subTest(value=value), self.assertRaises(ShapeError):
+                object_of(value)
+        for value in (True, 2, 1.5, "ab", [1]):
+            with self.subTest(value=value), self.assertRaises(ShapeError):
+                object_or_empty(value)
+
+    def test_items_first_item_and_holds(self) -> None:
+        self.assertEqual(items_of([1, "b"]), [1, "b"])
+        self.assertEqual(items_of("ab"), ["a", "b"])  # for x in "ab"
+        self.assertEqual(items_of({"k": 1, "l": 2}), ["k", "l"])  # an object's keys
+        self.assertEqual((first_item([3, 4]), first_item("ab")), (3, "a"))
+        self.assertTrue(has_item({"k": 1}, "k") and has_item(["k"], "k") and has_item("xky", "k"))
+        self.assertFalse(has_item({"j": "k"}, "k") or has_item([], "k") or has_item("", "k"))
+        for value in self.SCALARS:
+            with self.subTest(value=value):
+                for reader in (items_of, first_item, lambda v: has_item(v, "k")):
+                    with self.assertRaises(ShapeError):
+                        reader(value)
+        for value in ([], "", {"k": 1}):
+            with self.subTest(value=value), self.assertRaises(ShapeError):
+                first_item(value)  # IndexError for an empty one, KeyError(0) for an object
 
 
 class RegexTextTest(unittest.TestCase):

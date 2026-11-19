@@ -4,7 +4,6 @@ waits, btrfs-snapshot-core's runs and their alerts, as btrfs/btrfs-snapshot (bas
 
 from collections.abc import Sequence
 import glob
-import json
 import os
 import re
 import sys
@@ -31,6 +30,7 @@ from btrfs.snapshot_runtime.domain import (
     source_args,
 )
 from cst_core.domain.contracts import Urgency
+from cst_core.domain.shapes import ShapeError, items_of, object_of, parse_json
 from cst_core.domain.values import DAY, GIB
 from cst_core.ports import OutputMode
 
@@ -382,14 +382,25 @@ def manual_prune(m: SnapshotRun, args: Sequence[str]) -> int:
 
 
 # ---- purge ---------------------------------------------------------------------------------
+def _path(snap: object) -> object:
+    """snap["path"] of one snapshot of the core's list; ShapeError when it has none."""
+    data = object_of(snap)
+    if "path" not in data:
+        raise ShapeError("a snapshot without a path")
+    return data["path"]
+
+
 def listed_paths(out: str) -> list[str] | None:
     """The snapshot paths of the core's list --json (None: not its JSON)."""
     try:
         printed: list[str] = []
-        for src in json.loads(out)["sources"]:
-            printed.extend(str(snap["path"]) for snap in src.get("snapshots", []))
-    except ValueError, KeyError, TypeError, AttributeError, RecursionError:
-        return None  # whatever it holds: not the core's JSON
+        data = object_of(parse_json(out))
+        if "sources" not in data:
+            return None
+        for src in items_of(data["sources"]):
+            printed.extend(str(_path(snap)) for snap in items_of(object_of(src).get("snapshots", [])))
+    except ValueError, TypeError, RecursionError:
+        return None  # whatever it holds (ShapeError is a TypeError): not the core's JSON
     return [p for p in "\n".join(printed).split("\n") if p]
 
 

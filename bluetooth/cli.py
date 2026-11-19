@@ -18,11 +18,12 @@ import re
 import sys
 from typing import Final, TextIO
 
+from cst_core.domain.shapes import parse_json
 from bluetooth.domain import (
     SETTING_KEYS,
     SETTINGS_VALUE_RE,
     adapter_path,
-    card_state,
+    card_state_of,
     current_values,
     device_id,
     edit_general,
@@ -156,7 +157,7 @@ def main(
         print(unit_state(host.read_or_none(args[0]), render_unit(args[1], args[2])), file=out)
         return 0
     try:
-        data = json.loads(host.read_stdin())
+        data = parse_json(host.read_stdin())
     except ValueError:
         return 3 if cmd == "pw-parse" else 1
     if cmd == "adapter-path":
@@ -166,7 +167,7 @@ def main(
         print(path, file=out)
         return 0
     if cmd == "card-state":
-        card_st = card_state(args[0], *data)
+        card_st = card_state_of(args[0], data)
         if card_st is None:
             return 1
         print(f"{card_st[0]}|{int(card_st[1])}|{int(card_st[2])}", file=out)
