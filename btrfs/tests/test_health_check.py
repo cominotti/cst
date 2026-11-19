@@ -118,6 +118,9 @@ if name == "journalctl":
 if name == "systemctl":
     sys.exit(0 if args[-1] in m.get("enabled", []) else 1)
 if name == "rpm-ostree":
+    if "ostree_raw" in m:
+        sys.stderr.write(m.get("ostree_err", ""))
+        out(m["ostree_raw"], m.get("ostree_rc", 0))
     v = m.get("ostree")
     out(json.dumps(v), 0) if v is not None else sys.exit(1)
 if name == "btrfs-notify":
@@ -522,30 +525,42 @@ class HealthCheckTest(unittest.TestCase):
     def upstream_rule(self, rel: str = "usr/lib/udev/rules.d/64-btrfs.rules") -> str:
         return self.write(rel, 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"\n')
 
+    @staticmethod
+    def next_unknown(reason: str) -> str:
+        """The journal warning of a check that could not tell the next deployment's root."""
+        return f"<4>{TAG}: udev: next deployment unknown ({reason}); its 64-btrfs.rules was not checked\n"
+
     def test_last_resort_rule(self) -> None:
         rule = self.last_resort("aaaaaaaa-0000")
         self.upstream_rule()
+        # This machine has no rpm-ostree answer: the next deployment is unknown (a journal warning).
+        unknown = self.next_unknown("rpm-ostree status --json failed: exit 1")
         self.assert_problems(
             self.run_check(),
             f"btrfs-last-resort: {rule} is for aaaaaaaa-0000 but the root fs is {UUID}; re-run 'cst btrfs "
             "degraded-boot'",
+            stdout=unknown,
         )
         self.last_resort("")
         self.assert_problems(
             self.run_check(),
             f"btrfs-last-resort: {rule} is for ? but the root fs is {UUID}; re-run 'cst btrfs degraded-boot'",
+            stdout=unknown,
         )
         self.last_resort("aaaaaaaa-0000")
         self.machine["sysroot_uuid"] = ""
         self.assert_problems(
             self.run_check(),
             f"btrfs-last-resort: {rule} is for aaaaaaaa-0000 but the root fs is ?; re-run 'cst btrfs degraded-boot'",
+            stdout=unknown,
         )
 
     def test_upstream_rule_of_this_and_the_next_boot(self) -> None:
         self.last_resort(UUID)
         self.upstream_rule()
-        self.assert_healthy(self.run_check())
+        self.assert_healthy(
+            self.run_check(), self.next_unknown("rpm-ostree status --json failed: exit 1") + self.ok_line()
+        )
         self.machine["ostree"] = {
             "deployments": [{"osname": "fedora", "checksum": "abc123", "serial": 1}, {"osname": "fedora"}]
         }
@@ -560,6 +575,52 @@ class HealthCheckTest(unittest.TestCase):
         self.assert_problems(
             self.run_check(), f"udev: {here} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
         )
+
+    def test_an_unknown_next_deployment_is_a_journal_warning_and_the_booted_rule_is_still_checked(self) -> None:
+        # Before, next_root dropped the reason and nothing said the next boot's rule went unchecked.
+        self.last_resort(UUID)
+        self.upstream_rule()
+        here = self.path("usr/lib/udev/rules.d/64-btrfs.rules")
+        changed = f"udev: {here} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
+        cases: list[tuple[str, dict[str, object], str]] = [
+            ("rpm-ostree fails", {"ostree_raw": "", "ostree_rc": 1, "ostree_err": "error: x\n"}, "failed: error: x"),
+            ("not JSON", {"ostree_raw": "{"}, "unreadable output ("),
+            ("no deployment", {"ostree": {"deployments": []}}, "rpm-ostree lists no deployment"),
+            (
+                "no serial",
+                {"ostree": {"deployments": [{"osname": "fedora", "checksum": "abc123"}]}},
+                "its first deployment has no osname, checksum or whole serial",
+            ),
+            (
+                "serial inf",
+                {"ostree_raw": '{"deployments": [{"osname": "fedora", "checksum": "abc123", "serial": 1e999}]}'},
+                "its first deployment has no osname, checksum or whole serial",
+            ),
+        ]
+        for name, answer, reason in cases:
+            with self.subTest(name):
+                for key in ("ostree", "ostree_raw", "ostree_rc", "ostree_err"):
+                    self.machine.pop(key, None)
+                self.machine.update(answer)
+                r = self.run_check()
+                self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+                lines = r.stdout.splitlines(keepends=True)
+                self.assertEqual(len(lines), 2, r.stdout)
+                self.assertTrue(lines[0].startswith(f"<4>{TAG}: udev: next deployment unknown ("), lines[0])
+                self.assertIn(reason, lines[0])
+                self.assertTrue(lines[0].endswith("); its 64-btrfs.rules was not checked\n"), lines[0])
+                self.assertEqual(lines[1], self.ok_line())
+                self.assertEqual(self.alerts(), [])
+                # The booted system's rule is still checked.
+                os.rename(here, here + ".kept")
+                r = self.run_check()
+                os.rename(here + ".kept", here)
+                self.assert_problems(r, changed, stdout=lines[0])
+
+    def test_no_warning_without_degraded_boot(self) -> None:
+        # rpm-ostree is not even asked when the last-resort rule is not installed.
+        self.assert_healthy(self.run_check())
+        self.assertEqual(self.calls("rpm-ostree"), [])
 
     def test_degraded_boot_flag(self) -> None:
         self.write(f"run/btrfs-allow-degraded/{UUID}", "")
