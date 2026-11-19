@@ -241,6 +241,12 @@ class SwapReports:
             if settings.problems:
                 return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
             return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
+        return self._spec_from_older_install()
+
+    def _spec_from_older_install(self) -> SpecResolution:
+        """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
+        partition's size now), from which apply writes the file."""
+        env = self._env
         if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
             name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
             return (
