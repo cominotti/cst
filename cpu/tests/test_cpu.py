@@ -96,6 +96,10 @@ class GameCgroupTest(unittest.TestCase):
         text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
         self.assertEqual(self.cgroup(text), "user.slice/x.scope")
 
+    def test_a_carriage_return_in_the_path_is_kept(self) -> None:
+        # Only a newline ends a line of /proc/PID/cgroup; a cgroup name may hold a carriage return.
+        self.assertEqual(self.cgroup("0::/user.slice/a\rb.scope\n"), "user.slice/a\rb.scope")
+
     def test_no_0_line_or_no_file_is_no_cgroup(self) -> None:
         for text in ("", "1:name=systemd:/user.slice/x.scope\n", "1:name=systemd:/a::b\n"):
             with self.subTest(text=text):

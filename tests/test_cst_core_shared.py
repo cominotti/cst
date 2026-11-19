@@ -161,6 +161,11 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(cgroup_v2_path("0::/a.scope\n1:name=systemd:/b::c\n0::/d.scope"), "/a.scope")
         self.assertEqual(cgroup_v2_path("0::/a.scope  \n"), "/a.scope  ")  # the rest of the line, as it is
         self.assertEqual(cgroup_v2_path("0::\n"), "")  # a 0:: line with no path: not None
+        # Only a newline ends a line: a cgroup name may hold any other separator (not "/" or "\n").
+        for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=sep):
+                self.assertEqual(cgroup_v2_path(f"0::/user.slice/a{sep}b.scope\n"), f"/user.slice/a{sep}b.scope")
+                self.assertIsNone(cgroup_v2_path(f"1:name=systemd:/a{sep}0::/b.scope\n"))
         for text in ("", "\n", "1:name=systemd:/a.scope\n", " 0::/a.scope", "10::/a.scope", "0:/a.scope"):
             with self.subTest(text=text):
                 self.assertIsNone(cgroup_v2_path(text))

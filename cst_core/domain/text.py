@@ -71,8 +71,10 @@ def cgroup_v2_path(text: str) -> str | None:
     """The cgroup v2 ("unified") path in the text of a /proc/PID/cgroup: the rest of the first line
     that starts with "0::" (on a hybrid system the cgroup v1 lines, "N:controllers:/path", come
     before it). None when no line does (a cgroup v1 only file, or an empty text); "" for a "0::"
-    line with nothing after it."""
-    return next((ln[3:] for ln in text.splitlines() if ln.startswith("0::")), None)
+    line with nothing after it. Only a newline ends a line (file_lines, as the rustc wrapper's
+    `read -r` loop reads it): a cgroup name may hold a carriage return or another separator
+    that str.splitlines() would cut the path at."""
+    return next((ln[3:] for ln in file_lines(text) if ln.startswith("0::")), None)
 
 
 def is_yes(answer: str) -> bool:
