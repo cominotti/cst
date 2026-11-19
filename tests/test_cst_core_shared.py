@@ -1472,9 +1472,21 @@ class ShapesTest(unittest.TestCase):
         for text in ('{"a": [1, 2.5, null, true]}', "[]", '"x"', "3", "NaN", b'{"b": "\xc3\xa9"}'):
             with self.subTest(text=text):
                 self.assertEqual(repr(parse_json(text)), repr(json.loads(text)))
-        for bad, error in (("{", json.JSONDecodeError), (b"\xff", UnicodeDecodeError), ("[" * 100000, RecursionError)):
+        for bad, error in (("{", json.JSONDecodeError), (b"\xff", UnicodeDecodeError)):
             with self.subTest(bad=bad[:5]), self.assertRaises(error):
                 parse_json(bad)
+        # Deep nesting: json.loads raises RecursionError or JSONDecodeError depending on the
+        # interpreter's stack and recursion limit (the CI container differs from a workstation).
+        # parse_json raises whatever json.loads raises here, in this process.
+        deep = "[" * 100000
+        try:
+            json.loads(deep)
+        except (RecursionError, json.JSONDecodeError) as e:
+            expected: type[BaseException] = type(e)
+        else:
+            self.fail("json.loads accepted unbalanced brackets")
+        with self.assertRaises(expected):
+            parse_json(deep)
 
     def test_parse_toml_is_tomllib(self) -> None:
         text = 'a = 1\n[b]\nc = "\u00e9"\n'

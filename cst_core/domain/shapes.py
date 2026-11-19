@@ -20,7 +20,8 @@ type KeyTypes = Mapping[str, tuple[type, ...]]
 
 def parse_json(text: str | bytes) -> object:
     """json.loads(text): the same value and the same exceptions (JSONDecodeError, a
-    UnicodeDecodeError for bytes that are not UTF-8, RecursionError for deep nesting).
+    UnicodeDecodeError for bytes that are not UTF-8, and for deep nesting RecursionError or a
+    JSONDecodeError, whichever json.loads raises on this interpreter).
     A file reader passes f.read(): json.load(f) is exactly json.loads(f.read())."""
     return json.loads(text)
 
