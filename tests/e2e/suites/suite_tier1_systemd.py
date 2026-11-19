@@ -692,7 +692,7 @@ sys.exit(r.returncode)
 """
 
 
-# test_112: the program at argv[1] with its settings file at argv[2] against the same fake docker and
+# test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
 # run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
 # nothing done", and nothing is removed.
@@ -730,20 +730,20 @@ env = {
 want = f"<3>docker-gc: container inspect: {hole['Id']}: no Image; nothing done"
 for args in (["run", "--dry-run"], ["status"], ["run", "--dry-run"], ["status"]):  # run: skipped right after boot
     r = subprocess.run([prog, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
-    sys.stderr.write(f"test_112 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
+    sys.stderr.write(f"test_145 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
     if r.returncode != 76 or want not in r.stdout + r.stderr:  # 76: the recorder unit does not restart for it
-        sys.exit(f"test_112: {args}: expected exit 76 and {want!r}")
+        sys.exit(f"test_145: {args}: expected exit 76 and {want!r}")
 with open(os.path.join(tmp, "calls.log")) as f:
     calls = [json.loads(line) for line in f]
 removing = [c for c in calls if "rm" in c or "prune" in c]
 if removing:
-    sys.exit(f"test_112: docker was asked to remove {removing}")
+    sys.exit(f"test_145: docker was asked to remove {removing}")
 with open(os.path.join(tmp, "docker.json")) as f:
     if json.load(f) != docker:
-        sys.exit("test_112: the fake docker's objects changed")
+        sys.exit("test_145: the fake docker's objects changed")
 with open(last_used, "rb") as f:
     if f.read() != before:
-        sys.exit("test_112: last-used.json changed")
+        sys.exit("test_145: last-used.json changed")
 print("E2E-OK")
 """
 
@@ -4328,7 +4328,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             f"""
             set -E
-            trap 'echo "test_112 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            trap 'echo "test_145 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             stage={stage}
             rm -rf "$stage" && install -d -m 0755 "$stage"
