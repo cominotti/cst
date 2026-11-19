@@ -233,7 +233,8 @@ class SwapReports:
 
     def resolve_spec(self) -> SpecResolution:
         """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
-        up (its marked crypttab line, the partition's size now: apply writes the file from them)."""
+        up (its marked crypttab line, the partition's size now: apply writes the file from them). A file
+        that is there but cannot be read is never taken as missing."""
         env = self._env
         text = self._fs.read_text(env.settings_path)
         if text is not None:
@@ -241,7 +242,19 @@ class SwapReports:
             if settings.problems:
                 return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
             return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
+        if self._fs.lexists(env.settings_path):
+            return self._settings_not_read()
         return self._spec_from_older_install()
+
+    def _settings_not_read(self) -> SpecResolution:
+        """/etc/cst/swap.conf is there and could not be read: never taken as missing (the migration
+        would write over it). A user who may not read it is asked for --root; anything else stops apply."""
+        path = self._env.settings_path
+        if not self._fs.is_file(path):
+            return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
+        if not self._fs.is_readable(path):
+            return SpecResolution(None, SwapSpecState.UNREADABLE)
+        return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
 
     def _spec_from_older_install(self) -> SpecResolution:
         """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
@@ -288,6 +301,8 @@ class SwapReports:
                 f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
                 f" which needs root to read: on the host, {env.prog} {verb} --root",
             )
+        if res.state == SwapSpecState.UNREADABLE:
+            return PlanItem("?", target, f"cannot be read as this user: on the host, {env.prog} {verb} --root")
         if res.state == SwapSpecState.BAD:
             return PlanItem("REFUSE", target, f"{res.note}: apply stops")
         why = f" ({res.note})" if res.note else ""

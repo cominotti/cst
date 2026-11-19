@@ -650,6 +650,10 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         self._block_links = dict(block_links)
         self._unreadable = set() if unreadable_paths is None else set(unreadable_paths)
 
+    @property
+    def block_links(self) -> dict[str, str]:
+        return dict(self._block_links)
+
     def add_block_link(self, link: str, target: str) -> None:
         self._block_links[link] = target
 
@@ -668,6 +672,20 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         if path in self._unreadable:
             return False
         return super().is_readable(path)
+
+
+class _TextUnreadable(_FakeTempFileSystem):
+    """read_text gives its default for the paths in unread, as for a file the process may not open."""
+
+    def __init__(
+        self, block_links: Mapping[str, str], unreadable_paths: set[str] | None = None, *, unread: set[str]
+    ) -> None:
+        super().__init__(block_links, unreadable_paths)
+        self._unread = set(unread)
+
+    @override
+    def read_text(self, path: str, default: str | None = None) -> str | None:
+        return default if path in self._unread else super().read_text(path, default)
 
 
 class _FakeSystemd:
@@ -1570,6 +1588,72 @@ class SwapSettingsTest(_SwapScratch):
         err = io.StringIO()
         self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 1)
         self.assertFalse(os.path.exists(env.settings_path))
+
+    def _on(self, fs: _FakeTempFileSystem) -> tuple[SwapApplicationService, _FakeSystemd]:
+        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        return SwapApplicationService(self.env, fs, systemd, system, installer=_installer()), systemd
+
+    def _run_on(self, cmd: RunCommand, fs: _FakeTempFileSystem) -> tuple[int, str, str, _FakeSystemd]:
+        service, systemd = self._on(fs)
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(cmd, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def _older_install(self) -> None:
+        """What an older CST set up: the migration would write /etc/cst/swap.conf from it."""
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+
+    def test_a_settings_file_this_user_cannot_read_asks_for_root_and_is_not_taken_as_missing(self) -> None:
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                fs = _TextUnreadable(self._fs(unreadable={path}).block_links, unreadable_paths={path}, unread={path})
+                rc, out, err, _ = self._run_on(cmd, fs)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(
+                    "  ?         cst/swap.conf                          cannot be read as this user: on the host,"
+                    f" cst swap {cmd} --root\n",
+                    out,
+                )
+                self.assertNotIn("  write     cst/swap.conf", out)
+                self.assertNotIn("REFUSE    cst/swap.conf", out)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_path_that_is_not_a_regular_file_refuses_and_apply_writes_nothing(self) -> None:
+        self._older_install()  # with the partition there: the migration's write case
+        os.makedirs(self.env.settings_path)
+        before = _tree(self.tmp)
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, self._fs())
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  REFUSE    cst/swap.conf                          not a regular file: apply stops\n", out)
+        rc, out, err, systemd = self._run_on(D.SwapCommand.APPLY, self._fs())
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops.\n")
+        self.assertNotIn("written:", out)
+        self.assertEqual((systemd.daemon_reloads, systemd.calls), (0, []))
+        self.assertEqual(_tree(self.tmp), before)
+        self.assertTrue(os.path.isdir(self.env.settings_path))
+
+    def test_a_settings_file_that_cannot_be_read_although_access_allows_it_refuses(self) -> None:
+        # Root, and the read still fails (EIO, a security policy): apply stops, nothing is migrated.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        before = _tree(self.tmp)
+        fs = _TextUnreadable(self._fs().block_links, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  REFUSE    cst/swap.conf                          cannot be read: apply stops\n", out)
+        fs = _TextUnreadable(self._fs().block_links, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
+        self.assertEqual(_tree(self.tmp), before)
 
     def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")

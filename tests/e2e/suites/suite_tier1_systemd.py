@@ -1414,7 +1414,8 @@ echo E2E-OK
         changes nothing; as the user it says crypttab needs root; doctor warns. apply writes
         /etc/cst/swap.conf from the crypttab line and the partition, removes the old
         drop-in and its record line; a runtime MemoryLow then wins; a second apply changes
-        nothing; doctor is ok."""
+        nothing; doctor is ok; a swap.conf the user cannot read, or a folder in its place, is
+        never taken as missing."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -1566,6 +1567,27 @@ doc="$(as_user "$CST" doctor 2>&1 || true)"
 [[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line of a file not CST's"; }
 rm "$old"
 systemctl daemon-reload
+
+# An /etc/cst/swap.conf that is there but cannot be read is never taken as missing: as the user (mode
+# 0600) plan asks for --root and changes nothing; with a folder there, apply stops before any change.
+chmod 0600 /etc/cst/swap.conf
+s_unread="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, swap.conf 0600"; }
+[[ "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan would write swap.conf"; }
+swap_run plan
+grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
+[[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
+chmod 0644 /etc/cst/swap.conf
+mv /etc/cst/swap.conf "$W/swap.conf.aside"
+mkdir /etc/cst/swap.conf
+s_dir="$(snap)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder at /etc/cst/swap.conf"
+grep -qF "ERROR: /etc/cst/swap.conf: not a regular file: apply stops." <<<"$err" || fail "apply message, a folder at swap.conf"
+[[ "$out" != *"written:"* && "$(snap)" == "$s_dir" ]] || fail "apply with a folder at swap.conf changed something"
+rmdir /etc/cst/swap.conf
+mv "$W/swap.conf.aside" /etc/cst/swap.conf
 
 # Now a MemoryLow set at run time wins the reload, and status and apply leave it.
 systemctl set-property --runtime machine.slice MemoryLow=1G

@@ -224,6 +224,7 @@ class SwapSpecState(StrEnum):
     UNKNOWN = "unknown"
     UNSET = "unset"
     BAD = "bad"
+    UNREADABLE = "unreadable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +233,8 @@ class SpecResolution:
 
     state: "ok" (from the settings file), "write" (derived from what an older CST set up: apply
     writes the settings file first), "unknown" (an older CST set swap up, but /etc/crypttab needs
-    root to read), "unset" (not configured), "bad" (the settings file has problems).
+    root to read), "unset" (not configured), "bad" (the settings file has problems, is not a regular
+    file or cannot be read), "unreadable" (the settings file is there and this user may not read it).
     """
 
     spec: SwapHardwareSpec | None

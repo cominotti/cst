@@ -115,6 +115,11 @@ compressor later creates a second pool that lives until the old one drains).
   0644). Nothing is configured by default: without it `plan` and `status`
   show `REFUSE` for `cst/swap.conf` (and no crypttab, fstab or partition
   rows), `cst doctor` warns, and `apply` stops before it changes anything.
+  A `/etc/cst/swap.conf` that is there but cannot be read is never treated
+  as missing: as your user (a mode other than 0644) `plan` and `status`
+  show `?` and ask for `--root`; one that is not a regular file, or that
+  root cannot read, is `REFUSE`, and `apply` stops before it changes
+  anything.
   On sophia it reads:
 
   ```
