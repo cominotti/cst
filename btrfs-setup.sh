@@ -538,6 +538,21 @@ exec /usr/local/bin/btrfs-stall-report "$@"
 EOF
 }
 
+# install_report_launcher: btrfs-stall-report in the target user's ~/.local/bin,
+# for the host and toolboxes alike (no target user: none).
+install_report_launcher() {
+    if [[ -n "${shim}" ]]; then
+        shim_content | cst_install_text "${shim}" 0755 "${target_user}"
+    fi
+}
+
+# remove_report_launcher: that launcher, only when this script wrote it.
+remove_report_launcher() {
+    if [[ -n "${shim}" ]] && grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
+        rm -fv "${shim}"
+    fi
+}
+
 # ---- status ----------------------------------------------------------------------
 section() { printf '\n== %s\n' "$1"; }
 
@@ -907,9 +922,7 @@ uninstall() {
     remove_tuning_files
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
-    if [[ -n "${shim}" ]] && grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
-        rm -fv "${shim}"
-    fi
+    remove_report_launcher
     systemctl daemon-reload
     echo "Not touched: snapshots and the NAS backup ('${PROG} snapshots disable [--purge]' stops them / deletes"
     echo "             the local snapshots; the restic repository on the NAS, its password in"
@@ -948,9 +961,7 @@ install_all() {
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
     systemd-tmpfiles --create "${RECLAIM_FILE}"
-    if [[ -n "${shim}" ]]; then
-        shim_content | cst_install_text "${shim}" 0755 "${target_user}"
-    fi
+    install_report_launcher
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
     link_cst_command "${target_user}"
