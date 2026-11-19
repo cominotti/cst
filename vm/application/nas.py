@@ -707,15 +707,21 @@ def retry_torn(p: NasBackup, vm: str, nas: NasRepo) -> str | None:
 
 def forget_listed(p: NasBackup, vm: str, nas: NasRepo, e: TornEntry, listed: Sequence[ResticSnapshot]) -> str | None:
     """Forget the listed snapshot the torn entry e names (retry_torn); None when the entry is done with
-    (forgotten, or no longer a snapshot of vm here), else why it stays."""
+    (forgotten now, or restic no longer lists it: forgotten already), else why it stays. A listed one
+    without both tags is never forgotten: it stays, and the retention waits."""
     short = e["snapshot"][:8]
     found = [s for s in listed if s["id"].startswith(e["snapshot"]) or e["snapshot"].startswith(s["id"])]
     if len(found) > 1:
         return f"the torn snapshot {short} names {len(found)} listed snapshots"
-    tags = found[0].get("tags") if found else None
-    if not found or not isinstance(tags, list) or TAG not in tags or f"vm:{vm}" not in tags:
-        p.out.say(f"  torn restic snapshot {short}: left alone: no longer a {TAG} snapshot of {vm} in this repository")
+    if not found:
+        p.out.say(
+            f"  torn restic snapshot {short}: restic no longer lists it among the {TAG} snapshots of {vm} "
+            "(forgotten already): dropped from the record"
+        )
         return None
+    tags = found[0].get("tags")
+    if not isinstance(tags, list) or TAG not in tags or f"vm:{vm}" not in tags:
+        return f"restic lists the torn snapshot {short} without both tags {TAG} and vm:{vm}, so it was not forgotten"
     snap = found[0]["id"]
     if (failed := forget_snapshot(p, nas, snap)) is not None:
         return f"restic forget {snap[:8]} (torn, of an earlier run): {failed}"

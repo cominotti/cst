@@ -619,8 +619,11 @@ those restic still lists with the tags `cst-vm` and `vm:<name>`, under
 the host recorded with them (restic lists a snapshot only under the host it
 was made on, so a changed `NAS_RESTIC_HOST` or hostname hides none; one
 listed snapshot per recorded ID, forgotten by its listed ID): never by the
-recorded ID alone. A recorded ID that restic no longer lists that way is
-left alone and dropped from the record. The record is shared by every VM
+recorded ID alone. A recorded ID that restic no longer lists was forgotten
+already (by hand, or by the run that recorded it when it could not update
+the record): it is dropped from the record. One that restic lists without
+both tags is never forgotten: it stays recorded, and the retention waits.
+The record is shared by every VM
 and changed under its own lock (`/run/cst-vm/torn-record.lock`, one minute
 at most), so the backups of two VMs never lose each other's entries.
 
@@ -809,7 +812,8 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 **Torn snapshots first.** When the record of torn snapshots (section 10.2)
 names one of this VM in this repository, the backup forgets it before the
 retention. If that does not work (restic forget fails, `restic snapshots`
-cannot be read, a recorded ID names several listed snapshots, or the record
+cannot be read, a recorded ID names several listed snapshots or one listed
+without both tags, or the record
 cannot be read or written), the run **skips the retention** and says so
 ("retention skipped: WHY; the repository keeps more until the next backup"):
 the repository keeps more, never less. The backup itself is good, so the run
@@ -1041,8 +1045,9 @@ is recorded (once, 0644, atomically), one it forgets leaves no entry, a
 record that cannot be written or updated is said, a stop while forget waits
 leaves the entry; the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
-when that forget fails, a listing fails or an ID is ambiguous, drops one restic no longer lists that
-way without forgetting it, keeps the entries of other VMs, repositories and
+when that forget fails, a listing fails, an ID is ambiguous or its listed
+snapshot lacks a tag, drops one restic no longer lists without forgetting
+it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
 the record's lock gives up after its timeout. No E2E test covers the NAS
 path: neither tier has a restic repository, a NAS or a running guest.

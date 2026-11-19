@@ -1353,9 +1353,26 @@ class TornRecordTest(Nas):
         self.assertEqual(self.torn_list(), [self.torn_entry()])
         self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID, "the backup itself is recorded")
 
-    def test_a_recorded_snapshot_restic_no_longer_lists_with_both_tags_is_left_alone(self) -> None:
+    def test_a_recorded_snapshot_restic_no_longer_lists_is_dropped_from_the_record(self) -> None:
+        # Forgotten already: by hand, or by the run that recorded it when its record was not updated.
+        self.write_torn([self.torn_entry()])
+        self.restic_cfg(snapshots_json=self.listed((SNAP_ID, BOTH_TAGS)))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse([a for a in self.forgets() if TORN_ID in a], "never forgotten by its recorded id")
+        self.assertEqual(len(self.forgets()), 1)
+        self.assertIn("--keep-weekly", self.forgets()[0], "the retention runs")
+        self.assertIn(
+            f"torn restic snapshot {TORN_ID[:8]}: restic no longer lists it among the cst-vm snapshots of win "
+            "(forgotten already): dropped from the record",
+            r.stdout,
+        )
+        self.assertEqual(self.torn_list(), [])
+
+    def test_a_recorded_snapshot_listed_without_both_tags_is_kept_and_the_retention_waits(self) -> None:
+        # restic lists by both tags, so a listed snapshot without them is an answer of another shape:
+        # never forgotten, never dropped, and the retention (which could count it) waits.
         for listing in (
-            self.listed((SNAP_ID, BOTH_TAGS)),  # gone
             self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, ["cst-vm"])),
             self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, ["cst-vm", "vm:other"])),
             self.listed((SNAP_ID, BOTH_TAGS), (TORN_ID, None)),  # restic gave no tags
@@ -1368,15 +1385,13 @@ class TornRecordTest(Nas):
                     os.unlink(os.path.join(self.fix, "restic.log"))
                 r = self.run_tool("backup", "win", "--nas")
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                self.assertFalse([a for a in self.forgets() if TORN_ID in a], "never forgotten by its recorded id")
-                self.assertEqual(len(self.forgets()), 1)
-                self.assertIn("--keep-weekly", self.forgets()[0], "the retention runs")
+                self.assertEqual(self.forgets(), [], "nothing forgotten, no retention")
                 self.assertIn(
-                    f"torn restic snapshot {TORN_ID[:8]}: left alone: no longer a cst-vm snapshot of win in this "
-                    "repository",
+                    f"retention skipped: restic lists the torn snapshot {TORN_ID[:8]} without both tags cst-vm and "
+                    "vm:win, so it was not forgotten; the repository keeps more until the next backup",
                     r.stdout,
                 )
-                self.assertEqual(self.torn_list(), [])
+                self.assertEqual(self.torn_list(), [self.torn_entry()])
 
     def test_an_ambiguous_or_unlisted_record_keeps_the_entry_and_skips_the_retention(self) -> None:
         other = "f00dbabe" + "3" * 56
