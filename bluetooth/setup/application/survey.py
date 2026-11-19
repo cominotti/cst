@@ -296,9 +296,10 @@ class Survey:
             self.unit_states[unit] = unit_activity(shown)
         return self.unit_states[unit]
 
-    def forget_unit(self, unit: str) -> None:
-        """The unit was restarted: the next unit_show reads it again."""
-        self.unit_states.pop(unit, None)
+    def forget_unit(self, *units: str) -> None:
+        """The units were restarted: the next unit_show of each reads it again."""
+        for unit in units:
+            self.unit_states.pop(unit, None)
 
     def unit_invocation(self, unit: str, *, user: bool) -> str:
         """The unit's InvocationID while it runs (as `systemctl is-active` sees it), else ''."""

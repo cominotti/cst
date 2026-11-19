@@ -233,8 +233,7 @@ class Change(Checks):
             return 0
         owed = ["wireplumber.service", *(["bluetooth.service"] if bt else [])]
         # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
-        self.forget_unit("bluetooth.service")
-        self.forget_unit("wireplumber.service")
+        self.forget_unit("bluetooth.service", "wireplumber.service")
         if self.restart_state("save", *owed) is None:
             self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
         if self.o.no_restart:
