@@ -159,6 +159,12 @@ class S(unittest.TestCase):
         warnings.showwarning = lambda *args, **kwargs: None  # as logging.captureWarnings(True) does
         f = open(os.devnull)
         del f
+class F(unittest.TestCase):
+    def test_a_ignores_every_warning(self):
+        warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
+    def test_b_leaks_a_file(self):
+        f = open(os.devnull)
+        del f
 """
 
 
@@ -224,6 +230,11 @@ class ResourceWarningGateTest(unittest.TestCase):
         self.assertIn(
             "error: ResourceWarning in probe_leaks.S.test_replaces_showwarning_then_leaks: unclosed file", done.stderr
         )
+
+    def test_a_leak_after_a_test_that_ignored_every_warning_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="F")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("error: ResourceWarning in probe_leaks.F.test_b_leaks_a_file: unclosed file", done.stderr)
 
     def test_a_warning_the_test_records_itself_is_its_own(self) -> None:
         done = self.run_probe("test_records_its_own_warning")

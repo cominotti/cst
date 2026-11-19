@@ -57,7 +57,9 @@ such a leak when the object is freed and only prints a ResourceWarning
 (an exception raised in a __del__ is only printed too), so the test still
 passes; a daemon that leaks a descriptor per event fails slowly. This
 runner records every ResourceWarning (one that goes to a
-warnings.showwarning a test replaced too) and every exception raised in a
+warnings.showwarning a test replaced too, and one after a test that
+changed the warning filters for good: each test starts with them
+recording again) and every exception raised in a
 __del__ with the test that was running (LeakRecordingResult), runs the
 garbage collector once more after the last test, and fails the run on
 each one, with a hint: run the test again with -X tracemalloc=8 to see
@@ -257,6 +259,7 @@ class LeakRecordingResult(unittest.TextTestResult):
         # TextTestRunner.run has set its own filter ("default") inside a catch_warnings block,
         # which also restores showwarning when the run ends.
         warnings.simplefilter("always", ResourceWarning)
+        self._always = warnings.filters[0]
         # The hook below warnings.showwarning: it still gets the warning's source, so the
         # original prints where the object was allocated (with -X tracemalloc), and a test's
         # warnings.catch_warnings(record=True) replaces it for the test's own warnings.
@@ -277,6 +280,7 @@ class LeakRecordingResult(unittest.TextTestResult):
     @override
     def startTest(self, test: unittest.TestCase) -> None:
         self._running = test.id()
+        self._keep_recording()
         super().startTest(test)
 
     @override
@@ -284,11 +288,19 @@ class LeakRecordingResult(unittest.TextTestResult):
         # An object in a reference cycle is freed only by the collector: run it now, while the
         # hooks still record, instead of at exit.
         self._running = f"{self._running} (or one before it: found by the last garbage collection)"
+        self._keep_recording()
         gc.collect()
         for hook in reversed(self._hooks):
             hook.stop()
         sys.unraisablehook = self._unraisablehook
         super().stopTestRun()
+
+    def _keep_recording(self) -> None:
+        """Put the "always" filter for ResourceWarning first again. A test that called
+        warnings.simplefilter("ignore") or warnings.resetwarnings() outside a catch_warnings block
+        would otherwise hide the leaks of every test after it."""
+        if warnings.filters[:1] != [self._always]:
+            warnings.simplefilter("always", ResourceWarning)
 
     def _entered(self, msg: warnings.WarningMessage) -> None:
         if warnings.showwarning is not self._showwarning_orig:
