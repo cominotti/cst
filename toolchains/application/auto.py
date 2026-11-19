@@ -37,6 +37,7 @@ CLEAN_LEFT: Final = "which `systemctl --user clean` left"
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cst_core.domain.files import UnitFileState
     from toolchains.application.prune import Target
     from toolchains.domain.prune import Settings
     from toolchains.ports import HomeFilesPort, RunOutputPort, RunStatePort, UserUnitsPort
@@ -189,6 +190,16 @@ class AutoTimer:
             self.out.say(f"removed:   ~/{rel} ({why})")
         return True
 
+    def forget_timer_stamp(self, state: UnitFileState) -> bool:
+        """The timer's stamp, once both timers are stopped: when its file is gone, or is CST's
+        (what a failed clean left); never for a file that is not CST's or is masked. False when
+        it could not be removed (reported)."""
+        if state == OwnedState.MISSING:
+            return self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
+        if state in (OwnedState.OK, OwnedState.CHANGE):
+            return self.forget_stamp(TIMER, f"the last run of the timer, {CLEAN_LEFT}")
+        return True
+
     def off(self) -> int:
         home = self.home
         st = self.files.auto_states()
@@ -199,15 +210,9 @@ class AutoTimer:
             self.units.disable_timer(TIMER)
         elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
-        rc = 0 if self.remove_stale() else 1
-        if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE, OwnedState.MISSING):
-            why = (
-                "the last run of the timer whose file was gone"
-                if st[TIMER] == OwnedState.MISSING
-                else f"the last run of the timer, {CLEAN_LEFT}"
-            )
-            if not self.forget_stamp(TIMER, why):
-                rc = 1
+        stale_ok = self.remove_stale()
+        stamp_ok = self.forget_timer_stamp(st[TIMER])
+        rc = 0 if stale_ok and stamp_ok else 1
         removed = False
         for name in AUTO_UNITS:
             if st[name] in (OwnedState.OK, OwnedState.CHANGE):
