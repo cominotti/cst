@@ -137,9 +137,9 @@ def carries_flags(st: os.stat_result) -> bool:
     return stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)
 
 
-def tree(top: str) -> dict[str, tuple]:
+def tree(top: str) -> dict[str, tuple[object, ...]]:
     """Everything below top (and top's own mode), as comparable values."""
-    out: dict[str, tuple] = {".": ("dir", stat.S_IMODE(os.lstat(top).st_mode))}
+    out: dict[str, tuple[object, ...]] = {".": ("dir", stat.S_IMODE(os.lstat(top).st_mode))}
     for p, st in entries(top):
         rel = os.path.relpath(p, top)
         if stat.S_ISLNK(st.st_mode):

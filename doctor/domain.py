@@ -172,13 +172,13 @@ VIRT_PREFIXES = ("qemu-kvm", "qemu-system-x86", "libvirt-daemon", "edk2-ovmf", "
 VIRT_MAIN = ("qemu-kvm", "qemu-kvm-core", "qemu-system-x86-core", "libvirt-daemon", "edk2-ovmf", "swtpm", "libtpms")
 
 
-class Result(tuple):
+class Result(tuple[str, str, str]):
     """(status, message, fix): fix is the command to run, or ""."""
 
     __slots__ = ()
 
     def __new__(cls, status: str, message: str, fix: str = "") -> Self:
-        return super().__new__(cls, (status, message, fix))
+        return tuple.__new__(cls, (status, message, fix))
 
     @property
     def status(self) -> str:
