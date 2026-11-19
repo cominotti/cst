@@ -650,7 +650,8 @@ class GameProfile:
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
         p = self.paths
-        if not self.problems:  # fixed: a line that breaks again is said again
+        why = None if self.problems else self._target_refusal()  # 'on' would refuse for TARGET_USER
+        if not self.problems and why is None:  # fixed: a line or a name that breaks again is said again
             with contextlib.suppress(OSError):
                 os.unlink(p.settings_warned)
         if not os.path.exists(p.state):
@@ -662,8 +663,12 @@ class GameProfile:
                 if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
                     self.warn_once("GameMode client running, profile not switched on")
                     return 0
-                self.log(5, "GameMode client running but profile off: switching on")
-                self.ctl("sys", "start", "--no-block", "cpu-game.service")
+                if why is not None:  # the same for TARGET_USER, with the same mark
+                    said = f"GameMode client running, profile not switched on: {why} (fix it; said once per boot)"
+                    self._say_once(p.settings_warned, said, lambda: self.log(4, said))
+                else:
+                    self.log(5, "GameMode client running but profile off: switching on")
+                    self.ctl("sys", "start", "--no-block", "cpu-game.service")
             return 0
         if not os.path.exists(p.manual) and not self.gamemode_client():
             self.log(5, "no GameMode client left: switching off")

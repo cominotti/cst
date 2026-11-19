@@ -116,7 +116,8 @@ class GamePaths:
 
     @property
     def settings_warned(self) -> str:
-        """What the watchdog last said about the settings file's problem lines (once per boot)."""
+        """What the watchdog last said about settings 'on' refuses (once per boot): the settings file's
+        problem lines, or a TARGET_USER that is unset or names no account."""
         return _in(self.run, "settings-warned")
 
     @property

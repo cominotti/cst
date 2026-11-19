@@ -22,7 +22,9 @@ hooks, or by `cst cpu game on|off`), and from cpu-game-watchdog.timer.
   tick   watchdog (every 30 s): 'off' if no GameMode client is left (unless
          switched on by hand); 'on' if a client runs and the profile is off
          (fallback if the GameMode hook could not start the unit), unless
-         switched off by hand during that game; new containers get pinned,
+         switched off by hand during that game or 'on' would refuse (a
+         settings line that sets nothing, a TARGET_USER that is unset or
+         names no account: said once per boot); new containers get pinned,
          new Steam scopes (the game itself) get the memory protection, and
          new boxes of the user manager next to the game get idle-class;
          a setting that something undid meanwhile (a daemon-reload, or

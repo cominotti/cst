@@ -335,7 +335,12 @@ the profile on either: `cpu-game.service` fails, its journal says
 no account: NAME (in /etc/cpu-setup/cpu-setup.conf)`, nothing is changed, and
 the by-hand mark is dropped, as above. (Before 2026-11, a name with no account
 switched the profile on for no user: it set `user@.service` and
-`user-.slice`, which are nobody's.)
+`user-.slice`, which are nobody's.) The watchdog does not start the profile
+for such a `TARGET_USER` while a game runs either (it would fail again every
+30 s): it says why in the journal once per boot (`GameMode client running,
+profile not switched on: ...`; again after a tick found the name fixed; the
+same mark as for a settings line, `/run/cpu-setup/settings-warned`), and its
+unit does not fail.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
@@ -663,7 +668,9 @@ that has GameMode's library (`libgamemode`) loaded.
   and builds are not left slowed down.
 - Profile off, a client runs, and you did not switch it off by hand: it
   switches on (`GameMode client running but profile off: switching on`). This
-  is a fallback if the GameMode hook failed.
+  is a fallback if the GameMode hook failed. It does not when `on` would
+  refuse (6.2: a settings line that sets nothing, a `TARGET_USER` that is
+  unset or names no account); it says why once per boot.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
   Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
   other boxes next to the game that appeared in the meantime get the idle

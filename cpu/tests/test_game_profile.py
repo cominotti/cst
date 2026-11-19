@@ -10,7 +10,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest cpu.tests.test_game_profile -v
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import contextlib
 import errno
 import fnmatch
@@ -1117,6 +1117,77 @@ class OnTargetUserWithoutAccountTest(GameProfileCase):
         self.assertTrue(os.path.exists(self.state))
 
 
+class TickTargetUserWithoutAccountTest(GameProfileCase):
+    """The watchdog, with the profile off and a GameMode client running, does not start cpu-game.service
+    for a TARGET_USER 'on' refuses (unset, or a name with no account): it would fail again every 30 s.
+    It says why once per boot; once the name has an account it starts the unit again."""
+
+    NOBODY = "cst-test-no-such-user"
+
+    def tick(self, name: str, uid_of: Callable[[str], str] = user_id) -> tuple[str, str, list[str]]:
+        """One tick for TARGET_USER name: (its journal lines, its stderr, the systemctl calls)."""
+        out, err = io.StringIO(), io.StringIO()
+        p = GameProfile(self.paths, GameSettings(target_user=name), self.systemd, uid_of=uid_of, out=out)
+        self.systemd.actions = []
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.locked("tick"), 0)  # the watchdog's unit does not fail
+        return out.getvalue(), err.getvalue(), self.systemd.actions
+
+    def said(self, why: str) -> str:
+        return f"GameMode client running, profile not switched on: {why} (fix it; said once per boot)"
+
+    def test_no_start_for_a_name_without_account_said_once(self) -> None:
+        why = f"TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})"
+        self.assertEqual(self.tick(self.NOBODY), (f"<4>game-profile: {self.said(why)}\n", "", []))
+        self.assertEqual(self.read(self.paths.settings_warned), self.said(why))
+        self.assertEqual(self.tick(self.NOBODY), ("", "", []))  # said already this boot
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_no_start_for_an_unset_name_said_once(self) -> None:
+        why = f"TARGET_USER not set in {self.paths.conf}"
+        self.assertEqual(self.tick(""), (f"<4>game-profile: {self.said(why)}\n", "", []))
+        self.assertEqual(self.tick(""), ("", "", []))
+
+    def test_fixed_it_starts_the_unit_and_a_name_that_breaks_again_is_said_again(self) -> None:
+        self.tick(self.NOBODY)
+        out, err, actions = self.tick(self.NOBODY, lambda _u: UID)  # the account exists now
+        self.assertEqual(out, "<5>game-profile: GameMode client running but profile off: switching on\n")
+        self.assertEqual((err, actions), ("", [f"{SYS} start --no-block cpu-game.service"]))
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+        out, _, actions = self.tick(self.NOBODY)
+        self.assertIn("TARGET_USER names no account", out)
+        self.assertEqual(actions, [])
+
+    def test_a_name_fixed_while_the_profile_is_on_is_forgotten_too(self) -> None:
+        self.tick(self.NOBODY)
+        self.assertTrue(os.path.exists(self.paths.settings_warned))
+        self.run_profile("on")  # started by GameMode's hook, for a name with an account
+        self.tick(self.NOBODY, lambda _u: UID)
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+
+    def test_a_settings_line_and_the_name_share_the_mark_each_said_when_it_comes(self) -> None:
+        self.write(self.paths.conf, "TARGET_USER='cst-test-no-such-user'\nBUILD_CPUS=$(nproc)\n")
+        settings, problems = read_settings(self.paths.conf)
+        out = io.StringIO()
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=user_id, problems=problems, out=out)
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", out.getvalue())  # the line first: 'on' refuses for it
+        self.assertNotIn("names no account", out.getvalue())
+        # The line fixed, the name still without an account: the mark stays, and the name is said.
+        out, err, actions = self.tick(self.NOBODY)
+        self.assertEqual((out.count("TARGET_USER names no account"), err, actions), (1, "", []))
+
+    def test_a_link_at_the_mark_is_replaced_and_never_followed(self) -> None:
+        victim = os.path.join(self.tmp, "victim")
+        self.write(victim, "keep\n")
+        os.symlink(victim, self.paths.settings_warned)
+        out, _, _ = self.tick(self.NOBODY)
+        self.assertIn("TARGET_USER names no account", out)
+        self.assertEqual(self.read(victim), "keep\n")
+        self.assertFalse(os.path.islink(self.paths.settings_warned))
+        self.assertEqual(os.stat(self.paths.settings_warned).st_mode & 0o7777, 0o644)
+
+
 class SettingsProblemTest(GameProfileCase):
     """A line of cpu-setup.conf that bash would run or expand sets nothing: the profile does not
     switch on, and a tick changes nothing, until it is fixed; off still undoes everything."""
@@ -1209,9 +1280,10 @@ class SettingsProblemTest(GameProfileCase):
         p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems, out=out)
         self.assertEqual(p.tick(), 0)
         self.assertIn("line 2: P_CORES=`nproc`", out.getvalue())
-        # Fixed: the watchdog switches the profile on again.
+        # Fixed: the watchdog switches the profile on again (for a TARGET_USER with an account).
         self.write(self.paths.conf, "TARGET_USER='testuser'\n")
-        p = load_profile(self.paths, self.systemd)
+        settings, problems = read_settings(self.paths.conf)
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems)
         self.systemd.actions = []
         self.assertEqual(p.tick(), 0)
         self.assertEqual(self.systemd.actions, [f"{SYS} start --no-block cpu-game.service"])
@@ -1223,7 +1295,9 @@ class SettingsProblemTest(GameProfileCase):
         # Fixed (no game now), then broken again the same way: said again.
         self.no_game()
         self.write(self.paths.conf, "TARGET_USER='testuser'\n")
-        self.assertEqual(load_profile(self.paths, self.systemd).tick(), 0)
+        settings, problems = read_settings(self.paths.conf)  # for a TARGET_USER with an account
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems)
+        self.assertEqual(p.tick(), 0)
         self.assertFalse(os.path.exists(self.paths.settings_warned))
         self.gamemode_pid("1")
         p, out = self.problem_profile()

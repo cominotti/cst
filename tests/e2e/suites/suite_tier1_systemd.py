@@ -5524,14 +5524,21 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         """With a TARGET_USER that names no account, the real game profile does not switch on: exit 1,
         its output names the user and holds no "id: ...: no such user" line, no game.state, no
         MemoryLow drop-in (none for user@.service or user-.slice either), machine.slice's weights as they
-        were, and the by-hand mark there before is removed; 'state' says off and 'off' works. With
-        TARGET_USER='tester' the same steps switch on, and 'off' undoes it."""
+        were, and the by-hand mark there before is removed; 'state' says off and 'off' works. The
+        watchdog's tick, run as a unit with a GameMode client running (a process that maps a file named
+        libgamemode), does not start cpu-game.service (a stub that records its starts) for that name: its
+        unit ends in success, the user is named once, a second tick says nothing. With
+        TARGET_USER='tester' the tick starts the stub, and 'on' and 'off' work."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
             """
             printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
             python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-153-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-153-client.pid /tmp/e2e-153-ready /tmp/e2e-153-starts /tmp/e2e-153-libgamemode.so
             rm -f /etc/cpu-setup/cpu-setup.conf
             if [[ -e /tmp/e2e-153-conf.bak ]]; then mv /tmp/e2e-153-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rmdir /etc/cpu-setup 2>/dev/null || true
@@ -5569,8 +5576,38 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]]
             grep -q '^game profile: off$' <<<"$(gp state)"
             gp off
-            # The same steps for an account: switched on, and undone.
+            # The watchdog, a game running, the profile off: cpu-game.service is not started.
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-153-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-153-libgamemode.so /tmp/e2e-153-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-153-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-153-client.pid)/maps"
+            tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-153-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick 2>&1; }
+            first=$(tick 1)   # exit 0: the unit does not fail
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER names no account: e2e153-nobody' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$first"; then echo "first tick printed id's line: $first" >&2; exit 1; fi
+            second=$(tick 2)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            sleep 1
+            test ! -e /tmp/e2e-153-starts
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            test ! -e /run/cpu-setup/game.state
+            # The same steps for an account: the tick starts the unit, and on and off work.
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            third=$(tick 3)
+            grep -q 'switching on' <<<"$third" || { echo "third tick: $third" >&2; exit 1; }
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-starts ]] && break; sleep 0.1; done
+            test -e /tmp/e2e-153-starts
+            test ! -e /run/cpu-setup/settings-warned
+            kill "$(cat /tmp/e2e-153-client.pid)"
+            systemctl stop cpu-game.service
+            rm -f "$stub"
+            systemctl daemon-reload
             gp on
             test -e /run/cpu-setup/game.state
             [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
