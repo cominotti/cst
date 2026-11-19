@@ -4678,6 +4678,159 @@ echo test_109-ok
         ).stdout
         self.assertIn("test_109-ok", out)
 
+    def test_110_btrfs_snapshot_hourly_as_a_unit_hands_sigpipe_on_and_keeps_its_alert_as_root(self) -> None:
+        """btrfs-snapshot and its runtime as install writes them, run as real root with a fake
+        btrfs (10 GiB free: the emergency purge) and a fake btrfs-snapshot-core that records its own
+        SIGPIPE disposition, and no btrfs-notify. As a systemd unit (which starts it with SIGPIPE
+        ignored) the core gets SIGPIPE ignored, as bash's children did (CST_SIGPIPE_IGNORED, handed
+        over by the front); from a shell with SIGPIPE ignored too, and at its default from a shell
+        with it at its default. The emergency alert, which btrfs-notify cannot take, is kept by
+        cst_core's Notifier in the real /var/lib/cst-alerts/pending (root's, 0644 in a 0755 folder,
+        the spool's format) and sets the day's stamp, so the next run keeps no second copy. Then
+        convert-planned --lock-held against the real /run lock (/proc/self/fdinfo): an fd that holds
+        the flock is taken; another open of the lock file while that one holds it, an fd of another
+        file and an fd whose lock was released are refused (exit 2, nothing converted)."""
+        d = "/var/tmp/e2e-snapshot-unit"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        files = "btrfs/btrfs-snapshot-runtime btrfs/btrfs-snapshot"
+        core = "/usr/local/sbin/btrfs-snapshot-core"
+        notify = "/usr/local/sbin/btrfs-notify"
+        pending = "/var/lib/cst-alerts/pending"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; "
+            f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
+            f"rm -rf {pending}; if [ -e {d}/pending.bak ]; then mv {d}/pending.bak {pending}; fi; "
+            f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_110 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf} core={core} notify={notify} pending={pending}
+S=/usr/local/sbin/btrfs-snapshot
+rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
+install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup
+[ ! -e "$core" ] || {{ echo "a btrfs-snapshot-core is already installed" >&2; exit 1; }}
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
+if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; fi
+{inst} install {files} >/dev/null
+# The fake core: its own SigIgn, then success.
+printf '%s\n' '#!/bin/bash' "grep '^SigIgn:' /proc/\$\$/status >>$d/core-sigign" 'exit 0' >"$core"
+chmod 0755 "$core"
+# The fake btrfs: 10 GiB free (at or below EMERGENCY_AT_OR_BELOW_GIB), and subvolume sync.
+printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     10737418240      (min: 10737418240)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+chmod 0755 "$d/bin/btrfs"
+printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" >"$conf"
+pipe_ignored() {{ local mask; mask=$((16#$(tail -n 1 "$d/core-sigign" | awk '{{print $2}}'))); (( mask & (1 << 12) )); }}
+P="$d/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+# 1. As a unit: SIGPIPE ignored reaches the core; the alert is kept and stamped.
+rc=0; systemd-run --quiet --wait --collect --unit=e2e-110-hourly -p Environment=PATH="$P" "$S" hourly || rc=$?
+journalctl --sync
+journalctl -q --no-pager -o cat -u e2e-110-hourly.service >"$d/unit.log" || true
+cat "$d/unit.log"
+[ "$rc" = 0 ]
+[ "$(wc -l <"$d/core-sigign")" = 1 ]
+pipe_ignored
+[ "$(stat -c '%a %U' "$pending")" = "755 root" ]
+alerts=("$pending"/*.alert)
+[ "${{#alerts[@]}}" = 1 ]
+[ "$(stat -c '%a %U' "${{alerts[0]}}")" = "644 root" ]
+head -n 3 "${{alerts[0]}}" | diff - <(printf '%s\n' "cst-alert 1" "urgency=critical" "app=btrfs-snapshot")
+grep -qxF "count=1" "${{alerts[0]}}"
+grep -qxF "title=Snapshots: emergency purge" "${{alerts[0]}}"
+grep -qF "alert not delivered ($notify is not installed): Snapshots: emergency purge; kept in ${{alerts[0]}}" "$d/unit.log"
+[ -e /var/lib/btrfs-snapshot/alerted-emergency ]
+
+# 2. From a shell with SIGPIPE ignored: ignored in the core too; the stamp keeps a second copy out.
+rc=0; (trap '' PIPE; PATH="$P" "$S" hourly) >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 0 ]
+pipe_ignored
+if grep -q "alert not delivered" "$d/out"; then exit 1; fi
+grep -qxF "count=1" "${{alerts[0]}}"
+
+# 3. From a shell with SIGPIPE at its default: at its default in the core.
+rc=0; (trap - PIPE; PATH="$P" "$S" hourly) >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 0 ]
+[ "$(wc -l <"$d/core-sigign")" = 3 ]
+if pipe_ignored; then exit 1; fi
+
+# 4. convert-planned --lock-held: only an fd that holds the real lock.
+lock=/run/btrfs-snapshot.lock
+refused() {{ grep -qxF "<3>btrfs-snapshot: convert-planned: fd $1 is not a held $lock; nothing converted" "$d/out"; }}
+exec 9>"$lock"
+flock 9
+rc=0; "$S" convert-planned --lock-held 9 >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 0 ]
+[ ! -s "$d/out" ]
+exec 8<"$lock"
+rc=0; "$S" convert-planned --lock-held 8 >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 2 ]
+refused 8
+exec 7<"$conf"
+rc=0; "$S" convert-planned --lock-held 7 >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 2 ]
+refused 7
+flock -u 9
+rc=0; "$S" convert-planned --lock-held 9 >"$d/out" 2>&1 || rc=$?
+[ "$rc" = 2 ]
+refused 9
+exec 9>&- 8<&- 7<&-
+echo test_110-ok
+""",
+        ).stdout
+        self.assertIn("test_110-ok", out)
+
+    def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:
+        """cst btrfs snapshots status as root on the container's root, with a snapshots.conf that has
+        a command line and a $(...) value next to plain settings: it reads the file through
+        btrfs-snapshot settings-lines, as the units do (never sourced): the plain setting shows
+        (SNAPSHOT_EXCLUDE_CACHES=no), neither command runs, and a warning on stderr names each of the
+        two lines."""
+        d = "/var/tmp/e2e-snapshot-status"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"if [ -e {d}/conf.bak ]; then mv -f {d}/conf.bak {conf}; else rm -f {conf}; fi; rm -rf {d}",
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            rf"""
+set -E
+trap 'echo "test_111 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+d={d} conf={conf}
+rm -rf "$d"
+# Writable by everyone: a command in the file would leave its mark whoever runs it.
+install -d -m 1777 "$d"
+install -d -m 0755 /etc/btrfs-setup
+if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
+printf '%s\n' "HOME_DIR='/home/tester'" "touch $d/ran" "NAS_HOST=\"\$(touch $d/ran2; echo nas)\"" \
+    "SNAPSHOT_EXCLUDE_CACHES=no" >"$conf"
+rc=0; SUDO_USER=tester /opt/cst-rw/cst btrfs snapshots status >"$d/out" 2>"$d/err" || rc=$?
+cat "$d/out" "$d/err"
+[ "$rc" = 0 ]
+[ ! -e "$d/ran" ]
+[ ! -e "$d/ran2" ]
+grep -qxF "  cache folders (CACHEDIR.TAG): kept in new snapshots (SNAPSHOT_EXCLUDE_CACHES=no)" "$d/out"
+grep -qxF "<4>btrfs-snapshot: $conf line 2: touch $d/ran: not a KEY=VALUE line; ignored" "$d/err"
+grep -qF "<4>btrfs-snapshot: $conf line 3: NAS_HOST=" "$d/err"
+echo test_111-ok
+""",
+        ).stdout
+        self.assertIn("test_111-ok", out)
+
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and
         cst-pending-alerts as install writes them (zipapps from installer.py payload). The health
