@@ -26,7 +26,8 @@ hooks, or by `cst cpu game on|off`), and from cpu-game-watchdog.timer.
          settings line that sets nothing, a TARGET_USER that is unset or
          names no account: said once per boot); new containers get pinned,
          new Steam scopes (the game itself) get the memory protection, and
-         new boxes of the user manager next to the game get idle-class;
+         new boxes of the user manager next to the game get idle-class
+         (not for a user with no account: said once per boot);
          a setting that something undid meanwhile (a daemon-reload, or
          uresourced resetting MemoryLow) is set again and logged, unless
          game.state holds no record of it ('off' could not undo that).

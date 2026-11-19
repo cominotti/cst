@@ -1118,18 +1118,25 @@ class OffWithoutTargetUserTest(GameProfileCase):
 
     def quiet_ticks(self, target: str) -> None:
         """Two ticks for target with the real uid lookup and no account for the recorded uid: each ends
-        in success and prints nothing on stderr. Each meets every uid lookup of the tick: the user
-        manager's cgroup (twice) and setp's override path (a Steam scope started after 'on')."""
+        in success and prints nothing on stderr. Neither changes the user manager of a user with no
+        account (a Steam scope started after 'on' gets no setting and no record); the journal says why,
+        once per boot."""
         self.systemd.units["usr"] = [self.STEAM]
+        said: list[str] = []
         for _ in range(2):
-            err = io.StringIO()
+            out, err = io.StringIO(), io.StringIO()
             p = GameProfile(
-                self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=io.StringIO()
+                self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=out
             )
+            self.systemd.actions = []
             with contextlib.redirect_stderr(err):
                 self.assertEqual(p.tick(), 0)
             self.assertEqual(err.getvalue(), "")
-        self.assertIn(f" {self.STEAM} MemoryLow ", self.read(self.state))  # the tick reached setp
+            self.assertEqual([a for a in self.sets(self.systemd.actions) if "--user" in a], [])
+            said.append(out.getvalue())
+        self.assertNotIn(f" {self.STEAM} ", self.read(self.state))
+        self.assertIn("<4>game-profile: profile on, its user manager's side not handled: TARGET_USER ", said[0])
+        self.assertNotIn("not handled", said[1])  # said once per boot
 
     def off_err(self, target: str) -> str:
         """'off' for target with the real uid lookup and no account for the recorded uid: its stderr."""

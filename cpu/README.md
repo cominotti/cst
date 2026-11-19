@@ -681,7 +681,12 @@ that has GameMode's library (`libgamemode`) loaded.
   other boxes next to the game that appeared in the meantime get the idle
   class (7.1). A box it already handled is skipped, so `game.state` does not
   grow at each run. A setting of the profile that something undid in the
-  meantime is set again (section 7.5).
+  meantime is set again (section 7.5). When the user the profile acts for has
+  no account (6.2: `TARGET_USER` names none, or the account was deleted
+  while the profile was on), the Steam scopes and the boxes of its user
+  manager are left alone (there is no such user manager); the journal says
+  why once per boot (`profile on, its user manager's side not handled:
+  ...`), and `off` still undoes everything.
 - Profile off: if the profile's `zz-cst-game.conf` drop-ins (7.5) are still
   there, it removes them and reloads systemd (logged at level warning).
 

@@ -694,8 +694,12 @@ class GameProfile:
             return 0
         self._user_from_state(records(self._state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
-        self.protect_steam()  # the game's own scope, started after 'on'
-        self.demote_escapes()  # boxes next to the game that appeared after 'on'
+        why = self._target_refusal()  # no account for the user acted for: no user manager to change
+        if why is None:
+            self.protect_steam()  # the game's own scope, started after 'on'
+            self.demote_escapes()  # boxes next to the game that appeared after 'on'
+        else:
+            self._say_refusal("profile on, its user manager's side not handled", why)
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
 
