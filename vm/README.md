@@ -780,6 +780,9 @@ restic forget --host <NAS_RESTIC_HOST> --tag cst-vm,vm:<name> --group-by host \
 The index `/var/lib/cst/vm-backups.json` gets one entry per NAS backup
 (`mode` `nas`, the restic snapshot ID, the consistency, the keep tag, the
 versions and the deployment); entries whose snapshot was forgotten leave it.
+When `restic snapshots` cannot be read as a list of snapshots with their ids
+(another shape, an id that is not text), no entry leaves: the index keeps them
+all until a later backup reads the list.
 `cst vm list` and `cst vm status` show them, and `cst doctor` counts them as
 backups (its "No VM backup since the booted deployment" warning clears).
 

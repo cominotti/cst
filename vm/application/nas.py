@@ -5,11 +5,11 @@ it reaches the machine through the ports of vm/ports.py (NasBackup)."""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-import json
 import os.path
 import re
 
 from cst_core.domain.errors import ExitStatus, Refused, ResticExit
+from cst_core.domain.shapes import list_of, parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.ports import ClockPort
@@ -39,7 +39,7 @@ from vm.domain import (
     overlay_recovery,
     quiesce_skipped,
 )
-from vm.domain.backup import Fingerprint, Manifest, ResticSummary, Uncertain, manifest_text
+from vm.domain.backup import Fingerprint, Manifest, ResticSummary, Uncertain, is_restic_snapshot, manifest_text
 from vm.ports import (
     BackupStorePort,
     LockPort,
@@ -585,10 +585,15 @@ def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | No
         ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"],
         RESTIC_CHECK_TIMEOUT,
     )
-    try:
-        return {s["id"] for s in json.loads(so) if isinstance(s, dict) and s.get("id")} if rc == 0 else None
-    except ValueError, TypeError:
+    if rc != 0:
         return None
+    try:
+        data = parse_json(so)
+    except ValueError, RecursionError:
+        return None
+    # All or nothing: an answer of another shape is no list of the live snapshots, and reading it
+    # as one would drop the index entries of every snapshot it does not name.
+    return {s["id"] for s in data} if list_of(data, is_restic_snapshot) else None
 
 
 def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:

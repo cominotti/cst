@@ -7,7 +7,7 @@ Any: ty then asks every reader to check the shape (json_object, has_shape or a T
 guard of its own) before the value reaches a TypedDict or a typed parameter.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import json
 import tomllib
 from typing import TypeIs
@@ -76,6 +76,13 @@ def has_item(container: object, item: str) -> bool:
     if isinstance(container, list | str | dict):
         return item in container
     raise ShapeError(f"cannot look into {type(container).__name__}")
+
+
+def list_of[T](value: object, item: Callable[[object], TypeIs[T]]) -> TypeIs[list[T]]:
+    """value is a list whose every item passes the guard ITEM (all or nothing; a reader that skips
+    the items of another shape filters with the guard instead). For a value just parsed: a list
+    narrowed this way must not be given to code that adds items of another type."""
+    return isinstance(value, list) and all(item(v) for v in value)
 
 
 def has_shape(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:

@@ -127,6 +127,17 @@ class ResticMessage(StrEnum):
     ERROR = "error"
 
 
+class ResticSnapshot(TypedDict):
+    """One snapshot of `restic snapshots --json` (the field the NAS prune reads)."""
+
+    id: str
+
+
+def is_restic_snapshot(value: object) -> TypeIs[ResticSnapshot]:
+    """A snapshot of restic snapshots --json with a non-empty string id."""
+    return json_object(value) and isinstance(snap_id := value.get("id"), str) and snap_id != ""
+
+
 class ResticSummary(TypedDict, total=False):
     """The summary line of `restic backup --json` (the fields a backup reads)."""
 

@@ -64,6 +64,7 @@ from cst_core.domain.shapes import (
     has_item,
     items_of,
     json_object,
+    list_of,
     object_of,
     object_or_empty,
     parse_json,
@@ -1485,6 +1486,17 @@ class ShapesTest(unittest.TestCase):
         ):
             with self.subTest(obj=obj):
                 self.assertFalse(has_shape(obj, required, optional))
+
+
+class ListOfTest(unittest.TestCase):
+    """cst_core.domain.shapes.list_of: a list whose every item passes a guard, all or nothing."""
+
+    def test_list_of(self) -> None:
+        self.assertTrue(list_of([], json_object))
+        self.assertTrue(list_of([{}, {"a": 1}], json_object))
+        for value in ([{}, 1], [None], {"a": {}}, "x", None, ({},)):
+            with self.subTest(value=value):
+                self.assertFalse(list_of(value, json_object))
 
 
 class ShapeReadersTest(unittest.TestCase):
