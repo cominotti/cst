@@ -715,6 +715,13 @@ class DockerSliceTest(CpuSetupCase):
         self.assertIn("daemon.json cgroup-parent: -;", self.command("docker-slice", "status")[1])
         self.write(dj, '{"cgroup-parent": 5}')
         self.assertIn("daemon.json cgroup-parent: 5;", self.command("docker-slice", "status")[1])
+        for text in ("[1]", '"x"', "null"):
+            with self.subTest(text=text):
+                self.write(dj, text)
+                self.assertEqual(self.command("docker-slice", "install")[::2], (1, f"{dj}: not a JSON object\n"))
+                self.assertEqual(self.command("docker-slice", "uninstall")[::2], (1, f"{dj}: not a JSON object\n"))
+                self.assertIn("daemon.json cgroup-parent: -;", self.command("docker-slice", "status")[1])
+                self.assertEqual(self.read(dj), text)
         self.assertEqual(self.command("docker-slice", "bogus"), (2, "", "docker-slice: install|status|uninstall\n"))
         os.remove(self.paths.e_cores)
         self.runner.calls.clear()
