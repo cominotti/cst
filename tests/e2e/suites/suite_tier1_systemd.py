@@ -4705,10 +4705,15 @@ echo test_109-ok
         core = "/usr/local/sbin/btrfs-snapshot-core"
         notify = "/usr/local/sbin/btrfs-notify"
         pending = "/var/lib/cst-alerts/pending"
+        # Before the cleanup is registered: on a container where another test left a core, the
+        # cleanup below (which removes the core, the install, its state, the settings file and
+        # the alerts folder it did not back up) must not run at all.
+        found = exec_bash(self.SYSTEMD_CONTAINER, f"[ ! -e {core} ]", check=False)
+        self.assertEqual(found.returncode, 0, f"a btrfs-snapshot-core is already installed ({core}) {found.stderr}")
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"{inst} remove {files} >/dev/null 2>&1; if [ -e {d}/core.ours ]; then rm -f {core}; fi; "
+            f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; "
             f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
             f"rm -rf {pending}; if [ -e {d}/pending.bak ]; then mv {d}/pending.bak {pending}; fi; "
             f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
@@ -4724,13 +4729,11 @@ d={d} conf={conf} core={core} notify={notify} pending={pending}
 S=/usr/local/sbin/btrfs-snapshot
 rm -rf "$d" /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock
 install -d -m 0755 "$d" "$d/bin" /etc/btrfs-setup
-[ ! -e "$core" ] || {{ echo "a btrfs-snapshot-core is already installed" >&2; exit 1; }}
 if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
 if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
 if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; fi
 {inst} install {files} >/dev/null
-# The fake core: its own SigIgn, then success. core.ours: the cleanup removes only a core this test wrote.
-: >"$d/core.ours"
+# The fake core: its own SigIgn, then success.
 printf '%s\n' '#!/bin/bash' "grep '^SigIgn:' /proc/\$\$/status >>$d/core-sigign" 'exit 0' >"$core"
 chmod 0755 "$core"
 # The fake btrfs: 10 GiB free (at or below EMERGENCY_AT_OR_BELOW_GIB), and subvolume sync.
