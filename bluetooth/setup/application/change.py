@@ -32,7 +32,6 @@ from bluetooth.setup.domain import (
     BearerState,
     BluetoothCommand,
     LeState,
-    RunningState,
     WpState,
     bearer_matches,
     changes_machine,
@@ -40,7 +39,7 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import OutputMode
+from cst_core.ports import ActiveState, OutputMode
 
 SPACE = r"[ \t\n\r\f\v]"
 
@@ -448,7 +447,7 @@ class Change(Checks):
         if self.lw_enabled != "enabled":
             self.must(["systemctl", "--user", "enable", unit])
             self.out(f"enabled:   {unit} (starts with your session)\n")
-        if self.lw_active != RunningState.ACTIVE:
+        if self.lw_active != ActiveState.ACTIVE:
             self.must(["systemctl", "--user", "start", unit])
             self.out(f"started:   {unit} (logs: journalctl --user -u {unit})\n")
         elif changed:

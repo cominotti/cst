@@ -45,7 +45,6 @@ from bluetooth.setup.domain import (
     Options,
     Paths,
     OLD_WP_MARKER,
-    RunningState,
     WpState,
     bap_state,
     bearer_matches,
@@ -63,7 +62,7 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
+from cst_core.ports import ActiveState, ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
 
 
 def read_bluetooth_settings(
@@ -506,7 +505,7 @@ class Survey:
                 OwnedState.OK,
                 OwnedState.OK,
                 "enabled",
-                RunningState.ACTIVE,
+                ActiveState.ACTIVE,
             )
             self.lw_change = not done
         else:
@@ -678,7 +677,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        if self.lw_enabled == "enabled" and self.lw_active == RunningState.ACTIVE:
+        if self.lw_enabled == "enabled" and self.lw_active == ActiveState.ACTIVE:
             if self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
                 self.item("ok", svc, "enabled, active")
             else:

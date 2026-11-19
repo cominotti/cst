@@ -16,6 +16,7 @@ from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.text import HELP_WORDS, enum_member, group
+from cst_core.ports import ActiveState
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).
@@ -103,13 +104,9 @@ class BapState(StrEnum):
     UNKNOWN = "unknown"  # no bluetoothd or WirePlumber found
 
 
-class RunningState(StrEnum):
-    """The ActiveState words of a unit that runs: those for which `systemctl is-active` exits 0
-    (systemd 262, verb_is_active). Any other word (inactive, failed, activating, ...) is not running."""
-
-    ACTIVE = "active"
-    RELOADING = "reloading"
-    REFRESHING = "refreshing"
+# The ActiveStates (cst_core's) of a unit that runs: those for which `systemctl is-active` exits 0
+# (systemd 262, verb_is_active). Any other word (inactive, failed, activating, ...) is not running.
+RUNNING_STATES: Final = frozenset({ActiveState.ACTIVE, ActiveState.RELOADING, ActiveState.REFRESHING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +227,7 @@ def read_settings_output(shown: str) -> dict[str, str]:
 
 def is_running(active_state: str) -> bool:
     """The unit runs (`systemctl is-active` would exit 0) in this ActiveState."""
-    return enum_member(RunningState, active_state) is not None
+    return active_state in RUNNING_STATES
 
 
 def home_tilde(path: str, home: str) -> str:
