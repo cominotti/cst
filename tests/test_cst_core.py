@@ -201,6 +201,8 @@ class ActiveStateTest(unittest.TestCase):
         self.assertNotIn("a-word-a-newer-systemd-adds", running)
         self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
 
+
+class ManagedFilesTest(unittest.TestCase):
     @override
     def setUp(self) -> None:
         self.spec = MarkedLineSpec(
