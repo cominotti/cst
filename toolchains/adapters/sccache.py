@@ -75,7 +75,7 @@ SCOPE_PROGRAMS = ("systemd-run", "flock")
 def server_cgroup(pid: int | None) -> str | None:
     """The /proc/PID/cgroup text of the server's process PID (peer_pid of its
     socket); None when that is not known."""
-    return read_text(f"{PROC}/{pid}/cgroup") if pid else None
+    return read_text(f"{PROC}/{pid}/cgroup") if pid is not None and pid != 0 else None
 
 
 def missing_programs(pid: int | None, proc: str = PROC) -> tuple[str, ...]:
@@ -86,7 +86,7 @@ def missing_programs(pid: int | None, proc: str = PROC) -> tuple[str, ...]:
     that cannot be read (from inside another toolbox, a process that is gone,
     no PATH): nothing is claimed then."""
     root = f"{proc}/{pid}/root"
-    environ = read_bytes(f"{proc}/{pid}/environ") if pid else None
+    environ = read_bytes(f"{proc}/{pid}/environ") if pid is not None and pid != 0 else None
     if environ is None or not os.path.isdir(root):
         return ()
     path = next((e[5:] for e in environ.split(b"\0") if e.startswith(b"PATH=")), None)

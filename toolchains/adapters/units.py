@@ -27,7 +27,7 @@ def systemctl_cmd(*args: str, program: str | None) -> list[str]:
     # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), None for the real
     # systemctl. No default: every caller says which, so that no test reaches the real user
     # manager by leaving it out.
-    if program:
+    if program is not None:
         return [program, "--user", *args]
     cmd = ["systemctl", "--user", *args]
     return on_host_argv(cmd, {}) if in_container() else cmd

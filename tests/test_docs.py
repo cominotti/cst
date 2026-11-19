@@ -219,13 +219,13 @@ def agent_file_problems(repo: str) -> list[str]:
         fields = frontmatter(read(repo, f"{where}/SKILL.md"))
         if fields.get("name") != name:
             problems.append(f"{where}/SKILL.md: frontmatter name is {fields.get('name')!r}, not {name!r}")
-        if not fields.get("description"):
+        if not fields.get("description", ""):
             problems.append(f"{where}/SKILL.md: no description in the frontmatter")
     for name in sorted(os.listdir(rules)) if os.path.isdir(rules) else []:
         where = f".agents/rules/{name}"
         if not name.endswith(".md"):
             problems.append(f"{where}: a rule is a .md file")
-        elif not frontmatter(read(repo, where)).get("description"):
+        elif not frontmatter(read(repo, where)).get("description", ""):
             problems.append(f"{where}: no description in the frontmatter")
     return problems
 

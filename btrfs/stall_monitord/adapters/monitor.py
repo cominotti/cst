@@ -340,8 +340,8 @@ class Monitor:
             cg[sl] = [
                 p[1],
                 p[3],
-                m[1] if m else 0,
-                m[3] if m else 0,
+                m[1] if m is not None else 0,
+                m[3] if m is not None else 0,
                 *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0]),
             ]
         self.topo.scan_cgroups(time.monotonic())
@@ -407,7 +407,7 @@ class Monitor:
         out: list[DTask] = []
         for pid, tid, comm in d_tasks:
             frames, wchan = self.describe(pid, tid)
-            if not (frames or wchan) or d_comm(pid, tid) is None:
+            if not (frames or (wchan is not None and wchan != "")) or d_comm(pid, tid) is None:
                 continue
             out.append((pid, tid, comm, frames, wchan, wait_kind(frames, wchan)))
         return settle_kinds(out)
@@ -504,7 +504,7 @@ class Monitor:
         io = rec["psi"]["io"] or [0, 0, 0, 0]
         if self.episode is None:
             reason = episode_reason(self.want_episode, io_pct, rec["d"], cmax)
-            if reason:
+            if reason is not None:
                 self.start_episode(rec["ts"], reason)
         self.want_episode = None
         ep = self.episode
@@ -605,8 +605,8 @@ class Monitor:
         self.emit(self.meta_record())
         log(
             f"started: kernel {self.kernel}, fs {[v['label'] or k[:8] for k, v in self.topo.fs.items()]}, "
-            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd else 'no'}, "
-            f"kmsg={'yes' if self.kmsg_fd else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
+            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd is not None else 'no'}, "
+            f"kmsg={'yes' if self.kmsg_fd is not None else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
             f"dir={self.log_dir}"
         )
         # The PSI trigger and /dev/kmsg are open and SIGTERM is handled: the unit becomes active now.
@@ -618,7 +618,7 @@ class Monitor:
         while self.running:
             self.signs_of_life()
             now = time.monotonic()
-            if self.duration and now - t0 >= self.duration:
+            if self.duration is not None and now - t0 >= self.duration:
                 break
             try:
                 events = self.poller.poll(max(0.0, (min(next_sample, next_probe) - now) * 1000))
@@ -641,8 +641,8 @@ class Monitor:
             if now >= next_probe:
                 self.probe_commits()
                 next_probe = now + PROBE_INTERVAL
-            if self.episode is None and (triggered or self.want_episode):
-                if triggered and not self.want_episode:
+            if self.episode is None and (triggered or self.want_episode is not None):
+                if triggered and self.want_episode is None:
                     self.want_episode = "psi trigger"
                 next_sample = now
             if now >= next_sample:

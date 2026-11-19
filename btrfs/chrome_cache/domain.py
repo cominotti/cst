@@ -20,6 +20,8 @@ APP_DIR = f".var/app/{APP}"
 FLAGS_REL = f"{APP_DIR}/config/chrome-flags.conf"
 OLD_CACHE_REL = f"{APP_DIR}/cache/google-chrome"
 CACHE_SUBVOL_REL = f"{APP_DIR}/cache"
+# status's line for absent flags when Chrome is installed.
+ABSENT_ADDS = "absent; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them"
 MARK = "# btrfs-setup.sh (CST) chrome-cache"
 # The marker as versions named f44-tools wrote it: recognised like the current
 # one (a file it is in is not rewritten for the new name), never written.

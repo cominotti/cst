@@ -74,12 +74,12 @@ def classify_kept(b: Bulk, item: Item, done: set[str], kept: set[str]) -> tuple[
         L = ctx.link(item)
         linked = L is not None and t.kind(L) == LstatKind.LINK and t.link_target(L) == ctx.target(item)
         return BulkItemState.KEPT, BulkItemDetail.LINKED if linked else ""
-    if item.after and item.after in kept:
+    if item.after is not None and item.after in kept:
         why = f"~/{BY_ID[item.after].link} is kept in /home (by choice)"
         L = ctx.link(item)
         if (
-            L
-            and item.link
+            L is not None
+            and item.link is not None
             and t.chain(ctx.home, item.link) == PathChain.OK
             and not t.is_subvol(L)
             and not t.empty_dir(L)
@@ -90,7 +90,7 @@ def classify_kept(b: Bulk, item: Item, done: set[str], kept: set[str]) -> tuple[
                 f"'bulk keep {item.id}' too, or 'bulk unkeep {item.after}'"
             )
         return BulkItemState.WAIT, f"{why}: keep {item.id} too, or 'bulk unkeep {item.after}'"
-    if item.after and item.after not in done:
+    if item.after is not None and item.after not in done:
         return BulkItemState.WAIT, f"after ~/{BY_ID[item.after].link} is in place"
     return None
 
@@ -168,7 +168,7 @@ def committed(b: Bulk, j: ItemJournal) -> bool:
     kind = b.tree.kind
     if j["kind"] == BulkJournalKind.SUBVOL:
         return kind(present(j["link"], "the journal's link")) == LstatKind.LINK
-    if j["link"]:
+    if j["link"] is not None and j["link"] != "":
         return kind(j["link"]) == LstatKind.LINK and b.tree.link_target(j["link"]) == j["target"]
     # In-place rewrite of the target (no link): new renamed onto it, old kept.
     return (
@@ -193,7 +193,7 @@ def recover(b: Bulk) -> list[str]:
             state.jdrop(item.id)
         except (OSError, RuntimeError, Unexpected) as e:
             stuck.append(item.id)
-            wait = "" if j.get("bulk_only") else "; snapshots wait until it is gone"
+            wait = "" if j.get("bulk_only", False) else "; snapshots wait until it is gone"
             log(f"NEEDS A LOOK: {item.id}: an interrupted move: {e} (journal kept in {state.jpath(item.id)}{wait})")
     return stuck + steam_recover_all(b)
 
@@ -201,11 +201,11 @@ def recover(b: Bulk) -> list[str]:
 def recover_item(b: Bulk, item: Item, j: ItemJournal) -> None:
     """Finish or undo the move journal j recorded (ItemRecover); an exception: it stays."""
     ctx, user, log = b.ctx, b.user, b.out.log
-    if j.get("conflict"):
+    if j.get("conflict", False):
         if b.tree.kind(j["old"]) != LstatKind.ABSENT:
             raise Unexpected(conflict_text(ctx, j))
         log(f"  {item.id}: the old tree is gone: the move is complete")
-    elif j.get("finishing"):
+    elif j.get("finishing", False):
         # The last check had passed and the old tree was being deleted:
         # what is left of it is a partial copy (each deletion changes
         # ctimes there, so the late-write check cannot be made again).
@@ -213,7 +213,7 @@ def recover_item(b: Bulk, item: Item, j: ItemJournal) -> None:
         log(f"  {item.id}: deleted the old copy left by an interrupted run (its deletion was cut short)")
     elif j["kind"] == BulkJournalKind.SUBVOL:
         recover_subvol(b, item, j)
-    elif not j.get("undo") and committed(b, j):
+    elif not j.get("undo", False) and committed(b, j):
         recover_switched(b, item, j)
     else:
         user.rollback(j)
@@ -533,7 +533,7 @@ def apply_item(
         log(f"{'kept:':<10} {describe_paths(b.ctx, item)}: {kept_text(item, detail)}")
         return
     record_result(b, item, (state, detail), res, done, kept, deferred, problems)
-    if item.flatpak and b.tree.kind(b.ctx.target(item)) == LstatKind.DIR:
+    if item.flatpak is not None and b.tree.kind(b.ctx.target(item)) == LstatKind.DIR:
         allow_flatpak(b, item, item.flatpak, problems)
 
 
@@ -616,7 +616,7 @@ def item_text(b: Bulk, item: Item, state: str, detail: str) -> str:
     if state == BulkItemState.NOCOW:
         return f"rewrite without copy-on-write ({detail}, {du_text(du(T))})"
     if state == BulkItemState.UNEXPECTED:
-        size = du(L) if L and b.tree.kind(L) == LstatKind.DIR else TreeSize(0, True)
+        size = du(L) if L is not None and b.tree.kind(L) == LstatKind.DIR else TreeSize(0, True)
         there = f"; {du_text(size)} there, still in /home snapshots" if size.total >= BIG else ""
         return f"NEEDS A LOOK: {detail} (nothing touched{there})"
     return STATE_TEXT.get(state, state) + (f" ({detail})" if detail else "")
@@ -692,13 +692,17 @@ def report_journals(b: Bulk) -> int:
             continue
         left += 1
         j = state.jread_item(item.id)
-        if j and j.get("conflict") and b.tree.kind(j["old"]) != LstatKind.ABSENT:
+        if j and j.get("conflict", False) and b.tree.kind(j["old"]) != LstatKind.ABSENT:
             say(f"  {item.id}: NEEDS A LOOK: {conflict_text(ctx, j)}")
         elif j:
             say(f"  {item.id}: an interrupted move is recorded ({ctx.short(j['old'] or j['src'])}): the next")
             say(
                 "      apply (or boot) finishes or undoes it; "
-                + ("inside ~/Bulk only, snapshots do not wait" if j.get("bulk_only") else "snapshots wait until then")
+                + (
+                    "inside ~/Bulk only, snapshots do not wait"
+                    if j.get("bulk_only", False)
+                    else "snapshots wait until then"
+                )
             )
         else:
             say(f"  {item.id}: NEEDS A LOOK: {state.newer_journal(item.id) or damaged(state, item.id)}")
@@ -712,7 +716,7 @@ def report_steam_journals(b: Bulk) -> int:
     for ident in state.steam_journal_ids():
         left += 1
         sj = state.jread_steam(ident)
-        if sj and sj.get("conflict"):
+        if sj and sj.get("conflict", False):
             say(f"  {ident}: NEEDS A LOOK: {steam_conflict_text(b, sj)}")
         elif sj:
             say(f"  {ident}: an interrupted Steam game move is recorded (phase {sj.get('phase')}): the next")
@@ -740,7 +744,7 @@ def report_item(b: Bulk, item: Item, mode: str, seen: tuple[set[str], set[str], 
     T = ctx.target(item)
     if item.nocow and mode == BulkCommand.STATUS and b.tree.chain(ctx.bulk, item.target) == PathChain.OK:
         report_nocow(b, item, T)
-    if item.flatpak:
+    if item.flatpak is not None:
         report_flatpak(b, item.flatpak, T, mode)
     return int(st != BulkItemState.OK)
 

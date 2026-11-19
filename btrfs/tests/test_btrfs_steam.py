@@ -211,7 +211,7 @@ class SteamTest(tb.BulkBase):
     ) -> None:
         self.assertEqual(rc, want_rc, self.out)
         self.assertEqual(self.tree(), before)
-        if text:
+        if text is not None:
             self.assertIn(text, self.out)
 
     # ---- VDF parser ----

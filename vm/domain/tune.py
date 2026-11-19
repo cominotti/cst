@@ -77,7 +77,7 @@ def guest_kind(root: ET.Element) -> tuple[GuestKind, str]:
     virt-manager/virt-install/Boxes write into <metadata>, else Hyper-V
     enlightenments (only Windows guests use them)."""
     for el in root.iter():
-        if el.tag.endswith("}os") and el.get("id"):
+        if el.tag.endswith("}os") and el.get("id", ""):
             osid = el.get("id") or ""
             if "microsoft.com/win" in osid:
                 return GuestKind.WINDOWS, f"libosinfo {osid}"

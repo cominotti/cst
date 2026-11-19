@@ -140,7 +140,7 @@ def btrfs_device_bytes(host: DoctorHostPort, mnt: str, profiles: Mapping[str, Ma
     profile is not one known value."""
     data = list(profiles.get("data", {}))
     factor = {**ONE_DEVICE_FACTOR, **MIRROR_COPIES}.get(data[0]) if len(data) == 1 else None
-    if not mnt or not factor:
+    if not mnt or factor is None:
         return None
     rc, out, _ = host.run(["stat", "-f", "-c", "%S %b", mnt], timeout=15)
     f = out.split() if rc == 0 else []
@@ -164,7 +164,7 @@ def btrfs_devices(host: DoctorHostPort, base: ViewPath) -> tuple[list[tuple[str,
     devs: list[tuple[str, str, int]] = []
     for n in names:
         sectors = read_int(host, view_join(base, "devices", n, "size"))
-        if not sectors:
+        if sectors is None or sectors == 0:
             return [], f"no size for {n}"
         dm = read_text(host, view_join(base, "devices", n, "dm", "name"))
         devs.append((n, f"/dev/mapper/{dm}" if dm else f"/dev/{n}", sectors * 512))
@@ -207,7 +207,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
         for kind in ("data", "metadata"):
             total = read_int(host, view_join(alloc, kind, "total_bytes"))
             used = read_int(host, view_join(alloc, kind, "bytes_used"))
-            fill[kind] = (used, total) if total and used is not None else None
+            fill[kind] = (used, total) if total is not None and total != 0 and used is not None else None
         profiles = btrfs_profiles(host, alloc)
         layout = "/".join(sorted({p.upper() for prof in profiles.values() for p in prof})) or "?"
         parts: list[str] = []
@@ -235,7 +235,7 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
             count = read_int(host, view_join(alloc, "data", "reclaim_count"))
             errs = read_int(host, view_join(alloc, "data", "reclaim_errors"))
             extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
-            if errs:
+            if errs is not None and errs != 0:
                 yield Result(
                     INFO,
                     f"{name}: automatic data reclaim on (dynamic, periodic){extra}, "
@@ -367,7 +367,7 @@ def live_scrub_limits(host: DoctorHostPort) -> str:
             continue
         for devid in devids:
             v = read_int(host, view_join(devinfo, devid, "scrub_speed_max"))
-            if v:
+            if v is not None and v != 0:
                 limits.append(f"{uuid[:8]} device {devid} {format_bytes_gib_mib(v)}/s")
     return ", ".join(limits) if limits else "no limit on any device"
 

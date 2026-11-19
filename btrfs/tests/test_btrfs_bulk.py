@@ -1084,7 +1084,7 @@ class BulkTest(BulkBase):
             name = "disk.img" if "disk.img" in names else "a"
             with open(os.path.join(j["old"], name), "w") as f:
                 f.write("late")
-            if through_link:
+            if through_link is not None:
                 self.write(through_link, "new")
             raise Crash()
 

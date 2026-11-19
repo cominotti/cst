@@ -165,7 +165,7 @@ class Run:
     def behind_last_run(self) -> str | None:
         """Why the clock is not to be trusted against the state file (None = fine)."""
         last, problem = self.last_run()
-        if problem:
+        if problem is not None:
             return problem
         if last is not None and self.now < last.epoch - CLOCK_SLACK:
             return (
@@ -177,7 +177,7 @@ class Run:
     def backwards_problem(self, newest: Snap | None) -> str | None:
         """Deletions: the clock runs behind what this tool already recorded."""
         problem = self.behind_last_run()
-        if problem:
+        if problem is not None:
             return problem
         if newest is not None:
             newest_epoch = wall_to_epoch(newest.wall, self.tz)
@@ -195,7 +195,7 @@ class Run:
         last successful run, if that run was in this boot (else 0: unknown)."""
         last, problem = self.last_run()
         if (
-            problem
+            problem is not None
             or last is None
             or last.boot_id is None
             or last.boottime is None
@@ -212,7 +212,7 @@ class Run:
         why not to create it now (a refusal), notes = (level, text) to log if it
         is created."""
         problem = self.behind_last_run()
-        if problem:
+        if problem is not None:
             return problem, []
         synced = self.ntp_problem() is None
         last, _ = self.last_run()
@@ -275,11 +275,11 @@ class Run:
         """Store this run as the last successful one - only with a trusted clock,
         and never moving the record backwards (it guards against a clock that
         later runs behind)."""
-        if self.ntp_problem():
+        if self.ntp_problem() is not None:
             self.log(6, "the clock is not NTP-synchronized; this run is not recorded as the last successful one")
             return
         last, problem = self.last_run()
-        if problem:
+        if problem is not None:
             self.log(4, f"not recording this run: {problem}")
             return
         if last is not None and self.now < last.epoch:
@@ -292,7 +292,7 @@ class Run:
                 )
             return
         line = str(int(self.now))
-        if self.boot_id and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
+        if self.boot_id is not None and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
             line += f" {self.boot_id} {self.boottime:.3f}"
         # The file is fsynced, its folder is not (a crash at worst keeps the
         # previous record): one btrfs log sync less per run.
@@ -326,10 +326,10 @@ class Run:
                     f"{len(scan.unverifiable)} entr{'y' if len(scan.unverifiable) == 1 else 'ies'} "
                     f"could not be verified ({path}: {why})"
                 )
-            elif pin_problem:
+            elif pin_problem is not None:
                 refusal = pin_problem
-            else:
-                refusal = self.backwards_problem(newest) or self.ntp_problem()
+            elif (refusal := self.backwards_problem(newest)) is None:
+                refusal = self.ntp_problem()
             owned = len(snaps)
             if refusal is None and not self.options.allow_mass_delete:
                 refusal = self.breaker(src, decisions, snaps, pinned, doomed, owned)
@@ -458,7 +458,7 @@ def create_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, res: Result
         run.log(6, f"{src.name}: unchanged since {newest.entry}; no new snapshot")
         return scan
     problem, notes = run.creation_check(newest)
-    if problem:
+    if problem is not None:
         run.log(4, f"{src.name}: not creating a snapshot: {problem}")
         res.worse(EXIT_REFUSED)
         res.note = "clock"
@@ -517,7 +517,7 @@ def prune_step(run: Run, src: Source, info: SubvolInfo, scan: Scan, extra: Seque
     res.kept = sum(1 for d in decisions if d.action == "keep" and not d.snap.virtual)
     if not doomed:
         return
-    if refusal:
+    if refusal is not None:
         run.log(4, f"{src.name}: {len(doomed)} deletion(s) blocked: {refusal}")
         for d in doomed:
             run.log(6, f"{src.name}: blocked: {d.snap.entry} ({d.reason})")
@@ -543,7 +543,7 @@ def delete_doomed(run: Run, src: Source, info: SubvolInfo, doomed: Sequence[Deci
         res.worse(EXIT_ERROR)
         return
     _, fresh_doomed, refusal = run.decide(src, fresh)
-    if refusal:
+    if refusal is not None:
         run.log(4, f"{src.name}: deletions blocked on re-check: {refusal}")
         res.worse(EXIT_REFUSED)
         res.kept += len(doomed)
@@ -570,7 +570,7 @@ def delete_one(run: Run, src: Source, d: Decision, source_uuid: str, fresh_uuids
         res.kept += 1
         return True
     problem = recheck(run, s, source_uuid)
-    if problem:
+    if problem is not None:
         run.log(4, f"{src.name}: not deleting {s.path}: {problem}")
         res.worse(EXIT_REFUSED)
         res.kept += 1
@@ -588,7 +588,7 @@ def delete_one(run: Run, src: Source, d: Decision, source_uuid: str, fresh_uuids
 def recheck(run: Run, snap: Snap, source_uuid: str) -> str | None:
     """Why SNAP must not be deleted after all (None = go ahead)."""
     problem = run.pins()[1]
-    if problem:
+    if problem is not None:
         return problem
     if run.host.kind(snap.path) != PathKind.SUBVOL:
         return "no longer a subvolume"
@@ -669,7 +669,7 @@ def ours_writable(run: Run, src: Source, dest: str, entry: str, source_uuid: str
     except ParseError as e:
         return str(e), None
     other = other_parent(info, source_uuid)
-    return (f"a {other}" if other else None), ro
+    return (f"a {other}" if other is not None else None), ro
 
 
 def seal(run: Run, src: Source, dest: str, entry: str, source_uuid: str, *, created: bool) -> SealOutcome:
@@ -681,14 +681,14 @@ def seal(run: Run, src: Source, dest: str, entry: str, source_uuid: str, *, crea
     changed only once ours_writable() proves it is ours. Returns "sealed",
     "left" (not ours: untouched, still listed) or "error"."""
     problem, ro = ours_writable(run, src, dest, entry, source_uuid)
-    if problem and not created:
+    if problem is not None and not created:
         run.log(
             4,
             f"{src.name}: {entry} is listed in {run.state_file(UNFINISHED_FILE)} but is {problem}; "
             f"left alone - check it, then remove its line from that file",
         )
         return SealOutcome.LEFT
-    if problem:
+    if problem is not None:
         run.log(
             3,
             f"{src.name}: cannot check {dest} after creating it: {problem}; its cache folders stay, "
@@ -1041,7 +1041,7 @@ def cmd_latest(args: LatestQuery, machine: Machine) -> tuple[int, str | None]:
     check_snapdir(machine.host, args.snapdir)
     log = machine.log
     source_uuid = None
-    if args.source_path:
+    if args.source_path is not None and args.source_path != "":
         try:
             source_uuid = machine.btrfs.show(SubvolPath(os.path.normpath(args.source_path)))["uuid"]
         except ParseError as e:
@@ -1112,6 +1112,6 @@ def scan_entry(
     if not ro:
         return ScanVerdict.WRITABLE, "not read-only"
     other = other_parent(info, source_uuid) if source_uuid is not None else None
-    if other:
+    if other is not None:
         return ScanVerdict.IGNORED, other
     return Snap(entry=entry, wall=parsed[0], seq=parsed[1], path=path, uuid=info["uuid"], cgen=info["cgen"])

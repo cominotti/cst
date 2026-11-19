@@ -67,7 +67,7 @@ class PackageView:
         """Undo the latest set of `name` (the end of a `mock.patch.object` block)."""
         sets: dict[str, list[list[tuple[ModuleType, object]]]] = object.__getattribute__(self, "_sets")
         stack = sets.get(name)
-        if not stack:
+        if stack is None or len(stack) == 0:
             raise AttributeError(f"{name} was not replaced through this view")
         for mod, old in stack.pop():
             setattr(mod, name, old)

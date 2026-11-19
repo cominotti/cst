@@ -69,7 +69,8 @@ class Progress:
 
 def idle_cmd(cmd: list[str]) -> list[str]:
     """CMD run at idle IO and lowest CPU priority (where ionice/nice exist)."""
-    pre = (["ionice", "-c3"] if shutil.which("ionice") else []) + (["nice", "-n19"] if shutil.which("nice") else [])
+    has_ionice, has_nice = shutil.which("ionice") is not None, shutil.which("nice") is not None
+    pre = (["ionice", "-c3"] if has_ionice else []) + (["nice", "-n19"] if has_nice else [])
     return pre + cmd
 
 

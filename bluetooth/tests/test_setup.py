@@ -247,7 +247,7 @@ class HeadsetTest(SetupCase):
 
     def old_rule(self, m: Machine, name: str | None = None) -> str:
         with open(OLD_RULE, encoding="utf-8") as f:
-            return m.put(os.path.join(m.wp_dir, name) if name else m.wp_conf, f.read())
+            return m.put(os.path.join(m.wp_dir, name) if name is not None else m.wp_conf, f.read())
 
     def plan(self, m: Machine, *args: str) -> str:
         r = m.run("plan", *args, env={"CST_PROG": "cst-t"})

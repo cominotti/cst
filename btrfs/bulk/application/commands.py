@@ -90,7 +90,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         def settle(t: Vdf) -> Vdf:
             return lf_with_library(t, T, present(cid, "the marker's contentid"), b.tree.realpath)
 
-        S = steam_read_pair(b, settle if cid else None)
+        S = steam_read_pair(b, settle if cid is not None and cid != "" else None)
     except Unexpected as e:
         sv["fatal"] = str(e)
         return sv
@@ -299,7 +299,7 @@ def start_moves(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) -
             p.get("sample", "")
             for a in movers
             for p in a["parts"]
-            if p.get("mode") == SteamPartMode.REFLINK and p.get("sample")
+            if p.get("mode") == SteamPartMode.REFLINK and p.get("sample", "")
         ),
         "",
     )
@@ -470,11 +470,11 @@ def keep_report(tree: HomeTreePort, out: OutputPort, ctx: Ctx | None, cmd: str, 
             out.say(f"{ident}: no longer kept; the next 'cst btrfs bulk apply' moves it into ~/Bulk")
             continue
         out.say(
-            f"{ident}: {'kept in /home' if item.link else 'left out of ~/Bulk'} by choice; "
-            "bulk apply leaves it alone" + ("; its data is in /home snapshots" if item.link else "")
+            f"{ident}: {'kept in /home' if item.link is not None else 'left out of ~/Bulk'} by choice; "
+            "bulk apply leaves it alone" + ("; its data is in /home snapshots" if item.link is not None else "")
         )
-        if ctx and item.link:
+        if ctx and item.link is not None:
             L = ctx.link(item)
-            if L and tree.kind(L) == LstatKind.LINK and tree.link_target(L) == ctx.target(item):
+            if L is not None and tree.kind(L) == LstatKind.LINK and tree.link_target(L) == ctx.target(item):
                 out.say(f"  ~/{item.link} is still a link into ~/Bulk: to bring the data back, see")
                 out.say("  btrfs/SNAPSHOTS.md, section 12 (Undo one Bulk link)")

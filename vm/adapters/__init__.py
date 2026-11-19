@@ -212,7 +212,9 @@ def conf_files(paths: VmPaths, cmd: VmCommand, nas: bool, vm: str | None) -> lis
     files = [(paths.vm_conf, False)]
     # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
     # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
-    if cmd != VmCommand.NOCOW and not (vm and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)):
+    if cmd != VmCommand.NOCOW and not (
+        vm is not None and vm != "" and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)
+    ):
         files.append((paths.cpu_conf, True))
     if nas or cmd == VmCommand.BACKUP_TIMER:
         files.append((paths.nas_conf, True))
@@ -292,7 +294,7 @@ def nas_settings(cfg: VmSettings) -> NasRepo:
     repository, the SSH key and the password file this one reuses."""
     conf = read_conf(cfg.paths.nas_conf, nas_conf=cfg.paths.nas_conf, bash_sourced=True)
     setup = f"{cfg.cst} btrfs snapshots nas setup"
-    if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH"):
+    if conf.get("NAS_ENABLED") != "1" or not conf.get("NAS_PATH", ""):
         raise Refused(
             f"the NAS backup is not set up ({cfg.paths.nas_conf}: NAS_ENABLED=1 and NAS_PATH are needed). "
             f"Set it up first: {setup} (the VM backup shares its restic repository)"

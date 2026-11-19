@@ -16,7 +16,7 @@ def imported_modules(source: str, filename: str = "<source>") -> frozenset[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
             names.add(node.module)
             names.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name != "*")
     return frozenset(names)

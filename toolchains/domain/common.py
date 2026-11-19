@@ -205,7 +205,7 @@ def json_items(value: Json) -> list[Json]:
     """The items `for x in VALUE or []` visits that can be objects: a list's items; a
     string or an object (its characters, its keys) gives none; a number that is not 0
     is not iterable (TypeError, as the loop raised)."""
-    if not value:
+    if value is None or not value:
         return []
     if isinstance(value, list):
         return value
@@ -272,7 +272,7 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
     for a in it:
         if a == "--home":
             home = next(it, None)
-            if not home:
+            if home is None or home == "":
                 raise Usage("--home needs a folder")
         elif a.startswith("--home="):
             home = a.split("=", 1)[1]

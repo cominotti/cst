@@ -21,6 +21,7 @@ from btrfs.chrome_cache.adapters import (
     real_home,
 )
 from btrfs.chrome_cache.domain import (
+    ABSENT_ADDS,
     CACHE_SUBVOL_REL,
     FLAGS_REL,
     OLD_CACHE_REL,
@@ -39,12 +40,12 @@ from cst_core.domain.values import MIB
 def status(home: str) -> int:
     print("Chrome (Flatpak): HTTP cache in the sandbox /tmp (RAM, emptied at reboot), at most 512 MiB")
     inst = installed(home)
-    print(f"  Chrome Flatpak:        {('installed (' + inst + ')') if inst else 'not installed (nothing to do)'}")
+    print(f"  Chrome Flatpak:        {'not installed (nothing to do)' if inst is None else f'installed ({inst})'}")
     rc = 0
     try:
         state, _, msg = decide(flags_text(home))
         if state == ChromeFlagsState.ABSENT:
-            msg = "absent" + ("; 'snapshots setup' (or 'snapshots chrome-cache apply') adds them" if inst else "")
+            msg = "absent" if inst is None else ABSENT_ADDS
         elif state == ChromeFlagsState.CAP_MISSING:
             msg = "the 512 MiB cap line is missing: 'snapshots chrome-cache apply' adds it back"
         print(f"  ~/{FLAGS_REL}:")
@@ -81,7 +82,7 @@ def main(argv: Sequence[str]) -> int:
     if "--home" in args:
         i = args.index("--home")
         home = args[i + 1] if i + 1 < len(args) else None
-    if cmd is None or (("--home" in args) and not home):
+    if cmd is None or (("--home" in args) and (home is None or home == "")):
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
     if HostExecutionContext().is_root():

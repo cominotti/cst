@@ -49,6 +49,7 @@ from toolchains.adapters import cargo as tc_cargo
 from toolchains.adapters import rustup as tc_rustup
 from toolchains.adapters import sccache as tc_sccache
 from toolchains.adapters import units as tc_units
+from toolchains.application import auto as tc_app_auto
 from tests.probes import bytes_program
 from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, quiet_signals
 
@@ -1038,6 +1039,17 @@ class AutoTest(Scratch):
             "left alone: ~/.config/systemd/user/cst-toolchains-prune.timer (masked with systemctl --user mask)", err
         )
         self.assertEqual(os.readlink(timer), "/dev/null")
+
+    def test_an_empty_masked_refusal_still_refuses_auto_on(self) -> None:
+        # A refusal is any text, "" too: auto on must not go on and write the files.
+        self.csts_cargo_config()
+        with mock.patch.object(tc_app_auto, "masked_refusal", lambda *_args, **_kwargs: ""):
+            rc, out, err = self.run_split("auto", "on")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("nothing was written", err)
+        self.assertFalse(self.exists(".config/systemd/user/cst-toolchains-prune.timer"))
+        self.assertFalse(self.exists(".local/lib/cst/cst-toolchains"))
+        self.assertEqual(self.calls(), [], "systemctl was called")
 
     def test_a_unit_linked_to_anything_else_follows_the_link_rule(self) -> None:
         # Only a link to /dev/null is a mask: a link to the unit CST would write is kept (a

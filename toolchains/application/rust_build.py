@@ -171,7 +171,7 @@ class RustBuild(BaseTarget[RustPolicy]):
                 f"{unreadable} Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", 5
             )
         for t in trash:
-            if users.get(t.key):
+            if users.get(t.key, []):
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
                 continue
             ok, msg = self.machine.tree.remove(t.path, self.time_left())

@@ -209,7 +209,7 @@ def problems(repo: str, files: Iterable[str]) -> list[str]:
     for rel in checked_files(repo, files):
         text = _read(repo, rel)
         problem = f"{rel}: not UTF-8 text" if text is None else header_problem(rel, text)
-        if problem:
+        if problem is not None:
             found.append(problem)
     return found
 

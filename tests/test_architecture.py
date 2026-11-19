@@ -415,7 +415,7 @@ def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozense
             for alias in node.names:
                 if not _allowed_module(alias.name) and alias.name not in allowed_modules:
                     problems.append(f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)")
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
                 if _extra_allowed(full, allowed):
@@ -459,11 +459,11 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
                     problems.append(f"{rel}:{node.lineno}: {reason}")
         elif isinstance(node, ast.ImportFrom):
             targets: list[str] = []
-            if node.module:
+            if node.module is not None:
                 targets.append(node.module)
             for alias in node.names:
                 if alias.name != "*":
-                    targets.append(f"{node.module}.{alias.name}" if node.module else alias.name)
+                    targets.append(f"{node.module}.{alias.name}" if node.module is not None else alias.name)
             seen: set[str] = set()
             for target in targets:
                 reason = _forbidden_import_reason(target, role)
@@ -642,9 +642,9 @@ def _bindings(tree: ast.Module) -> dict[str, str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 bound[alias.asname or alias.name.split(".", 1)[0]] = (
-                    alias.name if alias.asname else alias.name.split(".", 1)[0]
+                    alias.name if alias.asname is not None else alias.name.split(".", 1)[0]
                 )
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
             for alias in node.names:
                 bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
     return bound

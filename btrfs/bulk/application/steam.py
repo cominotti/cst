@@ -94,7 +94,8 @@ def steam_read_pair(b: Bulk, settle: Callable[[Vdf], Vdf] | None = None) -> VdfP
             bak = b.tree.newest_backup(files[0])
             raise Unexpected(
                 f"the two copies of libraryfolders.vdf ({ctx.short(files[0])} and steamapps/) differ: with Steam "
-                f"closed, copy the right one over the other" + (f" (newest backup: {ctx.short(bak)})" if bak else "")
+                f"closed, copy the right one over the other"
+                + (f" (newest backup: {ctx.short(bak)})" if bak is not None else "")
             )
     return {
         "files": files,
@@ -482,7 +483,7 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
     """Finish or undo what an interrupted Steam move left."""
     ident = "steam-" + j["appid"]
     phase = j.get("phase")
-    if j.get("conflict"):
+    if j.get("conflict", False):
         if any(b.tree.kind(p["old"]) != LstatKind.ABSENT for p in j["parts"]):
             raise Unexpected(steam_conflict_text(b, j))
         j["phase"] = SteamPhase.FINISHING
@@ -495,7 +496,7 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
         steam_finish(b, j)
         return "finished an interrupted move"
     if (
-        j.get("undo")
+        j.get("undo", False)
         or phase == SteamPhase.PREPARED
         or (phase == SteamPhase.SWITCHING and not steam_all_switched(b, j))
     ):

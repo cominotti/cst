@@ -1500,7 +1500,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     @override
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
-        if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):
+        if not os.path.isdir(cache) or vm_adapters_images.is_btrfs(cache) is not True:
             self.skipTest("~/.cache is not on btrfs")
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-reflink-", dir=cache)
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1955,6 +1955,16 @@ class TimerUseCaseTest(unittest.TestCase):
             with self.subTest(states=states), self.assertRaisesRegex(Refused, words):
                 vm_application.timer_on(timers, systemd, "win", ready, lambda s: None)
             self.assertEqual(timers.done, [])
+
+    def test_an_empty_masked_refusal_still_refuses_before_any_change(self) -> None:
+        # A refusal is any text, "" too: on must not go on and install the files.
+        timers = FakeTimers({"/p": OwnedState.MISSING}, [])
+        with (
+            mock.patch.object(vm_application, "masked_refusal", lambda *_args, **_kwargs: ""),
+            self.assertRaisesRegex(Refused, "nothing was changed"),
+        ):
+            vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, lambda s: None)
+        self.assertEqual(timers.done, [])
 
     def test_a_failed_start_leaves_the_record_pending(self) -> None:
         for fail, words, done in (

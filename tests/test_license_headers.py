@@ -30,8 +30,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from cst_core.domain.install import INSTALL_MANIFEST, render_template, template_keys
+from tests import license_headers
 from tests.license_headers import (
     IDENTIFIER,
     LICENSE_EXEMPT,
@@ -230,6 +232,11 @@ class FixerTest(unittest.TestCase):
         self.assertEqual([(c.rel, c.text is None) for c in changes], [("blob.bin", True), ("odd.dat", True)])
         self.assertIn("not UTF-8", changes[0].refused or "")
         self.assertIn("unknown file kind", changes[1].refused or "")
+
+    def test_an_empty_problem_is_still_reported(self) -> None:
+        # A problem is any text, "" too: the file must not pass the gate unseen.
+        with mock.patch.object(license_headers, "header_problem", lambda _rel, _text: ""):
+            self.assertEqual(problems(self.repo, ["a.py"]), [""])
 
     def run_main(self, *argv: str, files: list[str] | None = None, repo: str = "") -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

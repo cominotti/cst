@@ -184,7 +184,7 @@ def flags_text(home: str) -> str:
 
 
 def plan_line(home: str) -> str:
-    if not installed(home):
+    if installed(home) is None:
         return "not installed: nothing to do"
     state, _, msg = decide(flags_text(home))
     return msg if state in (ChromeFlagsState.ABSENT, ChromeFlagsState.CAP_MISSING) else f"nothing to do ({msg})"
@@ -192,7 +192,7 @@ def plan_line(home: str) -> str:
 
 def apply(home: str) -> tuple[ChromeFlagsState, str, bool]:
     """(state, message, changed)."""
-    if not installed(home):
+    if installed(home) is None:
         return ChromeFlagsState.NO_APP, "Chrome Flatpak not installed: nothing to do", False
     dfd, text, st = current(home, create=False)
     try:

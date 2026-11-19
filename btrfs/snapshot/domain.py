@@ -246,7 +246,7 @@ def plan(
         groups = _preserve_level(groups, unit, following, policy, reasons, hod, DAY_NAMES[dow])
     deleted = f"not kept by policy '{format_policy(policy)}'"
     return [
-        Decision(i.snap, "keep", reasons[id(i)]) if reasons.get(id(i)) else Decision(i.snap, "delete", deleted)
+        Decision(i.snap, "keep", reasons[id(i)]) if id(i) in reasons else Decision(i.snap, "delete", deleted)
         for i in items
     ]
 

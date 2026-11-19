@@ -380,9 +380,9 @@ def describe(d: Deployment) -> str:
     deployment 44.x (next boot)' for the next boot that was not staged (after
     rpm-ostree rollback, or a deploy finished at once)."""
     ver = d.get("version") or (d.get("checksum") or "?")[:10]
-    if d.get("booted"):
+    if d.get("booted", False):
         return f"booted deployment {ver}"
-    if d.get("staged"):
+    if d.get("staged", False):
         return f"staged deployment {ver}"
     return f"pending deployment {ver} (next boot)"
 
@@ -425,7 +425,7 @@ def parse_alert_text(data: str) -> tuple[str, str, int] | None:
             break
         k, _, v = line.partition("=")
         head[k] = v
-    if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or not head.get("title"):
+    if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or not head.get("title", ""):
         return None
     last = int(head["last"]) if head.get("last", "").isdigit() else 0
     return head["urgency"], head["title"][:200], last

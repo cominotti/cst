@@ -147,7 +147,7 @@ def checkout_commit(root: str | None) -> str:
     gitdir or ref pointing elsewhere) cannot make root copy another file's text
     into the world-readable install record.
     """
-    if not root:
+    if root is None or root == "":
         return "unknown"
     try:
         owner = os.lstat(root).st_uid

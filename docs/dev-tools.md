@@ -233,8 +233,35 @@ repository:
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import`, `possibly-unresolved-reference`,
   `unused-ignore-comment` (an ignore comment that suppresses nothing) and
-  `redundant-cast` (a `cast()` to the type the value already has). A rule
-  may be added there only at `"error"`.
+  `redundant-cast` (a `cast()` to the type the value already has) and
+  `truthiness-test-of-none-union` (below). A rule may be added there only at
+  `"error"`.
+- **`truthiness-test-of-none-union`**: a boolean test (`if x:`, `not x`,
+  `x and y` in a condition) on a value that may be None and may also be
+  empty or zero (`str | None`, `int | None`, `list[str] | None`,
+  `bool | None`). Such a test cannot tell None from `""`, 0, False or an
+  empty container: a refusal reason that is `""` let the step go ahead, and
+  `--duration 0` meant no limit. Write which case is meant:
+  - `x is not None` / `x is None` where None alone means "none" (a reason,
+    a problem, a refusal: `""` is still a reason). A bare `is not None` on a
+    value whose falsy form used to count as absent needs its reason (why
+    that value cannot reach the test) in the commit message; without one,
+    use a form equal by type;
+  - an optional bool key of a TypedDict or JSON record: `d.get(k, False)`;
+  - an environment variable or a str-valued mapping where empty means
+    unset: `os.environ.get(X, "")`, `d.get(k, "")`, then `if x:`;
+  - another `str | None` where `""` means absent: `x is not None and x != ""`
+    (or `x is None or x == ""`);
+  - a number where 0 means unknown or unlimited: `x is not None and x != 0`;
+  - a container where empty means no data: `x is not None and len(x) > 0`;
+  - a JSON value (`Json`): None first (`x is not None and x`), then the
+    value as before;
+  - or, better where it is cheap, the producer returns one absent form.
+
+  The rule does not see value forms: `x or DEFAULT` and `x and y` as a
+  value, `bool(x)`, or a value typed `Any`. Never use them to get past
+  it, and no ignore comment, no `cast`, no `TypeIs[str]` "has text" helper
+  (its else branch would claim the value is not a str).
 
 ## The workflow audit (zizmor)
 

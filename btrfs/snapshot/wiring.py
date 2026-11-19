@@ -27,7 +27,7 @@ def run_time_zone(name: str | None) -> dt.tzinfo:
     """The zone of the names and the retention: --tz NAME, else $TZ, else /etc/localtime.
 
     Usage for an unknown NAME."""
-    if name:
+    if name is not None and name != "":
         tz = known_zone(name)
         if tz is None:
             raise Usage(f"unknown --tz {name!r}")

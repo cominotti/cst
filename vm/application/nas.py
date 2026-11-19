@@ -302,7 +302,7 @@ def nas_run(
             consistency = take_snapshot(cfg, p, vm, stamp, specs, others, quiesce, agent, overlaid, notes)
         else:
             before = {src: store.fingerprint(src) for src, _ in sources}
-        tags = [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep else [])
+        tags = [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep is not None and keep != "" else [])
         manifest: Manifest = {
             "vm": vm,
             "uuid": parts.uuid,
@@ -479,7 +479,7 @@ def nas_run(
         out.say(f"  note: {n}")
     out.say(
         f"Done: restic snapshot {snap[:8]} of {vm} ({consistency}"
-        f"{f'; kept until removed by hand: tags {KEEP_TAG},{keep}' if keep else ''})."
+        f"{f'; kept until removed by hand: tags {KEEP_TAG},{keep}' if keep is not None and keep != '' else ''})."
     )
     out.say(
         'Restore: vm/README.md in CST, section "Restore from the NAS" (restic restore '

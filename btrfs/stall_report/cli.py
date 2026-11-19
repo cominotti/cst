@@ -19,10 +19,10 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         f"  kernel {res.get('kernel') or '?'}"
     )
     cov = res["coverage"]
-    if cov.get("first_sample"):
+    if (first := cov.get("first_sample")) is not None and first != 0:
         print(
-            f"recorded {fmt_ts(cov['first_sample'])} -> {fmt_ts(cov['last_sample'])} "
-            f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps') else ''})"
+            f"recorded {fmt_ts(first)} -> {fmt_ts(cov['last_sample'])} "
+            f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps', 0) else ''})"
         )
     print()
     for line in verdict(res, meta):
@@ -45,7 +45,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
     )
     for uuid, f in res["fs"].items():
         label = (meta.get("fs") or {}).get(uuid, {}).get("label") or uuid[:8]
-        at = f" @{fmt_ts(f['max_at'])}" if f["max_at"] and f["max_commit_ms"] else ""
+        at = f" @{fmt_ts(f['max_at'])}" if f["max_at"] is not None and f["max_at"] != 0 and f["max_commit_ms"] else ""
         sp = (f.get("space") or {}).get("metadata") or [0, 0, 0, 0, 0]
         mu = sp[0] / sp[1] * 100 if sp[1] else 0
         print(
@@ -89,8 +89,8 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         )
     b = res.get("below")
     if b:
-        if b.get("error"):
-            print(f"below    {b['error']}")
+        if (err := b.get("error")) is not None and err != "":
+            print(f"below    {err}")
         for title, key in (("writers", "top_writers"), ("readers", "top_readers")):
             items = b.get(key) or []
             if items:
@@ -130,7 +130,7 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         print()
         print(f"events   {len(res['events'])} kernel/daemon event(s) ('!' = severe, on this host's disks):")
         for e in res["events"][-(30 if verbose else 8) :]:
-            print(f"  {'!' if e.get('severe') else ' '} {fmt_ts(e['ts'])} {e['msg'][:170]}")
+            print(f"  {'!' if e.get('severe', False) else ' '} {fmt_ts(e['ts'])} {e['msg'][:170]}")
     for a in res["alerts"]:
         print(f"alert    {fmt_ts(a['ts'])} {a['title']}: {a['body']}")
 

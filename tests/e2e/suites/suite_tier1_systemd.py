@@ -25,7 +25,7 @@ def docker_exec(
         full.append("-i")
     if user != "root":
         full.extend(["--user", user])
-    if env:
+    if env is not None:
         for k, v in env.items():
             full.extend(["-e", f"{k}={v}"])
     full.extend([container, *cmd])
@@ -2705,6 +2705,28 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             journalctl --sync
             journalctl -q --no-pager -o cat -u $u | grep -q 'Watchdog timeout'
             systemctl stop $u
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_112_stall_monitor_with_a_duration_of_zero_stops_at_once(self) -> None:
+        """This checkout's btrfs-stall-monitord, as its installer builds it, with --duration 0 ("stop after
+        0 seconds"): it ends before its first sample with exit 0. The daemon before took 0 as no limit and
+        ran on until the timeout killed it (124)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/lib/e2e-stall-duration"
+        self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
+        self._stall_daemons(c, w, old=False)
+        out = exec_bash(
+            c,
+            f"""
+            install -d {w}/log {w}/run
+            rc=0
+            timeout 20 /usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord \\
+                --duration 0 --log-dir {w}/log --run-dir {w}/run >{w}/out 2>&1 || rc=$?
+            [[ "$rc" == 0 ]] || {{ echo "exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -q 'stopped' {w}/out || {{ cat {w}/out >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout

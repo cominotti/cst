@@ -984,6 +984,29 @@ class NotifyLoopTest(unittest.TestCase):
             + ["log:stopped"],
         )
 
+    def test_a_duration_of_zero_stops_before_the_first_sample(self) -> None:
+        mon = self.monitor(_FakeNotifier(self.events, pings=3))
+        mon.duration = 0
+        mon.run()
+        self.assertEqual(self.events[4:], ["log:started", "READY=1", "WATCHDOG=1", "log:stopped"])
+
+    def test_descriptor_zero_is_an_open_psi_trigger_and_kmsg(self) -> None:
+        lines: list[str] = []
+        mon = self.monitor(_FakeNotifier(self.events, pings=1))
+
+        def open_psi() -> None:
+            mon.psi_fd = 0
+
+        def open_kmsg() -> None:
+            mon.kmsg_fd = 0
+
+        mon.open_psi_trigger = open_psi
+        mon.open_kmsg = open_kmsg
+        with mock.patch.object(md_monitor, "log", lambda msg, _prio=6: lines.append(msg)):
+            mon.run()
+        started = next(line for line in lines if line.startswith("started:"))
+        self.assertIn("psi_trigger=yes, kmsg=yes,", started)
+
     def test_a_blocked_cmdline_read_does_not_stop_the_pings(self) -> None:
         """A hung-task report at every pass whose /proc/PID/cmdline read never ends: the loop still pings."""
         release = threading.Event()

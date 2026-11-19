@@ -65,7 +65,7 @@ def ostree_deployments(host: DoctorHostPort) -> tuple[OstreeAnswer, list[Deploym
 def installed_packages(host: DoctorHostPort, d: Deployment) -> list[str] | None:
     """The NEVRAs in a deployment (rpm-ostree db list CHECKSUM), or None."""
     csum = d.get("checksum")
-    if not csum:
+    if csum is None or csum == "":
         return None
     rc, out, _ = host.run(["rpm-ostree", "db", "list", csum])
     if rc != 0:

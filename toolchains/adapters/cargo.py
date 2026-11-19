@@ -75,7 +75,7 @@ def cargo_binary(p: CargoProc, home: str) -> str:
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
     ):
-        if c and os.access(c, os.X_OK):
+        if c is not None and os.access(c, os.X_OK):
             return c
     return ""
 
@@ -194,7 +194,7 @@ def git_worktrees(wt: str, deadline: float, cmd_timeout: float) -> list[str]:
     repository of WT (CMD_TIMEOUT: the most seconds git may take). Raises
     Incomplete when git fails."""
     git = shutil.which("git")
-    if not git:
+    if git is None:
         raise Incomplete("git not found on PATH")
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_TERMINAL_PROMPT="0")
     try:
@@ -240,7 +240,7 @@ def find_worktrees(home: str, deadline: float, ws: Workspaces, cmd_timeout: floa
     for d in found:
         common = git_common_dir(d)
         roots.add(os.path.realpath(d))
-        if common:
+        if common is not None and common != "":
             groups.setdefault(common, d)
     for _common, d in sorted(groups.items()):
         for wt in git_worktrees(d, deadline, cmd_timeout):
@@ -290,7 +290,7 @@ def user_cargo(home: str) -> str:
         os.path.join(ch if os.path.isabs(ch) else os.path.join(home, ".cargo"), "bin", "cargo"),
         shutil.which("cargo"),
     ):
-        if c and os.access(c, os.X_OK):
+        if c is not None and os.access(c, os.X_OK):
             return c
     return ""
 
@@ -350,7 +350,7 @@ def cargo_users(
         if q.key not in cache:
             cache[q.key] = ask_cargo(q.cmd, q.env, q.cwd)
         bd, why = cache[q.key]
-        if why or bd is None:
+        if why is not None or bd is None:
             unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
             continue
         for pr in pre:
@@ -370,7 +370,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
     ws = Workspaces()
     start = time.monotonic()
     deadline = start + ENUM_BUDGET
-    pre = prefixes(root) if root else ()
+    pre = prefixes(root) if root is not None and root != "" else ()
     try:
         ws.worktrees = find_worktrees(home, deadline, ws, limits.cmd_timeout)
         cargo = user_cargo(home) if with_cargo else ""
@@ -391,7 +391,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
                     continue
                 data, why = workspace_metadata(cargo, m, env, deadline, limits.cmd_timeout)
                 ws.asked += 1
-                if why or data is None:
+                if why is not None or data is None:
                     ws.failures.append((m, why or "unknown"))
                     continue
                 covered.add(m)

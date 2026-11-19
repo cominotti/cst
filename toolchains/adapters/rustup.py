@@ -59,7 +59,7 @@ def rustup_default(home: str, rh: str) -> str:
     except OSError, tomllib.TOMLDecodeError:
         pass
     rustup = shutil.which("rustup")
-    if not rustup:
+    if rustup is None:
         return ""
     env = dict(os.environ, RUSTUP_HOME=rh, RUSTUP_AUTO_INSTALL="0", HOME=home)
     env.pop("RUSTUP_TOOLCHAIN", None)
@@ -130,7 +130,9 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
     unused: list[str] = []
     is_default = {n: bool(default) and short_toolchain(n) == short_toolchain(default) for n in names}
     loose = [
-        short_toolchain(n) for n in names if not is_default[n] and not pins.get(short_toolchain(n)) and not pins.get(n)
+        short_toolchain(n)
+        for n in names
+        if not is_default[n] and not pins.get(short_toolchain(n), []) and not pins.get(n, [])
     ]
     # Files in the home first (a linked worktree elsewhere, e.g. in /tmp, is shown only when it is the only one).
     files = sorted(ws.tool_files, key=lambda p: not (p == home or p.startswith(home + "/")))

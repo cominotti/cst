@@ -534,7 +534,7 @@ class SwapReports:
             name = self._fs.read_first_line(
                 posixpath.join(self._env.sys_dir, "class", "block", posixpath.basename(entry.device), "dm", "name")
             )
-            label = f"{entry.device} ({name})" if name else entry.device
+            label = f"{entry.device} ({name})" if name is not None and name != "" else entry.device
             out.append(
                 SwapDeviceRow(label, entry.swap_type, entry.used_kib * 1024, entry.size_kib * 1024, entry.priority)
             )
@@ -564,7 +564,7 @@ class SwapReports:
             cur = self._fs.read_first_line(posixpath.join(path, "memory.swap.current"))
             if cur is None and path == self._env.cgroup_dir and "SwapTotal" in meminfo:
                 cur = str(meminfo["SwapTotal"] - meminfo.get("SwapFree", 0))
-            row = cgroup_row(stat, int(cur) if cur and cur.isdigit() else None)
+            row = cgroup_row(stat, int(cur) if cur is not None and cur.isdigit() else None)
             wb = self._read_first(posixpath.join(path, "memory.zswap.writeback"), "-")
             low = self._read_first(posixpath.join(path, "memory.low"), "-")
             low_disp = human(int(low)) if low.isdigit() and int(low) else ("0" if low == "0" else low)

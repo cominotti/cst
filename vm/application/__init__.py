@@ -71,7 +71,7 @@ def timer_on(
     unit = instance(vm)
     states = timers.file_states(unit)
     _refuse_foreign(states)
-    if why := masked_refusal([p for p, st in states.items() if st == OwnedState.MASKED], user=False):
+    if (why := masked_refusal([p for p, st in states.items() if st == OwnedState.MASKED], user=False)) is not None:
         raise Refused(why + "; nothing was changed")
     nas_ready()
     timers.install(states, report)

@@ -2160,6 +2160,6 @@ class RustcWrapperTest(unittest.TestCase):
     def test_shell_lint(self) -> None:
         r = subprocess.run(["sh", "-n", WRAPPER], check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
-        if shutil.which("shellcheck"):
+        if shutil.which("shellcheck") is not None:
             r = subprocess.run(["shellcheck", "-S", "warning", WRAPPER], check=False, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout)

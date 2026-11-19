@@ -83,7 +83,7 @@ def run_idle_result(cmd: Sequence[str], cwd: str, env: Mapping[str, str], timeou
     slow builds either). A command that cannot start or does not finish within
     TIMEOUT comes back with fault and cause set."""
     io = shutil.which("ionice")
-    full = ([io, "-c", "3"] if io else []) + list(cmd)
+    full = ([io, "-c", "3"] if io is not None else []) + list(cmd)
     return RUNNER.run(full, cwd=cwd, base_env=env, timeout=timeout, nice=19)
 
 

@@ -62,7 +62,7 @@ def read_text(path: str) -> str | None:
 def read_kv(path: str) -> dict[str, int]:
     out = {}
     text = read_text(path)
-    if text:
+    if text is not None and text != "":
         for line in text.splitlines():
             parts = line.split()
             if len(parts) >= 2:
@@ -79,7 +79,7 @@ def read_int(path: str) -> int:
 def parse_psi(path: str) -> list[float | int] | None:
     """Return [some_avg10, some_total_us, full_avg10, full_total_us]."""
     text = read_text(path)
-    if not text:
+    if text is None or text == "":
         return None
     res: list[float | int] = [0.0, 0, 0.0, 0]
     for line in text.splitlines():
@@ -220,7 +220,7 @@ class TimedReader:
 
 def short_cgroup(pid: str | int) -> str:
     text = read_text(f"/proc/{pid}/cgroup")
-    if not text:
+    if text is None or text == "":
         return "?"
     path = text.strip().splitlines()[-1].partition("::")[2] or "/"
     leaf = path.rstrip("/").rsplit("/", 1)[-1] or "/"
@@ -235,7 +235,7 @@ def run_slices(pid: str | int, tid: str | int) -> int | None:
     unreadable (gone, or schedstats unavailable): then no progress is assumed."""
     s = read_text(f"/proc/{pid}/task/{tid}/schedstat")
     try:
-        return int(s.split()[2]) if s else None
+        return int(s.split()[2]) if s is not None and s != "" else None
     except IndexError, ValueError:
         return None
 
@@ -244,7 +244,7 @@ def d_comm(pid: str | int, tid: str | int) -> str | None:
     """comm of the task if it is in D state, else None. comm may contain ')':
     the state follows the last one."""
     data = read_bytes(f"/proc/{pid}/task/{tid}/stat", 1024)
-    if not data:
+    if data is None or len(data) == 0:
         return None
     rp = data.rfind(b")")
     if rp > 0 and data[rp + 2 : rp + 3] == b"D":

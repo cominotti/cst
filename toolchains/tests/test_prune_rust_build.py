@@ -970,7 +970,7 @@ echo '{{"packages": [], "build_directory": "{build_dir}"}}'
         q = tc_cargo.cargo_query(p, self.home)
         assert not isinstance(q, str)
         bd, why = tc_cargo.ask_cargo(q.cmd, q.env, q.cwd)
-        if why and ("toolchain" in why or "rustup" in why):
+        if why is not None and ("toolchain" in why or "rustup" in why):
             self.skipTest(why)
         self.assertIsNone(why)
         assert bd is not None

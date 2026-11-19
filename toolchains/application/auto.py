@@ -119,7 +119,7 @@ class AutoTimer:
             )
         st = self.files.auto_states()
         masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
-        if why := masked_refusal(masked, user=True):
+        if (why := masked_refusal(masked, user=True)) is not None:
             raise Refused(why + "; nothing was written")
         conflicts = [k for k, v in st.items() if v == OwnedState.CONFLICT]
         if conflicts:

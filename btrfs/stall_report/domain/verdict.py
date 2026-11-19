@@ -37,7 +37,7 @@ def zswap_text(vm: VmTotals) -> str:
     bypass = vm.get("swap_out_bypass_bytes") or 0
     return (
         f"zswap in/out {fmt_bytes(zswap_in)} / {fmt_bytes(zswap_out)}"
-        f"{f' (from {fmt_ts(since)})' if since else ''}   {disk}"
+        f"{f' (from {fmt_ts(since)})' if since is not None and since != 0 else ''}   {disk}"
         f"{f' ({fmt_bytes(bypass)} of it not through zswap)' if bypass >= 2**20 else ''}"
     )
 
@@ -135,7 +135,7 @@ def busy_lines(res: AnalyseResult) -> list[str]:
         e
         for e in res["events"]
         if e.get("kind") == "hung"
-        and e.get("severe")
+        and e.get("severe", False)
         and (v6 is None or e.get("ts", 0) < v6)
         and any(f in ("btrfs_sync_log", "btrfs_sync_file") for f in e.get("stack") or ())
     ]
@@ -176,7 +176,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             f"INCOMPLETE DATA: {cov['covered_s']} s of the {cov['window_s']} s window recorded, last sample "
             f"{fmt_ts(cov['last_sample'])}. Data is written every ~10 s; re-run shortly, or narrow the window."
         )
-    sev = [e for e in res["events"] if e.get("severe")]
+    sev = [e for e in res["events"] if e.get("severe", False)]
     if sev:
         out.append(f"KERNEL/FS PROBLEMS: {len(sev)} severe event(s) (hung task, btrfs or device error); see 'events'.")
     if any(f["new_device_errors"] for f in res["fs"].values()):
@@ -239,7 +239,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     out += open_lines
     if commit_stall:
         out.append(
-            f"Slow btrfs commits: longest {longest / 1000:.1f} s{' at ' + fmt_ts(longest_at) if longest_at else ''}."
+            f"Slow btrfs commits: longest {longest / 1000:.1f} s{' at ' + fmt_ts(longest_at) if longest_at is not None and longest_at != 0 else ''}."
         )
     cats = res["categories"]
     if cats:
@@ -254,7 +254,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
                     "zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; "
                     "may be plain compression contention."
                 )
-        elif HINTS.get(main):
+        elif HINTS.get(main) is not None:
             out.append(HINTS[main])
     if meta.get("stacks") is False:
         out.append("Caveat: the daemon could not read kernel stacks, so attribution is coarse (wchan only).")
@@ -266,7 +266,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             f"{w['max_d']} D tasks, commit {w['peak'].get('commit_ms', 0)} ms)."
         )
     sat = saturation_line(res)
-    if sat:
+    if sat is not None:
         out.append(sat)
     if res["vm"]["swap_out_bytes"] >= 256 * 2**20:
         out.append(f"Swap-out of {fmt_bytes(res['vm']['swap_out_bytes'])}: memory pressure also loaded the swap disk.")

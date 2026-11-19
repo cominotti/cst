@@ -52,7 +52,7 @@ def _parse_status(text: str) -> OstreeStatus:
     data = json.loads(text)
     deps = [d for d in data["deployments"] if isinstance(d, dict)]
     booted = next((d for d in deps if d.get("booted")), None)
-    osname = booted.get("osname") if booted else None
+    osname = booted.get("osname") if booted is not None else None
     first = next((d for d in deps if osname is None or d.get("osname") == osname), None)
     pending = first if first is not None and first is not booted else None
     return OstreeStatus(deps, booted, pending)

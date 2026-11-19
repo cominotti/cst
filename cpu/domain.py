@@ -560,7 +560,9 @@ def quiet_text(result: QuietResult) -> str:
     lines = []
     for t in result["tests"]:
         unit = f" {t['unit']}" if t["unit"] else ""
-        if t["error"]:
+        err = t["error"]
+        unreadable = err is not None and err != ""
+        if unreadable:
             value = "unreadable"
         elif isinstance(t["value"], float):
             value = f"{t['value']:.2f}{unit}"
@@ -569,7 +571,7 @@ def quiet_text(result: QuietResult) -> str:
         limit = f"< {t['limit']:g}{unit}" if t["unit"] else t["limit"]
         verdict = "ok"
         if not t["ok"]:
-            verdict = f"FAIL ({t['error']})" if t["error"] else "FAIL"
+            verdict = f"FAIL ({err})" if unreadable else "FAIL"
         lines.append(f"  {t['label']:<16} {value:<12} limit {limit:<11} {verdict}")
     span = f"{result['seconds']} s, {result['start']} to {result['end']}"
     if result.get("waited_s") is not None:
