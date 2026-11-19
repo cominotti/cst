@@ -60,7 +60,7 @@ class NoPrivilegeGainTest(unittest.TestCase):
         )
         lines = done.stdout.split()
         self.assertEqual(lines[:1], ["1"], done.stdout + done.stderr)
-        if shutil.which("sudo") and os.geteuid() != 0:
+        if shutil.which("sudo") is not None and os.geteuid() != 0:
             self.assertNotEqual(lines[1:], ["0"], "sudo ran as root despite no_new_privs")
 
 

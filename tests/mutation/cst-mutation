@@ -720,7 +720,7 @@ def run(opts: Options, repo: str, tools: Tools, env: Mapping[str, str] | None = 
 
         def step(label: str, argv: Sequence[str], stdout: str | None = None) -> int:
             say(label)
-            with open_new(stdout) if stdout else contextlib.nullcontext() as fh:
+            with open_new(stdout) if stdout is not None and stdout != "" else contextlib.nullcontext() as fh:
                 return subprocess.run([*box, *argv], check=False, stdin=subprocess.DEVNULL, stdout=fh).returncode
 
         def cr(name: str, *args: str) -> list[str]:

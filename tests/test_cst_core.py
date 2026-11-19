@@ -462,7 +462,7 @@ class _FakeDispatchPort:
         return self.passwd[user]
 
     def which(self, name: str, path: str | None) -> str | None:
-        return self.on_path.get(name) if path else None
+        return self.on_path.get(name) if path is not None and path != "" else None
 
     def realpath(self, path: str) -> str:
         return self.links.get(path, path)

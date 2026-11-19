@@ -303,7 +303,7 @@ def _loose_aliases(tree: ast.Module) -> frozenset[str]:
     for stmt in tree.body:
         name = _module_name(stmt)
         value = getattr(stmt, "value", None)
-        if name and isinstance(value, ast.expr) and _is_loose(value, frozenset()):
+        if name is not None and isinstance(value, ast.expr) and _is_loose(value, frozenset()):
             out.add(name)
     return frozenset(out)
 
