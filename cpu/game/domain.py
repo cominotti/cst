@@ -335,7 +335,8 @@ def has_record_part(text: str, part: str) -> bool:
     """A whole line of the file holds part (bash: grep -F on the file); a last line cut short (no
     newline at its end) holds none: its change was never made (records())."""
     lines = file_lines(text)
-    return any(part in line for number, line in enumerate(lines, 1) if not _cut_short(text, lines, number))
+    whole = lines[:-1] if ends_cut_short(text) else lines
+    return any(part in line for line in whole)
 
 
 def escaped_unit(name: str) -> str | None:
