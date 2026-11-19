@@ -31,7 +31,19 @@ sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
 from cpu.game.adapters import GameProfile, load_profile, read_settings, user_name
-from cpu.game.domain import GamePaths, GameSettings, ctl_file, escapes_in_state, expand_cpus, records, game_settings
+from cpu.game.domain import (
+    GamePaths,
+    GameSettings,
+    ctl_file,
+    Drift,
+    cut_tail,
+    escapes_in_state,
+    expand_cpus,
+    intended_records,
+    records,
+    game_settings,
+    unheld,
+)
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 
@@ -243,6 +255,45 @@ class PureRulesTest(unittest.TestCase):
                 "/run/user/1000/systemd/user.control/flatpak-session-helper.service.d/50-AllowedCPUs.conf",
             ],
         )
+
+    def test_a_last_line_cut_short(self) -> None:
+        self.assertIsNone(cut_tail(b""))
+        self.assertIsNone(cut_tail(b"a\n"))
+        self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
+        self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
+
+    def test_intended_records(self) -> None:
+        text = (
+            "cst-game-intended 1\n"
+            "prop sys user.slice MemoryLow 16G 17179869184\n"
+            "prop usr app.slice MemoryZSwapWriteback no ''\n"
+            "prop xyz a.slice CPUWeight 1 1\n"
+            "prop sys a.slice CPUWeight 1\n"
+            "cgw $'/sys/fs/cgroup/in\\tner/cpuset.cpus' 12-23 12-23 extra\n"
+            "bogus line\nprop sys 'unclosed\n"
+            "prop sys machine.slice CPUWeight 10 1"
+        )
+        self.assertEqual(
+            intended_records(text),
+            [
+                ("prop", "sys", "user.slice", "MemoryLow", "16G", "17179869184"),
+                ("prop", "usr", "app.slice", "MemoryZSwapWriteback", "no", ""),
+                ("cgw", "/sys/fs/cgroup/in\tner/cpuset.cpus", "12-23", "12-23"),
+            ],
+        )
+
+    def test_drift_game_state_holds_no_record_of(self) -> None:
+        prop, cgw = (
+            Drift(("prop", "sys", "a.slice", "CPUWeight", "10", "10"), "50"),
+            Drift(("cgw", "/f", "1", "1"), "2"),
+        )
+        usr = Drift(("prop", "usr", "a.slice", "CPUWeight", "idle", "idle"), "100")
+        drifts = [prop, cgw, usr]
+        self.assertEqual(unheld(drifts, []), drifts)
+        held = [("prop", "sys", "a.slice", "CPUWeight", "existed", "50"), ("cgw", "/f", "")]
+        self.assertEqual(unheld(drifts, held), [usr])  # another manager's record holds no other
+        self.assertEqual(unheld(drifts, [("prop", "sys", "a.slice", "CPUWeight", "new")]), drifts)  # 5 fields
+        self.assertEqual(unheld([cgw], [("cgw", "/f")]), [cgw])  # 2 fields: off undoes nothing
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
@@ -477,6 +528,42 @@ class GameProfileDriftTest(GameProfileCase):
         for p in (self.state, self.intended, self.manual):
             self.assertFalse(os.path.exists(p), p)
 
+    def lose_machine_slice_records(self) -> None:
+        """After 'on': machine.slice's records gone from game.state and its overrides removed (game.state
+        rewritten by hand, or written by a version that recorded it elsewhere): its values are back to
+        the unit's own, which game.intended calls drift."""
+        self.run_profile("on")
+        self.write(self.manual, "")
+        kept = [x for x in self.read(self.state).split("\n") if x and " machine.slice " not in x]
+        self.write(self.state, "".join(x + "\n" for x in kept))
+        for prop in ("AllowedCPUs", "CPUWeight", "IOWeight"):
+            os.remove(self.ctrl("sys", "machine.slice", prop))
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+
+    def test_a_setting_game_state_holds_no_record_of_is_not_set_again(self) -> None:
+        self.lose_machine_slice_records()
+        self.set_now("sys", "user.slice", MemoryLow="0")  # held: repaired as before
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime user.slice MemoryLow=16G"])
+        self.assertIn(
+            "<5>game-profile: drift not repaired: machine.slice CPUWeight: game.state holds no record of it, so"
+            " 'off' could not undo it\n",
+            out,
+        )
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
+        out, actions = self.run_profile("tick")
+        self.assertEqual((out, self.sets(actions)), ("", []))  # said once per boot
+        report, _ = self.drift_report()
+        self.assertIn(
+            "  DRIFT: machine.slice CPUWeight is '50', the profile set '10' (not set again: game.state holds no"
+            " record of it)\n",
+            report,
+        )
+        self.assertIn("(the watchdog does not set these again; cst cpu game off && cst cpu game on", report)
+        out, actions = self.run_profile("off")
+        self.assertEqual([a for a in actions if "machine.slice" in a], [])
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
+
     def test_cgroup_file_drift_is_rewritten(self) -> None:
         cg = os.path.join(self.tmp, "cpuset.cpus")
         self.write(cg, "8-23\n")
@@ -502,6 +589,19 @@ class GameProfileDriftTest(GameProfileCase):
         out, actions = self.run_profile("tick")
         self.assertEqual(self.sets(actions), [])
         self.assertEqual(out, "")
+
+    def test_a_short_record_of_game_intended_asks_systemd_nothing(self) -> None:
+        # game.intended read as cst doctor reads it (intended_records): a prop line of five fields is no
+        # drift record, so no systemctl show asks about it.
+        self.write(self.state, "prop sys builds.slice CPUWeight new -\n")
+        self.write(self.intended, "cst-game-intended 1\nprop sys builds.slice CPUWeight idle\n")
+        self.write(self.manual, "")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(out, "")
+        self.assertEqual([a for a in actions if " show -p " in a or "set-property" in a], [])
+        report, actions = self.drift_report()
+        self.assertEqual([a for a in actions if " show " in a], [])
+        self.assertEqual(report, "  drift: none (every setting the profile made still holds)\n")
 
     def test_old_format_state_is_tolerated(self) -> None:
         # Switched on by a version without game.intended: no comparison at all.
@@ -569,11 +669,16 @@ class GameProfileDriftTest(GameProfileCase):
 class IntendedFormatTest(GameProfileCase):
     """game.intended names its format on its first line; a newer one is left alone."""
 
+    def test_on_starts_a_session_without_the_drift_mark(self) -> None:
+        self.write(self.paths.drift_warned, "drift not repaired: x")  # left by an earlier session
+        self.run_profile("on")
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
+
     def test_on_writes_the_format_line_first(self) -> None:
         self.run_profile("on")
         first, _, rest = self.read(self.intended).partition("\n")
         self.assertEqual(first, "cst-game-intended 1")
-        self.assertTrue(rest.startswith("prop sys machine.slice AllowedCPUs 12-23 "), rest)
+        self.assertTrue(rest.startswith(f"prop sys user@{UID}.service MemoryLow 16G "), rest)
         self.assertEqual(records(first + "\n"), [("cst-game-intended", "1")])
         # Drift is compared below it as before.
         self.write(self.manual, "")
@@ -591,6 +696,7 @@ class IntendedFormatTest(GameProfileCase):
         why = f"{self.intended} is format 2 of the game-intended (this CST reads format 1 and older): written by a newer CST"
         self.assertEqual(out, f"<4>game-profile: drift not repaired: {why}\n")
         self.assertEqual([a for a in actions if " show -p " in a or "set-property" in a], [])
+        self.assertEqual(self.run_profile("tick")[0], "")  # said once per boot
         report, _ = self.drift_report()
         self.assertEqual(report, f"  drift: not checked ({why})\n")
         self.write(self.intended, "cst-game-intended x\nprop sys machine.slice CPUWeight 10 10\n")
@@ -600,6 +706,31 @@ class IntendedFormatTest(GameProfileCase):
         _, actions = self.run_profile("off")
         self.assertIn(f"{SYS} daemon-reload", actions)
         self.assertFalse(os.path.exists(self.intended))
+
+    def test_the_newer_format_is_said_once_per_boot_and_again_when_it_changes(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        intended = self.read(self.intended).replace("cst-game-intended 1\n", "cst-game-intended 2\n")
+        self.write(self.intended, intended)
+        said = "<4>game-profile: drift not repaired: "
+        self.assertEqual(self.run_profile("tick")[0].count(said), 1)
+        self.assertEqual(self.run_profile("tick")[0], "")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(f"{said}{self.intended} is format 3 ", self.run_profile("tick")[0])
+        self.assertEqual(self.run_profile("tick")[0], "")
+        # Readable again: a newer format later is said again.
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 1\n"))
+        self.run_profile("tick")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(said, self.run_profile("tick")[0])
+        # A new session says it again.
+        self.run_profile("off")
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(said, self.run_profile("tick")[0])
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
 
 
 class UnreadableRecordTest(GameProfileCase):
@@ -651,6 +782,57 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertEqual(records("epp 0 performance\nepp 1 balance"), [("epp", "0", "performance")])
         self.assertEqual(records("epp 0 performance\nepp 1 balance\n")[1], ("epp", "1", "balance"))
 
+    CUT = "prop sys machine.slice IOWeight existed 1"
+
+    def cut_and_box(self, *paths: str) -> None:
+        """After 'on': a record cut short at the end of each path, and a new box next to the game."""
+        self.run_profile("on")
+        self.write(self.manual, "")
+        for path in paths:
+            with open(path, "a") as f:
+                f.write(self.CUT)
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+
+    def test_a_record_after_a_line_cut_short_removes_that_line_first(self) -> None:
+        # Glued onto the cut line, the box's record would make it a whole record: 'off' would set
+        # IOWeight=1 (or worse), and the box's override would stay.
+        self.cut_and_box(self.state, self.intended)
+        n_state, n_intended = (len(self.read(p).split("\n")) for p in (self.state, self.intended))
+        out, _ = self.run_profile("tick")
+        self.assertIn(
+            f"<4>game-profile: {self.state} line {n_state}: a record cut short (its change was never made),"
+            f" removed before the next record: {self.CUT}\n",
+            out,
+        )
+        self.assertIn(
+            f"<4>game-profile: {self.intended} line {n_intended}: a record cut short (never read by the drift"
+            f" repair), removed before the next record: {self.CUT}\n",
+            out,
+        )
+        state, intended = self.read(self.state), self.read(self.intended)
+        self.assertNotIn(self.CUT, state + intended)
+        self.assertTrue(state.endswith("\nprop usr e2e.slice CPUWeight new -\n"), state)
+        self.assertTrue(intended.endswith("\nprop usr e2e.slice CPUWeight idle idle\n"), intended)
+        self.assertTrue(os.path.exists(self.ctrl("usr", "e2e.slice", "CPUWeight")))
+        out, actions = self.run_profile("off")
+        self.assertEqual([a for a in actions if "IOWeight=1" in a], [])
+        self.assertFalse(os.path.exists(self.ctrl("usr", "e2e.slice", "CPUWeight")))
+
+    def test_a_line_cut_short_that_cannot_be_removed_stops_the_change(self) -> None:
+        self.cut_and_box(self.state)
+        err = io.StringIO()
+        with (
+            unittest.mock.patch(
+                "cpu.game.adapters.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            out, actions = self.run_profile("tick")
+        self.assertIn(f"{self.state}: Read-only file system\n", err.getvalue())
+        self.assertIn(f"e2e.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n", out)
+        self.assertEqual([a for a in self.sets(actions) if "e2e.slice" in a], [])
+        self.assertTrue(self.read(self.state).endswith(f"\n{self.CUT}"))
+
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")
         self.write(self.manual, "")
@@ -695,6 +877,10 @@ class UnreadableRecordTest(GameProfileCase):
             f.write("prop sys machine.slice\n")
         out, _ = self.run_profile("tick")
         self.assertNotIn("unreadable", out)
+
+
+class _OnDiedError(Exception):
+    """'on' stopped halfway (killed, or a crash) in a test."""
 
 
 class OffWithoutTargetUserTest(GameProfileCase):
@@ -766,6 +952,84 @@ class OffWithoutTargetUserTest(GameProfileCase):
         out, actions = self.run_profile("off")
         self.assertNotIn("undoing for", out)
         self.assertIn(f"{USR} daemon-reload", actions)
+
+    def test_tick_and_state_act_for_the_user_on_acted_for_when_target_user_names_another_one(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.set_now("usr", "user.slice", CPUWeight="30")  # undone meanwhile (a daemon-reload)
+        self.systemd.units["usr"] = ["app-flatpak-com.valvesoftware.Steam-7.scope"]  # a game started after 'on'
+        steam_override = self.ctrl("usr", "app-flatpak-com.valvesoftware.Steam-7.scope", "MemoryLow")
+
+        def other_profile() -> tuple[GameProfile, io.StringIO]:
+            out = io.StringIO()
+            p = GameProfile(
+                self.paths,
+                GameSettings(target_user="other"),  # changed while the profile was on
+                self.systemd,
+                uid_of={USER: UID, "other": "424242"}.__getitem__,
+                name_of={UID: USER, "424242": "other"}.__getitem__,
+                out=out,
+            )
+            self.systemd.actions = []
+            return p, out
+
+        p, out = other_profile()
+        self.assertEqual(p.tick(), 0)
+        # Everything in the user manager for the user 'off' undoes for, nothing in other's.
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn(f"{USR} set-property --runtime user.slice CPUWeight=idle", self.systemd.actions)
+        self.assertIn(
+            f"{USR} set-property --runtime app-flatpak-com.valvesoftware.Steam-7.scope MemoryLow=16G",
+            self.systemd.actions,
+        )
+        self.assertIn("drift: user.slice CPUWeight was '30' instead of 'idle'", out.getvalue())
+        self.assertNotIn("undoing for", out.getvalue())  # the tick switches quietly
+        self.assertTrue(os.path.exists(steam_override))
+        p, out = other_profile()
+        self.assertEqual(p.state(), 0)
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn("  toolboxes       weight=idle\n", out.getvalue())
+        self.assertIn("  drift: none (every setting the profile made still holds)\n", out.getvalue())
+        p, out = other_profile()
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(steam_override))  # what the tick set, 'off' undid
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+
+    def test_on_records_the_user_first(self) -> None:
+        self.run_profile("on")
+        self.assertTrue(self.read(self.state).startswith(f"prop sys user@{UID}.service MemoryLow new -\n"))
+
+    def test_off_after_on_died_at_the_user_manager_acts_for_the_user_on_acted_for(self) -> None:
+        # 'on' dies at its first call to the user manager (its user.slice): game.state names the uid already.
+        real = self.systemd.run
+
+        def dying(argv: Sequence[str], **kw: object) -> CommandResult:
+            res = real(argv, **kw)
+            if list(argv[:2]) == ["systemctl", "--user"] and "set-property" in argv:
+                raise _OnDiedError
+            return res
+
+        p, _ = self.profile()
+        with unittest.mock.patch.object(self.systemd, "run", dying), self.assertRaises(_OnDiedError):
+            p.on()
+        user_override = self.ctrl("usr", "user.slice", "CPUWeight")
+        self.assertTrue(os.path.exists(user_override))
+        self.assertTrue(self.read(self.state).endswith("\nprop usr user.slice CPUWeight new -\n"))
+        out = io.StringIO()
+        p = GameProfile(
+            self.paths,
+            GameSettings(target_user="other"),
+            self.systemd,
+            uid_of={USER: UID, "other": "424242"}.__getitem__,
+            name_of={UID: USER, "424242": "other"}.__getitem__,
+            out=out,
+        )
+        self.systemd.actions = []
+        self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(user_override))
+        self.assertIn(f"{USR} daemon-reload", self.systemd.actions)
+        self.assertEqual([a for a in self.systemd.actions if "-M other@" in a], [])
+        self.assertIn(f"undoing for {USER} (uid {UID})", out.getvalue())
 
     def test_the_user_name_of_a_uid(self) -> None:
         import pwd
@@ -1280,7 +1544,7 @@ class FullRunFolderTest(GameProfileCase):
         self.systemd.actions = []
         p, out = self.profile()
         err = io.StringIO()
-        with self.full_after(3), contextlib.redirect_stderr(err):  # machine.slice's three records fit
+        with self.full_after(6), contextlib.redirect_stderr(err):  # the memory chain's and machine.slice's records fit
             self.assertEqual(p.locked("on"), 0)
         log = out.getvalue()
         self.assertIn(
@@ -1291,9 +1555,16 @@ class FullRunFolderTest(GameProfileCase):
         self.assertIn(f"{self.state}: No space left on device\n", err.getvalue())
         sets = self.sets(self.systemd.actions)
         self.assertEqual(
-            sets[0], f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10"
+            sets[:4],
+            [
+                f"{SYS} set-property --runtime user@{UID}.service MemoryLow=16G",
+                f"{SYS} set-property --runtime user-{UID}.slice MemoryLow=16G",
+                f"{SYS} set-property --runtime user.slice MemoryLow=16G",
+                f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10",
+            ],
         )
-        self.assertFalse([a for a in sets if " user.slice " in a])  # never changed without its record
+        # The user's user.slice is never changed without its record.
+        self.assertFalse([a for a in sets if a.startswith(USR) and " user.slice " in a])
         self.assertEqual(self.now("usr", "user.slice", "CPUWeight"), "30")
         self.assertTrue(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
         # What 'on' recorded, 'off' undoes.

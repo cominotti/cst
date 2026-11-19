@@ -699,7 +699,11 @@ In short: `off` puts every setting back exactly as it was before `on`, even if
 **Details (for experts).** Before each change, `on` writes a line to
 `/run/cpu-setup/game.state`: which property, and whether a runtime override
 already existed (with its old value). It writes the line *before* the change,
-so if `on` stops halfway, `off` can still undo what was done. When the line
+so if `on` stops halfway, `off` can still undo what was done. `on` sets the
+memory chain (7.1) first, `user@<uid>.service` before its parents, so the
+first line of `game.state` names the user it acts for, whatever step `on`
+stopped at (`off` acts for that user, 6.2, and so do the watchdog's `tick`
+and `state`, also when `TARGET_USER` names another user now). When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,
@@ -737,7 +741,11 @@ line, with exit 1 and `game.state` left in place.) The last line of the file
 with no newline at its end is such a line, also when its fields look whole:
 `on` writes each record before the change it describes, so that change was
 never made, and its value may be cut short (`1` of `100`), which `off` must
-not set.
+not set. A record written after such a line (a box the watchdog handles
+later) first removes it, so the two never glue into one line `off` would
+read as whole; the journal names it (`<4>... line N: a record cut short
+(its change was never made), removed before the next record: TEXT`). The
+same holds for `game.intended`, whose cut line the drift repair never read.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
@@ -800,7 +808,16 @@ What else the profile does about it:
   `systemctl set-property --runtime` and logged at level notice, for example:
   `drift: user.slice MemoryLow was '0' instead of '17179869184' (daemon-reload or uresourced?): set MemoryLow=16G again`.
   It does not add a line to `game.state`, so `off` still restores the value
-  from before `on`. A unit that systemd has not loaded (or a user manager
+  from before `on`. A setting `game.state` holds no record of (the file was
+  edited, or cut) is not set again, since `off` could not undo it: the tick
+  says so once per boot at level notice
+  (`drift not repaired: UNIT PROP: game.state holds no record of it, ...`;
+  said again when the list of such settings changes, and when one comes
+  back after a tick that found none, for example while systemd did not
+  answer about its unit; the same mark as below, 7.6), and `game state` marks its `DRIFT:` line
+  `(not set again: ...)`. `cst doctor` still warns about it and proposes
+  switching the profile off and on again, which writes fresh records. A
+  unit that systemd has not loaded (or a user manager
   that is gone after a logout) is skipped, and so is a `cpuset.cpus` file
   whose cgroup is gone.
 - `cst cpu game state` prints a `DRIFT:` line per setting that differs
@@ -847,8 +864,10 @@ Key on existence only. The contents of `game.state` (and of
 version. `game.intended` (what `on` set, for the drift repair) names its
 format on its first line (`cst-game-intended 1`; a file without it, from an
 older version, is format 0 and is read as before). A copy that finds a newer
-format there leaves the drift alone: `tick` says so in the journal,
-`state` and `cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
+format there leaves the drift alone: `tick` says so in the journal once
+per boot (again when the text changes; its mark is
+`/run/cpu-setup/drift-warned`, removed by `on` and `off`), `state` and
+`cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 
@@ -876,6 +895,8 @@ cst cpu vm-pin status   # state, CPU mode and features, vCPU count (live and sav
 cst cpu vm-pin plan     # show the XML diff, change nothing
 cst cpu vm-pin apply    # same diff, asks [y/N], then virsh define
 ```
+
+At the `[y/N]` question, Ctrl-D (end of input) answers no.
 
 An optional VM name can follow (`vm-pin plan OTHER-VM`); the default is
 `VM_NAME`. (`status` shows only part of `vm-pin status`.)

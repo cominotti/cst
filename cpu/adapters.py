@@ -36,6 +36,7 @@ from cpu.domain import (
     run_folder,
     watch_row,
 )
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
@@ -43,7 +44,7 @@ from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import CpuSet
-from cst_core.ports import CommandFault, VirshPort
+from cst_core.ports import CommandFault, CommandRunnerPort, VirshPort
 
 CG = "/sys/fs/cgroup"
 PROC = "/proc"
@@ -51,6 +52,8 @@ VIRSH_TIMEOUT = 60  # seconds for one virsh call
 # virsh where vm-pin runs (also in a toolbox: not moved to the host); output
 # that is not UTF-8 is replaced.
 VIRSH: VirshPort = SubprocessVirshAdapter(URI, on_host=False)
+# pgrep, where the program runs (never on the host from a toolbox).
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 
 def cpu_paths() -> CpuPaths:
@@ -161,9 +164,11 @@ def usage_usec(cg: str) -> int:
 
 def find_game(name: str | None) -> int | None:
     """PID of the game: NAME if given, else a process with GameMode's client
-    library loaded."""
+    library loaded. A pgrep that cannot be started raises (as subprocess.run did)."""
     if name is not None and name != "":
-        r = subprocess.run(["pgrep", "-xo", name], check=False, capture_output=True, text=True)
+        r = RUNNER.run(["pgrep", "-xo", name])
+        if r.cause is not None:
+            raise r.cause
         return int(r.stdout.split()[0]) if r.stdout.split() else None
     # Several processes of the launch chain (reaper, pressure-vessel) map it:
     # the game is the one with the most threads.

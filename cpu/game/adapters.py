@@ -27,13 +27,17 @@ from cpu.game.domain import (
     GAME_DROPIN,
     STEAM_SCOPES,
     TAG,
+    CgroupUndo,
     Drift,
+    EppUndo,
+    GameRecordKind,
     GamePaths,
     GameSettings,
     Manager,
     Record,
     cpuset_in,
     ctl_file,
+    cut_tail,
     drift_lines,
     drifted,
     dropin_text,
@@ -44,8 +48,11 @@ from cpu.game.domain import (
     has_record_part,
     intended_header,
     intended_props,
+    intended_records,
     newer_intended,
+    manager_of,
     on_text,
+    PropUndo,
     record_line,
     records,
     repaired_text,
@@ -53,8 +60,11 @@ from cpu.game.domain import (
     game_settings,
     show_values,
     state_uid,
+    state_undo,
     shown,
     transient_unit,
+    unheld,
+    unheld_text,
     vm_io_weight,
 )
 
@@ -210,13 +220,37 @@ class GameProfile:
     # ---- the state files --------------------------------------------------------------------
     def _append(self, path: str, *fields: str) -> bool:
         """One record at the end of path, on disk before the change it describes is made. False when it
-        cannot be written (a full /run): said on stderr, as bash's failed redirection said it."""
+        cannot be written (a full /run): said on stderr, as bash's failed redirection said it. A last
+        line cut short is removed first (_drop_cut_tail)."""
+        if not self._drop_cut_tail(path):
+            return False
         try:
             with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:
                 fh.write(record_line(*fields))
         except OSError as e:
             print(f"{path}: {e.strerror or e}", file=sys.stderr, flush=True)
             return False
+        return True
+
+    def _drop_cut_tail(self, path: str) -> bool:
+        """Remove a last line with no newline at its end (a record cut short when 'on' died while it
+        wrote it) and name it in the journal: a record glued onto it would become one line with the
+        cut fields, which 'off' would read as a whole record (an old IOWeight "1" of "100"). False when
+        the file cannot be cut (said on stderr, as a failed write)."""
+        data = read_bytes(path) or b""
+        cut = cut_tail(data)
+        if cut is None:
+            return True
+        keep, line = cut
+        try:
+            os.truncate(path, keep)
+        except OSError as e:
+            print(f"{path}: {e.strerror or e}", file=sys.stderr, flush=True)
+            return False
+        why = "never read by the drift repair" if path == self.paths.intended else "its change was never made"
+        number = data.count(b"\n") + 1
+        text = line.decode("utf-8", "replace")
+        self.log(4, f"{path} line {number}: a record cut short ({why}), removed before the next record: {text}")
         return True
 
     def _unrecorded(self, what: str) -> None:
@@ -232,9 +266,9 @@ class GameProfile:
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
-                rec = ("prop", mgr, unit, p, "existed", self.prop(mgr, unit, p))
+                rec = (GameRecordKind.PROP, mgr, unit, p, "existed", self.prop(mgr, unit, p))
             else:
-                rec = ("prop", mgr, unit, p, "new", "-")
+                rec = (GameRecordKind.PROP, mgr, unit, p, "new", "-")
             if not self._append(self.paths.state, *rec):
                 self._unrecorded(f"{unit}: {' '.join(settings)}")
                 return
@@ -245,7 +279,7 @@ class GameProfile:
             return
         for kv in settings:
             p, _, value = kv.partition("=")
-            self._append(self.paths.intended, "prop", mgr, unit, p, value, self.prop(mgr, unit, p))
+            self._append(self.paths.intended, GameRecordKind.PROP, mgr, unit, p, value, self.prop(mgr, unit, p))
 
     # ---- the boxes ----------------------------------------------------------------------------
     def steam_scopes(self) -> list[str]:
@@ -333,11 +367,11 @@ class GameProfile:
         old = read_stripped(f) or ""
         if old == self.s.build_cpus:
             return
-        if not self._append(self.paths.state, "cgw", f, old):
+        if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
             self._unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
         if _write_line(f, self.s.build_cpus):
-            self._append(self.paths.intended, "cgw", f, self.s.build_cpus, read_stripped(f) or "")
+            self._append(self.paths.intended, GameRecordKind.CGW, f, self.s.build_cpus, read_stripped(f) or "")
         else:
             self.log(4, f"{unit}: could not write {f}")
 
@@ -424,11 +458,18 @@ class GameProfile:
         except OSError as e:
             self.log(3, f"not switched on: could not write {p.state}: {e.strerror or e}")
             return 1
+        with contextlib.suppress(OSError):  # a new session: its drift is said again
+            os.unlink(p.drift_warned)
         try:
             with open(p.intended, "w", encoding="utf-8") as fh:
                 fh.write(intended_header())
         except OSError as e:  # no drift repair then; the profile itself still works
             print(f"{p.intended}: {e.strerror or e}", file=sys.stderr, flush=True)
+        # The memory chain first, leaf first: game.state's first record is then user@UID.service's,
+        # so 'off' knows the user 'on' acted for whatever step 'on' died at (state_uid).
+        for unit in reversed(self.game_dropin_units()):
+            self.setp("sys", unit, f"MemoryLow={s.game_memory_low}")
+        self.write_game_dropins()
         self.setp(
             "sys",
             "machine.slice",
@@ -446,9 +487,6 @@ class GameProfile:
             self.cpus_fallback("user.slice")
             self.cpus_fallback("flatpak-session-helper.service")
         self.demote_escapes()
-        for unit in self.game_dropin_units():
-            self.setp("sys", unit, f"MemoryLow={s.game_memory_low}")
-        self.write_game_dropins()
         self.setp("usr", "app.slice", f"MemoryLow={s.game_memory_low}")
         self.protect_steam()
         if s.game_zswap_writeback == "no" and self.prop("usr", "app.slice", "MemoryZSwapWriteback"):
@@ -457,7 +495,7 @@ class GameProfile:
             f = p.epp(cpu)
             if not os.access(f, os.W_OK):
                 continue
-            if not self._append(p.state, "epp", cpu, read_stripped(f) or ""):
+            if not self._append(p.state, GameRecordKind.EPP, cpu, read_stripped(f) or ""):
                 self._unrecorded(f"cpu{cpu}: EPP performance")
                 continue
             _write_line(f, "performance")
@@ -486,49 +524,52 @@ class GameProfile:
             self.ctl("sys", "daemon-reload")
         if reload["usr"]:
             self.ctl("usr", "daemon-reload")
-        for f in (p.state, p.intended, p.manual):
+        for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(f)
         self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
         return 0
 
-    def _user_from_state(self, recs: Sequence[Record]) -> None:
+    def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
-        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now."""
+        also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
+        The tick and 'state' act for that user too (say False: quietly), so what the tick sets in the
+        user manager is what 'off' undoes."""
         uid = state_uid(recs)
         target = self.s.target_user
         if uid is None or (target and self._uid_of(target) == uid):
             return
         name = self._name_of(uid)
         if name:
-            conf = self.paths.conf
-            why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
-            self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
+            if say:
+                conf = self.paths.conf
+                why = f"TARGET_USER in {conf} is {target}" if target else f"TARGET_USER not set in {conf}"
+                self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
             self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
-        """Undo one record of game.state."""
-        kind = rec[0] if rec else ""
-        if kind == "cgw" and len(rec) >= 3:
-            _write_line(rec[1], rec[2])
-        elif kind == "epp" and len(rec) >= 3:
-            _write_line(self.paths.epp(rec[1]), rec[2])
-        elif len(rec) >= 6:
-            mgr: Manager = "usr" if rec[1] == "usr" else "sys"
-            unit, prop, mode, old = rec[2], rec[3], rec[4], rec[5]
-            if mode == "new":
-                f = self.ctl_file(mgr, unit, prop)
-                with contextlib.suppress(OSError):
-                    os.unlink(f)
-                with contextlib.suppress(OSError):
-                    os.rmdir(os.path.dirname(f))
-                reload[mgr] = True
-            else:
-                self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+        """Undo one record of game.state (as state_undo reads it)."""
+        match state_undo(rec):
+            case CgroupUndo(file=f, old=old):
+                _write_line(f, old)
+            case EppUndo(cpu=cpu, old=old):
+                _write_line(self.paths.epp(cpu), old)
+            case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
+                if mode == "new":
+                    f = self.ctl_file(mgr, unit, prop)
+                    with contextlib.suppress(OSError):
+                        os.unlink(f)
+                    with contextlib.suppress(OSError):
+                        os.rmdir(os.path.dirname(f))
+                    reload[mgr] = True
+                else:
+                    self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+            case None:
+                pass
 
     def drift(self, text: str) -> list[Drift]:
         """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
-        recs = records(text)
+        recs = intended_records(text)  # as cst doctor reads it
         now: dict[tuple[str, str], dict[str, str]] = {}
         for (mgr, unit), props in intended_props(recs).items():
             args = ["show", "-p", "LoadState"] + [a for prop in props for a in ("-p", prop)] + [unit]
@@ -543,19 +584,48 @@ class GameProfile:
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
         a second record to game.state and make 'off' restore the profile's own value. A game.intended
-        of a newer CST is not read (its records may mean something else): said in the journal."""
+        of a newer CST is not read (its records may mean something else), and a setting game.state holds
+        no record of is not set again ('off' could not undo it): each said in the journal once per boot
+        (again when the text changes, and when it comes back after a tick that had nothing to say: _say_unheld)."""
         text, newer = self._intended()
         if newer is not None:
-            self.log(4, f"drift not repaired: {newer}")
+            said = f"drift not repaired: {newer}"
+            self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
-        for d in self.drift(text):
+        drifts = self.drift(text)
+        skipped = self._unheld(drifts)
+        self._say_unheld(skipped)
+        for d in drifts:
+            if d in skipped:
+                continue
             r = d.record
             if d.is_cgroup_file:
                 ok = _write_line(r[1], r[2])
             else:
-                mgr: Manager = "sys" if r[1] == "sys" else "usr"
-                ok = self.ctl(mgr, "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True) == 0
+                ok = (
+                    self.ctl(manager_of(r[1]) or "usr", "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True)
+                    == 0
+                )
             self.log(*repaired_text(d, ok=ok))
+
+    def _unheld(self, drifts: Sequence[Drift]) -> list[Drift]:
+        """The drifts game.state holds no record of (unheld)."""
+        return unheld(drifts, records(self._state_text()))
+
+    def _say_unheld(self, skipped: Sequence[Drift]) -> None:
+        """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
+        notice; with none, forget the mark, so a later one is said again."""
+        if not skipped:
+            with contextlib.suppress(OSError):
+                os.unlink(self.paths.drift_warned)
+            return
+        said = "\n".join(unheld_text(d) for d in skipped)
+
+        def emit() -> None:
+            for line in said.split("\n"):
+                self.log(5, line)
+
+        self._say_once(self.paths.drift_warned, said, emit)
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
@@ -582,6 +652,7 @@ class GameProfile:
         if self.problems:
             self.warn_once("tick changes nothing")
             return 0
+        self._user_from_state(records(self._state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
         self.protect_steam()  # the game's own scope, started after 'on'
         self.demote_escapes()  # boxes next to the game that appeared after 'on'
@@ -607,18 +678,26 @@ class GameProfile:
         them (and again when they or the word change, or after a tick found the file fixed), then quiet
         until the next boot (the mark is in /run); the watchdog's unit does not fail on them."""
         said = "\n".join([what, *self._problem_lines()])  # another word on the same lines is said too
-        mark = self.paths.settings_warned
+        self._say_once(self.paths.settings_warned, said, lambda: self._log_problems(4, what, "; said once per boot"))
+
+    @staticmethod
+    def _say_once(mark: str, said: str, emit: Callable[[], None]) -> None:
+        """emit() unless the mark holds said (it was said already this boot: the mark is in /run); then
+        the mark holds said, so another text is said again."""
         if read_text(mark) == said:
             return
-        self._log_problems(4, what, "; said once per boot")
+        emit()
         with contextlib.suppress(OSError):
             write_atomic(mark, said, mode=0o644, durable=False, relabel=False)
 
     # ---- state ------------------------------------------------------------------------------------
     def state(self) -> int:
-        """What is applied now, and which settings drifted from what 'on' set."""
+        """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
+        user manager of the user 'on' acted for)."""
+        on = os.path.exists(self.paths.state)
+        if on:
+            self._user_from_state(records(self._state_text()), say=False)
         p, s = self.paths, self.s
-        on = os.path.exists(p.state)
         manual = os.path.exists(p.manual)
         self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
         for line in self._problem_lines():
@@ -658,7 +737,8 @@ class GameProfile:
             return drift_lines(None, manual=os.path.exists(p.manual))
         text, newer = self._intended()
         drifts = self.drift(text) if newer is None else None
-        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer)
+        not_held = [] if drifts is None else self._unheld(drifts)
+        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer, not_held=not_held)
 
     def _intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""

@@ -10,7 +10,7 @@ from collections.abc import Mapping
 import os
 
 from cst_core.adapters.notify import PENDING_ALERTS
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.values import HOUR
@@ -48,7 +48,7 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
         ("index", "CST_VM_INDEX", state_format(StateFormatKey.VM_INDEX).path),
         ("swtpm_dir", "CST_VM_SWTPM_DIR", "/var/lib/libvirt/swtpm"),
         ("vm_conf", "CST_VM_CONF", "/etc/cst/vm.conf"),
-        ("cpu_conf", "CST_VM_CPU_CONF", "/etc/cpu-setup/cpu-setup.conf"),
+        ("cpu_conf", "CST_VM_CPU_CONF", CPU_SETTINGS),
         ("system_images", "CST_VM_SYSTEM_IMAGES", "/var/lib/libvirt/images"),
         # The NAS backup reuses the restic repository, password and cache of the /home NAS backup
         # (btrfs-snapshot's runtime, btrfs/snapshot_runtime: NAS_SSH_ALIAS, its restic paths; a test checks they

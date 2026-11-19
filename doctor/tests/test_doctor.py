@@ -1467,12 +1467,24 @@ class GameProfileTest(Scratch):
         self.assert_read_only()
         return res
 
-    def test_read_intended(self) -> None:
-        recs = doc_domain.read_intended(self.intended + "bogus line\nprop sys 'unclosed\n")
-        self.assertEqual(len(recs), 9)
-        self.assertEqual(recs[3], ("prop", "sys", "user.slice", "MemoryLow", "16G", "17179869184"))
-        self.assertEqual(recs[7][5], "")
-        self.assertEqual(recs[8], ("cgw", "/sys/fs/cgroup/inner/cpuset.cpus", "12-23", "12-23"))
+    def test_a_last_line_cut_short_is_not_compared(self) -> None:
+        # 'on' died while it wrote it: the profile never reads it, and neither does the doctor.
+        self.intended += "prop sys machine.slice CPUWeight 10 1"
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+
+    def test_a_file_name_printf_q_quotes_is_read_as_bash_reads_it(self) -> None:
+        # A tab in the cgroup's name: printf %q writes $'...', which shlex read as a "$..." word.
+        cg = os.path.join(self.root, "sys", "fs", "cgroup", "in\tner", "cpuset.cpus")
+        os.makedirs(os.path.dirname(cg))
+        with open(cg, "w") as f:
+            f.write("0-3\n")
+        self.intended += "cgw $'/sys/fs/cgroup/in\\tner/cpuset.cpus' 12-23 12-23\n"
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("/sys/fs/cgroup/in\tner/cpuset.cpus is 0-3 (the profile wrote 12-23)", res[0].message)
 
     def test_off_is_ok_and_absent_module_is_silent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=True):

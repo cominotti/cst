@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from btrfs.docker_volumes_nocow.domain import NocowPaths
 from btrfs.health_check.domain import UNALLOC_CRIT_GIB, UNALLOC_MIN_GIB
 from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_FILE
-from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import ShellAssignments, group
@@ -155,7 +155,7 @@ USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.sli
 LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
-CPU_CONF = HostPath("/etc/cpu-setup/cpu-setup.conf")
+CPU_CONF = HostPath(CPU_SETTINGS)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)
@@ -471,22 +471,6 @@ def per_device_allocated(profiles: Mapping[str, Mapping[str, int]], ndev: int) -
     if all(MIRROR_COPIES.get(p) == ndev for p in used):
         return sum(t for prof in profiles.values() for t in prof.values())
     return None
-
-
-def read_intended(text: str) -> list[tuple[str, ...]]:
-    """Records of game.intended (fields written with bash printf %q):
-    ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
-    A line that does not parse, or of another kind (the format line
-    "cst-game-intended 1"), is skipped."""
-    out: list[tuple[str, ...]] = []
-    for line in text.splitlines():
-        try:
-            f = shlex.split(line)
-        except ValueError:
-            continue
-        if (len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr")) or (len(f) == 4 and f[0] == "cgw"):
-            out.append(tuple(f))
-    return out
 
 
 def parse_cpu_stat_seconds(text: str) -> float | None:

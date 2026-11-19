@@ -4947,7 +4947,9 @@ EOF
         weight as it was. The watchdog's tick, run as a unit with a GameMode client running (a process
         that maps a file named libgamemode), does not start cpu-game.service (a stub that records its
         starts): its unit ends in success, the line is named once, a second tick says nothing. `off`
-        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work."""
+        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work.
+        A by-hand mark there before the refused `on` is removed by it; with the line broken again after
+        a tick found it fixed, the next tick names it again."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -4973,11 +4975,15 @@ EOF
             printf '%s\n' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
             gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
             base=$(systemctl show -P CPUWeight machine.slice)
+            # A by-hand mark left from an earlier 'cst cpu game on': the refused on removes it.
+            install -d -m 0755 /run/cpu-setup
+            touch /run/cpu-setup/manual
             rc=0; got=$(gp on) || rc=$?
             [[ $rc == 1 ]] || { echo "on with a bad line: exit $rc" >&2; exit 1; }
             grep -q 'cpu-setup.conf line 2: BUILD_CPUS=$(nproc): ' <<<"$got"
             grep -q 'not switched on' <<<"$got"
             test ! -e /run/cpu-setup/game.state
+            test ! -e /run/cpu-setup/manual || { echo "the refused on kept the by-hand mark" >&2; exit 1; }
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
             grep -q 'settings: /etc/cpu-setup/cpu-setup.conf line 2' <<<"$(gp state)"
             # The watchdog, a game running, the profile off: cpu-game.service is not started.
@@ -5001,10 +5007,18 @@ EOF
             test ! -e /run/cpu-setup/game.state
             gp off
             sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
-            # Fixed: the watchdog starts the unit again.
-            grep -q 'switching on' <<<"$(tick 3)"
+            # Fixed: the watchdog starts the unit again, and says nothing about the settings.
+            third=$(tick 3)
+            grep -q 'switching on' <<<"$third"
+            if grep -q 'sets nothing' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
             for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
             test -e /tmp/e2e-86-starts
+            # Broken again after a tick found it fixed: the warning is said again.
+            sed -i 's/^BUILD_CPUS=.*/BUILD_CPUS=$(nproc)/' /etc/cpu-setup/cpu-setup.conf
+            fourth=$(tick 4)
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$fourth" \
+                || { echo "fourth tick (broken again): $fourth" >&2; exit 1; }
+            sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
             kill "$(cat /tmp/e2e-86-client.pid)"
             systemctl stop cpu-game.service
             rm -f "$stub"
@@ -5069,6 +5083,191 @@ EOF
             test ! -e "$override"
             [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$uw" ]] \
                 || { echo "user.slice CPUWeight: not $uw" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_130_cpu_game_profile_off_acts_for_the_recorded_user_when_target_user_names_another(self) -> None:
+        """'off' with the real system and user managers, after 'on' for tester, with TARGET_USER
+        changed to another account that exists (e2e130, made here, with no user manager of its own):
+        a tick first sets tester's user.slice CPUWeight, changed meanwhile, again (the tick acts for the
+        user 'off' undoes for); then the user manager's side is undone for tester, the uid game.state
+        names, and the journal line says so (user.slice's CPUWeight back, its user.control override
+        gone)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            userdel e2e130 2>/dev/null || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-130-conf.bak ]]; then mv /tmp/e2e-130-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-130-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            uid=$(id -u tester)
+            uw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            override=/run/user/$uid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            useradd -M e2e130
+            printf '%s\n' "TARGET_USER='e2e130'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # The tick acts for tester too: a setting undone in tester's manager is set again there.
+            systemctl --user -M tester@ set-property --runtime user.slice CPUWeight=50
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == 50 ]]
+            ticked=$(gp tick)
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]] \
+                || { echo "the tick did not set tester's user.slice again: $ticked" >&2; exit 1; }
+            got=$(gp off)
+            grep -qF "TARGET_USER in /etc/cpu-setup/cpu-setup.conf is e2e130: undoing for tester (uid $uid)" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e /run/cpu-setup/game.state
+            test ! -e "$override" || { echo "tester's user.slice override is still there" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$uw" ]] \
+                || { echo "user.slice CPUWeight: not $uw" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_128_cpu_game_profile_drift_it_does_not_repair(self) -> None:
+        """The real game profile, on for tester. With machine.slice's records gone from game.state and
+        its overrides removed (then a daemon-reload), the tick does not set it again (off could not undo
+        that) and says so once, a second tick says nothing, 'state' marks it, and 'off' leaves
+        machine.slice at its own value with no override. With game.intended's first line changed to a
+        newer format ("cst-game-intended 2"), the tick says "drift not repaired" once, and a second
+        tick says nothing."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-128-conf.bak ]]; then mv /tmp/e2e-128-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            ov=/run/systemd/system.control/machine.slice.d
+            base=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            # machine.slice's records gone from game.state, its overrides too: 'off' could not undo a
+            # repair, so the tick leaves it and says so once.
+            sed -i '/ machine\.slice /d' "$st"
+            rm -f "$ov"/50-*.conf
+            systemctl daemon-reload
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            first=$(gp tick)
+            grep -qF "drift not repaired: machine.slice CPUWeight: game.state holds no record of it, so 'off' could not undo it" <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "the tick set machine.slice again" >&2; exit 1; fi
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            grep -q "DRIFT: machine.slice CPUWeight is .*, the profile set '10' (not set again: game.state holds no record of it)" <<<"$(gp state)"
+            gp off
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "an override of machine.slice is left" >&2; exit 1; fi
+            touch /run/cpu-setup/manual
+            gp on
+            # A game.intended of a newer format: said once per boot.
+            sed -i '1s/.*/cst-game-intended 2/' /run/cpu-setup/game.intended
+            first=$(gp tick)
+            grep -q 'drift not repaired: /run/cpu-setup/game.intended is format 2' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            gp off
+            test ! -e /run/cpu-setup/drift-warned
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
+        """The real game profile, on for tester: game.state's first record is user@UID.service's MemoryLow
+        (it names the user). With a last line of game.state cut short (no newline,
+        "existed 1"), then a box next to the game (a slice of the user manager's own, made by
+        systemd-run --user): the tick's record of the box removes the cut line first and names it, the
+        box's record is a whole last line, and 'off' undoes the box (its override gone) and leaves
+        machine.slice's IOWeight at its own value, not 1."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e129-box.service 2>/dev/null || true
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-129-conf.bak ]]; then mv /tmp/e2e-129-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-129-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            # The first record names the user 'on' acts for, whatever step it may die at.
+            first=$(head -n 1 "$st")
+            [[ "$first" == "prop sys user@$uid.service MemoryLow "* ]] || { echo "first record: $first" >&2; exit 1; }
+            printf 'prop sys machine.slice IOWeight existed 1' >>"$st"   # cut short
+            n=$(( $(wc -l <"$st") + 1 ))
+            systemd-run --user -M tester@ --quiet --slice=e2e129.slice --unit=e2e129-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e129.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            got=$(gp tick)
+            grep -qF "$st line $n: a record cut short (its change was never made), removed before the next record: prop sys machine.slice IOWeight existed 1" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            last=$(tail -n 1 "$st")
+            [[ "$last" =~ ^prop\ usr\ e2e129\.slice\ [A-Za-z]+\ new\ -$ ]] || { echo "last record: $last" >&2; exit 1; }
+            if grep -qF 'IOWeight existed 1' "$st"; then echo "the cut line is still there" >&2; exit 1; fi
+            override=/run/user/$uid/systemd/user.control/e2e129.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            gp off
+            test ! -e "$override" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]] || { echo "IOWeight: not $io" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e129-box.service
             echo E2E-OK
             """,
         ).stdout
