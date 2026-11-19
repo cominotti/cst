@@ -46,10 +46,13 @@ export const meta = {
 //   prompt says to run gates in the foreground, and the fixer commits before the gates.
 // - Never send a message to a running workflow agent: it revives a second copy of it. Change the brief instead.
 // - Do not move or edit the main checkout while a run is going: the guard below stops the run when it changes.
-// - Unverified: whether code-review "high <branch>" reviews only <base>..<branch> when the base is not main; the
-//   review agent drops findings on files outside this change's paths and, with a base other than main, findings
-//   that come only from the base's own commits. Named lookup through .claude/workflows was
-//   not tried before the first merge (scriptPath was).
+// - code-review "high <branch>" does NOT honour a base other than main (checked 2026-11-19, from the skill's text and
+//   three fork transcripts, without a run on another base): the skill takes a target and nothing else, and its
+//   fork computes the diff itself, always as "git diff main...<branch>". So the review agent drops findings on
+//   files outside this change's paths and, with a base other than main, findings that come only from the base's
+//   own commits; and a review of a range that is no branch (the fixer's commits, reviewed_head..head) is a review
+//   by hand, never code-review. Named lookup through .claude/workflows was not tried before the first merge
+//   (scriptPath was).
 // - Every agent pastes the output of GUARD_CMD for the main checkout (its HEAD, status lines, staged and unstaged
 //   contents and untracked files' contents) before and after; the script stops when an
 //   agent's two readings differ or when one agent's "before" differs from the previous agent's "after".
