@@ -1347,7 +1347,9 @@ cst cpu uninstall
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
   boost back to `0` (only when the file was there);
 - drops the install record lines of what it removed (`removed:   PATH` for
-  each file the installer removed), also of a file deleted by hand;
+  each file the installer removed), also of a file deleted by hand; when the
+  installer cannot change your record (one written by a newer CST), the two
+  user drop-ins still go, with a warning;
 - reloads systemd.
 
 It **keeps**: `/etc/cpu-setup/cpu-setup.conf`, your `gamemode` group

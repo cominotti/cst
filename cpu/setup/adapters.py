@@ -406,7 +406,17 @@ class CpuSetup:
             self.say(f"set:       {p.hwp_boost} = 0")
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
-            self.remove_user_text(self.toolbox_dropin(), self.helper_dropin())
+            dropins = (self.toolbox_dropin(), self.helper_dropin())
+            try:
+                self.remove_user_text(*dropins)
+            except Halt:
+                # The installer failed (a record of a newer CST, a folder the user cannot write): the record
+                # stays as it is, the drop-ins go as before the record, and uninstall goes on to the reloads.
+                self.warn(
+                    f"WARNING: the install record of {self.user} was not changed (see above); "
+                    "removing the drop-ins without it"
+                )
+                self.rm_v(*dropins)
             self.rmdir(os.path.dirname(self.toolbox_dropin()), os.path.dirname(self.helper_dropin()))
             if holds(gamemode_ini(self._home_of(self.user)), MANAGED_MARK):
                 home = self.required_home(self.user, "cst-install.bash")

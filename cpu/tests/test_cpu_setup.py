@@ -690,6 +690,25 @@ class UninstallTest(CpuSetupCase):
         self.command("uninstall", user="")
         self.assertNotIn("systemctl --user -M @ daemon-reload", self.runner.joined())
 
+    def test_an_installer_that_fails_on_the_user_drop_ins_does_not_stop_uninstall(self) -> None:
+        # The user's install record was written by a newer CST (or their drop-in folder is not theirs):
+        # the installer fails. The drop-ins go as before the record, and both managers are reloaded.
+        dropins = [toolbox_dropin(self.home), helper_dropin(self.home)]
+        for f in dropins:
+            self.write(f, "")
+        self.runner.answers = [("remove-text --home", CommandResult(1, "", ""))]
+        rc, out, err = self.command("uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            err, "WARNING: the install record of tester was not changed (see above); removing the drop-ins without it\n"
+        )
+        for f in dropins:
+            self.assertFalse(os.path.exists(f), f)
+            self.assertIn(f"removed '{f}'\n", out)
+        self.assertEqual(
+            self.runner.joined()[-2:], ["systemctl --user -M tester@ daemon-reload", "systemctl daemon-reload"]
+        )
+
     def test_the_game_drop_ins_go_in_the_order_of_the_locale_s_collation(self) -> None:
         # bash's glob lists them by the locale's collation (en_US puts user@1000.service.d before
         # user-1000.slice.d); a key that reverses the code-point order stands in for one.
