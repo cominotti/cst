@@ -1086,16 +1086,16 @@ class ReportCommandsTest(unittest.TestCase):
         self.assertEqual(rp_adapters.parse_time("", 3.0), 3.0)
         self.assertIsNone(self.argv("date"))
 
-    def test_without_date_the_error_escapes(self) -> None:
-        with self.assertRaises(FileNotFoundError) as cm:
+    def test_without_date_the_report_ends_with_its_error(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
             rp_adapters.parse_time("10:30", 5.0)
-        self.assertEqual(cm.exception.filename, "date")
+        self.assertEqual(cm.exception.code, "cannot parse time: '10:30' ([Errno 2] No such file or directory: 'date')")
 
-    def test_a_date_that_cannot_start_the_error_escapes(self) -> None:
+    def test_a_date_that_cannot_start_ends_the_report_with_its_error(self) -> None:
         self.fake("date", first_line="not a program")
-        with self.assertRaises(OSError) as cm:
+        with self.assertRaises(SystemExit) as cm:
             rp_adapters.parse_time("10:30", 5.0)
-        self.assertNotIsInstance(cm.exception, FileNotFoundError)
+        self.assertRegex(str(cm.exception.code), r"^cannot parse time: '10:30' \(\[Errno 8\] Exec format error: ")
 
     # ---- docker / podman ps ----------------------------------------------------------------------
     def test_container_names_of_docker_and_podman(self) -> None:

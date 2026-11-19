@@ -56,8 +56,8 @@ def parse_time(s: str | None, default: float) -> float:
     except ValueError:
         pass
     out = _run(["date", "-d", s, "+%s"])
-    if out.cause is not None:  # missing or cannot start: the error escapes, as it always did
-        raise out.cause
+    if out.cause is not None:  # missing or cannot start
+        sys.exit(f"cannot parse time: {s!r} ({out.cause})")
     if out.returncode != 0:
         sys.exit(f"cannot parse time: {s!r} ({out.stderr.strip()})")
     return float(out.stdout.strip())
