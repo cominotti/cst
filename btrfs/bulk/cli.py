@@ -64,7 +64,8 @@ def keep_cmd(w: Wiring, cmd: str, args: Sequence[str]) -> int:
 def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) -> int:
     """btrfs-bulk with argv (argv[0] the program); entry_file is the running
     entry point's __file__ (where btrfs-snapshot is found). Whose home it is
-    unknown (a bad bulk.conf line, no user as root): the message on stderr,
+    unknown (a bad bulk.conf line, no user as root, a name no account has):
+    the message on stderr,
     exit 1 (BOOT_REFUSED_EXIT at boot, from boot_run)."""
     w = Wiring.from_environment(entry_file) if wiring is None else wiring
     try:

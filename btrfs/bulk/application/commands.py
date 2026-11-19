@@ -451,7 +451,8 @@ def boot_run(
 ) -> int:
     """btrfs-bulk boot (btrfs-bulk-boot.service, before any login) over the Bulk make() puts
     together. When bulk.conf cannot tell whose home it is: the message to err, for a bad line
-    also an alert (nobody reads the boot console; btrfs-notify keeps it for the login), and
+    or a BULK_USER no account has (BadSettings) also an alert (nobody reads the boot console;
+    btrfs-notify keeps it for the login), and
     BOOT_REFUSED_EXIT, which fails the unit. Any other error, the alert's own included: a line
     and its traceback (trace) to err, and SystemExit(BOOT_CRASHED_EXIT), which ends the program
     and fails the unit too (an uncaught exception exited 1, a success for it). The flag stays:

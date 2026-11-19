@@ -208,10 +208,11 @@ class Unexpected(Exception):
 
 
 class BadSettings(Exception):
-    """bulk.conf has a line that is not a plain KEY=VALUE: main() stops the
-    run with exit 1 and the message on stderr. At boot, boot_run also sends it
-    as an alert (nobody reads the boot console) and exits BOOT_REFUSED_EXIT;
-    lines names each bad line (file and line number)."""
+    """bulk.conf has a line that is not a plain KEY=VALUE, or its BULK_USER
+    names no account: main() stops the run with exit 1 and the message on
+    stderr. At boot, boot_run also sends it as an alert (nobody reads the boot
+    console) and exits BOOT_REFUSED_EXIT; lines names each bad line (file and
+    line number) or the BULK_USER (file)."""
 
     def __init__(self, lines: str) -> None:
         super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
@@ -220,8 +221,9 @@ class BadSettings(Exception):
 
 class NoUser(Exception):
     """As root, neither --user NAME nor BULK_USER names whose home it is (or
-    it names root): main() stops the run with exit 1 (BOOT_REFUSED_EXIT at
-    boot) and the message on stderr. Root must never guess whose home it moves."""
+    it names root), or --user NAME names no account: main() stops the run with
+    exit 1 (BOOT_REFUSED_EXIT at boot) and the message on stderr. Root must
+    never guess whose home it moves."""
 
 
 # The exit status of btrfs-bulk boot when bulk.conf cannot tell whose home it is (a bad line, no
