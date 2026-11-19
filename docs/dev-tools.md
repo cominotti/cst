@@ -107,7 +107,18 @@ repository:
   shadowed), `T10` (no debugger call), `TID` (no relative import from a
   parent package), `LOG` and `G` (logging calls), `PLE` (pylint errors),
   `W` (pycodestyle warnings) and `C4` (comprehensions), for every Python
-  file (`test pylint`). `ANN`
+  file (`test pylint`). Since 2026-11 also `E7` (statements), `PLC` and
+  `PLR` (pylint conventions and refactors), `S` (bandit: no `os.system`,
+  `shell=True`, `exec`, `tempfile.mktemp`), `TRY` (exception handling),
+  `ISC` (implicit string joins: inside a list or a tuple a join needs
+  parentheses, so a comma forgotten between two lines of a unit file or a
+  plan is an error), `ARG` (unused arguments, production code only: fakes
+  in tests ignore arguments on purpose), `SLOT`, `YTT`, `FLY`, `RSE`,
+  `ASYNC`, `INT`, `INP`, `COM818` and `COM819`. The rules of these
+  families that are left out are in `[tool.ruff.lint] ignore` and
+  `per-file-ignores` of `pyproject.toml`, each with its reason in a
+  comment (the size rules `PLR09xx` and `PLR2004` are there because the
+  budgets below count them). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
   own (`ruff check --select ANN`), on every Python file (see "ANN applies
   to every file" below).
@@ -137,8 +148,8 @@ repository:
   `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
   SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
   measures. Ratchets on the size of a function: `PLR0911`, `PLR0912`,
-  `PLR0913`, `PLR0915` (more than 6 returns, 12 branches, 5 arguments or
-  50 statements, ruff's defaults), with `FBT003` (a bare `True`/`False`
+  `PLR0913`, `PLR0915`, `PLR0917` (more than 6 returns, 12 branches, 5
+  arguments, 50 statements or 5 positional arguments, ruff's defaults), with `FBT003` (a bare `True`/`False`
   passed by position) and the `N` family (pep8-naming), counted under `N`:
   an entry of RULES made of letters only counts every code of its family.
   The families of lint group 2 that still have hits no safe fix removes

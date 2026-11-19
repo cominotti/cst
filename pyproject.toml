@@ -86,11 +86,112 @@ exclude = ["*.md"]
 # calls: no f-string or % formatting in the message), PLE (pylint errors),
 # W (pycodestyle warnings: trailing whitespace, invalid escapes), C4
 # (comprehensions: no list() around a generator, no needless dict()).
-select = ["F", "B", "UP", "E9", "PLW1510", "PGH", "A", "T10", "TID", "LOG", "G", "PLE", "W", "C4"]
+# Turned on together (2026-11), each family's few hits fixed first: E7
+# (statements: no lambda bound to a name, no variable named l), PLC and PLR
+# (pylint conventions and refactors; the size rules are budgeted, below),
+# S (bandit: no os.system, shell=True, exec, mktemp, ...), TRY (exception
+# handling), ISC (implicit string joins: inside a list or a tuple a join
+# needs parentheses, so a missing comma between two lines is an error), ARG
+# (unused arguments, production code only: see per-file-ignores), SLOT
+# (__slots__ on str/tuple subclasses), YTT (sys.version checks), FLY (a
+# join of constants instead of an f-string), RSE (raise X, not X()), ASYNC,
+# INT (gettext), INP (a Python file outside a package), COM818 and COM819
+# (a stray trailing comma that makes a tuple, a comma where none belongs).
+select = [
+    "F",
+    "B",
+    "UP",
+    "E9",
+    "PLW1510",
+    "PGH",
+    "A",
+    "T10",
+    "TID",
+    "LOG",
+    "G",
+    "PLE",
+    "W",
+    "C4",
+    "E7",
+    "PLC",
+    "PLR",
+    "S",
+    "TRY",
+    "ISC",
+    "ARG",
+    "SLOT",
+    "YTT",
+    "FLY",
+    "RSE",
+    "ASYNC",
+    "INT",
+    "INP",
+    "COM818",
+    "COM819",
+]
+# Rules of the selected families left out, each with its reason. No entry
+# may name ANN or ALL (tests/test_python_files.py).
+ignore = [
+    # Counted per package by tests/ruff_budget.py (RUFF_BUDGETS), a budget
+    # never above its entry: too many returns, branches, arguments,
+    # statements, positional arguments; a number compared with a literal
+    # (.agents/rules/magic-values.md).
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR0917",
+    "PLR2004",
+    # Every command runs through cst_core's runner with an argument list and
+    # a bare program name, found on PATH on purpose (S603: subprocess call,
+    # S607: partial path). TRY003 (a long message passed to an exception):
+    # the messages are the programs' output.
+    "S603",
+    "S607",
+    "TRY003",
+    # assert: type narrowing (assert proc.stdout is not None); the helpers
+    # never run with -O.
+    "S101",
+    # XML parsing: the XML is libvirt's own (virsh dumpxml); the fix would be
+    # a third-party package (defusedxml), which CST cannot use.
+    "S314",
+    # chmod 0o755/0o711: the intended modes of folders and scripts.
+    "S103",
+    # A /tmp literal: /tmp/chrome-cache is the feature, TMPDIR=/tmp for sccache.
+    "S108",
+    # os.exec*: the wiring modules re-run the program through sudo on purpose.
+    "S606",
+    # urlopen of a fixed https URL (.github/scripts/pin_invowk.py downloads a release).
+    "S310",
+    # Style only, no safer code: a return in a try's else (TRY300), a raise
+    # inside a try (TRY301); TRY004 asks for TypeError where the code raises
+    # its own error on purpose (a behaviour change with no gain).
+    "TRY300",
+    "TRY301",
+    "TRY004",
+    # An import inside a function: cst_core/wiring.py imports a module's
+    # code only when its command runs, on purpose.
+    "PLC0415",
+]
 # CST uses the standard library only: no rule may suggest or write an import
 # from the third-party typing_extensions (tests/test_python_files.py checks
 # this is false).
 typing-extensions = false
+
+[tool.ruff.lint.per-file-ignores]
+# Fakes and stubs in tests take arguments they do not use, and tests may use
+# the random module and md5/sha1 (not for security): ARG, S311 and S324 apply
+# to production code only (tests/ at the top or inside a module, as
+# tests/budgets.py's is_test_file).
+"tests/**" = ["ARG", "S311", "S324"]
+"**/tests/**" = ["ARG", "S311", "S324"]
+# The E2E suites are loaded by path (tests/e2e/run.py), not imported: an
+# __init__.py there would make unittest discovery import them.
+"tests/e2e/suites/*.py" = ["INP001"]
+# S105 (a hard-coded password) reads names, not secrets: the PASS result
+# word of the health check, the NAS_PASSWORD settings key.
+"btrfs/health_check/domain.py" = ["S105"]
+"btrfs/snapshot_runtime/domain.py" = ["S105"]
 
 [tool.ruff.lint.mccabe]
 # For C901, which is not selected above: tests/ruff_budget.py counts the

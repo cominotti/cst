@@ -5,7 +5,8 @@
 Use: python3 -I -B tests/ruff_budget.py   (from anywhere; needs uv, like tests/uv-dev)
 
 Some ruff rules have hits today that are not fixed yet, so they cannot be in
-the `select` list of pyproject.toml (`ruff check` would fail). This script
+the `select` list of pyproject.toml (`ruff check` would fail; those of a
+selected family are in its `ignore` list instead). This script
 runs ruff with them added, reads its JSON output and compares the number of
 hits per package with RUFF_BUDGETS (tests/budgets.py: a count above its
 entry fails, a count below it passes and `invowk cmd fix budgets` lowers
@@ -24,9 +25,10 @@ the entry; a missing key is 0):
   [tool.ruff.lint.mccabe] max-complexity. It stands in for SonarCloud's
   cognitive complexity rule (S3776), which only a Sonar run measures: the
   same functions, counted another way;
-- PLR0911, PLR0912, PLR0913, PLR0915: a function with too many return
-  statements (6), branches (12), arguments (5) or statements (50), ruff's
-  defaults; split it, or pass a record instead of a long list of arguments;
+- PLR0911, PLR0912, PLR0913, PLR0915, PLR0917: a function with too many
+  return statements (6), branches (12), arguments (5), statements (50) or
+  positional arguments (5), ruff's defaults; split it, pass a record
+  instead of a long list of arguments, or make arguments keyword-only;
 - FBT003: a bare True or False passed as a positional argument (the call
   site says nothing; pass it by keyword);
 - N: pep8-naming, a whole family: a name that is not snake_case
@@ -70,6 +72,7 @@ RULES: Final = (
     "PLR0912",
     "PLR0913",
     "PLR0915",
+    "PLR0917",
     "FBT003",
     "N",
     "DTZ",
@@ -103,6 +106,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests FBT002": 5,
     "bluetooth tests FBT003": 10,
     "bluetooth tests PLR0913": 3,
+    "bluetooth tests PLR0917": 2,
     "bluetooth/setup N": 1,
     "bluetooth/setup PLR0911": 2,
     "bluetooth/setup PLR0912": 1,
@@ -117,6 +121,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs tests PLR0911": 2,
     "btrfs tests PLR0912": 2,
     "btrfs tests PLR0913": 11,
+    "btrfs tests PLR0917": 5,
     "btrfs tests PLW": 1,
     "btrfs tests RUF": 22,
     "btrfs/bulk BLE001": 1,
@@ -126,6 +131,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/bulk N": 33,
     "btrfs/bulk PLR0911": 5,
     "btrfs/bulk PLR0913": 8,
+    "btrfs/bulk PLR0917": 5,
     "btrfs/bulk PLR2004": 6,
     "btrfs/chrome_cache FBT001": 2,
     "btrfs/chrome_cache FBT002": 1,
@@ -141,6 +147,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/docker_volumes_nocow BLE001": 1,
     "btrfs/docker_volumes_nocow FBT003": 3,
     "btrfs/docker_volumes_nocow PLR0913": 1,
+    "btrfs/docker_volumes_nocow PLR0917": 1,
     "btrfs/docker_volumes_nocow PLR2004": 1,
     "btrfs/pending_alerts PLR0912": 1,
     "btrfs/pending_alerts PLR2004": 1,
@@ -149,6 +156,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/snapshot PIE": 1,
     "btrfs/snapshot PLR0911": 1,
     "btrfs/snapshot PLR0913": 13,
+    "btrfs/snapshot PLR0917": 11,
     "btrfs/snapshot PLR2004": 3,
     "btrfs/snapshot PLW": 2,
     "btrfs/snapshot RUF": 1,
@@ -174,6 +182,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "cpu FBT002": 1,
     "cpu FBT003": 3,
     "cpu PLR0913": 4,
+    "cpu PLR0917": 1,
     "cpu PLR2004": 2,
     "cpu tests FBT001": 1,
     "cpu tests FBT002": 1,
@@ -205,11 +214,13 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "doctor PLR0912": 3,
     "doctor PLR0913": 2,
     "doctor PLR0915": 3,
+    "doctor PLR0917": 2,
     "doctor PLR2004": 11,
     "doctor tests FBT001": 5,
     "doctor tests FBT002": 5,
     "doctor tests FBT003": 5,
     "doctor tests PLR0913": 2,
+    "doctor tests PLR0917": 1,
     "swap C901": 1,
     "swap PERF": 1,
     "swap PLR0911": 2,
@@ -231,6 +242,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "tests tests PLR0912": 5,
     "tests tests PLR0913": 4,
     "tests tests PLR0915": 2,
+    "tests tests PLR0917": 1,
     "tests tests PLW": 5,
     "tests tests PYI": 1,
     "tests tests RET": 1,
@@ -243,11 +255,13 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "toolchains PLR0912": 11,
     "toolchains PLR0913": 6,
     "toolchains PLR0915": 5,
+    "toolchains PLR0917": 4,
     "toolchains PLR2004": 4,
     "toolchains tests FBT001": 1,
     "toolchains tests FBT002": 1,
     "toolchains tests FBT003": 17,
     "toolchains tests PLR0913": 2,
+    "toolchains tests PLR0917": 1,
     "vm BLE001": 3,
     "vm C901": 4,
     "vm FBT001": 15,
@@ -258,6 +272,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "vm PLR0912": 8,
     "vm PLR0913": 3,
     "vm PLR0915": 3,
+    "vm PLR0917": 1,
     "vm PLR2004": 2,
     "vm SIM": 1,
     "vm tests FBT001": 9,
