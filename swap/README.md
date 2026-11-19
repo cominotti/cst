@@ -116,10 +116,10 @@ compressor later creates a second pool that lives until the old one drains).
   show `REFUSE` for `cst/swap.conf` (and no crypttab, fstab or partition
   rows), `cst doctor` warns, and `apply` stops before it changes anything.
   A `/etc/cst/swap.conf` that is there but cannot be read is never treated
-  as missing: as your user (a mode other than 0644) `plan` and `status`
-  show `?` and ask for `--root`; one that is not a regular file, or that
-  root cannot read, is `REFUSE`, and `apply` stops before it changes
-  anything.
+  as missing: as a user who may not read it (its mode or owner, or a folder
+  above it the user may not enter) `plan` and `status` show `?` and ask for
+  `--root`; one that is not a regular file, or that root cannot read, is
+  `REFUSE`, and `apply` stops before it changes anything.
   On sophia it reads:
 
   ```

@@ -244,6 +244,20 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual((res.returncode, res.stdout), (0, "\ufffdabc LC_ALL=C"))
         self.assertEqual(res.argv, ("virsh", "-c", "qemu:///system", "domstate", "vm1"))
 
+    def test_is_searchable_tells_a_folder_this_user_may_enter(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        fs = LocalFileSystemAdapter()
+        open_dir, closed_dir = os.path.join(tmp, "open"), os.path.join(tmp, "closed")
+        os.mkdir(open_dir, 0o300)  # searchable, not readable
+        os.mkdir(closed_dir, 0o600)  # readable, not searchable
+        for d in (open_dir, closed_dir):
+            self.addCleanup(os.chmod, d, 0o700)
+        self.assertTrue(fs.is_searchable(open_dir))
+        # Root may search any folder; any other user may not search one without its x bit.
+        self.assertEqual(fs.is_searchable(closed_dir), os.geteuid() == 0)
+        self.assertFalse(fs.is_searchable(os.path.join(tmp, "missing")))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)

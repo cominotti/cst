@@ -258,16 +258,27 @@ class SwapReports:
                 return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
             return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
         if self._fs.lexists(env.settings_path):
-            return self._settings_not_read()
+            return self._settings_not_read(seen=True)
+        if self._settings_folder_closed():
+            return self._settings_not_read(seen=False)
         return self._spec_from_older_install()
 
-    def _settings_not_read(self) -> SpecResolution:
-        """/etc/cst/swap.conf is there and could not be read: never taken as missing (the migration
-        would write over it). A user who may not read it is asked for --root; anything else stops apply."""
+    def _settings_folder_closed(self) -> bool:
+        """The nearest folder above /etc/cst/swap.conf that is there is one this user may not search:
+        lexists cannot see the file then, so it may be there."""
+        folder = posixpath.dirname(self._env.settings_path)
+        while not self._fs.is_dir(folder) and folder not in ("", "/"):
+            folder = posixpath.dirname(folder)
+        return not self._fs.is_searchable(folder)
+
+    def _settings_not_read(self, *, seen: bool) -> SpecResolution:
+        """/etc/cst/swap.conf is there (seen), or may be in a folder this user may not search, and could
+        not be read: never taken as missing (the migration would write over it). A user who may not read
+        it is asked for --root; anything else stops apply."""
         path = self._env.settings_path
-        if not self._fs.is_file(path):
+        if seen and not self._fs.is_file(path):
             return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
-        if not self._fs.is_readable(path) and not self._env.as_root:
+        if not self._env.as_root and not (seen and self._fs.is_readable(path)):
             return SpecResolution(None, SwapSpecState.UNREADABLE)
         # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
         return SpecResolution(None, SwapSpecState.BAD, "cannot be read")

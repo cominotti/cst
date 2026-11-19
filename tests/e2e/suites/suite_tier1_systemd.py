@@ -1582,6 +1582,16 @@ swap_run plan
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
 [[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
 chmod 0644 /etc/cst/swap.conf
+# A folder above it the user may not enter (lexists cannot see the file there): the same "?" row, and
+# swap.conf is not taken as missing (no migration from crypttab).
+cst_mode="$(stat -c %a /etc/cst)"
+chmod 0700 /etc/cst
+s_closed="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, /etc/cst 0700"; }
+[[ "$user_plan" != *"not written yet"* && "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan took swap.conf as missing"; }
+[[ "$(snap)" == "$s_closed" ]] || fail "plan with /etc/cst 0700 changed something"
+chmod "$cst_mode" /etc/cst
 mv /etc/cst/swap.conf "$W/swap.conf.aside"
 mkdir /etc/cst/swap.conf
 s_dir="$(snap)"

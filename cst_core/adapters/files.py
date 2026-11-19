@@ -179,6 +179,11 @@ class LocalFileSystemAdapter:
         """Return True if the current process has read access to path."""
         return os.access(path, os.R_OK)
 
+    def is_searchable(self, path: str) -> bool:
+        """Return True if the current process may search the folder path (its x bit for us): only then
+        can it tell a name in it that is not there (lexists False) from one it may not see."""
+        return os.access(path, os.X_OK)
+
     def read_text(self, path: str, default: str | None = None) -> str | None:
         """Read the file as UTF-8 text, returning default on OSError.
 

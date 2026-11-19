@@ -674,6 +674,45 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         return super().is_readable(path)
 
 
+class _ClosedFolder(_FakeTempFileSystem):
+    """A folder this user may not search (mode 0700 of another owner): nothing in it can be seen."""
+
+    def __init__(self, block_links: Mapping[str, str], *, closed: str) -> None:
+        super().__init__(block_links)
+        self._closed = closed
+
+    def _inside(self, path: str) -> bool:
+        return path.startswith(self._closed + os.sep)
+
+    @override
+    def lexists(self, path: str) -> bool:
+        return not self._inside(path) and super().lexists(path)
+
+    @override
+    def exists(self, path: str) -> bool:
+        return not self._inside(path) and super().exists(path)
+
+    @override
+    def is_file(self, path: str) -> bool:
+        return not self._inside(path) and super().is_file(path)
+
+    @override
+    def is_dir(self, path: str) -> bool:
+        return not self._inside(path) and super().is_dir(path)
+
+    @override
+    def is_readable(self, path: str) -> bool:
+        return path != self._closed and not self._inside(path) and super().is_readable(path)
+
+    @override
+    def is_searchable(self, path: str) -> bool:
+        return path != self._closed and not self._inside(path) and super().is_searchable(path)
+
+    @override
+    def read_text(self, path: str, default: str | None = None) -> str | None:
+        return default if self._inside(path) else super().read_text(path, default)
+
+
 class _BufferedToPipe(io.StringIO):
     """A stdout on a pipe: what is written reaches the pipe only when flushed."""
 
@@ -1684,6 +1723,34 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual((rc, out), (1, ""))
         self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
         self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_in_a_folder_this_user_may_not_search_is_not_taken_as_missing(self) -> None:
+        # /etc/cst at 0700 of root: lexists cannot see swap.conf there, and the migration must not run.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        closed = os.path.dirname(self.env.settings_path)
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                rc, out, err, _ = self._run_on(cmd, _ClosedFolder(self._fs().block_links, closed=closed))
+                self.assertEqual(rc, 0, err)
+                self.assertIn(
+                    "  ?         cst/swap.conf                          cannot be read as this user: on the host,"
+                    f" cst swap {cmd} --root\n",
+                    out,
+                )
+                self.assertNotIn("  write     cst/swap.conf", out)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_missing_from_a_folder_this_user_may_search_is_migrated(self) -> None:
+        # The folder is searchable (not readable: 0711): lexists is right, and the migration runs.
+        self._older_install()
+        folder = os.path.dirname(self.env.settings_path)
+        os.makedirs(folder, exist_ok=True)
+        fs = _FakeTempFileSystem(self._fs().block_links, unreadable_paths={folder})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  write     cst/swap.conf", out)
 
     def test_a_settings_file_root_may_not_read_refuses_and_does_not_ask_for_root(self) -> None:
         # Root, and access refuses (a security policy, a root-squashed mount): --root cannot help.
