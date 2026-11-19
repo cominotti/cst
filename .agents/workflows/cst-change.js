@@ -94,6 +94,9 @@ const BASH = /\.(sh|bash)$/
 // a missed checklist.
 const EXTLESS = /(^|\/)[^./]+$/
 const INSTALL = /^cst_core\/(domain|application|adapters)\/install\.py$/
+// A path of what CST installs or runs (an E2E test runs on the machine too): neither Markdown, a unit test nor
+// repository tooling.
+const machinePath = (p) => !MD.test(p.path) && !REPO_ONLY.test(p.path) && (!UNIT_TEST.test(p.path) || E2E.test(p.path))
 
 // Which checklist lenses review a change, and whether tier 1 must run, from the paths it touches
 // (git diff --name-status --no-renames). Pure: tested below at every start.
@@ -101,7 +104,7 @@ function pickLenses(kind, changed) {
   if (!changed.length) throw new Error('nothing changed beyond the base')
   for (const p of changed) if (!/^[AMDT]$/.test(p.status)) throw new Error('changed path status not in A/M/D/T: ' + JSON.stringify(p))
   const code = changed.filter((p) => !MD.test(p.path))
-  const machine = code.filter((p) => !REPO_ONLY.test(p.path) && (!UNIT_TEST.test(p.path) || E2E.test(p.path)))
+  const machine = code.filter(machinePath)
   const python = (p) => /\.py$/.test(p.path) || (EXTLESS.test(p.path) && !REPO_ONLY.test(p.path))
   const bashSource = (p) => p.status !== 'A' && (BASH.test(p.path) || (EXTLESS.test(p.path) && !UNIT_TEST.test(p.path) && !REPO_ONLY.test(p.path)))
   if (kind === 'docs' && (machine.length || code.some(python))) throw new Error('kind "docs" but code CST runs changed: ' + code.map((p) => p.path).join(', '))
@@ -165,7 +168,7 @@ function numstatLines(text) {
 function fullReviewReason(changed, lines, lenses) {
   if (lines === null) return 'a binary file or a numstat line that does not parse'
   if (lines > FAST_LINES) return lines + ' changed lines (more than ' + FAST_LINES + ')'
-  const other = changed.filter((p) => !MD.test(p.path) && !REPO_ONLY.test(p.path) && (!UNIT_TEST.test(p.path) || E2E.test(p.path)))
+  const other = changed.filter(machinePath)
   if (other.length) return 'paths beyond docs, unit tests and repository tooling: ' + other.map((p) => p.path).join(', ')
   const lens = lenses.filter((l) => l !== 'primitives')
   if (lens.length) return 'lenses beyond primitives: ' + lens.join(', ')
