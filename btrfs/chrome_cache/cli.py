@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 import sys
+from typing import assert_never
 from btrfs.chrome_cache.adapters import (
     allocated_bytes,
     apply,
@@ -97,23 +98,27 @@ def main(argv: Sequence[str]) -> int:
     if cmd in (ChromeCacheCommand.STATUS, ChromeCacheCommand.PLAN):
         restore_default_signals()  # they only read: `| head` ends them quietly; apply and off keep Python's handling
     try:
-        if cmd == ChromeCacheCommand.STATUS:
-            return status(home)
-        if cmd == ChromeCacheCommand.PLAN:
-            print(plan_line(home))
-            return 0
-        if cmd == ChromeCacheCommand.APPLY:
-            state, msg, changed = apply(home)
-            where = f"~/{FLAGS_REL}: " if state != ChromeFlagsState.NO_APP else ""
-            print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
-            if changed:
-                print("           Takes effect when Chrome starts again (quit all its windows first).")
-            return 0
-        msg, changed, still_set = off(home)
-        print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
-        if changed and not still_set:
-            print("           Takes effect when Chrome starts again.")
-        return 0
+        match cmd:
+            case ChromeCacheCommand.STATUS:
+                return status(home)
+            case ChromeCacheCommand.PLAN:
+                print(plan_line(home))
+                return 0
+            case ChromeCacheCommand.APPLY:
+                state, msg, changed = apply(home)
+                where = f"~/{FLAGS_REL}: " if state != ChromeFlagsState.NO_APP else ""
+                print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
+                if changed:
+                    print("           Takes effect when Chrome starts again (quit all its windows first).")
+                return 0
+            case ChromeCacheCommand.OFF | ChromeCacheCommand.UNDO:
+                msg, changed, still_set = off(home)
+                print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
+                if changed and not still_set:
+                    print("           Takes effect when Chrome starts again.")
+                return 0
+            case _:
+                assert_never(cmd)
     except (Refused, OSError, ValueError) as e:
         print(f"NEEDS A LOOK: chrome-cache: {e}", file=sys.stderr)
         return 1

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import TypedDict
+from typing import Literal, TypedDict
 import shlex
 
 from cst_core.domain.values import GIB, MIB
@@ -118,7 +118,18 @@ def inspect(text: str) -> _InspectResult:
     }
 
 
-def decide(text: str) -> tuple[ChromeFlagsState, str | None, str]:
+# What decide finds (NO_APP is apply's own answer, never decide's).
+type DecidedState = Literal[
+    ChromeFlagsState.OFF,
+    ChromeFlagsState.USER,
+    ChromeFlagsState.ABSENT,
+    ChromeFlagsState.MANAGED,
+    ChromeFlagsState.USER_SAME,
+    ChromeFlagsState.CAP_MISSING,
+]
+
+
+def decide(text: str) -> tuple[DecidedState, str | None, str]:
     """(state, new_text or None, message). new_text None: nothing to write."""
     i = inspect(text)
     d, s = i["dir"], i["size"]

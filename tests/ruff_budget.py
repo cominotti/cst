@@ -130,6 +130,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "btrfs/chrome_cache FBT001": 2,
     "btrfs/chrome_cache FBT002": 1,
     "btrfs/chrome_cache PLR0911": 2,
+    "btrfs/chrome_cache PLR0912": 1,
     "btrfs/chrome_cache PLR2004": 1,
     "btrfs/docker_gc DTZ": 3,
     "btrfs/docker_gc N": 2,

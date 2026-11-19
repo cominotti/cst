@@ -129,7 +129,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 149,
     "bluetooth/setup/cli.py": 32,
     "btrfs/bulk/cli.py": 89,
-    "btrfs/chrome_cache/cli.py": 80,
+    "btrfs/chrome_cache/cli.py": 84,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
