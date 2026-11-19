@@ -912,13 +912,15 @@ class CommandRunnerTest(unittest.TestCase):
                 self.py,
                 "-I",
                 "-c",
-                "import subprocess, sys\n"
-                f"sys.path.insert(0, {repo!r})\n"
-                "from cst_core.adapters.runner import SubprocessCommandRunner\n"
-                "r = SubprocessCommandRunner()\n"
-                "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
-                "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
-                "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n",
+                (
+                    "import subprocess, sys\n"
+                    f"sys.path.insert(0, {repo!r})\n"
+                    "from cst_core.adapters.runner import SubprocessCommandRunner\n"
+                    "r = SubprocessCommandRunner()\n"
+                    "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
+                    "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
+                    "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n"
+                ),
                 *probe,
             ]
             out = subprocess.run(

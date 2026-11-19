@@ -614,10 +614,14 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertEqual(
             out.split("\n")[:2],
             [
-                f"<4>game-profile: {self.state} line {n - 1}: no record 'off' can read, skipped:"
-                " prop sys 'user.slice MemoryLow new -",
-                f"<4>game-profile: {self.state} line {n}: no record 'off' can read, skipped:"
-                " prop sys machine.slice IOWeight existed",
+                (
+                    f"<4>game-profile: {self.state} line {n - 1}: no record 'off' can read, skipped:"
+                    " prop sys 'user.slice MemoryLow new -"
+                ),
+                (
+                    f"<4>game-profile: {self.state} line {n}: no record 'off' can read, skipped:"
+                    " prop sys machine.slice IOWeight existed"
+                ),
             ],
         )
         self.assertIn("<5>game-profile: off: previous CPU", out)
@@ -673,8 +677,10 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertEqual(
             [x for x in out.split("\n") if "unreadable:" in x],
             [
-                f"  unreadable: {self.state} line {len(self.read(self.state).split(chr(10))) - 2} (skipped):"
-                " prop usr 'lushtext.slice CPUWeight new -"
+                (
+                    f"  unreadable: {self.state} line {len(self.read(self.state).split(chr(10))) - 2} (skipped):"
+                    " prop usr 'lushtext.slice CPUWeight new -"
+                )
             ],
         )
         self.assertIn("drift: not checked", out)

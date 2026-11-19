@@ -1136,9 +1136,11 @@ class ZswapParamsTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  WARN   zswap shrinker_enabled: this kernel has no such parameter; /etc/tmpfiles.d/zswap.conf "
-                "sets it, and systemd-tmpfiles skips it at boot without a word (cst swap status shows the zswap "
-                "settings)"
+                (
+                    "  WARN   zswap shrinker_enabled: this kernel has no such parameter; /etc/tmpfiles.d/zswap.conf "
+                    "sets it, and systemd-tmpfiles skips it at boot without a word (cst swap status shows the zswap "
+                    "settings)"
+                )
             ],
         )
         self.assert_read_only()
@@ -1150,8 +1152,10 @@ class ZswapParamsTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  WARN   zswap: not in this kernel (no /sys/module/zswap/parameters): "
-                "/etc/tmpfiles.d/zswap.conf sets nothing"
+                (
+                    "  WARN   zswap: not in this kernel (no /sys/module/zswap/parameters): "
+                    "/etc/tmpfiles.d/zswap.conf sets nothing"
+                )
             ],
         )
 
@@ -1187,8 +1191,10 @@ class SwapSettingsDoctorTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  WARN   swap partition: /etc/cst/swap.conf SWAP_SIZE_BYTES=4 GiB: the partition's exact size in bytes"
-                " (blockdev --getsize64 /dev/disk/by-partuuid/...): cst swap apply refuses until it is fixed"
+                (
+                    "  WARN   swap partition: /etc/cst/swap.conf SWAP_SIZE_BYTES=4 GiB: the partition's exact size in bytes"
+                    " (blockdev --getsize64 /dev/disk/by-partuuid/...): cst swap apply refuses until it is fixed"
+                )
             ],
         )
 
@@ -1203,8 +1209,10 @@ class SwapSettingsDoctorTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  WARN   swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
-                " `cst swap apply` writes it from /etc/crypttab"
+                (
+                    "  WARN   swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
+                    " `cst swap apply` writes it from /etc/crypttab"
+                )
             ],
         )
         self.assertIn("swap apply", r.stdout.split("swap partition:", 1)[1])
@@ -1216,8 +1224,10 @@ class SwapSettingsDoctorTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
-                " refuses (swap/README.md, section 2.3)"
+                (
+                    "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+                    " refuses (swap/README.md, section 2.3)"
+                )
             ],
         )
 
@@ -1255,8 +1265,10 @@ class MachineSliceMemoryLowDoctorTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                f"  info   machine.slice MemoryLow 1.0 GiB: set by {self.RUN}, which systemd applies after CST's"
-                f" {self.CST} (48.0 GiB); cst swap leaves it"
+                (
+                    f"  info   machine.slice MemoryLow 1.0 GiB: set by {self.RUN}, which systemd applies after CST's"
+                    f" {self.CST} (48.0 GiB); cst swap leaves it"
+                )
             ],
         )
         self.assertNotIn("revert", r.stdout)
@@ -1301,8 +1313,10 @@ class DockerNocowPostponedTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
-                "2026-11-05 17:33: Docker is running; tried again at the next boot"
+                (
+                    "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
+                    "2026-11-05 17:33: Docker is running; tried again at the next boot"
+                )
             ],
         )
         self.assert_read_only()
@@ -1327,8 +1341,10 @@ class DockerNocowPostponedTest(Scratch):
         self.assertEqual(
             self.lines(r.stdout),
             [
-                "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
-                "at an unknown time: no reason recorded; tried again at the next boot"
+                (
+                    "  info   Docker volumes NOCOW: the boot-time migration was postponed at 1 boot(s) in a row, last "
+                    "at an unknown time: no reason recorded; tried again at the next boot"
+                )
             ],
         )
 

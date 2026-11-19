@@ -354,12 +354,14 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
                 priv,
                 "bash",
                 "-c",
-                "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
-                "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
-                "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
-                "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
-                "if [ -f /run/e2e-loop-devs ]; then "
-                "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi",
+                (
+                    "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
+                    "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
+                    "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
+                    "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
+                    "if [ -f /run/e2e-loop-devs ]; then "
+                    "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi"
+                ),
             ],
             check=False,
             capture=True,

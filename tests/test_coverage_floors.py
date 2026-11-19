@@ -67,8 +67,10 @@ class CoverageFloorsTest(unittest.TestCase):
         self.assertEqual(
             floor_problems({}, {"gone domain": 50}),
             [
-                "gone domain: has a floor (50 %) but no such package layer was measured; "
-                "rename the entry with its package, or delete it"
+                (
+                    "gone domain: has a floor (50 %) but no such package layer was measured; "
+                    "rename the entry with its package, or delete it"
+                )
             ],
         )
 

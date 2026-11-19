@@ -1278,8 +1278,10 @@ class ModuleRouterTest(unittest.TestCase):
             [
                 (
                     "err",
-                    "'cst x nocow apply' must run on the host, not inside a toolbox/container.\n"
-                    "In a host terminal: cst x nocow apply\n",
+                    (
+                        "'cst x nocow apply' must run on the host, not inside a toolbox/container.\n"
+                        "In a host terminal: cst x nocow apply\n"
+                    ),
                 )
             ],
         )
@@ -1335,8 +1337,10 @@ class ModuleRouterTest(unittest.TestCase):
                 [
                     (
                         "err",
-                        "cst x: ERROR: run it from your user account (needs SUDO_USER): "
-                        "toolchain caches and settings belong to your user\n",
+                        (
+                            "cst x: ERROR: run it from your user account (needs SUDO_USER): "
+                            "toolchain caches and settings belong to your user\n"
+                        ),
                     )
                 ],
             )

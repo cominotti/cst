@@ -382,8 +382,10 @@ class HealthCheckTest(unittest.TestCase):
                 "mixed profiles",
                 {"usage": "Overall:\n    Device missing:\t\t   0\n    Multiple profiles:\t\t  yes\n"},
                 [
-                    "btrfs /var: mixed chunk profiles (degraded writes?) - run balance "
-                    "-dconvert=raid1,soft -mconvert=raid1,soft"
+                    (
+                        "btrfs /var: mixed chunk profiles (degraded writes?) - run balance "
+                        "-dconvert=raid1,soft -mconvert=raid1,soft"
+                    )
                 ],
             ),
             ("critical unallocated", {"device_usage": device_usage(800 * GIB, 4 * GIB)}, [crit]),
@@ -391,9 +393,11 @@ class HealthCheckTest(unittest.TestCase):
                 "low unallocated",
                 {"device_usage": device_usage(20 * GIB + 5, 800 * GIB)},
                 [
-                    "btrfs /var: only 20 GiB unallocated on /dev/mapper/cst-test-1 (warning below 50 GiB; metadata "
-                    "grows only from unallocated space). Free space, or compact half-empty data chunks: "
-                    "'btrfs balance start -dusage=20 /var'"
+                    (
+                        "btrfs /var: only 20 GiB unallocated on /dev/mapper/cst-test-1 (warning below 50 GiB; metadata "
+                        "grows only from unallocated space). Free space, or compact half-empty data chunks: "
+                        "'btrfs balance start -dusage=20 /var'"
+                    )
                 ],
             ),
             (
@@ -1009,8 +1013,10 @@ class MemberDisksTest(unittest.TestCase):
             (rc, err),
             (
                 1,
-                f"<2>{TAG}: NVMe nvme0n1: critical_warning=1\n<2>{TAG}: NVMe nvme0n1: media_errors=1\n"
-                f"<2>{TAG}: NVMe nvme0n1: available_spare 5% below threshold 10%\n",
+                (
+                    f"<2>{TAG}: NVMe nvme0n1: critical_warning=1\n<2>{TAG}: NVMe nvme0n1: media_errors=1\n"
+                    f"<2>{TAG}: NVMe nvme0n1: available_spare 5% below threshold 10%\n"
+                ),
             ),
         )
         h.machine["nvme"] = {"nvme0": HEALTHY_SMART, "nvme2": HEALTHY_SMART}

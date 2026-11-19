@@ -73,9 +73,11 @@ class RustBuild(BaseTarget[RustPolicy]):
         if ws is None:
             return ["orphans: the rule is off (RUST_BUILD_ORPHANS=no)"]
         out = [
-            f"workspaces: {ws.repos} repositories under ~/{WORKSPACE_REL}, {len(ws.worktrees)} worktree(s), "
-            f"{ws.manifests} Cargo.toml, {ws.asked} asked (cargo metadata --offline --no-deps), "
-            f"{ws.seconds:.0f}s"
+            (
+                f"workspaces: {ws.repos} repositories under ~/{WORKSPACE_REL}, {len(ws.worktrees)} worktree(s), "
+                f"{ws.manifests} Cargo.toml, {ws.asked} asked (cargo metadata --offline --no-deps), "
+                f"{ws.seconds:.0f}s"
+            )
         ]
         if claimed is None:
             out.append(f"orphans: NOT looked for in this run: {ws.incomplete}")
@@ -321,8 +323,10 @@ class RustBuild(BaseTarget[RustPolicy]):
             return [f"size:     ~/{ROOT_REL} does not exist yet"]
         folders, trash, others = self.machine.tree.scan(root, self.now)
         out = [
-            f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
-            "(as du shows it: before btrfs compression)"
+            (
+                f"size:     {gib(sum(f.size for f in folders))} in {len(folders)} folder(s) "
+                "(as du shows it: before btrfs compression)"
+            )
         ]
         if folders:
             old = min(folders, key=lambda f: f.activity)

@@ -267,8 +267,10 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
         if not live.set_profile(ldac):
             return (
                 False,
-                f"pactl could not switch back to {ldac}: the headset stays on {alt} "
-                f"(pactl set-card-profile bluez_card.{live.dev} {ldac})",
+                (
+                    f"pactl could not switch back to {ldac}: the headset stays on {alt} "
+                    f"(pactl set-card-profile bluez_card.{live.dev} {ldac})"
+                ),
                 live.snap(),
             )
 

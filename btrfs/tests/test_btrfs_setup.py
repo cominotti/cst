@@ -307,8 +307,10 @@ disable_timers x.service
         # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
         # (not-found); the Python status part is a stub.
         body = [
-            f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
-            "is-active) echo inactive; return 3 ;; esac; }",
+            (
+                f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
+                "is-active) echo inactive; return 3 ;; esac; }"
+            ),
             'python3() { echo "python3 $*"; }',
             *self.docker_gc_body(),
             # The installed files, in the test's folder (the real ones may exist where the test runs).

@@ -400,8 +400,10 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(
             config_problems(bad),
             [
-                f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
-                "ignore the findings one by one instead, each with its reason"
+                (
+                    f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
+                    "ignore the findings one by one instead, each with its reason"
+                )
             ],
         )
 
@@ -433,8 +435,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 "  artipacked: &off\n    disable: true\n",
                 [
                     f"{CONFIG}:11: " + flow.format("artipacked"),
-                    f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
-                    "ignore the findings one by one instead, each with its reason",
+                    (
+                        f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
+                        "ignore the findings one by one instead, each with its reason"
+                    ),
                 ],
             ),
             ("  artipacked: *off\n", [f"{CONFIG}:11: " + flow.format("artipacked")]),
@@ -447,8 +451,10 @@ class WorkflowAuditTest(unittest.TestCase):
             (
                 '  artipacked:\n    config:\n      # why\n      "disable": true\n',
                 [
-                    f"{CONFIG}:14: artipacked: `disable` switches the audit off for every file; "
-                    "ignore the findings one by one instead, each with its reason"
+                    (
+                        f"{CONFIG}:14: artipacked: `disable` switches the audit off for every file; "
+                        "ignore the findings one by one instead, each with its reason"
+                    )
                 ],
             ),
             ("  artipacked:\n    config:\n      # why\n      *off: x\n", [f"{CONFIG}:14: {plain}"]),
@@ -470,20 +476,24 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(
             entry_problems(GOOD_CONFIG, {**files, ".github/actions/two/action.yml": 201}),
             [
-                f"{CONFIG}:6: github-env: `action.yml:201` matches .github/actions/one/action.yml, "
-                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
-                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
-                "fix the finding"
+                (
+                    f"{CONFIG}:6: github-env: `action.yml:201` matches .github/actions/one/action.yml, "
+                    ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                    "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                    "fix the finding"
+                )
             ],
         )
         whole = GOOD_CONFIG + "  artipacked:\n    ignore:\n      # why\n      - action.yml\n      - ci.yml\n"
         self.assertEqual(
             entry_problems(whole, files),
             [
-                f"{CONFIG}:14: artipacked: `action.yml` matches .github/actions/one/action.yml, "
-                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
-                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
-                "fix the finding"
+                (
+                    f"{CONFIG}:14: artipacked: `action.yml` matches .github/actions/one/action.yml, "
+                    ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                    "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                    "fix the finding"
+                )
             ],
         )
         for odd in ('"action.yml:201"', "action.yml:201  # why", "'ci.yml'"):
@@ -491,8 +501,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     entry_problems(GOOD_CONFIG.replace("action.yml:201", odd), files),
                     [
-                        f"{CONFIG}:6: github-env: write the entry as FILE or FILE:LINE, unquoted and with no "
-                        "comment after it, so that this test can check it"
+                        (
+                            f"{CONFIG}:6: github-env: write the entry as FILE or FILE:LINE, unquoted and with no "
+                            "comment after it, so that this test can check it"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -545,8 +557,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     task_problems(GOOD_CUE.replace(good, bad)),
                     [
-                        f"{INVOWKFILE}: the task `test workflows` must run exactly `{good}`, "
-                        f"not `{bad}` (see {AUDIT_WHY})"
+                        (
+                            f"{INVOWKFILE}: the task `test workflows` must run exactly `{good}`, "
+                            f"not `{bad}` (see {AUDIT_WHY})"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -602,8 +616,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     uv_audit_problems(GOOD_CUE.replace(good, bad), GOOD_NIGHTLY),
                     [
-                        f"{INVOWKFILE}: the task `ci uv-audit` must run exactly `{good}`, "
-                        f"not `{bad}` (see {UV_AUDIT_WHY})"
+                        (
+                            f"{INVOWKFILE}: the task `ci uv-audit` must run exactly `{good}`, "
+                            f"not `{bad}` (see {UV_AUDIT_WHY})"
+                        )
                     ],
                 )
 

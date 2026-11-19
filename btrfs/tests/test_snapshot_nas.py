@@ -715,8 +715,10 @@ class MaintenanceTest(Base):
                     "-a",
                     "btrfs-snapshot",
                     "NAS backup: repository check keeps failing",
-                    "restic check failed 3 runs in a row (rc=1) with the NAS reachable, without naming damaged data; "
-                    "see journalctl -u btrfs-snapshot-nas.",
+                    (
+                        "restic check failed 3 runs in a row (rc=1) with the NAS reachable, without naming damaged data; "
+                        "see journalctl -u btrfs-snapshot-nas."
+                    ),
                 ]
             ],
         )

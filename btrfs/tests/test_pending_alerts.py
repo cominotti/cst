@@ -441,8 +441,10 @@ class PendingAlertsTest(unittest.TestCase):
             [
                 f"Happened {when(FIRST)}, while no desktop session could show it.\n\nthe body\nline 2",
                 f"Happened again {when(FIRST + 60)}, while no desktop session could show it.\n\nthe body\nline 2",
-                f"Happened 2 more times since you last saw it, while no desktop session could show it: last "
-                f"{when(FIRST + 120)}.\n\nthe body\nline 2",
+                (
+                    f"Happened 2 more times since you last saw it, while no desktop session could show it: last "
+                    f"{when(FIRST + 120)}.\n\nthe body\nline 2"
+                ),
             ],
         )
 

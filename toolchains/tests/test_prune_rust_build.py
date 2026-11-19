@@ -550,11 +550,13 @@ class ApplyTest(Base):
                 sys.executable,
                 "-I",
                 "-c",
-                "import fcntl, sys, time\n"
-                "f = open(sys.argv[1])\n"
-                "fcntl.flock(f, fcntl.LOCK_EX)\n"
-                "print('held', flush=True)\n"
-                "time.sleep(60)\n",
+                (
+                    "import fcntl, sys, time\n"
+                    "f = open(sys.argv[1])\n"
+                    "fcntl.flock(f, fcntl.LOCK_EX)\n"
+                    "print('held', flush=True)\n"
+                    "time.sleep(60)\n"
+                ),
                 lock,
             ],
             stdout=subprocess.PIPE,

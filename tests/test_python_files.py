@@ -173,8 +173,10 @@ def ruff_version_problems(conf: Mapping[str, object]) -> list[str]:
     got = _sub(_sub(dict(conf), "tool"), "ruff").get("required-version")
     if got != want:
         return [
-            f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
-            "(change both together)"
+            (
+                f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
+                "(change both together)"
+            )
         ]
     return []
 
@@ -184,8 +186,10 @@ def typing_extensions_problems(conf: Mapping[str, object]) -> list[str]:
     got = _sub(_sub(_sub(dict(conf), "tool"), "ruff"), "lint").get("typing-extensions")
     if got is not False:
         return [
-            f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library only: "
-            "no ruff fix may import typing_extensions)"
+            (
+                f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library only: "
+                "no ruff fix may import typing_extensions)"
+            )
         ]
     return []
 
@@ -358,8 +362,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["a.py", "tool", "old.py", "new.py"], ["a.py", "tool", "old.py"], ["old.py"]),
             [
-                "old.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
-                "NOT_YET_CLEAN in tests/test_python_files.py",
+                (
+                    "old.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
+                    "NOT_YET_CLEAN in tests/test_python_files.py"
+                ),
                 outside.format("new.py"),
             ],
         )
@@ -367,8 +373,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["a.py", "tool", "new.py"], ["a.py", "tool"], ["old.py"]),
             [
-                "old.py: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
-                "repository; delete it there, or rename it there if the file was renamed",
+                (
+                    "old.py: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
+                    "repository; delete it there, or rename it there if the file was renamed"
+                ),
                 outside.format("new.py"),
             ],
         )
@@ -386,17 +394,21 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["pkg", "top.py", ".github/scripts", "other"]),
             [
-                "pkg/helper: a Python file outside the ty gate; make ty clean on it and add its path "
-                "(ty finds no extensionless file by itself) to [tool.ty.src] include (a new file never "
-                "goes to NOT_YET_CLEAN)"
+                (
+                    "pkg/helper: a Python file outside the ty gate; make ty clean on it and add its path "
+                    "(ty finds no extensionless file by itself) to [tool.ty.src] include (a new file never "
+                    "goes to NOT_YET_CLEAN)"
+                )
             ],
         )
         # A file below no listed folder is outside, a dot folder included.
         self.assertEqual(
             check(["pkg", "pkg/helper", "top.py", "other"]),
             [
-                ".github/scripts/c.py: a Python file outside the ty gate; make ty clean on it and add its "
-                "folder to [tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
+                (
+                    ".github/scripts/c.py: a Python file outside the ty gate; make ty clean on it and add its "
+                    "folder to [tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
+                )
             ],
         )
         # "pkg/s" is no folder of pkg/sub/b.py: a prefix of a name covers nothing.
@@ -405,8 +417,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(gate, ["pkg/sub/b.py"]),
             [
-                "pkg/sub/b.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
-                "NOT_YET_CLEAN in tests/test_python_files.py"
+                (
+                    "pkg/sub/b.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
+                    "NOT_YET_CLEAN in tests/test_python_files.py"
+                )
             ],
         )
         # Entries are plain paths to a folder with Python files or to a Python file.
@@ -455,15 +469,19 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(conf(), ["a.py", where]),
                     [
-                        f"{where}: ty leaves the files an .ignore file matches out of its check, and git "
-                        "does not see the rule; delete it"
+                        (
+                            f"{where}: ty leaves the files an .ignore file matches out of its check, and git "
+                            "does not see the rule; delete it"
+                        )
                     ],
                 )
         self.assertEqual(
             ty_setting_problems(conf(), ["a.py", "ty.toml"]),
             [
-                "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
-                "no longer applies; delete it"
+                (
+                    "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
+                    "no longer applies; delete it"
+                )
             ],
         )
         for name, bad in (
@@ -475,9 +493,11 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(bad, ["a.py"]),
                     [
-                        f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take "
-                        "files or diagnostics out of ty's check; allow it in TY_SETTINGS of "
-                        "tests/test_python_files.py only once it is known not to"
+                        (
+                            f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take "
+                            "files or diagnostics out of ty's check; allow it in TY_SETTINGS of "
+                            "tests/test_python_files.py only once it is known not to"
+                        )
                     ],
                 )
         # The platform may only be Linux, the one CST runs on.
@@ -487,8 +507,10 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(conf(environment={"python-platform": platform}), ["a.py"]),
                     [
-                        f"[tool.ty] environment.python-platform = {platform!r}: only 'linux' is allowed "
-                        "(CST runs on Linux only; another platform changes what ty checks)"
+                        (
+                            f"[tool.ty] environment.python-platform = {platform!r}: only 'linux' is allowed "
+                            "(CST runs on Linux only; another platform changes what ty checks)"
+                        )
                     ],
                 )
         # Another environment setting is still refused.
@@ -504,8 +526,10 @@ class PythonFilesTest(unittest.TestCase):
                         conf(rules={"division-by-zero": "error", "invalid-assignment": level}), ["a.py"]
                     ),
                     [
-                        f"[tool.ty] rules.invalid-assignment = {level!r}: a rule may only be raised to "
-                        '"error" here; a lower level takes its diagnostics out of the gate'
+                        (
+                            f"[tool.ty] rules.invalid-assignment = {level!r}: a rule may only be raised to "
+                            '"error" here; a lower level takes its diagnostics out of the gate'
+                        )
                     ],
                 )
         for terminal in ({"error-on-warning": False}, {}):
@@ -566,8 +590,10 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ruff_version_problems(conf(bad)),
                     [
-                        f"[tool.ruff] required-version = {bad!r}: must be '==1.2.3', the ruff pin of the "
-                        "dev group (change both together)"
+                        (
+                            f"[tool.ruff] required-version = {bad!r}: must be '==1.2.3', the ruff pin of the "
+                            "dev group (change both together)"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -586,8 +612,10 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     typing_extensions_problems(conf),
                     [
-                        f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library "
-                        "only: no ruff fix may import typing_extensions)"
+                        (
+                            f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library "
+                            "only: no ruff fix may import typing_extensions)"
+                        )
                     ],
                 )
 

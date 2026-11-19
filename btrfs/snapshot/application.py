@@ -226,14 +226,12 @@ class Run:
                     f"from a clock that ran ahead: check it with '{self.options.list_hint}' and delete it "
                     f"with 'btrfs subvolume delete {newest.path}'"
                 ), []
-            notes.append(
-                (
-                    4,
-                    f"the newest snapshot {newest.entry} is dated in the future (named while the clock "
-                    f"ran ahead?); it is kept until its date passes - if the name is wrong, delete it "
-                    f"with 'btrfs subvolume delete {newest.path}'",
-                )
+            future = (
+                f"the newest snapshot {newest.entry} is dated in the future (named while the clock "
+                f"ran ahead?); it is kept until its date passes - if the name is wrong, delete it "
+                f"with 'btrfs subvolume delete {newest.path}'"
             )
+            notes.append((4, future))
         if not synced:
             jump = self.clock_jump()
             if jump > CLOCK_SLACK:

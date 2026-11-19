@@ -461,13 +461,17 @@ R="{self.root}"
             "unpinned.json": ("no", "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]"),
             "staged-clean.json": (
                 "yes",
-                "  44.20261104.0  staged        555555555555 initramfs-etc=[]\n"
-                "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]",
+                (
+                    "  44.20261104.0  staged        555555555555 initramfs-etc=[]\n"
+                    "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]"
+                ),
             ),
             "pinned.json": (
                 "no",
-                "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]\n"
-                "  44.20261009.0  -             000000000000 initramfs-etc=[]",
+                (
+                    "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]\n"
+                    "  44.20261009.0  -             000000000000 initramfs-etc=[]"
+                ),
             ),
         }
         for name, (staged, summary) in cases.items():

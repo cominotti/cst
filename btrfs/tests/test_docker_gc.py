@@ -1207,8 +1207,10 @@ class DockerCommandTest(unittest.TestCase):
         self.assertTrue(self.info_says(0, ""))
         for down in (
             "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
-            "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct "
-            "and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n",
+            (
+                "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct "
+                "and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n"
+            ),
             "... dial unix /var/run/docker.sock: connect: connection refused\n",
         ):
             self.assertFalse(self.info_says(1, down), down)
