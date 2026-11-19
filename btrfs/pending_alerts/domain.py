@@ -23,6 +23,7 @@ copy of another version of CST reads and writes the same record.
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import posixpath
 import re
 import time
@@ -55,10 +56,20 @@ SUMMARY_BODY: Final = (
     "Older and not critical (critical ones are always shown). Read them: cst-pending-alerts --list "
     "(or cst btrfs status)."
 )
-MARKS: Final[Mapping[str, str]] = {
-    "shown": "  [shown to you]",
-    "summarized": "  [only counted in the summary at login; text not shown]",
-    "": "  [NOT shown to you yet: next login]",
+
+
+class SeenHow(StrEnum):
+    """How this user had a pending file at a login (the third field of a delivered line)."""
+
+    SHOWN = "shown"
+    SUMMARIZED = "summarized"
+
+
+# The mark --list puts after an alert: how this user had it (None: not at all yet).
+MARKS: Final[Mapping[SeenHow | None, str]] = {
+    SeenHow.SHOWN: "  [shown to you]",
+    SeenHow.SUMMARIZED: "  [only counted in the summary at login; text not shown]",
+    None: "  [NOT shown to you yet: next login]",
 }
 _HEADERS: Final = (f"cst-alert {_SPOOL.version}", "f44-alert 1")  # f44-tools wrote the second
 _APP: Final = re.compile(rf"[A-Za-z0-9._-]{{1,{ALERT_APP_MAX}}}")
@@ -161,7 +172,7 @@ class Seen:
     """What this user had of one pending file at a login."""
 
     mtime: str  # the file's mtime then (whole seconds in records of the first version)
-    how: str  # shown or summarized
+    how: SeenHow
     count: int  # its count then (0: unknown)
     first: int  # its first occurrence then (0: unknown)
 
@@ -179,7 +190,7 @@ def parse_delivered(text: str) -> dict[str, Seen]:
         # Lines of the first version had only "<name> <mtime>": shown, count unknown.
         seen = Seen(
             mtime,
-            "summarized" if how == "summarized" else "shown",
+            SeenHow.SUMMARIZED if how == SeenHow.SUMMARIZED else SeenHow.SHOWN,
             int(count) if _COUNT.fullmatch(count) else 0,
             int(first) if _EPOCH.fullmatch(first) else 0,
         )
@@ -190,15 +201,15 @@ def parse_delivered(text: str) -> dict[str, Seen]:
     return rec
 
 
-def seen_as(rec: Mapping[str, Seen], name: str, mtime: str) -> str:
-    """ "shown" or "summarized" if this user had this very version of the file at a login; "" otherwise."""
+def seen_as(rec: Mapping[str, Seen], name: str, mtime: str) -> SeenHow | None:
+    """How this user had this very version of the file at a login; None if not."""
     seen = rec.get(name)
     if seen is None:
-        return ""
+        return None
     # Full precision: a repeat kept within the same second is a new version.
     # Records of the first version had whole seconds only.
     same = seen.mtime == mtime if "." in seen.mtime else seen.mtime == mtime.split(".")[0]
-    return seen.how if same else ""
+    return seen.how if same else None
 
 
 def find_mtime(mtime_ns: int) -> str:
@@ -217,7 +228,7 @@ def login_text(alert: Alert, seen: Seen | None, at: Callable[[int], str]) -> str
     """The text shown: when it happened, then the original body. If this user saw an earlier version
     of the same file (same first occurrence), only the occurrences since then are counted."""
     text = ""
-    if seen is not None and seen.how == "shown" and seen.first == alert.first and 0 < seen.count < alert.count:
+    if seen is not None and seen.how == SeenHow.SHOWN and seen.first == alert.first and 0 < seen.count < alert.count:
         new = alert.count - seen.count
         if new == 1:
             text = f"Happened again {at(alert.last)}, while no desktop session could show it."

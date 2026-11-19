@@ -28,6 +28,7 @@ from btrfs.pending_alerts.domain import (
     Alert,
     PendingPaths,
     Seen,
+    SeenHow,
     alert_paths,
     happened_at,
     list_line,
@@ -93,7 +94,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
     if skip and show_notification(runner, Urgency.NORMAL, TAG, SUMMARY_TITLE.format(n=len(skip)), SUMMARY_BODY):
         for i in skip:
             mtime, name, alert = todo[i]
-            done[name] = Seen(mtime, "summarized", alert.count, alert.first)
+            done[name] = Seen(mtime, SeenHow.SUMMARIZED, alert.count, alert.first)
     for i in pick:
         mtime, name, first_read = todo[i]
         alert = read_pending(s, name)
@@ -101,7 +102,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
             log(4, f"{name}: not a valid pending alert; skipped")
             continue
         if show_notification(runner, alert.urgency, alert.app, alert.title, login_text(alert, rec.get(name), at)):
-            done[name] = Seen(mtime, "shown", first_read.count, first_read.first)
+            done[name] = Seen(mtime, SeenHow.SHOWN, first_read.count, first_read.first)
             log(5, f"shown: {alert.app}: {alert.title} (last {at(alert.last)})")
     if not done:
         return 0
