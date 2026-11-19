@@ -1300,6 +1300,7 @@ printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.con
 s1="$(snap)"
 swap_run plan
 [[ $rc == 0 ]] || fail "plan"
+[[ "$(head -n 1 <<<"$out")" == "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in $W/proc, /sys in $W/sys; the kernel's own settings are neither read nor changed" ]] || fail "plan's test seam line"
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "settings row"
 grep -qF "  write     crypttab: swap0 line" <<<"$out" || fail "crypttab row"
 grep -qF "  ok        partition 0e2e5a5a...                  /dev/e2e-swap0, $SIZE bytes as expected" <<<"$out" || fail "partition row"

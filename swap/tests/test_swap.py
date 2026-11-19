@@ -2326,6 +2326,41 @@ class SwapWiringTest(unittest.TestCase):
             [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "-p", "ActiveState", "machine.slice"]],
         )
 
+    def _seam_output(self, cmd: RunCommand, env: Mapping[str, str]) -> str:
+        # cst swap's own wiring, as root on a scratch /etc that is not there: apply stops before any write.
+        tmp = tempfile.mkdtemp(prefix="swap-seam-")
+        self.addCleanup(shutil.rmtree, tmp)
+        ctx = _FakeContext(
+            container=False, root=True, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        env = {k: v.replace("TMP", tmp) for k, v in env.items()}
+        runner = _ScriptedRunner({})  # never the real systemctl
+        service = swap_wiring.build_service("cst swap", ctx, runner, None, fallback_root="/nowhere", env=env)
+        out = io.StringIO()
+        run_command(cmd, service, hint="", out=out, err=io.StringIO())
+        return out.getvalue().replace(tmp, "TMP")
+
+    def test_a_test_seam_in_the_environment_is_the_first_line_of_plan_status_and_apply(self) -> None:
+        both = {"CST_SWAP_PROC": "TMP/proc", "CST_SWAP_SYS": "TMP/sys"}
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    self._seam_output(cmd, both).splitlines()[0],
+                    "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in TMP/proc, /sys in TMP/sys;"
+                    " the kernel's own settings are neither read nor changed",
+                )
+        self.assertEqual(
+            self._seam_output(D.SwapCommand.PLAN, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": "TMP/sys"}).splitlines()[0],
+            "test seam (CST_SWAP_SYS): /sys in TMP/sys; the kernel's own settings are neither read nor changed",
+        )
+
+    def test_without_a_test_seam_there_is_no_such_line(self) -> None:
+        for env in ({}, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": ""}):
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.APPLY):
+                with self.subTest(env=env, cmd=cmd):
+                    out = self._seam_output(cmd, env)
+                    self.assertNotIn("test seam", out)
+
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")
         self.assertEqual(

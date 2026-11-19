@@ -10,7 +10,7 @@ renders the result.
 from collections.abc import Mapping, Sequence
 import os
 import sys
-from typing import NoReturn
+from typing import Final, NoReturn
 
 from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -27,6 +27,10 @@ from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPo
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import SwapEnvironment
+
+# The test seam's variables (kernel_dirs).
+SEAM_PROC: Final = "CST_SWAP_PROC"
+SEAM_SYS: Final = "CST_SWAP_SYS"
 
 
 def start_swap() -> None:
@@ -85,12 +89,19 @@ def build_service(
     )
 
 
+def moved_kernel_dirs(env: Mapping[str, str]) -> tuple[tuple[str, str, str], ...]:
+    """The kernel folders CST_SWAP_PROC and CST_SWAP_SYS move (kernel_dirs): (variable, folder, where)."""
+    return tuple(
+        (name, kernel, env[name]) for name, kernel in ((SEAM_PROC, "/proc"), (SEAM_SYS, "/sys")) if env.get(name, "")
+    )
+
+
 def kernel_dirs(env: Mapping[str, str]) -> dict[str, str]:
     """Where /proc and /sys are read and written: CST_SWAP_PROC and CST_SWAP_SYS when set (a test's
     scratch tree: the tier 1 E2E container's own /proc/sys and /sys are read-only and the host's
     kernel), else the defaults. The cgroup tree stays /sys/fs/cgroup either way."""
     out: dict[str, str] = {}
-    proc, sys_dir = env.get("CST_SWAP_PROC", ""), env.get("CST_SWAP_SYS", "")
+    proc, sys_dir = env.get(SEAM_PROC, ""), env.get(SEAM_SYS, "")
     if proc:
         out["proc_dir"] = proc
     if sys_dir:
@@ -108,6 +119,7 @@ def desired_paths(
     etc = ctx.etc_dir()
     return SwapEnvironment(
         **kernel_dirs(env or {}),
+        test_seam=moved_kernel_dirs(env or {}),
         src_dir=os.path.join(checkout_root(__file__) or fallback_root, "swap"),
         etc_dir=etc,
         cpu_run_dir=ctx.host_run_dir("cpu-setup"),

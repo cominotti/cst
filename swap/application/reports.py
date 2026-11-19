@@ -97,6 +97,8 @@ class SwapEnvironment:
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+    # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
+    test_seam: tuple[tuple[str, str, str], ...] = ()
 
     def host_view(self, host_path: str) -> str:
         """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
@@ -180,6 +182,17 @@ class SwapReports:
     def prog(self) -> str:
         """The command name in messages (`cst swap`)."""
         return self._env.prog
+
+    @property
+    def test_seam_note(self) -> str:
+        """The line plan, status and apply print first when a test seam moved /proc or /sys ("": none), so
+        a stale export in a root shell cannot pass for the kernel's state."""
+        seam = self._env.test_seam
+        if not seam:
+            return ""
+        names = ", ".join(name for name, _kernel, _path in seam)
+        moved = ", ".join(f"{kernel} in {path}" for _name, kernel, path in seam)
+        return f"test seam ({names}): {moved}; the kernel's own settings are neither read nor changed"
 
     def _desired_text(self, path: str) -> str:
         text = self._fs.read_text(path)

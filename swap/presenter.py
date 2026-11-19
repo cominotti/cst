@@ -273,6 +273,8 @@ def run_command(cmd: RunCommand, service: SwapApplicationService, *, hint: str, 
     """plan, status or apply. apply prints each step as it runs; a failing command stops it with
     that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
     try:
+        if service.test_seam_note:
+            print(service.test_seam_note, file=out)
         match cmd:
             case SwapCommand.PLAN:
                 return render_plan(service.plan_report(), out=out)
