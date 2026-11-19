@@ -628,6 +628,16 @@ class ImportTest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, f"^{re.escape(path)}: not JSON$"):
                 nocow_adapters.configured_root(path)
 
+    def test_a_byte_order_mark_is_skipped_as_dockerd_skips_it(self) -> None:
+        # An editor may save daemon.json with a UTF-8 byte order mark; dockerd reads such a file,
+        # so its data-root counts, and the file is no problem.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daemon.json")
+            with open(path, "wb") as f:
+                f.write(b'\xef\xbb\xbf{"data-root": "/srv/docker"}')
+            self.assertEqual(nocow_adapters.daemon_config(path), ("/srv/docker", ""))
+            self.assertEqual(nocow_adapters.configured_root(path), "/srv/docker")
+
 
 class StatusTest(Base):
     def test_volumes_folder_absent(self) -> None:
@@ -1612,10 +1622,10 @@ class DockerdTest(PostponeBase):
         blocked = os.path.join(d, "root", "etc/docker/daemon.json")
         real_open = builtins.open
 
-        def fake_open(path: str, mode: str = "r") -> object:
+        def fake_open(path: str, mode: str = "r", encoding: str | None = None) -> object:
             if path == blocked:
                 raise PermissionError(13, "Permission denied", path)
-            return real_open(path, mode)
+            return real_open(path, mode, encoding=encoding)
 
         with mock.patch.object(builtins, "open", fake_open):
             rc, out = self.call(self.cli.migrate)

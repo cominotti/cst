@@ -38,9 +38,10 @@ def daemon_config(path: str) -> tuple[str | None, str]:
     file or it names no data root (dockerd's default then). problem: why the file cannot be read
     as one (not JSON, not an object, a data-root that is
     not a folder name); dockerd refuses such a file, so which folder Docker uses is unknown.
-    A read error other than a missing file is raised."""
+    A read error other than a missing file is raised. A UTF-8 byte order mark at its start is
+    skipped, as dockerd skips it."""
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8-sig") as f:
             text = f.read()
     except FileNotFoundError:
         return None, ""

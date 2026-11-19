@@ -741,8 +741,10 @@ docker volume rm <name>         # or one volume by name
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
   start Docker again with `sudo systemctl start docker.socket docker.service`.
-- A `/etc/docker/daemon.json` that dockerd cannot read (not JSON, not an
-  object, a `data-root` that is not a folder name, or a read error) leaves
+- A `/etc/docker/daemon.json` that dockerd cannot read (not JSON, which includes
+  bytes that are not UTF-8, not an object, a `data-root` that is not a folder
+  name, or a read error; a UTF-8 byte order mark at its start is skipped, as
+  dockerd skips it) leaves
   unknown which volumes folder Docker uses, so the boot's migration waits too:
   it is recorded as postponed with that reason (`status` shows it, `cst doctor`
   from two boots on), and the first boot after the file is fixed runs it. `mark`
