@@ -63,7 +63,11 @@ class Wiring:
         self.snapshot, self.home = snapshot, home
         self.machine = Primitives() if machine is None else machine
         self.tree = HomeTree(self.machine)
-        self.host: HostPort = Host(paths, self.tree, self.snapshot_program, alerts=alerts) if host is None else host
+        self.host: HostPort = (
+            Host(paths, self.tree, self.snapshot_program, alerts=alerts, runner=self.machine.runner)
+            if host is None
+            else host
+        )
         self.out: OutputPort = Output() if out is None else out
 
     @classmethod

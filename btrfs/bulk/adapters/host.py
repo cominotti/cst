@@ -13,13 +13,13 @@ import pwd
 import re
 import secrets
 import stat
-import subprocess
 import time
 
-from btrfs.bulk.adapters.machine import HomeTree, kind, log
+from btrfs.bulk.adapters.machine import HomeTree, kind, log, ran
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import Notifier, PENDING_ALERTS
 from cst_core.domain.contracts import Urgency
+from cst_core.ports import CommandRunnerPort
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
 
@@ -63,7 +63,8 @@ class Output:
 
 class Host:
     """HostPort. snapshot_program: btrfs-snapshot's path, asked when needed; alerts: where an alert
-    btrfs-notify could not take is kept (for cst doctor and the next login)."""
+    btrfs-notify could not take is kept (for cst doctor and the next login); runner: the
+    btrfs-snapshot runs (by default the cst_core runner)."""
 
     def __init__(
         self,
@@ -73,9 +74,11 @@ class Host:
         proc: str = PROC,
         run_user: str = RUN_USER,
         alerts: str = PENDING_ALERTS,
+        runner: CommandRunnerPort | None = None,
     ) -> None:
         self.paths, self.tree, self.snapshot_program = paths, tree, snapshot_program
         self.proc, self.run_user, self.alerts = proc, run_user, alerts
+        self.runner: CommandRunnerPort = SubprocessCommandRunner() if runner is None else runner
 
     def busy_paths(self, paths: Sequence[str], home: str) -> set[str]:
         """The subset of PATHS some process uses (open file, cwd, root, binary,
@@ -84,17 +87,15 @@ class Host:
         btrfs-snapshot's own detection. If it cannot be asked, all are busy."""
         if not paths:
             return set()
-        try:
-            r = subprocess.run(
-                ["bash", self.snapshot_program(), "busy", "--home", home, *paths],
-                check=False,
-                capture_output=True,
-                text=True,
-                env=snapshot_env(),
-                timeout=300,
-            )
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log(f"  cannot check open files ({e}): treated as busy")
+        r = self.runner.run(
+            ["bash", self.snapshot_program(), "busy", "--home", home, *paths],
+            stdin="inherit",
+            decode_errors="strict",
+            base_env=snapshot_env(),
+            timeout=300,
+        )
+        if r.cause is not None:  # bash could not start, or timed out
+            log(f"  cannot check open files ({r.cause}): treated as busy")
             return set(paths)
         if r.returncode != 0:
             log(f"  cannot check open files ({r.stderr.strip()[:200]}): treated as busy")
@@ -104,12 +105,13 @@ class Host:
     def convert_bulk_dir(self, bulk: str) -> list[str]:
         """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
         subvolume (its convert_one: reflink clone + switch, busy -> later)."""
-        r = subprocess.run(
-            ["bash", self.snapshot_program(), "convert-one", bulk],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=snapshot_env(),
+        r = ran(
+            self.runner.run(
+                ["bash", self.snapshot_program(), "convert-one", bulk],
+                stdin="inherit",
+                decode_errors="strict",
+                base_env=snapshot_env(),
+            )
         )
         return (r.stdout + r.stderr).splitlines()
 
@@ -235,7 +237,7 @@ class Host:
     def alert(self, title: str, body: str) -> None:
         log(f"<4>btrfs-bulk: {title}: {body}")
         notifier = Notifier(
-            SubprocessCommandRunner(),
+            self.runner,
             self.paths.notify,
             self.alerts,
             log=lambda p, m: log(f"<{p}>btrfs-bulk: {m}"),

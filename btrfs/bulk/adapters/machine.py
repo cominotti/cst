@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import Sequence
 import struct
 import subprocess
 import tempfile
@@ -38,6 +39,8 @@ from btrfs.bulk.domain import (
     hms,
 )
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
+from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.ports import CommandResult, CommandRunnerPort, DecodeErrors
 
 
 def log(msg: str) -> None:
@@ -106,9 +109,26 @@ def kind(path: str) -> LstatKind:
     return LstatKind.DIR if stat.S_ISDIR(st.st_mode) else LstatKind.OTHER
 
 
+def ran(r: CommandResult) -> CommandResult:
+    """r, of a command that ran; the OSError of one that could not start is
+    raised, as subprocess.run raised it."""
+    if r.cause is not None:
+        raise r.cause
+    return r
+
+
 class Primitives:
     """The primitives that need btrfs, root or the host (the tests' fakes
-    replace these methods; everything built on them stays real)."""
+    replace these methods; everything built on them stays real). runner:
+    the commands they run (by default the cst_core runner)."""
+
+    def __init__(self, runner: CommandRunnerPort | None = None) -> None:
+        self.runner: CommandRunnerPort = SubprocessCommandRunner() if runner is None else runner
+
+    def run(self, argv: Sequence[str], decode_errors: DecodeErrors = "strict") -> CommandResult:
+        """argv with its output captured, as subprocess.run(argv, capture_output=True,
+        text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start."""
+        return ran(self.runner.run(argv, stdin="inherit", decode_errors=decode_errors))
 
     def is_nocow(self, path: str) -> bool:
         return bool(inode_flags(path) & FS_NOCOW_FL)
@@ -128,7 +148,7 @@ class Primitives:
 
     def fs_magic(self, path: str) -> int:
         # statfs f_type is not in os.statvfs: ask stat(1).
-        r = subprocess.run(["stat", "-f", "-c", "%t", path], check=False, capture_output=True, text=True)
+        r = self.run(["stat", "-f", "-c", "%t", path])
         try:
             return int(r.stdout.strip(), 16)
         except ValueError:
@@ -167,29 +187,25 @@ class Primitives:
         """du -sxb: the apparent size of the tree at path (this filesystem only).
         A part du cannot read is left out of its sum, and it exits 1: the size
         is then incomplete, a lower bound (also when du printed no sum at all)."""
-        r = subprocess.run(["du", "-sxb", "--", path], check=False, capture_output=True, text=True)
+        r = self.run(["du", "-sxb", "--", path])
         try:
             return TreeSize(int(r.stdout.split()[0]), r.returncode == 0)
         except IndexError, ValueError:
             return TreeSize(0, False)
 
     def flatpak_installed(self, app: str) -> bool:
-        r = subprocess.run(["flatpak", "info", app], check=False, capture_output=True, text=True)
+        r = self.run(["flatpak", "info", app])
         return r.returncode == 0
 
     def flatpak_has_fs(self, app: str, path: str) -> bool:
-        r = subprocess.run(
-            ["flatpak", "override", "--user", "--show", app], check=False, capture_output=True, text=True
-        )
+        r = self.run(["flatpak", "override", "--user", "--show", app])
         for line in r.stdout.splitlines():
             if line.startswith("filesystems="):
                 return path in line.split("=", 1)[1].split(";")
         return False
 
     def flatpak_add_fs(self, app: str, path: str) -> None:
-        r = subprocess.run(
-            ["flatpak", "override", "--user", f"--filesystem={path}", app], check=False, capture_output=True, text=True
-        )
+        r = self.run(["flatpak", "override", "--user", f"--filesystem={path}", app])
         if r.returncode != 0:
             raise RuntimeError(f"flatpak override failed: {r.stderr.strip()[:200]}")
 
@@ -199,24 +215,14 @@ class Primitives:
         inherits it before data is written). Otherwise reflink clones where
         possible (same filesystem: no data written)."""
         reflink = "--reflink=never" if nocow else "--reflink=auto"
-        r = subprocess.run(
-            ["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        r = self.run(["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"])
         if r.returncode != 0:
             raise RuntimeError(f"copy failed: {r.stderr.strip()[:300]}")
 
     def copy_reflink(self, src: str, dst: str) -> None:
         """cp -a with --reflink=always: the data blocks are shared, none is
         written; fails (instead of copying bytes) where a clone is impossible."""
-        r = subprocess.run(
-            ["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        r = self.run(["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst])
         if r.returncode != 0:
             raise RuntimeError(f"reflink copy failed: {r.stderr.strip()[:300]}")
 
