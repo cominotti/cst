@@ -359,14 +359,14 @@ class SteamPart(TypedDict):
     content and file, the manifest). mode: reflink | copy."""
 
     name: str
-    kind: str
     src: str
-    mode: NotRequired[str]
     dst: str
-    bytes: NotRequired[int]
     new: str
-    sample: NotRequired[str]
     old: str
+    kind: str
+    mode: NotRequired[str]
+    bytes: NotRequired[int]
+    sample: NotRequired[str]
 
 
 class SteamJournal(TypedDict):
@@ -377,13 +377,13 @@ class SteamJournal(TypedDict):
     src_lib: str
     dst_lib: str
     size: str
-    stamp2: NotRequired[int]
     contentid: str
+    parts: list[SteamPart]
     stamp: int
     phase: SteamPhase
-    parts: list[SteamPart]
     conflict: NotRequired[bool]
     undo: NotRequired[bool]
+    stamp2: NotRequired[int]
 
 
 class SteamApp(TypedDict):

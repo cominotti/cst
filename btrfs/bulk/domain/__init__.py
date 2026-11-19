@@ -11,12 +11,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 from typing import Literal
 from typing import NotRequired
 from typing import TypedDict
 import os
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.domain.text import enum_member
 
@@ -206,10 +208,11 @@ class Unexpected(Exception):
 
 
 class BadSettings(Exception):
-    """bulk.conf has a line that is not a plain KEY=VALUE: main() stops the
-    run with exit 1 and the message on stderr. At boot, main() also sends it
-    as an alert (nobody reads the boot console); lines names each bad line
-    (file and line number)."""
+    """bulk.conf has a line that is not a plain KEY=VALUE, or its BULK_USER
+    names no account: main() stops the run with exit 1 and the message on
+    stderr. At boot, boot_run also sends it as an alert (nobody reads the boot
+    console) and exits BOOT_REFUSED_EXIT; lines names each bad line (file and
+    line number) or the BULK_USER (file)."""
 
     def __init__(self, lines: str) -> None:
         super().__init__(f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.")
@@ -218,8 +221,20 @@ class BadSettings(Exception):
 
 class NoUser(Exception):
     """As root, neither --user NAME nor BULK_USER names whose home it is (or
-    it names root): main() stops the run with exit 1 and the message on
-    stderr. Root must never guess whose home it moves."""
+    it names root), or --user NAME names no account: main() stops the run with
+    exit 1 (BOOT_REFUSED_EXIT at boot) and the message on stderr. Root must
+    never guess whose home it moves."""
+
+
+# The exit status of btrfs-bulk boot when bulk.conf cannot tell whose home it is (a bad line, no
+# user): EX_CONFIG of sysexits.h, as docker-gc's. It is not in the SuccessExitStatus= of
+# btrfs-bulk-boot.service (1 3 4), so the unit fails and cst doctor lists it; 1, 3 and 4 keep
+# their meaning.
+BOOT_REFUSED_EXIT: Final = ExitStatus.BAD_SETTINGS
+# The exit status of btrfs-bulk boot after an error it did not expect (its traceback goes to the
+# unit's journal): EX_SOFTWARE of sysexits.h, not in SuccessExitStatus= either. Python's own exit
+# status for an uncaught exception, 1, counted as success there.
+BOOT_CRASHED_EXIT: Final = 70
 
 
 KEEP_HEADER = (
@@ -352,9 +367,6 @@ def present[T](value: T | None, what: str) -> T:
 
 
 # ---- the journals (root-owned JSON in BulkPaths.state; read back by any later version) ----
-# The field order of these TypedDicts was chosen so that no eight lines repeat
-# another record (tests/test_duplication.py, type 2): reordering them can fail
-# that gate. JSON keys do not depend on it.
 class BulkJournalKind(StrEnum):
     """The kind of a journal: an item's copy or subvolume move, a Steam game's move."""
 
@@ -370,14 +382,23 @@ class ItemJournal(TypedDict):
     src: str
     target: str
     new: str
-    stamp2: NotRequired[int]
-    bulk_only: NotRequired[bool]
     old: str
+    link: str | None
     stamp: int
+    bulk_only: NotRequired[bool]
+    stamp2: NotRequired[int]
     conflict: NotRequired[bool]
     undo: NotRequired[bool]
-    link: str | None
     finishing: NotRequired[bool]
+
+
+# How a damaged journal is reported (recovery and report, of items and Steam games alike).
+DAMAGED = "unreadable, or not as btrfs-bulk writes it: left in place, nothing it names was touched"
+
+
+def damaged_text(path: str) -> str:
+    """What NEEDS A LOOK says of the journal at path, which is not as btrfs-bulk writes it."""
+    return f"damaged journal {path} ({DAMAGED})"
 
 
 # ---- texts ----

@@ -5,6 +5,7 @@ of the libraries, its text, the moves), the boot step and keep/unkeep.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Sequence
 import os
 
@@ -22,13 +23,17 @@ from btrfs.bulk.application.steam import (
     steam_target,
 )
 from btrfs.bulk.domain import (
+    BOOT_CRASHED_EXIT,
+    BOOT_REFUSED_EXIT,
     BY_ID,
     MARGIN,
+    BadSettings,
     BulkCommand,
     BulkItemState,
     Ctx,
     FlatpakAccess,
     LstatKind,
+    NoUser,
     Unexpected,
     du_text,
     gib,
@@ -53,7 +58,7 @@ from btrfs.bulk.domain.steam import (
     steam_move_lines,
     steam_nocow_files,
 )
-from btrfs.bulk.ports import BulkStatePort, HomeTreePort, OutputPort
+from btrfs.bulk.ports import BulkStatePort, HomeTreePort, HostPort, OutputPort
 
 LIBRARY_ROW = "library ~/Bulk/steam"  # the plan's line about ~/Bulk/steam as a Steam library
 
@@ -439,6 +444,36 @@ def boot(b: Bulk) -> int:
     if not deferred:
         b.boots.remove()
     return exit_status(b, deferred, problems)
+
+
+def boot_run(
+    make: Callable[[], Bulk], host: HostPort, err: Callable[[str], None], trace: Callable[[Exception], str]
+) -> int:
+    """btrfs-bulk boot (btrfs-bulk-boot.service, before any login) over the Bulk make() puts
+    together. When bulk.conf cannot tell whose home it is: the message to err, for a bad line
+    or a BULK_USER no account has (BadSettings) also an alert (nobody reads the boot console;
+    btrfs-notify keeps it for the login), and
+    BOOT_REFUSED_EXIT, which fails the unit. Any other error, the alert's own included: a line
+    and its traceback (trace) to err, and SystemExit(BOOT_CRASHED_EXIT), which ends the program
+    and fails the unit too (an uncaught exception exited 1, a success for it). The flag stays:
+    the items wait for the next boot. KeyboardInterrupt, SystemExit and the unit's SIGTERM at
+    its timeout are not caught."""
+    try:
+        try:
+            return boot(make())
+        except BadSettings as e:
+            err(str(e))
+            host.alert(
+                "~/Bulk: nothing moved at boot",
+                f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
+            )
+            return BOOT_REFUSED_EXIT
+        except NoUser as e:
+            err(str(e))
+            return BOOT_REFUSED_EXIT
+    except Exception as e:
+        err("btrfs-bulk boot: unexpected error, nothing more is done this boot\n" + trace(e).rstrip("\n"))
+        raise SystemExit(BOOT_CRASHED_EXIT) from e  # raised: ruff's BLE001 wants a blind except to raise
 
 
 def keep_ids(state: BulkStatePort, cmd: str, ids: Sequence[str]) -> OSError | None:

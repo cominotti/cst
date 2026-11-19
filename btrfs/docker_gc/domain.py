@@ -14,6 +14,7 @@ import re
 from typing import Final
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import DAY, MINUTE, format_bytes_decimal
 
@@ -39,14 +40,18 @@ class NewerState(RuntimeError):
 # The exit status of a command that met a NewerState. docker-gc-recorder.service names it in
 # RestartPreventExitStatus=: the recorder then stays failed (cst doctor lists it) instead of being
 # started again every 10 s to read the same file. Not 1 (any other error), not 2 (usage); record
-# passes on the status `docker events` ends with (the docker CLI uses 1 for its errors).
-# 65: EX_DATAERR of sysexits.h.
+# passes on the status `docker events` ends with (the docker CLI uses 1 for its errors), except
+# one of RECORDER_FINAL_EXITS, which it turns into 1. 65: EX_DATAERR of sysexits.h.
 NEWER_STATE_EXIT = 65
 # The exit status of a command stopped by an IncompleteRecordError. The recorder unit names it in
 # RestartPreventExitStatus= too: Docker gives the same answer at every start, so restarting the
 # recorder every 10 s would only inspect every container again, forever, and the unit would never
 # show as failed. 76: EX_PROTOCOL of sysexits.h (docker's answer lacks what its API promises).
 INCOMPLETE_RECORD_EXIT = 76
+# The statuses docker-gc-recorder.service lists in RestartPreventExitStatus=, in its order: only
+# docker-gc's own refusals. When `docker events` itself ends with one of them, record exits 1
+# instead, so that systemd restarts the recorder as for any other docker failure.
+RECORDER_FINAL_EXITS: Final = (NEWER_STATE_EXIT, INCOMPLETE_RECORD_EXIT)
 
 
 def stored_version(fmt: StateFormat, path: str, data: object) -> int | None:
@@ -205,8 +210,8 @@ def container_refusal(
 # ---- the settings file: which registries are protected ------------------------------
 # The exit status of a command that cannot tell which registries are protected (a settings file
 # it cannot read, or no file and an installed docker-gc it does not know): it removes nothing.
-# 78: EX_CONFIG of sysexits.h.
-BAD_SETTINGS_EXIT = 78
+# 78: EX_CONFIG of sysexits.h, shared with btrfs-bulk's boot step.
+BAD_SETTINGS_EXIT: Final = ExitStatus.BAD_SETTINGS
 SETTINGS_KEYS = ("DOCKER_GC_PROTECT",)
 # A registry as an image reference starts with it: a host (a name or an address, a port), and
 # optionally the first parts of a repository path ("ghcr.io/team").

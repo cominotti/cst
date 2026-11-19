@@ -831,6 +831,17 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(len(rec.calls), 1)
         return rec.calls[0]
 
+    def test_raise_cause_raises_what_kept_a_command_from_running_to_its_end(self) -> None:
+        runner = core_runner.SubprocessCommandRunner(_container(inside=False))
+        failed = runner.run([self.py, "-I", "-c", "import sys; sys.exit(3)"])
+        self.assertIs(failed.raise_cause(), failed)  # it ran: any exit status is the caller's
+        with self.assertRaises(FileNotFoundError):
+            runner.run(["cst-test-no-such-command"]).raise_cause()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner.run([self.py, "-I", "-c", "import time; time.sleep(5)"], timeout=0.2).raise_cause()
+        plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
+        self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
+
     def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
         # Only the arguments an option sets: a caller's test double that takes
         # a fixed set of arguments keeps working when the caller moves here.
@@ -1790,6 +1801,32 @@ class NotifierTest(unittest.TestCase):
                 self.assertEqual(outcome, "kept")
                 self.assertIn(f"alert not delivered ({why})", self.lines[0][1])
 
+    def test_the_journal_line_names_btrfs_notify_s_last_error_line(self) -> None:
+        # Only "exited 1" reached the journal: why btrfs-notify failed (its stderr) was dropped.
+        # Then its own closing remark was quoted instead of the cause: it always comes last.
+        echo = "<4>btrfs-bulk: Disk: problem: the body\nline 2\n"
+        remark = (
+            "<3>btrfs-notify: could not keep the alert for the next login (/var/lib/cst-alerts/pending); "
+            "it is only in this journal\n"
+        )
+        error = "mktemp: failed to create file via template '/var/lib/cst-alerts/pending/.tmp.XXXXXX': Read-only"
+        usage = "usage: btrfs-notify [-u critical|normal] [-a APP] TITLE BODY | --queue DIR | --prune"
+        long_line = "e" * 300
+        for stderr, why in (
+            (f"{echo}{error}\n{remark}", f"/x/btrfs-notify exited 1: {error}"),
+            (f"{echo}install: a\ninstall: b\n\n{remark}", "/x/btrfs-notify exited 1: install: b"),
+            (f"{echo}{remark}", "/x/btrfs-notify exited 1"),  # its lock never came: no cause printed
+            (f"{usage}\n", f"/x/btrfs-notify exited 1: {usage}"),
+            ("", "/x/btrfs-notify exited 1"),
+            (" \n\n", "/x/btrfs-notify exited 1"),
+            (f"{echo}{long_line}\n{remark}", "/x/btrfs-notify exited 1: " + "e" * 200),
+        ):
+            with self.subTest(stderr=stderr[:40]):
+                self.lines.clear()
+                outcome, _ = self.send(core_ports.CommandResult(1, "", stderr))
+                self.assertEqual(outcome, "kept")
+                self.assertTrue(self.lines[0][1].startswith(f"alert not delivered ({why}): Disk: problem; kept in "))
+
     def test_a_repeat_is_merged_into_the_kept_alert(self) -> None:
         path = self.missing(body="first")
         with open(path, "r+") as f:
@@ -1904,6 +1941,37 @@ class NotifierTest(unittest.TestCase):
         )
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
+
+    def test_the_journal_line_quotes_the_cause_btrfs_notify_printed(self) -> None:
+        """btrfs-notify itself (no desktop session, an alerts folder it cannot create): its stderr ends
+        with its own remark that the alert is only in the journal; the journal line quotes the cause
+        before it instead, and the alert is kept here."""
+        alert = ("Disk: problem", "the body\nline 2")  # the title and body send() passes
+        alerts = os.path.join(self.tmp, "not-a-folder")
+        with open(alerts, "w"):
+            pass
+        run_user = os.path.join(self.tmp, "run-user")
+        os.mkdir(run_user)
+        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "CST_ALERTS_DIR": alerts, "CST_RUN_USER": run_user}
+        done = subprocess.run(
+            ["bash", os.path.join(REPO, "btrfs", "btrfs-notify"), *("-u", "critical", "-a", "btrfs-bulk"), *alert],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("<3>btrfs-notify: could not keep the alert", done.stderr.splitlines()[-1])
+        outcome, _ = self.send(core_ports.CommandResult(1, "", done.stderr))
+        self.assertEqual(outcome, "kept")
+        [(prio, line)] = self.lines
+        self.assertEqual(prio, 3)
+        self.assertRegex(
+            line,
+            r"^alert not delivered \(/x/btrfs-notify exited 1: install: cannot create directory .*not-a-folder.*: "
+            r"Not a directory\): Disk: problem; kept in ",
+        )
 
 
 class _FailingSocket:

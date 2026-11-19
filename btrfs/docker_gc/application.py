@@ -15,6 +15,7 @@ from btrfs.docker_gc.domain import (
     INCOMPLETE_RECORD_EXIT,
     NEWER_STATE_EXIT,
     NOT_RECORDED,
+    RECORDER_FINAL_EXITS,
     UnknownProtection,
     DockerEvent,
     GcCommand,
@@ -220,7 +221,10 @@ class DockerGc:
         end = self.docker.follow_events(rec, every=self.settings.flush_seconds)
         if end.stopped or end.returncode < 0:
             return 0
-        # docker events ended by itself (daemon restart): systemd restarts us.
+        # docker events ended by itself (daemon restart): systemd restarts us. Its own 65 or 76
+        # is not one of our refusals, which the unit leaves failed: 1 instead.
+        if end.returncode in RECORDER_FINAL_EXITS:
+            return 1
         return end.returncode or 1
 
     # ---- plan and apply --------------------------------------------------

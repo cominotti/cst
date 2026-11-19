@@ -31,6 +31,7 @@ CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 if CHECKOUT not in sys.path:
     sys.path.insert(0, CHECKOUT)
 
+from btrfs.docker_gc.domain import RECORDER_FINAL_EXITS
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.shapes import json_object, object_of, parse_json
@@ -542,6 +543,12 @@ class StatusTest(unittest.TestCase):
             service = f.read().split("[Service]\n", 1)[1].split("\n[", 1)[0].splitlines()
         self.assertIn("Restart=on-failure", service)
         self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT} {INCOMPLETE_RECORD_EXIT}", service)
+        # record turns docker's own exit with one of these into 1 (RECORDER_FINAL_EXITS): a status added to
+        # the unit's list must be added there too.
+        [line] = [x for x in service if x.startswith("RestartPreventExitStatus=")]
+        self.assertEqual(
+            tuple(int(n) for n in line.removeprefix("RestartPreventExitStatus=").split()), RECORDER_FINAL_EXITS
+        )
 
     def test_cleanup_now_needs_a_terminal(self) -> None:
         rc, out, err = self.p.run("cleanup-now")

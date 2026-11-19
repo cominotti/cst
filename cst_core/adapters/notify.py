@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import time
+from typing import Final
 
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log as journal_log
@@ -39,6 +40,10 @@ _SPOOL = state_format(StateFormatKey.ALERT_SPOOL)
 PENDING_ALERTS = _SPOOL.folder
 _TIMEOUT = 60  # s: btrfs-notify waits up to 15 s per session and 30 s for its lock
 _LOCK_WAIT = 30  # s: as btrfs-notify waits for the same lock
+# Characters of btrfs-notify's last error line that the journal line of a failed send quotes.
+_ERROR_LINE_MAX: Final = 200
+# A line btrfs-notify writes itself starts with a journal priority ("<3>btrfs-notify: ...").
+_OWN_LINE = re.compile(r"<[0-7]>")
 
 
 class NotifyOutcome(StrEnum):
@@ -104,6 +109,18 @@ def _keep_alert(pending: str, urgency: Urgency, app: str, title: str, body: str)
     return path
 
 
+def _error_line(stderr: str, urgency: Urgency, app: str, title: str, body: str) -> str | None:
+    """The last line of btrfs-notify's stderr that a command it ran wrote (install, mktemp, flock,
+    bash itself): the cause of its failure. Its own lines are left out: the alert it echoes first
+    ("<4>APP: TITLE: BODY", the body's lines included) and its remarks ("<3>btrfs-notify: could
+    not keep the alert ...; it is only in this journal", which the caller contradicts by keeping
+    it). None when no such line is left (a lock it waited for in vain prints nothing)."""
+    _, app, title, body = _bounded(urgency, app, title, body)
+    stderr = stderr.removeprefix(f"<4>{app}: {title}: {body}\n")
+    said = [line.strip() for line in stderr.splitlines() if line.strip() and not _OWN_LINE.match(line)]
+    return said[-1] if said else None
+
+
 @dataclass(frozen=True, slots=True)
 class Notifier:
     """btrfs-notify at program, with the pending alerts folder for when it cannot be sent.
@@ -129,6 +146,8 @@ class Notifier:
             why = f"{self.program} cannot run ({r.cause or r.fault})"
         else:
             why = f"{self.program} exited {r.returncode}"
+            if (said := _error_line(r.stderr, urgency, app, title, body)) is not None:
+                why += f": {said[:_ERROR_LINE_MAX]}"
         say = self.log or (lambda prio, msg: journal_log(prio, msg, tag=app))
         try:
             path = _keep_alert(self.pending, urgency, app, title, body)

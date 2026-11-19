@@ -4957,7 +4957,7 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77) ----------------------
+    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77, test_122) ------------
     # The unit as the manifest installs it (copied to /etc when the container has none), running this
     # checkout's btrfs-bulk through a drop-in in /run; the settings, journals, boot flag, btrfs-notify
     # and new pending alerts are put back by the cleanup (btrfs-notify is moved aside, never removed).
@@ -4986,12 +4986,16 @@ install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
 [ -d /etc/btrfs-setup ] || touch "$s/made-etc"
 mkdir -p /etc/btrfs-setup
 systemctl daemon-reload
-# boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
+# boot_unit [WANT]: start it as at boot; WANT is "EXIT_STATUS SERVICE_RESULT", by default "1 success"
+# (exit 1, "needs a look", counts as success through SuccessExitStatus). A failed oneshot makes
+# systemctl start fail: allowed only when WANT is not a success.
 boot_unit() {
+    want="${1:-1 success}"
     rm -f "$s/exit"
-    systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
+    systemctl start btrfs-bulk-boot.service || [ "${want#* }" != success ] ||
+        { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
     for _ in $(seq 1 20); do [ -s "$s/exit" ] && break; sleep 0.25; done   # ExecStopPost may lag the job
-    [ "$(cat "$s/exit" 2>/dev/null)" = "1 success" ] ||
+    [ "$(cat "$s/exit" 2>/dev/null)" = "$want" ] ||
         { echo "exit status and result: $(cat "$s/exit" 2>/dev/null)" >&2; return 1; }
 }
 # unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
@@ -5064,15 +5068,17 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
-        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the refusal's alert
-        is kept in /var/lib/cst-alerts/pending in btrfs-notify's format (the unit's journal says so),
-        and cst doctor, as the user, shows it and warns that the installed unit alerts through a
-        missing btrfs-notify; cst-pending-alerts lists it for the next login."""
+        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the unit exits 78
+        and is failed; the refusal's alert is kept in /var/lib/cst-alerts/pending in btrfs-notify's
+        format (the unit's journal says so), and cst doctor, as the user, lists the failed unit, shows
+        the alert and warns that the installed unit alerts through a missing btrfs-notify;
+        cst-pending-alerts lists it for the next login."""
         out = self.bulk_boot(
             r"""
 printf 'BULK_USER=$USER\n' >/etc/btrfs-setup/bulk.conf
 printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
-boot_unit
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
 unit_log_has "alert not delivered (/usr/local/sbin/btrfs-notify is not installed): ~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
 f="$(grep -lxF 'title=~/Bulk: nothing moved at boot' /var/lib/cst-alerts/pending/*.alert)"
 [ "$(head -n 1 "$f")" = "cst-alert 1" ]
@@ -5087,12 +5093,52 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
         doctor = as_tester_bash(self.SYSTEMD_CONTAINER, "/opt/cst-rw/cst doctor", check=False).stdout
         self.assertIn("~/Bulk: nothing moved at boot", doctor)
-        self.assertIn("btrfs-bulk-boot.service", doctor)
+        failed = [line for line in doctor.splitlines() if "system units failed:" in line]
+        self.assertTrue(failed and "btrfs-bulk-boot.service" in failed[0], doctor)
         self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
         listed = as_tester_bash(
             self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"
         ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
+
+    def test_122_bulk_boot_failures_are_failed_units(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) with the boot flag. A BULK_USER that names no
+        account is a bulk.conf the boot step refuses: the unit exits 78 and is failed, its journal
+        names the account and has no traceback (pwd's KeyError went up uncaught before), and the
+        refusal's alert is kept. An error it does not expect (a file where its state folder belongs):
+        the unit exits 70 and is failed (an uncaught exception exited 1, which its SuccessExitStatus=
+        counts as success), its journal holds the traceback, and no alert is kept. The flag stays for
+        the next boot both times."""
+        out = self.bulk_boot(
+            r"""
+printf 'BULK_USER=cste2ebulkgone\n' >/etc/btrfs-setup/bulk.conf
+printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
+if id cste2ebulkgone >/dev/null 2>&1; then echo "the account cste2ebulkgone exists" >&2; exit 1; fi
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk: /etc/btrfs-setup/bulk.conf: BULK_USER=cste2ebulkgone: no such account"
+unit_log_has "~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
+journalctl --sync 2>/dev/null || true
+if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF Traceback; then
+    echo "a traceback for an account that does not exist" >&2; exit 1
+fi
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-refused"
+systemctl reset-failed btrfs-bulk-boot.service
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+rm -rf /var/lib/btrfs-bulk
+printf 'not a folder\n' >/var/lib/btrfs-bulk   # the boot counter cannot be written
+boot_unit "70 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk boot: unexpected error, nothing more is done this boot"
+unit_log_has "Traceback (most recent call last):"
+unit_log_has "FileExistsError"
+[ -e /etc/btrfs-setup/bulk-at-boot ]
+[ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-refused")" ]   # no alert kept
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
 
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
@@ -5102,7 +5148,8 @@ echo E2E-OK
         after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
         names the format once, and the file is byte for byte as it was. The same unit ending with exit
         76 (an inspect record without a key docker-gc relies on) is not restarted either. Control: the
-        same unit ending with exit 1 is restarted."""
+        same unit ending with exit 1 is restarted. And docker-gc record whose docker events (a fake docker)
+        ends with 65 itself exits 1 and is restarted: only docker-gc's own refusals stop the restarts."""
         shipped = docker_exec(
             self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
         ).stdout
@@ -5127,7 +5174,7 @@ echo E2E-OK
             if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
             if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
             if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
-            rm -rf "$s"
+            rm -rf "$s" /usr/local/libexec/e2e-gc-fake
             systemctl daemon-reload
             """,
             check=False,
@@ -5200,6 +5247,56 @@ echo E2E-OK
             systemctl stop {unit} || true
             [ "$state" = failed ] && [ "$n" = 0 ] && [ "$rc" = 76 ] ||
                 {{ echo "exit 76: state $state, NRestarts $n, status $rc" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # docker events itself ending with 65 is not docker-gc's refusal: record exits 1 for it, and the
+        # recorder is restarted. This checkout's docker-gc record with a fake docker first on PATH, under
+        # /usr/local/libexec (PrivateTmp= hides /var/tmp from the unit, and the container's /run is a
+        # noexec tmpfs): ps lists nothing, events exits 65.
+        fake = "/usr/local/libexec/e2e-gc-fake"
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"mkdir -p {fake} && cat >{fake}/docker && chmod 0755 {fake}/docker"],
+            input_text=(
+                "#!/usr/bin/python3 -I\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:1] == ['ps']:\n"
+                "    sys.exit(0)\n"
+                "if args[:1] == ['events']:\n"
+                "    sys.exit(65)\n"
+                "sys.stderr.write('e2e fake docker: unexpected ' + ' '.join(args) + '\\n')\n"
+                "sys.exit(1)\n"
+            ),
+        )
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"cat >{path}"],
+            input_text=derived(
+                f"/usr/bin/env PATH={fake}:/usr/bin:/bin /usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"
+            ),
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            rm -f /var/lib/docker-gc/last-used.json   # the newer state of the first part would give 65 itself
+            systemctl daemon-reload
+            start="$(date +%s)"
+            systemctl start {unit} || true
+            sleep 16   # past RestartSec=10, with the program's own start
+            n="$(show NRestarts)"
+            systemctl stop {unit} || true
+            journalctl --sync 2>/dev/null || true
+            log="$(journalctl -q --no-pager -o cat -u {unit} --since "@$start")"
+            grep -qF 'recording image use from docker events' <<<"$log" ||
+                {{ echo "docker events was not reached:" >&2; echo "$log" >&2; exit 1; }}
+            if grep -qF 'e2e fake docker: unexpected' <<<"$log"; then echo "$log" >&2; exit 1; fi
+            [ "$n" -ge 1 ] || {{ echo "docker events ending with 65 was not restarted (NRestarts=$n)" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout

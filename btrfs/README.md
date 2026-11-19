@@ -565,12 +565,22 @@ NAS runs of `btrfs-snapshot`, but not its conversion engine) send their alerts
 through one `cst_core` adapter (the health check runs `btrfs-notify` itself:
 without it, its alert reaches only the journal). When `btrfs-notify` is not installed, does not answer
 within 60 s, or could neither show nor keep the alert, the adapter writes a
-journal line ("alert not delivered (...)") and keeps the alert itself in
+journal line ("alert not delivered (...)"; when `btrfs-notify` ran and failed,
+the reason ends with the last error line of a command it ran, such as
+`install` or `mktemp`, not its own remarks) and keeps the alert itself in
 `/var/lib/cst-alerts/pending/`, in the same format and under the same lock as
 `btrfs-notify`. `cst doctor` then lists it as an alert you have not seen yet,
 and also warns that the installed units alert through a missing `btrfs-notify`
 (fix: `cst btrfs install`). So, for example, `btrfs-bulk-boot`'s refusal of a
 bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
+Kept alerts expire: `btrfs-health-check` runs `btrfs-notify --prune`, and
+`cst-pending-alerts` shows only those of the last `KEEP_DAYS` (7) days. An
+alert kept twice (`btrfs-notify` kept it but answered too late, then the
+adapter kept it too) is merged into the same file under the folder's lock and
+counted once more, never a second file. One accepted edge case: under a C
+locale, a long title with non-ASCII letters can be cut at a different place
+by `btrfs-notify` and by the adapter, and the same alert then gets a second
+pending file.
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
 small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
@@ -1608,7 +1618,8 @@ Because of this:
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
   nothing is removed by a record they do not understand. systemd does not
   restart the recorder for exit 65 (`RestartPreventExitStatus=`; nor for exit
-  76, below; any other failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  76, below; any other failure is restarted after 10 s, also `docker events`
+  ending with 65 or 76 itself, which `record` turns into 1): `docker-gc-recorder.service` stays
   failed, which `cst doctor` lists, and images are held back meanwhile, as
   with any recorder that is not running. Install the docker-gc of that CST
   again (`cst btrfs docker-gc enable` in that checkout), which starts the
