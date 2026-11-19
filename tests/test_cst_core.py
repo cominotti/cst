@@ -53,7 +53,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import CommandFailed, CommandFault, CommandResult, UnitName
+from cst_core.ports import ActiveState, CommandFailed, CommandFault, CommandResult, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -183,7 +183,24 @@ class ValueObjectsTest(unittest.TestCase):
                 OctalMode.parse(bad)
 
 
-class ManagedFilesTest(unittest.TestCase):
+class ActiveStateTest(unittest.TestCase):
+    """ActiveState holds systemd's ActiveState words, which systemctl's text is compared with."""
+
+    def test_it_holds_systemds_eight_words(self) -> None:
+        # systemd 262, unit_active_state_to_string.
+        words = {"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing"}
+        self.assertEqual({state.value for state in ActiveState}, words)
+
+    def test_plain_text_is_found_in_a_set_of_members(self) -> None:
+        # The modules keep systemctl's answer a str and look it up in a frozenset of members.
+        running = frozenset({ActiveState.ACTIVE, ActiveState.RELOADING})
+        self.assertIn("active", running)
+        self.assertIn("reloading", running)
+        self.assertNotIn("inactive", running)
+        self.assertNotIn("", running)
+        self.assertNotIn("a-word-a-newer-systemd-adds", running)
+        self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
+
     @override
     def setUp(self) -> None:
         self.spec = MarkedLineSpec(
