@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import os.path
 import re
-from typing import Final
+from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.text import HELP_WORDS, enum_member
@@ -406,20 +406,26 @@ def wp_label(path: str) -> str:
     return "wireplumber.conf.d/" + os.path.basename(path)
 
 
-def wp_note(state: str, quality: str, device: str) -> str:
-    """What plan says about the WirePlumber rule in this state."""
+def wp_note(state: WpState | Literal[""], quality: str, device: str) -> str:
+    """What plan says about the WirePlumber rule in this state ("" for none or not read)."""
     return {
-        "ok": f"up to date (LDAC {quality} for {device})",
-        "adopt": "up to date; written by apply-le-audio.sh or with older comments: apply only renews the comments, no restart",
-        "change": f"differs (apply writes LDAC {quality}; the old file is kept as .bak)",
-        "missing": "missing",
-        "conflict": "not written by CST or the old script: apply refuses; move it away by hand",
+        WpState.OK: f"up to date (LDAC {quality} for {device})",
+        WpState.ADOPT: "up to date; written by apply-le-audio.sh or with older comments: apply only renews the comments, no restart",
+        WpState.CHANGE: f"differs (apply writes LDAC {quality}; the old file is kept as .bak)",
+        WpState.MISSING: "missing",
+        WpState.CONFLICT: "not written by CST or the old script: apply refuses; move it away by hand",
     }.get(state, "")
 
 
-def wp_word(state: str) -> str:
-    """The first column of the rule's line."""
-    return {"ok": "ok", "adopt": "adopt", "change": "update", "missing": "write", "conflict": "CONFLICT"}.get(state, "")
+def wp_word(state: WpState | Literal[""]) -> str:
+    """The first column of the rule's line ("" for none or not read)."""
+    return {
+        WpState.OK: "ok",
+        WpState.ADOPT: "adopt",
+        WpState.CHANGE: "update",
+        WpState.MISSING: "write",
+        WpState.CONFLICT: "CONFLICT",
+    }.get(state, "")
 
 
 def bearer_matches(info: str, bearer: str) -> bool:

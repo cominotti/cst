@@ -538,16 +538,15 @@ class Survey:
         self.le_others_report()
         b, dev = self.c.bearer, self.c.device
         notes = {
-            "none": ("ok", "left alone (no BEARER set)"),
-            "ok": ("ok", f"already {b}"),
-            "set": ("set", f"-> {b} (only for connections the PC starts)"),
-            "unpaired": ("skip", f"{dev} is not paired: apply leaves it"),
-            "noheadset": ("skip", f"BEARER={b} is for a headset, and none is set: apply leaves it"),
-            "unknown": ("?", "bluetoothctl not found"),
+            BearerState.NONE: ("ok", "left alone (no BEARER set)"),
+            BearerState.OK: ("ok", f"already {b}"),
+            BearerState.SET: ("set", f"-> {b} (only for connections the PC starts)"),
+            BearerState.UNPAIRED: ("skip", f"{dev} is not paired: apply leaves it"),
+            BearerState.NOHEADSET: ("skip", f"BEARER={b} is for a headset, and none is set: apply leaves it"),
+            BearerState.UNKNOWN: ("?", "bluetoothctl not found"),
         }
-        if self.bearer_state in notes:
-            word, note = notes[self.bearer_state]
-            self.item(word, "preferred bearer", note)
+        word, note = notes[self.bearer_state]
+        self.item(word, "preferred bearer", note)
         if b == "le" and self.c.le_audio == "off":
             self.item(
                 "warn",
@@ -559,16 +558,28 @@ class Survey:
     def le_report(self) -> None:
         label, frm = wp_label(self.p.le_conf), self.c.le_from
         rows = {
-            "off:ok": ("ok", label, f"LE Audio off ({frm}): PipeWire offers only A2DP and HFP"),
-            "off:adopt": ("adopt", label, "LE Audio off; older comments: apply only renews them, no restart"),
-            "off:change": ("update", label, "differs (apply rewrites it: LE Audio off; restarts WirePlumber)"),
-            "off:missing": ("write", label, f"LE Audio off ({frm}): PipeWire will offer only A2DP and HFP"),
-            "off:conflict": ("CONFLICT", label, "not written by CST: apply refuses; move it away by hand"),
-            "on:absent": ("ok", "LE Audio", f"on ({frm}): PipeWire offers the bap-* profiles too"),
-            "on:remove": ("remove", label, f"LE Audio on ({frm}): apply removes it and restarts WirePlumber"),
-            "on:conflict": ("CONFLICT", label, "not written by CST: left alone (it may keep LE Audio off)"),
+            ("off", LeState.OK): ("ok", label, f"LE Audio off ({frm}): PipeWire offers only A2DP and HFP"),
+            ("off", LeState.ADOPT): (
+                "adopt",
+                label,
+                "LE Audio off; older comments: apply only renews them, no restart",
+            ),
+            ("off", LeState.CHANGE): (
+                "update",
+                label,
+                "differs (apply rewrites it: LE Audio off; restarts WirePlumber)",
+            ),
+            ("off", LeState.MISSING): ("write", label, f"LE Audio off ({frm}): PipeWire will offer only A2DP and HFP"),
+            ("off", LeState.CONFLICT): ("CONFLICT", label, "not written by CST: apply refuses; move it away by hand"),
+            ("on", LeState.ABSENT): ("ok", "LE Audio", f"on ({frm}): PipeWire offers the bap-* profiles too"),
+            ("on", LeState.REMOVE): (
+                "remove",
+                label,
+                f"LE Audio on ({frm}): apply removes it and restarts WirePlumber",
+            ),
+            ("on", LeState.CONFLICT): ("CONFLICT", label, "not written by CST: left alone (it may keep LE Audio off)"),
         }
-        row = rows.get(f"{self.c.le_audio}:{self.le_state}")
+        row = rows.get((self.c.le_audio, self.le_state))
         if row is not None:
             self.item(*row)
 
@@ -626,16 +637,16 @@ class Survey:
         if self.o.cmd == BluetoothCommand.PLAN and self.lw_last_failure():
             self.item("warn", "LDAC rate watcher", self.lw_failure_text())
         unit_rows = {
-            "ok": ("ok", f"up to date (LDAC to {rate} Hz)"),
-            "change": ("update", "differs (apply rewrites it)"),
-            "missing": ("write", f"the LDAC rate watcher (LDAC_RATE={rate})"),
-            "conflict": ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
+            OwnedState.OK: ("ok", f"up to date (LDAC to {rate} Hz)"),
+            OwnedState.CHANGE: ("update", "differs (apply rewrites it)"),
+            OwnedState.MISSING: ("write", f"the LDAC rate watcher (LDAC_RATE={rate})"),
+            OwnedState.CONFLICT: ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
         }
         prog_rows = {
-            "ok": ("ok", "same as bt-ldac-watch in CST"),
-            "change": ("update", "older copy (apply installs the one in CST)"),
-            "missing": ("write", "copy of bluetooth/bt-ldac-watch"),
-            "conflict": ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
+            OwnedState.OK: ("ok", "same as bt-ldac-watch in CST"),
+            OwnedState.CHANGE: ("update", "older copy (apply installs the one in CST)"),
+            OwnedState.MISSING: ("write", "copy of bluetooth/bt-ldac-watch"),
+            OwnedState.CONFLICT: ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
         }
         for rows, state, label in (
             (unit_rows, self.lw_unit_st, self.lw_unit_label()),
