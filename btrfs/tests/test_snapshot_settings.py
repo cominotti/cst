@@ -49,7 +49,7 @@ def filter_text() -> str:
     """The filter of btrfs-snapshot: its two patterns and three functions."""
     with open(SCRIPT, encoding="utf-8") as f:
         text = f.read()
-    patterns = [m.group(0) for m in re.finditer(r"^CONF_Q_(?:WORD|ANSI)=.*$", text, re.M)]
+    patterns = [m.group(0) for m in re.finditer(r"^CONF_Q_(?:WORD|ANSI)=.*$", text, re.MULTILINE)]
     assert len(patterns) == 2, patterns
     functions = [shell_function(SCRIPT, n) for n in ("conf_comment_after", "conf_line", "conf_assignment")]
     return "\n".join([*patterns, *functions])

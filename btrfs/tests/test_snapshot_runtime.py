@@ -228,4 +228,4 @@ class GuardNumbersTest(unittest.TestCase):
         with open(script, encoding="utf-8") as f:
             text = f.read()
         for name in GUARD_KEYS:
-            self.assertEqual(re.findall(rf"^{name}=(\d+)$", text, re.M), [DEFAULTS[name]])
+            self.assertEqual(re.findall(rf"^{name}=(\d+)$", text, re.MULTILINE), [DEFAULTS[name]])
