@@ -101,13 +101,14 @@ def kernel_dirs(env: Mapping[str, str]) -> dict[str, str]:
     scratch tree: the tier 1 E2E container's own /proc/sys and /sys are read-only and the host's
     kernel), else the defaults. The cgroup tree stays /sys/fs/cgroup either way."""
     out: dict[str, str] = {}
-    proc, sys_dir = env.get(SEAM_PROC, ""), env.get(SEAM_SYS, "")
-    if proc:
-        out["proc_dir"] = proc
-    if sys_dir:
-        out["sys_dir"] = sys_dir
-        out["zswap_params_dir"] = os.path.join(sys_dir, "module", "zswap", "parameters")
-        out["zswap_debug_dir"] = os.path.join(sys_dir, "kernel", "debug", "zswap")
+    # From moved_kernel_dirs, so the folders moved and the test seam line that names them stay one list.
+    for name, _kernel, where in moved_kernel_dirs(env):
+        if name == SEAM_PROC:
+            out["proc_dir"] = where
+        if name == SEAM_SYS:
+            out["sys_dir"] = where
+            out["zswap_params_dir"] = os.path.join(where, "module", "zswap", "parameters")
+            out["zswap_debug_dir"] = os.path.join(where, "kernel", "debug", "zswap")
     return out
 
 
