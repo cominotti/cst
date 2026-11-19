@@ -25,7 +25,7 @@ def docker_exec(
         full.append("-i")
     if user != "root":
         full.extend(["--user", user])
-    if env:
+    if env is not None:
         for k, v in env.items():
             full.extend(["-e", f"{k}={v}"])
     full.extend([container, *cmd])

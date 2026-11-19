@@ -289,7 +289,7 @@ def reference_keep(
         keep.add(items[-1]["entry"])
     for unit in "hdwmy":
         n = policy.get(unit)
-        if not n:
+        if n is None or not n:
             continue
         seen: set[int] = set()
         for i in items:

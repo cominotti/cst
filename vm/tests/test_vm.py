@@ -1500,7 +1500,7 @@ class BtrfsReflinkTest(unittest.TestCase):
     @override
     def setUp(self) -> None:
         cache = os.path.join(os.path.expanduser("~"), ".cache")
-        if not os.path.isdir(cache) or not vm_adapters_images.is_btrfs(cache):
+        if not os.path.isdir(cache) or vm_adapters_images.is_btrfs(cache) is not True:
             self.skipTest("~/.cache is not on btrfs")
         self.tmp = tempfile.mkdtemp(prefix="cst-vm-reflink-", dir=cache)
         self.addCleanup(shutil.rmtree, self.tmp)
