@@ -325,9 +325,10 @@ class SystemdPort(Protocol):
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
         """`systemctl show -p PROP... unit` as {prop: value}; {} when systemctl cannot answer.
-        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs)."""
+        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs);
+        user: the user's own manager (`systemctl --user show`)."""
         ...
 
 

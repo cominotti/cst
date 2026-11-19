@@ -1735,7 +1735,8 @@ class StatusTest(SetupCase):
 
 
 class EnvironmentTest(SetupCase):
-    """The commands get the caller's environment: nothing added, LC_CTYPE as it was."""
+    """The commands get the caller's environment: nothing added, LC_CTYPE as it was; only the
+    `systemctl show` of a unit's state (cst_core's SystemdPort.show) adds LC_ALL=C."""
 
     def test_no_leak(self) -> None:
         m = self.machine(DONE)
@@ -1746,9 +1747,19 @@ class EnvironmentTest(SetupCase):
                 os.unlink(log)
             m.run("status", env=extra)
             m.run("apply", "--no-restart", env=extra)
-            seen = {word for line in m.env_log().splitlines() for word in line.split(":", 1)[1].split()}
+            seen: set[str] = set()
+            shows: list[set[str]] = []
+            for line in m.env_log().splitlines():
+                call, words = line.split("\t", 1)
+                if call.startswith("systemctl") and "show -p ActiveState" in call:
+                    shows.append(set(words.split()))
+                else:
+                    seen |= set(words.split())
             want = {"CST_BT_CONTAINER=0", f"CST_BT_ROOT={m.root}"} | {f"{k}={v}" for k, v in extra.items()}
             self.assertEqual(seen, want, extra)
+            self.assertTrue(shows, extra)
+            for words in shows:
+                self.assertEqual(words, want | {"LC_ALL=C"}, extra)
 
 
 class ScratchFileTest(SetupCase):

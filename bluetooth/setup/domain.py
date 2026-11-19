@@ -228,13 +228,6 @@ def read_settings_output(shown: str) -> dict[str, str]:
     return out
 
 
-def unit_activity(shown: str) -> tuple[str, str]:
-    """(ActiveState, InvocationID) from the KEY=VALUE lines of `systemctl show -p ActiveState -p
-    InvocationID UNIT`, in whatever order systemctl prints them; a missing one is ''."""
-    props = read_settings_output(shown)
-    return props.get("ActiveState", ""), props.get("InvocationID", "")
-
-
 def is_running(active_state: str) -> bool:
     """The unit runs (`systemctl is-active` would exit 0) in this ActiveState."""
     return enum_member(RunningState, active_state) is not None

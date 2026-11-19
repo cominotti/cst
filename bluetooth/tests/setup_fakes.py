@@ -46,14 +46,14 @@ STUBS = (
 FAKE = r"""#!/bin/bash
 # The fake machine of bluetooth/tests/test_setup.py: one script for every
 # command it stands in for (named by $0). Its state is files in $FAKE_STATE;
-# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the CST_, LC_
-# and PYTHON variables it got, to catch a leak).
+# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the command and its
+# first four arguments, a tab, then the CST_, LC_ and PYTHON variables it got, to catch a leak).
 S="${FAKE_STATE:?}"
 me="${0##*/}"
 log() { printf '%s\n' "$*" >>"$S/log"; }
 if [[ "$me" != sleep && ( "$me" != python3 || "$*" == *wp-roles* ) ]]; then
     log "$me $*"
-    { printf '%s:' "$me"; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
+    { printf '%s\t' "$me ${1:-} ${2:-} ${3:-} ${4:-}" | tr '\n' ' '; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
 fi
 unit() { # unit SCOPE NAME: the file prefix of a unit's state
     local n="${2%.service}"
@@ -71,6 +71,7 @@ new_id() { # new_id PREFIX: a new invocation ID for the unit
 case "$me" in
     flatpak-spawn)
         [[ "$1" == --host ]] && shift
+        while [[ "$1" == --env=* ]]; do export "${1#--env=}"; shift; done  # flatpak-spawn --env=K=V
         if [[ "$1" == /usr/bin/python3 && "$*" == *socket* ]]; then
             [[ -e "$S/iso-socket" ]]
             exit
@@ -118,6 +119,7 @@ case "$me" in
                 exit 1
                 ;;
             show)
+                [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
                     *ActiveState*)   # systemd prints ActiveState= before InvocationID=

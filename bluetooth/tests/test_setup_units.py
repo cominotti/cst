@@ -9,6 +9,7 @@ the fake of setup_fakes.py; nothing real is touched.
 from collections.abc import Sequence
 import json
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -26,10 +27,10 @@ from bluetooth.setup.domain import (
     is_running,
     parse_command_line,
     resolve,
-    unit_activity,
 )
 from bluetooth.tests.setup_fakes import ISO, MAC, REPO, Machine
 from bluetooth.tests.test_ldac_watch import pw_dump
+from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
@@ -73,9 +74,12 @@ class Clock:
         self.slept.append(seconds)
 
 
-def change(m: Machine, *args: str, settings: dict[str, str] | None = None) -> tuple[Change, Console, Clock]:
+def change(
+    m: Machine, *args: str, settings: dict[str, str] | None = None, show_timeout: float | None = None
+) -> tuple[Change, Console, Clock]:
     """The use cases over the fake machine, as inside a toolbox for the host commands (so the
-    kernel ISO probe is the fake's), whatever the command."""
+    kernel ISO probe is the fake's), whatever the command; show_timeout: systemctl show's limit
+    (cst_core's 20 s when None)."""
     paths = Paths(
         home=m.home, config=f"{m.home}/.config", etc=f"{m.root}/etc", usr_share=f"{m.root}/usr/share", checkout=REPO
     )
@@ -85,8 +89,10 @@ def change(m: Machine, *args: str, settings: dict[str, str] | None = None) -> tu
     assert not isinstance(cfg, Exit)
     console, clock = Console(), Clock()
     env = m.env(container=True)
+    runner = SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env)
     machine = SetupMachine(
-        runner=SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env),
+        runner=runner,
+        systemd=SystemctlAdapter(runner, timeout=show_timeout),
         clock=clock,
         console=console,
         files=LocalSetupFiles(),
@@ -119,15 +125,32 @@ class BapStateTest(unittest.TestCase):
 class UnitActivityTest(unittest.TestCase):
     """What `systemctl show -p ActiveState -p InvocationID` says of a unit, and when it runs."""
 
-    def test_the_two_properties_in_either_order(self) -> None:
-        self.assertEqual(unit_activity("ActiveState=active\nInvocationID=0a1b\n"), ("active", "0a1b"))
-        self.assertEqual(unit_activity("InvocationID=0a1b\nActiveState=reloading"), ("reloading", "0a1b"))
+    def test_one_show_through_cst_core(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, _, _ = change(m, "status")
+        state = run.unit_show("wireplumber.service", user=True)
+        self.assertEqual(state, ("active", "wp-0"))
+        self.assertEqual(
+            m.read("log").splitlines()[-1], "systemctl --user show -p ActiveState -p InvocationID wireplumber.service"
+        )
+        # In the C locale, whatever the caller's.
+        self.assertIn("LC_ALL=C", m.env_log().splitlines()[-1].split("\t", 1)[1].split())
 
-    def test_missing_empty_and_odd_lines(self) -> None:
-        self.assertEqual(unit_activity(""), ("", ""))
-        self.assertEqual(unit_activity("ActiveState=inactive\nInvocationID=\n"), ("inactive", ""))
-        self.assertEqual(unit_activity("no equals sign\nActiveState=failed\n"), ("failed", ""))
-        self.assertEqual(unit_activity("InvocationID=0a1b\n"), ("", "0a1b"))
+    def test_a_systemctl_that_does_not_answer(self) -> None:
+        # Nothing answers (PID 1 or the user manager stuck): the look gives up at the limit and
+        # tells nothing, so the unit reads as not running and a wait for it can end.
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        m.put("hang-show", "")
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, _, _ = change(m, "status", show_timeout=1)
+        start = time.monotonic()
+        self.assertEqual(run.unit_show("bluetooth.service", user=False), ("", ""))
+        self.assertLess(time.monotonic() - start, 10)
 
     def test_running_as_systemctl_is_active_sees_it(self) -> None:
         for word in ("active", "reloading", "refreshing"):

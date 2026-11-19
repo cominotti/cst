@@ -71,11 +71,12 @@ class SystemctlAdapter:
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
         return UnitName(res.stdout.strip())
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
         """`systemctl show -p PROP... unit` as {prop: value}, on the host from a toolbox (read-only, so
-        also from plan and status there; on_host=False: where the caller runs); {} when systemctl fails
-        or cannot start. 20 s at most, or the adapter's timeout when it has one."""
-        argv = ["systemctl", "show", *(a for p in props for a in ("-p", p)), unit]
+        also from plan and status there; on_host=False: where the caller runs); user: the unit of the
+        user's own manager (`systemctl --user`); {} when systemctl fails or cannot start. 20 s at most,
+        or the adapter's timeout when it has one."""
+        argv = ["systemctl", *(["--user"] if user else []), "show", *(a for p in props for a in ("-p", p)), unit]
         timeout = 20 if self._timeout is None else self._timeout
         res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, on_host=on_host)
         if res.returncode != 0:

@@ -54,7 +54,6 @@ from bluetooth.setup.domain import (
     rule_device,
     senders_of,
     home_tilde,
-    unit_activity,
     wp_label,
     wp_note,
     wp_word,
@@ -62,7 +61,7 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
 
 
 def read_bluetooth_settings(
@@ -127,6 +126,7 @@ class SetupMachine:
     """The ports of one run."""
 
     runner: CommandRunnerPort
+    systemd: SystemdPort  # its show only: ActiveState and InvocationID (unit_show)
     clock: ClockPort
     console: SetupConsolePort
     files: SetupFilesPort
@@ -286,14 +286,12 @@ class Survey:
 
     # ---- the restarts still owed -----------------------------------------------------------
     def unit_show(self, unit: str, *, user: bool, fresh: bool = False) -> tuple[str, str]:
-        """(ActiveState, InvocationID) of the unit from one `systemctl show`, read once per run and
-        kept until CST restarts the unit (forget_unit); fresh: read it again (and keep that)."""
+        """(ActiveState, InvocationID) of the unit from one `systemctl show` (cst_core's: C locale, 20 s
+        at most, on the host from a toolbox; '' for what it cannot tell), read once per run and kept
+        until CST restarts the unit (forget_unit); fresh: read it again (and keep that)."""
         if fresh or unit not in self.unit_states:
-            scope = ["--user"] if user else []
-            shown = self.quiet(
-                ["systemctl", *scope, "show", "-p", "ActiveState", "-p", "InvocationID", unit], host=True
-            )
-            self.unit_states[unit] = unit_activity(shown)
+            shown = self.m.systemd.show(UnitName(unit), ("ActiveState", "InvocationID"), user=user)
+            self.unit_states[unit] = (shown.get("ActiveState", ""), shown.get("InvocationID", ""))
         return self.unit_states[unit]
 
     def forget_unit(self, *units: str) -> None:
