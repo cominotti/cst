@@ -53,7 +53,8 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import CommandFailed, CommandFault, CommandResult, UnitName
+from cst_core.domain.units import ActiveState
+from cst_core.ports import CommandFailed, CommandFault, CommandResult, SystemctlHost, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -181,6 +182,25 @@ class ValueObjectsTest(unittest.TestCase):
         for bad in ("999", "064444", "abc", -1, 0o10000, True):
             with self.subTest(bad=bad), self.assertRaises(DomainValidationError):
                 OctalMode.parse(bad)
+
+
+class ActiveStateTest(unittest.TestCase):
+    """ActiveState holds systemd's ActiveState words, which systemctl's text is compared with."""
+
+    def test_it_holds_systemds_eight_words(self) -> None:
+        # systemd 262, unit_active_state_to_string.
+        words = {"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing"}
+        self.assertEqual({state.value for state in ActiveState}, words)
+
+    def test_plain_text_is_found_in_a_set_of_members(self) -> None:
+        # The modules keep systemctl's answer a str and look it up in a frozenset of members.
+        running = frozenset({ActiveState.ACTIVE, ActiveState.RELOADING})
+        self.assertIn("active", running)
+        self.assertIn("reloading", running)
+        self.assertNotIn("inactive", running)
+        self.assertNotIn("", running)
+        self.assertNotIn("a-word-a-newer-systemd-adds", running)
+        self.assertEqual(str(ActiveState.MAINTENANCE), "maintenance")
 
 
 class ManagedFilesTest(unittest.TestCase):
@@ -444,8 +464,10 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(failing.show(UnitName("machine.slice"), ("MemoryLow",)), {})
         # A caller that reads the systemd it runs under, with a timeout of its own (vm's timer status).
         seen.clear()
-        local = SystemctlAdapter(Recording(CommandResult(0, "Result=success\n", "")), timeout=120)
-        self.assertEqual(local.show(UnitName("a.service"), ("Result",), on_host=False), {"Result": "success"})
+        local = SystemctlAdapter(
+            Recording(CommandResult(0, "Result=success\n", "")), timeout=120, on_host=SystemctlHost.LOCAL
+        )
+        self.assertEqual(local.show(UnitName("a.service"), ("Result",)), {"Result": "success"})
         self.assertEqual(seen[0][1], {"check": False, "timeout": 120, "locale_c": True, "on_host": False})
         # A unit of the user's own manager (bluetooth's wireplumber.service): --user before show.
         seen.clear()
@@ -504,18 +526,30 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(user.calls, words(["systemctl", "--user"]))
         self.assertEqual([set(o) for o in user.options[:-1]], [{"timeout", "locale_c"}] * 12)
         self.assertEqual(user.options[-1], {"timeout": 20, "locale_c": True, "on_host": True})
-        # on_host: every call but show through the runner's on_host; show keeps its own.
+        # on_host EVERY: every call through the runner's on_host; LOCAL: show too stays where it runs.
         host = FakeRunner()
-        sysd = SystemctlAdapter(host, user=True, on_host=True)
-        every_call(sysd)
-        sysd.show(unit, ("Result",), on_host=False)
+        every_call(SystemctlAdapter(host, user=True, on_host=SystemctlHost.EVERY))
+        SystemctlAdapter(host, user=True, on_host=SystemctlHost.LOCAL).show(unit, ("Result",))
         self.assertEqual([o.get("on_host") for o in host.options], [True] * 13 + [False])
+        # LOCAL names on_host to the runner only for show; SHOW_ONLY is what an adapter built without it does.
+        local = FakeRunner()
+        every_call(SystemctlAdapter(local, user=True, on_host=SystemctlHost.LOCAL))
+        self.assertEqual(local.options, [*user.options[:-1], {**user.options[-1], "on_host": False}])
+        show_only = FakeRunner()
+        every_call(SystemctlAdapter(show_only, user=True, on_host=SystemctlHost.SHOW_ONLY))
+        self.assertEqual(show_only.options, user.options)
         # program: a stub in place of systemctl, never on the host (show neither); base_env and stdin
         # reach every systemctl call, with the adapter's timeout and locale.
         stub = FakeRunner()
         env = {"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": "/run/user/1000"}
         stubbed = SystemctlAdapter(
-            stub, timeout=60, user=True, program="/stub/systemctl", on_host=True, base_env=env, stdin="inherit"
+            stub,
+            timeout=60,
+            user=True,
+            program="/stub/systemctl",
+            on_host=SystemctlHost.EVERY,
+            base_env=env,
+            stdin="inherit",
         )
         every_call(stubbed)
         self.assertEqual(stub.calls, words(["/stub/systemctl", "--user"]))

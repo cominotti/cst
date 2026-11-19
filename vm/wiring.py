@@ -26,7 +26,7 @@ from cst_core.domain.values import HOUR
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.terminal import confirm
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.ports import SystemdPort
+from cst_core.ports import SystemctlHost, SystemdPort
 from cst_core.ports import ClockPort
 from vm.adapters import COMMANDS_OF_VM, NAME, VmConfFiles, effective_root, fault_words, prepare_command, run
 from vm.adapters.backup import BackupFiles, DefinitionFiles, StopSignals, TerminalLines, VmLock, notify, safe_output
@@ -102,9 +102,11 @@ def timer_port(cfg: VmSettings, entry_file: str) -> TimerFilesPort:
 
 
 def systemd() -> SystemdPort:
-    """systemctl as cst-vm runs it: in the C locale, 120 s at most, with its own words for a
-    systemctl that is missing or does not answer (fault_words)."""
-    return SystemctlAdapter(SubprocessCommandRunner(words=fault_words), timeout=120, locale_c=True)
+    """systemctl as cst-vm runs it: the systemd it runs under (show too), in the C locale, 120 s at
+    most, with its own words for a systemctl that is missing or does not answer (fault_words)."""
+    return SystemctlAdapter(
+        SubprocessCommandRunner(words=fault_words), timeout=120, locale_c=True, on_host=SystemctlHost.LOCAL
+    )
 
 
 def vm_commands() -> VmCommandsPort:

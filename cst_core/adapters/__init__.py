@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import time
 from typing import TypedDict, Unpack
 
-from cst_core.ports import CommandResult, CommandRunnerPort, StdinMode, UnitName
+from cst_core.ports import CommandResult, CommandRunnerPort, StdinMode, SystemctlHost, UnitName
 
 
 class SystemClockAdapter:
@@ -39,7 +39,7 @@ class _SystemctlScope(TypedDict, total=False):
 
     user: bool
     program: str | None
-    on_host: bool
+    on_host: SystemctlHost
     base_env: Mapping[str, str] | None
     stdin: StdinMode
 
@@ -51,10 +51,11 @@ class SystemctlAdapter:
     always the C locale); by default none (no limit, the caller's locale). A caller that keeps its own words for a systemctl that is
     missing or does not answer gives the runner its words (SubprocessCommandRunner(words=...)).
 
-    The scope, every option off by default: user (`systemctl --user`: the user manager); program (a stub
-    run instead of systemctl, never on the host); on_host (every call but show through the runner's
-    on_host: the host's systemctl from a toolbox; show keeps its own on_host); base_env and stdin (passed
-    to the runner on every systemctl call)."""
+    The scope, every option off by default but on_host: user (`systemctl --user`: the user manager);
+    program (a stub run instead of systemctl, never on the host); on_host (a SystemctlHost: which calls
+    go to the host's systemctl from a toolbox, through the runner's on_host: none (LOCAL), show only
+    (SHOW_ONLY, the default) or every call (EVERY); systemd-escape never does); base_env and stdin
+    (passed to the runner on every systemctl call)."""
 
     def __init__(
         self,
@@ -70,9 +71,12 @@ class SystemctlAdapter:
         program, user = scope.get("program"), scope.get("user", False)
         self._head = [program or "systemctl", *(["--user"] if user else [])]
         self._stub = program is not None
-        on_host = scope.get("on_host", False) and not self._stub
+        # A stub never runs on the host. show always names on_host to the runner; the other calls name
+        # it only when every call goes to the host.
+        policy = SystemctlHost.LOCAL if self._stub else scope.get("on_host", SystemctlHost.SHOW_ONLY)
+        self._show_on_host = policy != SystemctlHost.LOCAL
         self._scope = _ScopeOptions()
-        if on_host:
+        if policy == SystemctlHost.EVERY:
             self._scope["on_host"] = True
         if (base_env := scope.get("base_env")) is not None:
             self._scope["base_env"] = base_env
@@ -139,15 +143,15 @@ class SystemctlAdapter:
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
         return UnitName(res.stdout.strip())
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
-        """`systemctl show -p PROP... unit` as {prop: value}, on the host from a toolbox (read-only, so
-        also from plan and status there; on_host=False: where the caller runs); user: the unit of the
+    def show(self, unit: UnitName, props: Sequence[str], *, user: bool = False) -> dict[str, str]:
+        """`systemctl show -p PROP... unit` as {prop: value}, on the host from a toolbox unless the
+        adapter's on_host is LOCAL (read-only, so also from plan and status there); user: the unit of the
         user's own manager (`systemctl --user`; an adapter whose scope is user already has it); {} when
         systemctl fails or cannot start. 20 s at most, or the adapter's timeout when it has one."""
         head = [*self._head, "--user"] if user and "--user" not in self._head else self._head
         argv = [*head, "show", *(a for p in props for a in ("-p", p)), unit]
         timeout = 20 if self._timeout is None else self._timeout
-        scope = _ScopeOptions(self._scope, on_host=on_host and not self._stub)
+        scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
         res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
         if res.returncode != 0:
             return {}

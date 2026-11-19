@@ -61,6 +61,7 @@ from btrfs.stall_monitord.domain import (
     wait_at,
     wait_counts,
     wait_kind,
+    WaitKind,
 )
 from btrfs.stall_monitord.adapters.proc import (
     CGROUP_ROOT,
@@ -426,11 +427,11 @@ class Monitor:
         for tid, t in current.items():
             frames, wchan, kind = info[tid]
             comm, pid = t["comm"], t["pid"]
-            if kind == "idle":
+            if kind == WaitKind.IDLE:
                 continue
             first = hung_start(kind, t, now)
             if now - first < HUNG_SECONDS:
-                if kind == "storage" and now - t["busy"] >= HUNG_SECONDS:
+                if kind == WaitKind.STORAGE and now - t["busy"] >= HUNG_SECONDS:
                     self.report_io_busy(t, tid, frames, wchan, now)
                 continue
             key = hung_key(kind, t, now)

@@ -4,7 +4,7 @@
 import itertools
 import math
 
-from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE
+from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE, WaitKind
 from btrfs.stall_report.domain.categories import CAT_DESC, MAINT_TEXT, NON_STORAGE, V2_HUNG_SIG, classify
 from btrfs.stall_report.domain.records import (
     DI,
@@ -332,7 +332,7 @@ def summarise(
             # Daemons v3-v7 counted in max_d every wait they tagged "storage":
             # memory reclaim / swap, and before v5 btrfs maintenance (fstrim,
             # scrub), too. Same estimate, applied to those task-samples.
-            counted = [x for x in sigs if x.get("kind", "storage") == "storage"]
+            counted = [x for x in sigs if x.get("kind", WaitKind.STORAGE) == WaitKind.STORAGE]
             counted_n = sum(x["n"] for x in counted)
             storage_n = sum(x["n"] for x in counted if x["cat"] not in NON_STORAGE)
             mem_n = sum(x["n"] for x in counted if x["cat"] == "reclaim")
