@@ -31,6 +31,20 @@ class ExitStatus(IntEnum):
     KILLED = 137  # 128 + 9: killed by SIGKILL
 
 
+class ResticExit(IntEnum):
+    """The exit statuses of restic (and of timeout around it) that the NAS backups (btrfs-snapshot's
+    and cst-vm's) tell apart."""
+
+    OK = 0
+    INCOMPLETE = 3
+    NO_REPOSITORY = 10
+    LOCKED = 11
+    WRONG_PASSWORD = 12
+    TIMED_OUT = ExitStatus.TIMED_OUT
+    INTERRUPTED = 130
+    KILLED = ExitStatus.KILLED
+
+
 def shell_exit_status(returncode: int) -> int:
     """A child's return code as a shell exit status: 128+N for a child killed by signal N (-N)."""
     return ExitStatus.SIGNALLED - returncode if returncode < 0 else returncode

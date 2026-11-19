@@ -38,7 +38,6 @@ from btrfs.snapshot_runtime.domain import (
     AlertKind,
     CoreCommand,
     GuardError,
-    ResticExit,
     restic_time,
     duration_s,
     features_type,
@@ -48,6 +47,7 @@ from btrfs.snapshot_runtime.domain import (
     summary_text,
 )
 from cst_core.ports import OutputMode
+from cst_core.domain.errors import ResticExit
 
 UMOUNT_TRIES = 5
 

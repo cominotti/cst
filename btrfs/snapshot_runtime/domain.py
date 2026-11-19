@@ -11,7 +11,6 @@ import re
 from typing import Final
 
 from btrfs.health_check.domain import awk_field, bash_div, bash_int
-from cst_core.domain.errors import ExitStatus
 from cst_core.domain.text import read_fields
 from cst_core.domain.values import DAY, HOUR, MINUTE
 
@@ -406,19 +405,6 @@ SFTP_TIMEOUT_S: Final = 60
 NAS_LOCK_WAIT_S: Final = 1800
 CHECK_FAILURES_ALERTED: Final = 3
 SUMMARY_CHARS: Final = 300
-
-
-class ResticExit(IntEnum):
-    """The exit statuses of restic (and of timeout around it) that the NAS backup tells apart."""
-
-    OK = 0
-    INCOMPLETE = 3
-    NO_REPOSITORY = 10
-    LOCKED = 11
-    WRONG_PASSWORD = 12
-    TIMED_OUT = ExitStatus.TIMED_OUT
-    INTERRUPTED = 130
-    KILLED = ExitStatus.KILLED
 
 
 # Messages of restic check (0.19) that name damaged data, not a transport problem.

@@ -9,7 +9,7 @@ import json
 import os.path
 import re
 
-from cst_core.domain.errors import ExitStatus, Refused
+from cst_core.domain.errors import ExitStatus, Refused, ResticExit
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR, format_bytes_gib_mib
 from cst_core.ports import ClockPort
@@ -97,9 +97,9 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
     why = {
         ExitStatus.NOT_FOUND: "restic is not installed (it comes with the NAS setup; after rpm-ostree, active at the next reboot)",
         ExitStatus.TIMED_OUT: "the NAS did not answer within 5 minutes",
-        10: f"no restic repository at {nas['repo']}",
-        11: "the repository is locked (try again later)",
-        12: f"{cfg.paths.restic_password} does not open the repository",
+        ResticExit.NO_REPOSITORY: f"no restic repository at {nas['repo']}",
+        ResticExit.LOCKED: "the repository is locked (try again later)",
+        ResticExit.WRONG_PASSWORD: f"{cfg.paths.restic_password} does not open the repository",
     }.get(rc, first_line(err) or f"restic exit {rc}")
     raise Refused(f"NAS repository not usable: {why}. Nothing was changed (no snapshot taken)")
 
@@ -350,10 +350,10 @@ def nas_run(
                     nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800
                 )  # incomplete (rc 3): not a backup
             why = {
-                3: "some files could not be read",
+                ResticExit.INCOMPLETE: "some files could not be read",
                 ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
                 ExitStatus.NOT_FOUND: "restic not found",
-                11: "the repository stayed locked",
+                ResticExit.LOCKED: "the repository stayed locked",
             }.get(rc, f"restic exit {rc}")
             raise Refused(f"restic backup failed: {why}; no backup recorded")
         if live:
