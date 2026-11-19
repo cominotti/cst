@@ -660,8 +660,8 @@ want = f"<3>docker-gc: container inspect: {hole['Id']}: no Image; nothing done"
 for args in (["run", "--dry-run"], ["status"], ["run", "--dry-run"], ["status"]):  # run: skipped right after boot
     r = subprocess.run([prog, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
     sys.stderr.write(f"test_112 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
-    if r.returncode != 1 or want not in r.stdout + r.stderr:
-        sys.exit(f"test_112: {args}: expected exit 1 and {want!r}")
+    if r.returncode != 76 or want not in r.stdout + r.stderr:  # 76: the recorder unit does not restart for it
+        sys.exit(f"test_112: {args}: expected exit 76 and {want!r}")
 with open(os.path.join(tmp, "calls.log")) as f:
     calls = [json.loads(line) for line in f]
 removing = [c for c in calls if "rm" in c or "prune" in c]
@@ -3614,7 +3614,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
 
     def test_112_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
         """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
-        a fake docker whose container record lacks "Image": run --dry-run and status exit 1 naming the
+        a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
         record and the key ("nothing done"), twice; docker is asked to remove nothing, its objects and
         last-used.json are unchanged. (A plain run plans the same way, but is skipped in the first
         10 minutes after boot: the unit tests cover it.)"""
