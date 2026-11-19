@@ -192,6 +192,17 @@ class H(unittest.TestCase):
         sys.unraisablehook = lambda unraisable: None  # and does not restore it
     def test_b_a_weakref_callback_raises(self):
         U.test_a_weakref_callback_raises(self)
+class N(unittest.TestCase):
+    def test_a_showwarning_that_warns_once_then_calls_the_original(self):
+        shown = []
+        def show(*args, **kwargs):
+            if not shown:
+                shown.append(1)
+                warnings.warn("a second warning", ResourceWarning)
+            warnings._showwarning_orig(*args, **kwargs)
+        warnings.showwarning = show
+        f = open(os.devnull)
+        del f
 class K(unittest.TestCase):
     def test_ignores_every_warning_and_keeps_a_file(self):
         warnings.simplefilter("ignore")  # outside a catch_warnings block
@@ -316,6 +327,14 @@ class ResourceWarningGateTest(unittest.TestCase):
             done.stderr,
         )
         self.assertIn("error: exception in probe_leaks.H.test_b_a_weakref_callback_raises: ", done.stderr)
+
+    def test_a_warning_raised_inside_a_replaced_showwarning_is_one_line_each(self) -> None:
+        done = self.run_probe("", cls="N")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 2, done.stderr)  # each warning once
+        self.assertEqual(len([line for line in error if ": a second warning (" in line]), 1, error)
+        self.assertEqual(len([line for line in error if ": unclosed file " in line]), 1, error)
 
     def test_a_leak_freed_between_two_tests_fails_the_run(self) -> None:
         done = self.run_probe("", cls="K")

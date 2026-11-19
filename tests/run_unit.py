@@ -396,11 +396,11 @@ class LeakRecordingResult(unittest.TextTestResult):
         self._record(msg)  # the replacement gets it, not _warned
         # A replacement that hands the warning on to the original (warnings._showwarning_orig)
         # reaches _warned: that is the same warning, already recorded.
-        self._in_replaced = True
+        outer, self._in_replaced = self._in_replaced, True
         try:
             self._show_entry(msg)
         finally:
-            self._in_replaced = False
+            self._in_replaced = outer  # a warning raised inside the replacement must not clear it
 
     def _warned(self, msg: warnings.WarningMessage) -> None:
         if not self._in_replaced:
