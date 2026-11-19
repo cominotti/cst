@@ -80,7 +80,12 @@ exclude = ["*.md"]
 # entry may ignore ANN (tests/test_python_files.py fails on one).
 # PLW1510: every subprocess.run says check=True or check=False. Whether a
 # failed command stops the program is a decision, not a default.
-select = ["F", "B", "UP", "E9", "PLW1510"]
+# With no hit to fix when they were turned on: PGH (no blanket `# type:
+# ignore` or `# noqa`), A (no builtin name shadowed), T10 (no debugger call
+# left), TID (no relative import from a parent package), LOG and G (logging
+# calls: no f-string or % formatting in the message), PLE (pylint errors),
+# W (pycodestyle warnings: trailing whitespace, invalid escapes).
+select = ["F", "B", "UP", "E9", "PLW1510", "PGH", "A", "T10", "TID", "LOG", "G", "PLE", "W"]
 # CST uses the standard library only: no rule may suggest or write an import
 # from the third-party typing_extensions (tests/test_python_files.py checks
 # this is false).
@@ -122,6 +127,10 @@ division-by-zero = "error"
 possibly-missing-attribute = "error"
 possibly-missing-import = "error"
 possibly-unresolved-reference = "error"
+# A `# type: ignore` or `# ty: ignore` that suppresses nothing, and a cast()
+# to the type the value already has.
+unused-ignore-comment = "error"
+redundant-cast = "error"
 
 [tool.ty.src]
 # The ty gate: every Python file of the repository, by folder. ty finds the

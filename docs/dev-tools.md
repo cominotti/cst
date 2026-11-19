@@ -22,7 +22,7 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 ## Running them
 
 ```
-invowk cmd test pylint        # ruff check (F, B, UP, E9, PLW1510), ruff format --check, then the ruff budgets: every Python file
+invowk cmd test pylint        # ruff check (the select list of pyproject.toml), ruff format --check, then the ruff budgets: every Python file
 invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
 invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
 invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
@@ -102,7 +102,11 @@ repository:
   Python). CST uses the standard library only. No hit today;
   `tests/test_python_files.py` fails when the setting is not `false`.
 - **ruff rules**: `F` (pyflakes), `B` (bugbear), `UP` (pyupgrade), `E9`
-  (syntax errors) and `PLW1510` for every Python file (`test pylint`). `ANN`
+  (syntax errors), `PLW1510`, and the families that had no hit when they
+  were turned on: `PGH` (no blanket ignore comments), `A` (no builtin name
+  shadowed), `T10` (no debugger call), `TID` (no relative import from a
+  parent package), `LOG` and `G` (logging calls), `PLE` (pylint errors) and
+  `W` (pycodestyle warnings), for every Python file (`test pylint`). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
   own (`ruff check --select ANN`), on every Python file (see "ANN applies
   to every file" below).
@@ -218,8 +222,10 @@ repository:
   `requires-python`.)
 - **`[tool.ty.rules]`** raises rules that are warnings or off by default to
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
-  `possibly-missing-import` and `possibly-unresolved-reference`. A rule may
-  be added there only at `"error"`.
+  `possibly-missing-import`, `possibly-unresolved-reference`,
+  `unused-ignore-comment` (an ignore comment that suppresses nothing) and
+  `redundant-cast` (a `cast()` to the type the value already has). A rule
+  may be added there only at `"error"`.
 
 ## The workflow audit (zizmor)
 
