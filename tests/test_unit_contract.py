@@ -2,8 +2,9 @@
 """Unit contract: every program a unit starts or checks for is an installed CST file that its runner can run.
 
 For every unit CST installs or writes (tests/unit_files.py: the manifest's
-units, templates rendered, and the units cst-vm, cst-toolchains, the LDAC
-watcher and the degraded-boot setup generate), each absolute path under
+units and drop-ins, templates rendered, the units cst-vm, cst-toolchains,
+the LDAC watcher and the degraded-boot setup generate, and the drop-ins
+btrfs-setup.sh, cpu-setup and the game profile write), each absolute path under
 /usr/local/ or %h/.local/ in an Exec*= line (ExecStart, ExecStartPost,
 ExecCondition, ...) must be a manifest destination of kind python-entry or
 shell whose mode lets the unit's runner (root for a system unit, the user
@@ -20,7 +21,7 @@ import unittest
 
 from cst_core.domain.install import ArtifactKind, InstallEntry, Owner, manifest_by_dest
 from cst_core.domain.values import OctalMode
-from tests.unit_files import Scope, UnitText, generated_units, manifest_units
+from tests.unit_files import Scope, UnitText, generated_dropins, generated_units, manifest_units
 
 ROOTS = ("/usr/local/", "%h/.local/")
 
@@ -46,7 +47,7 @@ def contract_problems(unit: UnitText, by_dest: Mapping[str, InstallEntry]) -> li
     for key, path in unit_paths(unit.text):
         dest = "~/" + path[len("%h/") :] if path.startswith("%h/") else path
         entry = by_dest.get(dest)
-        where = f"{unit.origin}: {unit.name}: {key}={path}"
+        where = f"{unit.origin}: {unit.label}: {key}={path}"
         if entry is None:
             problems.append(f"{where}: not a file INSTALL_MANIFEST installs")
             continue
@@ -79,7 +80,7 @@ def nnp_problems(unit: UnitText) -> list[str]:
         line.lower() in ("nonewprivileges=yes", "nonewprivileges=true", "nonewprivileges=1", "nonewprivileges=on")
         for line in lines
     ):
-        return [f"{unit.origin}: {unit.name}: NoNewPrivileges=yes blocks the SELinux move into the Docker domain"]
+        return [f"{unit.origin}: {unit.label}: NoNewPrivileges=yes blocks the SELinux move into the Docker domain"]
     return []
 
 
@@ -100,14 +101,26 @@ class UnitContractTest(unittest.TestCase):
 
     def test_every_unit_names_installed_programs(self) -> None:
         by_dest = manifest_by_dest()
-        units = manifest_units() + generated_units()
+        units = manifest_units() + generated_units() + generated_dropins()
         problems = [p for u in units for p in contract_problems(u, by_dest)]
         self.assertEqual(problems, [], "\n".join(problems))
-        # The gate sees the units it is meant for.
-        names = {u.name for u in units}
-        for name in ("btrfs-snapshot.service", "cst-vm-backup@.service", "cst-bt-ldac48.service"):
+        # The gate sees the units and drop-ins it is meant for.
+        names = {u.label for u in units}
+        for name in (
+            "btrfs-snapshot.service",
+            "cst-vm-backup@.service",
+            "cst-bt-ldac48.service",
+            "btrfs-scrub-weekly.service.d/10-cst-limit.conf",
+            "below.service.d/10-cst.conf",
+            "machine.slice.d/10-cpu-setup.conf",
+            "user@.service.d/50-cpu-setup-cpuset.conf",
+            "machine.slice.d/10-swap-memory-low.conf",
+            "user.slice.d/10-cpu-setup.conf",
+            "user@1000.service.d/zz-cst-game.conf",
+        ):
             self.assertIn(name, names)
         self.assertTrue(any(unit_paths(u.text) for u in units))
+        self.assertIn("ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 500M /var\n", generated_dropins()[0].text)
 
     def test_paths_are_found_and_checked(self) -> None:
         text = (
@@ -155,6 +168,12 @@ class UnitContractTest(unittest.TestCase):
                 "m: u.service: ExecStartPost=/usr/local/sbin/gone: not a file INSTALL_MANIFEST installs",
                 "m: u.service: ExecCondition=/usr/local/sbin/data: m/data is of kind data, not a program",
             ],
+        )
+        # A drop-in is named with its UNIT.d folder.
+        dropin = UnitText("10-x.conf", "[Service]\nExecStartPre=/usr/local/sbin/gone\n", "system", "m", "a.service")
+        self.assertEqual(
+            contract_problems(dropin, by_dest),
+            ["m: a.service.d/10-x.conf: ExecStartPre=/usr/local/sbin/gone: not a file INSTALL_MANIFEST installs"],
         )
         # The same program started by the system manager: root is not its owner (user), and others may not run it.
         system = UnitText("s.service", "[Service]\nExecStart=%h/.local/lib/cst/tool\n", "system", "m")
