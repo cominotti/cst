@@ -548,6 +548,8 @@ class SettingState(StrEnum):
     MISSING = "MISSING"
     BAD = "BAD"
     INACTIVE = "-"
+    # Only in apply's verification notes under the rows: something that clears by itself later.
+    LATER = "later"
 
 
 class SliceActiveState(StrEnum):

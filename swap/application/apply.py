@@ -442,7 +442,7 @@ class SwapApplicationService(SwapReports):
             verify_notes.append(f"  {SettingState.BAD:<{SETTING_STATE_WIDTH}} {spec.name} is not active as swap")
         if active_zram0:
             verify_notes.append(
-                f"  {'later':<{SETTING_STATE_WIDTH}} zram0 still active as swap"
+                f"  {SettingState.LATER:<{SETTING_STATE_WIDTH}} zram0 still active as swap"
                 " (gone after a reboot, or apply again under lower pressure)"
             )
         verify_error = f"{env.prog}: ERROR: one or more settings did not apply as expected (see above)." if fail else ""
