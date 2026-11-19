@@ -341,14 +341,14 @@ def decide(
         for f in order:
             if total <= pol.max_total:
                 break
-            a = act.get(f.key, ("", ""))[0]
-            if a in (FolderAction.KEEP, FolderAction.DELETE):
+            prev = act.get(f.key)
+            if prev is not None and prev[0] in (FolderAction.KEEP, FolderAction.DELETE):
                 continue
             act[f.key] = (
                 FolderAction.DELETE,
                 f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active",
             )
-            total -= f.size - (f.inc_size if a == FolderAction.TRIM else 0)
+            total -= f.size - (f.inc_size if prev is not None and prev[0] == FolderAction.TRIM else 0)
     out: list[tuple[Folder, FolderAction, str]] = []
     for f in order:
         a, why = act.get(f.key, (FolderAction.KEEP, f"active {ago(now - f.activity)} ago"))
