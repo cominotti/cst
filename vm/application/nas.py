@@ -384,7 +384,7 @@ def nas_run(
                 left = forget_torn(p, nas, snap)
                 raise Refused(
                     f"the VM's state changed during the backup, the copy is not consistent "
-                    f"({f'restic snapshot {snap[:8]} forgotten' if left is None else left}): {e}"
+                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
                 ) from None
 
             def now_fp(path: str) -> Fingerprint | None:
@@ -398,7 +398,7 @@ def nas_run(
                 left = forget_torn(p, nas, snap)
                 raise Refused(
                     "changed during the backup (the VM was started?), the copy is not consistent "
-                    f"({f'restic snapshot {snap[:8]} forgotten' if left is None else left}): {', '.join(changed)}"
+                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"
                 )
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
