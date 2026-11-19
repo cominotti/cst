@@ -1969,6 +1969,27 @@ class VmTest(Scratch):
                 )
                 self.assert_read_only()
 
+    def test_an_index_cst_vm_cannot_read_counts_no_backup(self) -> None:
+        # Doctor read the index two ways: the backup count decoded a byte that is not UTF-8 as U+FFFD
+        # and counted a backup cst vm refuses to list, which cleared the warning.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        with open(path) as f:
+            text = f.read()
+        for raw in (text.encode().replace(b'"t"', b'"t\xff"'), b"[" * 100_000):
+            with self.subTest(raw=raw[:20]):
+                with open(path, "wb") as f:
+                    f.write(raw)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("cannot be read as cst vm's backup index (not JSON)", r.stdout)
+                self.assertNotIn("rollback pinned and VM backup present", r.stdout)
+                self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+                self.assertIn("last backup: never", r.stdout)
+                self.assertNotIn("Traceback", r.stdout + r.stderr)
+                self.assert_read_only()
+
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
         # After going back to an older CST: a newer index is neither taken for "never backed up"
         # nor read as if this checkout knew its format.

@@ -171,29 +171,38 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
             )
 
 
-def vm_index_data(host: DoctorHostPort) -> object:
-    """cst vm's backup index as read, None when it is missing or unreadable."""
-    try:
-        with host.open_text(host.path(VM_INDEX)) as f:
-            return parse_json(f.read())
-    except OSError, ValueError:
-        return None
-
-
-def vm_index_problem(host: DoctorHostPort) -> str | None:
-    """Why cst vm's backup index cannot be read as one, as cst vm reads it (vm.adapters.backup's
-    stored_backups); None when it is missing, readable, or of a newer cst vm."""
+def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
+    """cst vm's backup index read as cst vm reads it (vm.adapters.backup's stored_backups): None when it
+    is missing; (data, None) when it is JSON; (None, why) when it is there but cannot be read, or is not
+    JSON. The one reader of the index here, so every check sees what cst vm sees."""
     try:
         with host.open_bytes(host.path(VM_INDEX)) as f:
             raw = f.read()
     except FileNotFoundError:
         return None
     except OSError as e:
-        return e.strerror or str(e)
+        return None, e.strerror or str(e)
     try:  # decoded strictly, as cst vm decodes it: a byte that is not UTF-8 is not JSON there either
-        data = parse_json(raw.decode())
+        return parse_json(raw.decode()), None
     except ValueError, RecursionError:
-        return "not JSON"
+        return None, "not JSON"
+
+
+def vm_index_data(host: DoctorHostPort) -> object:
+    """cst vm's backup index as read, None when it is missing or unreadable."""
+    read = read_vm_index(host)
+    return None if read is None else read[0]
+
+
+def vm_index_problem(host: DoctorHostPort) -> str | None:
+    """Why cst vm's backup index cannot be read as one, as cst vm reads it; None when it is missing,
+    readable, or of a newer cst vm."""
+    read = read_vm_index(host)
+    if read is None:
+        return None
+    data, why = read
+    if why is not None:
+        return why
     if VM_INDEX_FORMAT.newer(data, "version") is not None:
         return None
     return NO_BACKUPS_LIST if stored_list(data) is None else None
