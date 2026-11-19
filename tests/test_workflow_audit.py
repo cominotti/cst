@@ -247,9 +247,30 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
 
 # What sets a variable for a task: an env block (vars or files) or a uv or zizmor variable named.
 # The env key may be quoted ("env": {...}) or inside a struct on one line ({name: "native", env:
-# {...}}); a longer word that holds it (environment:, my_env:) is not one.
+# {...}}); a longer word that holds it (environment:, my_env:) is not one, nor an env: in a string
+# or a comment (_code_only).
 _TASK_ENV = re.compile(r'(?<![\w"-])"?env"?\s*:')
 _TOOL_VARIABLE = re.compile(r"\b(?:UV|ZIZMOR)_[A-Z0-9_]*")
+# What is not CUE code in a task's text, left to right: a multi-line string, a quoted key (a string
+# right before its ':'), any other string, a // comment.
+_NOT_CODE = re.compile(r'"""[\s\S]*?"""|("(?:[^"\\\n]|\\.)*")(?=[ \t]*:)|"(?:[^"\\\n]|\\.)*"|//[^\n]*')
+
+
+# Every character but those str.splitlines() breaks a line at.
+_NOT_A_LINE_BREAK = re.compile(r"[^\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def _code_only(block: str) -> str:
+    """block with its strings and comments blanked, newlines kept (its lines stay in step), so an
+    env: in a string value ("echo $env: x") or after a // is not an env key. The quoted key
+    "env" stays."""
+
+    def blank(found: re.Match[str]) -> str:
+        if found.group(1) == '"env"':
+            return found.group(0)
+        return _NOT_A_LINE_BREAK.sub(" ", found.group(0))
+
+    return _NOT_CODE.sub(blank, block)
 
 
 def task_block(cue: str, name: str) -> str | None:
@@ -261,10 +282,10 @@ def task_block(cue: str, name: str) -> str | None:
 def _task_variables(block: str) -> list[str]:
     """The env keys and uv or zizmor variables of a task's text, comment lines left out."""
     out: list[str] = []
-    for line in block.splitlines():
+    for line, code in zip(block.splitlines(), _code_only(block).splitlines(), strict=True):
         if line.lstrip().startswith("//"):
             continue
-        if _TASK_ENV.search(line):
+        if _TASK_ENV.search(code):
             out.append("env")
         out += _TOOL_VARIABLE.findall(line)
     return out
@@ -577,6 +598,18 @@ class WorkflowAuditTest(unittest.TestCase):
             ('\t\t"env": {vars: {A: "1"}}\n', ["env"]),
             ('\t\truntimes: [{name: "native", env: {vars: {A: "1"}}}]\n', ["env"]),
             ('\t\tenvironment: "x"\n\t\tmy_env: "x"\n', []),
+            # env: in a string value, a multi-line string, a quoted key of another name or after a //.
+            ('\t\tdescription: "echo $env: x"\n', []),
+            ('\t\tdescription: "a \\"quoted\\" env: x"\n', []),
+            ('\t\tdescription: """\n\t\t\tenv: x\n\t\t\t"""\n', []),
+            ('\t\t"my env": "x"\n', []),
+            ('\t\tdescription: "x" // env: none\n', []),
+            # Still an env key: after a string with a // in it, in CUE's short form, after a string.
+            ('\t\tlinks: ["https://x"], env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\truntimes: env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\tdescription: "x", "env": {vars: {A: "1"}}\n', ["env"]),
+            # A tool variable in a string still counts.
+            ('\t\tdescription: "ZIZMOR_X=1"\n', ["ZIZMOR_X"]),
             ("\t\t// ZIZMOR_X is only a comment\n", []),
         ):
             with self.subTest(env=env):
