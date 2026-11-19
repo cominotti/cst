@@ -306,10 +306,14 @@ python-platform = "linux"
 error-on-warning = true
 
 [tool.ty.rules]
-# Rules raised to errors (by default some are warnings, some are off).
-# tests/test_python_files.py accepts a rule here only when it is raised to
-# "error": lowering one ("warn", "ignore") would take diagnostics out of the
-# gate.
+# Every rule is an error (all), also those that are warnings or off by
+# default: missing-type-argument, redundant-condition-strict and the others,
+# and each rule a newer ty adds. The rules named below are raised by all too;
+# they stay named for what their comments say about each one.
+# tests/test_python_files.py accepts a rule (or all) here only when it is
+# raised to "error": lowering one ("warn", "ignore") would take diagnostics
+# out of the gate.
+all = "error"
 deprecated = "error"
 division-by-zero = "error"
 possibly-missing-attribute = "error"

@@ -588,6 +588,17 @@ class PythonFilesTest(unittest.TestCase):
         )
         # A rule may be raised to "error", never lowered.
         self.assertEqual(ty_setting_problems(conf(rules={"division-by-zero": "error"}), ["a.py"]), [])
+        # all (every rule at once) the same way: raised to "error", never lowered.
+        self.assertEqual(ty_setting_problems(conf(rules={"all": "error", "deprecated": "error"}), ["a.py"]), [])
+        self.assertEqual(
+            ty_setting_problems(conf(rules={"all": "warn"}), ["a.py"]),
+            [
+                (
+                    "[tool.ty] rules.all = 'warn': a rule may only be raised to \"error\" here; a lower level takes "
+                    "its diagnostics out of the gate"
+                )
+            ],
+        )
         for level in ("warn", "ignore", "info"):
             with self.subTest(level=level):
                 self.assertEqual(

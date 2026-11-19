@@ -262,8 +262,12 @@ repository:
   calls that exist only on Linux or Unix (`os.geteuid`, `os.killpg`). CST
   runs on Linux only. (`python-version` needs no setting: ty takes it from
   `requires-python`.)
-- **`[tool.ty.rules]`** raises rules that are warnings or off by default to
-  errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
+- **`[tool.ty.rules]`** makes every rule an error (`all = "error"`, what
+  `ty check --error all` does): also the rules that are warnings or off by
+  default (`missing-type-argument`, `redundant-condition-strict`, ...) and
+  each rule a newer ty adds. The rules it names as well, with a comment on
+  each, are the ones raised on purpose before `all`: `deprecated`,
+  `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import`, `possibly-unresolved-reference`,
   `unused-ignore-comment` (an ignore comment that suppresses nothing),
   `redundant-cast` (a `cast()` to the type the value already has),
