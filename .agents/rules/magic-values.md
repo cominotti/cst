@@ -19,7 +19,7 @@ declared once and used by name.
   the plain word, and a test that passes a plain string still compares equal.
   `repr()` and `!r` do not: print `.value` or `str(x)` where the output
   showed the word.
-- **A Literal of members** (`type UnitFileState = Literal[OwnedState.OK, ...]`)
+- **A Literal of members** (`type WholeFileState = Literal[OwnedState.OK, ...]`)
   for the subset one function returns; not a `Literal` of strings. A
   `Literal[...]` of strings stays only for a fixed outside format, listed in
   `MAGIC_EXEMPT` with the reason.
@@ -35,7 +35,14 @@ declared once and used by name.
   `cast`, never a rebuilt dict. The guard is built on `cst_core.domain.shapes`
   (`json_object`, `has_shape`, `list_of`) over the `object` that `parse_json`
   or `parse_toml` gave, and checks every key whose type is narrower than
-  `object` or `Json` and every Required key.
+  `object` or `Json` and every Required key. Two gates keep this border:
+  `json.load(s)` and `tomllib.load(s)` are called nowhere else in production
+  code (`PRIMITIVE_OWNERS` in `tests/test_architecture.py`), so every reader
+  gets the `object` that `parse_json` and `parse_toml` return, which ty does
+  not let reach a narrower type unchecked; and ty's `unsound-return` and
+  `unsound-assignment` refuse a value typed `Any` from elsewhere (a regex
+  group, `sys.stdout`, `struct.unpack`) where a narrower type is declared
+  ([docs/dev-tools.md](../../docs/dev-tools.md#what-each-gate-checks)).
 
 ## Rules that keep the behaviour
 
@@ -61,12 +68,14 @@ declared once and used by name.
 
 ## The gates
 
-- `tests/test_magic_values.py` counts, per package, string comparisons with
-  an enum's word (leak), if/elif or match chains of 3 string arms, unit
-  numbers, loose dicts in signatures and `Literal`s of 3 strings, under
-  `MAGIC_CEILINGS` (never above; the target is 0). `MAGIC_EXEMPT` names a
-  scope that keeps one, with its reason; a stale entry fails. No ignore
-  comments.
+- `tests/test_magic_values.py` counts, per package of production code (tests
+  keep the raw words), string comparisons with an enum's word (leak), if/elif
+  or match chains of 3 string arms, unit numbers, loose dicts in signatures
+  and `Literal`s of 3 strings, under `MAGIC_CEILINGS` (never above), one entry
+  per package and kind of hit. A package and kind with no entry may have no
+  hit at all, so a new hit there fails. `MAGIC_EXEMPT` names a scope that
+  keeps one (`path:qualname`), with its reason; a stale entry fails. No
+  ignore comments.
 - ruff's `PLR2004` (a number compared with a literal) is counted in
   `RUFF_BUDGETS` (`tests/ruff_budget.py`), production code only.
 - A test passes the member where ty asks for it and keeps the raw string in

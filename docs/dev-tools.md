@@ -181,16 +181,20 @@ repository:
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
   `Any` (inside generics: `ANN401` already refuses it as a whole
   annotation) and `cast()` are counted per package and layer, the tests
-  apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which they may not go above. Type the
-  value instead: a `TypedDict` for a record read from JSON, a frozen
-  dataclass for one built in code, `isinstance` narrowing instead of a cast.
+  apart, in `ANY_BUDGETS` and `CAST_BUDGETS`, which they may not go above.
+  A package and layer without an entry may have none; the tables in that
+  file say which production code still has one, and why. Type the value
+  instead: a `TypedDict` for a record read from JSON, a frozen dataclass
+  for one built in code, `isinstance` narrowing instead of a cast.
 - **The magic values gate** (`tests/test_magic_values.py`, in the unit
   suite): in production code, a string compared with a word of a StrEnum
   (of the package or of cst_core), an if/elif chain or match with 3 or more
   string arms on one subject, a unit number (3600, 86400, 604800, the exit
   statuses 124, 126, 127, 137), a signature with a loose
   `dict[str, Any | object | Json]` and a `Literal` of 3 or more strings are
-  counted per package in `MAGIC_CEILINGS`, which they may not go above.
+  counted per package and kind in `MAGIC_CEILINGS`, which they may not go
+  above. A package and kind with no entry may have no hit, so a new hit
+  there fails.
   `MAGIC_EXEMPT` names the scopes that keep one, with the reason; a stale
   entry fails. See
   [.agents/rules/magic-values.md](../.agents/rules/magic-values.md).

@@ -815,8 +815,9 @@ files without that line are never overwritten or removed. A unit you masked
 masked: `auto on` refuses, writes nothing and says how to unmask it, `status`
 shows it as `masked`, and `auto off` leaves the link alone. Each run saves its
 summary in `~/.local/state/cst/toolchains-<target>.json` (shown by `status`). A
-summary that is not a JSON object (edited by hand, say) counts as none
-recorded.
+summary that is not a JSON object (edited by hand, say), or one without the
+keys and numbers this version writes (an older or foreign one), counts as
+none recorded.
 
 **Coming from `cst btrfs cargo-gc`.** The first version of this cleanup was
 `cst btrfs cargo-gc` (timer `cst-cargo-build-gc.timer`, settings

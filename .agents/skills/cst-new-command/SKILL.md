@@ -50,8 +50,12 @@ replace them.
 - [ ] Its states, kinds, subcommands and modes are a StrEnum matched with
       `match`, its durations and exit statuses use `cst_core`'s names, its
       JSON formats are TypedDicts, and outside text is parsed once at the
-      border ([magic-values](../../rules/magic-values.md));
-      `tests/test_magic_values.py` counts what is left.
+      border ([magic-values](../../rules/magic-values.md)): JSON and TOML
+      through `cst_core.domain.shapes` (`parse_json`, `parse_toml`, then a
+      shape check), never `json.loads` (`PRIMITIVE_OWNERS` in
+      `tests/test_architecture.py`, and ty's `unsound-return` and
+      `unsound-assignment`). `tests/test_magic_values.py` fails on a new
+      hit of a kind its package has no entry for in `MAGIC_CEILINGS`.
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of
@@ -69,7 +73,8 @@ replace them.
       and state formats.
 - [ ] A fix: its test fails without the fix
       ([refactor-vs-behaviour](../../rules/refactor-vs-behaviour.md)).
-- [ ] A test that runs bash passes `stdin=`
+- [ ] A test that runs bash passes `stdin=`, and a test closes the files,
+      sockets and processes it opens (a ResourceWarning fails the run)
       ([AGENTS.md, "Test gotchas"](../../../AGENTS.md#test-gotchas)).
 
 ## Doctor and docs
