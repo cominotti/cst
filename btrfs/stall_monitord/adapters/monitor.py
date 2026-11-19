@@ -599,9 +599,10 @@ class Monitor:
     def run(self) -> None:
         """The daemon until SIGTERM, SIGINT or --duration; its notifier's socket is closed when it ends (or raises)."""
         with self.notifier:
-            self.loop()
+            self._loop()
 
-    def loop(self) -> None:
+    def _loop(self) -> None:
+        """run's body (call run, which closes the notifier when this ends)."""
         self.writer.start()
         self.open_psi_trigger()
         self.open_kmsg()
