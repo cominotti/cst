@@ -67,6 +67,14 @@ def split(pattern: re.Pattern[str] | str, text: str, maxsplit: int = 0) -> list[
     return out
 
 
+def cgroup_v2_path(text: str) -> str | None:
+    """The cgroup v2 ("unified") path in the text of a /proc/PID/cgroup: the rest of the first line
+    that starts with "0::" (on a hybrid system the cgroup v1 lines, "N:controllers:/path", come
+    before it). None when no line does (a cgroup v1 only file, or an empty text); "" for a "0::"
+    line with nothing after it."""
+    return next((ln[3:] for ln in text.splitlines() if ln.startswith("0::")), None)
+
+
 def is_yes(answer: str) -> bool:
     """A [y/N] prompt's answer is yes: it starts with y or s (sim), any case."""
     return answer.strip().lower().startswith(("y", "s"))

@@ -78,6 +78,7 @@ from cst_core.domain.text import (
     HELP_WORDS,
     NO_WORDS,
     YES_WORDS,
+    cgroup_v2_path,
     describe_problems,
     enum_member,
     first_line,
@@ -151,6 +152,18 @@ class DomainTest(unittest.TestCase):
                 )
                 with self.subTest(line=line, n=n):
                     self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
+
+    def test_cgroup_v2_path_is_the_rest_of_the_first_0_line(self) -> None:
+        scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"
+        self.assertEqual(cgroup_v2_path(f"0::{scope}\n"), scope)  # cgroup v2 only
+        hybrid = f"12:cpuset:/\n2:cpu,cpuacct:/user.slice\n1:name=systemd:{scope}\n0::{scope}\n"
+        self.assertEqual(cgroup_v2_path(hybrid), scope)  # cgroup v1 lines first, the 0:: line last
+        self.assertEqual(cgroup_v2_path("0::/a.scope\n1:name=systemd:/b::c\n0::/d.scope"), "/a.scope")
+        self.assertEqual(cgroup_v2_path("0::/a.scope  \n"), "/a.scope  ")  # the rest of the line, as it is
+        self.assertEqual(cgroup_v2_path("0::\n"), "")  # a 0:: line with no path: not None
+        for text in ("", "\n", "1:name=systemd:/a.scope\n", " 0::/a.scope", "10::/a.scope", "0:/a.scope"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")
