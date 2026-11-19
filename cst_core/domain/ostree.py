@@ -7,6 +7,14 @@ query (btrfs-setup.sh, btrfs/setup-snapshots.bash,
 btrfs/btrfs-degraded-boot-setup.sh) stay until those scripts are Python.
 doctor asks query_status, and so do vm's booted_deployment (vm/adapters/__init__.py),
 which records None for any failure, and btrfs-health-check (btrfs/health_check/adapters.py).
+
+For the next boot's 64-btrfs.rules, btrfs-health-check (next_root) and
+btrfs-degraded-boot-setup.sh (ostree_query next-root and tracked) take
+deployments[0], the bootloader's default entry, on purpose, not pending
+(which applies the booted system's osname rule, for rpm-ostree
+install and initramfs-etc). The two differ only with several osnames
+installed. The health check keeps the script's choice until degraded-boot
+setup is Python.
 """
 
 from collections.abc import Callable

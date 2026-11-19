@@ -76,7 +76,7 @@ SCOPE_PROGRAMS = ("systemd-run", "flock")
 def server_cgroup(pid: int | None) -> str | None:
     """The /proc/PID/cgroup text of the server's process PID (peer_pid of its
     socket); None when that is not known."""
-    return read_text(f"{PROC}/{pid}/cgroup") if pid is not None and pid != 0 else None
+    return read_text(f"{PROC}/{pid}/cgroup", keep_line_ends=True) if pid is not None and pid != 0 else None
 
 
 def missing_programs(pid: int | None, proc: str = PROC) -> tuple[str, ...]:

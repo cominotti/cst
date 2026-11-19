@@ -276,6 +276,14 @@ The three programs say `Installed by ...` or `Installed as ...` instead.
 comment. `uninstall` uses the marker only for one decision: whether
 `~/.config/gamemode.ini` is the script's file (and may be deleted).
 
+Every file in the table but the settings file (which you may edit) and the
+group lines is listed in the install record, so `cst doctor` reports one
+that is missing or was changed by hand: root's files in
+`/var/lib/cst/installed.json` (the hwp file under the component `cpu:core`),
+the two user drop-ins in your `~/.local/state/cst/installed.json` (component
+`cpu:toolbox`, marked done at the end of every `install`). A file an older
+CST installed is adopted by the next `install`, without being written again.
+
 ### 6.2 Settings file
 
 `/etc/cpu-setup/cpu-setup.conf`, exactly as `install` writes it:
@@ -317,7 +325,9 @@ file fixed; its mark is `/run/cpu-setup/settings-warned`, a file only root
 can write there, replaced and never followed), and its unit does not fail. `off`
 still undoes everything (for the user `on` acted for, the uid of its
 `user@UID.service` record in `game.state`, also when `TARGET_USER` sets
-nothing or names another user now), and `cst cpu game state` shows the line.
+nothing or names another user now; the watchdog's `tick` acts for that
+user too, without a word every 30 s about a `TARGET_USER` that names no
+account), and `cst cpu game state` shows the line.
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
@@ -427,6 +437,10 @@ install copies the `gamemode` line from `/usr/lib/group` to `/etc/group` (and
 adds `gamemode:!::` to `/etc/gshadow`), then adds your user. If the group does
 not exist at all, it prints
 `no 'gamemode' group on this system (is the gamemode package installed?)`.
+If the system knows the group (through NSS, for example from a directory
+service) but neither `/etc/group` nor `/usr/lib/group` has its line, install
+stops with
+`the 'gamemode' group comes from NSS, not /etc/group or /usr/lib/group: add its line to /etc/group by hand, then run install again`.
 
 **polkit** decides which user may do which privileged action. Normally only
 root may start system services. The rule from 6.1 lets your user start or stop
@@ -687,7 +701,11 @@ In short: `off` puts every setting back exactly as it was before `on`, even if
 **Details (for experts).** Before each change, `on` writes a line to
 `/run/cpu-setup/game.state`: which property, and whether a runtime override
 already existed (with its old value). It writes the line *before* the change,
-so if `on` stops halfway, `off` can still undo what was done. When the line
+so if `on` stops halfway, `off` can still undo what was done. `on` sets the
+memory chain (7.1) first, `user@<uid>.service` before its parents, so the
+first line of `game.state` names the user it acts for, whatever step `on`
+stopped at (`off` acts for that user, 6.2, and so do the watchdog's `tick`
+and `state`, also when `TARGET_USER` names another user now). When the line
 cannot be written (`/run` full), `on` leaves that change out and logs
 `<unit>: <settings>: not done, its record could not be written to
 /run/cpu-setup/game.state`; it carries on with the rest and still exits 0,
@@ -725,7 +743,11 @@ line, with exit 1 and `game.state` left in place.) The last line of the file
 with no newline at its end is such a line, also when its fields look whole:
 `on` writes each record before the change it describes, so that change was
 never made, and its value may be cut short (`1` of `100`), which `off` must
-not set.
+not set. A record written after such a line (a box the watchdog handles
+later) first removes it, so the two never glue into one line `off` would
+read as whole; the journal names it (`<4>... line N: a record cut short
+(its change was never made), removed before the next record: TEXT`). The
+same holds for `game.intended`, whose cut line the drift repair never read.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
@@ -788,7 +810,16 @@ What else the profile does about it:
   `systemctl set-property --runtime` and logged at level notice, for example:
   `drift: user.slice MemoryLow was '0' instead of '17179869184' (daemon-reload or uresourced?): set MemoryLow=16G again`.
   It does not add a line to `game.state`, so `off` still restores the value
-  from before `on`. A unit that systemd has not loaded (or a user manager
+  from before `on`. A setting `game.state` holds no record of (the file was
+  edited, or cut) is not set again, since `off` could not undo it: the tick
+  says so once per boot at level notice
+  (`drift not repaired: UNIT PROP: game.state holds no record of it, ...`;
+  said again when the list of such settings changes, and when one comes
+  back after a tick that found none, for example while systemd did not
+  answer about its unit; the same mark as below, 7.6), and `game state` marks its `DRIFT:` line
+  `(not set again: ...)`. `cst doctor` still warns about it and proposes
+  switching the profile off and on again, which writes fresh records. A
+  unit that systemd has not loaded (or a user manager
   that is gone after a logout) is skipped, and so is a `cpuset.cpus` file
   whose cgroup is gone.
 - `cst cpu game state` prints a `DRIFT:` line per setting that differs
@@ -835,8 +866,10 @@ Key on existence only. The contents of `game.state` (and of
 version. `game.intended` (what `on` set, for the drift repair) names its
 format on its first line (`cst-game-intended 1`; a file without it, from an
 older version, is format 0 and is read as before). A copy that finds a newer
-format there leaves the drift alone: `tick` says so in the journal,
-`state` and `cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
+format there leaves the drift alone: `tick` says so in the journal once
+per boot (again when the text changes; its mark is
+`/run/cpu-setup/drift-warned`, removed by `on` and `off`), `state` and
+`cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 
@@ -864,6 +897,8 @@ cst cpu vm-pin status   # state, CPU mode and features, vCPU count (live and sav
 cst cpu vm-pin plan     # show the XML diff, change nothing
 cst cpu vm-pin apply    # same diff, asks [y/N], then virsh define
 ```
+
+At the `[y/N]` question, Ctrl-D (end of input) answers no.
 
 An optional VM name can follow (`vm-pin plan OTHER-VM`); the default is
 `VM_NAME`. (`status` shows only part of `vm-pin status`.)
@@ -1297,7 +1332,9 @@ cst cpu experiment off wsf-300
 ```
 
 - `on` saves the old value to `/run/cpu-setup/exp-<name>` (only the first
-  time), then writes the new one.
+  time), then writes the new one. When the old value cannot be read, `on`
+  stops with `sed: can't read FILE: REASON` (exit 2) and saves nothing, so
+  `off` then says `not on` instead of writing an empty value.
 - `off` writes the saved value back. A **reboot** also reverts everything.
 - `uninstall` does **not** switch experiments off. Use `off` or reboot.
 
@@ -1331,7 +1368,11 @@ cst cpu uninstall
 - removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
   and `~/.config/gamemode.ini` (only if it is the script's file);
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
-  boost back to `0`;
+  boost back to `0` (only when the file was there);
+- drops the install record lines of what it removed (`removed:   PATH` for
+  each file the installer removed), also of a file deleted by hand; when the
+  installer cannot change your record (one written by a newer CST), the two
+  user drop-ins still go, with a warning;
 - reloads systemd.
 
 It **keeps**: `/etc/cpu-setup/cpu-setup.conf`, your `gamemode` group
@@ -1387,7 +1428,9 @@ above:
 **`status` shows `group: NOT a member`.** Your user is not in the `gamemode`
 group in `/etc/group`. Run `install` again. If it prints
 `no 'gamemode' group on this system (is the gamemode package installed?)`,
-install the `gamemode` package first.
+install the `gamemode` package first. If it stops with `the 'gamemode' group
+comes from NSS, not /etc/group or /usr/lib/group`, copy the group's line
+(`getent group gamemode`) into `/etc/group` by hand and run `install` again.
 
 **`status` shows `ini: own/absent`.** `~/.config/gamemode.ini` is missing or
 is your own file. If it is missing, run `install` again. If it is your own,

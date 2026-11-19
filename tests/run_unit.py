@@ -69,7 +69,23 @@ ResourceWarning, run the test again with -X tracemalloc=8 to see where the
 resource was opened; for an exception, its traceback is printed above the
 test results. A test that records warnings itself
 (warnings.catch_warnings(record=True)) keeps them. Code that runs in a
-child process (a helper started with python3 -I) is not seen.
+child process (a helper started with python3 -I) is not seen. The filters
+are put back at the end of each test too, so an object freed after a test
+that changed them for good, before the next one starts, is still recorded.
+A test that replaces sys.unraisablehook and does not restore it fails the
+run, and the runner's hook is put back. A class or module set-up may
+replace it until its tear-down; one its tear-down does not restore fails
+the run, found when the next module starts (the runner's hook is put back
+then) or after the last tear-down.
+
+No test may write bytecode into the checkout. `python3 -I` ignores
+PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
+without -B writes __pycache__ folders there (root's, when the code runs as
+root). This runner sets sys.dont_write_bytecode for itself first (run by its
+shebang it has no -B), notes every .pyc of the checkout before the tests
+(.git, virtual environments and other checkouts nested in it, such as an
+agent's worktree under .claude/worktrees, left out), and fails the run on
+each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 """
 
 from collections.abc import Callable, Sequence
@@ -243,12 +259,52 @@ LOST_EXCEPTION_HINT: Final = (
 )
 
 
+# What the run prints after the bytecode a test wrote into the checkout.
+BYTECODE_HINT: Final = (
+    "a test started Python on the checkout's code without -B (python3 -I ignores PYTHONDONTWRITEBYTECODE), "
+    "or a program without the bootstrap of tests/test_entrypoints.py: pass -B"
+)
+
+
+def _not_ours(folder: str) -> bool:
+    """A folder under the checkout whose bytecode is not this run's: .git, a virtual environment
+    (it holds pyvenv.cfg), or another checkout nested in it (it holds a .git: a folder for a clone,
+    a file for a linked worktree, such as an agent's under .claude/worktrees)."""
+    return os.path.basename(folder) == ".git" or any(
+        os.path.lexists(os.path.join(folder, name)) for name in ("pyvenv.cfg", ".git")
+    )
+
+
+def bytecode_files(root: str) -> dict[str, int]:
+    """The .pyc files under root (path relative to root -> mtime in ns), the folders _not_ours
+    names left out."""
+    found: dict[str, int] = {}
+    for folder, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if not _not_ours(os.path.join(folder, d))]
+        for name in names:
+            if name.endswith(".pyc"):
+                path = os.path.join(folder, name)
+                try:
+                    found[os.path.relpath(path, root)] = os.stat(path).st_mtime_ns
+                except FileNotFoundError:  # removed while we walked
+                    continue
+    return found
+
+
+def new_bytecode(before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """The .pyc files of after that were not in before, or were rewritten since."""
+    return sorted(path for path, mtime in after.items() if before.get(path) != mtime)
+
+
 # The warnings module's functions that write one warning (WarningMessage) out: _showwarnmsg is the
 # one Python calls; it hands the warning to warnings.showwarning when that was replaced (and its
 # original is _showwarning_orig), and to _showwarnmsg_impl otherwise.
 _SHOW_HOOK: Final = "_showwarnmsg_impl"
 _SHOW_ENTRY: Final = "_showwarnmsg"
 _SHOWWARNING_ORIG: Final = "_showwarning_orig"
+
+
+type _UnraisableHook = Callable[[sys.UnraisableHookArgs], object]
 
 
 class LeakRecordingResult(unittest.TextTestResult):
@@ -261,12 +317,21 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     leaks: list[str]
     lost_exceptions: list[str]
+    hook_problems: list[str]
 
     @override
     def startTestRun(self) -> None:
         super().startTestRun()
         self.leaks = []
         self.lost_exceptions = []
+        self.hook_problems = []
+        self._in_replaced = False
+        # A class or module set-up may replace sys.unraisablehook until its tear-down: the one
+        # found in place at a startTest (its first test's), where, and in which module.
+        self._fixture_hook: _UnraisableHook | None = None
+        self._fixture_where = ""
+        self._fixture_module = ""
+        self._hook_at_start: _UnraisableHook = self._unraisable
         self._running = "before the first test"
         # A leak the garbage collector frees (an object in a reference cycle) may come from any
         # test before the one running: _where says so (gc.callbacks tell when it collects).
@@ -296,15 +361,30 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     @override
     def startTest(self, test: unittest.TestCase) -> None:
+        self._note_fixture_hook(test)
+        self._hook_at_start = sys.unraisablehook
         self._running = test.id()
         self._keep_recording()
         super().startTest(test)
+
+    @override
+    def stopTest(self, test: unittest.TestCase) -> None:
+        # The suite drops the test case after this: what it held is freed before the next startTest.
+        if sys.unraisablehook != self._hook_at_start:  # the test itself replaced it
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {test.id()}")
+            sys.unraisablehook = self._hook_at_start
+        self._keep_recording()
+        super().stopTest(test)
 
     @override
     def stopTestRun(self) -> None:
         # An object in a reference cycle is freed only by the collector: run it now, while the
         # hooks still record, instead of at exit.
         self._found_by = "the last garbage collection"
+        if sys.unraisablehook != self._unraisable:  # every tear-down has run
+            where = self._fixture_where or "a class or module tear-down after the last test"
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {where}")
+            sys.unraisablehook = self._unraisable
         self._keep_recording()
         gc.collect()
         gc.callbacks.remove(self._gc_phase)
@@ -320,6 +400,27 @@ class LeakRecordingResult(unittest.TextTestResult):
         if warnings.filters[:1] != [self._always]:
             warnings.simplefilter("always", ResourceWarning)
 
+    def _note_fixture_hook(self, test: unittest.TestCase) -> None:
+        """Before a test: note a sys.unraisablehook that a class or module set-up put in place
+        (its tear-down may restore it, so it is no error yet). The same hook still in place when
+        the next module starts is one a tear-down did not restore: an error, and the runner's
+        hook is put back. stopTestRun reports one still in place after the last tear-down."""
+        hook, module = sys.unraisablehook, type(test).__module__
+        if hook == self._unraisable:  # a bound method: equal, not the same object
+            self._fixture_hook = None
+            self._fixture_where = ""
+            return
+        if hook == self._fixture_hook and module != self._fixture_module:
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {self._fixture_where}")
+            sys.unraisablehook = self._unraisable
+            self._fixture_hook = None
+            self._fixture_where = ""
+            return
+        if hook != self._fixture_hook:
+            self._fixture_hook = hook
+            self._fixture_where = f"a class or module set-up or tear-down before {test.id()}"
+            self._fixture_module = module
+
     def _gc_phase(self, phase: str, _info: dict[str, int]) -> None:
         self._collecting = phase == "start"
 
@@ -331,12 +432,21 @@ class LeakRecordingResult(unittest.TextTestResult):
         return self._running
 
     def _entered(self, msg: warnings.WarningMessage) -> None:
-        if warnings.showwarning is not self._showwarning_orig:
-            self._record(msg)  # the replacement gets it, not _warned
-        self._show_entry(msg)
+        if warnings.showwarning is self._showwarning_orig:
+            self._show_entry(msg)
+            return
+        self._record(msg)  # the replacement gets it, not _warned
+        # A replacement that hands the warning on to the original (warnings._showwarning_orig)
+        # reaches _warned: that is the same warning, already recorded.
+        outer, self._in_replaced = self._in_replaced, True
+        try:
+            self._show_entry(msg)
+        finally:
+            self._in_replaced = outer  # a warning raised inside the replacement must not clear it
 
     def _warned(self, msg: warnings.WarningMessage) -> None:
-        self._record(msg)
+        if not self._in_replaced:
+            self._record(msg)
         self._show(msg)
 
     def _record(self, msg: warnings.WarningMessage) -> None:
@@ -372,6 +482,7 @@ def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
 
 
 def main(argv: Sequence[str]) -> int:
+    sys.dont_write_bytecode = True  # run by its shebang (no -B): the test modules it imports write none
     verbosity = 2 if "-v" in argv else 1
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(repo)
@@ -404,9 +515,14 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
     sys.stdin = open(0, closefd=False)
+    bytecode_before = bytecode_files(repo)
     suite = load(repo, argv)
     result = LeakRecordingRunner(verbosity=verbosity).run(suite)
     ours.close()
+    bytecode = [
+        f"a test wrote bytecode into the checkout: {path}"
+        for path in new_bytecode(bytecode_before, bytecode_files(repo))
+    ]
     if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
         raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
     skipped = [(test.id(), reason) for test, reason in result.skipped]
@@ -414,13 +530,16 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
     leaks, lost = result.leaks, result.lost_exceptions
-    for line in [*problems, *leaks, *lost]:
+    errors = [*problems, *leaks, *lost, *result.hook_problems, *bytecode]
+    for line in errors:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
         print(LEAK_HINT, file=sys.stderr)
     if lost:
         print(LOST_EXCEPTION_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems and not leaks and not lost else 1
+    if bytecode:
+        print(BYTECODE_HINT, file=sys.stderr)
+    return 0 if result.wasSuccessful() and not errors else 1
 
 
 if __name__ == "__main__":

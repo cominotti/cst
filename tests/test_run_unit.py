@@ -17,8 +17,11 @@ from tests.run_unit import (
     HOST_GUARD_EXIT,
     LEAK_HINT,
     LOST_EXCEPTION_HINT,
+    BYTECODE_HINT,
+    bytecode_files,
     expected_skip,
     load,
+    new_bytecode,
     skip_problems,
 )
 
@@ -178,12 +181,91 @@ class C(unittest.TestCase):
     def test_b_collects(self):
         gc.collect()
         gc.enable()
+class P(unittest.TestCase):
+    def test_replaces_showwarning_with_one_that_calls_the_original_then_leaks(self):
+        warnings.showwarning = lambda *args, **kwargs: warnings._showwarning_orig(*args, **kwargs)
+        f = open(os.devnull)
+        del f
+class H(unittest.TestCase):
+    def test_a_replaces_the_unraisable_hook(self):
+        import sys
+        sys.unraisablehook = lambda unraisable: None  # and does not restore it
+    def test_b_a_weakref_callback_raises(self):
+        U.test_a_weakref_callback_raises(self)
+class R(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        cls.saved = sys.unraisablehook
+        sys.unraisablehook = cls.own_hook  # restored by tearDownClass
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+        sys.unraisablehook = cls.saved
+    @staticmethod
+    def own_hook(unraisable):
+        pass
+    def test_a_sees_its_own_hook(self):
+        import sys
+        self.assertIs(sys.unraisablehook, R.own_hook)
+    def test_b_sees_its_own_hook(self):
+        import sys
+        self.assertIs(sys.unraisablehook, R.own_hook)
+class Q(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        sys.unraisablehook = lambda unraisable: None  # and no tearDownClass restores it
+    def test_runs(self):
+        pass
+class N(unittest.TestCase):
+    def test_a_showwarning_that_warns_once_then_calls_the_original(self):
+        shown = []
+        def show(*args, **kwargs):
+            if not shown:
+                shown.append(1)
+                warnings.warn("a second warning", ResourceWarning)
+            warnings._showwarning_orig(*args, **kwargs)
+        warnings.showwarning = show
+        f = open(os.devnull)
+        del f
+class K(unittest.TestCase):
+    def test_ignores_every_warning_and_keeps_a_file(self):
+        warnings.simplefilter("ignore")  # outside a catch_warnings block
+        self.f = open(os.devnull)  # freed when the suite drops the test case, after stopTest
 class F(unittest.TestCase):
     def test_a_ignores_every_warning(self):
         warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
     def test_b_leaks_a_file(self):
         f = open(os.devnull)
         del f
+"""
+
+
+# A module whose set-up replaces sys.unraisablehook and whose tear-down does not restore it.
+_HOOK_LEFT_BY_A_MODULE = """
+import sys, unittest
+def setUpModule():
+    sys.unraisablehook = lambda unraisable: None
+class T(unittest.TestCase):
+    def test_a(self):
+        pass
+    def test_b(self):
+        pass
+"""
+
+# A module whose test loses an exception in a weakref callback.
+_LOSES_AN_EXCEPTION = """
+import unittest, weakref
+class T(unittest.TestCase):
+    def test_a_weakref_callback_raises(self):
+        class Freed:
+            pass
+        thing = Freed()
+        def boom_callback(ref):
+            raise ZeroDivisionError("boom")
+        self.ref = weakref.ref(thing, boom_callback)
+        del thing
 """
 
 
@@ -259,6 +341,19 @@ class ResourceWarningGateTest(unittest.TestCase):
             "error: ResourceWarning in probe_leaks.S.test_replaces_showwarning_then_leaks: unclosed file", done.stderr
         )
 
+    def test_a_leak_seen_by_a_showwarning_that_calls_the_original_is_one_line(self) -> None:
+        done = self.run_probe("", cls="P")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 1, done.stderr)
+        self.assertTrue(
+            error[0].startswith(
+                "error: ResourceWarning in "
+                "probe_leaks.P.test_replaces_showwarning_with_one_that_calls_the_original_then_leaks: unclosed file"
+            ),
+            error,
+        )
+
     def test_a_leak_after_a_test_that_ignored_every_warning_fails_the_run(self) -> None:
         done = self.run_probe("", cls="F")
         self.assertEqual(done.returncode, 1, done.stderr)
@@ -277,10 +372,174 @@ class ResourceWarningGateTest(unittest.TestCase):
         self.assertIn(LOST_EXCEPTION_HINT, done.stderr)
         self.assertNotIn(LEAK_HINT, done.stderr)
 
+    def test_a_replaced_unraisable_hook_fails_the_run_and_later_exceptions_still_count(self) -> None:
+        done = self.run_probe("", cls="H")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by probe_leaks.H.test_a_replaces_the_unraisable_hook",
+            done.stderr,
+        )
+        self.assertIn("error: exception in probe_leaks.H.test_b_a_weakref_callback_raises: ", done.stderr)
+
+    def test_a_class_set_up_may_replace_the_unraisable_hook_until_its_tear_down(self) -> None:
+        done = self.run_probe("", cls="R")
+        self.assertEqual(done.returncode, 0, done.stderr)  # its tests see their own hook
+        self.assertNotIn("error:", done.stderr)
+
+    def test_a_class_set_up_that_never_restores_the_unraisable_hook_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="Q")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by a class or module set-up or tear-down "
+            "before probe_leaks.Q.test_runs",
+            done.stderr,
+        )
+
+    def test_a_module_set_up_hook_left_in_place_is_found_at_the_next_module(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
+        for name, text in (
+            ("probe_first.py", _HOOK_LEFT_BY_A_MODULE),
+            ("probe_second.py", _LOSES_AN_EXCEPTION),
+        ):
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        done = subprocess.run(
+            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_first", "probe_second"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env={**os.environ, "PYTHONPATH": tmp},
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 2, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by a class or module set-up or tear-down "
+            "before probe_first.T.test_a",
+            error,
+        )
+        # The runner's hook is back for the next module: its lost exception is recorded.
+        self.assertTrue(
+            any(
+                line.startswith("error: exception in probe_second.T.test_a_weakref_callback_raises: ") for line in error
+            ),
+            error,
+        )
+
+    def test_a_warning_raised_inside_a_replaced_showwarning_is_one_line_each(self) -> None:
+        done = self.run_probe("", cls="N")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 2, done.stderr)  # each warning once
+        self.assertEqual(len([line for line in error if ": a second warning (" in line]), 1, error)
+        self.assertEqual(len([line for line in error if ": unclosed file " in line]), 1, error)
+
+    def test_a_leak_freed_between_two_tests_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="K")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.K.test_ignores_every_warning_and_keeps_a_file: unclosed file",
+            done.stderr,
+        )
+
     def test_a_warning_the_test_records_itself_is_its_own(self) -> None:
         done = self.run_probe("test_records_its_own_warning")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn("error:", done.stderr)
+
+
+# A test that starts a child Python without -B on a module that imports a sibling, and one that
+# imports a sibling in its own process (the runner's flag keeps that one from writing bytecode).
+_BYTECODE = """
+import os, subprocess, sys, unittest
+class T(unittest.TestCase):
+    def test_a_child_without_b(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run([sys.executable, "-I", os.path.join(here, "child.py")], check=True, stdin=subprocess.DEVNULL)
+    def test_imports_a_sibling(self):
+        import sibling
+        self.assertEqual(sibling.X, 1)
+"""
+
+
+class BytecodeGateTest(unittest.TestCase):
+    def test_new_or_rewritten_bytecode_is_reported(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-gate-"))
+
+        def put(rel: str) -> None:
+            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "wb"):
+                pass
+
+        put("a/__pycache__/old.cpython-314.pyc")
+        put("a/__pycache__/rewritten.cpython-314.pyc")
+        put(".git/objects/x.pyc")
+        put("venv/pyvenv.cfg")
+        put("venv/lib/__pycache__/v.cpython-314.pyc")
+        # A checkout nested in this one (a linked worktree: its .git is a file; a clone: a folder).
+        put(".claude/worktrees/w/.git")
+        put(".claude/worktrees/w/__pycache__/w.cpython-314.pyc")
+        put("clone/.git/HEAD")
+        put("clone/a/__pycache__/c.cpython-314.pyc")
+        before = bytecode_files(tmp)
+        self.assertEqual(
+            sorted(before), ["a/__pycache__/old.cpython-314.pyc", "a/__pycache__/rewritten.cpython-314.pyc"]
+        )
+        put("b/__pycache__/new.cpython-314.pyc")
+        put("venv/lib/__pycache__/w.cpython-314.pyc")
+        put(".git/y.pyc")
+        put(".claude/worktrees/w/b/__pycache__/x.cpython-314.pyc")  # another checkout's run wrote it
+        put("clone/b/__pycache__/d.cpython-314.pyc")
+        rewritten = os.path.join(tmp, "a/__pycache__/rewritten.cpython-314.pyc")
+        later = before["a/__pycache__/rewritten.cpython-314.pyc"] + 10**9
+        os.utime(rewritten, ns=(later, later))
+        self.assertEqual(
+            new_bytecode(before, bytecode_files(tmp)),
+            ["a/__pycache__/rewritten.cpython-314.pyc", "b/__pycache__/new.cpython-314.pyc"],
+        )
+
+    def run_copy(self, name: str) -> tuple[subprocess.CompletedProcess[str], str]:
+        """A copy of the runner in a temporary checkout of its own, run by its shebang on one test of _BYTECODE."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-run-"))
+        os.makedirs(os.path.join(tmp, "tests"))
+        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        for rel, text in (
+            ("probe_bytecode.py", _BYTECODE),
+            (
+                "child.py",
+                "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport sibling\n",
+            ),
+            ("sibling.py", "X = 1\n"),
+        ):
+            with open(os.path.join(tmp, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        done = subprocess.run(
+            [os.path.join(tmp, "tests", "run_unit.py"), f"probe_bytecode.T.{name}"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+        )
+        return done, tmp
+
+    @unittest.skipUnless(os.access("/usr/bin/python3", os.X_OK), "needs /usr/bin/python3")
+    def test_a_child_that_writes_bytecode_fails_the_run(self) -> None:
+        done, _ = self.run_copy("test_a_child_without_b")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("OK", done.stderr)  # unittest alone lets it pass
+        self.assertRegex(
+            done.stderr, r"error: a test wrote bytecode into the checkout: __pycache__/sibling\.cpython-\d+\.pyc"
+        )
+        self.assertIn(BYTECODE_HINT, done.stderr)
+
+    @unittest.skipUnless(os.access("/usr/bin/python3", os.X_OK), "needs /usr/bin/python3")
+    def test_the_runner_run_by_its_shebang_writes_no_bytecode_itself(self) -> None:
+        done, tmp = self.run_copy("test_imports_a_sibling")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(bytecode_files(tmp), {})
 
 
 class LoadTest(unittest.TestCase):

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import posixpath
 import re
+from typing import Final
 
 from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
@@ -13,6 +14,7 @@ from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
+    MACHINE_SLICE,
     WSF_EXPERIMENT,
     CgroupSwapRow,
     ConfigSectionReport,
@@ -49,6 +51,7 @@ from swap.domain import (
     parse_tmpfiles_params,
     psi_value,
     same_param,
+    slice_not_active,
     state_note,
     zswap_summary,
 )
@@ -68,6 +71,8 @@ OLD_DROPIN_ENTRY: InstallEntry = replace(
     src="swap/units/machine.slice.d-50-memory-low.conf",
     dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
 )
+# The row of machine.slice's live floor in status.
+_MEMORY_LOW_ROW: Final = f"{MACHINE_SLICE} memory.low"
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -96,6 +101,8 @@ class SwapEnvironment:
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+    # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
+    test_seam: tuple[tuple[str, str, str], ...] = ()
 
     def host_view(self, host_path: str) -> str:
         """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
@@ -180,6 +187,19 @@ class SwapReports:
         """The command name in messages (`cst swap`)."""
         return self._env.prog
 
+    @property
+    def test_seam_note(self) -> str:
+        """The line plan, status and apply print first when a test seam moved /proc or /sys ("": none), so
+        a stale export in a root shell cannot pass for the kernel's state. The seam moves only those
+        folders: /etc stays the real one, and apply's commands (sysctl, modprobe, zramctl) are the ones
+        on PATH, so the line says that too."""
+        seam = self._env.test_seam
+        if not seam:
+            return ""
+        names = ", ".join(name for name, _kernel, _path in seam)
+        moved = ", ".join(f"{kernel} in {path}" for _name, kernel, path in seam)
+        return f"test seam ({names}): {moved}, not the kernel's; /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them"
+
     def _desired_text(self, path: str) -> str:
         text = self._fs.read_text(path)
         if text is None:
@@ -232,7 +252,8 @@ class SwapReports:
 
     def resolve_spec(self) -> SpecResolution:
         """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
-        up (its marked crypttab line, the partition's size now: apply writes the file from them)."""
+        up (its marked crypttab line, the partition's size now: apply writes the file from them). A file
+        that is there but cannot be read is never taken as missing."""
         env = self._env
         text = self._fs.read_text(env.settings_path)
         if text is not None:
@@ -240,6 +261,36 @@ class SwapReports:
             if settings.problems:
                 return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
             return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
+        if self._fs.lexists(env.settings_path):
+            return self._settings_not_read(seen=True)
+        if self._settings_folder_closed():
+            return self._settings_not_read(seen=False)
+        return self._spec_from_older_install()
+
+    def _settings_folder_closed(self) -> bool:
+        """The nearest folder above /etc/cst/swap.conf that is there is one this user may not search:
+        lexists cannot see the file then, so it may be there."""
+        folder = posixpath.dirname(self._env.settings_path)
+        while not self._fs.is_dir(folder) and folder not in ("", "/"):
+            folder = posixpath.dirname(folder)
+        return not self._fs.is_searchable(folder)
+
+    def _settings_not_read(self, *, seen: bool) -> SpecResolution:
+        """/etc/cst/swap.conf is there (seen), or may be in a folder this user may not search, and could
+        not be read: never taken as missing (the migration would write over it). A user who may not read
+        it is asked for --root; anything else stops apply."""
+        path = self._env.settings_path
+        if seen and not self._fs.is_file(path):
+            return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
+        if not self._env.as_root and not (seen and self._fs.is_readable(path)):
+            return SpecResolution(None, SwapSpecState.UNREADABLE)
+        # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
+        return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
+
+    def _spec_from_older_install(self) -> SpecResolution:
+        """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
+        partition's size now), from which apply writes the file."""
+        env = self._env
         if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
             name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
             return (
@@ -281,6 +332,8 @@ class SwapReports:
                 f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
                 f" which needs root to read: on the host, {env.prog} {verb} --root",
             )
+        if res.state == SwapSpecState.UNREADABLE:
+            return PlanItem("?", target, f"cannot be read as this user: on the host, {env.prog} {verb} --root")
         if res.state == SwapSpecState.BAD:
             return PlanItem("REFUSE", target, f"{res.note}: apply stops")
         why = f" ({res.note})" if res.note else ""
@@ -490,25 +543,34 @@ class SwapReports:
 
     def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
         """machine.slice's floor: "over" (and the drop-in that sets it) when systemd takes MemoryLow from a
-        drop-in after CST's; else the cgroup's memory.low against CST's value (DIFF when it differs)."""
-        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths"))
+        drop-in after CST's; else "-" when systemd says the slice is not active (a cgroup folder left
+        behind is not the slice's) or the cgroup has no memory.low (an active slice's row says so: no
+        memory controller for it); else the cgroup's memory.low against CST's value (DIFF when it differs)."""
+        shown = self._systemd.show(UnitName(MACHINE_SLICE), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
             return SettingCheckRow(
-                SettingState.OVER, "machine.slice MemoryLow", human_size(effective), human(want_low)
+                SettingState.OVER, f"{MACHINE_SLICE} MemoryLow", human_size(effective), human(want_low)
             ), source
-        live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
-        if live_low is None:
+        active_state = shown.get("ActiveState", "")
+        live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, MACHINE_SLICE, "memory.low"))
+        if slice_not_active(active_state) or (live_low is None and not active_state):
             return SettingCheckRow(
-                SettingState.INACTIVE, "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+                SettingState.INACTIVE, _MEMORY_LOW_ROW, "slice not active (no VM running)", human(want_low)
+            ), ""
+        if live_low is None:
+            # systemd says the slice is active, and its cgroup has no memory.low: no memory controller for it.
+            return SettingCheckRow(
+                SettingState.INACTIVE,
+                _MEMORY_LOW_ROW,
+                "slice active, no memory.low (memory controller off)",
+                human(want_low),
             ), ""
         ok = live_low.isdigit() and int(live_low) == want_low
         live = human(int(live_low)) if live_low.isdigit() else live_low
-        return SettingCheckRow(
-            SettingState.OK if ok else SettingState.DIFF, "machine.slice memory.low", live, human(want_low)
-        ), ""
+        return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _MEMORY_LOW_ROW, live, human(want_low)), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
         try:
@@ -543,7 +605,7 @@ class SwapReports:
     def _cgroups(self) -> list[tuple[str, str]]:
         cg = self._env.cgroup_dir
         out = [("(whole system)", cg)]
-        out.extend((name, posixpath.join(cg, name)) for name in ("system.slice", "machine.slice", "builds.slice"))
+        out.extend((name, posixpath.join(cg, name)) for name in ("system.slice", MACHINE_SLICE, "builds.slice"))
         base = posixpath.join(cg, "user.slice")
         try:
             users = [d for d in self._fs.list_dir(base) if re.fullmatch(r"user-\d+\.slice", d)]

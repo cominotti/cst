@@ -133,18 +133,20 @@ warn() { echo "WARNING: $*" >&2; }
 
 # Generated files (stdin) go through CST's one installer: written only when
 # the content or the mode differs, atomically, owned by root, relabelled;
-# it prints `unchanged: DEST` or `written:   DEST`.
+# it prints `unchanged: DEST` or `written:   DEST`, and lists each in the
+# install record under btrfs:degraded-boot (cst doctor checks them there).
 # shellcheck source=cst-install.bash
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../cst-install.bash"
 # With --plan, the text is kept under etc_base and the installer only says
 # `unchanged: DEST` or `would write: DEST`.
 write_if_changed() {
+    local dest="$1" mode="$2"
     if (( plan )); then
-        mkdir -p "$(dirname "${etc_base}$1")"
-        cat >"${etc_base}$1"
-        cst_install_text_plan "$1" "$2" <"${etc_base}$1"
+        mkdir -p "$(dirname "${etc_base}${dest}")"
+        cat >"${etc_base}${dest}"
+        cst_install_text_plan "${dest}" "${mode}" <"${etc_base}${dest}"
     else
-        cst_install_text "$1" "$2"
+        cst_install_text "${dest}" "${mode}" root btrfs:degraded-boot
     fi
 }
 
@@ -388,7 +390,7 @@ summary() {
 }
 
 uninstall() {
-    local f tracked to_untrack=()
+    local f tracked to_untrack=() generated=()
     if compgen -G "${FLAG_DIR}/*" >/dev/null; then
         die "this boot is DEGRADED (${FLAG_DIR} has flags); /var and /home depend on the rule. Uninstall after restoring RAID1 and rebooting."
     fi
@@ -408,7 +410,15 @@ uninstall() {
     systemctl disable "${RECORD_UNIT}" 2>/dev/null || true
     systemctl stop 'btrfs-last-resort@*.timer' 2>/dev/null || true
     old_rule_is_ours && rm -fv "${OLD_RULE}"
-    rm -fv "${TRACKED[@]}" "${UNIT_DIR}/${RECORD_UNIT}" "${SYNCED_SUM_FILE}" "${OLD_FILES[@]}"
+    # The files this script generated, with their install record lines; the old ones were never listed.
+    # An installer that fails (a record of a newer CST) leaves the record as it is: the files go
+    # without it, and uninstall goes on (the initramfs no longer has them).
+    generated=("${TRACKED[@]}" "${UNIT_DIR}/${RECORD_UNIT}" "${SYNCED_SUM_FILE}")
+    if ! cst_remove_text "${generated[@]}"; then
+        warn "the install record was not changed (see above); removing the files without it"
+        rm -fv "${generated[@]}"
+    fi
+    rm -fv "${OLD_FILES[@]}"
     rmdir -v "${CONF_DIR}" 2>/dev/null || true
     systemctl daemon-reload
     udevadm control --reload
@@ -886,7 +896,9 @@ else
     fi
     if (( ! selftest_ok )); then
         if (( ! rule_was_present )); then
-            rm -f "${RULE}"
+            # An installer that fails here (a record of a newer CST) must not stop the cleanup:
+            # the rule that failed goes without its record line.
+            cst_remove_text "${RULE}" >/dev/null || rm -f "${RULE}"
             udevadm control --reload
         fi
         die "udev self-test failed; no initramfs change made"
@@ -943,5 +955,7 @@ if (( plan )); then
     echo "plan: nothing was changed"
     exit 0
 fi
+# Every step ran (files-only stops before the overlay: the component stays pending).
+cst_mark btrfs:degraded-boot
 echo
 status

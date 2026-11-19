@@ -21,7 +21,7 @@ from cst_core.adapters.files import (
     read_text,
 )
 from cst_core.adapters.runtime import restore_default_signals
-from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.contracts import NAS_SSH_ALIAS, StateFormatKey, state_format
 from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
@@ -36,7 +36,6 @@ from cst_core.domain.text import (
     parse_snapshots_conf,
 )
 from vm.domain import (
-    NAS_SSH_ALIAS,
     VmCommand,
     VmSub,
     NasRepo,
@@ -212,9 +211,7 @@ def conf_files(paths: VmPaths, cmd: VmCommand, nas: bool, vm: str | None) -> lis
     files = [(paths.vm_conf, False)]
     # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
     # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
-    if cmd != VmCommand.NOCOW and not (
-        vm is not None and vm != "" and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)
-    ):
+    if cmd != VmCommand.NOCOW and not (vm is not None and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)):
         files.append((paths.cpu_conf, True))
     if nas or cmd == VmCommand.BACKUP_TIMER:
         files.append((paths.nas_conf, True))

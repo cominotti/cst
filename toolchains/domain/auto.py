@@ -27,6 +27,21 @@ class UnitActiveState(StrEnum):
     FAILED = "failed"
 
 
+class UserManagerVerb(StrEnum):
+    """The systemctl --user commands cst-toolchains runs (the word after --user)."""
+
+    IS_ACTIVE = "is-active"
+    IS_ENABLED = "is-enabled"
+    SHOW = "show"
+    SHOW_ENVIRONMENT = "show-environment"
+    START = "start"
+    STOP = "stop"
+    ENABLE = "enable"
+    DISABLE = "disable"
+    CLEAN = "clean"
+    DAEMON_RELOAD = "daemon-reload"
+
+
 def render_service() -> str:
     return render_unit_file(
         [

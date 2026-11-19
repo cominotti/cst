@@ -57,6 +57,8 @@ _SAFE_PARTITION_TYPES: Final[frozenset[str]] = frozenset({"", "swap", "crypto_PL
 # manages. Nothing is configured by default; apply refuses until it is (swap/README.md, 2.3).
 SETTINGS_REL: Final[str] = "cst/swap.conf"
 DEFAULT_SWAP_NAME: Final[str] = "swap0"
+# The slice libvirt runs the VM in, whose MemoryLow swap sets.
+MACHINE_SLICE: Final[str] = "machine.slice"
 # GPT PARTUUIDs as /dev/disk/by-partuuid names them (lower case), or the MBR form (disk id-partition).
 _PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{2}")
 # A dm-crypt mapper name that is also safe in a crypttab line, an fstab line and a unit name.
@@ -224,6 +226,7 @@ class SwapSpecState(StrEnum):
     UNKNOWN = "unknown"
     UNSET = "unset"
     BAD = "bad"
+    UNREADABLE = "unreadable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +235,8 @@ class SpecResolution:
 
     state: "ok" (from the settings file), "write" (derived from what an older CST set up: apply
     writes the settings file first), "unknown" (an older CST set swap up, but /etc/crypttab needs
-    root to read), "unset" (not configured), "bad" (the settings file has problems).
+    root to read), "unset" (not configured), "bad" (the settings file has problems, is not a regular
+    file or cannot be read), "unreadable" (the settings file is there and this user may not read it).
     """
 
     spec: SwapHardwareSpec | None
@@ -546,6 +550,32 @@ class SettingState(StrEnum):
     MISSING = "MISSING"
     BAD = "BAD"
     INACTIVE = "-"
+    # Only in apply's verification notes under the rows: something that clears by itself later.
+    LATER = "later"
+
+
+class SliceActiveState(StrEnum):
+    """machine.slice's ActiveState as `systemctl show` prints it (systemd's words)."""
+
+    ACTIVE = "active"
+    RELOADING = "reloading"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    ACTIVATING = "activating"
+    DEACTIVATING = "deactivating"
+    MAINTENANCE = "maintenance"
+    REFRESHING = "refreshing"
+
+
+def slice_not_active(active_state: str) -> bool:
+    """systemd says the slice is not active: an ActiveState other than "active" (any word, known or not).
+    "" (systemd gave no answer) is False: not known, so the cgroup is read as before."""
+    return active_state not in ("", SliceActiveState.ACTIVE)
+
+
+# The width of the state column of the settings rows and of apply's verification notes under them:
+# the longest word, so every label starts in the same column.
+SETTING_STATE_WIDTH: Final = max(len(state.value) for state in SettingState)
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 import os
 
-from btrfs.bulk.adapters.host import Host, Output, default_home, is_root, lookup_user, real_path
+from btrfs.bulk.adapters.host import Host, Output, default_home, error_trace, is_root, lookup_user, real_path
 from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.state import StateFiles, bulk_user
 from btrfs.bulk.adapters.user import Account, UserFiles
@@ -63,7 +63,11 @@ class Wiring:
         self.snapshot, self.home = snapshot, home
         self.machine = Primitives() if machine is None else machine
         self.tree = HomeTree(self.machine)
-        self.host: HostPort = Host(paths, self.tree, self.snapshot_program, alerts=alerts) if host is None else host
+        self.host: HostPort = (
+            Host(paths, self.tree, self.snapshot_program, alerts=alerts, runner=self.machine.runner)
+            if host is None
+            else host
+        )
         self.out: OutputPort = Output() if out is None else out
 
     @classmethod
@@ -88,6 +92,10 @@ class Wiring:
             raise RuntimeError("btrfs-bulk's entry file is not known: main() names it")
         return sibling_program("btrfs/btrfs-snapshot", self.entry_file)
 
+    def trace(self, e: Exception) -> str:
+        """e and its traceback, as Python prints an uncaught exception."""
+        return error_trace(e)
+
     def state(self) -> StateFiles:
         return StateFiles(self.paths)
 
@@ -98,15 +106,22 @@ class Wiring:
     def user(self, args: Sequence[str]) -> tuple[Ctx, Account | None]:
         """Whose home, from --user NAME (root) or, not as root, the current
         user and the home override. As root without a name: BULK_USER of
-        bulk.conf (BadSettings on a bad line); NoUser without either."""
+        bulk.conf (BadSettings on a bad line, or a name no account has);
+        NoUser without either, or for a --user NAME no account has."""
         _, user_args = split_user_args(args)
         name = user_args[1] if len(user_args) == 2 else None
         if self.root:
-            if name is None or name == "":
+            from_conf = name is None or name == ""
+            if from_conf:
                 name = bulk_user(self.paths.conf)  # a name or None, never ""
             if name is None or name == ROOT_ACCOUNT:
                 raise NoUser("btrfs-bulk: needs --user NAME (not root)")
-            pw = lookup_user(name)
+            try:
+                pw = lookup_user(name)
+            except KeyError:
+                if from_conf:  # bulk.conf names nobody: fixed there, like a bad line
+                    raise BadSettings(f"{self.paths.conf}: BULK_USER={name}: no such account") from None
+                raise NoUser(f"btrfs-bulk: --user {name}: no such account") from None
             return Ctx(real_path(pw.pw_dir), uid=pw.pw_uid), pw
         return self.home_ctx(self.home or default_home()), None
 
@@ -119,7 +134,7 @@ class Wiring:
             if self.root:
                 return self.user_ctx(user_args) if user_args else None
             return self.user_ctx([])
-        except BadSettings, NoUser, KeyError:
+        except BadSettings, NoUser:
             return None
 
     def build(self, ctx: Ctx, pw: Account | None = None) -> Bulk:

@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fnmatch
 import json
 import os
 import queue
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +49,7 @@ from btrfs.stall_monitord import domain as md_domain
 from btrfs.stall_monitord.adapters import monitor as md_monitor
 from btrfs.stall_monitord.adapters import proc as md_proc
 from cst_core.adapters.sd_notify import ServiceNotifier
+from cst_core.domain.contracts import StateFormatKey, state_format
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -422,6 +425,50 @@ STACKS = {
 }
 
 
+class ShortCgroupTest(unittest.TestCase):
+    """short_cgroup names a task's cgroup in an event line: the last part of its cgroup v2 path
+    (cst_core cgroup_v2_path), a docker or podman scope cut to its id's first 12 characters."""
+
+    def short(self, text: str | None) -> str:
+        with mock.patch.object(md_proc, "read_text", return_value=text):
+            return md_proc.short_cgroup(4242)
+
+    def test_the_leaf_of_the_0_line(self) -> None:
+        self.assertEqual(self.short("0::/user.slice/user-1000.slice/session-2.scope\n"), "session-2.scope")
+        self.assertEqual(self.short("0::/\n"), "/")
+        docker = "0::/system.slice/docker-0123456789abcdef0123.scope\n"
+        self.assertEqual(self.short(docker), "docker-0123456789ab")
+
+    def test_the_0_line_not_the_last_line(self) -> None:
+        text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
+        self.assertEqual(self.short(text), "x.scope")
+
+    def test_a_carriage_return_in_the_real_file_is_kept(self) -> None:
+        # The daemon's own read_text decodes the file's bytes (no universal newlines), so a "\r"
+        # in a cgroup's name reaches cgroup_v2_path as it is. It reads the planted file; the stub hands that on.
+        real = md_proc.read_text
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cgroup")
+            with open(path, "wb") as f:
+                f.write(b"0::/user.slice/a\rb.scope\n")
+            with mock.patch.object(md_proc, "read_text", return_value=real(path)):
+                self.assertEqual(md_proc.short_cgroup(4242), "a\\rb.scope")  # kept, and shown escaped
+
+    def test_a_character_that_is_not_printable_is_shown_escaped(self) -> None:
+        # A cgroup's name may hold a carriage return or an escape; written as it is into the event
+        # text, it would move the cursor of the terminal that shows the report.
+        self.assertEqual(self.short("0::/user.slice/a\rFAKE TEXT\n"), "a\\rFAKE TEXT")
+        self.assertEqual(self.short("0::/user.slice/\x1b[2Jx.scope\n"), "\\x1b[2Jx.scope")
+        self.assertEqual(self.short("0::/system.slice/docker-\x07bcdef0123456789.scope\n"), "docker-\\x07bcdef012345")
+        self.assertEqual(self.short("0::/user.slice/caf\u00e9 x.scope\n"), "caf\u00e9 x.scope")  # printable: kept
+
+    def test_unreadable_empty_or_without_a_0_line(self) -> None:
+        self.assertEqual(self.short(None), "?")
+        self.assertEqual(self.short(""), "?")
+        self.assertEqual(self.short("1:name=systemd:/user.slice/x.scope\n"), "/")
+        self.assertEqual(self.short("\n"), "/")  # only blanks: no 0:: line (it raised IndexError before)
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
@@ -791,6 +838,40 @@ class TimedReaderTest(unittest.TestCase):
                 time.sleep(0.01)
         self.assertEqual(value, "text of b")
         self.assertEqual(reader.read("c"), "text of c")
+
+
+class PrepareLogDirTest(unittest.TestCase):
+    """prepare_log_dir: a missing log folder (a run by hand with --log-dir) is made as systemd makes
+    the unit's LogsDirectory=, whatever the umask: the folder with its LogsDirectoryMode= (0750),
+    its missing parents 0755; one that is there is left as it is."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-stall-logdir-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def mode(self, path: str) -> int:
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_missing_folder_gets_0750_and_its_parents_0755_under_any_umask(self) -> None:
+        for umask in (0, 0o077):
+            with self.subTest(umask=oct(umask)):
+                top = os.path.join(self.tmp, f"u{umask:o}")
+                logs = os.path.join(top, "a", "logs")
+                old = os.umask(umask)
+                self.addCleanup(os.umask, old)
+                md_proc.prepare_log_dir(logs + "/")  # a trailing slash names the same folder
+                os.umask(old)
+                self.assertEqual(oct(self.mode(logs)), "0o750")
+                self.assertEqual(oct(self.mode(os.path.join(top, "a"))), "0o755")
+                self.assertEqual(oct(self.mode(top)), "0o755")
+
+    def test_a_folder_that_is_there_keeps_its_mode(self) -> None:
+        logs = os.path.join(self.tmp, "logs")
+        os.mkdir(logs)
+        os.chmod(logs, 0o700)
+        md_proc.prepare_log_dir(logs)
+        self.assertEqual(oct(self.mode(logs)), "0o700")
 
 
 class CmdlineReadTest(unittest.TestCase):
@@ -1247,6 +1328,19 @@ class AlertHandOffTest(unittest.TestCase):
         self.assertTrue(_eventually(lambda: len(self.started) == 2))
         time.sleep(0.2)
         self.assertEqual(self.started, [list(self.ALERT_ARGV)] * 2)  # the service sends all three at its start
+
+    def test_an_alert_creates_a_missing_runtime_folder(self) -> None:
+        run_dir = os.path.join(self.run_dir, "gone")  # not made: only a run by hand with --run-dir meets this
+        mon = self.monitor(run_dir)
+        mon.alert("hung", "warn", "Task stuck", "body")
+        self.assertTrue(os.path.isdir(run_dir))
+        names = os.listdir(run_dir)
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(fnmatch.fnmatch(names[0], state_format(StateFormatKey.STALL_QUEUE).file_name), names)
+        with open(os.path.join(run_dir, names[0]), "rb") as f:
+            self.assertEqual(f.read(), md_domain.alert_text("warn", "Task stuck", "body").encode("utf-8"))
+        self.assertTrue(_eventually(lambda: self.started == [list(self.ALERT_ARGV)]), self.started)
+        self.assertFalse([ln for ln in self.lines if ln.startswith("alert hand-off failed")], self.lines)
 
     def test_without_a_runtime_folder_nothing_is_started(self) -> None:
         mon = self.monitor("")

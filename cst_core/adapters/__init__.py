@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 """Concrete infrastructure adapters implementing cst_core ports (the runner: cst_core.adapters.runner; virsh: cst_core.adapters.virsh; files: cst_core.adapters.files; zipapps: cst_core.adapters.zipapp)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import time
+from typing import TypedDict, Unpack
 
-from cst_core.ports import CommandResult, CommandRunnerPort, UnitName
+from cst_core.ports import CommandResult, CommandRunnerPort, StdinMode, UnitName
 
 
 class SystemClockAdapter:
@@ -23,24 +24,91 @@ class SystemClockAdapter:
         time.sleep(seconds)
 
 
+class _ScopeOptions(TypedDict, total=False):
+    """The runner options of an adapter's scope: only those it sets, so an adapter built without them
+    calls the runner as it always did."""
+
+    on_host: bool
+    base_env: Mapping[str, str]
+    stdin: StdinMode
+
+
+class _SystemctlScope(TypedDict, total=False):
+    """Which manager an adapter reaches and how (see SystemctlAdapter): one keyword bag, so that the
+    constructor's own arguments stay few."""
+
+    user: bool
+    program: str | None
+    on_host: bool
+    base_env: Mapping[str, str] | None
+    stdin: StdinMode
+
+
 class SystemctlAdapter:
     """SystemdPort implementation delegating to systemctl and systemd-escape.
 
     timeout and locale_c apply to every systemctl call (show: 20 s unless a timeout is given, and
     always the C locale); by default none (no limit, the caller's locale). A caller that keeps its own words for a systemctl that is
-    missing or does not answer gives the runner its words (SubprocessCommandRunner(words=...))."""
+    missing or does not answer gives the runner its words (SubprocessCommandRunner(words=...)).
 
-    def __init__(self, runner: CommandRunnerPort, *, timeout: float | None = None, locale_c: bool = False) -> None:
+    The scope, every option off by default: user (`systemctl --user`: the user manager); program (a stub
+    run instead of systemctl, never on the host); on_host (every call but show through the runner's
+    on_host: the host's systemctl from a toolbox; show keeps its own on_host); base_env and stdin (passed
+    to the runner on every systemctl call)."""
+
+    def __init__(
+        self,
+        runner: CommandRunnerPort,
+        *,
+        timeout: float | None = None,
+        locale_c: bool = False,
+        **scope: Unpack[_SystemctlScope],
+    ) -> None:
         self._runner = runner
         self._timeout = timeout
         self._locale_c = locale_c
+        program, user = scope.get("program"), scope.get("user", False)
+        self._head = [program or "systemctl", *(["--user"] if user else [])]
+        self._stub = program is not None
+        on_host = scope.get("on_host", False) and not self._stub
+        self._scope = _ScopeOptions()
+        if on_host:
+            self._scope["on_host"] = True
+        if (base_env := scope.get("base_env")) is not None:
+            self._scope["base_env"] = base_env
+        if (stdin := scope.get("stdin", "devnull")) != "devnull":
+            self._scope["stdin"] = stdin
 
     def _systemctl(self, *args: str, check: bool = False) -> CommandResult:
-        return self._runner.run(["systemctl", *args], check=check, timeout=self._timeout, locale_c=self._locale_c)
+        return self._runner.run(
+            [*self._head, *args], check=check, timeout=self._timeout, locale_c=self._locale_c, **self._scope
+        )
 
     def daemon_reload(self) -> None:
         """Run `systemctl daemon-reload` (CommandFailed when it fails)."""
         self._systemctl("daemon-reload", check=True)
+
+    def daemon_reload_result(self) -> CommandResult:
+        """`systemctl daemon-reload`: its exit status and output (a fault with its cause), never raised."""
+        return self._systemctl("daemon-reload")
+
+    def is_active(self, unit: str) -> CommandResult:
+        """`systemctl is-active unit`: the state on stdout; exit 3 for a unit that is not active, 4 for one
+        the manager does not know."""
+        return self._systemctl("is-active", unit)
+
+    def is_enabled(self, unit: str) -> CommandResult:
+        """`systemctl is-enabled unit`: its exit status and output."""
+        return self._systemctl("is-enabled", unit)
+
+    def show_environment(self) -> CommandResult:
+        """`systemctl show-environment`: the manager's environment, one KEY=VALUE per line."""
+        return self._systemctl("show-environment")
+
+    def show_value(self, unit: str, prop: str) -> CommandResult:
+        """`systemctl show -p PROP --value unit`, with the adapter's own timeout and locale (show() has the
+        C locale; a value shown to the user, such as a timestamp, keeps the caller's)."""
+        return self._systemctl("show", "-p", prop, "--value", unit)
 
     def start(self, unit: str) -> CommandResult:
         """Start unit; its exit status and output (the caller shows systemctl's message)."""
@@ -71,13 +139,16 @@ class SystemctlAdapter:
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
         return UnitName(res.stdout.strip())
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
         """`systemctl show -p PROP... unit` as {prop: value}, on the host from a toolbox (read-only, so
-        also from plan and status there; on_host=False: where the caller runs); {} when systemctl fails
-        or cannot start. 20 s at most, or the adapter's timeout when it has one."""
-        argv = ["systemctl", "show", *(a for p in props for a in ("-p", p)), unit]
+        also from plan and status there; on_host=False: where the caller runs); user: the unit of the
+        user's own manager (`systemctl --user`; an adapter whose scope is user already has it); {} when
+        systemctl fails or cannot start. 20 s at most, or the adapter's timeout when it has one."""
+        head = [*self._head, "--user"] if user and "--user" not in self._head else self._head
+        argv = [*head, "show", *(a for p in props for a in ("-p", p)), unit]
         timeout = 20 if self._timeout is None else self._timeout
-        res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, on_host=on_host)
+        scope = _ScopeOptions(self._scope, on_host=on_host and not self._stub)
+        res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
         if res.returncode != 0:
             return {}
         return dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line)

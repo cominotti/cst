@@ -17,6 +17,7 @@ import pwd
 import re
 import signal
 import stat
+from typing import Final
 import unittest
 
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
@@ -721,7 +722,9 @@ class RestartTest(SetupCase):
             "systemctl --user restart wireplumber",
         )
         after = self.after(r.calls, "systemctl --user restart wireplumber")
-        self.assertTrue(after[0].startswith("systemctl show -p InvocationID --value bluetooth"), after)  # the BAP wait
+        self.assertEqual(
+            after[0], "systemctl show -p ActiveState -p InvocationID bluetooth.service", after
+        )  # the BAP wait
         self.assertIn("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n", r.stdout)
         self.assertIn("restart:   wireplumber (your session; audio stops for a moment)\n", r.stdout)
         self.assertFalse(os.path.exists(m.pending))
@@ -889,6 +892,59 @@ class RestartOwedTest(SetupCase):
         self.assertNotIn("still owed", m.run("plan").stdout)
         m.run("apply", "--no-restart")
         self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
+
+
+class InvocationReadTest(SetupCase):
+    """One `systemctl show` per service for its state and invocation ID, read again only after CST
+    restarts it (the BAP wait reads bluetoothd's at each look)."""
+
+    BT: Final = "systemctl show -p ActiveState -p InvocationID bluetooth.service"
+    WP: Final = "systemctl --user show -p ActiveState -p InvocationID wireplumber.service"
+    RESTARTS: Final = ("sudo systemctl restart bluetooth", "systemctl --user restart wireplumber")
+
+    def reads(self, calls: Sequence[str]) -> list[str]:
+        """The calls that read an invocation ID or restart a service, in order."""
+        return [c for c in calls if "InvocationID" in c or "is-active --quiet" in c or c in self.RESTARTS]
+
+    def test_plan_reads_each_once(self) -> None:
+        m = self.machine()
+        self.assertEqual(self.reads(m.run("plan").calls), [self.BT, self.WP])
+
+    def test_apply_reads_again_only_after_a_restart(self) -> None:
+        m = self.machine(settings="LE_AUDIO=on\n")
+        m.put("bt-journal", BAP_REGISTERED)
+        m.adapter(listed=False)
+        r = m.run("apply", "--yes")
+        self.assertEqual(
+            self.reads(r.calls),
+            [
+                self.BT,  # plan
+                self.WP,
+                self.BT,  # read again for the record of what is owed (either may have restarted meanwhile)
+                self.WP,
+                "sudo systemctl restart bluetooth",
+                "systemctl --user restart wireplumber",
+                self.BT,  # the BAP wait's look (registered at once); the checks reuse it
+                self.WP,  # the record after the restarts; the checks' services rows reuse both
+            ],
+        )
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_status_reads_each_once(self) -> None:
+        m = self.machine()
+        m.put("bt-journal", BAP_REGISTERED)
+        r = m.run("status")
+        self.assertEqual([c for c in self.reads(r.calls) if "InvocationID" in c], [self.BT, self.WP])
+
+    def test_reloading_still_runs_activating_does_not(self) -> None:
+        """As `systemctl is-active`: a reloading unit still runs its invocation (its restart stays
+        owed), an activating one does not run yet (it reads main.conf when it starts)."""
+        m = self.machine()
+        m.run("apply", "--yes", "--no-restart")
+        m.unit_active_state("system", "bluetooth", "reloading")
+        self.assertEqual(m.run("plan").stdout.count("still owed"), 2)
+        m.unit_active_state("system", "bluetooth", "activating")
+        self.assertEqual(m.run("plan").stdout.count("still owed"), 1)
 
 
 class LeAudioTest(SetupCase):
@@ -1397,6 +1453,30 @@ class WatcherTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
         self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), m.run("plan").stdout)
 
+    def test_apply_adopts_a_current_watcher_the_record_does_not_list(self) -> None:
+        """A current program and unit missing from the install record (installed before it existed)
+        are added to it, with no write, no daemon-reload and no restart."""
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.run("apply", "--no-restart")
+        rec = json.loads(self.text(m.record))
+        before = {path: rec["files"].pop(path) for path in (m.lw_prog, m.lw_unit)}
+        with open(m.record, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        stats = {path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in (m.lw_prog, m.lw_unit)}
+        r = m.run("apply", "--no-restart")
+        self.assertIn(
+            f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\nunchanged: {LW} enabled and active\n",
+            r.stdout,
+        )
+        self.assertEqual({path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in stats}, stats)
+        self.assertEqual(
+            [c for c in r.calls if c.startswith("systemctl --user") and "is-" not in c and "show" not in c], []
+        )
+        files = json.loads(self.text(m.record))["files"]
+        self.assertEqual(files[m.lw_prog]["src"], "bluetooth/bt-ldac-watch")
+        self.assertEqual(files[m.lw_unit]["component"], "bluetooth:ldac")
+        self.assertEqual({path: files[path]["sha256"] for path in before}, {p: f["sha256"] for p, f in before.items()})
+
     def test_plan_and_status_name_the_last_failure(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")
         m.put("lw-journal", JOURNAL)
@@ -1532,7 +1612,7 @@ class ApplyTest(SetupCase):
             "systemctl --user restart wireplumber",
             f"systemctl --user start {LW}",
             f"bluetoothctl bearer {MAC} bredr",
-            "systemctl is-active --quiet bluetooth",
+            f"journalctl --user -u {LW}",  # the checks (their services rows reuse the states read)
         )
         bearer = r.calls.index(f"bluetoothctl bearer {MAC} bredr")
         self.assertTrue(r.calls[bearer + 1].startswith("  stdin=/dev/null via=timeout 5 bluetoothctl bearer"), r.calls)
@@ -1653,7 +1733,8 @@ class StatusTest(SetupCase):
 
 
 class EnvironmentTest(SetupCase):
-    """The commands get the caller's environment: nothing added, LC_CTYPE as it was."""
+    """The commands get the caller's environment: nothing added, LC_CTYPE as it was; only the
+    `systemctl show` of a unit's state (cst_core's SystemdPort.show) adds LC_ALL=C."""
 
     def test_no_leak(self) -> None:
         m = self.machine(DONE)
@@ -1664,9 +1745,19 @@ class EnvironmentTest(SetupCase):
                 os.unlink(log)
             m.run("status", env=extra)
             m.run("apply", "--no-restart", env=extra)
-            seen = {word for line in m.env_log().splitlines() for word in line.split(":", 1)[1].split()}
+            seen: set[str] = set()
+            shows: list[set[str]] = []
+            for line in m.env_log().splitlines():
+                call, words = line.split("\t", 1)
+                if call.startswith("systemctl") and "show -p ActiveState" in call:
+                    shows.append(set(words.split()))
+                else:
+                    seen |= set(words.split())
             want = {"CST_BT_CONTAINER=0", f"CST_BT_ROOT={m.root}"} | {f"{k}={v}" for k, v in extra.items()}
             self.assertEqual(seen, want, extra)
+            self.assertTrue(shows, extra)
+            for words in shows:
+                self.assertEqual(words, want | {"LC_ALL=C"}, extra)
 
 
 class ScratchFileTest(SetupCase):

@@ -17,7 +17,6 @@ import os
 import pwd
 import shutil
 import stat
-import subprocess
 import time
 from typing import TypedDict
 
@@ -32,7 +31,7 @@ from btrfs.bulk.adapters.child import (
     is_str,
     is_user_read,
 )
-from btrfs.bulk.adapters.machine import HomeTree, Progress, kind
+from btrfs.bulk.adapters.machine import HomeTree, Primitives, Progress, kind
 from btrfs.bulk.domain import NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
 from btrfs.bulk.domain.steam import (
     CHUNK,
@@ -48,13 +47,13 @@ from btrfs.bulk.domain.steam import (
 from cst_core.domain.values import Json
 
 
-def idle_priority() -> None:
+def idle_priority(machine: Primitives) -> None:
     """This process, and what it starts, at the lowest CPU priority and the
-    idle IO class (the IO class only counts with the BFQ IO scheduler)."""
+    idle IO class (the IO class only counts with the BFQ IO scheduler); machine runs ionice."""
     with contextlib.suppress(OSError):
         os.nice(19)
     if shutil.which("ionice") is not None:
-        subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False, capture_output=True)
+        machine.run(["ionice", "-c3", "-p", str(os.getpid())], decode_errors="replace")
 
 
 def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
@@ -290,7 +289,7 @@ class UserFiles:
         created in it would inherit that: give it the policy's label (as the
         user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
         with contextlib.suppress(OSError):
-            subprocess.run(["restorecon", path], check=False, capture_output=True)
+            self.machine.run(["restorecon", path], decode_errors="replace")
         return True
 
     def relabel(self, path: str) -> bool:
@@ -559,7 +558,7 @@ class UserFiles:
         the disk first and read back from there; if that write fails (sync or
         fsync reports an error), RuntimeError: the caller drops the copy and the
         original stays."""
-        r = subprocess.run(["sync", "-f", new], check=False, capture_output=True, text=True)
+        r = self.machine.run(["sync", "-f", new])
         if r.returncode != 0:
             raise RuntimeError(
                 f"the copy could not be written to the disk (sync: {(r.stderr.strip() or f'exit {r.returncode}')[:300]})"
@@ -607,7 +606,7 @@ class UserFiles:
                 if kind(x) != LstatKind.ABSENT:
                     raise Unexpected(f"{x} exists already: remove it or move it back")
         if idle and any(p.get("mode") == SteamPartMode.COPY for p in parts):
-            idle_priority()
+            idle_priority(self.machine)
         stamp = self.u_clock(parts[-1]["new"])
         uid = os.getuid()
         try:

@@ -1579,10 +1579,25 @@ and run `cst btrfs bulk apply`. Log: `journalctl -u btrfs-bulk-boot`.
 
 **Nothing moved into ~/Bulk at boot** (alert `~/Bulk: nothing moved at boot`).
 A line of `/etc/btrfs-setup/bulk.conf` is not a plain `KEY=VALUE` (the alert
-names the file and the line), so the boot step cannot tell whose home it
-handles and moves nothing; it exits with 1, like a run that needs a look. The
-items keep waiting for the boot. Fix the line (`cst btrfs install` writes the
-file again), then run `cst btrfs bulk apply` or reboot.
+names the file and the line), or its `BULK_USER` names an account that does
+not exist (the alert says so), so the boot step cannot tell whose home it
+handles and moves nothing. It exits with 78, so `btrfs-bulk-boot.service`
+shows as failed (`systemctl --failed`, `cst doctor`); the same happens,
+without the alert, when `bulk.conf` names no user. Exit 1 ("needs a look"),
+3 and 4 still count as success for the unit. The items keep waiting for the
+boot. Fix the line (`cst btrfs install` writes the file again), then run
+`cst btrfs bulk apply` or reboot. `sudo systemctl reset-failed
+btrfs-bulk-boot.service` clears the failed mark at once; the next boot
+clears it too.
+
+**`btrfs-bulk-boot.service` failed with status 70.** The boot step hit an
+error it did not expect and stopped. As with status 78 above,
+`systemctl is-system-running` says `degraded` until the unit runs again
+without the error or `sudo systemctl reset-failed btrfs-bulk-boot.service`
+clears it. The error and its traceback are in
+`journalctl -b -u btrfs-bulk-boot`. Nothing is left half done that the move
+journals do not cover: the next run repairs an interrupted move, and the
+items keep waiting for the boot.
 
 **`bulk status` says `an interrupted move is recorded`.**
 A move was interrupted (power loss, kill). Nothing is lost. Normally the next
@@ -1871,8 +1886,11 @@ quotes when the value holds a `'`. `btrfs-snapshot` (bash and its Python runtime
 file as data, below) and CST's other Python programs (`cst doctor`, `cst vm`, `btrfs-health-check`) read these alike.
 A value no such form can hold (a line break, or a `'` together with `"`,
 `$`, a backtick or a backslash) is refused, and nothing is written. The file
-is written only when its content changes; a mode changed by hand goes back
-to 0644 (everyone may read it).
+is written only when its content, owner or mode changes, through CST's
+installer: a new file renamed into place (a run never reads half a file) and
+synced to disk; `written:` or `unchanged:` names it. So a run puts its owner
+(root) and mode 0644 back (everyone may read it) by writing it again; a link
+in its place is replaced by the file.
 
 Older versions wrote values with backslashes instead (`NAS_PATH=/a\ b`,
 `K=$'a\tb'`). `cst doctor`, `cst vm` and the health check read those lines as bash does, so
@@ -2126,12 +2144,16 @@ The **old tree** is the original folder after the swap, renamed to
 
 1. **Checks.** The folder is skipped (and the reason is shown by `status` as
    `skipped: ...`) if it is a symlink (a shortcut that points to another path)
-   or a file, if it is or contains a mount point, or if it already contains a
-   nested subvolume. Skipped folders are checked again on every run, because
-   the cause may go away.
+   or a file, if it is or contains a mount point (also one whose path holds a
+   blank, a tab, a backslash or an accented letter), or if it already
+   contains a nested subvolume. Skipped folders are checked again on every
+   run, because the cause may go away.
 2. **In use?** The script looks at every process: its open files, its working
    folder, and the bind mounts of containers (for example `docker run -v
-   ~/Workspace/x:/src`). If anything uses the folder, it is left for later.
+   ~/Workspace/x:/src`; also of a folder whose name holds a blank, a tab or
+   a backslash). If anything uses the folder, it is left for later. A folder
+   whose name holds a line break always counts as in use: the list of open
+   paths has one path per line, so its name cannot be found there.
 3. **New subvolume** `FOLDER.subvol-new`, with the same owner, permissions and
    SELinux label as the folder (an SELinux label is a security tag that Fedora
    puts on every file).

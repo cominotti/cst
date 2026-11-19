@@ -7,13 +7,14 @@ import shlex
 import time
 
 from cst_core.domain.values import DAY
-from doctor.application.shared import check, deployments, installed_packages
+from doctor.application.shared import check, installed_packages, ostree_facts
 from doctor.domain import (
     INFO,
     OK,
     STAGED_OLD_DAYS,
     WARN,
     Deployment,
+    OstreeAnswer,
     Request,
     Result,
     classify_requests,
@@ -25,6 +26,11 @@ from doctor.ports import CheckFn, DoctorHostPort
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
+
+
+def deployments(host: DoctorHostPort) -> OstreeAnswer:
+    """(booted, pending, error) of ostree_facts."""
+    return ostree_facts(host)[0]
 
 
 @check(CHECKS, "rpm-ostree")

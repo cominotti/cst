@@ -15,7 +15,7 @@ import posixpath
 import time
 
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import MARGIN, BulkJournalKind, Ctx, LstatKind, PathChain, Unexpected, present
+from btrfs.bulk.domain import MARGIN, BulkJournalKind, Ctx, LstatKind, PathChain, Unexpected, damaged_text, present
 from btrfs.bulk.domain.steam import (
     STEAM_ROOT,
     SteamApp,
@@ -513,13 +513,9 @@ def steam_recover(b: Bulk, j: SteamJournal) -> str:
     raise Unexpected(f"unknown phase {phase!r}")
 
 
-# How a damaged journal is reported (recovery and report, of items and Steam games alike).
-DAMAGED = "unreadable, or not as btrfs-bulk writes it: left in place, nothing it names was touched"
-
-
 def damaged(state: BulkStatePort, ident: str) -> str:
     """What NEEDS A LOOK says of a journal that is not as btrfs-bulk writes it."""
-    return f"damaged journal {state.jpath(ident)} ({DAMAGED})"
+    return damaged_text(state.jpath(ident))
 
 
 def steam_recover_all(b: Bulk) -> list[str]:

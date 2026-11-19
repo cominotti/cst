@@ -10,7 +10,16 @@ from collections.abc import Mapping
 import os
 
 from cst_core.adapters.notify import PENDING_ALERTS
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, Urgency, state_format
+from cst_core.domain.contracts import (
+    CPU_SETTINGS,
+    NOTIFY_PROGRAM,
+    RESTIC_CACHE_DIR,
+    RESTIC_PW_FILE,
+    SNAPSHOTS_CONF,
+    StateFormatKey,
+    Urgency,
+    state_format,
+)
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.values import HOUR
@@ -48,14 +57,14 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
         ("index", "CST_VM_INDEX", state_format(StateFormatKey.VM_INDEX).path),
         ("swtpm_dir", "CST_VM_SWTPM_DIR", "/var/lib/libvirt/swtpm"),
         ("vm_conf", "CST_VM_CONF", "/etc/cst/vm.conf"),
-        ("cpu_conf", "CST_VM_CPU_CONF", "/etc/cpu-setup/cpu-setup.conf"),
+        ("cpu_conf", "CST_VM_CPU_CONF", CPU_SETTINGS),
         ("system_images", "CST_VM_SYSTEM_IMAGES", "/var/lib/libvirt/images"),
         # The NAS backup reuses the restic repository, password and cache of the /home NAS backup
-        # (btrfs-snapshot's runtime, btrfs/snapshot_runtime: NAS_SSH_ALIAS, its restic paths; a test checks they
-        # stay the same). The password never leaves its root-only file.
-        ("nas_conf", "CST_VM_NAS_CONF", "/etc/btrfs-setup/snapshots.conf"),
-        ("restic_password", "CST_VM_RESTIC_PASSWORD", "/etc/btrfs-setup/restic-password"),
-        ("restic_cache", "CST_VM_RESTIC_CACHE", "/var/cache/btrfs-snapshot-restic"),
+        # (btrfs-snapshot's runtime, btrfs/snapshot_runtime): the paths come from cst_core, shared with it.
+        # The password never leaves its root-only file.
+        ("nas_conf", "CST_VM_NAS_CONF", SNAPSHOTS_CONF),
+        ("restic_password", "CST_VM_RESTIC_PASSWORD", RESTIC_PW_FILE),
+        ("restic_cache", "CST_VM_RESTIC_CACHE", RESTIC_CACHE_DIR),
         # A fixed path per VM, so restic's parent snapshot and forget's groups stay the same.
         ("nas_stage", "CST_VM_NAS_STAGE", "/var/lib/cst/vm-nas"),
         ("run_dir", "CST_VM_RUN_DIR", "/run/cst-vm"),

@@ -53,7 +53,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import CommandFailed, CommandResult, UnitName
+from cst_core.ports import CommandFailed, CommandFault, CommandResult, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -126,6 +126,39 @@ class ValueObjectsTest(unittest.TestCase):
                 Duration.parse(bad)
         with self.assertRaises(DomainValidationError):
             Duration(-5)
+
+    def test_sizes_too_large_to_hold_are_the_domain_error(self) -> None:
+        # float('9' * 400) is inf and '9' * 308 is finite until multiplied by T: int() of either
+        # raised OverflowError; int() of more than 4300 digits raised a plain ValueError.
+        for spec in ("9" * 400 + "G", "9" * 308 + "T", "9" * 5000 + "K"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "too large for a size"):
+                ByteSize.parse_iec(spec)
+        self.assertIsNone(ByteSize.parse("9" * 5000))
+        self.assertIsNone(ByteSize.parse("9" * 5000 + "G"))
+        # Huge but finite values keep their value.
+        self.assertEqual(ByteSize.parse_iec("8" + "0" * 290 + "T"), ByteSize(int(8e290 * 2**40)))
+
+    def test_a_systemd_size_above_64_bits_is_invalid(self) -> None:
+        # systemd's sizes are 64-bit unsigned: one above 2**64 - 1 is invalid (None), before or
+        # after its unit. A value that big once came back whole, and the float formats raised
+        # OverflowError on it (format_bytes_human of 10**400 - 1).
+        self.assertEqual(ByteSize.parse(str(2**64 - 1)), ByteSize(2**64 - 1))
+        self.assertEqual(ByteSize.parse("16777215T"), ByteSize(16777215 * 2**40))
+        for spec in (str(2**64), "16777216T", "18014398509481984K", "9" * 400, "9" * 400 + "K"):
+            with self.subTest(spec=spec[-6:]):
+                self.assertIsNone(ByteSize.parse(spec))
+
+    def test_durations_too_large_to_hold_are_the_domain_error(self) -> None:
+        with self.assertRaisesRegex(DomainValidationError, "invalid duration"):
+            Duration.parse("9" * 5000 + "s")
+        for spec in ("9" * 400 + "s", "9" * 5000 + "w", "9" * 307 + "w"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "duration too large"):
+                Duration.parse_float(spec)
+        with self.assertRaisesRegex(DomainValidationError, "duration too large"):
+            Duration.parse_float("9" * 400, allow_unitless=True, positive_only=True)
+        # Huge but finite values keep their value.
+        self.assertEqual(Duration.parse("9" * 400 + "s"), Duration(int("9" * 400)))
+        self.assertEqual(Duration.parse_float("1" + "0" * 300 + "s"), 1e300)
 
     def test_cpu_set_parse(self) -> None:
         cs = CpuSet.parse("0-3,6,12-13")
@@ -244,6 +277,20 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual((res.returncode, res.stdout), (0, "\ufffdabc LC_ALL=C"))
         self.assertEqual(res.argv, ("virsh", "-c", "qemu:///system", "domstate", "vm1"))
 
+    def test_is_searchable_tells_a_folder_this_user_may_enter(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
+        self.addCleanup(shutil.rmtree, tmp)
+        fs = LocalFileSystemAdapter()
+        open_dir, closed_dir = os.path.join(tmp, "open"), os.path.join(tmp, "closed")
+        os.mkdir(open_dir, 0o300)  # searchable, not readable
+        os.mkdir(closed_dir, 0o600)  # readable, not searchable
+        for d in (open_dir, closed_dir):
+            self.addCleanup(os.chmod, d, 0o700)
+        self.assertTrue(fs.is_searchable(open_dir))
+        # Root may search any folder; any other user may not search one without its x bit.
+        self.assertEqual(fs.is_searchable(closed_dir), os.geteuid() == 0)
+        self.assertFalse(fs.is_searchable(os.path.join(tmp, "missing")))
+
     def test_local_filesystem_adapter(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-core-fs-")
         self.addCleanup(shutil.rmtree, tmp)
@@ -281,8 +328,8 @@ class AdaptersTest(unittest.TestCase):
         self.assertFalse(fs.is_symlink(link))
         self.assertEqual(fs.read_text(link), "replaced\n")
 
-        fs.remove_file(link)
-        fs.remove_file(link)  # idempotent
+        self.assertTrue(fs.remove_file(link))  # something was there
+        self.assertFalse(fs.remove_file(link))  # idempotent: nothing left to remove
         self.assertFalse(fs.lexists(link))
 
     def test_subprocess_runner_and_systemctl_adapter(self) -> None:
@@ -400,6 +447,113 @@ class AdaptersTest(unittest.TestCase):
         local = SystemctlAdapter(Recording(CommandResult(0, "Result=success\n", "")), timeout=120)
         self.assertEqual(local.show(UnitName("a.service"), ("Result",), on_host=False), {"Result": "success"})
         self.assertEqual(seen[0][1], {"check": False, "timeout": 120, "locale_c": True, "on_host": False})
+        # A unit of the user's own manager (bluetooth's wireplumber.service): --user before show.
+        seen.clear()
+        mine = SystemctlAdapter(Recording(CommandResult(0, "ActiveState=active\nInvocationID=\n", "")))
+        self.assertEqual(
+            mine.show(UnitName("wireplumber.service"), ("ActiveState", "InvocationID"), user=True),
+            {"ActiveState": "active", "InvocationID": ""},
+        )
+        argv, options = seen[0]
+        self.assertEqual(
+            argv, ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "InvocationID", "wireplumber.service"]
+        )
+        self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
+
+    def test_systemctl_adapter_user_scope(self) -> None:
+        unit = UnitName("cst-toolchains-prune.timer")
+
+        def every_call(sysd: SystemctlAdapter) -> None:
+            sysd.start(unit)
+            sysd.stop(unit)
+            sysd.restart(unit)
+            sysd.enable(unit, now=True)
+            sysd.disable(unit, now=True)
+            sysd.clean(unit, what="state")
+            sysd.daemon_reload()
+            sysd.daemon_reload_result()
+            sysd.is_active(unit)
+            sysd.is_enabled(unit)
+            sysd.show_environment()
+            sysd.show_value(unit, "NextElapseUSecRealtime")
+            sysd.show(unit, ("Result",))
+
+        def words(head: list[str]) -> list[list[str]]:
+            return [
+                [*head, *args]
+                for args in (
+                    ["start", unit],
+                    ["stop", unit],
+                    ["restart", unit],
+                    ["enable", "--now", unit],
+                    ["disable", "--now", unit],
+                    ["clean", "--what=state", unit],
+                    ["daemon-reload"],
+                    ["daemon-reload"],
+                    ["is-active", unit],
+                    ["is-enabled", unit],
+                    ["show-environment"],
+                    ["show", "-p", "NextElapseUSecRealtime", "--value", unit],
+                    ["show", "-p", "Result", unit],
+                )
+            ]
+
+        # user: --user right after the program, on every call; nothing else changes.
+        user = FakeRunner()
+        every_call(SystemctlAdapter(user, user=True))
+        self.assertEqual(user.calls, words(["systemctl", "--user"]))
+        self.assertEqual([set(o) for o in user.options[:-1]], [{"timeout", "locale_c"}] * 12)
+        self.assertEqual(user.options[-1], {"timeout": 20, "locale_c": True, "on_host": True})
+        # on_host: every call but show through the runner's on_host; show keeps its own.
+        host = FakeRunner()
+        sysd = SystemctlAdapter(host, user=True, on_host=True)
+        every_call(sysd)
+        sysd.show(unit, ("Result",), on_host=False)
+        self.assertEqual([o.get("on_host") for o in host.options], [True] * 13 + [False])
+        # program: a stub in place of systemctl, never on the host (show neither); base_env and stdin
+        # reach every systemctl call, with the adapter's timeout and locale.
+        stub = FakeRunner()
+        env = {"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": "/run/user/1000"}
+        stubbed = SystemctlAdapter(
+            stub, timeout=60, user=True, program="/stub/systemctl", on_host=True, base_env=env, stdin="inherit"
+        )
+        every_call(stubbed)
+        self.assertEqual(stub.calls, words(["/stub/systemctl", "--user"]))
+        scope = {"timeout": 60, "locale_c": False, "base_env": env, "stdin": "inherit"}
+        self.assertEqual(stub.options, [scope] * 12 + [{**scope, "locale_c": True, "on_host": False}])
+        # Without the scope: the runner gets exactly the options it always got.
+        plain = FakeRunner()
+        every_call(SystemctlAdapter(plain))
+        self.assertEqual(plain.calls, words(["systemctl"]))
+        self.assertEqual(plain.options, [{"timeout": None, "locale_c": False}] * 12 + [user.options[-1]])
+        # show(user=True) (bluetooth's per-call scope) on an adapter whose scope is already user: one --user.
+        both = FakeRunner()
+        SystemctlAdapter(both, user=True).show(unit, ("Result",), user=True)
+        SystemctlAdapter(both, program="/stub/systemctl").show(unit, ("Result",), user=True)
+        self.assertEqual(
+            both.calls,
+            [
+                ["systemctl", "--user", "show", "-p", "Result", unit],
+                ["/stub/systemctl", "--user", "show", "-p", "Result", unit],
+            ],
+        )
+
+    def test_systemctl_adapter_user_scope_over_the_real_runner(self) -> None:
+        # is-active exits 3 for a unit that is not active: its state and status come back, nothing raised.
+        tmp = tempfile.mkdtemp(prefix="cst-systemctl-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "systemctl")
+        with open(stub, "w") as f:
+            f.write('#!/bin/sh\necho "$*"\nexit 3\n')
+        os.chmod(stub, 0o755)
+        sysd = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=stub, base_env={"PATH": "/usr/bin:/bin"})
+        res = sysd.is_active(UnitName("a.timer"))
+        self.assertEqual((res.returncode, res.stdout), (3, "--user is-active a.timer\n"))
+        # A program that is not there: daemon_reload_result gives the fault and its cause, no CommandFailed.
+        gone = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=os.path.join(tmp, "missing"))
+        res = gone.daemon_reload_result()
+        self.assertEqual((res.returncode, res.fault), (127, CommandFault.MISSING))
+        self.assertIsInstance(res.cause, FileNotFoundError)
 
     def test_host_execution_context_and_clock(self) -> None:
         host = HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000)

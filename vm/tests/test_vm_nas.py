@@ -178,6 +178,8 @@ if cmd == "backup":
     if "slow-backup" in vm.get("fail", []):
         open(os.path.join(fix, "backup-started"), "w").close()
         import time; time.sleep(3)
+    if "write_index" in cfg:  # [path, text]: a newer cst vm rewrote the index meanwhile
+        open(cfg["write_index"][0], "w").write(cfg["write_index"][1])
     for line in cfg.get("backup_lines", []):
         print(line)
     print(json.dumps({"message_type": "status", "percent_done": 0.5, "total_bytes": 10, "bytes_done": 5}))
@@ -193,6 +195,8 @@ if cmd == "backup":
     sys.exit(rc)
 if cmd == "forget":
     print("remove 1 snapshots:" if cfg.get("forgot") else "keep 2 snapshots:")
+    if "forget_err" in cfg:
+        print(cfg["forget_err"], file=sys.stderr)
     sys.exit(cfg.get("forget_rc", 0))
 if cmd == "snapshots":
     print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
@@ -530,6 +534,58 @@ class LiveBackupTest(Nas):
         forgets = [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
+
+    def test_an_index_changed_during_the_backup_keeps_the_snapshot_and_says_it_is_not_indexed(self) -> None:
+        # A newer cst vm rewrote the index while restic ran: the message said "nothing is backed up".
+        text = json.dumps({"version": 2, "backups": []})
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        self.restic_cfg(write_index=[self.index, text])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"cst vm: the restic snapshot {SNAP_ID[:8]} of win is complete but not in the index: {self.index} is "
+            "format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST, so the index was "
+            "left as it is and cst vm does not list this backup; the snapshot stays in the repository, where the "
+            'retention sees it as any VM backup of its tags (restore it by its ID: vm/README.md, section "Restore '
+            'from the NAS"). Then: use the cst vm of that CST',
+            r.stderr,
+        )
+        self.assertNotIn("nothing is backed up", r.stderr)
+        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget"])
+        self.assertFalse(os.path.exists(self.overlay))
+        with open(self.index) as f:
+            self.assertEqual(f.read(), text)
+
+    def test_a_snapshot_not_indexed_still_prints_its_notes_and_how_to_restore_it(self) -> None:
+        # The refusal came before the notes: a missing TPM state went unsaid, and restic keeps no
+        # manifest with them.
+        shutil.rmtree(os.path.join(self.swtpm, UUID))
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        self.restic_cfg(write_index=[self.index, json.dumps({"version": 2, "backups": []})])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("is complete but not in the index", r.stderr)
+        self.assertIn("  note: TPM state", r.stdout)
+        self.assertIn("BitLocker", r.stdout)
+        self.assertIn(f"restic restore {SNAP_ID[:8]} --sparse", r.stdout)
+
+    def test_an_incomplete_snapshot_restic_does_not_forget_is_named(self) -> None:
+        # The forget's answer was dropped: a torn snapshot stayed in the repository unsaid. These runs
+        # stop before the retention, whose forget forget_rc would fail too.
+        self.restic_cfg(backup_rc=3, forget_rc=1)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"restic backup failed: some files could not be read; no backup recorded; restic snapshot {SNAP_ID[:8]} "
+            f"could NOT be forgotten (exit 1): it is no backup; forget it by hand, restic forget {SNAP_ID}, with "
+            'the repository\'s variables of vm/README.md, section "Restore from the NAS"',
+            r.stderr,
+        )
+        self.assertFalse(os.path.exists(self.index))
+        self.restic_cfg(backup_rc=3)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertIn("some files could not be read; no backup recorded\n", r.stderr)
+        self.assertNotIn("forgotten", r.stderr)
 
     def test_commit_failure_is_loud_and_leaves_everything(self) -> None:
         self.vm(fail=["commit"], agent="connected")
@@ -924,6 +980,30 @@ class ShutOffAndRefusalTest(Nas):
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertFalse(os.path.exists(self.index))
 
+    def test_a_torn_snapshot_restic_does_not_forget_is_named(self) -> None:
+        # "(restic snapshot X forgotten)" was said whatever forget answered. These runs stop before the
+        # retention, whose forget forget_rc would fail too.
+        lock = "Fatal: unable to create lock in backend: repository is already locked"
+        for fail, what in (
+            ("start-during-backup", "the VM's state changed during the backup, the copy is not consistent ("),
+            ("touch-nvram", "changed during the backup (the VM was started?), the copy is not consistent ("),
+        ):
+            for cfg, said in (
+                ({"forget_rc": 1, "forget_err": lock}, f"could NOT be forgotten ({lock}): it is no backup; "),
+                ({"forget_rc": 1}, "could NOT be forgotten (exit 1): it is no backup; "),
+                ({}, "forgotten): "),
+            ):
+                with self.subTest(fail=fail, cfg=cfg):
+                    self.vm(state="shut off", fail=[fail])
+                    self.restic_cfg(**cfg)
+                    r = self.run_tool("backup", "win", "--nas")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(f"{what}restic snapshot {SNAP_ID[:8]} {said}", r.stderr)
+                    if cfg:
+                        self.assertIn(f"forget it by hand, restic forget {SNAP_ID}, with the repository's", r.stderr)
+                        self.assertNotIn("forgotten)", r.stderr)
+                    self.assertFalse(os.path.exists(self.index))
+
     def test_refused_states(self) -> None:
         for state in ("paused", "pmsuspended", "in shutdown"):
             self.vm(state=state)
@@ -1056,17 +1136,26 @@ class SharedRepositoryTest(Nas):
 
 class ConstantsTest(unittest.TestCase):
     def test_nas_default_paths_match_btrfs_snapshot(self) -> None:
-        # btrfs-snapshot's NAS backup is its Python runtime's (btrfs/snapshot_runtime): its paths
-        # outside the test seam (no CST_SNAPSHOT_ROOT) and its ssh alias.
+        # btrfs-snapshot's NAS backup is its Python runtime's (btrfs/snapshot_runtime): cst vm's
+        # paths are its paths outside the test seam (no CST_SNAPSHOT_ROOT). The ssh alias is
+        # compared by SharedRepositoryTest: both give restic the same RESTIC_REPOSITORY.
         from btrfs.snapshot_runtime.adapters.machine import SnapshotRun
-        from btrfs.snapshot_runtime.domain import NAS_SSH_ALIAS
         from cst_core.adapters.runner import SubprocessCommandRunner
 
         run = SnapshotRun({}, SubprocessCommandRunner())
-        self.assertEqual(NAS_SSH_ALIAS, vm_domain.NAS_SSH_ALIAS)
-        self.assertEqual(run.restic_password, "/etc/btrfs-setup/restic-password")
-        self.assertEqual(run.restic_cache, "/var/cache/btrfs-snapshot-restic")
-        self.assertEqual(run.conf, "/etc/btrfs-setup/snapshots.conf")
+        vm = vm_wiring.vm_paths({})
+        self.assertEqual(
+            (vm.nas_conf, vm.restic_password, vm.restic_cache), (run.conf, run.restic_password, run.restic_cache)
+        )
+        # The machine's paths, which setup-snapshots.bash and the READMEs also name.
+        self.assertEqual(
+            (vm.nas_conf, vm.restic_password, vm.restic_cache),
+            (
+                "/etc/btrfs-setup/snapshots.conf",
+                "/etc/btrfs-setup/restic-password",
+                "/var/cache/btrfs-snapshot-restic",
+            ),
+        )
 
     def test_forget_args_are_scoped(self) -> None:
         a = vm_domain.forget_args("win", "sophia", 4, 3)

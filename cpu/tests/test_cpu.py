@@ -79,6 +79,43 @@ class CpusOfTest(unittest.TestCase):
                 self.cpus(text)
 
 
+class GameCgroupTest(unittest.TestCase):
+    """game_cgroup reads the game's cgroup v2 path from /proc/PID/cgroup (cst_core cgroup_v2_path),
+    without its leading slash."""
+
+    def cgroup(self, text: str) -> str:
+        with unittest.mock.patch.object(cpu_adapters, "read_text", lambda _path, default="", **_kw: text or default):
+            return cpu_adapters.game_cgroup(4242)
+
+    def test_the_path_of_the_0_line_without_its_leading_slash(self) -> None:
+        scope = "user.slice/user-1000.slice/user@1000.service/app.slice/app-steam-1.scope"
+        self.assertEqual(self.cgroup(f"0::/{scope}\n"), scope)
+        self.assertEqual(self.cgroup(f"12:cpuset:/\n1:name=systemd:/{scope}\n0::/{scope}\n"), scope)
+
+    def test_only_the_0_line_when_other_lines_follow_it(self) -> None:
+        text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
+        self.assertEqual(self.cgroup(text), "user.slice/x.scope")
+
+    def test_a_carriage_return_in_the_path_is_kept(self) -> None:
+        # Only a newline ends a line of /proc/PID/cgroup; a cgroup name may hold a carriage return.
+        self.assertEqual(self.cgroup("0::/user.slice/a\rb.scope\n"), "user.slice/a\rb.scope")
+
+    def test_a_carriage_return_in_the_real_file_is_kept(self) -> None:
+        # Read through cst_core's read_text from a real file: in universal-newlines mode the "\r"
+        # became a newline and cgroup_v2_path cut the path there.
+        with tempfile.TemporaryDirectory() as proc:
+            os.mkdir(os.path.join(proc, "4242"))
+            with open(os.path.join(proc, "4242", "cgroup"), "wb") as f:
+                f.write(b"0::/user.slice/a\rb.scope\n")
+            self.assertEqual(cpu_adapters.game_cgroup(4242, proc), "user.slice/a\rb.scope")
+            self.assertEqual(cpu_adapters.game_cgroup(7, proc), "")  # no such process
+
+    def test_no_0_line_or_no_file_is_no_cgroup(self) -> None:
+        for text in ("", "1:name=systemd:/user.slice/x.scope\n", "1:name=systemd:/a::b\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.cgroup(text), "")
+
+
 class VmPinTest(unittest.TestCase):
     @override
     def setUp(self) -> None:
@@ -726,6 +763,55 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
 
+class _CtrlDTerminal(io.StringIO):
+    """stdin of a terminal where the user pressed Ctrl-D: isatty() is true, nothing to read."""
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
+
+class FindGameTest(unittest.TestCase):
+    """find_game with a game name: the first pid `pgrep -xo NAME` prints (a fake pgrep on PATH)."""
+
+    def find(self, body: str | None) -> tuple[int | None, list[str]]:
+        """find_game("dota2") with a pgrep that runs body (None: no pgrep on PATH); its result and pgrep's argv."""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = os.path.join(tmp, "args")
+            if body is not None:
+                fake = os.path.join(tmp, "pgrep")
+                with open(fake, "w") as f:
+                    f.write(
+                        "#!/usr/bin/python3 -I\n"
+                        "import sys\n"
+                        f"with open({args!r}, 'w') as f:\n"
+                        "    f.write(' '.join(sys.argv[1:]))\n"
+                        f"{body}\n"
+                    )
+                os.chmod(fake, 0o755)
+            with unittest.mock.patch.dict(os.environ, {"PATH": tmp}):
+                pid = cpu_adapters.find_game("dota2")
+            argv: list[str] = []
+            if os.path.exists(args):
+                with open(args) as f:
+                    argv = f.read().split()
+        return pid, argv
+
+    def test_the_oldest_pid_of_the_name(self) -> None:
+        self.assertEqual(self.find("print('123'); print('456')"), (123, ["-xo", "dota2"]))
+
+    def test_no_such_process(self) -> None:
+        self.assertEqual(self.find("sys.exit(1)"), (None, ["-xo", "dota2"]))
+
+    def test_a_first_word_that_is_no_pid_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.find("print('abc')")
+
+    def test_no_pgrep(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.find(None)
+
+
 class VmPinCliTest(unittest.TestCase):
     """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
 
@@ -890,6 +976,31 @@ class VmPinCliTest(unittest.TestCase):
                     f"Previous definition saved in {backup} (restore: virsh -c {cpu_domain.URI} define {backup}).\n"
                 )
             )
+
+    def test_ctrl_d_at_the_question_changes_nothing(self) -> None:
+        # The real confirm and input(): Ctrl-D (an empty terminal) is a no, after a newline.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cpu_domain.CpuPaths(runs=tmp, conf=os.path.join(tmp, "absent.conf"), etc=os.path.join(tmp, "etc"))
+            calls: list[tuple[str, ...]] = []
+
+            def cli_virsh(*args: str, check: bool = True) -> str:
+                return SAMPLE_DOMAIN_XML
+
+            def adapter_virsh(*args: str, check: bool = True) -> str:
+                calls.append(args)
+                return ""
+
+            out = io.StringIO()
+            with (
+                unittest.mock.patch.object(cpu_cli, "virsh", cli_virsh),
+                unittest.mock.patch.object(cpu_adapters, "virsh", adapter_virsh),
+                unittest.mock.patch("sys.stdin", _CtrlDTerminal()),
+                contextlib.redirect_stdout(out),
+            ):
+                self.assertEqual(cpu_cli.vm_pin(["apply", "box"], doc="DOC", paths=paths), 0)
+            self.assertTrue(out.getvalue().endswith("[y/N] \nNothing changed.\n"), out.getvalue()[-200:])
+            self.assertFalse(os.path.exists(paths.etc), "no definition saved")
+            self.assertEqual(calls, [], "no virsh define")
 
     def test_virsh_adapter(self) -> None:
         ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")

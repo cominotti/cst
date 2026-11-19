@@ -61,6 +61,13 @@ class CommandResult:
     # that lets the exception propagate as it did before. Not compared.
     cause: Exception | None = field(default=None, compare=False)
 
+    def raise_cause(self) -> CommandResult:
+        """self, of a command that ran and exited (whatever its exit status); the cause of one
+        that did not is raised, as subprocess.run raised it (for a caller that keeps that)."""
+        if self.cause is not None:
+            raise self.cause
+        return self
+
 
 class CommandFailed(RuntimeError):
     """Raised when an external command fails and check=True."""
@@ -160,6 +167,8 @@ class FileSystemPort(Protocol):
 
     def is_readable(self, path: str) -> bool: ...
 
+    def is_searchable(self, path: str) -> bool: ...
+
     def read_text(self, path: str, default: str | None = None) -> str | None: ...
 
     def read_first_line(self, path: str, default: str | None = None) -> str | None: ...
@@ -174,7 +183,7 @@ class FileSystemPort(Protocol):
 
     def copy_if_absent(self, src: str, dest: str) -> None: ...
 
-    def remove_file(self, path: str) -> None: ...
+    def remove_file(self, path: str) -> bool: ...
 
     def force_symlink(self, target: str, link_path: str) -> None: ...
 
@@ -325,9 +334,10 @@ class SystemdPort(Protocol):
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
         """`systemctl show -p PROP... unit` as {prop: value}; {} when systemctl cannot answer.
-        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs)."""
+        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs);
+        user: the user's own manager (`systemctl --user show`)."""
         ...
 
 

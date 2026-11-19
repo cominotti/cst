@@ -71,9 +71,20 @@ consistent.
   new files; `tests/test_license_headers.py` fails on a file without it.
   The few files that cannot carry it (no comment syntax, captured data) are
   in `LICENSE_EXEMPT` of `tests/license_headers.py`, each with its reason.
-- **CI is the gate.** Work on a branch and open a pull request; `main` accepts
-  squash merges with a green `CI Status` (fast gates, both E2E tiers) and a
-  green SonarCloud check. Never weaken a check to make it pass.
+- **CI is the gate.** Work on a branch and open a pull request; nothing is
+  pushed to `main` directly. A pull request lands only with a green
+  `CI Status` (fast gates, both E2E tiers) and a green SonarCloud check on
+  its head, merged through GitHub in one of two ways:
+  - a pull request of one kind (one change, a Dependabot bump): a squash
+    merge;
+  - a batch, or any pull request whose commits are of more than one kind: a
+    merge commit, never squashed or rebased, so each commit keeps its kind
+    and its proof. The pull request lists each commit's kind.
+
+  The merge names the head CI tested
+  (`gh pr merge N --merge --match-head-commit SHA`). `git log --first-parent
+  main` shows one entry per pull request either way. Never weaken a check
+  to make it pass.
 
 ## Index: where each part is documented
 
@@ -251,3 +262,19 @@ first and holds a fake of each of these commands the code may run. `HostCommandG
 stubs. A command run by its absolute path (`/usr/bin/systemctl`) passes the
 stubs: production code names these commands bare, and a test never adds a
 path to them.
+
+### A child Python without -B writes __pycache__ into the checkout
+
+`python3 -I` ignores `PYTHONDONTWRITEBYTECODE`. A test that starts Python
+on the checkout's code (a program, a `-c` script that imports cst_core)
+without `-B` writes `__pycache__` folders there, and as root they are
+root's.
+
+**Rule:** a test's child Python passes `-B` (`[sys.executable, "-I", "-B",
+...]`). A program run by its shebang is covered by the bootstrap, which
+sets `sys.dont_write_bytecode` from a checkout (`tests/test_entrypoints.py`).
+`tests/run_unit.py` enforces it at run time: it notes the checkout's
+`.pyc` files before the tests and fails the run on each one that is new or
+rewritten after them. `tests/test_bytecode.py` checks production code's
+argv lists and shell scripts, and runs every entry by its shebang from a
+copy of the checkout.

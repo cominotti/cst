@@ -18,7 +18,12 @@ Usage:
                                           --component, listed in the install record under C
   installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
                                           removed: per file that was there
-  installer.py remove-text DEST... [--root DIR]
+  installer.py remove-text DEST... [--home DIR] [--root DIR]
+                                          the same for generated files (--home: run as a user,
+                                          the record in that home)
+  installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
+                                          are (a file a setup script keeps); prints nothing
+  installer.py forget-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
                                           component stays "pending" from a write until then)
@@ -60,9 +65,12 @@ import sys as _cst_sys
 
 # CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
 # it): from a checkout, cst_core and the module packages are in the folder above
-# this file; inside an installed zipapp, sys.path already holds the archive.
+# this file, and Python writes no bytecode there (no __pycache__ in the checkout,
+# even for a program run by its shebang as root); inside an installed zipapp,
+# sys.path already holds the archive.
 _cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
 if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.dont_write_bytecode = True
     _cst_sys.path.insert(0, _cst_root)
 
 import argparse
@@ -82,6 +90,7 @@ from cst_core.application.install import (
 )
 from cst_core.domain.install import (
     COMPONENTS,
+    GENERATED_COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
     GeneratedKind,
@@ -113,6 +122,8 @@ class InstallerCommand(StrEnum):
     SRCS = "srcs"
     REMOVE = "remove"
     REMOVE_TEXT = "remove-text"
+    FORGET = "forget"
+    FORGET_TEXT = "forget-text"
     MARK = "mark"
     HELP = "help"
 
@@ -218,11 +229,18 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     return f"unchanged: {place.path}" if current else f"would write: {place.path}"
 
 
+def _component_owner(component: str) -> Owner:
+    """Whose record lists the component: its manifest files' owner, or GENERATED_COMPONENTS' for one whose
+    files are all generated text."""
+    owners = {e.owner for e in INSTALL_MANIFEST if e.component == component}
+    return owners.pop() if owners else GENERATED_COMPONENTS[component]
+
+
 def _mark(service: InstallService, a: argparse.Namespace) -> int:
     """mark --component C done: the record of C's owner says done."""
     if a.args != ["done"] or a.component not in COMPONENTS:
         raise _UsageError("mark --component C done")
-    owner = next(e.owner for e in INSTALL_MANIFEST if e.component == a.component)
+    owner = _component_owner(a.component)
     _, home, as_root = _own()
     if owner == Owner.USER and as_root and not a.root:
         raise InstallRefused(f"{a.component}: belongs to the user; mark it as the user, not as root")
@@ -247,13 +265,28 @@ def _stream(lines: Iterable[str]) -> int:
     return 0
 
 
+def _remove_or_forget(service: InstallService, command: str, places: Sequence[Placement]) -> int:
+    """remove or remove-text: the files and their record lines ('removed:' per file that was there);
+    forget or forget-text: only the record lines dropped, the files left alone."""
+    if command not in (InstallerCommand.FORGET, InstallerCommand.FORGET_TEXT):
+        return _stream(service.remove(places))
+    for record in sorted({p.record for p in places if p.record}):
+        service.forget(record, [p.dest for p in places if p.record == record])
+    return 0
+
+
 def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[InstallEntry]) -> int:
-    """install, remove, plan or check of manifest entries."""
+    """install, remove, forget, plan or check of manifest entries."""
     req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=_own()[2])
-    if a.command == InstallerCommand.REMOVE:
+    if a.command in (InstallerCommand.REMOVE, InstallerCommand.FORGET):
         if any(e.owner == Owner.USER for e in entries) and req.as_root and not req.root:
-            raise InstallRefused("files of the user are removed as the user (cst_remove_as USER), not as root")
-        return _stream(service.remove([service.placement(e, req) for e in entries]))
+            how = (
+                "removed as the user (cst_remove_as USER)"
+                if a.command == InstallerCommand.REMOVE
+                else "forgotten as the user"
+            )
+            raise InstallRefused(f"files of the user are {how}, not as root")
+        return _remove_or_forget(service, a.command, [service.placement(e, req) for e in entries])
     if a.command == InstallerCommand.INSTALL:
         return _stream(service.install(entries, req))
     lines, todo = service.plan(entries, req)
@@ -270,10 +303,10 @@ def _command(service: InstallService, a: argparse.Namespace) -> int:
         return 0
     if a.command == InstallerCommand.MARK:
         return _mark(service, a)
-    if a.command == InstallerCommand.REMOVE_TEXT:
+    if a.command in (InstallerCommand.REMOVE_TEXT, InstallerCommand.FORGET_TEXT):
         if not a.args:
-            raise _UsageError("remove-text DEST...")
-        return _stream(service.remove([_text_place(d, 0, None, a, recorded=True) for d in a.args]))
+            raise _UsageError(f"{a.command} DEST...")
+        return _remove_or_forget(service, a.command, [_text_place(d, 0, None, a, recorded=True) for d in a.args])
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
     if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)

@@ -353,7 +353,7 @@ class GcStateFiles:
         return GcState(since=time.time(), images={}, heartbeat=0)
 
     def save_state(self, state: GcState) -> None:
-        os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
+        # write_atomic creates a missing state folder, exactly 0755 (the umask does not reduce it).
         # "v": its format (STATE_FORMAT). A docker-gc from this format on refuses a state of a newer one;
         # one from before the field reads any state as its own (format 0).
         text = json.dumps({**asdict(state), "v": STATE_FORMAT.version})
@@ -377,7 +377,6 @@ class GcStateFiles:
 
     def save_summary(self, summary: RunSummary) -> None:
         """LAST_RUN, replaced atomically (it was rewritten in place): what status shows of the last run."""
-        os.makedirs(self.paths.state_dir, mode=0o755, exist_ok=True)
         text = json.dumps({**asdict(summary), "v": LAST_RUN_FORMAT.version})
         write_atomic(self.paths.last_run, text, mode="umask", durable=False, relabel=False)
 

@@ -744,6 +744,86 @@ class BtrfsTest(Scratch):
         self.assertEqual(len(scrub), 1, out)
         self.assertIn("snapshots.conf line 3: SCRUB_LIMIT=$X", scrub[0])
 
+    def scrub_warnings(self, out: str, line: str) -> list[str]:
+        """The WARN lines that name this line of snapshots.conf."""
+        return [ln for ln in out.splitlines() if ln.lstrip().startswith("WARN") and f"snapshots.conf {line}" in ln]
+
+    def test_a_bad_scrub_limit_line_gets_one_warning_the_scrub_rows(self) -> None:
+        # The scrub row and the settings row both warned about the same line.
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\nFOO=$Y\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 3: SCRUB_LIMIT=$X")
+        self.assertEqual(len(named), 1, out)
+        self.assertIn("`cst btrfs install` refuses to run until it is fixed", named[0])
+        # Another bad line beside it is still the settings row's.
+        foo = self.scrub_warnings(out, "line 4: FOO=$Y")
+        self.assertEqual(len(foo), 1, out)
+        self.assertIn("CST's Python programs take nothing from the line (btrfs-snapshot ignores it too", foo[0])
+
+    def test_every_bad_scrub_limit_line_gets_one_warning(self) -> None:
+        # The scrub row named only the first, so with the settings row leaving them to it none may be lost.
+        out = self.scrub(conf="SCRUB_LIMIT=$X\nSCRUB_LIMIT=`y`\n", dropin="1G")
+        for line in ("line 1: SCRUB_LIMIT=$X", "line 2: SCRUB_LIMIT=`y`"):
+            named = self.scrub_warnings(out, line)
+            self.assertEqual(len(named), 1, out)
+            self.assertIn("`cst btrfs install` refuses to run until it is fixed", named[0])
+
+    def test_a_scrub_limit_line_ending_in_cr_gets_one_warning(self) -> None:
+        # The settings row reads the file as text (the CR goes with the line end) and finds no problem there.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        self.assertEqual(len(self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")), 1, out)
+
+    def test_the_scrub_rows_warning_says_what_the_settings_row_said(self) -> None:
+        # The settings row left the line to the scrub row, whose warning named only the install: that
+        # cst vm's NAS backup (and the other commands that read the file) refuses too was lost.
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 3: SCRUB_LIMIT=$X")
+        self.assertEqual(len(named), 1, out)
+        for words in (
+            "`cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
+            (
+                "CST's Python programs take nothing from the line (btrfs-snapshot ignores it too, with a "
+                "warning in its journal), and the cst commands that change the machine with these settings "
+                "refuse to run until it is fixed"
+            ),
+        ):
+            self.assertIn(words, named[0])
+
+    def test_a_scrub_limit_line_only_bash_refuses_names_only_the_install(self) -> None:
+        # Text mode takes the CR as the line end: CST's Python programs read the value.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")
+        self.assertEqual(len(named), 1, out)
+        self.assertNotIn("CST's Python programs", named[0])
+
+    def assert_one_scrub_limit_warning(self, conf: str, line: str) -> None:
+        """One WARN names the bad SCRUB_LIMIT line of conf, at bash's line number, with both effects."""
+        out = self.scrub(conf=conf, dropin="1G")
+        named = [ln for ln in out.splitlines() if ln.lstrip().startswith("WARN") and "SCRUB_LIMIT=$X" in ln]
+        self.assertEqual(len(named), 1, out)
+        self.assertIn(f"snapshots.conf {line}: SCRUB_LIMIT=$X", named[0])
+        self.assertIn("`cst btrfs install` refuses to run", named[0])
+        self.assertIn("CST's Python programs take nothing from the line", named[0])
+
+    # The two rows read the line ends differently (bash keeps a CR in the line, text mode ends the line
+    # there), so the same line had two warnings: with other reasons, or other line numbers.
+    def test_a_bad_scrub_limit_line_ending_in_crlf_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("SCRUB_LIMIT=$X\r\n", "line 1")
+
+    def test_a_bad_scrub_limit_line_after_a_crlf_line_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("A=1\r\nSCRUB_LIMIT=$X\r\n", "line 2")
+
+    def test_a_bad_scrub_limit_line_after_a_lone_cr_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("A=1\rB=2\nSCRUB_LIMIT=$X\n", "line 2")
+
+    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_still_warned(self) -> None:
+        # bash reads one line, text mode two: A=$Y is a line of its own for CST's Python programs.
+        out = self.scrub(conf="SCRUB_LIMIT=$X\rA=$Y\n", dropin="1G")
+        scrub = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=$X")
+        self.assertEqual(len(scrub), 1, out)
+        other = self.scrub_warnings(out, "line 2: A=$Y")
+        self.assertEqual(len(other), 1, out)
+        self.assertIn("CST's Python programs take nothing from the line", other[0])
+
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
         self.assertIn(
@@ -1467,12 +1547,24 @@ class GameProfileTest(Scratch):
         self.assert_read_only()
         return res
 
-    def test_read_intended(self) -> None:
-        recs = doc_domain.read_intended(self.intended + "bogus line\nprop sys 'unclosed\n")
-        self.assertEqual(len(recs), 9)
-        self.assertEqual(recs[3], ("prop", "sys", "user.slice", "MemoryLow", "16G", "17179869184"))
-        self.assertEqual(recs[7][5], "")
-        self.assertEqual(recs[8], ("cgw", "/sys/fs/cgroup/inner/cpuset.cpus", "12-23", "12-23"))
+    def test_a_last_line_cut_short_is_not_compared(self) -> None:
+        # 'on' died while it wrote it: the profile never reads it, and neither does the doctor.
+        self.intended += "prop sys machine.slice CPUWeight 10 1"
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+
+    def test_a_file_name_printf_q_quotes_is_read_as_bash_reads_it(self) -> None:
+        # A tab in the cgroup's name: printf %q writes $'...', which shlex read as a "$..." word.
+        cg = os.path.join(self.root, "sys", "fs", "cgroup", "in\tner", "cpuset.cpus")
+        os.makedirs(os.path.dirname(cg))
+        with open(cg, "w") as f:
+            f.write("0-3\n")
+        self.intended += "cgw $'/sys/fs/cgroup/in\\tner/cpuset.cpus' 12-23 12-23\n"
+        self.profile_on()
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("/sys/fs/cgroup/in\tner/cpuset.cpus is 0-3 (the profile wrote 12-23)", res[0].message)
 
     def test_off_is_ok_and_absent_module_is_silent(self) -> None:
         with mock.patch.dict(os.environ, self.env, clear=True):
@@ -1967,6 +2059,27 @@ class VmTest(Scratch):
                     "cst vm refuses to back up or list with it; move it aside to start a new index",
                     r.stdout,
                 )
+                self.assert_read_only()
+
+    def test_an_index_cst_vm_cannot_read_counts_no_backup(self) -> None:
+        # Doctor read the index two ways: the backup count decoded a byte that is not UTF-8 as U+FFFD
+        # and counted a backup cst vm refuses to list, which cleared the warning.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        with open(path) as f:
+            text = f.read()
+        for raw in (text.encode().replace(b'"t"', b'"t\xff"'), b"[" * 100_000):
+            with self.subTest(raw=raw[:20]):
+                with open(path, "wb") as f:
+                    f.write(raw)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("cannot be read as cst vm's backup index (not JSON)", r.stdout)
+                self.assertNotIn("rollback pinned and VM backup present", r.stdout)
+                self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+                self.assertIn("last backup: never", r.stdout)
+                self.assertNotIn("Traceback", r.stdout + r.stderr)
                 self.assert_read_only()
 
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
@@ -3057,7 +3170,7 @@ class DoctorFactsTest(unittest.TestCase):
         host = self.host()
         doc_vm.libvirt_domains(host)
         doc_vm.domain_xml(host, "win")
-        doc_shared.deployments(host)
+        doc_shared.ostree_facts(host)
         self.assertEqual([n for n in vars(host) if n in ("_domains", "_dumpxml", "_ostree", "_ostree_list")], [])
 
 

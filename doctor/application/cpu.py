@@ -4,7 +4,7 @@ boxes outside CST's rules."""
 
 from collections.abc import Iterator
 
-from cpu.game.domain import newer_intended
+from cpu.game.domain import intended_records, newer_intended
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -24,7 +24,6 @@ from doctor.domain import (
     cpu_time,
     name_list,
     parse_cpu_stat_seconds,
-    read_intended,
     view_join,
     ViewPath,
     host_join,
@@ -130,7 +129,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
     if newer is not None:
         yield Result(INFO, f"game profile: ON; drift not checked ({newer})")
         return
-    records = read_intended(text)
+    records = intended_records(text)
     managers: dict[str, tuple[list[str] | None, str]] = {"sys": (["systemctl"], "")}
     managers["usr"] = user_manager(host)
     wanted: dict[tuple[str, str], list[str]] = {}

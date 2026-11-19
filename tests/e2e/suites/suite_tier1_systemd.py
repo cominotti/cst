@@ -63,6 +63,20 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
 DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+# RECORD_COMPONENT RECORD COMPONENT: the destinations a record lists under the component, sorted, then its
+# state ("-": none; no record: "- -"). RECORD_STRIP RECORD COMPONENT: the record as an install from before
+# the component was recorded left it (its lines and its state taken out).
+RECORD_COMPONENT = r"""import json, os, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p)) if os.path.exists(p) else {"files": {}, "components": {}}
+files = sorted(k for k, v in d["files"].items() if v["component"] == comp)
+print(" ".join(files) or "-", d["components"].get(comp, "-"))"""
+RECORD_STRIP = r"""import json, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p))
+d["files"] = {k: v for k, v in d["files"].items() if v["component"] != comp}
+d["components"].pop(comp, None)
+open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\n")"""
 DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DEGRADED_BOOT_FAKES = (
     f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
@@ -161,10 +175,28 @@ DROPIN_DIR=/etc/systemd/system/machine.slice.d
 REC=/var/lib/cst/installed.json
 export PATH="$W/bin:$PATH" CST_SWAP_PROC="$W/proc" CST_SWAP_SYS="$W/sys"
 
+# swap_setup works in three parts, and swap_cleanup (the caller's EXIT trap, set before it) undoes
+# only what the parts that ran changed: (1) the checks that can fail, before anything outside $W
+# changes; (2) the originals saved into $W/orig, $W/orig/.saved last; (3) the changes. Without
+# .saved, swap_cleanup removes $W and nothing else.
 swap_setup() {
+    cpu_dropin_added=""
     rm -rf "$W"
     mkdir -p "$W/bin" "$W/orig" "$W/proc/sys/vm" "$W/proc/pressure" "$W/sys/module/zswap/parameters" \
         "$W/sys/class/block/e2e-swap0" "$W/sys/class/block/e2e-dm0/dm"
+    # 1. The checks.
+    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
+    [[ ! -e /etc/cst/swap.conf ]]
+    # 2. What swap_cleanup puts back.
+    for f in /etc/crypttab /etc/fstab "$REC"; do
+        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
+    done
+    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
+        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
+    fi
+    systemctl is-active machine.slice >"$W/orig/slice-state" || true
+    : >"$W/orig/.saved"
+    # 3. The changes.
     printf 'name         : zstd\ndriver       : zstd-generic\n' >"$W/proc/crypto"
     printf 'MemTotal:        8000000 kB\nMemAvailable:    6000000 kB\nZswap:                 0 kB\nZswapped:              0 kB\n' >"$W/proc/meminfo"
     printf 'zswpout 0\nzswpin 0\nzswpwb 0\npswpout 0\npswpin 0\n' >"$W/proc/vmstat"
@@ -178,7 +210,6 @@ swap_setup() {
     echo $((SIZE / 512)) >"$W/sys/class/block/e2e-swap0/size"
     echo swap0 >"$W/sys/class/block/e2e-dm0/dm/name"
     mkdir -p /dev/disk/by-partuuid /dev/mapper
-    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
     mknod /dev/e2e-swap0 b 7 1040
     mknod /dev/e2e-dm0 b 7 1041
     ln -s ../../e2e-swap0 "/dev/disk/by-partuuid/$PU"
@@ -207,23 +238,14 @@ EOF
     cp "$W/bin/modprobe" "$W/bin/zramctl"
     printf '#!/bin/bash\necho "NAME TYPE SIZE USED PRIO"\necho "/dev/e2e-dm0 partition 1024M 2M -2"\n' >"$W/bin/swapon"
     chmod 0755 "$W"/bin/*
-    for f in /etc/crypttab /etc/fstab "$REC"; do
-        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
-    done
-    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
-        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
-    fi
-    [[ ! -e /etc/cst/swap.conf ]]
-    systemctl is-active machine.slice >"$W/orig/slice-state" || true
-    # Stopped while apply writes the drop-in: a daemon-reload does not put a new MemoryLow into the
-    # memory.low of a slice that is already running (a start does), and apply checks memory.low.
+    # Stopped, so that every swap test starts from the same machine.slice (apply's daemon-reload puts
+    # a new MemoryLow into a running slice's memory.low too: test_88 step 7).
     if [[ "$(cat "$W/orig/slice-state")" == active ]]; then systemctl stop machine.slice; fi
-    # A cgroup folder an inactive machine.slice left in the container (memory.low 0 there would be
-    # read as the slice's): removed when it is empty, as systemd removes it at a stop.
+    # A cgroup folder an inactive machine.slice left in the container: removed when it is empty, as
+    # systemd removes it at a stop, so every swap test starts from the same tree (test_88 plants one).
     if [[ -d /sys/fs/cgroup/machine.slice ]] && ! systemctl -q is-active machine.slice; then
         rmdir /sys/fs/cgroup/machine.slice || { slice_facts; exit 1; }
     fi
-    cpu_dropin_added=""
     if [[ ! -e "$DROPIN_DIR/10-cpu-setup.conf" ]]; then
         mkdir -p "$DROPIN_DIR"
         cp /opt/cst-rw/cpu/units/machine.slice.d-10-cpu-setup.conf "$DROPIN_DIR/10-cpu-setup.conf"
@@ -233,6 +255,10 @@ EOF
 
 swap_cleanup() {
     local f
+    if [[ ! -e "$W/orig/.saved" ]]; then
+        rm -rf "$W"
+        return 0
+    fi
     for f in crypttab fstab; do
         rm -f "/etc/$f.pre-swap-config.bak"
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
@@ -249,6 +275,8 @@ swap_cleanup() {
     if [[ -n "${cpu_dropin_added:-}" ]]; then rm -f "$DROPIN_DIR/10-cpu-setup.conf"; fi
     rmdir "$DROPIN_DIR" 2>/dev/null || true
     rm -f /dev/mapper/swap0 "/dev/disk/by-partuuid/$PU" /dev/e2e-swap0 /dev/e2e-dm0
+    systemctl stop e2e-swap-vm.service 2>/dev/null || true
+    rm -rf /var/tmp/e2e-swap-cst40g
     if [[ "$(cat "$W/orig/slice-state" 2>/dev/null)" == active ]]; then
         systemctl start machine.slice || true
     else
@@ -284,13 +312,13 @@ check_runtime_over() {
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "no runtime MemoryLow"
     swap_run status
     [[ $rc == 0 ]] || fail "status with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
     grep -qF "  over: $rt sets machine.slice's MemoryLow" <<<"$out" || fail "status over note"
     [[ "$out" != *"  DIFF "* ]] || fail "status DIFF with a runtime MemoryLow"
     s="$(snap)"
     swap_run apply
     [[ $rc == 0 ]] || fail "apply with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
     [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "apply with a runtime MemoryLow wrote"
     [[ "$(snap)" == "$s" ]] || fail "apply with a runtime MemoryLow changed something"
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "apply touched the runtime value"
@@ -493,6 +521,26 @@ grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
 s1="$(files)"
 le_text="$(cat "$le")"
 
+# 1b. the watcher runs pactl subscribe with LC_ALL=C, also when the session sets another
+# language (pactl's event lines are read in English).
+systemctl --user set-environment LC_ALL=pt_BR.UTF-8
+systemctl --user restart cst-bt-ldac48.service
+lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
+pactl_env=""
+# A pactl that is exiting (or a zombie the watcher has not reaped yet) reads as an empty
+# environ: keep looking until one that runs shows its variables.
+for _ in $(seq 150); do
+    pactl_pid="$(pgrep -n -P "$lw_pid" -x pactl || true)"
+    if [[ -n "$pactl_pid" ]]; then
+        pactl_env="$(tr '\0' '\n' <"/proc/$pactl_pid/environ" 2>/dev/null || true)"
+        [[ -n "$pactl_env" ]] && break
+    fi
+    sleep 0.1
+done
+systemctl --user unset-environment LC_ALL
+[[ -n "$pactl_env" ]] || { echo "test_80: no pactl child of the watcher (MainPID $lw_pid)" >&2; false; }
+grep -qxF LC_ALL=C <<<"$pactl_env" || { echo "test_80: the watcher's pactl has $(grep '^LC_ALL=' <<<"$pactl_env" || echo 'no LC_ALL')" >&2; false; }
+
 # 2. apply: no file written, no backup; the owed WirePlumber restart is made, then forgotten.
 step "apply after --no-restart" apply --yes
 wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
@@ -518,6 +566,28 @@ grep -qxF "unchanged: cst-bt-ldac48.service enabled and active" <<<"$out"
 grep -qxF "none needed" <<<"$out"
 same "second apply" "$s1"
 [[ "$(wp_pid)" == "$pid" ]]
+
+# 3b. a current watcher the install record does not list (installed before the record existed)
+# is added to it by the next apply: no file written, no restart of the watcher or WirePlumber.
+record="$H/.local/state/cst/installed.json"
+python3 -I -c 'import json, sys
+rec = json.load(open(sys.argv[1]))
+for dest in sys.argv[2:]:
+    del rec["files"][dest]
+json.dump(rec, open(sys.argv[1], "w"))' "$record" "$watch" "$unit"
+lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
+step "apply over an unrecorded watcher" apply --yes
+no_writes "apply over an unrecorded watcher" "$out"
+grep -qxF "unchanged: $watch" <<<"$out"
+grep -qxF "unchanged: $unit (LDAC to 48000 Hz)" <<<"$out"
+grep -qxF "unchanged: cst-bt-ldac48.service enabled and active" <<<"$out"
+same "apply over an unrecorded watcher" "$s1"
+[[ "$(wp_pid)" == "$pid" ]]
+[[ "$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)" == "$lw_pid" ]]
+python3 -I -c 'import json, sys
+files = json.load(open(sys.argv[1]))["files"]
+assert files[sys.argv[2]]["src"] == "bluetooth/bt-ldac-watch", files.get(sys.argv[2])
+assert files[sys.argv[3]]["component"] == "bluetooth:ldac", files.get(sys.argv[3])' "$record" "$watch" "$unit"
 
 # 4. le-audio without on/off only shows the setting.
 out="$(bt le-audio)"
@@ -622,7 +692,7 @@ sys.exit(r.returncode)
 """
 
 
-# test_112: the program at argv[1] with its settings file at argv[2] against the same fake docker and
+# test_145: the program at argv[1] with its settings file at argv[2] against the same fake docker and
 # scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
 # run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
 # nothing done", and nothing is removed.
@@ -660,20 +730,20 @@ env = {
 want = f"<3>docker-gc: container inspect: {hole['Id']}: no Image; nothing done"
 for args in (["run", "--dry-run"], ["status"], ["run", "--dry-run"], ["status"]):  # run: skipped right after boot
     r = subprocess.run([prog, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
-    sys.stderr.write(f"test_112 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
+    sys.stderr.write(f"test_145 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
     if r.returncode != 76 or want not in r.stdout + r.stderr:  # 76: the recorder unit does not restart for it
-        sys.exit(f"test_112: {args}: expected exit 76 and {want!r}")
+        sys.exit(f"test_145: {args}: expected exit 76 and {want!r}")
 with open(os.path.join(tmp, "calls.log")) as f:
     calls = [json.loads(line) for line in f]
 removing = [c for c in calls if "rm" in c or "prune" in c]
 if removing:
-    sys.exit(f"test_112: docker was asked to remove {removing}")
+    sys.exit(f"test_145: docker was asked to remove {removing}")
 with open(os.path.join(tmp, "docker.json")) as f:
     if json.load(f) != docker:
-        sys.exit("test_112: the fake docker's objects changed")
+        sys.exit("test_145: the fake docker's objects changed")
 with open(last_used, "rb") as f:
     if f.read() != before:
-        sys.exit("test_112: last-used.json changed")
+        sys.exit("test_145: last-used.json changed")
 print("E2E-OK")
 """
 
@@ -786,6 +856,119 @@ rm -f "$legacy"
 echo E2E-OK
 """
 )
+
+
+# test_83, test_133, for a test that has set $w and $st: scc_setup writes the fake sccache
+# ($w/bin/sccache, its records in $SCCACHE_E2E_STATE) and a crate with six path dependencies
+# ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts;
+# live_server_in checks the live server's cgroup, stop_server stops it and waits for its scope to go.
+SCCACHE_FAKE_STEPS = r"""
+scc_setup() {
+    # The fake sccache. --start-server: a daemon (setsid, stdio closed)
+    # that records its cgroup, then the socket 0.3 s later. A compile
+    # with no live server starts one in its own cgroup, as the real
+    # client does. The socket is a bare socket node; with a file
+    # $st/listen, the daemon itself (same PID) listens on it, as the real
+    # server does, so that status can ask it who it is (SO_PEERCRED),
+    # and a start returns once it listens: it clears the socket path first
+    # (a socket file a stopped server left would make its bind fail) and
+    # waits for $st/listening, which the daemon writes after listen() (the
+    # socket file is there from bind() on, before a connect can succeed);
+    # a listener that is not up within 5 s adds no-listener to $st/starts.
+    cat >"$w/bin/sccache" <<'EOF'
+#!/bin/sh
+st=$SCCACHE_E2E_STATE
+listener='
+import socket, sys, time
+time.sleep(0.3)
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen()
+open(sys.argv[2], "w").close()
+end = time.monotonic() + 300
+while (left := end - time.monotonic()) > 0:
+    s.settimeout(left)
+    try:
+        s.accept()[0].close()
+    except TimeoutError:
+        break
+'
+serve() {
+    if [ -e "$st/listen" ]; then rm -f "$SCCACHE_SERVER_UDS" "$st/listening"; fi
+    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"
+        [ -e "$1/listen" ] && exec python3 -I -c "$2" "$SCCACHE_SERVER_UDS" "$1/listening"; exec sleep 300' \
+        sh "$st" "$listener" </dev/null >/dev/null 2>&1 &
+    for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
+}
+sock() {
+    if [ -e "$st/listen" ]; then
+        for _ in $(seq 50); do [ -e "$st/listening" ] && return 0; sleep 0.1; done
+        echo no-listener >>"$st/starts"
+        return 1
+    fi
+    [ -e "$SCCACHE_SERVER_UDS" ] || python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"
+}
+live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
+if [ "${1:-}" = --start-server ]; then
+    echo start >>"$st/starts"
+    rm -f "$st/live"
+    serve
+    sleep 0.3
+    sock
+    exit 0
+fi
+if ! live || [ ! -e "$SCCACHE_SERVER_UDS" ]; then
+    echo auto >>"$st/starts"
+    rm -f "$st/live"
+    serve
+    sock
+fi
+cat /proc/self/cgroup >>"$st/compiles"
+exec "$@"
+EOF
+    chmod 755 "$w/bin/sccache"
+    # A crate with six path dependencies: cargo compiles them in parallel.
+    printf '[package]\nname = "e2escc"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' \
+        >"$w/crate/Cargo.toml"
+    for i in 1 2 3 4 5 6; do
+        mkdir -p "$w/crate/d$i/src"
+        printf '[package]\nname = "d%s"\nversion = "0.1.0"\nedition = "2021"\n' "$i" >"$w/crate/d$i/Cargo.toml"
+        echo "pub fn f() -> u32 { $i }" >"$w/crate/d$i/src/lib.rs"
+        printf 'd%s = { path = "d%s" }\n' "$i" "$i" >>"$w/crate/Cargo.toml"
+    done
+    echo 'pub fn all() -> u32 { d1::f() + d2::f() + d3::f() + d4::f() + d5::f() + d6::f() }' \
+        >"$w/crate/src/lib.rs"
+}
+
+# build N: cargo build from scratch inside a capped transient scope
+# (MemoryMax=1G), started from a user service: a --user --scope
+# needs a caller that the user manager may move.
+build() {
+    local n=$1 jobs=${2:-8}
+    systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
+        -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
+        -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
+        -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
+        systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
+        cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
+}
+starts() { tr '\n' ' ' <"$st/starts"; }
+# live_server_in WANT WHAT: sets server to the live server's PID and checks that its cgroup is
+# WANT (else it prints WHAT and the cgroup, and fails). Call it on a line of its own: in a
+# condition, errexit is off inside it.
+live_server_in() {
+    server=$(cat "$st/live")
+    local got
+    got=$(cat "$st/server-$server.cgroup")
+    [ "$got" = "$1" ] || { echo "e2e: $2: '$got'" >&2; return 1; }
+}
+# stop_server PID DIR: stops the server PID and checks that its scope's folder DIR goes within 5 s.
+stop_server() {
+    kill "$1"
+    for _ in $(seq 50); do [ -d "$2" ] || break; sleep 0.1; done
+    test ! -d "$2"
+}
+"""
 
 
 class Tier1SystemdE2ETest(unittest.TestCase):
@@ -1257,13 +1440,15 @@ EOF
         scratch partition; apply writes crypttab, fstab, the three files, the zram mask and
         the install record; the real systemd merges swap's 10-swap-memory-low.conf with
         cpu's 10-cpu-setup.conf on machine.slice; status has nothing to do; a second apply
-        changes nothing; a MemoryLow set at run time wins over CST's after a daemon-reload."""
+        changes nothing; with a VM stand-in running, a changed MemoryLow reaches the running
+        slice through apply's daemon-reload; a MemoryLow set at run time wins over CST's after
+        a daemon-reload."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1284,13 +1469,24 @@ printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.con
 s1="$(snap)"
 swap_run plan
 [[ $rc == 0 ]] || fail "plan"
+[[ "$(head -n 1 <<<"$out")" == "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in $W/proc, /sys in $W/sys, not the kernel's; /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them" ]] || fail "plan's test seam line"
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "settings row"
 grep -qF "  write     crypttab: swap0 line" <<<"$out" || fail "crypttab row"
 grep -qF "  ok        partition 0e2e5a5a...                  /dev/e2e-swap0, $SIZE bytes as expected" <<<"$out" || fail "partition row"
 grep -qF "  later     swap0" <<<"$out" || fail "swap0 row"
 [[ "$(snap)" == "$s1" ]] || fail "plan changed something"
+# A cgroup folder of machine.slice while systemd reports the slice inactive (as one left behind; its
+# memory.low reads 0): plan and apply do not read it as the slice's floor.
+! systemctl -q is-active machine.slice || fail "machine.slice active before apply"
+mkdir /sys/fs/cgroup/machine.slice || fail "cannot plant a cgroup folder for the inactive machine.slice"
+# Without a memory.low there (no memory controller) the step could not tell this folder from none.
+[[ "$(cat /sys/fs/cgroup/machine.slice/memory.low 2>&1)" == 0 ]] || fail "the planted cgroup folder's memory.low is not 0"
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a stale cgroup folder"
+grep -qF "  -       machine.slice memory.low     slice not active (no VM running)" <<<"$out" || fail "plan, stale cgroup folder"
+[[ "$out" != *"  DIFF    machine.slice"* ]] || fail "plan DIFF with a stale cgroup folder"
 
-# 3. apply.
+# 3. apply (the stale cgroup folder still there).
 swap_run apply
 [[ $rc == 0 ]] || fail "apply"
 grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
@@ -1314,6 +1510,7 @@ assert want <= set(rec["files"]), sorted(rec["files"])
 assert d + "50-memory-low.conf" not in rec["files"]
 assert rec["components"]["swap:core"] == "done", rec["components"]
 PY
+rmdir /sys/fs/cgroup/machine.slice || fail "the stale cgroup folder"
 
 # 4. The real systemd merges both 10- drop-ins of machine.slice, and a start puts the floor
 # into the cgroup (where the memory controller is there).
@@ -1342,7 +1539,31 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && "$out" != *"masked:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s2" ]] || fail "second apply changed something"
 
-# 7. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
+# 7. A changed MemoryLow reaches a running slice through apply's daemon-reload alone: a stand-in VM
+# in machine.slice, and a copy of the checkout whose drop-in says 40G (outside $W, which snap hashes).
+systemd-run --quiet --unit=e2e-swap-vm --slice=machine.slice sleep 600
+systemctl -q is-active e2e-swap-vm || fail "the stand-in VM"
+c40=/var/tmp/e2e-swap-cst40g
+rm -rf "$c40"
+cp -a /opt/cst-rw "$c40"
+sed -i 's/^MemoryLow=48G$/MemoryLow=40G/' "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+grep -qx MemoryLow=40G "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+for want in 42949672960 51539607552; do
+    cst_real="$CST"
+    if [[ $want == 42949672960 ]]; then CST="$c40/cst"; fi
+    swap_run apply
+    CST="$cst_real"
+    [[ $rc == 0 && -z "$err" ]] || fail "apply of MemoryLow $want with a VM running"
+    grep -qF "written:   $DROPIN_DIR/10-swap-memory-low.conf" <<<"$out" || fail "apply of $want: drop-in not written"
+    [[ "$out" != *"  DIFF "* ]] || fail "apply of $want: DIFF"
+    systemctl -q is-active e2e-swap-vm || fail "apply of $want stopped the stand-in VM"
+    [[ "$(systemctl show -P MemoryLow machine.slice)" == "$want" ]] || fail "apply of $want: MemoryLow"
+    [[ -e "$low" && "$(cat "$low")" == "$want" ]] || fail "apply of $want: the running slice's memory.low"
+done
+systemctl stop e2e-swap-vm
+rm -rf "$c40"
+
+# 8. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 ]]
@@ -1365,13 +1586,14 @@ echo E2E-OK
         changes nothing; as the user it says crypttab needs root; doctor warns. apply writes
         /etc/cst/swap.conf from the crypttab line and the partition, removes the old
         drop-in and its record line; a runtime MemoryLow then wins; a second apply changes
-        nothing; doctor is ok."""
+        nothing; doctor is ok; a swap.conf the user cannot read, or a folder in its place, is
+        never taken as missing."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1412,7 +1634,8 @@ systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]] || fail "old name: runtime value won"
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
-# set-property wrote 1G into the cgroup itself; a restart of the slice puts the 48G back there.
+# A stop and a start give the steps below a slice started with the 48G (the reload already put it
+# back into memory.low).
 systemctl stop machine.slice
 systemctl start machine.slice
 
@@ -1472,6 +1695,82 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s1" ]] || fail "second apply changed something"
 
+# A record line of 50-memory-low.conf whose file is gone, then one whose file is not CST's: apply
+# drops the line and leaves the file as it is; doctor then asks for nothing.
+record_old_name() {
+    python3 -I - "$REC" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    rec = json.load(f)
+d = "/etc/systemd/system/machine.slice.d/"
+entry = dict(rec["files"][d + "10-swap-memory-low.conf"])
+entry["src"] = "swap/units/machine.slice.d-50-memory-low.conf"
+rec["files"][d + "50-memory-low.conf"] = entry
+with open(path, "w") as f:
+    json.dump(rec, f, indent=2)
+PY
+}
+old_name_recorded() {
+    python3 -I -c 'import json, sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["files"] else 1)' "$REC" "$old"
+}
+record_old_name
+old_name_recorded || fail "the record line was not planted"
+[[ ! -e "$old" ]]
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line without its file"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line without its file"
+! old_name_recorded || fail "apply kept the record line of a file that is gone"
+[[ ! -e "$old" && "$out" != *"written:"* ]] || fail "apply wrote with a record line without its file"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line without its file"; }
+printf '[Slice]\nMemoryLow=48G\n' >"$old"
+systemctl daemon-reload
+record_old_name
+foreign="$(sha256sum "$old")"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line of a file not CST's"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line of a file not CST's"
+! old_name_recorded || fail "apply kept the record line of a file not CST's"
+[[ "$(sha256sum "$old")" == "$foreign" && "$out" != *"removed:"* ]] || fail "apply touched a file not CST's"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line of a file not CST's"; }
+rm "$old"
+systemctl daemon-reload
+
+# An /etc/cst/swap.conf that is there but cannot be read is never taken as missing: as the user (mode
+# 0600) plan asks for --root and changes nothing; with a folder there, apply stops before any change.
+chmod 0600 /etc/cst/swap.conf
+s_unread="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, swap.conf 0600"; }
+[[ "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan would write swap.conf"; }
+swap_run plan
+grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
+[[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
+chmod 0644 /etc/cst/swap.conf
+# A folder above it the user may not enter (lexists cannot see the file there): the same "?" row, and
+# swap.conf is not taken as missing (no migration from crypttab).
+cst_mode="$(stat -c %a /etc/cst)"
+chmod 0700 /etc/cst
+s_closed="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, /etc/cst 0700"; }
+[[ "$user_plan" != *"not written yet"* && "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan took swap.conf as missing"; }
+[[ "$(snap)" == "$s_closed" ]] || fail "plan with /etc/cst 0700 changed something"
+chmod "$cst_mode" /etc/cst
+mv /etc/cst/swap.conf "$W/swap.conf.aside"
+mkdir /etc/cst/swap.conf
+s_dir="$(snap)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder at /etc/cst/swap.conf"
+grep -qF "ERROR: /etc/cst/swap.conf: not a regular file: apply stops." <<<"$err" || fail "apply message, a folder at swap.conf"
+[[ "$out" != *"written:"* && "$(snap)" == "$s_dir" ]] || fail "apply with a folder at swap.conf changed something"
+rmdir /etc/cst/swap.conf
+mv "$W/swap.conf.aside" /etc/cst/swap.conf
+
 # Now a MemoryLow set at run time wins the reload, and status and apply leave it.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
@@ -1525,6 +1824,54 @@ echo E2E-OK
             [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 51539607552 ]]
             """,
         )
+
+    def test_125_swap_e2e_setup_that_fails_before_saving_leaves_etc_alone(self) -> None:
+        """The swap E2E harness itself (SWAP_E2E_LIB, as test_88 and test_90 use it: the cleanup
+        trap set before swap_setup). A swap_setup whose own check fails, here on an
+        /etc/cst/swap.conf already there, stops before it saves or changes anything, and the
+        trap then removes only its scratch folder: swap.conf, crypttab, fstab, the install
+        record and machine.slice's state stay as they were."""
+        state = r"""
+            for f in /etc/cst/swap.conf /etc/crypttab /etc/fstab /var/lib/cst/installed.json; do
+                if [[ -e "$f" ]]; then sha256sum "$f"; else echo "absent $f"; fi
+            done
+            echo "machine.slice $(systemctl is-active machine.slice || true)"
+            if [[ -e /var/tmp/e2e-swap ]]; then echo "scratch folder there"; fi
+            """
+        planted = "/var/tmp/e2e-swap125-planted"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            if [[ -f "$p/files" ]]; then xargs -r rm -f <"$p/files"; fi
+            if [[ -f "$p/dirs" ]]; then xargs -r rmdir <"$p/dirs" || true; fi
+            rm -rf "$p"
+            """,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            [[ ! -e /etc/cst/swap.conf && ! -e /var/tmp/e2e-swap ]]
+            rm -rf "$p"
+            mkdir -p "$p"
+            for f in /etc/crypttab /etc/fstab; do
+                if [[ ! -e "$f" ]]; then echo "$f" >>"$p/files"; printf '# e2e test_125\n' >"$f"; fi
+            done
+            if [[ ! -d /etc/cst ]]; then echo /etc/cst >>"$p/dirs"; mkdir /etc/cst; fi
+            echo /etc/cst/swap.conf >>"$p/files"
+            printf 'SWAP_PARTUUID=0e2e5a5a-1111-4222-8333-944455556666\nSWAP_SIZE_BYTES=1073741824\n' >/etc/cst/swap.conf
+            """,
+        )
+        before = exec_bash(self.SYSTEMD_CONTAINER, state).stdout
+        self.assertNotIn("scratch folder there", before)
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER, SWAP_E2E_LIB + "trap swap_cleanup EXIT\nswap_setup\necho SETUP-RAN\n", check=False
+        )
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("SETUP-RAN", r.stdout)
+        self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
 
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
@@ -2103,7 +2450,13 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         made_stub = exec_bash(c, f"[[ -e {stub} ]] || {{ install -m 0755 /dev/null {stub}; echo made; }}").stdout
         if "made" in made_stub:
             self.addCleanup(exec_bash, c, f"rm -f {stub}", check=False)
-        script = 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.domain.install import COMPONENTS; print(" ".join(COMPONENTS))'
+        # The components of generated files only have no manifest file to install: test_13 (degraded-boot),
+        # test_119 (the stall-report launcher) and test_84 (cpu's toolbox drop-ins) run their cycles.
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import COMPONENTS, GENERATED_COMPONENTS; "
+            'print(" ".join(c for c in COMPONENTS if c not in GENERATED_COMPONENTS))'
+        )
         components = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
         self.assertIn("btrfs:core", components)
         for comp in components:
@@ -2327,7 +2680,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         reads with the copy) stops plan and an install at their
         `systemd-analyze verify`, before they write anything (a hand edit of
         the timer stays) and before any rpm-ostree change; uninstall removes
-        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        everything and untracks it. The install record lists the six files under
+        btrfs:degraded-boot, done, doctor warns of none, a second install keeps
+        the record's bytes, an install whose record lacks them (an older CST's)
+        adopts them without writing, and uninstall drops their lines. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -2351,6 +2707,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
             rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
                 /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record} {typo}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py forget-text {" ".join(files)} {record} {synced}
             systemctl daemon-reload
             """,
             check=False,
@@ -2390,6 +2747,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         modes = step(f"stat -c '%a %U %n' {' '.join(files)} {record}").splitlines()
         self.assertEqual(modes, [f"{'755' if f.endswith('last-resort') else '644'} root {f}" for f in (*files, record)])
         self.assertEqual(step("systemctl is-enabled btrfs-degraded-boot-record.service").strip(), "enabled")
+        # Every file is in root's install record, the component done; cst doctor has nothing to say of it.
+        root_record = "/var/lib/cst/installed.json"
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {root_record} btrfs:degraded-boot"
+        six = " ".join(sorted((*files, record, synced)))
+        self.assertEqual(step(lines), f"{six} done\n")
+        doc = step("env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true")
+        inst = doc.split("== install", 1)[1].split("\n== ", 1)[0] if "== install" in doc else ""
+        self.assertEqual([x for x in inst.splitlines() if "WARN" in x and "degraded" in x], [], doc)
 
         # The install already ran the real `udevadm verify` on the rule it
         # wrote (it stops when verify fails), so this needs no skip.
@@ -2406,10 +2771,19 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             )
 
         n = len(calls())
+        recorded = step(f"sha256sum {root_record}")
         second = step("/opt/cst-rw/cst btrfs degraded-boot")
         self.assertNotIn("written:", second)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
         self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        self.assertEqual(step(f"sha256sum {root_record}"), recorded)
+        # The upgrade: an install from before the record listed these files left the same bytes and no
+        # line of them; the next install adopts them, writing nothing.
+        step(f"/usr/bin/python3 -I -c {shlex.quote(RECORD_STRIP)} {root_record} btrfs:degraded-boot")
+        self.assertEqual(step(lines), "- -\n")
+        adopted = step("/opt/cst-rw/cst btrfs degraded-boot")
+        self.assertNotIn("written:", adopted)
+        self.assertEqual(step(lines), f"{six} done\n")
         again = step("/opt/cst-rw/cst btrfs degraded-boot plan")
         self.assertNotIn("would ", again)
         self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", again)
@@ -2494,6 +2868,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
         self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
+        self.assertEqual(step(lines), "- -\n")
         self.assertEqual(step(exists), "")
         self.assertEqual(step(f"cat {w}/tracked"), "")
         self.assertNotEqual(
@@ -2536,12 +2911,16 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         `systemd-analyze security --offline` of every service stays at or under
         its SECURITY_CEILINGS entry (lower the entry when a unit gets better; a
         score under it does not fail, so a systemd update in the image that
-        rates a unit better does not turn tier 1 red). Drop-ins (below, machine.slice, user@.service) are not
-        units of their own and are not verified here."""
+        rates a unit better does not turn tier 1 red). Drop-ins (the manifest's, and the generated ones of
+        tests/unit_files.py) are verified through the unit they extend: a unit the distribution ships
+        (machine.slice, user@.service, below.service, ...) gets a stand-in in the stage, a template its
+        @e2e instance, and a user drop-in is checked under the user-check- prefix as user units are. The
+        stand-ins are not services of SECURITY_CEILINGS. A planted drop-in with an unknown key must make
+        verify speak, so a drop-in check cannot pass by reading nothing."""
         c = self.SYSTEMD_CONTAINER
         stage = "/var/tmp/e2e-units"
         # Commands of packages the tier 1 image does not install: staged even so.
-        not_in_image = "/usr/sbin/btrfs"
+        not_in_image = "/usr/sbin/btrfs /usr/bin/below"
         self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         sets = (
@@ -2562,7 +2941,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                     install -d "{stage}$(dirname "$p")" && install -m 0755 /dev/null "{stage}$p"
                 fi
             done
-            for f in user/*; do cp "$f" "system/user-check-$(basename "$f")"; done
+            for f in user/*; do
+                if [[ -d $f ]]; then cp -r "$f" "system/user-check-$(basename "$f")"; else cp "$f" "system/user-check-$(basename "$f")"; fi
+            done
             """,
         )
         names = exec_bash(
@@ -2576,6 +2957,60 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         verify = f"systemd-analyze verify --man=no --recursive-errors=no --root={stage} "
         v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in names), check=False)
         self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))
+        # Drop-ins: the unit each *.d folder extends (an instance for a template), with a stand-in
+        # when no unit of that name is staged; made after `names`, so the services stay the same.
+        extended = exec_bash(
+            c,
+            f"""
+            cd {stage}/etc/systemd/system
+            [[ -e {stage}/usr/bin/true ]] || {{ install -d {stage}/usr/bin && install -m 0755 /dev/null {stage}/usr/bin/true; }}
+            for d in *.d; do
+                [[ -d $d ]] || continue
+                b="${{d%.d}}"
+                t="$(sed -E 's/@[^.]*\\./@./' <<<"$b")"
+                if [[ ! -e $t ]]; then
+                    if [[ $t == *.service ]]; then
+                        printf '[Unit]\\nDescription=e2e stand-in\\n[Service]\\nExecStart=/usr/bin/true\\n' >"$t"
+                    else
+                        printf '[Unit]\\nDescription=e2e stand-in\\n' >"$t"
+                    fi
+                fi
+                if [[ $b == *@.* ]]; then b="${{b/@./@e2e.}}"; fi
+                echo "$b"
+            done
+            """,
+        ).stdout.split()
+        for name in (
+            "btrfs-scrub-weekly.service",
+            "below.service",
+            "machine.slice",
+            "user@e2e.service",
+            "user@1000.service",
+            "user-1000.slice",
+            "user-check-user.slice",
+            "user-check-flatpak-session-helper.service",
+        ):
+            self.assertIn(name, extended)
+        v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in extended), check=False)
+        self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))
+        # Negative control: verify --root reads a drop-in (an unknown key in one is reported).
+        planted = f"{stage}-planted"
+        self.addCleanup(exec_bash, c, f"rm -rf {planted}", check=False)
+        exec_bash(
+            c,
+            f"""
+            rm -rf {planted} && d={planted}/etc/systemd/system && install -d "$d/e2e-planted.service.d" {planted}/usr/bin
+            install -m 0755 /dev/null {planted}/usr/bin/true
+            printf '[Unit]\\nDescription=e2e stand-in\\n[Service]\\nExecStart=/usr/bin/true\\n' >"$d/e2e-planted.service"
+            printf '[Service]\\nNoSuchKey=1\\n' >"$d/e2e-planted.service.d/10-typo.conf"
+            """,
+        )
+        v = exec_bash(
+            c,
+            f"systemd-analyze verify --man=no --recursive-errors=no --root={planted} e2e-planted.service",
+            check=False,
+        )
+        self.assertIn("NoSuchKey", v.stdout + v.stderr)
         services = sorted(n for n in names if n.endswith(".service") and not n.startswith("user-check-"))
         self.assertEqual(services, sorted(self.SECURITY_CEILINGS), "every service has a SECURITY_CEILINGS entry")
         for name in services:
@@ -2771,7 +3206,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
     def test_112_stall_monitor_with_a_duration_of_zero_stops_at_once(self) -> None:
         """This checkout's btrfs-stall-monitord, as its installer builds it, with --duration 0 ("stop after
         0 seconds"): it ends before its first sample with exit 0. The daemon before took 0 as no limit and
-        ran on until the timeout killed it (124)."""
+        ran on until the timeout killed it (124). Run as root under umask 0 with a --log-dir whose two
+        parents are missing too, it makes the three as systemd makes a LogsDirectory=: the log folder 0750 (the
+        unit's LogsDirectoryMode=), its missing parents 0755 (os.makedirs gave all three 0777 there)."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/lib/e2e-stall-duration"
         self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
@@ -2779,12 +3216,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         out = exec_bash(
             c,
             f"""
-            install -d {w}/log {w}/run
+            install -d {w}/run
             rc=0
-            timeout 20 /usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord \\
-                --duration 0 --log-dir {w}/log --run-dir {w}/run >{w}/out 2>&1 || rc=$?
+            (umask 0; exec timeout 20 /usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord \\
+                --duration 0 --log-dir {w}/top/a/log --run-dir {w}/run) >{w}/out 2>&1 || rc=$?
             [[ "$rc" == 0 ]] || {{ echo "exit $rc" >&2; cat {w}/out >&2; exit 1; }}
             grep -q 'stopped' {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            modes=$(stat -c %a {w}/top {w}/top/a {w}/top/a/log | tr '\\n' ' ')
+            [[ "$modes" == "755 755 750 " ]] || {{ echo "folder modes: $modes" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout
@@ -2923,7 +3362,16 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         (systemctl --user clean --what=state, before the unit file goes).
         No prune runs here: `auto on` starts the timer, and starting a
         Persistent= timer that never ran makes its stamp (systemd's
-        timer_start). The guard below fails loudly if it did not."""
+        timer_start). The guard below fails loudly if it did not.
+        Then the timer file gone before auto off (removed by hand, or by an
+        older auto off): clean cannot work once the unit is not loaded, and
+        systemd leaves the stamp (guarded); auto off removes it itself, a
+        second auto off has nothing left to remove, and auto on still works.
+        Last, the earlier cst-cargo-build-gc.timer left running with its files
+        gone (its stamp made when it started; removed with no daemon-reload
+        after, so systemd keeps it loaded and running: a daemon-reload here
+        stops it, as a first run of this test showed): auto on stops it before
+        it removes that stamp, and a second auto on leaves it alone."""
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
             """
@@ -2937,6 +3385,48 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             fi
             /opt/cst-rw/cst toolchains auto off
             if [ -e "$stamp" ]; then echo "auto off left $stamp" >&2; exit 1; fi
+            units=/home/tester/.config/systemd/user
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            [ -e "$stamp" ] || { echo "no $stamp after the second auto on" >&2; exit 1; }
+            systemctl --user disable --now cst-toolchains-prune.timer
+            rm -f "$units/cst-toolchains-prune.timer" "$units/cst-toolchains-prune.service"
+            systemctl --user daemon-reload
+            if [ ! -e "$stamp" ]; then
+                echo "systemd removed $stamp with the timer file: the check below would prove nothing" >&2
+                exit 1
+            fi
+            off="$(/opt/cst-rw/cst toolchains auto off)"
+            if [ -e "$stamp" ]; then echo "auto off left $stamp of a timer whose file was gone" >&2; exit 1; fi
+            case "$off" in
+                *"removed:   ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer"*) ;;
+                *) echo "auto off did not say it removed the stamp: $off" >&2; exit 1;;
+            esac
+            again="$(/opt/cst-rw/cst toolchains auto off)"
+            case "$again" in *stamp-*) echo "a second auto off touched a stamp: $again" >&2; exit 1;; esac
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            [ -e "$stamp" ] || { echo "auto on did not start the timer again" >&2; exit 1; }
+            /opt/cst-rw/cst toolchains auto off >/dev/null
+            [ ! -e "$stamp" ] || { echo "the last auto off left $stamp" >&2; exit 1; }
+            old=cst-cargo-build-gc.timer
+            oldstamp=/home/tester/.local/share/systemd/timers/stamp-$old
+            mark='# managed-by: btrfs-setup.sh (CST): e2e'
+            printf '%s\n' "$mark" '[Timer]' 'OnCalendar=yearly' 'Persistent=true' >"$units/$old"
+            printf '%s\n' "$mark" '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' >"$units/cst-cargo-build-gc.service"
+            systemctl --user daemon-reload
+            systemctl --user start "$old"
+            [ -e "$oldstamp" ] || { echo "no $oldstamp after $old started: the check below would prove nothing" >&2; exit 1; }
+            rm -f "$units/$old" "$units/cst-cargo-build-gc.service"
+            if ! systemctl --user is-active "$old" >/dev/null; then
+                echo "$old stopped with its files: the check below would prove nothing" >&2
+                exit 1
+            fi
+            on="$(/opt/cst-rw/cst toolchains auto on)"
+            case "$on" in *"stopped:   $old"*) ;; *) echo "auto on did not stop $old: $on" >&2; exit 1;; esac
+            if systemctl --user is-active "$old" >/dev/null; then echo "$old still runs after auto on" >&2; exit 1; fi
+            [ ! -e "$oldstamp" ] || { echo "auto on left $oldstamp" >&2; exit 1; }
+            again="$(/opt/cst-rw/cst toolchains auto on)"
+            case "$again" in *cst-cargo-build-gc*) echo "a second auto on touched $old: $again" >&2; exit 1;; esac
+            /opt/cst-rw/cst toolchains auto off >/dev/null
             echo E2E-OK
             """,
         ).stdout
@@ -2948,12 +3438,18 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         The real `cst btrfs snapshots nas disable` (as root, the real systemctl)
         rewrites them in quotes with the values bash read from the old file,
         the cst_core reader then finds no problem, and a second run leaves the
-        file as it is (same inode, same time)."""
+        file as it is (same inode, same time). The real installer writes it: a
+        new file renamed into place (a new inode), owner root, mode 0644,
+        `written:` and then `unchanged:` on the output; the same content with
+        its mode changed to 0600 is written again (root 0644, `written:`, then
+        `unchanged:`); a link in its place, to a file with the same content, is
+        replaced by a regular file and the file it pointed to is left as it was."""
         conf = "/etc/btrfs-setup/snapshots.conf"
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"rm -f {conf}; if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
+            f"rm -f {conf} /var/tmp/e2e-snapconf.target; "
+            f"if [ -e /var/tmp/e2e-snapconf.bak ]; then mv /var/tmp/e2e-snapconf.bak {conf}; fi",
             check=False,
         )
         out = exec_bash(
@@ -2971,7 +3467,11 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             grep -qF 'NAS_PATH=/volume1/My\\ Backups' "$conf"
             values() {{ (. "$conf"; printf '%s|' "$NAS_ENABLED" "$NAS_PATH" "$NAS_RESTIC_HOST" "$NAS_USER"); }}
             before="$(values)"
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            old_ino="$(stat -c %i "$conf")"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            [ "$(stat -c %i "$conf")" != "$old_ino" ] || {{ echo "written in place, not renamed" >&2; exit 1; }}
             after="$(values)"
             [ "$after" = "0|${{before#1|}}" ] || {{ echo "values changed: $before -> $after" >&2; exit 1; }}
             grep -qx "NAS_PATH='/volume1/My Backups'" "$conf"
@@ -2987,10 +3487,31 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
 ' "$conf"
             st="$(stat -c '%i %y' "$conf")"
             cp "$conf" /var/tmp/e2e-snapconf.first
-            /opt/cst-rw/cst btrfs snapshots nas disable
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "no unchanged: line: $out" >&2; exit 1; }}
             [ "$(stat -c '%i %y' "$conf")" = "$st" ] || {{ echo "the second run wrote the file" >&2; exit 1; }}
             cmp "$conf" /var/tmp/e2e-snapconf.first
-            rm -f /var/tmp/e2e-snapconf.first
+            # The same content, mode changed by hand to 0600: written again (root 0644) and
+            # named so; the next run leaves it.
+            chmod 0600 "$conf"
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "written:   $conf" <<<"$out" || {{ echo "mode 0600: no written: line: $out" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            out="$(/opt/cst-rw/cst btrfs snapshots nas disable)"
+            grep -qxF "unchanged: $conf" <<<"$out" || {{ echo "after the mode: no unchanged: line: $out" >&2; exit 1; }}
+            # A link in its place (to a file with the same content, mode 0600): replaced by a
+            # regular file; the file it pointed to keeps its bytes and its mode.
+            target=/var/tmp/e2e-snapconf.target
+            cp "$conf" "$target"; chmod 0600 "$target"
+            rm -f "$conf"; ln -s "$target" "$conf"
+            /opt/cst-rw/cst btrfs snapshots nas disable >/dev/null
+            [ -f "$conf" ] && [ ! -L "$conf" ] || {{ echo "the link is still there" >&2; exit 1; }}
+            [ "$(stat -c '%u:%g %a' "$conf")" = "0:0 644" ]
+            cmp "$conf" /var/tmp/e2e-snapconf.first
+            cmp "$target" /var/tmp/e2e-snapconf.first
+            [ "$(stat -c %a "$target")" = 600 ] || {{ echo "the link's target was changed" >&2; exit 1; }}
+            rm -f /var/tmp/e2e-snapconf.first "$target"
             echo E2E-OK
             """,
         ).stdout
@@ -3350,6 +3871,154 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_118_btrfs_uninstall_keeps_a_reclaim_file_it_did_not_create_and_forgets_it(self) -> None:
+        """btrfs-setup.sh's remove_tuning_files as root on the container's /, with the real installer,
+        record and cst doctor: the writeback and reclaim files installed and recorded, the reclaim file
+        then rewritten by hand without CST's marker. A control first runs the function as main had it
+        (its Kept branch only said so): the file stays, its record line too, and doctor's install area
+        warns that it changed (the problem fixed). Then the script's function: the file is kept with
+        its bytes, its line is gone and doctor names it in no WARN; a second run changes nothing, the
+        record's sha256 included."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        srcs = "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"
+        if exec_bash(c, f"for f in {reclaim} {sysctl}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a tuning file is there already (another test's)")
+        self.addCleanup(exec_bash, c, f"{installer} remove {srcs} >/dev/null; rm -f {reclaim} {sysctl}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_118 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(SYSCTL|RECLAIM)_(FILE|SRC)=' /opt/cst-rw/btrfs-setup.sh)"
+            eval "$(sed -n '/^remove_tuning_files() {{/,/^}}/p' /opt/cst-rw/btrfs-setup.sh)"
+            declare -F remove_tuning_files >/dev/null
+            [[ "$RECLAIM_FILE" == {reclaim} && "$SYSCTL_FILE" == {sysctl} ]]
+            # As main had it: the Kept branch without the forget.
+            main_remove_tuning_files() {{
+                if grep -qs 'Managed by btrfs-setup.sh' "$RECLAIM_FILE"; then
+                    cst_remove "$RECLAIM_SRC"
+                elif [[ -e "$RECLAIM_FILE" ]]; then
+                    echo "Kept $RECLAIM_FILE: not created by this script."
+                else
+                    cst_remove "$RECLAIM_SRC"
+                fi
+                cst_remove "$SYSCTL_SRC"
+            }}
+            doctor_warns() {{
+                local doc inst
+                doc="$(env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+                inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+                # An empty record gives no install area at all: nothing to warn about.
+                grep -E '^ *WARN' <<<"$inst" | grep -F {reclaim}
+            }}
+            mine='# the owner'"'"'s own reclaim settings'
+            cst_install --set UUID=00000000-0000-0000-0000-000000000000 {srcs} >/dev/null
+            grep -qF '"{reclaim}"' "$R"
+            printf '%s
+' "$mine" >{reclaim}
+            # Control: the old function keeps the file and its line, and doctor warns.
+            out="$(main_remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            grep -qF '"{reclaim}"' "$R" || {{ echo "control: main's function dropped the line" >&2; exit 1; }}
+            doctor_warns >/dev/null || {{ echo "control: doctor does not warn about the kept file" >&2; exit 1; }}
+            # The script's function, over the same state (the writeback file installed again).
+            cst_install "$SYSCTL_SRC" >/dev/null
+            out="$(remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            [[ "$(cat {reclaim})" == "$mine" ]] || {{ echo "the kept file changed" >&2; exit 1; }}
+            [[ ! -e {sysctl} ]]
+            if grep -qF '"{reclaim}"' "$R"; then echo "the kept file is still in the record" >&2; exit 1; fi
+            if doctor_warns; then echo "doctor still warns about the kept file" >&2; exit 1; fi
+            before="$(sha256sum "$R")"
+            again="$(remove_tuning_files)"
+            [[ "$again" == "Kept {reclaim}: not created by this script." ]] || {{ echo "a second run said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R")" == "$before" ]] || {{ echo "a second run changed the record" >&2; exit 1; }}
+            [[ "$(cat {reclaim})" == "$mine" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_119_btrfs_scrub_dropin_and_stall_report_launcher_recorded_and_removed(self) -> None:
+        """btrfs-setup.sh's install_scrub_limit, install_report_launcher and remove_report_launcher as
+        root on the container's /, the launcher written for tester through the real runuser. Over the
+        two files as the previous version wrote them (no record line), install writes nothing and
+        lists the drop-in in root's install record (btrfs:core) and the launcher in tester's
+        (btrfs:report-launcher); once marked, tester's cst doctor names the launcher in no WARN; a
+        second install changes nothing, both records included; no limit and remove_report_launcher
+        remove both files and both lines."""
+        c = self.SYSTEMD_CONTAINER
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {dropin} {shim}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("the drop-in or the launcher is there already (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {dropin} {shim}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; {installer} forget-text {dropin}; "
+            f"runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_119 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            U=/home/tester/.local/state/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(UNIT_DIR|SCRUB_SERVICE|SCRUB_DROPIN|BTRFS_CONF)=' /opt/cst-rw/btrfs-setup.sh)"
+            for f in shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher >/dev/null
+            [[ "$SCRUB_DROPIN" == {dropin} ]]
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            # The previous version: the same files, written without a component.
+            scrub_limit_dropin 500M | cst_install_text "$SCRUB_DROPIN" 0644 >/dev/null
+            shim_content | cst_install_text "$shim" 0755 tester >/dev/null
+            if grep -qsF '"{dropin}"' "$R"; then echo "the previous version is recorded" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            out="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$out" == "unchanged: {dropin}"$'
+'"unchanged: {shim}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            grep -qF '"{dropin}"' "$R"
+            {lines} "$R" btrfs:core | grep -qF '{dropin}'
+            [[ "$(launcher_lines)" == "{shim} pending" ]]
+            cst_mark_as tester btrfs:report-launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            [[ -n "$inst" ]] || {{ echo "doctor has no install area: $doc" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor warns about the launcher" >&2; exit 1
+            fi
+            before="$(sha256sum "$R" "$U")"
+            again="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$again" == "$out" ]] || {{ echo "a second install said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R" "$U")" == "$before" ]] || {{ echo "a second install changed a record" >&2; exit 1; }}
+            gone="$(install_scrub_limit ""; remove_report_launcher)"
+            [[ "$gone" == "removed:   {dropin}"$'
+'"removed:   {shim}" ]] || {{ echo "removal said: $gone" >&2; exit 1; }}
+            [[ ! -e {dropin} && ! -e {shim} && ! -e {dropin.rsplit("/", 1)[0]} ]]
+            if grep -qF '"{dropin}"' "$R"; then echo "root's record still lists the drop-in" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
@@ -3358,17 +4027,22 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         does not run here, so it owes none). `apply` makes that restart and
         writes nothing; `plan` then has nothing to do (exit 0). A second
         `apply` changes nothing: the same inode, mtime and content of each
-        file, no new main.conf backup, no restart of WirePlumber. `le-audio` alone only shows the setting.
+        file, no new main.conf backup, no restart of WirePlumber. With the watcher's program and unit
+        taken out of the install record, the next `apply` adds them back, writes nothing and restarts
+        neither the watcher nor WirePlumber. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
         defaults; nothing else changes and `plan` exits 0. A second
         `le-audio on` writes nothing and restarts nothing. `le-audio off`
         puts the same drop-in back, restarts WirePlumber and the roles are the
-        classic ones again. `revert` afterwards."""
+        classic ones again. The watcher's `pactl subscribe` runs with LC_ALL=C
+        also when the user manager sets LC_ALL to another language. `revert`
+        afterwards."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "systemctl --user unset-environment LC_ALL || true; "
             "rm -f /home/tester/.config/cst/bluetooth.conf",
             check=False,
         )
@@ -3636,7 +4310,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_112_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
+    def test_145_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
         """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
         a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
         record and the key ("nothing done"), twice; docker is asked to remove nothing, its objects and
@@ -3654,7 +4328,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             f"""
             set -E
-            trap 'echo "test_112 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            trap 'echo "test_145 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
             export LC_ALL=C
             stage={stage}
             rm -rf "$stage" && install -d -m 0755 "$stage"
@@ -3779,7 +4453,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             fi
             [[ -S /run/user/1000/systemd/private ]]
             out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
-                . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
             sed 's/^/test_81: /' <<<"$out" >&2
             if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
             grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
@@ -3787,6 +4461,134 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             as_tester systemctl --user is-active cst-toolchains-prune.timer
             python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["components"].get("toolchains:auto") != "done")' \
                 "$H/.local/state/cst/installed.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_115_cst_as_user_gives_the_command_the_users_session(self) -> None:
+        """cst_as_user (cst-install.bash), as root with what sudo hands root (SUDO_USER, its own
+        XDG_RUNTIME_DIR and bus): the real runuser runs the command as tester with HOME, USER,
+        LOGNAME, tester's /run/user/1000 and bus, and no SUDO_USER; systemctl --user reaches
+        tester's manager, which root's variables do not (checked first, else the test proves
+        nothing). What a fake runuser cannot show: what the real one keeps or resets."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_115 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export SUDO_USER=tester XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+            [[ -S /run/user/1000/systemd/private ]]
+            if runuser -u tester -- systemctl --user show-environment >/dev/null 2>&1; then
+                echo "root's variables still reach tester's manager: the test would prove nothing" >&2
+                exit 1
+            fi
+            . /opt/cst-rw/cst-install.bash
+            seen="$(cst_as_user tester sh -c 'id -un; env')"
+            [[ "$(head -n1 <<<"$seen")" == tester ]]
+            for want in HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; do
+                grep -qxF "$want" <<<"$seen" || { echo "no $want in: $seen" >&2; exit 1; }
+            done
+            if grep -q '^SUDO_USER=' <<<"$seen"; then echo "SUDO_USER reached the command" >&2; exit 1; fi
+            state="$(cst_as_user tester systemctl --user is-system-running 2>&1 || true)"
+            case "$state" in
+                running | degraded | starting | initializing) ;;
+                *) echo "tester's manager not reached: $state" >&2; exit 1 ;;
+            esac
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_116_btrfs_snapshot_reads_the_real_kernels_and_findmnts_escapes(self) -> None:
+        """btrfs/btrfs-snapshot against the real kernel's mountinfo and the real findmnt, as root.
+        A tmpfs stands in for the home subvolume (its folder "home" bind-mounted at a HOME_MOUNT
+        with a blank, set in snapshots.conf); another mount namespace (unshare -m) bind-mounts
+        folders whose names hold a tab, a blank, a backslash and an accented letter, as a
+        container's -v does: `busy` lists each, no sibling, and nothing once that namespace is
+        gone. A tmpfs mounted below a folder whose path findmnt -r writes escaped (\\x20,
+        \\xc3\\xba): `convert-one` skips it (is or contains a mountpoint). The escapes are
+        checked first, else the test proves nothing. What the fakes of the unit tests cannot
+        show: how the kernel and findmnt write these names."""
+        cleanup = r"""
+        d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+        if [ -s "$d/holder" ]; then kill "$(cat "$d/holder")" 2>/dev/null || true; fi
+        if mountpoint -q "$d/top" 2>/dev/null; then
+            umount -R "$d/home mnt" "$d/top" 2>/dev/null || umount -lR "$d/top" || true
+        fi
+        rm -rf "$d" "$state"
+        if [ -e "$d.state" ]; then mv "$d.state" "$state"; fi
+        if [ -e "$d.conf" ]; then mv -f "$d.conf" "$conf"; else rm -f "$conf"; fi
+        """
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, cleanup, check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_116 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+            snap=/opt/cst-rw/btrfs/btrfs-snapshot
+            install -d -m 0755 "$d" /etc/btrfs-setup
+            if [ -e "$conf" ]; then cp -a "$conf" "$d.conf"; fi
+            if [ -e "$state" ]; then mv "$state" "$d.state"; fi
+            # The home subvolume without btrfs: a tmpfs whose folder "home" is bind-mounted at
+            # HOME_MOUNT (root field /home in mountinfo), a mount point with a blank.
+            install -d "$d/top"
+            mount -t tmpfs tmpfs "$d/top"
+            h="$d/home mnt"
+            mkdir -p "$d/top/home/u" "$h"
+            mount --bind "$d/top/home" "$h"
+            printf '%s\n' "HOME_MOUNT='$h'" "HOME_SUBVOL='home'" >"$conf"
+            names=($'Work\tspace' 'a b' 'back\slash' $'M\xc3\xbasica')
+            paths=()
+            i=0
+            for n in "${names[@]}"; do
+                mkdir -p "$h/u/$n" "$d/src$i"
+                paths+=("$h/u/$n")
+                i=$((i + 1))
+            done
+            mkdir -p "$h/u/Work" "$h/u/a"
+            # Another mount namespace bind-mounts each folder, as a container's -v does: the real
+            # kernel writes the root field of each (/home/u/a\040b, ...) in its mountinfo.
+            (
+                i=0
+                for p in "${paths[@]}"; do printf '%s\0%s\0' "$p" "$d/src$i"; i=$((i + 1)); done
+            ) >"$d/binds"
+            D="$d" unshare -m bash -c '
+                while IFS= read -r -d "" src && IFS= read -r -d "" dst; do mount --bind "$src" "$dst"; done <"$D/binds"
+                echo "$" >"$D/holder"
+                : >"$D/ready"
+                exec sleep 300' >"$d/holder.log" 2>&1 &
+            holder=$!
+            for _ in $(seq 100); do [ -e "$d/ready" ] && break; sleep 0.1; done
+            [ -e "$d/ready" ] || { cat "$d/holder.log" >&2; exit 1; }
+            # The kernel escapes them in mountinfo: else the test proves nothing.
+            grep -qF 'home/u/a\040b' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/Work\011space' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/back\134slash' "/proc/$holder/mountinfo"
+            grep -qF 'home\040mnt' /proc/self/mountinfo
+            want="$(printf '%s\n' "${paths[@]}")"
+            got="$("$snap" busy "$h/u/Work" "$h/u/a" "${paths[@]}")"
+            [ "$got" = "$want" ] || { printf 'busy listed:\n%s\nwanted:\n%s\n' "$got" "$want" >&2; exit 1; }
+            kill "$holder"; wait "$holder" 2>/dev/null || true
+            [ -z "$("$snap" busy "${paths[@]}")" ]
+            # A mount below a folder whose path findmnt -r writes escaped (\x20, \xc3\xba).
+            conv=("$h/u/conv a b" "$h/u/conv "$'M\xc3\xbasica')
+            for p in "${conv[@]}"; do
+                mkdir -p "$p/m"
+                [ "$(stat -c %i "$p")" != 256 ]   # a tmpfs inode 256 would read as a subvolume
+                mount -t tmpfs tmpfs "$p/m"
+            done
+            findmnt -rn -o TARGET | grep -qF 'conv\x20a\x20b/m'   # escaped: else the test proves nothing
+            findmnt -rn -o TARGET | grep -qF 'conv\x20M\xc3\xbasica/m'
+            for p in "${conv[@]}"; do
+                rc=0; out="$("$snap" convert-one "$p")" || rc=$?
+                [ "$rc" = 1 ]
+                [ "$out" = "<4>btrfs-snapshot: convert: $p: is or contains a mountpoint, skipped" ] ||
+                    { echo "convert-one $p: $out" >&2; exit 1; }
+                mountpoint -q "$p/m"
+            done
             echo E2E-OK
             """,
         ).stdout
@@ -3935,7 +4737,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         starts in, and the socket comes 0.3 s after the start; unlike the real
         one it runs rustc in the client's cgroup). The toolbox is a stand-in
         (CST_SCCACHE_CONTAINERENV names "e2ebox"), so this is the toolbox
-        branch; the host one (app.slice) has unit tests only. The first build
+        branch; test_133 covers the host one (app.slice). The first build
         runs in a transient scope with MemoryMax, like a test harness's capped
         lane: the wrapper must start the one server in
         cst-sccache-e2ebox.scope in the inner user.slice (MemoryMax infinity),
@@ -3965,7 +4767,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         )
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
-            r"""
+            SCCACHE_FAKE_STEPS
+            + r"""
             set -E
             trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
             cst=/opt/cst-rw/cst
@@ -3978,67 +4781,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             rm -rf "$w" "$sock" "$sock.lock"
             mkdir -p "$w/bin" "$w/crate/src" "$st"
             printf 'name="e2ebox"\n' >"$w/containerenv"
-            # The fake sccache. --start-server: a daemon (setsid, stdio closed)
-            # that records its cgroup, then the socket 0.3 s later. A compile
-            # with no live server starts one in its own cgroup, as the real
-            # client does.
-            cat >"$w/bin/sccache" <<'EOF'
-#!/bin/sh
-st=$SCCACHE_E2E_STATE
-serve() {
-    setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"; exec sleep 300' \
-        sh "$st" </dev/null >/dev/null 2>&1 &
-    for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
-}
-sock() { python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"; }
-live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
-if [ "${1:-}" = --start-server ]; then
-    echo start >>"$st/starts"
-    rm -f "$st/live"
-    serve
-    sleep 0.3
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
-    exit 0
-fi
-if ! live || [ ! -e "$SCCACHE_SERVER_UDS" ]; then
-    echo auto >>"$st/starts"
-    rm -f "$st/live"
-    serve
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
-fi
-cat /proc/self/cgroup >>"$st/compiles"
-exec "$@"
-EOF
-            chmod 755 "$w/bin/sccache"
-            # A crate with six path dependencies: cargo compiles them in parallel.
-            printf '[package]\nname = "e2escc"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' \
-                >"$w/crate/Cargo.toml"
-            for i in 1 2 3 4 5 6; do
-                mkdir -p "$w/crate/d$i/src"
-                printf '[package]\nname = "d%s"\nversion = "0.1.0"\nedition = "2021"\n' "$i" >"$w/crate/d$i/Cargo.toml"
-                echo "pub fn f() -> u32 { $i }" >"$w/crate/d$i/src/lib.rs"
-                printf 'd%s = { path = "d%s" }\n' "$i" "$i" >>"$w/crate/Cargo.toml"
-            done
-            echo 'pub fn all() -> u32 { d1::f() + d2::f() + d3::f() + d4::f() + d5::f() + d6::f() }' \
-                >"$w/crate/src/lib.rs"
+            scc_setup
 
             "$cst" toolchains config apply --sccache >/dev/null
             wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
             grep -q "^rustc-wrapper = \"$wrapper\"" /home/tester/.cargo/config.toml
-
-            # build N: cargo build from scratch inside a capped transient scope
-            # (MemoryMax=1G), started from a user service: a --user --scope
-            # needs a caller that the user manager may move.
-            build() {
-                local n=$1 jobs=${2:-8}
-                systemd-run --user --wait --pipe --quiet --collect --unit="e2e-scc-launch-$n" \
-                    -E PATH="$w/bin:$PATH" -E SCCACHE_E2E_STATE="$st" -E CST_SCCACHE_CONTAINERENV="$w/containerenv" \
-                    -E CARGO_INCREMENTAL=0 -E CARGO_TARGET_DIR="$w/t$n" -E CARGO_BUILD_BUILD_DIR="$w/b$n" \
-                    -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --working-directory="$w/crate" \
-                    systemd-run --user --scope --quiet --collect --unit="e2e-scc-cap-$n.scope" -p MemoryMax=1G \
-                    cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
-            }
-            starts() { tr '\n' ' ' <"$st/starts"; }
 
             build 1
             # One start, by the wrapper; no compile found the server missing.
@@ -4046,8 +4793,7 @@ EOF
             # The compiles ran in the capped scope; the server is in its own one.
             [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
             if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
-            server=$(cat "$st/live")
-            [ "$(cat "$st/server-$server.cgroup")" = "$want" ]
+            live_server_in "$want" "the server's cgroup"
             test -d "$ucg/user.slice/$scope"
             [ "$(systemctl --user show -P Slice "$scope")" = user.slice ]
             [ "$(systemctl --user show -P MemoryMax "$scope")" = infinity ]
@@ -4060,9 +4806,7 @@ EOF
             [ "$(starts)" = "start " ]
 
             # The server stops: the scope goes away.
-            kill "$server"
-            for _ in $(seq 50); do [ -d "$ucg/user.slice/$scope" ] || break; sleep 0.1; done
-            test ! -d "$ucg/user.slice/$scope"
+            stop_server "$server" "$ucg/user.slice/$scope"
             [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
 
             # Upgrade: a server that an older wrapper left in a capped scope (it
@@ -4076,9 +4820,9 @@ EOF
             grep -q e2e-scc-old.scope "$st/server-$old.cgroup"
             build 4
             [ "$(starts)" = "auto start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
-            [ "$(cat "$st/server-$(cat "$st/live").cgroup")" = "$want" ]
+            live_server_in "$want" "the new server's cgroup"
             kill -0 "$old"   # the old one runs on until it stops by itself (killed here)
-            kill "$old" "$(cat "$st/live")"
+            kill "$old" "$server"
             for _ in $(seq 50); do [ -d "$ucg/user.slice/$scope" ] || break; sleep 0.1; done
 
             # A start that systemd refuses: a unit of the scope's name is already
@@ -4102,6 +4846,96 @@ EOF
             systemctl --user stop e2e-scc-block "$scope" 2>/dev/null || true
 
             # Undo: cargo no longer names the wrapper.
+            "$cst" toolchains config apply --no-sccache >/dev/null
+            if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_133_sccache_host_server_starts_in_app_slice_scope(self) -> None:
+        """The host branch of the real rustc wrapper (test_83 covers a toolbox's): with no
+        container file (CST_SCCACHE_CONTAINERENV names a file that is not there) the wrapper's
+        environment is "host", its socket cst-sccache-host.sock, and a first build inside a
+        transient scope with MemoryMax starts the one server in cst-sccache-host.scope in the user
+        manager's app.slice (MemoryMax infinity), not in the capped scope and not in user.slice
+        (the toolboxes' slice). The fake sccache is test_83's, with its server listening on its
+        socket (SCCACHE_FAKE_STEPS, $st/listen), so that `cst toolchains status` asks the real
+        socket who listens (SO_PEERCRED), reads that process's real /proc/PID/cgroup and says the
+        server is in its own scope. A second build starts nothing; the scope goes away when the
+        server stops, and a build after that, with the stopped server's socket file still there,
+        starts a new server in the same scope."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            for f in /home/tester/work/scc-host/state/*.pid; do
+                [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true
+            done
+            systemctl --user stop 'e2e-scc-*' cst-sccache-host.scope 2>/dev/null || true
+            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
+            rm -rf /home/tester/work/scc-host /run/user/1000/cst-sccache-host.sock \
+                /run/user/1000/cst-sccache-host.sock.lock /run/user/1000/cst-sccache-host.sock.failed
+            """,
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            SCCACHE_FAKE_STEPS
+            + r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=/home/tester/work/scc-host
+            st=$w/state
+            ucg=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
+            scope=cst-sccache-host.scope
+            want="0::/user.slice/user-1000.slice/user@1000.service/app.slice/$scope"
+            sock=/run/user/1000/cst-sccache-host.sock
+            rm -rf "$w" "$sock" "$sock.lock" "$sock.failed"
+            mkdir -p "$w/bin" "$w/crate/src" "$st"
+            : >"$st/listen"
+            scc_setup
+            # No $w/containerenv: build's CST_SCCACHE_CONTAINERENV names a missing file.
+            test ! -e "$w/containerenv"
+
+            "$cst" toolchains config apply --sccache >/dev/null
+
+            build 1
+            # One start, by the wrapper; the compiles ran in the capped scope.
+            [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+            [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
+            if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
+            # The server is in its own scope, in app.slice.
+            live_server_in "$want" "the server's cgroup"
+            test -d "$ucg/app.slice/$scope"
+            test ! -e "$ucg/user.slice/$scope"
+            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            [ "$(systemctl --user show -P MemoryMax "$scope")" = infinity ]
+            test -S "$sock"
+
+            # status asks the socket who listens and reads that process's cgroup.
+            status_out=$("$cst" toolchains status)
+            grep -qF "sccache server host: in its own scope (app.slice/$scope)" <<<"$status_out" ||
+                { printf 'e2e: status said:\n%s\n' "$status_out" >&2; exit 1; }
+
+            # A second build: the server is there, nothing starts.
+            build 2
+            [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+
+            # The server stops: the scope goes away; its socket file stays behind.
+            stop_server "$server" "$ucg/app.slice/$scope"
+            [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
+            test -S "$sock"
+
+            # A build after that: the stale socket is no server, so the wrapper starts a new one,
+            # again in its own scope in app.slice.
+            build 3
+            [ "$(starts)" = "start start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
+            live_server_in "$want" "the new server's cgroup"
+            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            stop_server "$server" "$ucg/app.slice/$scope"
+
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
             echo E2E-OK
@@ -4138,9 +4972,12 @@ EOF
         """`cst cpu install` as root for tester with the real systemd, over what the bash
         cpu-setup.sh (main before the port) installed: only the programs are written again (the game
         profile becomes a zipapp; the other zipapps carry the new cst_core), every unit, drop-in, rule
-        and setting stays as it was; `status` runs; a second install writes nothing; `uninstall`
+        and setting stays as it was; the toolboxes' drop-ins are adopted into tester's install record
+        (cpu:toolbox, done; no doctor WARN), the hwp file into root's where the knob exists; `status`
+        runs; a second install writes nothing; `uninstall`
         removes the units, programs, rule and drop-ins (and their record lines) and stops the timer; a
-        second uninstall works too. The bash version's uninstall then finds nothing left."""
+        second uninstall works too, and no record line of them is left. The bash version's uninstall then
+        finds nothing left."""
         old = self.legacy_cpu_tree()
         self.addCleanup(
             exec_bash,
@@ -4175,6 +5012,24 @@ EOF
             grep -q 'unchanged: /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf' /tmp/e2e-84-new.txt
             systemctl is-active cpu-game-watchdog.timer
             grep -q 'cpu-game-profile' /var/lib/cst/installed.json
+            # The toolboxes' drop-ins (unchanged above: adopted) are in tester's install record under
+            # cpu:toolbox, done; the hwp file is in root's only where the container has the boost knob.
+            U=/home/tester/.local/state/cst/installed.json
+            hwp=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
+            toolbox_lines() {{ runuser -u tester -- /usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} "$U" cpu:toolbox; }}
+            want=/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf
+            helper=/home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf
+            [[ ! -e "$helper" ]] || want="$helper $want"
+            [[ "$(toolbox_lines)" == "$want done" ]] || {{ echo "tester's record: $(toolbox_lines)" >&2; exit 1; }}
+            if [[ -e "$hwp" ]]; then
+                grep -qF "\"$hwp\"" /var/lib/cst/installed.json
+            elif grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then
+                echo "root's record lists a hwp file that is not there" >&2; exit 1
+            fi
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            if sed -n '/^== install/,/^== /p' <<<"$doc" | grep -E '^ *WARN' | grep -F -e cpu:toolbox -e 10-cpu-setup.conf; then
+                echo "doctor warns about the toolbox drop-ins" >&2; exit 1
+            fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
             for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
@@ -4190,6 +5045,8 @@ EOF
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
             if grep -q 'cpu-game-profile' /var/lib/cst/installed.json; then echo "the record still lists the game profile" >&2; exit 1; fi
+            [[ "$(toolbox_lines)" == "- -" ]] || {{ echo "tester's record after uninstall: $(toolbox_lines)" >&2; exit 1; }}
+            if grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then echo "the record still lists the hwp file" >&2; exit 1; fi
             as_root /opt/cst-rw/cst cpu uninstall >/dev/null
             as_root bash {old}/cpu-setup.sh uninstall >/dev/null
             rm -f /etc/cpu-setup/cpu-setup.conf
@@ -4337,7 +5194,9 @@ EOF
         weight as it was. The watchdog's tick, run as a unit with a GameMode client running (a process
         that maps a file named libgamemode), does not start cpu-game.service (a stub that records its
         starts): its unit ends in success, the line is named once, a second tick says nothing. `off`
-        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work."""
+        still works; with the line fixed, the tick starts the unit again, and `on` and `off` work.
+        A by-hand mark there before the refused `on` is removed by it; with the line broken again after
+        a tick found it fixed, the next tick names it again."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -4363,11 +5222,15 @@ EOF
             printf '%s\n' "TARGET_USER='tester'" 'BUILD_CPUS=$(nproc)' "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
             gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
             base=$(systemctl show -P CPUWeight machine.slice)
+            # A by-hand mark left from an earlier 'cst cpu game on': the refused on removes it.
+            install -d -m 0755 /run/cpu-setup
+            touch /run/cpu-setup/manual
             rc=0; got=$(gp on) || rc=$?
             [[ $rc == 1 ]] || { echo "on with a bad line: exit $rc" >&2; exit 1; }
             grep -q 'cpu-setup.conf line 2: BUILD_CPUS=$(nproc): ' <<<"$got"
             grep -q 'not switched on' <<<"$got"
             test ! -e /run/cpu-setup/game.state
+            test ! -e /run/cpu-setup/manual || { echo "the refused on kept the by-hand mark" >&2; exit 1; }
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
             grep -q 'settings: /etc/cpu-setup/cpu-setup.conf line 2' <<<"$(gp state)"
             # The watchdog, a game running, the profile off: cpu-game.service is not started.
@@ -4391,10 +5254,18 @@ EOF
             test ! -e /run/cpu-setup/game.state
             gp off
             sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
-            # Fixed: the watchdog starts the unit again.
-            grep -q 'switching on' <<<"$(tick 3)"
+            # Fixed: the watchdog starts the unit again, and says nothing about the settings.
+            third=$(tick 3)
+            grep -q 'switching on' <<<"$third"
+            if grep -q 'sets nothing' <<<"$third"; then echo "third tick: $third" >&2; exit 1; fi
             for _ in $(seq 50); do [[ -e /tmp/e2e-86-starts ]] && break; sleep 0.1; done
             test -e /tmp/e2e-86-starts
+            # Broken again after a tick found it fixed: the warning is said again.
+            sed -i 's/^BUILD_CPUS=.*/BUILD_CPUS=$(nproc)/' /etc/cpu-setup/cpu-setup.conf
+            fourth=$(tick 4)
+            grep -q 'GameMode client running, profile not switched on: a line of /etc/cpu-setup/cpu-setup.conf sets nothing' <<<"$fourth" \
+                || { echo "fourth tick (broken again): $fourth" >&2; exit 1; }
+            sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='0'/" /etc/cpu-setup/cpu-setup.conf
             kill "$(cat /tmp/e2e-86-client.pid)"
             systemctl stop cpu-game.service
             rm -f "$stub"
@@ -4464,6 +5335,191 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_130_cpu_game_profile_off_acts_for_the_recorded_user_when_target_user_names_another(self) -> None:
+        """'off' with the real system and user managers, after 'on' for tester, with TARGET_USER
+        changed to another account that exists (e2e130, made here, with no user manager of its own):
+        a tick first sets tester's user.slice CPUWeight, changed meanwhile, again (the tick acts for the
+        user 'off' undoes for); then the user manager's side is undone for tester, the uid game.state
+        names, and the journal line says so (user.slice's CPUWeight back, its user.control override
+        gone)."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            userdel e2e130 2>/dev/null || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-130-conf.bak ]]; then mv /tmp/e2e-130-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-130-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            uid=$(id -u tester)
+            uw=$(systemctl --user -M tester@ show -P CPUWeight user.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]]
+            override=/run/user/$uid/systemd/user.control/user.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            useradd -M e2e130
+            printf '%s\n' "TARGET_USER='e2e130'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            # The tick acts for tester too: a setting undone in tester's manager is set again there.
+            systemctl --user -M tester@ set-property --runtime user.slice CPUWeight=50
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == 50 ]]
+            ticked=$(gp tick)
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == idle ]] \
+                || { echo "the tick did not set tester's user.slice again: $ticked" >&2; exit 1; }
+            got=$(gp off)
+            grep -qF "TARGET_USER in /etc/cpu-setup/cpu-setup.conf is e2e130: undoing for tester (uid $uid)" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            test ! -e /run/cpu-setup/game.state
+            test ! -e "$override" || { echo "tester's user.slice override is still there" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight user.slice)" == "$uw" ]] \
+                || { echo "user.slice CPUWeight: not $uw" >&2; exit 1; }
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_128_cpu_game_profile_drift_it_does_not_repair(self) -> None:
+        """The real game profile, on for tester. With machine.slice's records gone from game.state and
+        its overrides removed (then a daemon-reload), the tick does not set it again (off could not undo
+        that) and says so once, a second tick says nothing, 'state' marks it, and 'off' leaves
+        machine.slice at its own value with no override. With game.intended's first line changed to a
+        newer format ("cst-game-intended 2"), the tick says "drift not repaired" once, and a second
+        tick says nothing."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-128-conf.bak ]]; then mv /tmp/e2e-128-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            ov=/run/systemd/system.control/machine.slice.d
+            base=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            # machine.slice's records gone from game.state, its overrides too: 'off' could not undo a
+            # repair, so the tick leaves it and says so once.
+            sed -i '/ machine\.slice /d' "$st"
+            rm -f "$ov"/50-*.conf
+            systemctl daemon-reload
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            first=$(gp tick)
+            grep -qF "drift not repaired: machine.slice CPUWeight: game.state holds no record of it, so 'off' could not undo it" <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "the tick set machine.slice again" >&2; exit 1; fi
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            grep -q "DRIFT: machine.slice CPUWeight is .*, the profile set '10' (not set again: game.state holds no record of it)" <<<"$(gp state)"
+            gp off
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "an override of machine.slice is left" >&2; exit 1; fi
+            touch /run/cpu-setup/manual
+            gp on
+            # A game.intended of a newer format: said once per boot.
+            sed -i '1s/.*/cst-game-intended 2/' /run/cpu-setup/game.intended
+            first=$(gp tick)
+            grep -q 'drift not repaired: /run/cpu-setup/game.intended is format 2' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            gp off
+            test ! -e /run/cpu-setup/drift-warned
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
+        """The real game profile, on for tester: game.state's first record is user@UID.service's MemoryLow
+        (it names the user). With a last line of game.state cut short (no newline,
+        "existed 1"), then a box next to the game (a slice of the user manager's own, made by
+        systemd-run --user): the tick's record of the box removes the cut line first and names it, the
+        box's record is a whole last line, and 'off' undoes the box (its override gone) and leaves
+        machine.slice's IOWeight at its own value, not 1."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e129-box.service 2>/dev/null || true
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-129-conf.bak ]]; then mv /tmp/e2e-129-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-129-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            # The first record names the user 'on' acts for, whatever step it may die at.
+            first=$(head -n 1 "$st")
+            [[ "$first" == "prop sys user@$uid.service MemoryLow "* ]] || { echo "first record: $first" >&2; exit 1; }
+            printf 'prop sys machine.slice IOWeight existed 1' >>"$st"   # cut short
+            n=$(( $(wc -l <"$st") + 1 ))
+            systemd-run --user -M tester@ --quiet --slice=e2e129.slice --unit=e2e129-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e129.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            got=$(gp tick)
+            grep -qF "$st line $n: a record cut short (its change was never made), removed before the next record: prop sys machine.slice IOWeight existed 1" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            last=$(tail -n 1 "$st")
+            [[ "$last" =~ ^prop\ usr\ e2e129\.slice\ [A-Za-z]+\ new\ -$ ]] || { echo "last record: $last" >&2; exit 1; }
+            if grep -qF 'IOWeight existed 1' "$st"; then echo "the cut line is still there" >&2; exit 1; fi
+            override=/run/user/$uid/systemd/user.control/e2e129.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            gp off
+            test ! -e "$override" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]] || { echo "IOWeight: not $io" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e129-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
@@ -4525,7 +5581,7 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77) ----------------------
+    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77, test_122) ------------
     # The unit as the manifest installs it (copied to /etc when the container has none), running this
     # checkout's btrfs-bulk through a drop-in in /run; the settings, journals, boot flag, btrfs-notify
     # and new pending alerts are put back by the cleanup (btrfs-notify is moved aside, never removed).
@@ -4554,12 +5610,16 @@ install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
 [ -d /etc/btrfs-setup ] || touch "$s/made-etc"
 mkdir -p /etc/btrfs-setup
 systemctl daemon-reload
-# boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
+# boot_unit [WANT]: start it as at boot; WANT is "EXIT_STATUS SERVICE_RESULT", by default "1 success"
+# (exit 1, "needs a look", counts as success through SuccessExitStatus). A failed oneshot makes
+# systemctl start fail: allowed only when WANT is not a success.
 boot_unit() {
+    want="${1:-1 success}"
     rm -f "$s/exit"
-    systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
+    systemctl start btrfs-bulk-boot.service || [ "${want#* }" != success ] ||
+        { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
     for _ in $(seq 1 20); do [ -s "$s/exit" ] && break; sleep 0.25; done   # ExecStopPost may lag the job
-    [ "$(cat "$s/exit" 2>/dev/null)" = "1 success" ] ||
+    [ "$(cat "$s/exit" 2>/dev/null)" = "$want" ] ||
         { echo "exit status and result: $(cat "$s/exit" 2>/dev/null)" >&2; return 1; }
 }
 # unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
@@ -4632,15 +5692,17 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
-        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the refusal's alert
-        is kept in /var/lib/cst-alerts/pending in btrfs-notify's format (the unit's journal says so),
-        and cst doctor, as the user, shows it and warns that the installed unit alerts through a
-        missing btrfs-notify; cst-pending-alerts lists it for the next login."""
+        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the unit exits 78
+        and is failed; the refusal's alert is kept in /var/lib/cst-alerts/pending in btrfs-notify's
+        format (the unit's journal says so), and cst doctor, as the user, lists the failed unit, shows
+        the alert and warns that the installed unit alerts through a missing btrfs-notify;
+        cst-pending-alerts lists it for the next login."""
         out = self.bulk_boot(
             r"""
 printf 'BULK_USER=$USER\n' >/etc/btrfs-setup/bulk.conf
 printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
-boot_unit
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
 unit_log_has "alert not delivered (/usr/local/sbin/btrfs-notify is not installed): ~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
 f="$(grep -lxF 'title=~/Bulk: nothing moved at boot' /var/lib/cst-alerts/pending/*.alert)"
 [ "$(head -n 1 "$f")" = "cst-alert 1" ]
@@ -4655,12 +5717,52 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
         doctor = as_tester_bash(self.SYSTEMD_CONTAINER, "/opt/cst-rw/cst doctor", check=False).stdout
         self.assertIn("~/Bulk: nothing moved at boot", doctor)
-        self.assertIn("btrfs-bulk-boot.service", doctor)
+        failed = [line for line in doctor.splitlines() if "system units failed:" in line]
+        self.assertTrue(failed and "btrfs-bulk-boot.service" in failed[0], doctor)
         self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
         listed = as_tester_bash(
             self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"
         ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
+
+    def test_122_bulk_boot_failures_are_failed_units(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) with the boot flag. A BULK_USER that names no
+        account is a bulk.conf the boot step refuses: the unit exits 78 and is failed, its journal
+        names the account and has no traceback (pwd's KeyError went up uncaught before), and the
+        refusal's alert is kept. An error it does not expect (a file where its state folder belongs):
+        the unit exits 70 and is failed (an uncaught exception exited 1, which its SuccessExitStatus=
+        counts as success), its journal holds the traceback, and no alert is kept. The flag stays for
+        the next boot both times."""
+        out = self.bulk_boot(
+            r"""
+printf 'BULK_USER=cste2ebulkgone\n' >/etc/btrfs-setup/bulk.conf
+printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
+if id cste2ebulkgone >/dev/null 2>&1; then echo "the account cste2ebulkgone exists" >&2; exit 1; fi
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk: /etc/btrfs-setup/bulk.conf: BULK_USER=cste2ebulkgone: no such account"
+unit_log_has "~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
+journalctl --sync 2>/dev/null || true
+if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF Traceback; then
+    echo "a traceback for an account that does not exist" >&2; exit 1
+fi
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-refused"
+systemctl reset-failed btrfs-bulk-boot.service
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+rm -rf /var/lib/btrfs-bulk
+printf 'not a folder\n' >/var/lib/btrfs-bulk   # the boot counter cannot be written
+boot_unit "70 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk boot: unexpected error, nothing more is done this boot"
+unit_log_has "Traceback (most recent call last):"
+unit_log_has "FileExistsError"
+[ -e /etc/btrfs-setup/bulk-at-boot ]
+[ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-refused")" ]   # no alert kept
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
 
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
@@ -4670,7 +5772,8 @@ echo E2E-OK
         after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
         names the format once, and the file is byte for byte as it was. The same unit ending with exit
         76 (an inspect record without a key docker-gc relies on) is not restarted either. Control: the
-        same unit ending with exit 1 is restarted."""
+        same unit ending with exit 1 is restarted. And docker-gc record whose docker events (a fake docker)
+        ends with 65 itself exits 1 and is restarted: only docker-gc's own refusals stop the restarts."""
         shipped = docker_exec(
             self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
         ).stdout
@@ -4695,7 +5798,7 @@ echo E2E-OK
             if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
             if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
             if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
-            rm -rf "$s"
+            rm -rf "$s" /usr/local/libexec/e2e-gc-fake
             systemctl daemon-reload
             """,
             check=False,
@@ -4768,6 +5871,56 @@ echo E2E-OK
             systemctl stop {unit} || true
             [ "$state" = failed ] && [ "$n" = 0 ] && [ "$rc" = 76 ] ||
                 {{ echo "exit 76: state $state, NRestarts $n, status $rc" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # docker events itself ending with 65 is not docker-gc's refusal: record exits 1 for it, and the
+        # recorder is restarted. This checkout's docker-gc record with a fake docker first on PATH, under
+        # /usr/local/libexec (PrivateTmp= hides /var/tmp from the unit, and the container's /run is a
+        # noexec tmpfs): ps lists nothing, events exits 65.
+        fake = "/usr/local/libexec/e2e-gc-fake"
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"mkdir -p {fake} && cat >{fake}/docker && chmod 0755 {fake}/docker"],
+            input_text=(
+                "#!/usr/bin/python3 -I\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:1] == ['ps']:\n"
+                "    sys.exit(0)\n"
+                "if args[:1] == ['events']:\n"
+                "    sys.exit(65)\n"
+                "sys.stderr.write('e2e fake docker: unexpected ' + ' '.join(args) + '\\n')\n"
+                "sys.exit(1)\n"
+            ),
+        )
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"cat >{path}"],
+            input_text=derived(
+                f"/usr/bin/env PATH={fake}:/usr/bin:/bin /usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"
+            ),
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            rm -f /var/lib/docker-gc/last-used.json   # the newer state of the first part would give 65 itself
+            systemctl daemon-reload
+            start="$(date +%s)"
+            systemctl start {unit} || true
+            sleep 16   # past RestartSec=10, with the program's own start
+            n="$(show NRestarts)"
+            systemctl stop {unit} || true
+            journalctl --sync 2>/dev/null || true
+            log="$(journalctl -q --no-pager -o cat -u {unit} --since "@$start")"
+            grep -qF 'recording image use from docker events' <<<"$log" ||
+                {{ echo "docker events was not reached:" >&2; echo "$log" >&2; exit 1; }}
+            if grep -qF 'e2e fake docker: unexpected' <<<"$log"; then echo "$log" >&2; exit 1; fi
+            [ "$n" -ge 1 ] || {{ echo "docker events ending with 65 was not restarted (NRestarts=$n)" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout

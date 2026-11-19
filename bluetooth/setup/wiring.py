@@ -25,7 +25,7 @@ from bluetooth.setup.adapters import (
 from bluetooth.setup.application.change import Change, ReRun
 from bluetooth.setup.application.survey import SetupMachine
 from bluetooth.setup.domain import Config, Exit, Options, Paths
-from cst_core.adapters import SystemClockAdapter
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, undo_python_start
 from cst_core.adapters.files import read_text
@@ -128,12 +128,14 @@ def bt_host() -> LocalBluetoothHostAdapter:
 def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeout: int) -> Change:
     """The use cases over this machine."""
     probe = HostExecutionContext(exists=lambda _path: container)
+    runner = SubprocessCommandRunner(probe)
     return Change(
         opts,
         cfg,
         where,
         SetupMachine(
-            runner=SubprocessCommandRunner(probe),
+            runner=runner,
+            systemd=SystemctlAdapter(runner),
             clock=SystemClockAdapter(),
             console=SetupTerminal(),
             files=LocalSetupFiles(),

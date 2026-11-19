@@ -13,6 +13,7 @@ import json
 import re
 from typing import Final, TypedDict, TypeIs
 
+from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
@@ -60,6 +61,8 @@ QUIET_ENV: Final = ("QUIET_CPU_PCT", "QUIET_CPU_PSI", "QUIET_IO_PSI", "QUIET_MEM
 DROPIN_NAME: Final = "10-cpu-setup.conf"
 OLD_DROPIN_NAME: Final = "50-cpu-setup.conf"  # until 2026-11; install and uninstall remove it
 MANAGED_MARK: Final = "Managed by cpu-setup.sh"
+# The install record's component of the toolbox drop-ins (a key of COMPONENTS in cst_core/domain/install.py).
+TOOLBOX_COMPONENT: Final = "cpu:toolbox"
 
 # Runtime-only memory experiments, in the order `experiment list` shows them: name -> (file, value).
 EXPERIMENTS: Final[Mapping[str, tuple[str, str]]] = {
@@ -82,7 +85,7 @@ def route(cmd: str) -> CpuRoute:
 class SetupPaths:
     """Where `cst cpu` reads and writes on the host (tests point them into a folder of their own)."""
 
-    conf: str = "/etc/cpu-setup/cpu-setup.conf"
+    conf: str = CPU_SETTINGS
     unit_dir: str = "/etc/systemd/system"
     daemon_json: str = "/etc/docker/daemon.json"
     # intel_pstate: raise the frequency at once when a task wakes up after an I/O wait (builds with

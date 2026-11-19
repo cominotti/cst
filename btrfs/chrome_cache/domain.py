@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Literal, TypedDict
 import shlex
 
-from cst_core.domain.values import GIB, MIB
+from cst_core.domain.values import GIB, MIB, format_bytes_gib_mib
 from cst_core.domain.text import enum_member
 
 APP = "com.google.Chrome"
@@ -211,7 +211,7 @@ def turn_off(text: str) -> str | None:
 
 
 def size_text(n: int) -> str:
-    return f"{n / GIB:.1f} GiB" if n >= GIB // 10 else f"{n >> 20} MiB"
+    return format_bytes_gib_mib(n, gib_threshold=GIB // 10)
 
 
 def off_message(text: str, new: str) -> str:

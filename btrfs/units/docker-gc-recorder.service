@@ -14,6 +14,7 @@ RestartSec=10
 # 65: a record of a newer docker-gc (after going back to an older CST). Restarting would only read the
 # same file again every 10 s; the unit stays failed instead, which cst doctor lists.
 # 76: a docker inspect record without a key docker-gc relies on: Docker answers the same at every start.
+# Only docker-gc's own refusals: when `docker events` itself ends with 65 or 76, record exits 1 (restarted).
 RestartPreventExitStatus=65 76
 Nice=10
 # Sandbox: it needs only the docker CLI over /run/docker.sock (owned by root, so

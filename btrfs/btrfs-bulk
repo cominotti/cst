@@ -59,6 +59,8 @@ Exit status of apply/boot: 0 everything in place (kept items count as in
 place), 1 something needs a look (unexpected or failed; busy ones may wait
 too), 4 only something inside ~/Bulk needs a look (the in-place NOCOW rewrite: no
 data of it in /home; busy ones may wait too), 3 only busy items wait for the boot, 2 usage error.
+Boot only: 78 bulk.conf cannot tell whose home it is (a bad line, no user), 70 an
+unexpected error (its traceback in the journal); both fail btrfs-bulk-boot.service.
 """
 
 import os.path as _cst_path
@@ -66,9 +68,12 @@ import sys as _cst_sys
 
 # CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
 # it): from a checkout, cst_core and the module packages are in the folder above
-# this file; inside an installed zipapp, sys.path already holds the archive.
+# this file, and Python writes no bytecode there (no __pycache__ in the checkout,
+# even for a program run by its shebang as root); inside an installed zipapp,
+# sys.path already holds the archive.
 _cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
 if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.dont_write_bytecode = True
     _cst_sys.path.insert(0, _cst_root)
 
 import sys

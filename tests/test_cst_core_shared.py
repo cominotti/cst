@@ -78,6 +78,7 @@ from cst_core.domain.text import (
     HELP_WORDS,
     NO_WORDS,
     YES_WORDS,
+    cgroup_v2_path,
     describe_problems,
     enum_member,
     first_line,
@@ -151,6 +152,27 @@ class DomainTest(unittest.TestCase):
                 )
                 with self.subTest(line=line, n=n):
                     self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
+
+    def test_cgroup_v2_path_is_the_rest_of_the_first_0_line(self) -> None:
+        scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"
+        self.assertEqual(cgroup_v2_path(f"0::{scope}\n"), scope)  # cgroup v2 only
+        hybrid = f"12:cpuset:/\n2:cpu,cpuacct:/user.slice\n1:name=systemd:{scope}\n0::{scope}\n"
+        self.assertEqual(cgroup_v2_path(hybrid), scope)  # cgroup v1 lines first, the 0:: line last
+        self.assertEqual(cgroup_v2_path("0::/a.scope\n1:name=systemd:/b::c\n0::/d.scope"), "/a.scope")
+        self.assertEqual(cgroup_v2_path("0::/a.scope  \n"), "/a.scope  ")  # the rest of the line, as it is
+        # A 0:: line with no path is no path (the rustc wrapper's 0::/* case skips it too).
+        self.assertEqual(cgroup_v2_path("0::\n0::/a.scope\n"), "/a.scope")
+        for text in ("0::\n", "0::a.scope\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
+        # Only a newline ends a line: a cgroup name may hold any other separator (not "/" or "\n").
+        for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=sep):
+                self.assertEqual(cgroup_v2_path(f"0::/user.slice/a{sep}b.scope\n"), f"/user.slice/a{sep}b.scope")
+                self.assertIsNone(cgroup_v2_path(f"1:name=systemd:/a{sep}0::/b.scope\n"))
+        for text in ("", "\n", "1:name=systemd:/a.scope\n", " 0::/a.scope", "10::/a.scope", "0:/a.scope"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
 
     def test_first_line(self) -> None:
         self.assertEqual(first_line("\n  \n  error: x \nmore"), "error: x")
@@ -258,6 +280,16 @@ class AdaptersTest(unittest.TestCase):
         self.assertEqual(read_int(self.path("n", b"-7\n")), -7)
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
+
+    def test_read_text_keeps_line_ends_only_when_asked(self) -> None:
+        # By default a "\r" or "\r\n" becomes a newline (universal newlines); keep_line_ends gives
+        # every character as it is, with the same default, limit and lenient decode.
+        p = self.path("ends", b"0::/a\rb.scope\r\nx\xff\n")
+        self.assertEqual(read_text(p), "0::/a\nb.scope\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, keep_line_ends=True), "0::/a\rb.scope\r\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, "", limit=6, keep_line_ends=True), "0::/a\r")
+        self.assertIsNone(read_text(self.path("missing"), keep_line_ends=True))
+        self.assertEqual(read_text(self.path("missing"), "d", keep_line_ends=True), "d")
 
     def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
         # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
@@ -831,6 +863,19 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(len(rec.calls), 1)
         return rec.calls[0]
 
+    def test_raise_cause_raises_what_kept_a_command_from_running_to_its_end(self) -> None:
+        runner = core_runner.SubprocessCommandRunner(_container(inside=False))
+        failed = runner.run([self.py, "-I", "-c", "import sys; sys.exit(3)"])
+        self.assertIs(failed.raise_cause(), failed)  # it ran: any exit status is the caller's
+        missing = runner.run(["cst-test-no-such-command"])
+        with self.assertRaises(FileNotFoundError):
+            missing.raise_cause()
+        timed_out = runner.run([self.py, "-I", "-c", "import time; time.sleep(5)"], timeout=0.2)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            timed_out.raise_cause()
+        plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
+        self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
+
     def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
         # Only the arguments an option sets: a caller's test double that takes
         # a fixed set of arguments keeps working when the caller moves here.
@@ -945,6 +990,7 @@ class CommandRunnerTest(unittest.TestCase):
             wrapper = [
                 self.py,
                 "-I",
+                "-B",
                 "-c",
                 (
                     "import subprocess, sys\n"
@@ -1417,9 +1463,10 @@ class ShellAssignmentsTest(unittest.TestCase):
         conf = os.path.join(self.tmp, "snapshots.conf")
         quoted = self.bash_text(
             f"TMPDIR={shlex.quote(self.tmp)}; SRC={shlex.quote(os.path.join(REPO, 'btrfs'))}; "
+            f". {shlex.quote(os.path.join(REPO, 'cst-install.bash'))}; "
             f'. "$SRC/setup-snapshots.bash"; SNAP_CONF={shlex.quote(conf)}; '
             "snap_conf_set NAS_HOST=nas.local NAS_USER=danilo NAS_PATH=/volume1/backup/sophia NAS_PORT=2204 "
-            'NAS_RESTIC_HOST="it\'s" HOME_DIR=\'/var/home/a b\' && cat "$SNAP_CONF"'
+            'NAS_RESTIC_HOST="it\'s" HOME_DIR=\'/var/home/a b\' >/dev/null && cat "$SNAP_CONF"'
         )
         self.assertIn("HOME_DIR='/var/home/a b'", quoted.splitlines())
         for name, text in (
@@ -1678,6 +1725,21 @@ class ConfirmTest(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "^apply asks for confirmation: run it in a terminal$"):
             self.ask("y", tty=False)
 
+    def test_end_of_input_is_no_after_a_newline(self) -> None:
+        # Ctrl-D at the question: the real input() reads an empty stdin and raises EOFError.
+        out = io.StringIO()
+        with mock.patch("sys.stdin", _EmptyTerminal()), contextlib.redirect_stdout(out):
+            answer = confirm("\nDefine it?")
+        self.assertEqual((answer, out.getvalue()), (False, "\nDefine it? [y/N] \n"))
+
+
+class _EmptyTerminal(io.StringIO):
+    """A terminal on which the user pressed Ctrl-D: isatty() is true and nothing is left to read."""
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
 
 class SettingWordsTest(unittest.TestCase):
     """The yes/no words of a setting and the help words, pinned: every module reads them from here, and a word
@@ -1787,6 +1849,32 @@ class NotifierTest(unittest.TestCase):
                 outcome, _ = self.send(result)
                 self.assertEqual(outcome, "kept")
                 self.assertIn(f"alert not delivered ({why})", self.lines[0][1])
+
+    def test_the_journal_line_names_btrfs_notify_s_last_error_line(self) -> None:
+        # Only "exited 1" reached the journal: why btrfs-notify failed (its stderr) was dropped.
+        # Then its own closing remark was quoted instead of the cause: it always comes last.
+        echo = "<4>btrfs-bulk: Disk: problem: the body\nline 2\n"
+        remark = (
+            "<3>btrfs-notify: could not keep the alert for the next login (/var/lib/cst-alerts/pending); "
+            "it is only in this journal\n"
+        )
+        error = "mktemp: failed to create file via template '/var/lib/cst-alerts/pending/.tmp.XXXXXX': Read-only"
+        usage = "usage: btrfs-notify [-u critical|normal] [-a APP] TITLE BODY | --queue DIR | --prune"
+        long_line = "e" * 300
+        for stderr, why in (
+            (f"{echo}{error}\n{remark}", f"/x/btrfs-notify exited 1: {error}"),
+            (f"{echo}install: a\ninstall: b\n\n{remark}", "/x/btrfs-notify exited 1: install: b"),
+            (f"{echo}{remark}", "/x/btrfs-notify exited 1"),  # its lock never came: no cause printed
+            (f"{usage}\n", f"/x/btrfs-notify exited 1: {usage}"),
+            ("", "/x/btrfs-notify exited 1"),
+            (" \n\n", "/x/btrfs-notify exited 1"),
+            (f"{echo}{long_line}\n{remark}", "/x/btrfs-notify exited 1: " + "e" * 200),
+        ):
+            with self.subTest(stderr=stderr[:40]):
+                self.lines.clear()
+                outcome, _ = self.send(core_ports.CommandResult(1, "", stderr))
+                self.assertEqual(outcome, "kept")
+                self.assertTrue(self.lines[0][1].startswith(f"alert not delivered ({why}): Disk: problem; kept in "))
 
     def test_a_repeat_is_merged_into_the_kept_alert(self) -> None:
         path = self.missing(body="first")
@@ -1902,6 +1990,37 @@ class NotifierTest(unittest.TestCase):
         )
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
+
+    def test_the_journal_line_quotes_the_cause_btrfs_notify_printed(self) -> None:
+        """btrfs-notify itself (no desktop session, an alerts folder it cannot create): its stderr ends
+        with its own remark that the alert is only in the journal; the journal line quotes the cause
+        before it instead, and the alert is kept here."""
+        alert = ("Disk: problem", "the body\nline 2")  # the title and body send() passes
+        alerts = os.path.join(self.tmp, "not-a-folder")
+        with open(alerts, "w"):
+            pass
+        run_user = os.path.join(self.tmp, "run-user")
+        os.mkdir(run_user)
+        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "CST_ALERTS_DIR": alerts, "CST_RUN_USER": run_user}
+        done = subprocess.run(
+            ["bash", os.path.join(REPO, "btrfs", "btrfs-notify"), *("-u", "critical", "-a", "btrfs-bulk"), *alert],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("<3>btrfs-notify: could not keep the alert", done.stderr.splitlines()[-1])
+        outcome, _ = self.send(core_ports.CommandResult(1, "", done.stderr))
+        self.assertEqual(outcome, "kept")
+        [(prio, line)] = self.lines
+        self.assertEqual(prio, 3)
+        self.assertRegex(
+            line,
+            r"^alert not delivered \(/x/btrfs-notify exited 1: install: cannot create directory .*not-a-folder.*: "
+            r"Not a directory\): Disk: problem; kept in ",
+        )
 
 
 class _FailingSocket:

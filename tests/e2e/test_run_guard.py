@@ -26,7 +26,7 @@ class _E2ERunModule(Protocol):
     run_tier2: Callable[..., bool]
     main: Callable[[Sequence[str] | None], int]
     checkout_preflight: Callable[..., str | None]
-    host_lsm_security_opts: Callable[[], list[str]]
+    host_lsm_security_opts: Callable[..., list[str]]
     selinux_type: Callable[[Path], str | None]
     host_selinux: Callable[..., bool]
     run: Callable[..., object]
@@ -151,6 +151,22 @@ class CheckoutPreflightTest(unittest.TestCase):
         self.assertIn("label=disable", self.mod.host_lsm_security_opts())
         self.mod.host_selinux = lambda *a, **k: False
         self.assertNotIn("label=disable", self.mod.host_lsm_security_opts())
+
+    def test_apparmor_unconfined_only_when_the_kernel_has_it_on(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-e2e-apparmor-")))
+        enabled = tmp / "enabled"
+        unconfined = ["--security-opt", "apparmor=unconfined"]
+        self.mod.host_selinux = lambda *a, **k: False
+        enabled.write_text("Y\n")
+        self.assertEqual(self.mod.host_lsm_security_opts(enabled), unconfined)
+        enabled.write_text("N\n")
+        self.assertEqual(self.mod.host_lsm_security_opts(enabled), [])
+        self.assertEqual(self.mod.host_lsm_security_opts(tmp / "missing"), [], "no AppArmor in the kernel")
+        self.assertEqual(self.mod.host_lsm_security_opts(tmp), [], "unreadable (a folder: IsADirectoryError)")
+        # With SELinux too: label=disable first, then apparmor=unconfined.
+        self.mod.host_selinux = lambda *a, **k: True
+        enabled.write_text("Y\n")
+        self.assertEqual(self.mod.host_lsm_security_opts(enabled), ["--security-opt", "label=disable", *unconfined])
 
     def test_tier1_suite_gets_the_security_options(self) -> None:
         # test_01 starts containers of its own: they need label=disable too.

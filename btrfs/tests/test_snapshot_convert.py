@@ -32,6 +32,14 @@ PLAN = "etc/btrfs-setup/convert-plan"
 BOOT_FLAG = "etc/btrfs-setup/convert-at-boot"
 FIRST = "Converting planned directories (busy ones wait for the next boot)..."
 BOOT_FIRST = "btrfs-snapshot: converting the directories the desktop session kept busy..."
+# Names findmnt -r writes escaped (\xHH): a blank, an accented letter, a backslash, a tab.
+ESCAPED_NAMES = ("Work space", "Música", "back\\slash", "Work\tspace")
+
+
+def findmnt_raw(path: str) -> str:
+    """PATH as `findmnt -rn -o TARGET` prints it: every byte that is not printable ASCII, a
+    blank or a backslash as \\xHH (tier 1 test_116 checks the real findmnt)."""
+    return "".join(chr(b) if 0x21 <= b < 0x7F and b != 0x5C else f"\\x{b:02x}" for b in os.fsencode(path))
 
 
 class Base(RuntimeTest):
@@ -373,6 +381,20 @@ class ConvertTest(Base):
         self.assertEqual(read(named), "a file\n")
         self.assertTrue(os.path.islink(link))
 
+    def test_an_old_tree_with_a_mount_below_an_escaped_name_is_kept(self) -> None:
+        # findmnt -r writes the mount point escaped (\xHH). Before, has_mount_below compared that
+        # text with the path, never matched, and rm --one-file-system emptied the old tree, which
+        # does not stop at a bind mount of the same file system.
+        for name in ESCAPED_NAMES:
+            with self.subTest(name=name):
+                old = self.tree(f"{name}.pre-subvol-20261101T000000")
+                self.machine(mounts=["/", findmnt_raw(f"{old}/sub")])
+                self.write(self.state_file("drop-pending"), f"{old}\n")
+                r = self.run_prog("convert")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(read(os.path.join(old, "sub", "inner")), "inner\n")
+                self.assertEqual(read(self.state_file("drop-pending")), f"{old}\n")
+
 
 class ConvertBootTest(Base):
     def test_without_the_flag_nothing_happens(self) -> None:
@@ -601,6 +623,32 @@ class ConvertOneTest(Base):
             self.lines(r.stdout), [log(4, f"convert: {link}: not a directory (a symlink or file), skipped")]
         )
 
+    def test_a_mount_below_an_escaped_name_is_found(self) -> None:
+        # findmnt -r writes the mount point escaped (\xHH). Before, has_mount_below compared that
+        # text with the path and never matched: the folder was converted with a mount below it.
+        for name in ESCAPED_NAMES:
+            with self.subTest(name=name):
+                p = self.tree(name)
+                self.machine(mounts=["/", findmnt_raw(f"{p}/sub")])
+                r = self.run_prog("convert-one", p)
+                self.assertEqual(
+                    (r.returncode, self.lines(r.stdout)),
+                    (1, [log(4, f"convert: {p}: is or contains a mountpoint, skipped")]),
+                )
+                self.assertFalse(self.is_subvol(p))
+                self.assertEqual(self.calls("btrfs"), [])
+
+    def test_a_name_with_a_line_break_is_in_use(self) -> None:
+        # A path with a line break is split across two lines of the open paths (a /proc link, a
+        # bind mount's source), so its use cannot be seen there: it counts as in use, even with
+        # nothing using it, as here. Before, it was converted, also while a container's bind mount
+        # of it was in use (BusyTest.test_a_bind_mount_of_a_name_with_a_line_break_is_busy).
+        p = self.tree("a\nb")
+        r = self.run_prog("convert-one", p)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, log(5, f"convert: {p}: in use, left for later") + "\n")
+        self.assertFalse(self.is_subvol(p))
+
     def test_without_a_path(self) -> None:
         # A usage error (exit 2), told before the lock is taken: it does not wait for another run.
         # Before, bash's own "${2:?}" message and exit 1, after the lock.
@@ -662,6 +710,62 @@ class BusyTest(Base):
         # With --home: also a mount of a folder between the home and the path, not the home itself.
         r = self.run_prog("busy", "--home", self.home + "/", repo, os.path.join(self.home, "Documents"))
         self.assertEqual((r.returncode, self.lines(r.stdout)), (0, [repo]))
+
+    def mounted_elsewhere(self, *roots: str) -> None:
+        """Another mount namespace (pid 300) bind-mounts each root (below the home subvolume, in
+        mountinfo's escaped form) somewhere; the program's own table has the subvolume at HOME_MOUNT."""
+        os.makedirs(self.path("proc/300/ns"), exist_ok=True)
+        if not os.path.lexists(self.path("proc/300/ns/mnt")):
+            os.symlink("mnt:[4026532001]", self.path("proc/300/ns/mnt"))
+        self.write(
+            "proc/300/mountinfo",
+            "".join(f"{50 + i} 40 0:42 {root} /src{i} rw - btrfs x rw\n" for i, root in enumerate(roots)),
+        )
+
+    def test_bind_mounts_of_paths_with_every_escaped_character(self) -> None:
+        # The kernel escapes a blank, a tab, a line break and a backslash as \ooo. Before, only
+        # \040 was decoded: a bind mount of a folder whose name held a tab or a backslash was not
+        # seen, and the folder was converted while a container wrote into it.
+        self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
+        for name, escaped in (
+            ("Work space", "Work\\040space"),
+            ("Work\tspace", "Work\\011space"),
+            ("Work\\space", "Work\\134space"),
+        ):
+            with self.subTest(name=name):
+                self.mounted_elsewhere(f"/home/u/{escaped}/sub")
+                p = os.path.join(self.home, name, "sub")
+                r = self.run_prog("busy", p, os.path.join(self.home, "Work"))
+                self.assertEqual((r.returncode, self.lines(r.stdout), r.stderr), (0, [p], ""))
+
+    def test_an_escaped_backslash_before_040_is_a_backslash_not_a_blank(self) -> None:
+        # One pass, left to right: \134040 is a backslash and the text 040 (the name a\040b), as
+        # bulk's unescape_mountinfo reads it; a sibling "a b" is not busy.
+        self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
+        self.mounted_elsewhere("/home/u/a\\134040b")
+        literal, blank = os.path.join(self.home, "a\\040b"), os.path.join(self.home, "a b")
+        r = self.run_prog("busy", literal, blank)
+        self.assertEqual((r.returncode, self.lines(r.stdout), r.stderr), (0, [literal], ""))
+
+    def test_a_bind_mount_of_a_name_with_a_line_break_is_busy(self) -> None:
+        # The source /home/u/a\012b decodes to two lines of the open paths, neither of which is the
+        # path: a path with a line break counts as busy. Before, it was not listed.
+        self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
+        self.mounted_elsewhere("/home/u/a\\012b")
+        p = os.path.join(self.home, "a\nb")
+        r = self.run_prog("busy", p, os.path.join(self.home, "c"))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"{p}\n", ""))
+
+    def test_a_home_mount_point_with_a_blank_is_found(self) -> None:
+        # The mount point field is escaped too: HOME_MOUNT ".../home mnt" is ".../home\040mnt" there.
+        # Before, it never matched, and no bind mount of the home counted.
+        home_mount = os.path.join(self.tmp, "home mnt")
+        self.conf(HOME_MOUNT=home_mount)
+        self.mountinfo(f"30 1 0:42 /home {home_mount.replace(' ', '\\040')} rw - btrfs /dev/dm-0 rw\n")
+        self.mounted_elsewhere("/home/u/.m2")
+        m2 = os.path.join(home_mount, "u", ".m2")
+        r = self.run_prog("busy", m2)
+        self.assertEqual((r.returncode, self.lines(r.stdout), r.stderr), (0, [m2], ""))
 
     def test_home_without_a_folder(self) -> None:
         # A usage error (exit 2) with the usage line, also for an empty folder (it would match

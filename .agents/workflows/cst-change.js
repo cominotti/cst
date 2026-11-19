@@ -15,8 +15,8 @@ export const meta = {
 }
 //
 // The CST per-change workflow (Workflow tool: name "cst-change", from .claude/workflows/).
-// It ends at "branch ready" (result.ready): integration (one branch, one CI run with tier 2, fast-forward) stays
-// with the orchestrator.
+// It ends at "branch ready" (result.ready): integration (one branch, one CI run with tier 2, a merge commit on
+// the pull request, AGENTS.md "CI is the gate") stays with the orchestrator.
 //
 // args (JSON):
 //   main      absolute path of the main checkout (required: the script cannot run a shell)

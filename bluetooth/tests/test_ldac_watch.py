@@ -10,6 +10,7 @@ Run from the repository root:
 """
 
 from collections.abc import Callable
+import contextlib
 import json
 import os
 import shutil
@@ -18,8 +19,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
-from typing import override
+from typing import Final, override
 import unittest
 from unittest import mock
 
@@ -673,6 +675,73 @@ class StopTest(unittest.TestCase):
         self.assertIn("watching bluez_card.0A_1B_2C_3D_4E_5F", first)
         self.assertEqual((p.returncode, err), (0, ""))
         self.assertEqual((first + out).splitlines()[-1], "<6>stopped")
+
+
+class LocaleTest(unittest.TestCase):
+    """The real program runs `pactl subscribe` and pw-dump with LC_ALL=C whatever the session's
+    locale (pactl translates its event lines, which relevant() reads in English); the rest of the
+    environment is passed on."""
+
+    FAKE: Final = (
+        "#!/bin/bash\n"
+        'd="$(dirname "$0")"\n'
+        'name="$(basename "$0")-$1"\n'
+        'if [[ "$name" == pactl-subscribe ]]; then echo "$$" >"$d/subscribe.pid"; fi\n'
+        'printf \'%s|%s\\n\' "${LC_ALL-unset}" "${LANG-unset}" >"$d/$name.tmp"\n'
+        'mv "$d/$name.tmp" "$d/$name.env"\n'
+        'if [[ "$name" == pactl-subscribe ]]; then exec sleep 20; fi\n'
+        "echo '[]'\n"
+    )
+
+    def environments(self, env: dict[str, str]) -> dict[str, str]:
+        """What the fake pactl subscribe and pw-dump saw (LC_ALL|LANG), the watcher run with env."""
+        fakes = tempfile.mkdtemp(prefix="bt-test-")
+        self.addCleanup(shutil.rmtree, fakes)
+        for name in ("pactl", "pw-dump"):
+            path = os.path.join(fakes, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.FAKE)
+            os.chmod(path, 0o755)
+        self.addCleanup(self.kill_subscribe, fakes)
+        p = subprocess.Popen(
+            [sys.executable, "-I", WATCH, "--device", MAC, "--rate", "48000"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"PATH": f"{fakes}:/usr/bin", **env},
+        )
+        self.addCleanup(p.kill)  # a program that hangs is killed: the test fails, the run goes on
+        wanted = {"subscribe": "pactl-subscribe.env", "pw-dump": "pw-dump-.env"}
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not all(os.path.exists(os.path.join(fakes, f)) for f in wanted.values()):
+            time.sleep(0.05)
+        p.send_signal(signal.SIGTERM)
+        p.communicate(timeout=10)
+        seen: dict[str, str] = {}
+        for what, name in wanted.items():
+            path = os.path.join(fakes, name)
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    seen[what] = f.read().strip()
+        return seen
+
+    @staticmethod
+    def kill_subscribe(fakes: str) -> None:
+        """The fake pactl subscribe the watcher leaves behind when it stops."""
+        with (
+            contextlib.suppress(OSError, ValueError),
+            open(os.path.join(fakes, "subscribe.pid"), encoding="utf-8") as f,
+        ):
+            os.kill(int(f.read()), signal.SIGKILL)
+
+    def test_a_session_locale_does_not_reach_pactl(self) -> None:
+        seen = self.environments({"LC_ALL": "pt_BR.UTF-8", "LANG": "pt_BR.UTF-8"})
+        self.assertEqual(seen, {"subscribe": "C|pt_BR.UTF-8", "pw-dump": "C|pt_BR.UTF-8"})
+
+    def test_without_a_locale_still_c(self) -> None:
+        seen = self.environments({"LANG": "pt_BR.UTF-8"})
+        self.assertEqual(seen, {"subscribe": "C|pt_BR.UTF-8", "pw-dump": "C|pt_BR.UTF-8"})
 
 
 class UnitTest(unittest.TestCase):

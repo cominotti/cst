@@ -8,6 +8,7 @@ bash: to the journal (passed on), nowhere (2>/dev/null) or into its output (2>&1
 """
 
 from collections.abc import Sequence
+import contextlib
 from dataclasses import dataclass, field
 import os
 import stat
@@ -55,7 +56,7 @@ from btrfs.health_check.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.adapters.journal import log
-from cst_core.domain.contracts import NOTIFY_PROGRAM, Urgency
+from cst_core.domain.contracts import NOTIFY_PROGRAM, SNAPSHOTS_CONF, Urgency
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
@@ -299,9 +300,12 @@ def degraded_boot_problems(m: Probe) -> list[str]:
             )
         # Upstream rule semantics the last resort builds on: booted and next boot.
         ups = [m.path("/usr/lib/udev/rules.d/64-btrfs.rules")]
-        nxt = next_root(m)
+        nxt, unknown = next_root(m)
         if nxt:
             ups.append(m.path(f"{nxt}/usr/lib/udev/rules.d/64-btrfs.rules"))
+        else:
+            # A journal warning, not a problem: the booted system's rule is still checked.
+            log(4, f"udev: next deployment unknown ({unknown}); its 64-btrfs.rules was not checked", tag=TAG)
         problems.extend(
             f"udev: {up} changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)"
             for up in ups
@@ -329,24 +333,26 @@ def _glob_names(folder: str) -> list[str]:
         return []
 
 
-def next_root(m: Probe) -> str:
-    """The root of the deployment rpm-ostree lists first (the next boot's): "" when unknown."""
+def next_root(m: Probe) -> tuple[str, str]:
+    """The root of the deployment rpm-ostree lists first (the next boot's) and "", or "" and why it is
+    unknown (one line)."""
 
     def run(argv: list[str]) -> tuple[int, str, str]:
         r = m.run(argv, StderrRoute.DROP)
         return r.returncode, r.stdout, r.stderr
 
     status = query_status(run)
-    if isinstance(status, str) or not status.deployments:
-        return ""
+    if isinstance(status, str):
+        return "", status
+    if not status.deployments:
+        return "", "rpm-ostree lists no deployment"
     first = status.deployments[0]
     serial = first.get("serial")
-    if "osname" not in first or "checksum" not in first or not isinstance(serial, (int, float)):
-        return ""  # the bash's "%d" % ... failed on these: no next root
-    try:
-        return f"/ostree/deploy/{first['osname']}/deploy/{first['checksum']}.{int(serial)}"
-    except OverflowError, ValueError:  # inf, nan
-        return ""
+    # The bash's "%d" % ... failed on the others: no next root.
+    if "osname" in first and "checksum" in first and isinstance(serial, (int, float)):
+        with contextlib.suppress(OverflowError, ValueError):  # inf, nan
+            return f"/ostree/deploy/{first['osname']}/deploy/{first['checksum']}.{int(serial)}", ""
+    return "", "its first deployment has no osname, checksum or whole serial"
 
 
 def marker_problems(m: Probe, marker: str) -> list[str]:
@@ -486,7 +492,7 @@ def snapshot_problems(m: Probe) -> list[str]:
     last_n = bash_int(last)
     if not quiet and last_n is not None and now() - last_n > SNAPSHOT_MAX_AGE and now() - awake > SNAPSHOT_GRACE:
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
-    conf = m.path("/etc/btrfs-setup/snapshots.conf")
+    conf = m.path(SNAPSHOTS_CONF)
     settings = parse_snapshots_conf(m.text(conf) or "").values if os.access(conf, os.R_OK) else {}
     if settings.get("NAS_ENABLED", "0") == "1":
         # The last success, or when the backup was turned on if later (as btrfs-snapshot).

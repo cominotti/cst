@@ -202,13 +202,21 @@ written first: the units of the next one run `btrfs-notify`), `btrfs:core`
 `docker-gc enable`, `btrfs:docker-gc`. `uninstall` removes the files of the
 manifest's components, not a list of its own, and their lines in the install
 record (also of a writeback or reclaim file that was already deleted by hand).
+A reclaim file that CST did not create (no "Managed by btrfs-setup.sh" line)
+is kept, and its line is dropped from the install record, so `cst doctor` no
+longer reports it as changed.
 `docker-gc disable` stops with an error, before it disables anything, when the
 installer cannot list docker-gc's units.
 
 The launcher `~/.local/bin/btrfs-stall-report` and the link
 `~/.local/bin/cst` are created for **the user who ran `sudo`** (the script
 reads this from `sudo`). If you run `install` directly as root (not through
-`sudo`), neither is created.
+`sudo`), neither is created. The launcher is listed in that user's install
+record (`~/.local/state/cst/installed.json`, component
+`btrfs:report-launcher`), so `cst doctor` run as that user reports it
+missing or changed. When the installer cannot write that record (a record of
+a newer CST, a folder the user cannot write), `install` prints a warning,
+leaves the launcher as it is and goes on: the services are still enabled.
 
 At the end, `install` runs the health check once and prints its result, checks
 that the stall monitor is running (it stops with `ERROR:` if not), and prints
@@ -242,6 +250,12 @@ section 8). It alerts about:
 | The degraded-boot rule was made for another filesystem (only with the degraded-boot part) | `btrfs-last-resort: /etc/udev/rules.d/65-btrfs-last-resort.rules is for ... but the root fs is ...; re-run 'cst btrfs degraded-boot'` |
 | A Fedora update changed the udev rule that degraded-boot depends on (only with the degraded-boot part) | `udev: .../64-btrfs.rules changed semantics; review btrfs/btrfs-degraded-boot-setup.sh (CST)` |
 | Hourly snapshots stopped working (only with snapshots set up) | `snapshots: no successful hourly run for over 3 hours` |
+
+When rpm-ostree cannot say which deployment boots next (it fails, its
+output is unreadable, or it lists no complete deployment), the check writes
+`udev: next deployment unknown (REASON); its 64-btrfs.rules was not checked`
+to the journal as a warning (not an alert) and checks only the booted
+system's rule.
 
 **Swap disks too.** Swap has no second copy: if the swap disk fails, the
 programs whose memory was swapped out crash or hang. So the SMART checks also
@@ -318,7 +332,9 @@ SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limi
   it back to 0 after it (`ExecStopPost`, which also runs when the scrub
   fails or is stopped; the kernel forgets the limit at the next mount anyway).
   With no limit there is no drop-in, and `install` removes an old one.
-  `uninstall` removes it too.
+  `uninstall` removes it too. The drop-in is listed in the install record
+  (component `btrfs:core`), so `cst doctor` reports it missing or changed;
+  its removal drops the line, also when the file was deleted by hand.
 - The value is read with the same rules as `cst doctor` reads this file: a
   plain size (digits, then K, M, G or T), as `SCRUB_LIMIT=1G`,
   `SCRUB_LIMIT='1G'` or `SCRUB_LIMIT="1G"`. Any other form, or a value
@@ -460,6 +476,9 @@ kernel shows its own state as files) and in the cgroup tree.
 - Data goes to `/var/log/btrfs-stall-monitor`, one file per day, **8 days** kept.
   Only members of the `wheel` group (the users who are allowed to use `sudo`)
   can read it, because it contains process names and kernel messages.
+  Run by hand with `--log-dir DIR`, the daemon creates a missing DIR with
+  mode 0750 (the unit's `LogsDirectoryMode=`) and its missing parents with
+  0755, as systemd does; the group is the caller's, not the unit's `wheel`.
 - Note on zswap numbers: daemons before version 7 read only the first 4 KiB
   of `/proc/vmstat`, so they recorded `zswpin`, `zswpout` and `zswpwb` as 0.
   The report ignores those counters in old logs: it prints `n/a (daemon < v7)`,
@@ -551,15 +570,27 @@ NAS runs of `btrfs-snapshot`, but not its conversion engine) send their alerts
 through one `cst_core` adapter (the health check runs `btrfs-notify` itself:
 without it, its alert reaches only the journal). When `btrfs-notify` is not installed, does not answer
 within 60 s, or could neither show nor keep the alert, the adapter writes a
-journal line ("alert not delivered (...)") and keeps the alert itself in
+journal line ("alert not delivered (...)"; when `btrfs-notify` ran and failed,
+the reason ends with the last error line of a command it ran, such as
+`install` or `mktemp`, not its own remarks) and keeps the alert itself in
 `/var/lib/cst-alerts/pending/`, in the same format and under the same lock as
 `btrfs-notify`. `cst doctor` then lists it as an alert you have not seen yet,
 and also warns that the installed units alert through a missing `btrfs-notify`
 (fix: `cst btrfs install`). So, for example, `btrfs-bulk-boot`'s refusal of a
 bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
+Kept alerts expire: `btrfs-health-check` runs `btrfs-notify --prune`, and
+`cst-pending-alerts` shows only those of the last `KEEP_DAYS` (7) days. An
+alert kept twice (`btrfs-notify` kept it but answered too late, then the
+adapter kept it too) is merged into the same file under the folder's lock and
+counted once more, never a second file. One accepted edge case: under a C
+locale, a long title with non-ASCII letters can be cut at a different place
+by `btrfs-notify` and by the adapter, and the same alert then gets a second
+pending file.
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
-small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
+small file in `/run/btrfs-stall-monitor` (the folder is made when missing,
+which only a run by hand with `--run-dir` meets: under systemd
+`RuntimeDirectory=` makes it) and starts `btrfs-stall-alert.service`,
 which sends it. It starts that service from a helper thread: starting a program
 waits until the program is read from the disk, which during a stall can take
 minutes, and the sampling must not wait for it. Alerts that come while a start
@@ -870,7 +901,10 @@ It does not ask for confirmation; it starts at once. It stops and removes:
 - the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
   section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed programs in `/usr/local/sbin` and `/usr/local/bin`, and the
-  `~/.local/bin/btrfs-stall-report` launcher;
+  `~/.local/bin/btrfs-stall-report` launcher (only CST's: a file there without
+  its "btrfs-setup.sh" line, or a link that leads nowhere, is kept, and dropped
+  from the install record; when the installer cannot change that user's
+  record, CST's launcher still goes, with a warning, and uninstall goes on);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
 - the writeback file. Then it restarts `tuned` so its own values come back. If
@@ -1206,11 +1240,20 @@ own checks:
   would apply to them). A problem such as a typo (an
   unknown key) stops the install before it writes anything: the files of a
   previous install stay as they are, and the initramfs is **not** changed.
-  Only then it writes each file, atomically.
+  Only then it writes each file, atomically. Each file it writes (the rule,
+  the two units, the record unit, the helper and `initramfs-synced.sha256`)
+  is listed in the install record under the component `btrfs:degraded-boot`,
+  so `cst doctor` reports one that is missing or was changed by hand. The
+  component is marked done only when every step ran: after a failed
+  self-test, or a `files-only` run that wrote a file or adopted one (the
+  first run after an upgrade from a CST without the record), `cst doctor`
+  says its install did not finish. Files of an install from before the record
+  are adopted by the next install, without being written again.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
-  again and the initramfs is **not** changed. The other helper files stay in
+  again (also when the installer cannot drop its record line) and the
+  initramfs is **not** changed. The other helper files stay in
   `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).
@@ -1231,7 +1274,11 @@ on every run; `plan` does not list that.
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.
 
-**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It
+**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It removes
+the files with their install record lines (`removed:   PATH` for each;
+`removed 'PATH'` for a file an older version left, which the record never
+listed). When the installer cannot change the install record (one written by a newer
+CST), it removes the files without it, with a warning, and goes on. It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
 
@@ -1579,7 +1626,8 @@ Because of this:
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
   nothing is removed by a record they do not understand. systemd does not
   restart the recorder for exit 65 (`RestartPreventExitStatus=`; nor for exit
-  76, below; any other failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  76, below; any other failure is restarted after 10 s, also `docker events`
+  ending with 65 or 76 itself, which `record` turns into 1): `docker-gc-recorder.service` stays
   failed, which `cst doctor` lists, and images are held back meanwhile, as
   with any recorder that is not running. Install the docker-gc of that CST
   again (`cst btrfs docker-gc enable` in that checkout), which starts the

@@ -13,24 +13,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from cst_core.ports import CommandResult
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.runner import on_host_argv
+from cst_core.adapters import SystemctlAdapter
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
-from toolchains.domain.auto import TimerFacts, UnitActiveState, own_session_env
+from toolchains.domain.auto import TimerFacts, UnitActiveState, UserManagerVerb, own_session_env
 from toolchains.domain.common import NAME
-from toolchains.adapters.program import RUNNER, in_container
-
-
-def systemctl_cmd(*args: str, program: str | None) -> list[str]:
-    # PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), None for the real
-    # systemctl. No default: every caller says which, so that no test reaches the real user
-    # manager by leaving it out.
-    if program is not None:
-        return [program, "--user", *args]
-    cmd = ["systemctl", "--user", *args]
-    return on_host_argv(cmd, {}) if in_container() else cmd
+from toolchains.adapters.program import RUNNER
 
 
 def systemctl_env() -> dict[str, str]:
@@ -40,10 +31,49 @@ def systemctl_env() -> dict[str, str]:
     return own_session_env(os.environ, uid, owner, own_exists=os.path.isdir(f"/run/user/{uid}"))
 
 
+def user_systemctl(program: str | None) -> SystemctlAdapter:
+    """cst_core's systemctl adapter for the user manager: systemctl --user, on the host from a
+    toolbox, this user's session (systemctl_env, read at each call), one minute at most, stdin
+    inherited. PROGRAM: a test's stub (CST_TOOLCHAINS_SYSTEMCTL, which wiring reads), never on the
+    host; None for the real systemctl. No default: every caller says which, so that no test
+    reaches the real user manager by leaving it out."""
+    return SystemctlAdapter(
+        RUNNER, timeout=MINUTE, user=True, program=program, on_host=True, base_env=systemctl_env(), stdin="inherit"
+    )
+
+
+def _result(manager: SystemctlAdapter, args: Sequence[str]) -> CommandResult:
+    """The adapter's call for one systemctl command line (ARGS without systemctl --user)."""
+    match args:
+        case (UserManagerVerb.IS_ACTIVE, unit):
+            res = manager.is_active(unit)
+        case (UserManagerVerb.IS_ENABLED, unit):
+            res = manager.is_enabled(unit)
+        case (UserManagerVerb.SHOW, "-p", prop, "--value", unit):
+            res = manager.show_value(unit, prop)
+        case (UserManagerVerb.SHOW_ENVIRONMENT,):
+            res = manager.show_environment()
+        case (UserManagerVerb.START, unit):
+            res = manager.start(unit)
+        case (UserManagerVerb.STOP, unit):
+            res = manager.stop(unit)
+        case (UserManagerVerb.ENABLE, "--now", unit):
+            res = manager.enable(unit, now=True)
+        case (UserManagerVerb.DISABLE, "--now", unit):
+            res = manager.disable(unit, now=True)
+        case (UserManagerVerb.CLEAN, flag, unit) if flag.startswith("--what="):
+            res = manager.clean(unit, what=flag.removeprefix("--what="))
+        case (UserManagerVerb.DAEMON_RELOAD,):
+            res = manager.daemon_reload_result()
+        case _:
+            raise ValueError(f"systemctl --user {' '.join(args)}: not a call cst-toolchains makes")
+    return res
+
+
 def systemctl(*args: str, program: str | None, check: bool = False, ok: Sequence[int] = (0,)) -> str:
     """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
     check: Refused when it could not run or exited with a code not in ok."""
-    r = RUNNER.run(systemctl_cmd(*args, program=program), base_env=systemctl_env(), timeout=MINUTE, stdin="inherit")
+    r = _result(user_systemctl(program), args)
     if r.cause is not None:
         if check:
             raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None
@@ -67,28 +97,30 @@ class UserUnits:
         return systemctl(*args, check=check, ok=ok, program=self.program)
 
     def active_state(self, name: str) -> str:
-        return self.systemctl("is-active", name)
+        return self.systemctl(UserManagerVerb.IS_ACTIVE, name)
 
     def timer_facts(self, name: str) -> TimerFacts:
-        enabled = self.systemctl("is-enabled", name)
-        active = self.systemctl("is-active", name)
+        enabled = self.systemctl(UserManagerVerb.IS_ENABLED, name)
+        active = self.systemctl(UserManagerVerb.IS_ACTIVE, name)
         if active != UnitActiveState.ACTIVE:
             return TimerFacts(enabled, active)
-        return TimerFacts(enabled, active, self.systemctl("show", "-p", "NextElapseUSecRealtime", "--value", name))
+        next_elapse = self.systemctl(UserManagerVerb.SHOW, "-p", "NextElapseUSecRealtime", "--value", name)
+        return TimerFacts(enabled, active, next_elapse)
 
     def stop_if_running(self, name: str) -> bool:
         # is-active prints the state; it exits 3 when the unit is not active,
         # and 4 when the manager does not know it (nothing loaded it).
-        if self.before_removal(name, "is-active", ok=(0, 3, 4)) in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
+        state = self.before_removal(name, UserManagerVerb.IS_ACTIVE, ok=(0, 3, 4))
+        if state in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
             return False
-        self.before_removal(name, "stop")
+        self.before_removal(name, UserManagerVerb.STOP)
         return True
 
     def reload(self) -> None:
-        self.systemctl("daemon-reload", check=True)
+        self.systemctl(UserManagerVerb.DAEMON_RELOAD, check=True)
 
     def enable_now(self, name: str) -> None:
-        self.systemctl("enable", "--now", name, check=True)
+        self.systemctl(UserManagerVerb.ENABLE, "--now", name, check=True)
 
     def before_removal(self, name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
         """systemctl --user ARGS NAME for a timer, checked, before auto on/off
@@ -125,14 +157,15 @@ class UserUnits:
         last run: systemd keeps the stamp of a Persistent= timer
         (~/.local/share/systemd/timers/stamp-NAME) after the timer is gone.
         `clean` needs the timer loaded and stopped, so this runs before its file
-        is removed; a failed clean only leaves that empty file behind."""
-        self.before_removal(name, "disable", "--now")
-        self.systemctl("clean", "--what=state", name)
+        is removed; a failed clean leaves that file, which auto on and auto off
+        then remove themselves (AutoTimer.forget_stamp)."""
+        self.before_removal(name, UserManagerVerb.DISABLE, "--now")
+        self.systemctl(UserManagerVerb.CLEAN, "--what=state", name)
 
     def manager_path(self) -> str | None:
         """PATH of the user manager (what the service runs with), or None when
         it cannot be read."""
-        for line in self.systemctl("show-environment").splitlines():
+        for line in self.systemctl(UserManagerVerb.SHOW_ENVIRONMENT).splitlines():
             if line.startswith("PATH="):
                 val = line[len("PATH=") :]
                 # systemd quotes a value with special characters ($'...'): not parsed here.
