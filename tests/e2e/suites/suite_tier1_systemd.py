@@ -1310,6 +1310,8 @@ grep -qF "  later     swap0" <<<"$out" || fail "swap0 row"
 # memory.low reads 0): plan and apply do not read it as the slice's floor.
 ! systemctl -q is-active machine.slice || fail "machine.slice active before apply"
 mkdir /sys/fs/cgroup/machine.slice || fail "cannot plant a cgroup folder for the inactive machine.slice"
+# Without a memory.low there (no memory controller) the step could not tell this folder from none.
+[[ "$(cat /sys/fs/cgroup/machine.slice/memory.low 2>&1)" == 0 ]] || fail "the planted cgroup folder's memory.low is not 0"
 swap_run plan
 [[ $rc == 0 ]] || fail "plan with a stale cgroup folder"
 grep -qF "  -       machine.slice memory.low     slice not active (no VM running)" <<<"$out" || fail "plan, stale cgroup folder"
@@ -1387,7 +1389,7 @@ for want in 42949672960 51539607552; do
     [[ "$out" != *"  DIFF "* ]] || fail "apply of $want: DIFF"
     systemctl -q is-active e2e-swap-vm || fail "apply of $want stopped the stand-in VM"
     [[ "$(systemctl show -P MemoryLow machine.slice)" == "$want" ]] || fail "apply of $want: MemoryLow"
-    [[ ! -e "$low" || "$(cat "$low")" == "$want" ]] || fail "apply of $want: the running slice's memory.low"
+    [[ -e "$low" && "$(cat "$low")" == "$want" ]] || fail "apply of $want: the running slice's memory.low"
 done
 systemctl stop e2e-swap-vm
 rm -rf "$c40"
