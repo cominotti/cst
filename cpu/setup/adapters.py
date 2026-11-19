@@ -18,11 +18,11 @@ import json
 import locale
 import os
 import pwd
-import sys
 from typing import TextIO
 
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
+from cst_core.adapters.terminal import stderr, stdout
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
 from cst_core.domain.values import ROOT_ACCOUNT
@@ -140,10 +140,10 @@ class CpuSetup:
 
     # ---- output and commands --------------------------------------------------------------
     def _o(self) -> TextIO:
-        return sys.stdout if self._out is None else self._out
+        return stdout() if self._out is None else self._out
 
     def _e(self) -> TextIO:
-        return sys.stderr if self._err is None else self._err
+        return stderr() if self._err is None else self._err
 
     def say(self, line: str = "") -> None:
         """A line on stdout."""

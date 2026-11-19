@@ -31,6 +31,7 @@ from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log
+from cst_core.adapters.terminal import stdin
 from cst_core.ports import CommandFault, CommandRunnerPort
 
 
@@ -140,7 +141,7 @@ class LocalBluetoothHostAdapter:
 
     def read_stdin(self) -> str:
         """Read all text from sys.stdin."""
-        return sys.stdin.read()
+        return stdin().read()
 
     def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
         """The restarts still owed, one per line; with save, the file at path holds them (atomically), or is removed.

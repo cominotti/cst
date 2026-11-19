@@ -78,6 +78,9 @@ _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 MAGIC_CEILINGS: Final[dict[str, int]] = {}
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
+    "cst_core/domain/shapes.py:json_object": (
+        "the one generic JSON-object guard; every record type is a TypedDict narrowed from it"
+    ),
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
     ),

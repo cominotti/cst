@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
+from cst_core.domain.shapes import json_object, parse_toml
 from cst_core.domain.text import HELP_WORDS, NO_WORDS, YES_WORDS, enum_member, parse_shell_assignments
 from cst_core.domain.values import (
     DAY,
@@ -221,7 +222,8 @@ def plain(data: Mapping[str, object]) -> dict[str, Json]:
 
 def parses_as(text: str, expect: Mapping[str, object]) -> bool:
     try:
-        return plain(tomllib.loads(text)) == expect
+        data = parse_toml(text)
+        return json_object(data) and plain(data) == expect
     except tomllib.TOMLDecodeError:
         return False
 

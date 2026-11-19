@@ -42,6 +42,31 @@ def read_fields(line: str, n: int) -> list[str]:
     return out + [""] * (n - len(out))
 
 
+def group(m: re.Match[str], n: int | str = 0) -> str:
+    """Group n of the match. ValueError when the group did not take part in it (an optional
+    group or one side of an alternation: use group_or_none there)."""
+    found = m.group(n)
+    if isinstance(found, str):
+        return found
+    raise ValueError(f"group {n!r} of {m.re.pattern!r} did not take part in the match")
+
+
+def group_or_none(m: re.Match[str], n: int | str) -> str | None:
+    """Group n of the match, or None when it did not take part in it."""
+    found = m.group(n)
+    return found if isinstance(found, str) else None
+
+
+def split(pattern: re.Pattern[str] | str, text: str, maxsplit: int = 0) -> list[str]:
+    """re.split(pattern, text, maxsplit). ValueError when an item is None (a group of the
+    pattern that did not take part in a match): every item is a str otherwise."""
+    parts = re.split(pattern, text, maxsplit=maxsplit)
+    out = [p for p in parts if isinstance(p, str)]
+    if len(out) != len(parts):
+        raise ValueError(f"{pattern!r}: a group that did not take part in a match split the text")
+    return out
+
+
 def is_yes(answer: str) -> bool:
     """A [y/N] prompt's answer is yes: it starts with y or s (sim), any case."""
     return answer.strip().lower().startswith(("y", "s"))

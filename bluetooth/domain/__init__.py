@@ -12,7 +12,7 @@ import re
 from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
-from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem
+from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, split
 from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
@@ -63,7 +63,7 @@ def split_lines(text: str) -> tuple[list[str], str, bool]:
     """(lines, newline, final) of TEXT: the lines without the empty string
     after the last newline, and whether TEXT ended with a newline."""
     nl = "\r\n" if "\r\n" in text else "\n"
-    lines = re.split(r"\r?\n", text)
+    lines = split(r"\r?\n", text)
     final = lines[-1] == ""
     if final:
         lines.pop()

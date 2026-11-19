@@ -12,6 +12,7 @@ import contextlib
 from enum import StrEnum
 import hashlib
 import io
+import json
 import os
 import re
 import shlex
@@ -25,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest import mock
 
@@ -48,22 +50,27 @@ from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
 from cst_core.adapters.sd_notify import ServiceNotifier
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters import terminal as core_terminal
 from cst_core.adapters.terminal import confirm
 from cst_core.domain.errors import Refused, Usage
 from doctor.domain import parse_alert_text
 from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import Owner
+from cst_core.domain.shapes import has_shape, json_object, parse_json, parse_toml
 from cst_core.domain.text import (
     describe_problems,
     enum_member,
     first_line,
+    group,
+    group_or_none,
     is_yes,
     parse_shell_assignments,
     parse_snapshots_conf,
     printf_q,
     printf_q_words,
     read_fields,
+    split,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
@@ -1422,6 +1429,89 @@ class ShellAssignmentsTest(unittest.TestCase):
         self.assertEqual([p.line for p in parsed.problems], [1])
         # The same escapes with the closing quote: bash takes up to three octal digits.
         self.assertEqual(parse_snapshots_conf("K=$'\\1111'\n").entries[0].value, "\x491")
+
+
+class ShapesTest(unittest.TestCase):
+    """cst_core.domain.shapes: the one parse of JSON and TOML, and the shape checks on what it gives."""
+
+    def test_parse_json_is_json_loads(self) -> None:
+        for text in ('{"a": [1, 2.5, null, true]}', "[]", '"x"', "3", "NaN", b'{"b": "\xc3\xa9"}'):
+            with self.subTest(text=text):
+                self.assertEqual(repr(parse_json(text)), repr(json.loads(text)))
+        for bad, error in (("{", json.JSONDecodeError), (b"\xff", UnicodeDecodeError), ("[" * 100000, RecursionError)):
+            with self.subTest(bad=bad[:5]), self.assertRaises(error):
+                parse_json(bad)
+
+    def test_parse_toml_is_tomllib(self) -> None:
+        text = 'a = 1\n[b]\nc = "\u00e9"\n'
+        self.assertEqual(parse_toml(text), tomllib.loads(text))
+        self.assertEqual(parse_toml(text.encode()), tomllib.loads(text))
+        with self.assertRaises(tomllib.TOMLDecodeError):
+            parse_toml("a = [")
+        with self.assertRaises(UnicodeDecodeError):  # as tomllib.load of a binary file: not a TOMLDecodeError
+            parse_toml(b'a = "\xff"\n')
+
+    def test_json_object(self) -> None:
+        self.assertTrue(json_object({}))
+        self.assertTrue(json_object({"a": [1]}))
+        for value in ([], "x", None, 3, {1: "a"}, {"a": 1, 2: "b"}):
+            with self.subTest(value=value):
+                self.assertFalse(json_object(value))
+
+    def test_has_shape(self) -> None:
+        required = {"kind": (str,), "n": (int,)}
+        optional = {"flag": (bool,), "link": (str, type(None))}
+        self.assertTrue(has_shape({"kind": "a", "n": 1}, required, optional))
+        self.assertTrue(has_shape({"kind": "a", "n": 1, "flag": False, "link": None, "other": []}, required, optional))
+        for obj in (
+            {"kind": "a"},  # a required key missing
+            {"kind": "a", "n": True},  # a bool is no int
+            {"kind": "a", "n": 1.0},
+            {"kind": "a", "n": 1, "flag": 1},
+            {"kind": "a", "n": 1, "link": 3},
+            [{"kind": "a", "n": 1}],
+            None,
+        ):
+            with self.subTest(obj=obj):
+                self.assertFalse(has_shape(obj, required, optional))
+
+
+class RegexTextTest(unittest.TestCase):
+    """cst_core.domain.text: a regex group and re.split, as str (typeshed types them str | Any)."""
+
+    def test_group(self) -> None:
+        m = re.fullmatch(r"(a)(b?)(?P<c>c)?", "a")
+        assert m is not None
+        self.assertEqual((group(m), group(m, 1), group(m, 2)), ("a", "a", ""))  # an empty match is ""
+        with self.assertRaisesRegex(ValueError, r"^group 'c' of .* did not take part in the match$"):
+            group(m, "c")
+        with self.assertRaisesRegex(ValueError, "^group 3 of"):
+            group(m, 3)
+        self.assertEqual((group_or_none(m, "c"), group_or_none(m, 2), group_or_none(m, 1)), (None, "", "a"))
+        m = re.fullmatch(r"(x)|(y)", "y")
+        assert m is not None
+        self.assertEqual((group_or_none(m, 1), group_or_none(m, 2)), (None, "y"))
+
+    def test_split(self) -> None:
+        self.assertEqual(split(r"\r?\n", "a\r\nb\n"), ["a", "b", ""])
+        self.assertEqual(split(re.compile(r"\s+#"), "x  # y # z", maxsplit=1), ["x", " y # z"])
+        self.assertEqual(split(r"(-)", "a-b"), ["a", "-", "b"])
+        with self.assertRaisesRegex(ValueError, "did not take part"):
+            split(r"(-)|(\+)", "a-b")
+
+
+class StdStreamsTest(unittest.TestCase):
+    """cst_core.adapters.terminal: the standard streams, read when asked for."""
+
+    def test_follows_the_current_streams(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            print("o", file=core_terminal.stdout())
+            print("e", file=core_terminal.stderr())
+        self.assertEqual((out.getvalue(), err.getvalue()), ("o\n", "e\n"))
+        with mock.patch.object(sys, "stdin", io.StringIO("in\n")):
+            self.assertEqual(core_terminal.stdin().read(), "in\n")
+        self.assertIs(core_terminal.stdout(), sys.stdout)
 
 
 class ConfirmTest(unittest.TestCase):

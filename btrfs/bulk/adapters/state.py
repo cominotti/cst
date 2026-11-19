@@ -8,7 +8,6 @@ CounterFile, which wiring.py builds.)
 from __future__ import annotations
 
 from collections.abc import Collection
-from collections.abc import Mapping
 from collections.abc import Sequence
 import contextlib
 import json
@@ -21,6 +20,7 @@ from btrfs.bulk.domain.steam import SteamJournal, SteamPhase, dec
 from cst_core.adapters.files import locale_bytes, read_text, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.shapes import KeyTypes, has_shape
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 
 # The journals of moves not finished yet (read back by any later btrfs-bulk).
@@ -40,7 +40,6 @@ def bulk_user(conf: str) -> str | None:
 # The shape recovery may trust: each key it reads without .get, of its type, and the optional
 # ones of their type when present (journals of older versions lack stamp2, conflict, undo).
 # A journal that fails it is damaged: named, kept, and nothing it names is touched.
-type KeyTypes = Mapping[str, tuple[type, ...]]
 _ITEM_REQUIRED: KeyTypes = {
     "kind": (str,),
     "src": (str,),
@@ -68,27 +67,11 @@ _STEAM_OPTIONAL: KeyTypes = {"stamp2": (int,), "conflict": (bool,), "undo": (boo
 STEAM_PHASES = tuple(SteamPhase)
 
 
-def _fits(obj: object, required: KeyTypes, optional: KeyTypes) -> bool:
-    """obj is a JSON object with every required key and each known key of its type (a bool is
-    no int here, as JSON tells them apart)."""
-    if not isinstance(obj, dict):
-        return False
-    for key, kinds in (*required.items(), *optional.items()):
-        if key not in obj:
-            if key in required:
-                return False
-            continue
-        value = obj[key]
-        if not isinstance(value, kinds) or (isinstance(value, bool) and bool not in kinds):
-            return False
-    return True
-
-
 def is_item_journal(obj: object) -> TypeIs[ItemJournal]:
     """A journal-<id>.json's JSON has the shape btrfs-bulk writes (kind copy or subvol)."""
     return (
         isinstance(obj, dict)
-        and _fits(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL)
+        and has_shape(obj, _ITEM_REQUIRED, _ITEM_OPTIONAL)
         and obj["kind"] in (BulkJournalKind.COPY, BulkJournalKind.SUBVOL)
     )
 
@@ -96,7 +79,7 @@ def is_item_journal(obj: object) -> TypeIs[ItemJournal]:
 def is_steam_journal(obj: object) -> TypeIs[SteamJournal]:
     """A journal-steam-<appid>.json's JSON has the shape btrfs-bulk writes: kind steam, a known
     phase, every part whole, and stamp2 once the copies are made (any phase after prepared)."""
-    if not isinstance(obj, dict) or not _fits(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
+    if not isinstance(obj, dict) or not has_shape(obj, _STEAM_REQUIRED, _STEAM_OPTIONAL):
         return False
     appid, phase, parts = obj["appid"], obj["phase"], obj["parts"]
     return (
@@ -105,7 +88,7 @@ def is_steam_journal(obj: object) -> TypeIs[SteamJournal]:
         and phase in STEAM_PHASES
         and (phase == SteamPhase.PREPARED or "stamp2" in obj)
         and isinstance(parts, list)
-        and all(_fits(p, _PART_REQUIRED, _PART_OPTIONAL) for p in parts)
+        and all(has_shape(p, _PART_REQUIRED, _PART_OPTIONAL) for p in parts)
     )
 
 
