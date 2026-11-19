@@ -56,6 +56,9 @@ from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import Owner
 from cst_core.domain.text import (
+    HELP_WORDS,
+    NO_WORDS,
+    YES_WORDS,
     describe_problems,
     enum_member,
     first_line,
@@ -1462,6 +1465,17 @@ class ConfirmTest(unittest.TestCase):
     def test_no_terminal_refuses_without_asking(self) -> None:
         with self.assertRaisesRegex(Refused, "^apply asks for confirmation: run it in a terminal$"):
             self.ask("y", tty=False)
+
+
+class SettingWordsTest(unittest.TestCase):
+    """The yes/no words of a setting and the help words, pinned: every module reads them from here, and a word
+    taken out would turn a knob or a help request into something else without any other test noticing."""
+
+    def test_the_words(self) -> None:
+        self.assertEqual(YES_WORDS, frozenset({"yes", "true", "on", "1"}))
+        self.assertEqual(NO_WORDS, frozenset({"no", "false", "off", "0"}))
+        self.assertEqual(HELP_WORDS, frozenset({"help", "-h", "--help"}))
+        self.assertEqual(YES_WORDS & NO_WORDS, frozenset())
 
 
 class _NotifyRunner:

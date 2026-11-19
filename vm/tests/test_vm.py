@@ -1703,6 +1703,15 @@ class PackageTest(unittest.TestCase):
             )
             self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
 
+    def test_every_no_word_turns_a_knob_off_and_anything_else_leaves_it_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            for word, on in (("false", False), ("' FALSE '", False), ("Off", False), ("maybe", True), ("TRUE", True)):
+                with self.subTest(word=word):
+                    with open(conf, "w") as f:
+                        f.write(f"VM_NOCOW={word}\n")
+                    self.assertEqual(vm_adapters.knobs(replace(PATHS, vm_conf=conf))["VM_NOCOW"], on)
+
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
         self.assertEqual(parts.uuid, UUID)
