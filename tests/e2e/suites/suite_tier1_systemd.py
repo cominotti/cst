@@ -5520,6 +5520,68 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_153_cpu_game_profile_on_refuses_a_target_user_without_an_account(self) -> None:
+        """With a TARGET_USER that names no account, the real game profile does not switch on: exit 1,
+        its output names the user and holds no "id: ...: no such user" line, no game.state, no
+        MemoryLow drop-in (none for user@.service or user-.slice either), machine.slice's weights as they
+        were, and the by-hand mark there before is removed; 'state' says off and 'off' works. With
+        TARGET_USER='tester' the same steps switch on, and 'off' undoes it."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-153-conf.bak ]]; then mv /tmp/e2e-153-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-153-conf.bak
+            install -d /etc/cpu-setup
+            install -d -m 0755 /run/cpu-setup
+            printf '%s\n' "TARGET_USER='e2e153-nobody'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            if id -u e2e153-nobody >/dev/null 2>&1; then echo "e2e153-nobody has an account" >&2; exit 1; fi
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            cpu=$(systemctl show -P CPUWeight machine.slice)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            rc=0; got=$(gp on 2>&1) || rc=$?
+            [[ $rc == 1 ]] || { echo "on for no account: exit $rc: $got" >&2; exit 1; }
+            grep -qF 'TARGET_USER names no account: e2e153-nobody (in /etc/cpu-setup/cpu-setup.conf)' <<<"$got" \
+                || { echo "on: $got" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$got"; then echo "on printed id's line: $got" >&2; exit 1; fi
+            test ! -e /run/cpu-setup/game.state
+            test ! -e /run/cpu-setup/manual || { echo "the refused on kept the by-hand mark" >&2; exit 1; }
+            if compgen -G '/run/systemd/system/*.d/zz-cst-game.conf' >/dev/null; then
+                echo "a MemoryLow drop-in was written" >&2; exit 1
+            fi
+            test ! -e /run/systemd/system/user@.service.d
+            test ! -e /run/systemd/system/user-.slice.d
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]]
+            grep -q '^game profile: off$' <<<"$(gp state)"
+            gp off
+            # The same steps for an account: switched on, and undone.
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp on
+            test -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            gp off
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;

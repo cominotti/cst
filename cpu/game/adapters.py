@@ -447,7 +447,8 @@ class GameProfile:
         if os.path.exists(p.state):
             self.log(6, "already on")
             return 0
-        if self.problems or not s.target_user:
+        why = None if self.problems else self._target_refusal()
+        if self.problems or why is not None:
             # Not switched on: a by-hand mark ('cst cpu game on' makes it first) would keep a profile a
             # later game switches on from being switched off when that game ends.
             with contextlib.suppress(FileNotFoundError):
@@ -455,8 +456,8 @@ class GameProfile:
         if self.problems:
             self.refuse("not switched on")
             return 1
-        if not s.target_user:
-            self.log(3, f"TARGET_USER not set in {p.conf}")
+        if why is not None:
+            self.log(3, why)
             return 1
         try:
             with open(p.state, "w", encoding="utf-8"):
@@ -507,6 +508,16 @@ class GameProfile:
             _write_line(f, "performance")
         self.log(5, on_text(s))
         return 0
+
+    def _target_refusal(self) -> str | None:
+        """Why 'on' refuses for TARGET_USER: unset, or a name with no account (it would act for user@.service
+        and user-.slice); None for an account. The lookup is quiet: the caller's line names the user."""
+        name, conf = self.s.target_user, self.paths.conf
+        if not name:
+            return f"TARGET_USER not set in {conf}"
+        if not self._lookup_uid(name, say=False):
+            return f"TARGET_USER names no account: {name} (in {conf})"
+        return None
 
     def off(self) -> int:
         """Exact revert: the overrides 'on' created go (then daemon-reload), the ones that existed

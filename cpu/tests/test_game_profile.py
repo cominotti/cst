@@ -1084,6 +1084,39 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.state))
 
 
+class OnTargetUserWithoutAccountTest(GameProfileCase):
+    """'on' with a TARGET_USER that names no account: refused before it changes anything (it would set
+    user@.service and user-.slice, and the user manager of no one)."""
+
+    NOBODY = "cst-test-no-such-user"
+
+    def test_on_refuses_and_changes_nothing(self) -> None:
+        self.write(self.manual, "")  # 'cst cpu game on' makes it, then starts cpu-game.service
+        out, err = io.StringIO(), io.StringIO()
+        p = GameProfile(self.paths, GameSettings(target_user=self.NOBODY), self.systemd, uid_of=user_id, out=out)
+        self.systemd.actions = []
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.on(), 1)
+            self.assertEqual(p.locked("on"), 1)  # what the unit's ExecStart gets
+        line = f"<3>game-profile: TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})\n"
+        self.assertEqual(out.getvalue(), line * 2)
+        self.assertEqual(err.getvalue(), "")  # no "id: ...: no such user" line on top of it
+        self.assertEqual(self.systemd.actions, [])
+        for path in (self.state, self.intended, self.manual):
+            self.assertFalse(os.path.exists(path), path)
+        self.assertFalse(os.path.exists(self.unit_runtime) and os.listdir(self.unit_runtime))
+        # Nothing to undo: 'state' says off, and 'off' works.
+        out, _ = self.run_profile("state")
+        self.assertTrue(out.startswith("game profile: off\n"), out)
+        self.run_profile("off")
+
+    def test_the_same_name_with_an_account_switches_on(self) -> None:
+        # The check reads the lookup, not the name.
+        out, _ = self.run_profile("on", GameSettings(target_user=self.NOBODY))
+        self.assertIn("<5>game-profile: on: ", out)
+        self.assertTrue(os.path.exists(self.state))
+
+
 class SettingsProblemTest(GameProfileCase):
     """A line of cpu-setup.conf that bash would run or expand sets nothing: the profile does not
     switch on, and a tick changes nothing, until it is fixed; off still undoes everything."""

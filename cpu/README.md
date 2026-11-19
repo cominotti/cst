@@ -329,6 +329,14 @@ nothing or names another user now; the watchdog's `tick` acts for that
 user too, without a word every 30 s about a `TARGET_USER` that names no
 account), and `cst cpu game state` shows the line.
 
+A `TARGET_USER` that is not set, or that names no account, does not switch
+the profile on either: `cpu-game.service` fails, its journal says
+`TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf` or `TARGET_USER names
+no account: NAME (in /etc/cpu-setup/cpu-setup.conf)`, nothing is changed, and
+the by-hand mark is dropped, as above. (Before 2026-11, a name with no account
+switched the profile on for no user: it set `user@.service` and
+`user-.slice`, which are nobody's.)
+
 | Key | Meaning | Read by |
 |-----|---------|---------|
 | `TARGET_USER` | Your user. Needed for everything in your session. | `cst cpu` (`cpu/setup`), game profile |
@@ -1411,7 +1419,8 @@ suggestions:
    journalctl -b -u cpu-game.service -u cpu-game-watchdog.service
    ```
    `TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf` means the settings
-   file is broken: fix `TARGET_USER`.
+   file is broken: fix `TARGET_USER`. `TARGET_USER names no account: NAME`
+   means NAME is no user of this machine: set it to yours (`id -un`).
 
 **Does GameMode work inside the Steam Flatpak?** Start the game with
 `gamemoderun %command%`, wait 30 s, and run `game state`. Then look at the log
