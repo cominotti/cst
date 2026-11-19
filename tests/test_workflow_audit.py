@@ -253,9 +253,22 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
 # or a comment (_code_only).
 _TASK_ENV = re.compile(r'(?<![\w"-])"?env"?\s*:')
 _TOOL_VARIABLE = re.compile(r"\b(?:UV|ZIZMOR)_[A-Z0-9_]*")
-# What is not CUE code in a task's text, left to right: a multi-line string, a quoted key (a string
-# right before its ':'), any other string, a // comment.
-_NOT_CODE = re.compile(r'"""[\s\S]*?"""|("(?:[^"\\\n]|\\.)*")(?=[ \t]*:)|"(?:[^"\\\n]|\\.)*"|//[^\n]*')
+# What is not CUE code in a task's text, left to right: a raw multi-line string (three double
+# quotes between # signs, as many on both sides), a multi-line string or bytes (three double or
+# three single quotes), a raw string (a string between # signs, which a lone quote or backslash
+# does not end), any other string, bytes (in single quotes), a // comment.
+_NOT_CODE = re.compile(
+    r'(?P<rawmulti>#+)"""[\s\S]*?"""(?P=rawmulti)'
+    r'|"""[\s\S]*?"""'
+    r"|'''[\s\S]*?'''"
+    r'|(?P<raw>#+)"(?:(?!"(?P=raw))[^\n])*"(?P=raw)'
+    r'|"(?:[^"\\\n]|\\.)*"'
+    r"|'(?:[^'\\\n]|\\.)*'"
+    r"|//[^\n]*"
+)
+# The env key in any quoting ("env", #"env"#), and the ':' after a key.
+_ENV_KEY = re.compile(r'(?P<hashes>#*)"env"(?P=hashes)')
+_KEY_COLON = re.compile(r"[ \t]*:")
 
 
 # Every character but those str.splitlines() breaks a line at.
@@ -264,13 +277,14 @@ _NOT_A_LINE_BREAK = re.compile(r"[^\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 def _code_only(block: str) -> str:
     """block with its strings and comments blanked, newlines kept (its lines stay in step), so an
-    env: in a string value ("echo $env: x") or after a // is not an env key. The quoted key
-    "env" stays."""
+    env: in a string value ("echo $env: x") or after a // is not an env key. A quoted env key
+    ("env": or #"env"#:) becomes "env" padded with spaces to its length."""
 
     def blank(found: re.Match[str]) -> str:
-        if found.group(1) == '"env"':
-            return found.group(0)
-        return _NOT_A_LINE_BREAK.sub(" ", found.group(0))
+        text = found.group(0)
+        if _ENV_KEY.fullmatch(text) and _KEY_COLON.match(block, found.end()):
+            return '"env"'.ljust(len(text))
+        return _NOT_A_LINE_BREAK.sub(" ", text)
 
     return _NOT_CODE.sub(blank, block)
 
@@ -606,6 +620,15 @@ class WorkflowAuditTest(unittest.TestCase):
             ('\t\tdescription: """\n\t\t\tenv: x\n\t\t\t"""\n', []),
             ('\t\t"my env": "x"\n', []),
             ('\t\tdescription: "x" // env: none\n', []),
+            # env: inside CUE's other literals: raw strings, multi-line bytes, bytes.
+            ('\t\tdescription: #"a "env: x"#\n', []),
+            ('\t\tdescription: #"""\n\t\t\t"""env: x\n\t\t\t"""#\n', []),
+            ("\t\tdescription: '''\n\t\t\tenv: x\n\t\t\t'''\n", []),
+            ("\t\tdescription: 'env: x'\n", []),
+            # Still an env key after a raw string or bytes that hold a lone ", and as a raw key.
+            ('\t\tdescription: #"a "b"#, env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\tdescription: \'a "b\', env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\t#"env"#: {vars: {A: "1"}}\n', ["env"]),
             # Still an env key: after a string with a // in it, in CUE's short form, after a string.
             ('\t\tlinks: ["https://x"], env: {vars: {A: "1"}}\n', ["env"]),
             ('\t\truntimes: env: {vars: {A: "1"}}\n', ["env"]),
