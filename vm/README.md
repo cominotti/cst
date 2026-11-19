@@ -608,13 +608,14 @@ the variables of section 10.9).
 Such a **torn** snapshot is no backup, but the retention (section 10.6) would
 count it as one and could forget a good backup in its place. So, before the
 forget, its ID goes into `/var/lib/cst/vm-nas-torn.json` (0644, with the
-VM, the repository, the host, the time and what tore it; a stop while
-`restic forget` waits for the repository's lock leaves it there), and it
-leaves the record once restic forgot it. When the forget fails, the message
+VM, the repository, the host, the time and what tore it; a stop waits until
+the record is written, so a stop then or while `restic forget` waits for
+the repository's lock leaves it there), and it leaves the record once
+restic forgot it. When the forget fails, the message
 adds "recorded in /var/lib/cst/vm-nas-torn.json: the next NAS backup of VM
 forgets it before its retention". If the record cannot be written either,
-the message says so: then forget it by hand before the next backup. The
-next NAS backup of that VM forgets the recorded snapshots first, and only
+the message says so (a stop's message too): then forget it by hand before
+the next backup. The next NAS backup of that VM forgets the recorded snapshots first, and only
 those restic still lists with the tags `cst-vm` and `vm:<name>`, under
 the host recorded with them (restic lists a snapshot only under the host it
 was made on, so a changed `NAS_RESTIC_HOST` or hostname hides none; one
@@ -1043,7 +1044,8 @@ written during the read. The torn record (`TornRecordTest`, its path a
 scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
 is recorded (once, 0644, atomically), one it forgets leaves no entry, a
 record that cannot be written or updated is said, a stop while forget waits
-leaves the entry; the next run forgets a recorded snapshot restic lists with
+or while the record waits for its lock leaves the entry, a stop after a
+record that failed names the snapshot left; the next run forgets a recorded snapshot restic lists with
 both tags by its listed ID (under the host it recorded), skips the retention
 when that forget fails, a listing fails, an ID is ambiguous or its listed
 snapshot lacks a tag, drops one restic no longer lists without forgetting

@@ -45,6 +45,7 @@ from vm.domain.backup import (
     Manifest,
     ResticSnapshot,
     ResticSummary,
+    Stop,
     TornEntry,
     Uncertain,
     is_restic_snapshot,
@@ -634,16 +635,28 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
     """Forget a restic snapshot that is no backup (incomplete, or not consistent). None when restic
     forgot it; else the words that name the snapshot left in the repository and how to forget it.
 
-    The snapshot goes into the torn record first, and out again once restic forgot it: a stop while
-    forget waits for the repository's lock leaves it recorded, and the next NAS backup of the VM
-    forgets it before its retention could count it as a backup."""
+    The snapshot goes into the torn record first, and out again once restic forgot it: a stop waits
+    until the record is written (its lock: TORN_LOCK_TIMEOUT at most), so a stop then or while forget
+    waits for the repository's lock leaves it recorded, and the next NAS backup of the VM forgets it
+    before its retention could count it as a backup. A stop after a record that failed says which
+    snapshot is left, neither recorded nor forgotten."""
     snap, vm = entry["snapshot"], entry["vm"]
+    unrecorded: str | None = None
     try:
-        p.store.record_torn(entry)
-        unrecorded = None
-    except (OSError, Refused) as e:
-        unrecorded = str(e)
-    failed = forget_snapshot(p, nas, snap)
+        with p.signals.held():
+            try:
+                p.store.record_torn(entry)
+            except (OSError, Refused) as e:
+                unrecorded = str(e)
+        failed = forget_snapshot(p, nas, snap)
+    except Stop as e:
+        if unrecorded is None:
+            raise
+        raise Stop(
+            f"{e}; restic snapshot {snap[:8]} is no backup and could NOT be recorded ({unrecorded}) or forgotten: "
+            f"forget it by hand before the next backup of {vm}, whose retention would count it: restic forget "
+            f"{snap}, with the repository's variables of vm/README.md, section \"Restore from the NAS\""
+        ) from None
     if failed is None:
         if unrecorded is None:
             try:

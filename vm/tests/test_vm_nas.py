@@ -153,6 +153,25 @@ else:
 # $FIX/restic.json sets exit codes and the snapshots `restic snapshots` lists.
 RESTIC = r"""#!/usr/bin/python3 -I
 import json, os, sys
+# Another NAS backup holding the torn record's lock (argv: the lock, cst-vm's pid, a file made once it
+# holds it): it sends cst-vm a SIGTERM once cst-vm has the lock file open (waiting for it), then lets go.
+HOLDER = '''
+import fcntl, os, signal, sys, time
+lock, pid, ready = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+fd = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").close()
+def waiting():
+    try:
+        return any(os.readlink(f"/proc/{pid}/fd/{n}") == lock for n in os.listdir(f"/proc/{pid}/fd"))
+    except OSError:
+        return False
+deadline = time.monotonic() + 20
+while not waiting() and time.monotonic() < deadline:
+    time.sleep(0.02)
+os.kill(pid, signal.SIGTERM)
+time.sleep(0.5)
+'''
 fix = os.environ["FIX"]
 args = sys.argv[1:]
 cfg = json.load(open(os.path.join(fix, "restic.json")))
@@ -184,6 +203,16 @@ if cmd == "backup":
         import time; time.sleep(3)
     if "write_index" in cfg:  # [path, text]: a newer cst vm rewrote the index meanwhile
         open(cfg["write_index"][0], "w").write(cfg["write_index"][1])
+    if "hold_torn_lock" in cfg:  # the torn record's lock, held by another backup when the record comes
+        import subprocess, time
+        os.makedirs(os.path.dirname(cfg["hold_torn_lock"]), exist_ok=True)
+        ready = os.path.join(fix, "torn-lock-held")
+        subprocess.Popen([sys.executable, "-I", "-c", HOLDER, cfg["hold_torn_lock"], str(os.getppid()), ready],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        deadline = time.monotonic() + 20
+        while not os.path.exists(ready) and time.monotonic() < deadline:
+            time.sleep(0.02)
     if "break_torn" in cfg:  # the torn record's path becomes a folder: it can no longer be written
         if os.path.isfile(cfg["break_torn"]):
             os.unlink(cfg["break_torn"])
@@ -1289,6 +1318,34 @@ class TornRecordTest(Nas):
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1, "merged back as after any stop")
         self.assertEqual(self.vm_state()["live"]["sda"], self.disk)
         self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP)])
+
+    def test_a_stop_while_the_record_waits_for_its_lock_leaves_the_snapshot_recorded(self) -> None:
+        # Another backup holds the record's lock: the stop waits until the record is written, and
+        # comes before the forget.
+        self.vm(agent="connected")
+        self.restic_cfg(backup_rc=3, hold_torn_lock=os.path.join(self.tmp, "run", "torn-record.lock"))
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("stopped by signal SIGTERM", r.stderr)
+        self.assertEqual(self.vm_state()["live"]["sda"], self.disk, "merged back as after any stop")
+        self.assertEqual(self.torn_list(), [self.torn_entry(SNAP_ID, timestamp=STAMP)])
+        self.assertEqual(self.forgets(), [], "stopped before the forget")
+
+    def test_a_stop_after_a_record_that_failed_names_the_snapshot_left(self) -> None:
+        self.vm(fail=["term-during-forget"], agent="connected")
+        self.restic_cfg(backup_rc=3, break_torn=self.torn)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"stopped by signal SIGTERM; restic snapshot {SNAP_ID[:8]} is no backup and could NOT be recorded ("
+            f"{self.torn} cannot be read as cst vm's record of torn NAS snapshots (",
+            r.stderr,
+        )
+        self.assertIn(
+            f") or forgotten: forget it by hand before the next backup of win, whose retention would count it: "
+            f"restic forget {SNAP_ID}, with the repository's variables of vm/README.md",
+            r.stderr,
+        )
 
     def test_the_next_run_forgets_a_recorded_snapshot_restic_still_lists_with_both_tags(self) -> None:
         for recorded in (TORN_ID, TORN_ID[:8]):  # the full id, or a short one restic named
