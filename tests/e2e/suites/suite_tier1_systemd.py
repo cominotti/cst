@@ -224,8 +224,8 @@ EOF
     cp "$W/bin/modprobe" "$W/bin/zramctl"
     printf '#!/bin/bash\necho "NAME TYPE SIZE USED PRIO"\necho "/dev/e2e-dm0 partition 1024M 2M -2"\n' >"$W/bin/swapon"
     chmod 0755 "$W"/bin/*
-    # Stopped while apply writes the drop-in: a daemon-reload does not put a new MemoryLow into the
-    # memory.low of a slice that is already running (a start does), and apply checks memory.low.
+    # Stopped, so that every swap test starts from the same machine.slice (apply's daemon-reload puts
+    # a new MemoryLow into a running slice's memory.low too: test_88 step 7).
     if [[ "$(cat "$W/orig/slice-state")" == active ]]; then systemctl stop machine.slice; fi
     # A cgroup folder an inactive machine.slice left in the container: removed when it is empty, as
     # systemd removes it at a stop, so every swap test starts from the same tree (test_88 plants one).
@@ -261,6 +261,8 @@ swap_cleanup() {
     if [[ -n "${cpu_dropin_added:-}" ]]; then rm -f "$DROPIN_DIR/10-cpu-setup.conf"; fi
     rmdir "$DROPIN_DIR" 2>/dev/null || true
     rm -f /dev/mapper/swap0 "/dev/disk/by-partuuid/$PU" /dev/e2e-swap0 /dev/e2e-dm0
+    systemctl stop e2e-swap-vm.service 2>/dev/null || true
+    rm -rf /var/tmp/e2e-swap-cst40g
     if [[ "$(cat "$W/orig/slice-state" 2>/dev/null)" == active ]]; then
         systemctl start machine.slice || true
     else
@@ -1269,7 +1271,9 @@ EOF
         scratch partition; apply writes crypttab, fstab, the three files, the zram mask and
         the install record; the real systemd merges swap's 10-swap-memory-low.conf with
         cpu's 10-cpu-setup.conf on machine.slice; status has nothing to do; a second apply
-        changes nothing; a MemoryLow set at run time wins over CST's after a daemon-reload."""
+        changes nothing; with a VM stand-in running, a changed MemoryLow reaches the running
+        slice through apply's daemon-reload; a MemoryLow set at run time wins over CST's after
+        a daemon-reload."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -1363,7 +1367,31 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && "$out" != *"masked:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s2" ]] || fail "second apply changed something"
 
-# 7. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
+# 7. A changed MemoryLow reaches a running slice through apply's daemon-reload alone: a stand-in VM
+# in machine.slice, and a copy of the checkout whose drop-in says 40G (outside $W, which snap hashes).
+systemd-run --quiet --unit=e2e-swap-vm --slice=machine.slice sleep 600
+systemctl -q is-active e2e-swap-vm || fail "the stand-in VM"
+c40=/var/tmp/e2e-swap-cst40g
+rm -rf "$c40"
+cp -a /opt/cst-rw "$c40"
+sed -i 's/^MemoryLow=48G$/MemoryLow=40G/' "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+grep -qx MemoryLow=40G "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+for want in 42949672960 51539607552; do
+    cst_real="$CST"
+    if [[ $want == 42949672960 ]]; then CST="$c40/cst"; fi
+    swap_run apply
+    CST="$cst_real"
+    [[ $rc == 0 && -z "$err" ]] || fail "apply of MemoryLow $want with a VM running"
+    grep -qF "written:   $DROPIN_DIR/10-swap-memory-low.conf" <<<"$out" || fail "apply of $want: drop-in not written"
+    [[ "$out" != *"  DIFF "* ]] || fail "apply of $want: DIFF"
+    systemctl -q is-active e2e-swap-vm || fail "apply of $want stopped the stand-in VM"
+    [[ "$(systemctl show -P MemoryLow machine.slice)" == "$want" ]] || fail "apply of $want: MemoryLow"
+    [[ ! -e "$low" || "$(cat "$low")" == "$want" ]] || fail "apply of $want: the running slice's memory.low"
+done
+systemctl stop e2e-swap-vm
+rm -rf "$c40"
+
+# 8. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 ]]
@@ -1433,7 +1461,8 @@ systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]] || fail "old name: runtime value won"
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
-# set-property wrote 1G into the cgroup itself; a restart of the slice puts the 48G back there.
+# A stop and a start give the steps below a slice started with the 48G (the reload already put it
+# back into memory.low).
 systemctl stop machine.slice
 systemctl start machine.slice
 

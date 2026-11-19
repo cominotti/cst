@@ -157,6 +157,8 @@ left, the floor is ignored, so it cannot starve the host. The cgroup
 filesystem is mounted with `memory_recursiveprot`, so the protection reaches
 the VM's own scope without any libvirt setting. Raise the value in
 `units/machine.slice.d-10-swap-memory-low.conf` if the VM grows.
+`apply`'s `daemon-reload` puts the new value into the running slice's
+`memory.low` (no VM restart), and its verification checks it.
 
 The drop-in is `machine.slice.d/10-swap-memory-low.conf`. The `cpu` module
 has its own drop-in in the same folder, `10-cpu-setup.conf`, with
