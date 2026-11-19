@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 export const meta = {
   name: 'cst-change',
-  description: 'One CST change: design, implement, simplify, findings-only review, one independent fixer (branch ready)',
+  description: 'One CST change: design, implement, simplify, findings-only review (a fast lane for a small change of docs, tests and tooling), one independent fixer, a re-review of its code (branch ready)',
   whenToUse: 'A CST change worth a reviewed branch: a command, a fix, a refactor, a port. Integration and merge stay with the orchestrator.',
   phases: [
     { title: 'Design', detail: 'brief + advisor review' },
@@ -38,9 +38,10 @@ export const meta = {
 // the gates once; no code-review fork, no lens agents. Anything else takes the full review.
 // The fixer (in both lanes) applies every confirmed finding and defers one only when it suspects a redesign would be
 // significantly more appropriate than a local fix, never by size or count; the result's deferred lists each with
-// its reason, and a deferral without one makes the branch not ready. In both lanes the
-// result's needs_review is true when the fixer says its commits change code outside tests or when a path it
-// changed is neither Markdown nor a test: in the fast lane the reviewer is the fixer, so its word is not enough.
+// its reason, and a deferral without one makes the branch not ready.
+// In both lanes the result's needs_review is true when the fixer says its commits change code outside tests or when
+// a path it changed is neither Markdown nor a test: in the fast lane the reviewer is the fixer, so its word is not
+// enough.
 // When it is true and the branch is otherwise ready, the workflow reviews the fixer's commits itself (Re-review:
 // one findings-only agent, by hand, on reviewed_head..head; the orchestrator no longer does): a "high" finding
 // stops the run (ready false, stopped "re-review"), the others go to the result's rereview.low.
