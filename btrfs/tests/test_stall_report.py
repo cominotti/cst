@@ -9,6 +9,8 @@ seconds. The records here are built in memory; nothing reads the real
 /var/log/btrfs-stall-monitor or runs below.
 
 StallWatchWaitTest runs btrfs/btrfs-stall-watch with a stand-in report.
+ReportCommandsTest runs the report's commands (date, docker, podman, below)
+as fakes, with only their folder on PATH.
 
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_stall_report -v
@@ -30,6 +32,7 @@ import time
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Protocol, cast, override
+from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_stall_report.py): the checkout root holds the tests package.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1019,6 +1022,144 @@ class StallWatchWaitTest(unittest.TestCase):
         self.assertIsNone(last)
         self.assertIn(until - end, (1.0, 2.0))  # end + 1 (date may tick between)
         self.assertEqual(len([c for c in calls if "--json" in c]), 21, calls)
+
+
+class ReportCommandsTest(unittest.TestCase):
+    """The three commands the report runs (date -d for --since/--until, docker/podman ps for container names,
+    below dump), with fake programs: PATH is only the folder of fakes (they name /usr/bin/python3 themselves), so
+    no real program can be reached."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-report-cmds-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.mkdir(self.bin)
+        patcher = mock.patch.dict(os.environ, {"PATH": self.bin})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake(self, name: str, out: bytes = b"", err: str = "", rc: int = 0, *, first_line: str = "") -> None:
+        """A program NAME that writes its arguments (JSON) to NAME.argv, prints OUT and ERR and exits RC;
+        FIRST_LINE replaces its #! line (a program that cannot start)."""
+        log = os.path.join(self.tmp, f"{name}.argv")
+        body = (
+            "import json, sys\n"
+            f"with open({log!r}, 'w', encoding='utf-8') as f:\n"
+            "    json.dump(sys.argv[1:], f)\n"
+            f"sys.stdout.buffer.write({out!r})\n"
+            f"sys.stderr.write({err!r})\n"
+            f"sys.exit({rc})\n"
+        )
+        path = os.path.join(self.bin, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write((first_line or "#!/usr/bin/python3 -I") + "\n" + body)
+        os.chmod(path, 0o755)
+
+    def argv(self, name: str) -> list[str] | None:
+        """The arguments the fake NAME got, None when it did not run."""
+        try:
+            with open(os.path.join(self.tmp, f"{name}.argv"), encoding="utf-8") as f:
+                args: object = json.load(f)
+        except FileNotFoundError:
+            return None
+        assert isinstance(args, list)
+        return [str(a) for a in args]
+
+    # ---- date -d -------------------------------------------------------------------------------
+    def test_a_time_in_words_is_read_by_date(self) -> None:
+        self.fake("date", b"1234\n")
+        self.assertEqual(rp_adapters.parse_time(" 10:30 ", 5.0), 1234.0)
+        self.assertEqual(self.argv("date"), ["-d", "10:30", "+%s"])
+
+    def test_a_time_date_refuses_ends_the_report_with_its_words(self) -> None:
+        self.fake("date", err="bad\n", rc=2)
+        with self.assertRaises(SystemExit) as cm:
+            rp_adapters.parse_time("10:30", 5.0)
+        self.assertEqual(cm.exception.code, "cannot parse time: '10:30' (bad)")
+
+    def test_numbers_and_no_time_never_run_date(self) -> None:
+        self.fake("date", b"1\n")
+        self.assertEqual(rp_adapters.parse_time("@5", 0.0), 5.0)
+        self.assertEqual(rp_adapters.parse_time("7", 0.0), 7.0)
+        self.assertEqual(rp_adapters.parse_time(None, 3.0), 3.0)
+        self.assertEqual(rp_adapters.parse_time("", 3.0), 3.0)
+        self.assertIsNone(self.argv("date"))
+
+    def test_without_date_the_error_escapes(self) -> None:
+        with self.assertRaises(FileNotFoundError) as cm:
+            rp_adapters.parse_time("10:30", 5.0)
+        self.assertEqual(cm.exception.filename, "date")
+
+    def test_a_date_that_cannot_start_the_error_escapes(self) -> None:
+        self.fake("date", first_line="not a program")
+        with self.assertRaises(OSError) as cm:
+            rp_adapters.parse_time("10:30", 5.0)
+        self.assertNotIsInstance(cm.exception, FileNotFoundError)
+
+    # ---- docker / podman ps ----------------------------------------------------------------------
+    def test_container_names_of_docker_and_podman(self) -> None:
+        self.fake("docker", b"0123456789abcdef0000\tweb\n\torphan\n\n")
+        self.fake("podman", b"fedcba9876543210\tdb\n", err="warning\n", rc=3)  # a failed run is still read
+        self.assertEqual(rp_adapters.container_names(), {"docker-0123456789ab": "web", "libpod-fedcba987654": "db"})
+        want = ["ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"]
+        self.assertEqual(self.argv("docker"), want)
+        self.assertEqual(self.argv("podman"), want)
+
+    def test_a_tool_that_is_missing_or_cannot_start_is_skipped(self) -> None:
+        self.assertEqual(rp_adapters.container_names(), {})
+        self.fake("docker", first_line="#!/nonexistent/interpreter")  # found by which, its exec fails
+        self.fake("podman", first_line="not a program")
+        self.assertEqual(rp_adapters.container_names(), {})
+        self.fake("podman", b"abc\tdb\n")
+        self.assertEqual(rp_adapters.container_names(), {"libpod-abc": "db"})
+
+    # ---- below dump ----------------------------------------------------------------------------
+    def test_below_rows_become_the_top_list(self) -> None:
+        rows = [
+            {"comm": "dd", "cgroup": "/system.slice/a.service", "io.rbytes_per_sec": 9, "io.wbytes_per_sec": 100},
+            {"comm": "cp", "cgroup": "/user.slice/", "io.wbytes_per_sec": "300.5 B/s"},
+            {"comm": "dd", "cgroup": "/system.slice/a.service", "io.wbytes_per_sec": 50},
+            {"comm": "idle", "cgroup": "/", "io.wbytes_per_sec": 0},
+        ]
+        self.fake("below", json.dumps(rows).encode())
+        items, err = rp_adapters.below_top(100.7, 200.2, "io.wbytes_per_sec", top=3)
+        self.assertIsNone(err)
+        self.assertEqual(
+            items,
+            [
+                {"comm": "cp", "cgroup": "user.slice", "bytes": 1502},
+                {"comm": "dd", "cgroup": "a.service", "bytes": 750},
+            ],
+        )
+        self.assertEqual(
+            self.argv("below"),
+            [
+                *("dump", "process", "-b", "100", "-e", "200", "-O", "json", "--raw", "-f", "timestamp", "pid"),
+                *("comm", "cgroup", "io.rbytes_per_sec", "io.wbytes_per_sec"),
+                *("-s", "io.wbytes_per_sec", "--rsort", "--top", "3"),
+            ],
+        )
+
+    def test_a_failed_below_is_the_error_of_the_section(self) -> None:
+        self.fake("below", b"ignored", err="x\n", rc=1)
+        self.assertEqual(rp_adapters.below_top(1, 2, "io.rbytes_per_sec"), (None, "below dump failed: x"))
+        self.fake("below", b"only stdout\n", rc=1)
+        self.assertEqual(rp_adapters.below_top(1, 2, "io.rbytes_per_sec"), (None, "below dump failed: only stdout"))
+
+    def test_a_missing_below_is_the_error_of_the_section(self) -> None:
+        self.assertEqual(
+            rp_adapters.below_top(1, 2, "io.rbytes_per_sec"),
+            (None, "below dump failed: [Errno 2] No such file or directory: 'below'"),
+        )
+
+    def test_output_that_is_not_utf8_escapes(self) -> None:
+        self.fake("below", b"\xff\xfe[]\n")
+        with self.assertRaises(UnicodeDecodeError):
+            rp_adapters.below_top(1, 2, "io.rbytes_per_sec")
+        self.fake("docker", b"\xff\tweb\n")
+        with self.assertRaises(UnicodeDecodeError):
+            rp_adapters.container_names()
 
 
 if __name__ == "__main__":
