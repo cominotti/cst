@@ -11,7 +11,8 @@ Use: python3 -I -B tests/unit_files.py write STAGE   (from anywhere)
   LDAC watcher's user unit, and the degraded-boot units (the texts
   btrfs/tests/test_degraded_boot.py checks the setup script writes);
 - `generated_dropins()`: the drop-ins programs write, rendered by their
-  own code: btrfs-setup.sh's scrub limit (its shell function run in bash),
+  own code: btrfs-setup.sh's scrub limit (its shell function run in bash,
+  at the path its SCRUB_DROPIN names; its values read as bash reads them),
   cpu-setup's toolbox and session-helper drop-ins, and the game profile's
   MemoryLow drop-ins. A drop-in's UnitText names the unit it extends
   (dropin_of); the manifest's drop-in rows get it too.
@@ -25,9 +26,9 @@ their names with their scope.
 Standard library only.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import os
-import re
 import subprocess
 import sys
 from typing import Final, Literal
@@ -41,7 +42,7 @@ from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, EXPECTED_SERVICE, EX
 from cpu.game import domain as game_domain
 from cpu.setup import domain as cpu_domain
 from cst_core.domain.install import INSTALL_MANIFEST, manifest_by_src, render_template
-from cst_core.domain.text import group
+from cst_core.domain.text import file_lines, parse_shell_assignments
 from toolchains.domain import auto as tcd_auto
 from tests.shell_source import shell_function
 from toolchains.domain import common as tcd_common
@@ -114,43 +115,62 @@ def generated_units() -> list[UnitText]:
     ]
 
 
-def _shell_value(path: str, name: str) -> str:
-    """The value a shell script assigns to NAME on a line of its own (NAME=value, unquoted)."""
-    with open(path, encoding="utf-8") as fh:
-        found = re.search(rf"^{re.escape(name)}=(\S+)$", fh.read(), re.MULTILINE)
-    if found is None:
-        raise AssertionError(f"{name}= not found in {path}")
-    return group(found, 1)
+def _setup_value(text: str, path: str, name: str) -> str:
+    """The value the setup script at PATH (its TEXT) assigns to NAME, read as bash reads it
+    (parse_shell_assignments: quotes, a trailing # comment); it must be assigned there exactly once."""
+    found = [a.value for a in parse_shell_assignments(text).entries if a.key == name]
+    if len(found) != 1:
+        raise AssertionError(f"{path}: {name}= is assigned {len(found)} times as a plain value, not once")
+    return found[0]
+
+
+def _dropin_path(text: str, path: str, values: Mapping[str, str]) -> str:
+    """The value of the script's own SCRUB_DROPIN= line, which names other variables: bash expands it
+    with VALUES in its environment."""
+    lines = [line for line in file_lines(text) if line.startswith("SCRUB_DROPIN=")]
+    if len(lines) != 1:
+        raise AssertionError(f"{path}: SCRUB_DROPIN= is assigned on {len(lines)} lines, not one")
+    done = subprocess.run(
+        ["bash", "-c", f'{lines[0]}\nprintf "%s" "$SCRUB_DROPIN"\n'],
+        capture_output=True,
+        text=True,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", **values},
+        timeout=60,
+    )
+    return done.stdout
 
 
 def scrub_limit_dropin(limit: str, setup: str = BTRFS_SETUP) -> str:
     """btrfs-setup.sh's scrub limit drop-in, as its function scrub_limit_dropin prints it."""
-    script = (
-        f"BTRFS_CONF={_shell_value(setup, 'BTRFS_CONF')}\n"
-        f"{shell_function(setup, 'scrub_limit_dropin')}"
-        f'scrub_limit_dropin "$1"\n'
-    )
+    with open(setup, encoding="utf-8") as fh:
+        text = fh.read()
+    script = f'{shell_function(setup, "scrub_limit_dropin")}scrub_limit_dropin "$1"\n'
     done = subprocess.run(
         ["bash", "-c", script, "scrub_limit_dropin", limit],
         capture_output=True,
         text=True,
         check=True,
         stdin=subprocess.DEVNULL,
-        env={"PATH": "/usr/bin:/bin"},
+        env={"PATH": "/usr/bin:/bin", "BTRFS_CONF": _setup_value(text, setup, "BTRFS_CONF")},
         timeout=60,
     )
     return done.stdout
 
 
 def scrub_dropin(setup: str = BTRFS_SETUP) -> UnitText:
-    """btrfs-setup.sh's scrub limit drop-in, for SCRUB_LIMIT, in the folder of the unit it extends."""
-    return UnitText(
-        "10-cst-limit.conf",
-        scrub_limit_dropin(SCRUB_LIMIT, setup),
-        "system",
-        "btrfs-setup.sh",
-        _shell_value(setup, "SCRUB_SERVICE"),
-    )
+    """btrfs-setup.sh's scrub limit drop-in, for SCRUB_LIMIT, at the path its SCRUB_DROPIN names
+    (the file name, and the unit of its UNIT.d folder under UNIT_DIR)."""
+    with open(setup, encoding="utf-8") as fh:
+        text = fh.read()
+    values = {name: _setup_value(text, setup, name) for name in ("UNIT_DIR", "SCRUB_SERVICE")}
+    dropin = _dropin_path(text, setup, values)
+    prefix = values["UNIT_DIR"] + "/"
+    folder, sep, name = dropin.removeprefix(prefix).partition("/")
+    if not dropin.startswith(prefix) or not sep or "/" in name or not folder.endswith(".d"):
+        raise AssertionError(f"{setup}: SCRUB_DROPIN={dropin} is not UNIT_DIR/UNIT.d/NAME")
+    return UnitText(name, scrub_limit_dropin(SCRUB_LIMIT, setup), "system", "btrfs-setup.sh", folder.removesuffix(".d"))
 
 
 def generated_dropins() -> list[UnitText]:

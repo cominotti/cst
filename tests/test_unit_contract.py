@@ -17,11 +17,21 @@ units for what a parser cannot see.
 """
 
 from collections.abc import Mapping
+import os
+import tempfile
 import unittest
 
 from cst_core.domain.install import ArtifactKind, InstallEntry, Owner, manifest_by_dest
 from cst_core.domain.values import OctalMode
-from tests.unit_files import Scope, UnitText, generated_dropins, generated_units, manifest_units
+from tests.unit_files import (
+    BTRFS_SETUP,
+    Scope,
+    UnitText,
+    generated_dropins,
+    generated_units,
+    manifest_units,
+    scrub_dropin,
+)
 
 ROOTS = ("/usr/local/", "%h/.local/")
 
@@ -181,6 +191,53 @@ class UnitContractTest(unittest.TestCase):
             contract_problems(system, by_dest),
             ["m: s.service: ExecStart=%h/.local/lib/cst/tool: mode 0700 does not let root run it"],
         )
+
+
+class ScrubDropinTest(unittest.TestCase):
+    """unit_files reads btrfs-setup.sh's names of the scrub drop-in as bash reads them."""
+
+    def planted(self, *edits: tuple[str, str]) -> str:
+        """btrfs-setup.sh with each (old, new) line replaced once, in a temporary folder."""
+        with open(BTRFS_SETUP, encoding="utf-8") as f:
+            text = f.read()
+        for old, new in edits:
+            self.assertEqual(text.count(old), 1, old)
+            text = text.replace(old, new)
+        folder = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-scrub-dropin-"))
+        path = os.path.join(folder, "btrfs-setup.sh")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_the_drop_in_name_comes_from_scrub_dropin(self) -> None:
+        dropin = scrub_dropin(self.planted(('.d/10-cst-limit.conf"\n', '.d/20-cst-limit.conf"\n')))
+        self.assertEqual(dropin.label, "btrfs-scrub-weekly.service.d/20-cst-limit.conf")
+        self.assertIn("ExecStartPre=/usr/sbin/btrfs scrub limit -a -l 500M /var\n", dropin.text)
+
+    def test_quoted_values_are_read_as_bash_reads_them(self) -> None:
+        path = self.planted(
+            ("\nSCRUB_SERVICE=btrfs-scrub-weekly.service\n", '\nSCRUB_SERVICE="other-scrub.service"\n'),
+            ("\nBTRFS_CONF=/etc/btrfs-setup/snapshots.conf\n", "\nBTRFS_CONF='/etc/other/snapshots.conf'\n"),
+        )
+        dropin = scrub_dropin(path)
+        self.assertEqual((dropin.name, dropin.dropin_of), ("10-cst-limit.conf", "other-scrub.service"))
+        self.assertIn("from SCRUB_LIMIT in /etc/other/snapshots.conf.\n", dropin.text)
+
+    def test_a_trailing_comment_is_no_part_of_the_value(self) -> None:
+        path = self.planted(
+            ("\nSCRUB_SERVICE=btrfs-scrub-weekly.service\n", "\nSCRUB_SERVICE=btrfs-scrub-weekly.service  # weekly\n")
+        )
+        self.assertEqual(scrub_dropin(path).label, "btrfs-scrub-weekly.service.d/10-cst-limit.conf")
+
+    def test_the_checkouts_script_gives_the_weekly_scrubs_drop_in(self) -> None:
+        dropin = scrub_dropin()
+        self.assertEqual(dropin.label, "btrfs-scrub-weekly.service.d/10-cst-limit.conf")
+        self.assertIn("from SCRUB_LIMIT in /etc/btrfs-setup/snapshots.conf.\n", dropin.text)
+
+    def test_a_name_the_script_no_longer_assigns_is_a_loud_error(self) -> None:
+        path = self.planted(("\nSCRUB_SERVICE=btrfs-scrub-weekly.service\n", "\n"))
+        with self.assertRaisesRegex(AssertionError, "SCRUB_SERVICE"):
+            scrub_dropin(path)
 
 
 if __name__ == "__main__":
