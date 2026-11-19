@@ -231,6 +231,17 @@ def last_run_text(tid: str, s: SavedRun) -> str:
     raise KeyError(tid)
 
 
+def saved_run_text(tid: str, saved: SavedRun | None) -> str:
+    """status's last-prune text of target TID's saved summary: "none recorded" for no summary, or one
+    this version cannot read (keys missing, a value that is no number)."""
+    if not saved:
+        return "none recorded"
+    try:
+        return last_run_text(tid, saved)
+    except KeyError, TypeError:  # an object, but no summary this version writes
+        return "none recorded"
+
+
 def uv_last_run(s: SavedRun) -> str:
     """One line of status from python:uv's saved summary."""
     return (

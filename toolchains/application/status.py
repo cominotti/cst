@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from toolchains.domain.auto import label
 from toolchains.domain.common import ConfigError, tilde
 from toolchains.domain.config import ConfigView
-from toolchains.domain.prune import PLANNED, SPECS, last_run_text
+from toolchains.domain.prune import PLANNED, SPECS, saved_run_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,8 +52,7 @@ class ToolchainsStatus:
             settings = None
             say(f"BAD SETTINGS: {e} (prune and the timer do nothing until it is fixed)")
         for tid, spec in SPECS.items():
-            saved = self.state.read(tid)
-            last = last_run_text(tid, saved) if saved else "none recorded"
+            last = saved_run_text(tid, self.state.read(tid))
             if brief:
                 say(f"{tid}: last prune: {last}")
                 continue

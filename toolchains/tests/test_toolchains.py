@@ -1252,6 +1252,21 @@ class StatusTest(Scratch):
         self.assertIn("rust:build: last prune: none recorded", out)
         self.assertIn("python:uv: last prune: none recorded", out)
 
+    def test_a_summary_without_its_keys_or_numbers_is_none_recorded(self) -> None:
+        # An object that is not a summary this version writes (keys missing, a time that is no
+        # number) is no record either; status --brief stopped with a KeyError or TypeError traceback.
+        self.write(".local/state/cst/toolchains-rust-build.json", '{"busy": 1}')
+        self.write(".local/state/cst/toolchains-python-uv.json", '{"time": "yesterday"}')
+        for args in (("status", "--brief"), ("status",)):
+            with self.subTest(args=args):
+                rc, out = self.run_main(*args)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("last prune: none recorded", out)
+                self.assertNotIn("Traceback", out)
+        rc, out = self.run_main("status", "--brief")
+        self.assertIn("rust:build: last prune: none recorded", out)
+        self.assertIn("python:uv: last prune: none recorded", out)
+
     def test_bad_settings_are_shown(self) -> None:
         self.write(".config/cst/toolchains.conf", "RUST_BUILD_MAX_TOTAL=150\n")
         rc, out = self.run_main("status")
