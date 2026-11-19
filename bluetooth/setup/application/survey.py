@@ -17,6 +17,7 @@ from bluetooth.domain import (
     ISO_UUID,
     LDAC_UNIT,
     MARKER,
+    WholeFileState,
     adapter_path,
     card_state,
     current_values,
@@ -375,7 +376,7 @@ class Survey:
             cmd = ["timeout", str(self.m.bt_timeout), *cmd]
         return self.quiet(cmd, host=True)
 
-    def file_state(self, path: str, rendered: str, *, unit: bool = False) -> OwnedState:
+    def file_state(self, path: str, rendered: str, *, unit: bool = False) -> WholeFileState:
         """bt-helper's state of a file apply writes: a link judged by what it points to; what is
         there but not a readable plain file is a conflict. A file it cannot decode stops the
         run (STATE="$(file_state ...)" under set -e)."""

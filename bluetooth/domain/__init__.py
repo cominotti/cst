@@ -9,7 +9,7 @@ from enum import StrEnum
 import json
 import posixpath
 import re
-from typing import Final, TypedDict
+from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
 from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem
@@ -242,7 +242,14 @@ def effective(text: str) -> list[str]:
     return [line.rstrip() for line in effective_lines(text)]
 
 
-def wp_state(existing: str | None, rendered: str) -> OwnedState:
+# The states of a whole file CST writes (wp_state, unit_state): the five OwnedState words WpState
+# and LeState copy, so WpState(state) and LeState(state) always name a member.
+type WholeFileState = Literal[
+    OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE, OwnedState.MISSING, OwnedState.CONFLICT
+]
+
+
+def wp_state(existing: str | None, rendered: str) -> WholeFileState:
     """ok (equal), adopt (only comments differ: apply renews them, no
     restart), change (ours or the old script's, settings differ), conflict
     (a file nobody of ours wrote, with other settings: apply refuses),
@@ -287,7 +294,7 @@ WantedBy=default.target
 """
 
 
-def unit_state(existing: str | None, rendered: str) -> OwnedState:
+def unit_state(existing: str | None, rendered: str) -> WholeFileState:
     """ok, change (ours, differs), conflict (not ours), missing."""
     if existing is None:
         return OwnedState.MISSING
