@@ -27,7 +27,7 @@ from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entri
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
-from cpu.game.adapters import holds, read_stripped
+from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import GAME_DROPIN, cpuset_in
 from cpu.setup.domain import (
     MANAGED_MARK,

@@ -22,9 +22,12 @@ hooks, or by `cst cpu game on|off`), and from cpu-game-watchdog.timer.
   tick   watchdog (every 30 s): 'off' if no GameMode client is left (unless
          switched on by hand); 'on' if a client runs and the profile is off
          (fallback if the GameMode hook could not start the unit), unless
-         switched off by hand during that game; new containers get pinned,
+         switched off by hand during that game or 'on' would refuse (a
+         settings line that sets nothing, a TARGET_USER that is unset or
+         names no account: said once per boot); new containers get pinned,
          new Steam scopes (the game itself) get the memory protection, and
-         new boxes of the user manager next to the game get idle-class;
+         new boxes of the user manager next to the game get idle-class
+         (not for a user with no account: said once per boot);
          a setting that something undid meanwhile (a daemon-reload, or
          uresourced resetting MemoryLow) is set again and logged, unless
          game.state holds no record of it ('off' could not undo that).
@@ -36,7 +39,7 @@ not permanent within a boot either: every daemon-reload re-reads the
 drop-ins, and a drop-in that sorts after it, or a same-named file in
 /etc/systemd/system.control (uresourced's 50-MemoryLow.conf), wins again.
 For the MemoryLow chain 'on' therefore also writes a drop-in named
-zz-cst-game.conf, which sorts after every other one (see write_game_dropins in cpu/game/adapters.py).
+zz-cst-game.conf, which sorts after every other one (see write_game_dropins in cpu/game/adapters/profile.py).
 
 For other projects: /run/cpu-setup/game.state exists exactly while the
 profile is on. Key on its existence only; its contents may change.

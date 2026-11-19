@@ -5655,6 +5655,170 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_153_cpu_game_profile_on_refuses_a_target_user_without_an_account(self) -> None:
+        """With a TARGET_USER that names no account, the real game profile does not switch on: exit 1,
+        its output names the user and holds no "id: ...: no such user" line, no game.state, no
+        MemoryLow drop-in (none for user@.service or user-.slice either), machine.slice's weights as they
+        were, and the by-hand mark there before is removed; 'state' says off and 'off' works. The
+        watchdog's tick, run as a unit with a GameMode client running (a process that maps a file named
+        libgamemode), does not start cpu-game.service (a stub that records its starts) for that name: its
+        unit ends in success, the user is named once, a second tick says nothing. With
+        TARGET_USER='tester' the tick starts the stub, and 'on' and 'off' work."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-153-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-153-client.pid /tmp/e2e-153-ready /tmp/e2e-153-starts /tmp/e2e-153-libgamemode.so
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-153-conf.bak ]]; then mv /tmp/e2e-153-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-153-conf.bak
+            install -d /etc/cpu-setup
+            install -d -m 0755 /run/cpu-setup
+            printf '%s\n' "TARGET_USER='e2e153-nobody'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            if id -u e2e153-nobody >/dev/null 2>&1; then echo "e2e153-nobody has an account" >&2; exit 1; fi
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            cpu=$(systemctl show -P CPUWeight machine.slice)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            rc=0; got=$(gp on 2>&1) || rc=$?
+            [[ $rc == 1 ]] || { echo "on for no account: exit $rc: $got" >&2; exit 1; }
+            grep -qF 'TARGET_USER names no account: e2e153-nobody (in /etc/cpu-setup/cpu-setup.conf)' <<<"$got" \
+                || { echo "on: $got" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$got"; then echo "on printed id's line: $got" >&2; exit 1; fi
+            test ! -e /run/cpu-setup/game.state
+            test ! -e /run/cpu-setup/manual || { echo "the refused on kept the by-hand mark" >&2; exit 1; }
+            if compgen -G '/run/systemd/system/*.d/zz-cst-game.conf' >/dev/null; then
+                echo "a MemoryLow drop-in was written" >&2; exit 1
+            fi
+            test ! -e /run/systemd/system/user@.service.d
+            test ! -e /run/systemd/system/user-.slice.d
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]]
+            grep -q '^game profile: off$' <<<"$(gp state)"
+            gp off
+            # The watchdog, a game running, the profile off: cpu-game.service is not started.
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-153-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-153-libgamemode.so /tmp/e2e-153-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-153-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-153-client.pid)/maps"
+            tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-153-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick 2>&1; }
+            first=$(tick 1)   # exit 0: the unit does not fail
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER names no account: e2e153-nobody' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$first"; then echo "first tick printed id's line: $first" >&2; exit 1; fi
+            second=$(tick 2)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            sleep 1
+            test ! -e /tmp/e2e-153-starts
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            test ! -e /run/cpu-setup/game.state
+            # The same steps for an account: the tick starts the unit, and on and off work.
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            third=$(tick 3)
+            grep -q 'switching on' <<<"$third" || { echo "third tick: $third" >&2; exit 1; }
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-starts ]] && break; sleep 0.1; done
+            test -e /tmp/e2e-153-starts
+            test ! -e /run/cpu-setup/settings-warned
+            kill "$(cat /tmp/e2e-153-client.pid)"
+            systemctl stop cpu-game.service
+            rm -f "$stub"
+            systemctl daemon-reload
+            gp on
+            test -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            gp off
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_154_cpu_game_profile_tick_sets_a_box_whose_record_was_cut_short(self) -> None:
+        """The real game profile, on for tester, then a box next to the game (a slice of the user
+        manager's own, made by systemd-run --user) whose record is the last line of game.state, cut
+        short (no newline: 'on' died while it wrote it, before it set the box). The tick sets the box
+        (CPUWeight idle in the real user manager, its override written): the cut line is no record of a
+        box handled. It removes the cut line first and names it, the record is then a whole line, a
+        second tick adds nothing, and 'off' gives the box its own CPUWeight back."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e154-box.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-154-conf.bak ]]; then mv /tmp/e2e-154-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-154-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            touch /run/cpu-setup/manual
+            gp on
+            systemd-run --user -M tester@ --quiet --slice=e2e154.slice --unit=e2e154-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e154.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            own=$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)
+            [[ "$own" != idle ]]
+            rec='prop usr e2e154.slice CPUWeight new -'
+            printf '%s' "$rec" >>"$st"   # cut short: no newline
+            n=$(( $(wc -l <"$st") + 1 ))
+            got=$(gp tick)
+            grep -qF "$st line $n: a record cut short (its change was never made), removed before the next record: $rec" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)" == idle ]] \
+                || { echo "the tick did not set the box: $got" >&2; cat "$st" >&2; exit 1; }
+            override=/run/user/$uid/systemd/user.control/e2e154.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            [[ "$(grep -cxF "$rec" "$st")" == 1 ]] || { echo "the record is not one whole line" >&2; cat "$st" >&2; exit 1; }
+            [[ -z "$(tail -c 1 "$st")" ]] || { echo "game.state does not end in a newline" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            gp tick >/dev/null
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a second tick added a record" >&2; cat "$st" >&2; exit 1; }
+            gp off
+            test ! -e "$override" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)" == "$own" ]] \
+                || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e154-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;

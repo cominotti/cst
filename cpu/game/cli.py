@@ -11,7 +11,8 @@ import sys
 from cst_core.adapters.dispatch import default_ctrl_c
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals
-from cpu.game.adapters import collate_as_bash, load_profile
+from cpu.game.adapters.host import collate_as_bash
+from cpu.game.adapters.profile import load_profile
 from cpu.game.domain import USAGE, GamePaths
 
 
