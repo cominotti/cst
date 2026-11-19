@@ -772,6 +772,58 @@ class BtrfsTest(Scratch):
         out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
         self.assertEqual(len(self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")), 1, out)
 
+    def test_the_scrub_rows_warning_says_what_the_settings_row_said(self) -> None:
+        # The settings row left the line to the scrub row, whose warning named only the install: that
+        # cst vm's NAS backup (and the other commands that read the file) refuses too was lost.
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 3: SCRUB_LIMIT=$X")
+        self.assertEqual(len(named), 1, out)
+        for words in (
+            "`cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
+            (
+                "CST's Python programs take nothing from the line (btrfs-snapshot ignores it too, with a "
+                "warning in its journal), and the cst commands that change the machine with these settings "
+                "refuse to run until it is fixed"
+            ),
+        ):
+            self.assertIn(words, named[0])
+
+    def test_a_scrub_limit_line_only_bash_refuses_names_only_the_install(self) -> None:
+        # Text mode takes the CR as the line end: CST's Python programs read the value.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")
+        self.assertEqual(len(named), 1, out)
+        self.assertNotIn("CST's Python programs", named[0])
+
+    def assert_one_scrub_limit_warning(self, conf: str, line: str) -> None:
+        """One WARN names the bad SCRUB_LIMIT line of conf, at bash's line number, with both effects."""
+        out = self.scrub(conf=conf, dropin="1G")
+        named = [ln for ln in out.splitlines() if ln.lstrip().startswith("WARN") and "SCRUB_LIMIT=$X" in ln]
+        self.assertEqual(len(named), 1, out)
+        self.assertIn(f"snapshots.conf {line}: SCRUB_LIMIT=$X", named[0])
+        self.assertIn("`cst btrfs install` refuses to run", named[0])
+        self.assertIn("CST's Python programs take nothing from the line", named[0])
+
+    # The two rows read the line ends differently (bash keeps a CR in the line, text mode ends the line
+    # there), so the same line had two warnings: with other reasons, or other line numbers.
+    def test_a_bad_scrub_limit_line_ending_in_crlf_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("SCRUB_LIMIT=$X\r\n", "line 1")
+
+    def test_a_bad_scrub_limit_line_after_a_crlf_line_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("A=1\r\nSCRUB_LIMIT=$X\r\n", "line 2")
+
+    def test_a_bad_scrub_limit_line_after_a_lone_cr_gets_one_warning(self) -> None:
+        self.assert_one_scrub_limit_warning("A=1\rB=2\nSCRUB_LIMIT=$X\n", "line 2")
+
+    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_still_warned(self) -> None:
+        # bash reads one line, text mode two: A=$Y is a line of its own for CST's Python programs.
+        out = self.scrub(conf="SCRUB_LIMIT=$X\rA=$Y\n", dropin="1G")
+        scrub = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=$X")
+        self.assertEqual(len(scrub), 1, out)
+        other = self.scrub_warnings(out, "line 2: A=$Y")
+        self.assertEqual(len(other), 1, out)
+        self.assertIn("CST's Python programs take nothing from the line", other[0])
+
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
         self.assertIn(

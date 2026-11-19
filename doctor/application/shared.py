@@ -166,11 +166,16 @@ def settings_file_warnings(
     for p in parsed.problems if parsed else ():
         if p in skip:
             continue
-        yield Result(
-            WARN,
-            f"{path} {p}. CST's Python programs take nothing from the line{bash}, and the cst commands "
-            "that change the machine with these settings refuse to run until it is fixed",
-        )
+        yield Result(WARN, f"{path} {p}. {ignored_line_text(bash)}")
+
+
+def ignored_line_text(note: str) -> str:
+    """What a problem line of a settings file means for CST (settings_file_warnings); note goes after
+    "take nothing from the line"."""
+    return (
+        f"CST's Python programs take nothing from the line{note}, and the cst commands that change the "
+        "machine with these settings refuse to run until it is fixed"
+    )
 
 
 def refresh(host: DoctorHostPort, component: str) -> str:
