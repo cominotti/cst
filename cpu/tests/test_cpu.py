@@ -726,6 +726,47 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
 
+class FindGameTest(unittest.TestCase):
+    """find_game with a game name: the first pid `pgrep -xo NAME` prints (a fake pgrep on PATH)."""
+
+    def find(self, body: str | None) -> tuple[int | None, list[str]]:
+        """find_game("dota2") with a pgrep that runs body (None: no pgrep on PATH); its result and pgrep's argv."""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = os.path.join(tmp, "args")
+            if body is not None:
+                fake = os.path.join(tmp, "pgrep")
+                with open(fake, "w") as f:
+                    f.write(
+                        "#!/usr/bin/python3 -I\n"
+                        "import sys\n"
+                        f"with open({args!r}, 'w') as f:\n"
+                        "    f.write(' '.join(sys.argv[1:]))\n"
+                        f"{body}\n"
+                    )
+                os.chmod(fake, 0o755)
+            with unittest.mock.patch.dict(os.environ, {"PATH": tmp}):
+                pid = cpu_adapters.find_game("dota2")
+            argv: list[str] = []
+            if os.path.exists(args):
+                with open(args) as f:
+                    argv = f.read().split()
+        return pid, argv
+
+    def test_the_oldest_pid_of_the_name(self) -> None:
+        self.assertEqual(self.find("print('123'); print('456')"), (123, ["-xo", "dota2"]))
+
+    def test_no_such_process(self) -> None:
+        self.assertEqual(self.find("sys.exit(1)"), (None, ["-xo", "dota2"]))
+
+    def test_a_first_word_that_is_no_pid_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.find("print('abc')")
+
+    def test_no_pgrep(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.find(None)
+
+
 class VmPinCliTest(unittest.TestCase):
     """cpu-vm-pin's command line (cpu.cli.vm_pin) with a fake virsh and settings."""
 
