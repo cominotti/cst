@@ -1724,6 +1724,17 @@ class _RecordingSocket:
         self.closes += 1
 
 
+class _RecordingSockets:
+    """An open_socket for ServiceNotifier: each call makes a _RecordingSocket, kept in made."""
+
+    def __init__(self) -> None:
+        self.made: list[_RecordingSocket] = []
+
+    def __call__(self) -> _RecordingSocket:
+        self.made.append(_RecordingSocket())
+        return self.made[-1]
+
+
 class ServiceNotifierTest(unittest.TestCase):
     """cst_core.adapters.sd_notify: sd_notify(3) datagrams to systemd's NOTIFY_SOCKET, and nothing without it."""
 
@@ -1837,12 +1848,8 @@ class ServiceNotifierTest(unittest.TestCase):
         self.assertTrue(warning.startswith("<4>cannot notify systemd (WATCHDOG): [Errno 11]"), warning)
 
     def test_close_closes_the_socket_once(self) -> None:
-        made: list[_RecordingSocket] = []
-
-        def recording() -> _RecordingSocket:
-            made.append(_RecordingSocket())
-            return made[-1]
-
+        recording = _RecordingSockets()
+        made = recording.made
         notifier = ServiceNotifier("/run/systemd/notify", open_socket=recording)
         self.assertTrue(notifier.ready())
         notifier.close()
@@ -1864,12 +1871,8 @@ class ServiceNotifierTest(unittest.TestCase):
             self.assertFalse(notifier.ready())
 
     def test_a_with_block_closes_the_socket_at_its_end_and_on_an_exception(self) -> None:
-        made: list[_RecordingSocket] = []
-
-        def recording() -> _RecordingSocket:
-            made.append(_RecordingSocket())
-            return made[-1]
-
+        recording = _RecordingSockets()
+        made = recording.made
         with ServiceNotifier("/run/systemd/notify", open_socket=recording) as notifier:
             self.assertTrue(notifier.ready())
             self.assertEqual(made[0].closes, 0)
