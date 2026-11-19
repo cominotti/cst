@@ -12,11 +12,14 @@ from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.domain.install import GeneratedKind, Owner, manifest_by_src
+from cst_core.domain.values import MINUTE
 from vm.adapters import TIMER_COMPONENT
 from vm.domain import (
     SERVICE,
+    STOP_MARGIN,
     TIMER,
     UNIT_MARKER,
+    VIRSH_COMMIT_MARGIN,
     TimerStep,
     TimerStepKind,
     VmPaths,
@@ -45,7 +48,8 @@ def stop_timeout(s: VmSettings) -> str:
     """A stop may arrive while the snapshot call is held (snapshot_timeout +
     snapshot_settle), then the merge runs (commit_timeout, plus virsh's own
     300 s), then the checks and the alert: 30 minutes of margin."""
-    return f"{(s.snapshot_timeout + s.snapshot_settle + s.commit_timeout + 300 + 1800 + 59) // 60}min"
+    stop = s.snapshot_timeout + s.snapshot_settle + s.commit_timeout + VIRSH_COMMIT_MARGIN + STOP_MARGIN
+    return f"{(stop + MINUTE - 1) // MINUTE}min"
 
 
 def timer_files(s: VmSettings, entry_file: str) -> dict[str, tuple[bytes, int]]:

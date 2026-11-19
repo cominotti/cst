@@ -11,17 +11,21 @@ import re
 
 from cst_core.domain.errors import ExitStatus, Refused, ResticExit
 from cst_core.domain.text import first_line
-from cst_core.domain.values import HOUR, format_bytes_gib_mib
+from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state
 from vm.application.backup import check_backup_start, check_shut_off, backup_time
 from vm.domain import (
     KEEP_TAG,
     LIVE_STATES,
+    NAS_DEFAULTS,
     OVERLAY_MARK,
+    RESTIC_CHECK_TIMEOUT,
+    RESTIC_FORGET_TIMEOUT,
     RETRY_LOCK,
     SHUT_OFF,
     TAG,
+    VIRSH_COMMIT_MARGIN,
     DomainParts,
     NasRepo,
     VmOverlayKind,
@@ -91,12 +95,12 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
     on an overlay."""
     # --no-lock: it only proves the repository opens, also while the /home
     # NAS job holds the lock (its prune), which the backup waits for.
-    rc, _, err = restic.run(nas["env"], ["cat", "config", "--no-lock"], 300)
+    rc, _, err = restic.run(nas["env"], ["cat", "config", "--no-lock"], RESTIC_CHECK_TIMEOUT)
     if rc == 0:
         return
     why = {
         ExitStatus.NOT_FOUND: "restic is not installed (it comes with the NAS setup; after rpm-ostree, active at the next reboot)",
-        ExitStatus.TIMED_OUT: "the NAS did not answer within 5 minutes",
+        ExitStatus.TIMED_OUT: f"the NAS did not answer within {RESTIC_CHECK_TIMEOUT // MINUTE} minutes",
         ResticExit.NO_REPOSITORY: f"no restic repository at {nas['repo']}",
         ResticExit.LOCKED: "the repository is locked (try again later)",
         ResticExit.WRONG_PASSWORD: f"{cfg.paths.restic_password} does not open the repository",
@@ -127,13 +131,13 @@ def commit_back(
         p.out.say(f"  {vm} is {state}: merging back anyway (a block job works on it)", flush=True)
     deadline = p.clock.monotonic() + cfg.commit_timeout
     for t, (base, _overlay) in overlaid.items():
-        left = max(60, int(deadline - p.clock.monotonic()))
+        left = max(MINUTE, int(deadline - p.clock.monotonic()))
         p.out.say(f"  merging the overlay of {t} back into {base} (virsh blockcommit --active --pivot)", flush=True)
         # --timeout: virsh aborts the job itself (the disk stays on the overlay, no job
         # left half done) before the timer's TimeoutStopSec could kill it.
         rc, so, err = p.commands.virsh(
             ("blockcommit", vm, t, "--active", "--pivot", "--wait", "--verbose", "--timeout", str(left)),
-            left + 300,
+            left + VIRSH_COMMIT_MARGIN,
             detach=None,
         )
         if rc != 0:
@@ -318,7 +322,7 @@ def nas_run(
         }
         stage = store.stage(vm, xml_text, manifest_text(manifest))
         paths = [src for src, _ in sources] + [stage]
-        timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or 6 * HOUR
+        timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
         for src, k in sources:
             a, s = store.sizes(src)
             out.say(
@@ -347,7 +351,7 @@ def nas_run(
         if rc != 0 or not snap:
             if snap:
                 p.restic.run(
-                    nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800
+                    nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT
                 )  # incomplete (rc 3): not a backup
             why = {
                 ResticExit.INCOMPLETE: "some files could not be read",
@@ -371,7 +375,7 @@ def nas_run(
             try:
                 check_shut_off(p.commands, vm)
             except Refused as e:
-                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800)
+                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
                 raise Refused(
                     f"the VM's state changed during the backup, the copy is not consistent "
                     f"(restic snapshot {snap[:8]} forgotten): {e}"
@@ -385,7 +389,7 @@ def nas_run(
 
             changed = [src for src, _ in sources if now_fp(src) != before[src]]
             if changed:
-                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], 1800)
+                p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
                 raise Refused(
                     "changed during the backup (the VM was started?), the copy is not consistent "
                     f"(restic snapshot {snap[:8]} forgotten): {', '.join(changed)}"
@@ -577,7 +581,9 @@ def take_snapshot(
 def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | None:
     """The ids of the VM's restic snapshots, or None when not readable."""
     rc, so, _ = restic.run(
-        nas["env"], ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"], 300
+        nas["env"],
+        ["snapshots", "--json", "--no-lock", "--host", nas["host"], "--tag", f"{TAG},vm:{vm}"],
+        RESTIC_CHECK_TIMEOUT,
     )
     try:
         return {s["id"] for s in json.loads(so) if isinstance(s, dict) and s.get("id")} if rc == 0 else None
@@ -592,7 +598,7 @@ def retention(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
             f"  retention: VM_NAS_KEEP_WEEKLY and VM_NAS_KEEP_MONTHLY are 0 in {cfg.paths.vm_conf}: nothing forgotten"
         )
         return
-    rc, so, err = p.restic.run(nas["env"], forget_args(vm, nas["host"], weekly, monthly), 1800)
+    rc, so, err = p.restic.run(nas["env"], forget_args(vm, nas["host"], weekly, monthly), RESTIC_FORGET_TIMEOUT)
     if rc != 0:
         p.out.say(
             f"  note: restic forget failed ({first_line(err) or f'exit {rc}'}): the backup is fine, the "

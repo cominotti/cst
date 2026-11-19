@@ -26,7 +26,7 @@ from vm.adapters.restic import Restic
 from vm.adapters.timer import TimerFiles
 from vm.application.backup import LocalBackup
 from vm.application.nas import NasBackup
-from vm.domain import VmArgs, VmPaths, VmSettings
+from vm.domain import SNAPSHOT_TIMEOUT_DEFAULT, VmArgs, VmPaths, VmSettings
 from vm.ports import (
     BackupStorePort,
     DefinitionStorePort,
@@ -82,8 +82,8 @@ def vm_settings(env: Mapping[str, str] | None = None) -> VmSettings:
         now=e.get("CST_VM_NOW") or None,
         sudo_user=e.get("SUDO_USER") or None,
         commit_timeout=int(e.get("CST_VM_COMMIT_TIMEOUT") or 4 * HOUR),
-        snapshot_timeout=int(e.get("CST_VM_SNAPSHOT_TIMEOUT") or 600),
-        snapshot_settle=int(e.get("CST_VM_SNAPSHOT_SETTLE") or 600),
+        snapshot_timeout=int(e.get("CST_VM_SNAPSHOT_TIMEOUT") or SNAPSHOT_TIMEOUT_DEFAULT),
+        snapshot_settle=int(e.get("CST_VM_SNAPSHOT_SETTLE") or SNAPSHOT_TIMEOUT_DEFAULT),
     )
 
 

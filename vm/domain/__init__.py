@@ -18,7 +18,7 @@ from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import UnitFileState
 from cst_core.domain.units import render_timer as render_timer_unit, render_unit_file
-from cst_core.domain.values import GIB, format_bytes_gib_mib
+from cst_core.domain.values import GIB, MINUTE, format_bytes_gib_mib
 
 URI = "qemu:///system"
 
@@ -55,6 +55,13 @@ KEEP_TAG = "cst-keep"  # --keep-tag: never forgotten by the retention
 RETRY_LOCK = "30m"  # the /home NAS job may hold the repository's lock
 
 NAS_DEFAULTS = {"VM_NAS_KEEP_WEEKLY": 4, "VM_NAS_KEEP_MONTHLY": 3, "VM_NAS_TIMEOUT_HOURS": 6}
+
+# Time limits of the NAS backup's commands (seconds).
+RESTIC_CHECK_TIMEOUT: Final = 5 * MINUTE  # restic cat config and snapshots: a short answer
+RESTIC_FORGET_TIMEOUT: Final = 30 * MINUTE  # restic forget, of one snapshot or by the keep policy
+VIRSH_COMMIT_MARGIN: Final = 5 * MINUTE  # virsh blockcommit's wait beyond its own --timeout
+STOP_MARGIN: Final = 30 * MINUTE  # after the merge: the checks and the alert (the timer's stop timeout)
+SNAPSHOT_TIMEOUT_DEFAULT: Final = 10 * MINUTE  # CST_VM_SNAPSHOT_TIMEOUT and CST_VM_SNAPSHOT_SETTLE when unset
 
 SHUT_OFF = "shut off"  # virsh domstate of a VM that is not running (in the C locale)
 

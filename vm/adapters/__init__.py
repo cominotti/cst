@@ -25,6 +25,7 @@ from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
+from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode, VirshPort
 from cst_core.domain.text import (
     NO_WORDS,
@@ -278,7 +279,7 @@ def booted_deployment() -> BootedDeployment | None:
     """{version, checksum, timestamp} of the booted rpm-ostree deployment, or None: rpm-ostree
     failed, its answer is not readable, or it names no booted deployment. The reason
     query_status gives is not kept: the manifest and the index record null, as they always did."""
-    status = query_status(lambda argv: run(argv, timeout=60))
+    status = query_status(lambda argv: run(argv, timeout=MINUTE))
     if isinstance(status, str) or status.booted is None:
         return None
     d = status.booted
