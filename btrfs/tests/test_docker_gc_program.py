@@ -33,6 +33,7 @@ if CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.shapes import json_object
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
@@ -199,19 +200,32 @@ def scenario(now: float) -> dict[str, object]:
             {"Name": "v4", "Labels": anon},
         ],
         "images": [
-            {"Id": sha("a"), "RepoTags": ["alpine:old"], "Size": 7_000_000, "Metadata": {"LastTagTime": iso(OLD)}},
-            {"Id": sha("b"), "RepoTags": ["redis:7"], "Size": 100, "Metadata": {}},
-            {"Id": sha("c"), "RepoTags": ["web:1"], "Size": 100, "Metadata": {}},
+            {
+                "Id": sha("a"),
+                "RepoTags": ["alpine:old"],
+                "RepoDigests": [],
+                "Size": 7_000_000,
+                "Metadata": {"LastTagTime": iso(OLD)},
+            },
+            {"Id": sha("b"), "RepoTags": ["redis:7"], "RepoDigests": [], "Size": 100, "Metadata": {}},
+            {"Id": sha("c"), "RepoTags": ["web:1"], "RepoDigests": [], "Size": 100, "Metadata": {}},
             {
                 "Id": sha("d"),
                 "RepoTags": ["registry.example.com/team/db:1"],
+                "RepoDigests": [],
                 "Size": 3_000_000,
                 "Metadata": {"LastTagTime": iso(OLD)},
             },
             {"Id": sha("e"), "RepoTags": None, "RepoDigests": [], "Size": 999, "Metadata": {}},
-            {"Id": sha("9"), "RepoTags": ["fresh:1"], "Size": 5, "Metadata": {"LastTagTime": iso(now - DAY)}},
-            {"Id": sha("8"), "RepoTags": ["seen:1"], "Size": 6, "Metadata": {}},
-            {"Id": sha("f"), "RepoTags": ["kept:1"], "Size": 6, "Metadata": {}},
+            {
+                "Id": sha("9"),
+                "RepoTags": ["fresh:1"],
+                "RepoDigests": [],
+                "Size": 5,
+                "Metadata": {"LastTagTime": iso(now - DAY)},
+            },
+            {"Id": sha("8"), "RepoTags": ["seen:1"], "RepoDigests": [], "Size": 6, "Metadata": {}},
+            {"Id": sha("f"), "RepoTags": ["kept:1"], "RepoDigests": [], "Size": 6, "Metadata": {}},
         ],
     }
 
@@ -307,6 +321,13 @@ class Program:
             stdin=subprocess.DEVNULL,
             cwd="/",
         )
+
+
+def records(st: Mapping[str, object], kind: str) -> list[dict[str, object]]:
+    """The containers, volumes or images of a fake docker's state, as the state holds them (edits change it)."""
+    rows = st[kind]
+    assert isinstance(rows, list), rows
+    return [r for r in rows if json_object(r)]
 
 
 def days_ago(t: float) -> int:
@@ -428,6 +449,44 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.p.docker(), before)
         self.assertTrue(os.path.isfile(os.path.join(self.p.runtime, "run.lock")))
         self.assertFalse(os.path.exists(os.path.join(self.p.state, "last-run.json")))
+
+    def test_a_record_without_a_key_the_plan_needs_stops_the_run(self) -> None:
+        # A container without Image would leave its image looking unused (and planned for removal);
+        # one without Mounts its volumes orphaned. Nothing is removed, the record is named.
+        for key in ("Image", "Mounts", "Config"):
+            with self.subTest(key=key):
+                st = self.p.docker()
+                del records(st, "containers")[0][key]
+                self.p.set_docker(st)
+                before = self.p.last_used()
+                # run --dry-run and status plan as the weekly run does (a run itself is skipped in the
+                # first 10 minutes after boot, before it plans: ApplicationTest covers it).
+                for args in (("run", "--dry-run"), ("status",)):
+                    rc, out, err = self.p.run(*args)
+                    self.assertEqual((rc, err), (1, ""), out)
+                    self.assertTrue(
+                        out.endswith(f"<3>docker-gc: container inspect: {'1' * 64}: no {key}; nothing done\n"), out
+                    )
+                self.assertFalse([c for c in self.p.calls() if "rm" in c or "prune" in c], self.p.calls())
+                self.assertEqual(self.p.docker(), st)
+                self.assertEqual(self.p.last_used(), before)
+                self.p.set_docker(scenario(self.p.now))
+        st = self.p.docker()
+        del records(st, "images")[0]["RepoTags"]  # a protected registry could hide in it: not read as "untagged"
+        self.p.set_docker(st)
+        rc, out, _err = self.p.run("run", "--dry-run")
+        self.assertEqual((rc, out), (1, f"<3>docker-gc: image inspect: {sha('a')}: no RepoTags; nothing done\n"))
+
+    def test_docker_s_nulls_are_read_as_none(self) -> None:
+        # null Mounts, Config.Labels, volume Labels, RepoTags and RepoDigests: Docker's "none".
+        st = self.p.docker()
+        records(st, "containers")[1]["Mounts"] = None
+        records(st, "images")[1]["RepoDigests"] = None
+        self.p.set_docker(st)
+        rc, out, err = self.p.run("run", "--dry-run")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("orphaned anonymous volumes: 3\n", out)  # redis_cache's v4 is no longer in use
+        self.assertTrue(out.endswith("(dry run: nothing removed)\n"), out)
 
     def test_a_failing_docker_command_is_logged_and_exits_1(self) -> None:
         st = self.p.docker()

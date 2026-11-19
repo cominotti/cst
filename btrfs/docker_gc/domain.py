@@ -212,6 +212,12 @@ REGISTRY_RE = re.compile(
 )
 
 
+class InspectError(RuntimeError):
+    """Docker's inspect answer cannot be planned from: an object missing from it, output that is
+    not JSON, or a record that lacks a key the plan relies on. Before anything is removed the run
+    stops ("nothing done"); during the removals the image being re-checked is kept."""
+
+
 class UnknownProtection(RuntimeError):
     """docker-gc cannot tell which registries are protected: it removes nothing, and says why."""
 

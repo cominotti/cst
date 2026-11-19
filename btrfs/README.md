@@ -1573,6 +1573,23 @@ Because of this:
   recorder again.
 - Right before removing an image, it checks again that nothing started using it.
 
+**When docker's answer is incomplete.** The plan relies on keys every Docker
+writes in `docker inspect`: a container's `Id`, `Image`, `State`, `Config`
+(with its `Labels`), `HostConfig` and `Mounts`; an image's `Id`, `RepoTags`
+and `RepoDigests`; a volume's `Name` and `Labels` (`null`, Docker's "none",
+counts as empty). Without one, a protection would be lost (a container without
+`Image` would make the image it uses look unused). So a record that lacks one,
+or holds another type there, stops `run`, `run --dry-run`, `cleanup-now`,
+`status` and the recorder's start before anything is removed, with a journal
+line that names the object and the key: `container inspect: <id>: no Image;
+nothing done` (exit 1; systemd restarts the recorder). The same holds for an
+object missing from the answer or an answer that is not JSON. During the
+removals, the check before an image is removed reads the containers again: if
+that list cannot be read, that image is kept (`kept image ...: container list
+unreadable: ...`, counted in the run's failures) and the run goes on with the
+next one. An image whose `RepoTags` cannot be read there is kept too (it may
+have new tags).
+
 **When the weekly run does not happen.** The run is skipped in the first 10
 minutes after boot, and when Docker is not running (it never starts Docker just
 to clean it). If the PC was off on Monday, the missed run starts right after the

@@ -17,6 +17,7 @@ from btrfs.docker_gc.domain import (
     UnknownProtection,
     DockerEvent,
     GcCommand,
+    InspectError,
     GcPaths,
     GcPlan,
     GcSettings,
@@ -189,6 +190,9 @@ class DockerGc:
             for line in str(e).splitlines():
                 self.console.log(3, line)
             return BAD_SETTINGS_EXIT
+        except InspectError as e:
+            self.console.log(3, f"{e}; nothing done")
+            return 1
         except RuntimeError as e:
             self.console.log(3, str(e))
             return 1
@@ -269,7 +273,13 @@ class DockerGc:
                 failed += 1
                 self.console.log(4, f"could not remove volume {v[:16]}: {r.stderr.strip()[:100]}")
         for img in p.images:
-            why = self.remove_image(img, p.at)
+            try:
+                why = self.remove_image(img, p.at)
+            except InspectError as e:
+                # The re-check cannot read the containers: this image stays, the run goes on.
+                failed += 1
+                self.console.log(4, f"kept image {(img.tags or (img.id,))[0]}: container list unreadable: {e}")
+                continue
             if why:
                 self.console.log(5, f"kept image {(img.tags or (img.id,))[0]}: {why}")
         # --all: unused cache of any kind; until= is measured from its last use.

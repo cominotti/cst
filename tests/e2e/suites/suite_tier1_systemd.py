@@ -621,6 +621,62 @@ sys.exit(r.returncode)
 """
 
 
+# test_112: the program at argv[1] with its settings file at argv[2] against the same fake docker and
+# scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
+# run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
+# nothing done", and nothing is removed.
+GC_HOLE_RUN = r"""
+import json, os, subprocess, sys, tempfile, time
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests import test_docker_gc_program as t
+prog, conf = sys.argv[1], sys.argv[2]
+tmp = tempfile.mkdtemp(prefix="e2e-gc-hole-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+fakes = os.path.join(tmp, "bin")
+os.mkdir(fakes)
+for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
+    path = os.path.join(fakes, name)
+    with open(path, "w") as f:
+        f.write(text.replace("@PYTHON@", sys.executable))
+    os.chmod(path, 0o755)
+now = time.time()
+docker = t.scenario(now)
+hole = docker["containers"][0]
+del hole["Image"]
+with open(os.path.join(tmp, "docker.json"), "w") as f:
+    json.dump(docker, f)
+state = os.path.join(tmp, "state")
+os.mkdir(state)
+last_used = os.path.join(state, "last-used.json")
+with open(last_used, "w") as f:
+    json.dump({"since": t.OLD + 30 * t.DAY, "images": {t.sha("8"): now - t.DAY}, "heartbeat": now}, f)
+with open(last_used, "rb") as f:
+    before = f.read()
+env = {
+    "PATH": fakes + ":/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": state, "DOCKER_GC_RUNTIME": os.path.join(tmp, "run"),
+    "DOCKER_GC_CONF": conf, "DOCKER_GC_INSTALLED": prog,
+    "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(tmp, "calls.log"),
+}
+want = f"<3>docker-gc: container inspect: {hole['Id']}: no Image; nothing done"
+for args in (["run", "--dry-run"], ["status"], ["run", "--dry-run"], ["status"]):  # run: skipped right after boot
+    r = subprocess.run([prog, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
+    sys.stderr.write(f"test_112 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
+    if r.returncode != 1 or want not in r.stdout + r.stderr:
+        sys.exit(f"test_112: {args}: expected exit 1 and {want!r}")
+with open(os.path.join(tmp, "calls.log")) as f:
+    calls = [json.loads(line) for line in f]
+removing = [c for c in calls if "rm" in c or "prune" in c]
+if removing:
+    sys.exit(f"test_112: docker was asked to remove {removing}")
+with open(os.path.join(tmp, "docker.json")) as f:
+    if json.load(f) != docker:
+        sys.exit("test_112: the fake docker's objects changed")
+with open(last_used, "rb") as f:
+    if f.read() != before:
+        sys.exit("test_112: last-used.json changed")
+print("E2E-OK")
+"""
+
+
 # test_101: run as tester once the test has written main.conf. First the machine as main's CST
 # (535aea1) left it when it set the headset by default: its LDAC rule (the vendored fixture, for an
 # invented headset) and a settings file without DEVICE. Then a machine with no headset at all.
@@ -3552,6 +3608,34 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ "$rc" == 78 ]]
             grep -qF "$conf is missing, and the installed $prog reads them from that file" <<<"$out"
             echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_112_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
+        """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
+        a fake docker whose container record lacks "Image": run --dry-run and status exit 1 naming the
+        record and the key ("nothing done"), twice; docker is asked to remove nothing, its objects and
+        last-used.json are unchanged. (A plain run plans the same way, but is skipped in the first
+        10 minutes after boot: the unit tests cover it.)"""
+        c = self.SYSTEMD_CONTAINER
+        stage = "/var/tmp/e2e-gc-hole"
+        self.addCleanup(exec_bash, c, f"rm -rf {stage} /var/tmp/e2e-gc-hole-*", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_112 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            stage={stage}
+            rm -rf "$stage" && install -d -m 0755 "$stage"
+            {installer} install --root "$stage" --owner root {sets} >/dev/null
+            /usr/bin/python3 -I -c {shlex.quote(GC_HOLE_RUN)} "$stage/usr/local/sbin/docker-gc" "$stage/etc/cst/docker-gc.conf"
             """,
         ).stdout
         self.assertIn("E2E-OK", out)

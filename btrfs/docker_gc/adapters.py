@@ -13,12 +13,13 @@ import subprocess
 import sys
 import threading
 import time
-from typing import TypedDict, TypeIs
+from typing import Final, TypedDict, TypeIs
 import zipfile
 import zlib
 
 from btrfs.docker_gc.domain import (
     DOCKER_TIMEOUT,
+    InspectError,
     UnknownProtection,
     Container,
     DockerEvent,
@@ -39,7 +40,7 @@ from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdin
-from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.shapes import KeyTypes, json_object, parse_json
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -78,6 +79,44 @@ def _obj(value: object) -> dict[str, object]:
 def _is_inspected(value: object) -> TypeIs[InspectedObject]:
     """A JSON object is an InspectedObject: none of its keys is required, any value is accepted."""
     return isinstance(value, dict)
+
+
+# The keys of an inspected record the plan relies on, of their types (null: Docker's "none"). A
+# record without one would lose a protection: a container without Image leaves its image looking
+# unused, one without Mounts its volumes orphaned, one without Config or HostConfig its labels and
+# restart policy; an image without RepoTags or RepoDigests its registry. Every Docker writes them.
+_NONE = type(None)
+RELIED_ON: Final[dict[str, KeyTypes]] = {
+    "container": {
+        "Id": (str,),
+        "Image": (str,),
+        "State": (dict,),
+        "Config": (dict,),
+        "HostConfig": (dict,),
+        "Mounts": (list, _NONE),
+    },
+    "image": {"Id": (str,), "RepoTags": (list, _NONE), "RepoDigests": (list, _NONE)},
+    "volume": {"Name": (str,), "Labels": (dict, _NONE)},
+}
+
+
+def record_problem(kind: str, record: object) -> str | None:
+    """What a record of `docker KIND inspect` lacks of the keys the plan relies on ("no Image",
+    "Mounts is a str"), or None. A container's Config also holds Labels (an object or null)."""
+    if not json_object(record):
+        return "not an object"
+    for key, kinds in RELIED_ON.get(kind, {}).items():
+        if key not in record:
+            return f"no {key}"
+        if not isinstance(record[key], kinds):
+            return f"{key} is {type(record[key]).__name__}"
+    config = record.get("Config")
+    if kind == "container" and json_object(config):
+        if "Labels" not in config:
+            return "no Config.Labels"
+        if not isinstance(config["Labels"], dict | _NONE):
+            return f"Config.Labels is {type(config['Labels']).__name__}"
+    return None
 
 
 def _inspected(value: object) -> InspectedObject:
@@ -182,14 +221,17 @@ class DockerCli:
         for i in range(0, len(ids), 100):
             r = self.run(kind, "inspect", *ids[i : i + 100], check=False)
             try:
-                found = json.loads(r.stdout or "[]")
+                found = parse_json(r.stdout or "[]")
             except json.JSONDecodeError as e:
-                raise RuntimeError(f"{kind} inspect: unreadable output ({e})") from e
-            out.extend(_inspected(o) for o in (found if isinstance(found, list) else []))
+                raise InspectError(f"{kind} inspect: unreadable output ({e})") from e
+            for o in found if isinstance(found, list) else []:
+                if json_object(o) and (why := record_problem(kind, o)) is not None:
+                    raise InspectError(f"{kind} inspect: {str(o.get('Id') or o.get('Name'))[:100]}: {why}")
+                out.append(_inspected(o))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got
         if missing and missing & set(self.run(*list_args).stdout.split()):
-            raise RuntimeError(f"{kind} inspect failed for {len(missing)} object(s); nothing done")
+            raise InspectError(f"{kind} inspect failed for {len(missing)} object(s)")
         return out
 
     def is_up(self) -> bool:
@@ -221,13 +263,13 @@ class DockerCli:
         if r.returncode != 0:
             return None
         try:
-            found = json.loads(r.stdout)
+            found = parse_json(r.stdout)
             first = found[0] if isinstance(found, list) else None
         except ValueError, IndexError:
             return ["?"]
-        if not isinstance(first, dict):
-            return ["?"]
-        return list(_strs(_obj(first).get("RepoTags")))
+        if not json_object(first) or not isinstance(tags := first.get("RepoTags", "?"), list | _NONE):
+            return ["?"]  # no RepoTags: tags it may have cannot be ruled out
+        return list(_strs(tags))
 
     def remove_container(self, container_id: str) -> CommandResult:
         return self.run("container", "rm", container_id, check=False)
