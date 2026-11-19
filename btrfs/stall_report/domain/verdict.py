@@ -7,6 +7,7 @@ import time
 from btrfs.stall_monitord.domain import HUNG_SECONDS
 from btrfs.stall_report.domain.categories import HINTS
 from btrfs.stall_report.domain.records import AnalyseResult, DiskTotals, MetaRecord, VmTotals
+from cst_core.domain.values import GIB, format_bytes_gib_mib
 
 
 def kernel_tuple(release: str | None) -> tuple[int, ...]:
@@ -15,9 +16,7 @@ def kernel_tuple(release: str | None) -> tuple[int, ...]:
 
 
 def fmt_bytes(b: float) -> str:
-    if b >= 10 * 2**30:
-        return f"{b / 2**30:,.1f} GiB"
-    return f"{b / 2**20:,.0f} MiB"
+    return format_bytes_gib_mib(b, gib_threshold=10 * GIB, comma=True, mib_floor=False)
 
 
 def fmt_ts(ts: float | None) -> str:

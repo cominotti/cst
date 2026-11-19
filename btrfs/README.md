@@ -474,6 +474,9 @@ kernel shows its own state as files) and in the cgroup tree.
 - Data goes to `/var/log/btrfs-stall-monitor`, one file per day, **8 days** kept.
   Only members of the `wheel` group (the users who are allowed to use `sudo`)
   can read it, because it contains process names and kernel messages.
+  Run by hand with `--log-dir DIR`, the daemon creates a missing DIR with
+  mode 0750 (the unit's `LogsDirectoryMode=`) and its missing parents with
+  0755, as systemd does; the group is the caller's, not the unit's `wheel`.
 - Note on zswap numbers: daemons before version 7 read only the first 4 KiB
   of `/proc/vmstat`, so they recorded `zswpin`, `zswpout` and `zswpwb` as 0.
   The report ignores those counters in old logs: it prints `n/a (daemon < v7)`,
@@ -583,7 +586,9 @@ by `btrfs-notify` and by the adapter, and the same alert then gets a second
 pending file.
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
-small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
+small file in `/run/btrfs-stall-monitor` (the folder is made when missing,
+which only a run by hand with `--run-dir` meets: under systemd
+`RuntimeDirectory=` makes it) and starts `btrfs-stall-alert.service`,
 which sends it. It starts that service from a helper thread: starting a program
 waits until the program is read from the disk, which during a stall can take
 minutes, and the sampling must not wait for it. Alerts that come while a start

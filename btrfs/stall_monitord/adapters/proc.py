@@ -10,13 +10,14 @@ import os
 import queue
 import threading
 import time
-from typing import override
+from typing import Final, override
 
 from btrfs.stall_monitord.domain import (
     CGROUP_RESCAN,
     KEEP_DAYS,
     FsTopo,
 )
+from cst_core.adapters.files import ensure_dir
 from cst_core.adapters.journal import log as journal_log
 from cst_core.domain.text import cgroup_v2_path
 from cst_core.domain.values import DAY
@@ -284,9 +285,19 @@ def scan_d_tasks() -> list[tuple[str, str, str]]:
     return out
 
 
+# The modes the daemon gives the folders it makes for a run by hand with --log-dir, as systemd
+# makes a LogsDirectory=: the log folder gets the unit's LogsDirectoryMode=, its missing parents
+# 0755. (Only the mode: the folder's group is the caller's, not the unit's Group=.)
+LOG_DIR_MODE: Final = 0o750
+LOG_PARENT_MODE: Final = 0o755
+
+
 def prepare_log_dir(log_dir: str) -> None:
-    """The folder of the daily log files, made (with its parents) when missing."""
-    os.makedirs(log_dir, exist_ok=True)
+    """The folder of the daily log files, made when missing: LOG_DIR_MODE, and LOG_PARENT_MODE for
+    each missing parent; a folder that is there is left as it is."""
+    folder = os.path.abspath(log_dir)
+    ensure_dir(os.path.dirname(folder), LOG_PARENT_MODE)
+    ensure_dir(folder, LOG_DIR_MODE)
 
 
 class Writer(threading.Thread):

@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fnmatch
 import json
 import os
 import queue
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +49,7 @@ from btrfs.stall_monitord import domain as md_domain
 from btrfs.stall_monitord.adapters import monitor as md_monitor
 from btrfs.stall_monitord.adapters import proc as md_proc
 from cst_core.adapters.sd_notify import ServiceNotifier
+from cst_core.domain.contracts import StateFormatKey, state_format
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -837,6 +840,40 @@ class TimedReaderTest(unittest.TestCase):
         self.assertEqual(reader.read("c"), "text of c")
 
 
+class PrepareLogDirTest(unittest.TestCase):
+    """prepare_log_dir: a missing log folder (a run by hand with --log-dir) is made as systemd makes
+    the unit's LogsDirectory=, whatever the umask: the folder with its LogsDirectoryMode= (0750),
+    its missing parents 0755; one that is there is left as it is."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-stall-logdir-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def mode(self, path: str) -> int:
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_missing_folder_gets_0750_and_its_parents_0755_under_any_umask(self) -> None:
+        for umask in (0, 0o077):
+            with self.subTest(umask=oct(umask)):
+                top = os.path.join(self.tmp, f"u{umask:o}")
+                logs = os.path.join(top, "a", "logs")
+                old = os.umask(umask)
+                self.addCleanup(os.umask, old)
+                md_proc.prepare_log_dir(logs + "/")  # a trailing slash names the same folder
+                os.umask(old)
+                self.assertEqual(oct(self.mode(logs)), "0o750")
+                self.assertEqual(oct(self.mode(os.path.join(top, "a"))), "0o755")
+                self.assertEqual(oct(self.mode(top)), "0o755")
+
+    def test_a_folder_that_is_there_keeps_its_mode(self) -> None:
+        logs = os.path.join(self.tmp, "logs")
+        os.mkdir(logs)
+        os.chmod(logs, 0o700)
+        md_proc.prepare_log_dir(logs)
+        self.assertEqual(oct(self.mode(logs)), "0o700")
+
+
 class CmdlineReadTest(unittest.TestCase):
     """A hung-task or io-busy report names the task with its /proc/PID/cmdline. That read takes the program's
     memory map lock, which can stay taken for minutes during the stall being recorded: the report waits at most
@@ -1291,6 +1328,19 @@ class AlertHandOffTest(unittest.TestCase):
         self.assertTrue(_eventually(lambda: len(self.started) == 2))
         time.sleep(0.2)
         self.assertEqual(self.started, [list(self.ALERT_ARGV)] * 2)  # the service sends all three at its start
+
+    def test_an_alert_creates_a_missing_runtime_folder(self) -> None:
+        run_dir = os.path.join(self.run_dir, "gone")  # not made: only a run by hand with --run-dir meets this
+        mon = self.monitor(run_dir)
+        mon.alert("hung", "warn", "Task stuck", "body")
+        self.assertTrue(os.path.isdir(run_dir))
+        names = os.listdir(run_dir)
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(fnmatch.fnmatch(names[0], state_format(StateFormatKey.STALL_QUEUE).file_name), names)
+        with open(os.path.join(run_dir, names[0]), "rb") as f:
+            self.assertEqual(f.read(), md_domain.alert_text("warn", "Task stuck", "body").encode("utf-8"))
+        self.assertTrue(_eventually(lambda: self.started == [list(self.ALERT_ARGV)]), self.started)
+        self.assertFalse([ln for ln in self.lines if ln.startswith("alert hand-off failed")], self.lines)
 
     def test_without_a_runtime_folder_nothing_is_started(self) -> None:
         mon = self.monitor("")

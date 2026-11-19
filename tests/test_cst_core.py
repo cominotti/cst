@@ -127,6 +127,39 @@ class ValueObjectsTest(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             Duration(-5)
 
+    def test_sizes_too_large_to_hold_are_the_domain_error(self) -> None:
+        # float('9' * 400) is inf and '9' * 308 is finite until multiplied by T: int() of either
+        # raised OverflowError; int() of more than 4300 digits raised a plain ValueError.
+        for spec in ("9" * 400 + "G", "9" * 308 + "T", "9" * 5000 + "K"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "too large for a size"):
+                ByteSize.parse_iec(spec)
+        self.assertIsNone(ByteSize.parse("9" * 5000))
+        self.assertIsNone(ByteSize.parse("9" * 5000 + "G"))
+        # Huge but finite values keep their value.
+        self.assertEqual(ByteSize.parse_iec("8" + "0" * 290 + "T"), ByteSize(int(8e290 * 2**40)))
+
+    def test_a_systemd_size_above_64_bits_is_invalid(self) -> None:
+        # systemd's sizes are 64-bit unsigned: one above 2**64 - 1 is invalid (None), before or
+        # after its unit. A value that big once came back whole, and the float formats raised
+        # OverflowError on it (format_bytes_human of 10**400 - 1).
+        self.assertEqual(ByteSize.parse(str(2**64 - 1)), ByteSize(2**64 - 1))
+        self.assertEqual(ByteSize.parse("16777215T"), ByteSize(16777215 * 2**40))
+        for spec in (str(2**64), "16777216T", "18014398509481984K", "9" * 400, "9" * 400 + "K"):
+            with self.subTest(spec=spec[-6:]):
+                self.assertIsNone(ByteSize.parse(spec))
+
+    def test_durations_too_large_to_hold_are_the_domain_error(self) -> None:
+        with self.assertRaisesRegex(DomainValidationError, "invalid duration"):
+            Duration.parse("9" * 5000 + "s")
+        for spec in ("9" * 400 + "s", "9" * 5000 + "w", "9" * 307 + "w"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "duration too large"):
+                Duration.parse_float(spec)
+        with self.assertRaisesRegex(DomainValidationError, "duration too large"):
+            Duration.parse_float("9" * 400, allow_unitless=True, positive_only=True)
+        # Huge but finite values keep their value.
+        self.assertEqual(Duration.parse("9" * 400 + "s"), Duration(int("9" * 400)))
+        self.assertEqual(Duration.parse_float("1" + "0" * 300 + "s"), 1e300)
+
     def test_cpu_set_parse(self) -> None:
         cs = CpuSet.parse("0-3,6,12-13")
         self.assertEqual(cs.cpus, frozenset({0, 1, 2, 3, 6, 12, 13}))

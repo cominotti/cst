@@ -3164,7 +3164,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
     def test_112_stall_monitor_with_a_duration_of_zero_stops_at_once(self) -> None:
         """This checkout's btrfs-stall-monitord, as its installer builds it, with --duration 0 ("stop after
         0 seconds"): it ends before its first sample with exit 0. The daemon before took 0 as no limit and
-        ran on until the timeout killed it (124)."""
+        ran on until the timeout killed it (124). Run as root under umask 0 with a --log-dir whose two
+        parents are missing too, it makes the three as systemd makes a LogsDirectory=: the log folder 0750 (the
+        unit's LogsDirectoryMode=), its missing parents 0755 (os.makedirs gave all three 0777 there)."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/lib/e2e-stall-duration"
         self.addCleanup(exec_bash, c, f"rm -rf {w}", check=False)
@@ -3172,12 +3174,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         out = exec_bash(
             c,
             f"""
-            install -d {w}/log {w}/run
+            install -d {w}/run
             rc=0
-            timeout 20 /usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord \\
-                --duration 0 --log-dir {w}/log --run-dir {w}/run >{w}/out 2>&1 || rc=$?
+            (umask 0; exec timeout 20 /usr/bin/python3 -I {w}/new/usr/local/sbin/btrfs-stall-monitord \\
+                --duration 0 --log-dir {w}/top/a/log --run-dir {w}/run) >{w}/out 2>&1 || rc=$?
             [[ "$rc" == 0 ]] || {{ echo "exit $rc" >&2; cat {w}/out >&2; exit 1; }}
             grep -q 'stopped' {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            modes=$(stat -c %a {w}/top {w}/top/a {w}/top/a/log | tr '\\n' ' ')
+            [[ "$modes" == "755 755 750 " ]] || {{ echo "folder modes: $modes" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout
