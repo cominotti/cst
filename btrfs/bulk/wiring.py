@@ -103,8 +103,8 @@ class Wiring:
         name = user_args[1] if len(user_args) == 2 else None
         if self.root:
             if name is None or name == "":
-                name = bulk_user(self.paths.conf)
-            if name is None or name == "" or name == ROOT_ACCOUNT:
+                name = bulk_user(self.paths.conf)  # a name or None, never ""
+            if name is None or name == ROOT_ACCOUNT:
                 raise NoUser("btrfs-bulk: needs --user NAME (not root)")
             pw = lookup_user(name)
             return Ctx(real_path(pw.pw_dir), uid=pw.pw_uid), pw
