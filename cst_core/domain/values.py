@@ -86,6 +86,14 @@ def format_bytes_decimal(n: float) -> str:
     return f"{val} B"
 
 
+def _whole_number(digits: str) -> int | None:
+    """int(DIGITS), or None for more digits than int() reads (sys.get_int_max_str_digits)."""
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ByteSize:
     """Non-negative byte quantity with binary unit parsing and formatting."""
@@ -100,11 +108,8 @@ class ByteSize:
     def parse(cls, spec: str | None) -> Self | None:
         """Parse a systemd-style binary size ('48G', '512M', '1024'), or None if invalid."""
         m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
-        if not m:
-            return None
-        try:
-            number = int(m.group(1))
-        except ValueError:  # more digits than int() reads (sys.get_int_max_str_digits)
+        number = _whole_number(m.group(1)) if m else None
+        if m is None or number is None:
             return None
         return cls(number * 1024 ** " KMGT".index(m.group(2) or " "))
 
@@ -143,12 +148,9 @@ class Duration:
     def parse(cls, spec: str) -> Self:
         """Parse '<int>[s|m|h|d|w]' into a Duration, raising DomainValidationError if invalid."""
         m = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", spec)
-        if not m:
+        number = _whole_number(m.group(1)) if m else None
+        if m is None or number is None:
             raise DomainValidationError(f"invalid duration {spec!r} (expected integer with s, m, h, d or w)")
-        try:
-            number = int(m.group(1))
-        except ValueError:  # more digits than int() reads (sys.get_int_max_str_digits)
-            raise DomainValidationError(f"invalid duration {spec!r} (expected integer with s, m, h, d or w)") from None
         return cls(number * _DURATION_UNITS[m.group(2)])
 
     @classmethod
