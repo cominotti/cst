@@ -75,22 +75,7 @@ _MAPPING_ARGS: Final = 2  # Mapping[key, value]
 _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 
 # The highest count per "<package> <rule>" (tests/budgets.py; a missing key is 0).
-MAGIC_CEILINGS: Final[dict[str, int]] = {
-    "bluetooth leak": 1,
-    "btrfs/bulk leak": 10,
-    "btrfs/health_check leak": 1,
-    "btrfs/snapshot leak": 5,
-    "btrfs/snapshot literal-vocabulary": 3,
-    "btrfs/snapshot loose-record": 4,
-    "btrfs/snapshot unit-number": 9,
-    "cpu/setup leak": 1,
-    "cst_core chain": 1,
-    "cst_core leak": 1,
-    "cst_core literal-vocabulary": 2,
-    "cst_core unit-number": 3,
-    "doctor leak": 1,
-    "vm leak": 1,
-}
+MAGIC_CEILINGS: Final[dict[str, int]] = {}
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/record.py:_string": (
