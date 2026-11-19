@@ -174,7 +174,15 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
 def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
     """cst vm's backup index read as cst vm reads it (vm.adapters.backup's stored_backups): None when it
     is missing; (data, None) when it is JSON; (None, why) when it is there but cannot be read, or is not
-    JSON. The one reader of the index here, so every check sees what cst vm sees."""
+    JSON. The one reader of the index here, so every check sees what cst vm sees; read once per check-up,
+    so they all judge the same contents."""
+    known = facts(host)
+    if known.vm_index is None:
+        known.vm_index = (_read_vm_index(host),)
+    return known.vm_index[0]
+
+
+def _read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
     try:
         with host.open_bytes(host.path(VM_INDEX)) as f:
             raw = f.read()

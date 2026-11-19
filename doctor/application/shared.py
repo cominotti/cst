@@ -46,6 +46,8 @@ class DoctorFacts:
     # Read once, boxed (None: not read yet): snapshots.conf's text with its line ends, None when it
     # cannot be read (snapshots_conf_text).
     snap_conf: tuple[str | None] | None = None
+    # cst vm's backup index as read_vm_index reads it, boxed the same way.
+    vm_index: tuple[tuple[object, str | None] | None] | None = None
 
 
 # host -> its facts. A host hashes by identity, so a new Host starts with none.
