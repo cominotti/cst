@@ -1592,7 +1592,7 @@ writes in `docker inspect`: a container's `Id`, `Image`, `State`, `Config`
 and `RepoDigests`; a volume's `Name` and `Labels` (`null`, Docker's "none",
 counts as empty). Without one, a protection would be lost (a container without
 `Image` would make the image it uses look unused). So a record that lacks one,
-or holds another type there, stops `run`, `run --dry-run`, `cleanup-now`,
+holds another type there, or is not an object at all, stops `run`, `run --dry-run`, `cleanup-now`,
 `status` and the recorder's start before anything is removed, with a journal
 line that names the object and the key: `container inspect: <id>: no Image;
 nothing done` (exit 1; systemd restarts the recorder). The same holds for an

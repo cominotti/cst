@@ -217,8 +217,9 @@ class DockerCli:
             except json.JSONDecodeError as e:
                 raise InspectError(f"{kind} inspect: unreadable output ({e})") from e
             for o in found if isinstance(found, list) else []:
-                if json_object(o) and (why := record_problem(kind, o)) is not None:
-                    raise InspectError(f"{kind} inspect: {str(o.get('Id') or o.get('Name'))[:100]}: {why}")
+                if (why := record_problem(kind, o)) is not None:
+                    name = (o.get("Id") or o.get("Name")) if json_object(o) else o
+                    raise InspectError(f"{kind} inspect: {str(name)[:100]}: {why}")
                 out.append(_inspected(o))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got

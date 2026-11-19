@@ -1246,6 +1246,17 @@ class DockerInspectTest(unittest.TestCase):
             self.docker.containers()
         self.assertEqual(str(stop.exception), "container inspect: c1: no Config.Labels")
 
+    def test_a_record_that_is_no_object_is_an_inspect_error(self) -> None:
+        # Not taken for an empty container next to the real one: the run stops, naming it.
+        for junk, shown in (("junk", "junk"), (5, "5"), (None, "None"), ([], "[]")):
+            with (
+                self.subTest(junk=junk),
+                self.answer([self.container, junk]),
+                self.assertRaises(gc_domain.InspectError) as stop,
+            ):
+                self.docker.containers()
+            self.assertEqual(str(stop.exception), f"container inspect: {shown}: not an object")
+
     def test_docker_s_nulls_are_accepted(self) -> None:
         with self.answer([{**self.container, "Mounts": None}]):
             [c] = self.docker.containers()
