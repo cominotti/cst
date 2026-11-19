@@ -22,14 +22,16 @@ what zizmor itself cannot:
 - no file of .github carries an inline `zizmor: ignore` comment: an
   exception goes into .github/zizmor.yml, with its reason;
 - the nightly runs `invowk cmd ci uv-audit` as the last step of a job with
-  no `if:` or `continue-on-error:` (a failed audit then skips no other
-  gate and cannot be let through), with no uv variable (`UV_...`) in the
-  workflow, and that task runs exactly UV_AUDIT_COMMAND: `uv audit
-  --locked` on every dependency group;
+  no `if:`, `continue-on-error:` or `needs:` (a failed audit then skips no
+  other gate and cannot be let through or skipped), with no uv variable
+  (`UV_...`) in the workflow, and that task runs exactly UV_AUDIT_COMMAND:
+  `uv audit --locked` on every dependency group;
 - `invowk cmd check` runs `invowk cmd test workflows`, and that task runs
   exactly ZIZMOR_COMMAND: zizmor with --offline, the config file and
   --strict-collection (without it, a file zizmor cannot parse is skipped
-  with a warning and the audit passes), on all of .github.
+  with a warning and the audit passes), on all of .github;
+- neither task sets a variable: no `env` block (vars or files) and no uv or
+  zizmor variable (`UV_...`, `ZIZMOR_...`) in its text.
 
 The two commands are compared word for word, not searched for options to
 refuse: any other word (an option that filters findings or packages out or
@@ -236,12 +238,39 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
         return [
             f"{INVOWKFILE}: the task `{task}` must run exactly `{' '.join(want)}`, not `{' '.join(got)}` (see {why})"
         ]
-    return []
+    return [
+        f"{INVOWKFILE}: the task `{task}` sets variables (`{word}`): they can change what the command checks "
+        f"(see {why})"
+        for word in _task_variables(task_block(cue, task) or "")
+    ]
+
+
+# What sets a variable for a task: an env block (vars or files) or a uv or zizmor variable named.
+_TASK_ENV = re.compile(r"^\s*env\s*:")
+_TOOL_VARIABLE = re.compile(r"\b(?:UV|ZIZMOR)_[A-Z0-9_]*")
+
+
+def task_block(cue: str, name: str) -> str | None:
+    """The text of the invowk task `name`, from its `name:` to the next task's (None: no such task)."""
+    found = re.search(r'\n\t\tname:\s*"' + re.escape(name) + r'"(?:(?!\n\t\tname:).)*', cue, re.DOTALL)
+    return None if found is None else found.group(0)
+
+
+def _task_variables(block: str) -> list[str]:
+    """The env keys and uv or zizmor variables of a task's text, comment lines left out."""
+    out: list[str] = []
+    for line in block.splitlines():
+        if line.lstrip().startswith("//"):
+            continue
+        if _TASK_ENV.match(line):
+            out.append("env")
+        out += _TOOL_VARIABLE.findall(line)
+    return out
 
 
 UV_AUDIT_STEP = re.compile(r"^\s*(?:-\s+)?run:\s*invowk cmd ci uv-audit\s*$")
 _JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-_LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error)\s*:")
+_LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error|needs)\s*:")
 _STEP = re.compile(r"^(\s*)-\s")
 
 
@@ -250,8 +279,9 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
 
     The nightly must run the task in a step `run: invowk cmd ci uv-audit`
     (on one line, nothing added), as the last step of its job (a failed
-    audit then skips no other gate), in a job with no `if:` or
-    `continue-on-error:` at any depth, and no uv variable (`UV_...`) may
+    audit then skips no other gate), in a job with no `if:`,
+    `continue-on-error:` or `needs:` at any depth (a job that needs another
+    is skipped when that one is skipped, and the run still passes), and no uv variable (`UV_...`) may
     appear anywhere in the workflow. Comment lines are left out.
     """
     out: list[str] = []
@@ -523,6 +553,22 @@ class WorkflowAuditTest(unittest.TestCase):
             task_problems(GOOD_CUE.replace('name:        "test workflows"', 'name:        "test flows"')),
             [f"{INVOWKFILE}: there is no task `test workflows`"],
         )
+        # A variable set for the task, by an env block or by name, changes what zizmor checks.
+        script = '\t\tscript: {content: "' + good + '"}'
+        for env, words in (
+            ('\t\tenv: {vars: {ZIZMOR_OFFLINE: "0"}}\n', ["env", "ZIZMOR_OFFLINE"]),
+            ('\t\tenv: {files: [".env"]}\n', ["env"]),
+            ("\t\t// ZIZMOR_X is only a comment\n", []),
+        ):
+            with self.subTest(env=env):
+                self.assertEqual(
+                    task_problems(GOOD_CUE.replace(script, env + script)),
+                    [
+                        f"{INVOWKFILE}: the task `test workflows` sets variables (`{word}`): they can change "
+                        f"what the command checks (see {AUDIT_WHY})"
+                        for word in words
+                    ],
+                )
 
     def test_the_nightly_audits_every_locked_package(self) -> None:
         self.assertEqual(uv_audit_problems(GOOD_CUE, GOOD_NIGHTLY), [])
@@ -531,6 +577,15 @@ class WorkflowAuditTest(unittest.TestCase):
             [f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)"],
         )
         good = " ".join(UV_AUDIT_COMMAND)
+        script = '\t\tscript: {content: "' + good + '"}'
+        self.assertEqual(
+            uv_audit_problems(GOOD_CUE.replace(script, '\t\tenv: {vars: {UV_NO_DEV: "1"}}\n' + script), GOOD_NIGHTLY),
+            [
+                f"{INVOWKFILE}: the task `ci uv-audit` sets variables (`{word}`): they can change what the "
+                f"command checks (see {UV_AUDIT_WHY})"
+                for word in ("env", "UV_NO_DEV")
+            ],
+        )
         for bad in (
             good.replace("--locked ", ""),
             good + " --no-group mutation",
@@ -581,6 +636,10 @@ class WorkflowAuditTest(unittest.TestCase):
             (
                 GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:\n    if: false\n"),
                 [lenient.format(f"{NIGHTLY}:13", "if")],
+            ),
+            (
+                GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:\n    needs: static-gates\n"),
+                [lenient.format(f"{NIGHTLY}:13", "needs")],
             ),
             (
                 GOOD_NIGHTLY.replace("permissions:", "env:\n  UV_NO_DEV: '1'\npermissions:"),

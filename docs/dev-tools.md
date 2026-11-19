@@ -512,9 +512,10 @@ nightly's static gates still run; `check` does not run it.
 When it fails, upgrade that pin (below), or the tool that pulls it in.
 `tests/test_workflow_audit.py` fails when the nightly stops running the task
 (the step must be `run: invowk cmd ci uv-audit` on one line, not a comment),
-when that step is not the last of its job or the job has an `if:` or a
-`continue-on-error:`, when a uv variable (`UV_...`) appears in the
-nightly, or when the task runs anything but exactly that command: dropping `--locked`
+when that step is not the last of its job or the job has an `if:`, a
+`continue-on-error:` or a `needs:` (skipped with the job it needs), when a
+uv variable (`UV_...`) appears in the nightly or the task sets a variable
+(an `env` block, a `UV_...` name), or when the task runs anything but exactly that command: dropping `--locked`
 fails, and so does any word added, such as an option that leaves packages
 or vulnerabilities out (`--no-group`, `--only-dev`, `--no-extra`,
 `--ignore`, `--ignore-until-fixed`, `--frozen`, `--service-url`), a
