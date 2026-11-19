@@ -248,6 +248,10 @@ class HomeFilesPort(Protocol):
         """Remove the file (or link) PATH; OSError when that fails."""
         ...
 
+    def remove_if_present(self, path: str) -> bool:
+        """Remove the file (or link) PATH; False when nothing was there; OSError when that fails."""
+        ...
+
     def dangling_link(self, path: str) -> bool:
         """PATH is a symbolic link to nothing."""
         ...

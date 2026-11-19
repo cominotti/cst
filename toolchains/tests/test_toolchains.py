@@ -905,6 +905,84 @@ class AutoTest(Scratch):
         self.assertEqual(self.calls(), ["--user daemon-reload"])
         self.assertFalse(os.path.lexists(link))
 
+    STAMP = ".local/share/systemd/timers/stamp-cst-toolchains-prune.timer"
+    OLD_STAMP = ".local/share/systemd/timers/stamp-cst-cargo-build-gc.timer"
+
+    def test_auto_off_removes_the_stamp_of_a_timer_whose_file_is_gone(self) -> None:
+        # clean needs the timer loaded: with its file gone, systemd's stamp of its last run
+        # stays unless auto off removes it itself.
+        self.orphan()
+        self.write(self.STAMP, "")
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "removed:   ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer "
+            "(the last run of the timer whose file was gone)",
+            out,
+        )
+        self.assertFalse(os.path.lexists(os.path.join(self.home, self.STAMP)))
+        self.assertEqual(self.calls(), ["--user daemon-reload"])
+        # Run again: nothing more to do.
+        open(self.log, "w").close()
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("stamp-", out)
+        self.assertEqual(self.calls(), [])
+
+    def test_auto_off_keeps_the_stamp_when_the_manager_does_not_answer(self) -> None:
+        link = self.orphan()
+        self.write(self.STAMP, "")
+        with self.failing("is-active"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("nothing was removed", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.STAMP)))
+        self.assertTrue(os.path.islink(link))
+
+    def test_auto_off_keeps_the_stamp_of_a_timer_file_that_is_not_csts(self) -> None:
+        self.write(self.STAMP, "")
+        self.write(".config/systemd/user/cst-toolchains-prune.timer", "[Timer]\nOnCalendar=daily\n")
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("not written by CST", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.STAMP)))
+        os.unlink(self.unit("cst-toolchains-prune.timer"))
+        os.symlink("/dev/null", self.unit("cst-toolchains-prune.timer"))
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("masked with systemctl --user mask", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.STAMP)))
+        self.assertEqual(self.calls(), [])
+
+    def test_auto_on_and_off_remove_the_stamp_of_the_earlier_timer_whose_file_is_gone(self) -> None:
+        self.csts_cargo_config()
+        self.write(self.OLD_STAMP, "")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "removed:   ~/.local/share/systemd/timers/stamp-cst-cargo-build-gc.timer "
+            "(the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone)",
+            out,
+        )
+        self.assertFalse(os.path.lexists(os.path.join(self.home, self.OLD_STAMP)))
+        rc, out = self.run_main("auto", "on")
+        self.assertNotIn("stamp-", out)
+        self.write(self.OLD_STAMP, "")
+        rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("removed:   ~/.local/share/systemd/timers/stamp-cst-cargo-build-gc.timer", out)
+        self.assertFalse(os.path.lexists(os.path.join(self.home, self.OLD_STAMP)))
+
+    def test_the_stamp_of_the_earlier_timer_stays_while_its_file_is_there(self) -> None:
+        # Its file is there: disable and clean (systemd removes the stamp), or not CST's: left alone.
+        self.csts_cargo_config()
+        self.write(self.OLD_STAMP, "")
+        self.write(".config/systemd/user/cst-cargo-build-gc.timer", "# my own: x\n[Timer]\n")
+        rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("stamp-", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.OLD_STAMP)))
+
     def test_auto_off_leaves_everything_when_an_orphan_timer_cannot_be_stopped(self) -> None:
         link = self.orphan()
         with self.failing("stop"), mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):

@@ -2923,7 +2923,11 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         (systemctl --user clean --what=state, before the unit file goes).
         No prune runs here: `auto on` starts the timer, and starting a
         Persistent= timer that never ran makes its stamp (systemd's
-        timer_start). The guard below fails loudly if it did not."""
+        timer_start). The guard below fails loudly if it did not.
+        Then the timer file gone before auto off (removed by hand, or by an
+        older auto off): clean cannot work once the unit is not loaded, and
+        systemd leaves the stamp (guarded); auto off removes it itself, a
+        second auto off has nothing left to remove, and auto on still works."""
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
             """
@@ -2937,6 +2941,28 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             fi
             /opt/cst-rw/cst toolchains auto off
             if [ -e "$stamp" ]; then echo "auto off left $stamp" >&2; exit 1; fi
+            units=/home/tester/.config/systemd/user
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            [ -e "$stamp" ] || { echo "no $stamp after the second auto on" >&2; exit 1; }
+            systemctl --user disable --now cst-toolchains-prune.timer
+            rm -f "$units/cst-toolchains-prune.timer" "$units/cst-toolchains-prune.service"
+            systemctl --user daemon-reload
+            if [ ! -e "$stamp" ]; then
+                echo "systemd removed $stamp with the timer file: the check below would prove nothing" >&2
+                exit 1
+            fi
+            off="$(/opt/cst-rw/cst toolchains auto off)"
+            if [ -e "$stamp" ]; then echo "auto off left $stamp of a timer whose file was gone" >&2; exit 1; fi
+            case "$off" in
+                *"removed:   ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer"*) ;;
+                *) echo "auto off did not say it removed the stamp: $off" >&2; exit 1;;
+            esac
+            again="$(/opt/cst-rw/cst toolchains auto off)"
+            case "$again" in *stamp-*) echo "a second auto off touched a stamp: $again" >&2; exit 1;; esac
+            /opt/cst-rw/cst toolchains auto on >/dev/null
+            [ -e "$stamp" ] || { echo "auto on did not start the timer again" >&2; exit 1; }
+            /opt/cst-rw/cst toolchains auto off >/dev/null
+            [ ! -e "$stamp" ] || { echo "the last auto off left $stamp" >&2; exit 1; }
             echo E2E-OK
             """,
         ).stdout

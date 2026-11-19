@@ -26,6 +26,7 @@ from toolchains.domain.common import (
     UNIT_DIR_REL,
     WANTS_REL,
     tilde,
+    timer_stamp_rel,
 )
 from toolchains.domain.prune import SPECS
 
@@ -58,11 +59,13 @@ class AutoTimer:
         Refused (nothing removed) when its timer could not be stopped."""
         home = self.home
         found = self.files.stale_files()
-        if not found:
-            return True
         timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
+        elif timer not in (path for path, _ in found):
+            self.forget_stamp(OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone")
+        if not found:
+            return True
         reload = False
         for path, ours in found:
             if not ours:
@@ -150,6 +153,13 @@ class AutoTimer:
         if self.units.stop_if_running(TIMER):
             self.out.say(f"stopped:   {TIMER} (it was still running although its file was gone)")
 
+    def forget_stamp(self, name: str, why: str) -> None:
+        """Remove the stamp of timer NAME (its last run, which systemd keeps for a Persistent= timer)
+        when its unit file is gone: `systemctl --user clean` needs the timer loaded, so it cannot."""
+        rel = timer_stamp_rel(name)
+        if self.files.remove_if_present(os.path.join(self.home, rel)):
+            self.out.say(f"removed:   ~/{rel} ({why})")
+
     def off(self) -> int:
         home = self.home
         st = self.files.auto_states()
@@ -159,6 +169,7 @@ class AutoTimer:
             self.units.disable_timer(TIMER)
         elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
+            self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
         rc = 0 if self.remove_stale() else 1
         removed = False
         for name in AUTO_UNITS:

@@ -57,6 +57,14 @@ OLD_UNITS = ("cst-cargo-build-gc.timer", "cst-cargo-build-gc.service")
 OLD_FILES = (".local/lib/cst/cargo-build-gc", ".config/cst/cargo-gc.disabled")
 OLD_DATA = (".local/state/cst/cargo-build-gc.json", ".local/state/cst/cargo-build-gc.lock")
 OLD_CONF_REL = ".config/cst/cargo-gc.conf"
+# Where systemd keeps a Persistent= user timer's last run (when the user manager has no
+# XDG_DATA_HOME): `clean --what=state` removes it, but only while the timer is loaded.
+TIMER_STAMP_DIR_REL = ".local/share/systemd/timers"
+
+
+def timer_stamp_rel(name: str) -> str:
+    """The stamp of user timer NAME, relative to the home."""
+    return f"{TIMER_STAMP_DIR_REL}/stamp-{name}"
 
 
 class ConfigError(Exception):

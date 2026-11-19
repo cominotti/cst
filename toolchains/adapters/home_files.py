@@ -400,6 +400,13 @@ class HomeFiles:
     def remove(self, path: str) -> None:
         os.unlink(path)
 
+    def remove_if_present(self, path: str) -> bool:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            return False
+        return True
+
     def dangling_link(self, path: str) -> bool:
         return os.path.islink(path) and not os.path.exists(path)
 

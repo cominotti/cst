@@ -838,8 +838,13 @@ stops the timer and removes the program copies and the unit files. Before the
 timer file goes, it makes systemd forget the timer's last run
 (`systemctl --user clean --what=state`, which removes
 `~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer`); the same for
-the timer of the earlier `cst btrfs cargo-gc`. Your
-`~/.config/cst/toolchains.conf` stays. `auto off` also writes
+the timer of the earlier `cst btrfs cargo-gc`. When the timer file is already
+gone (removed by hand, or by an older `auto off`), `clean` cannot work (systemd
+needs the unit loaded): `auto off` then stops the timer if it still runs and
+removes that stamp itself (`removed:`); `auto on` and `auto off` do the same
+for the stamp of the earlier `cst-cargo-build-gc.timer`. (If your user manager
+sets `XDG_DATA_HOME`, systemd keeps the stamps there instead, and CST does not
+look for them.) Your `~/.config/cst/toolchains.conf` stays. `auto off` also writes
 `~/.config/cst/toolchains-auto.off`, so that a later `snapshots setup` does
 not turn the timer back on (it says `left off` instead); `auto on` removes
 that file again.
