@@ -30,6 +30,7 @@ def is_config_reason(reason: object) -> bool:
     """reason (a postponed record's) is config_reason's: the dockerd config file could not be read."""
     return isinstance(reason, str) and reason.endswith(CONFIG_UNKNOWN)
 
+
 # Beside a volume's _data during its migration: the NOCOW copy being made, and the
 # original between the two renames (followed by the time it was moved aside).
 NEW_SUFFIX = ".nocow-new"

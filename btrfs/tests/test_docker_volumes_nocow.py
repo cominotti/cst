@@ -1382,8 +1382,12 @@ class DaemonJsonProblemTest(PostponeBase):
                     shutil.rmtree(self.vols)
                 self.assertEqual(self.call(self.cli.migrate)[0], 0)
                 with open(self.postponed) as f:
-                    self.assertEqual(json.load(f)["reason"], f"{self.PROBLEM}, so the volumes folder Docker uses is unknown")
-                self.assertIn(f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1])
+                    self.assertEqual(
+                        json.load(f)["reason"], f"{self.PROBLEM}, so the volumes folder Docker uses is unknown"
+                    )
+                self.assertIn(
+                    f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1]
+                )
 
     def test_mark_changes_nothing(self) -> None:
         self.fs.sets.clear()
