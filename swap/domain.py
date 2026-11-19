@@ -8,7 +8,7 @@ import contextlib
 import posixpath
 import re
 import shlex
-from typing import Final, Literal, TypedDict
+from typing import Final, Literal, Protocol, TypedDict
 
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
@@ -243,6 +243,83 @@ class SpecResolution:
     spec: SwapHardwareSpec | None
     state: SwapSpecState
     note: str = ""
+    # "bad" from the settings file's own lines: each problem (note is their "; " join).
+    problems: tuple[str, ...] = ()
+
+
+class SwapSettingsFacts(Protocol):
+    """What resolve_settings asks of the machine, each only when it needs it, as the reader sees it:
+    settings_text: /etc/cst/swap.conf's text, None when it could not be read (not there included);
+    settings_seen: something is at it (a link too, even one that points nowhere); settings_is_file: a
+    regular file (through a link); settings_readable: this user may read it; settings_folder_closed: the
+    nearest folder above it that is there is one this user may not search (whether it is there cannot
+    be seen); crypttab_closed: /etc/crypttab is there and this user may not read it; crypttab_text and
+    fstab_text: "" when not there or not readable; partition_size: the size in bytes of the block
+    device a path leads to, None when it leads to none."""
+
+    def settings_text(self) -> str | None: ...
+    def settings_seen(self) -> bool: ...
+    def settings_is_file(self) -> bool: ...
+    def settings_readable(self) -> bool: ...
+    def settings_folder_closed(self) -> bool: ...
+    def crypttab_closed(self) -> bool: ...
+    def crypttab_text(self) -> str: ...
+    def fstab_text(self) -> str: ...
+    def partition_size(self, device_path: str) -> int | None: ...
+
+
+def resolve_settings(facts: SwapSettingsFacts, *, as_root: bool) -> SpecResolution:
+    """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
+    up (its marked crypttab line, the partition's size now: apply writes the file from them). A file
+    that is there but cannot be read is never taken as missing. cst swap and cst doctor both read the
+    file through this (as_root: the reader runs as root)."""
+    text = facts.settings_text()
+    if text is not None:
+        settings = parse_swap_settings(text)
+        if settings.problems:
+            return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems), settings.problems)
+        return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
+    if facts.settings_seen():
+        return _settings_not_read(facts, seen=True, as_root=as_root)
+    if facts.settings_folder_closed():
+        return _settings_not_read(facts, seen=False, as_root=as_root)
+    return _spec_from_older_install(facts)
+
+
+def _settings_not_read(facts: SwapSettingsFacts, *, seen: bool, as_root: bool) -> SpecResolution:
+    """/etc/cst/swap.conf is there (seen), or may be in a folder this user may not search, and could
+    not be read: never taken as missing (the migration would write over it). A user who may not read
+    it is asked for --root; anything else stops apply."""
+    if seen and not facts.settings_is_file():
+        return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
+    if not as_root and not (seen and facts.settings_readable()):
+        return SpecResolution(None, SwapSpecState.UNREADABLE)
+    # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
+    return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
+
+
+def _spec_from_older_install(facts: SwapSettingsFacts) -> SpecResolution:
+    """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
+    partition's size now), from which apply writes the file."""
+    if facts.crypttab_closed():
+        name = marked_fstab_name(facts.fstab_text())
+        return (
+            SpecResolution(None, SwapSpecState.UNSET)
+            if name is None
+            else SpecResolution(None, SwapSpecState.UNKNOWN, name)
+        )
+    entry = marked_crypttab_entry(facts.crypttab_text())
+    if entry is None:
+        return SpecResolution(None, SwapSpecState.UNSET)
+    name, partuuid = entry
+    size = facts.partition_size(partuuid_path(partuuid))
+    if size is None:
+        return SpecResolution(
+            None,
+            SwapSpecState.UNSET,
+            f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here",
+        )
+    return SpecResolution(SwapHardwareSpec(partuuid, name, size), SwapSpecState.WRITE, name)
 
 
 @dataclass(frozen=True, slots=True)

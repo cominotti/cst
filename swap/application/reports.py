@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The read-only use cases of swap: what plan and status show (no direct OS I/O or terminal formatting)."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import posixpath
 import re
@@ -38,11 +38,8 @@ from swap.domain import (
     SpecResolution,
     human_size,
     is_cst_dropin,
-    marked_crypttab_entry,
-    marked_fstab_name,
     memory_low_override,
-    parse_swap_settings,
-    partuuid_path,
+    resolve_settings,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -164,6 +161,50 @@ def _short_etc_path(etc_dir: str, path: str) -> str:
     return path.removeprefix(prefix).removeprefix("systemd/system/")
 
 
+class _FileSettingsFacts:
+    """swap.domain's SwapSettingsFacts over swap's file system (the paths of env; partition: the
+    device a path leads to and its size, from sysfs)."""
+
+    def __init__(
+        self, fs: FileSystemPort, env: SwapEnvironment, partition: Callable[[str], tuple[str, int] | None]
+    ) -> None:
+        self._fs = fs
+        self._env = env
+        self._partition = partition
+
+    def settings_text(self) -> str | None:
+        return self._fs.read_text(self._env.settings_path)
+
+    def settings_seen(self) -> bool:
+        return self._fs.lexists(self._env.settings_path)
+
+    def settings_is_file(self) -> bool:
+        return self._fs.is_file(self._env.settings_path)
+
+    def settings_readable(self) -> bool:
+        return self._fs.is_readable(self._env.settings_path)
+
+    def settings_folder_closed(self) -> bool:
+        # lexists cannot see the file under a folder this user may not search, so it may be there.
+        folder = posixpath.dirname(self._env.settings_path)
+        while not self._fs.is_dir(folder) and folder not in ("", "/"):
+            folder = posixpath.dirname(folder)
+        return not self._fs.is_searchable(folder)
+
+    def crypttab_closed(self) -> bool:
+        return self._fs.exists(self._env.crypttab) and not self._fs.is_readable(self._env.crypttab)
+
+    def crypttab_text(self) -> str:
+        return self._fs.read_text(self._env.crypttab, "") or ""
+
+    def fstab_text(self) -> str:
+        return self._fs.read_text(self._env.fstab, "") or ""
+
+    def partition_size(self, device_path: str) -> int | None:
+        part = self._partition(device_path)
+        return None if part is None else part[1]
+
+
 class SwapReports:
     """The plan and status use cases, and the inspection apply builds on (SwapApplicationService)."""
 
@@ -251,65 +292,10 @@ class SwapReports:
         return dev, int(sectors) * 512
 
     def resolve_spec(self) -> SpecResolution:
-        """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
-        up (its marked crypttab line, the partition's size now: apply writes the file from them). A file
-        that is there but cannot be read is never taken as missing."""
-        env = self._env
-        text = self._fs.read_text(env.settings_path)
-        if text is not None:
-            settings = parse_swap_settings(text)
-            if settings.problems:
-                return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems))
-            return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
-        if self._fs.lexists(env.settings_path):
-            return self._settings_not_read(seen=True)
-        if self._settings_folder_closed():
-            return self._settings_not_read(seen=False)
-        return self._spec_from_older_install()
-
-    def _settings_folder_closed(self) -> bool:
-        """The nearest folder above /etc/cst/swap.conf that is there is one this user may not search:
-        lexists cannot see the file then, so it may be there."""
-        folder = posixpath.dirname(self._env.settings_path)
-        while not self._fs.is_dir(folder) and folder not in ("", "/"):
-            folder = posixpath.dirname(folder)
-        return not self._fs.is_searchable(folder)
-
-    def _settings_not_read(self, *, seen: bool) -> SpecResolution:
-        """/etc/cst/swap.conf is there (seen), or may be in a folder this user may not search, and could
-        not be read: never taken as missing (the migration would write over it). A user who may not read
-        it is asked for --root; anything else stops apply."""
-        path = self._env.settings_path
-        if seen and not self._fs.is_file(path):
-            return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
-        if not self._env.as_root and not (seen and self._fs.is_readable(path)):
-            return SpecResolution(None, SwapSpecState.UNREADABLE)
-        # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
-        return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
-
-    def _spec_from_older_install(self) -> SpecResolution:
-        """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
-        partition's size now), from which apply writes the file."""
-        env = self._env
-        if self._fs.exists(env.crypttab) and not self._fs.is_readable(env.crypttab):
-            name = marked_fstab_name(self._fs.read_text(env.fstab, "") or "")
-            return (
-                SpecResolution(None, SwapSpecState.UNSET)
-                if name is None
-                else SpecResolution(None, SwapSpecState.UNKNOWN, name)
-            )
-        entry = marked_crypttab_entry(self._fs.read_text(env.crypttab, "") or "")
-        if entry is None:
-            return SpecResolution(None, SwapSpecState.UNSET)
-        name, partuuid = entry
-        part = self._partition_size_sysfs(partuuid_path(partuuid))
-        if part is None:
-            return SpecResolution(
-                None,
-                SwapSpecState.UNSET,
-                f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here",
-            )
-        return SpecResolution(SwapHardwareSpec(partuuid, name, part[1]), SwapSpecState.WRITE, name)
+        """The partition from /etc/cst/swap.conf, or the one an older CST set up (swap.domain's
+        resolve_settings, over this file system)."""
+        facts = _FileSettingsFacts(self._fs, self._env, self._partition_size_sysfs)
+        return resolve_settings(facts, as_root=self._env.as_root)
 
     def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
         """The row of /etc/cst/swap.conf in plan and status."""
