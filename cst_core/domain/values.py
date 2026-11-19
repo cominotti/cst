@@ -15,6 +15,9 @@ class DomainValidationError(ValueError):
     """Raised when a domain value object invariant is violated."""
 
 
+# The superuser's account name (SUDO_USER, --user, an install's owner): not a FileOwner or Owner member.
+ROOT_ACCOUNT: Final = "root"
+
 MIB: Final = 1 << 20
 GIB: Final = 1 << 30
 

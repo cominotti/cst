@@ -25,6 +25,7 @@ from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
+from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters import holds, read_stripped
 from cpu.game.domain import GAME_DROPIN, cpuset_in
@@ -89,7 +90,7 @@ def my_name() -> str:
 
 def target_user(sudo_user: str, conf: str) -> str:
     """Whose session the commands are for: SUDO_USER, else (root, or none) the user install recorded."""
-    if sudo_user and sudo_user != "root":
+    if sudo_user and sudo_user != ROOT_ACCOUNT:
         return sudo_user
     return target_user_in(read_text(conf) or "")
 
@@ -209,9 +210,9 @@ class CpuSetup:
         handover = lc_ctype_handover().partition("=")
         self.run(argv, input_text=input_text, env={handover[0]: handover[2]})
 
-    def install_text(self, dest: str, text: str, owner: str = "root") -> None:
+    def install_text(self, dest: str, text: str, owner: str = ROOT_ACCOUNT) -> None:
         """cst_install_text DEST 0644 [OWNER]."""
-        self.installer("text", dest, "0644", as_user="" if owner == "root" else owner, input_text=text)
+        self.installer("text", dest, "0644", as_user="" if owner == ROOT_ACCOUNT else owner, input_text=text)
 
     def required_home(self, user: str, who: str) -> str:
         """The user's home for a step in it (who: the helper that says so), or Halt(1)."""
@@ -291,7 +292,7 @@ class CpuSetup:
     def install(self) -> int:
         """The game profile, baseline weights, the toolboxes on the E-cores, GameMode, cpu-watch, the cst link."""
         p, user = self.paths, self.user
-        if not user or user == "root":
+        if not user or user == ROOT_ACCOUNT:
             raise Halt(1, "install: run through sudo from your user account (needs SUDO_USER)")
         srcs = [
             e.src

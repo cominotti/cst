@@ -24,6 +24,7 @@ from btrfs.bulk.ports import HostPort, OutputPort
 from cst_core.adapters.files import CounterFile
 from cst_core.adapters.notify import PENDING_ALERTS
 from cst_core.adapters.runtime import sibling_program
+from cst_core.domain.values import ROOT_ACCOUNT
 
 
 def bulk_paths(environ: Mapping[str, str], *, root: bool) -> BulkPaths:
@@ -103,7 +104,7 @@ class Wiring:
         if self.root:
             if not name:
                 name = bulk_user(self.paths.conf)
-            if not name or name == "root":
+            if not name or name == ROOT_ACCOUNT:
                 raise NoUser("btrfs-bulk: needs --user NAME (not root)")
             pw = lookup_user(name)
             return Ctx(real_path(pw.pw_dir), uid=pw.pw_uid), pw

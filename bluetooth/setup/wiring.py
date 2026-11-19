@@ -30,6 +30,7 @@ from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunn
 from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, undo_python_start
 from cst_core.adapters.files import read_text
 from cst_core.domain.dispatch import script_help, step_down_argv
+from cst_core.domain.values import ROOT_ACCOUNT
 
 
 def take_handover() -> Mapping[str, str]:
@@ -70,7 +71,7 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
     if effective_uid() != 0:
         return None
     user = env.get("SUDO_USER", "")
-    if not user or user == "root":
+    if not user or user == ROOT_ACCOUNT:
         return Exit(
             1,
             err=f"{prog_name}: ERROR: run it from your user account (needs SUDO_USER): the WirePlumber parts belong to your session; it calls sudo by itself for main.conf\n",

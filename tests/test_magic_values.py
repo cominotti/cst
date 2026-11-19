@@ -93,22 +93,8 @@ MAGIC_CEILINGS: Final[dict[str, int]] = {
 }
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
-    "cst_core/application/dispatch.py:CstDispatcher.run_doctor": (
-        'compares SUDO_USER with the account name "root", not a FileOwner or Owner'
-    ),
-    "cst_core/application/dispatch.py:ModuleRouter._as_user": (
-        'compares SUDO_USER with the account name "root", not a FileOwner or Owner'
-    ),
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
-    ),
-    # The account name "root" (SUDO_USER, --user, BULK_USER, cst_install_text's OWNER): not a FileOwner or CpuRoute.
-    "bluetooth/setup/wiring.py:step_down": 'compares SUDO_USER with the account name "root", not a FileOwner',
-    "btrfs/bulk/wiring.py:Wiring.user": 'compares the account from --user or BULK_USER with "root", not a FileOwner',
-    "cpu/setup/adapters.py:target_user": 'compares SUDO_USER with the account name "root", not a CpuRoute',
-    "cpu/setup/adapters.py:CpuSetup.install": 'compares the target user with the account name "root", not a CpuRoute',
-    "cpu/setup/adapters.py:CpuSetup.install_text": (
-        'its owner is an account name ("root" means no runuser), not a CpuRoute or FileOwner'
     ),
     # Loose records with no fixed format to describe.
     "btrfs/bulk/adapters/user.py:u_read": (

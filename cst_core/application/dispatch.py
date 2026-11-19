@@ -24,6 +24,7 @@ from cst_core.domain.dispatch import (
     script_help,
     step_down_argv,
 )
+from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CstDispatchPort, ModuleRoutePort
 
 
@@ -87,7 +88,7 @@ class CstDispatcher:
             return 1
         env = dict(self._port.environ())
         user = env.get("SUDO_USER", "")
-        if self._port.euid() == 0 and user and user != "root":
+        if self._port.euid() == 0 and user and user != ROOT_ACCOUNT:
             try:
                 uid, home = self._port.user_passwd(user)
             except KeyError:
@@ -254,7 +255,7 @@ class ModuleRouter:
         if self._port.euid() != 0:
             return self._run_program(cmd, rest)
         user = self._s.sudo_user
-        if not user or user == "root":
+        if not user or user == ROOT_ACCOUNT:
             self._port.say(
                 "err",
                 f"{self._prog}: ERROR: run it from your user account (needs SUDO_USER): {self._routing.user_reason}\n",
