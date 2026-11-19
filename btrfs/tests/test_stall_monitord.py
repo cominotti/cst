@@ -797,8 +797,9 @@ class TimedReaderTest(unittest.TestCase):
 
 
 class PrepareLogDirTest(unittest.TestCase):
-    """prepare_log_dir: a missing log folder (a run by hand with --log-dir) is made with the unit's
-    LogsDirectoryMode= (0750), whatever the umask; one that is there is left as it is."""
+    """prepare_log_dir: a missing log folder (a run by hand with --log-dir) is made as systemd makes
+    the unit's LogsDirectory=, whatever the umask: the folder with its LogsDirectoryMode= (0750),
+    its missing parents 0755; one that is there is left as it is."""
 
     @override
     def setUp(self) -> None:
@@ -808,14 +809,18 @@ class PrepareLogDirTest(unittest.TestCase):
     def mode(self, path: str) -> int:
         return stat.S_IMODE(os.stat(path).st_mode)
 
-    def test_a_missing_folder_and_its_parents_get_0750_under_any_umask(self) -> None:
-        logs = os.path.join(self.tmp, "a", "logs")
-        old = os.umask(0)
-        self.addCleanup(os.umask, old)
-        md_proc.prepare_log_dir(logs)
-        os.umask(old)
-        self.assertEqual(oct(self.mode(logs)), "0o750")
-        self.assertEqual(oct(self.mode(os.path.join(self.tmp, "a"))), "0o750")
+    def test_a_missing_folder_gets_0750_and_its_parents_0755_under_any_umask(self) -> None:
+        for umask in (0, 0o077):
+            with self.subTest(umask=oct(umask)):
+                top = os.path.join(self.tmp, f"u{umask:o}")
+                logs = os.path.join(top, "a", "logs")
+                old = os.umask(umask)
+                self.addCleanup(os.umask, old)
+                md_proc.prepare_log_dir(logs + "/")  # a trailing slash names the same folder
+                os.umask(old)
+                self.assertEqual(oct(self.mode(logs)), "0o750")
+                self.assertEqual(oct(self.mode(os.path.join(top, "a"))), "0o755")
+                self.assertEqual(oct(self.mode(top)), "0o755")
 
     def test_a_folder_that_is_there_keeps_its_mode(self) -> None:
         logs = os.path.join(self.tmp, "logs")

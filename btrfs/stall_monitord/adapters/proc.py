@@ -274,15 +274,19 @@ def scan_d_tasks() -> list[tuple[str, str, str]]:
     return out
 
 
-# The mode of the log folder and of its missing parents when the daemon makes them (a run by
-# hand with --log-dir): the unit's LogsDirectoryMode=.
+# The modes the daemon gives the folders it makes for a run by hand with --log-dir, as systemd
+# makes a LogsDirectory=: the log folder gets the unit's LogsDirectoryMode=, its missing parents
+# 0755. (Only the mode: the folder's group is the caller's, not the unit's Group=.)
 LOG_DIR_MODE: Final = 0o750
+LOG_PARENT_MODE: Final = 0o755
 
 
 def prepare_log_dir(log_dir: str) -> None:
-    """The folder of the daily log files, made (with its missing parents, each LOG_DIR_MODE) when
-    missing; a folder that is there is left as it is."""
-    ensure_dir(log_dir, LOG_DIR_MODE)
+    """The folder of the daily log files, made when missing: LOG_DIR_MODE, and LOG_PARENT_MODE for
+    each missing parent; a folder that is there is left as it is."""
+    folder = os.path.abspath(log_dir)
+    ensure_dir(os.path.dirname(folder), LOG_PARENT_MODE)
+    ensure_dir(folder, LOG_DIR_MODE)
 
 
 class Writer(threading.Thread):
