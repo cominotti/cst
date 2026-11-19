@@ -281,8 +281,8 @@ class AdaptersTest(unittest.TestCase):
         self.assertFalse(fs.is_symlink(link))
         self.assertEqual(fs.read_text(link), "replaced\n")
 
-        fs.remove_file(link)
-        fs.remove_file(link)  # idempotent
+        self.assertTrue(fs.remove_file(link))  # something was there
+        self.assertFalse(fs.remove_file(link))  # idempotent: nothing left to remove
         self.assertFalse(fs.lexists(link))
 
     def test_subprocess_runner_and_systemctl_adapter(self) -> None:
