@@ -4632,15 +4632,19 @@ written="$({inst} install {files})"
 printf '%s\n' "$written"
 w_rt="$(grep -n 'btrfs-snapshot-runtime$' <<<"$written" | cut -d: -f1)"
 w_front="$(grep -n 'sbin/btrfs-snapshot$' <<<"$written" | cut -d: -f1)"
-[ -n "$w_rt" ] && [ -n "$w_front" ] && [ "$w_rt" -lt "$w_front" ]
+[ -n "$w_rt" ]
+[ -n "$w_front" ]
+[ "$w_rt" -lt "$w_front" ]
 S=/usr/local/sbin/btrfs-snapshot
 [ "$(head -c 2 /usr/local/sbin/btrfs-snapshot-runtime)" = "#!" ]
 printf '%s\n' "NAS_RESTIC_HOST=e2e" >"$conf"
 rc=0; "$S" configure >"$d/out" 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ ! -s "$d/out" ]
+[ "$rc" = 0 ]
+[ ! -s "$d/out" ]
 printf '%s\n' "HOME_MOUNT=/home" "NAS_RESTIC_HOST=e2e" >"$conf"
 rc=0; "$S" list >"$d/out" 2>"$d/err" || rc=$?
-[ "$rc" = 1 ] && [ ! -s "$d/out" ]
+[ "$rc" = 1 ]
+[ ! -s "$d/out" ]
 grep -qxF "not set up; run 'cst btrfs snapshots setup'" "$d/err"
 printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_ENABLED=0" "NAS_RESTIC_HOST=e2e" >"$conf"
 rc=0; "$S" nas >"$d/out" 2>&1 || rc=$?
@@ -4655,7 +4659,7 @@ rc=0; "$S" hourly >"$d/out" 2>"$d/err" || rc=$?
 cat "$d/out" "$d/err"
 [ "$rc" = 1 ]
 grep -qxF "<3>btrfs-snapshot: cannot read free space" "$d/out"
-! grep -q "convert-planned" "$d/out" "$d/err"
+if grep -q "convert-planned" "$d/out" "$d/err"; then exit 1; fi
 rc=0; "$S" prune --x >"$d/out" 2>"$d/err" || rc=$?
 [ "$rc" = 2 ]
 grep -qxF "usage: btrfs-snapshot prune [--dry-run] [--allow-mass-delete]" "$d/err"
@@ -4672,7 +4676,9 @@ removed="$({inst} remove {files})"
 printf '%s\n' "$removed"
 r_rt="$(grep -n 'btrfs-snapshot-runtime$' <<<"$removed" | cut -d: -f1)"
 r_front="$(grep -n 'sbin/btrfs-snapshot$' <<<"$removed" | cut -d: -f1)"
-[ -n "$r_rt" ] && [ -n "$r_front" ] && [ "$r_front" -lt "$r_rt" ]
+[ -n "$r_rt" ]
+[ -n "$r_front" ]
+[ "$r_front" -lt "$r_rt" ]
 echo test_109-ok
 """,
         ).stdout
