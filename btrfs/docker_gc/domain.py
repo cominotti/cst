@@ -14,6 +14,7 @@ import re
 from typing import Final
 
 from cst_core.domain.contracts import StateFormat, StateFormatKey, state_format, version_of
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import DAY, MINUTE, format_bytes_decimal
 
@@ -209,8 +210,8 @@ def container_refusal(
 # ---- the settings file: which registries are protected ------------------------------
 # The exit status of a command that cannot tell which registries are protected (a settings file
 # it cannot read, or no file and an installed docker-gc it does not know): it removes nothing.
-# 78: EX_CONFIG of sysexits.h.
-BAD_SETTINGS_EXIT = 78
+# 78: EX_CONFIG of sysexits.h, shared with btrfs-bulk's boot step.
+BAD_SETTINGS_EXIT: Final = ExitStatus.BAD_SETTINGS
 SETTINGS_KEYS = ("DOCKER_GC_PROTECT",)
 # A registry as an image reference starts with it: a host (a name or an address, a port), and
 # optionally the first parts of a repository path ("ghcr.io/team").

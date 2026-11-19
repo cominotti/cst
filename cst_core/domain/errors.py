@@ -22,8 +22,10 @@ class Refused(Exception):
 
 
 class ExitStatus(IntEnum):
-    """Exit statuses with a meaning of their own, as bash and timeout(1) give them."""
+    """Exit statuses with a meaning of their own, as bash and timeout(1) give them, and the
+    sysexits.h ones that several CST programs return for the same reason."""
 
+    BAD_SETTINGS = 78  # EX_CONFIG: the settings cannot tell what to act on (docker-gc, btrfs-bulk boot)
     TIMED_OUT = 124  # timeout(1): the command ran out of time
     CANNOT_RUN = 126  # found, but it cannot be executed
     NOT_FOUND = 127  # no such command

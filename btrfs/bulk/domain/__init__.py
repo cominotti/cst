@@ -18,6 +18,7 @@ from typing import TypedDict
 import os
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.domain.text import enum_member
 
@@ -224,9 +225,10 @@ class NoUser(Exception):
 
 
 # The exit status of btrfs-bulk boot when bulk.conf cannot tell whose home it is (a bad line, no
-# user): EX_CONFIG of sysexits.h. It is not in the SuccessExitStatus= of btrfs-bulk-boot.service
-# (1 3 4), so the unit fails and cst doctor lists it; 1, 3 and 4 keep their meaning.
-BOOT_REFUSED_EXIT: Final = 78
+# user): EX_CONFIG of sysexits.h, as docker-gc's. It is not in the SuccessExitStatus= of
+# btrfs-bulk-boot.service (1 3 4), so the unit fails and cst doctor lists it; 1, 3 and 4 keep
+# their meaning.
+BOOT_REFUSED_EXIT: Final = ExitStatus.BAD_SETTINGS
 # The exit status of btrfs-bulk boot after an error it did not expect (its traceback goes to the
 # unit's journal): EX_SOFTWARE of sysexits.h, not in SuccessExitStatus= either. Python's own exit
 # status for an uncaught exception, 1, counted as success there.
