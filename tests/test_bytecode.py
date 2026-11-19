@@ -27,7 +27,7 @@ import unittest
 from cst_core.adapters.runtime import SYSTEM_PYTHON
 from tests.duplication import is_shell
 from tests.repo_files import REPO, repo_files
-from tests.run_unit import HOST_GUARD_ENV
+from tests.run_unit import HOST_GUARD_ENV, bytecode_files
 from tests.test_distribution import HELP_MODES
 
 _SHELL_CALL = re.compile(r"python3 -I(?! -B)(?! -c)(?! - )(?! -$)")
@@ -63,13 +63,6 @@ def copy_checkout(dest: str) -> None:
     for rel in repo_files():
         os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
         shutil.copy2(os.path.join(REPO, rel), os.path.join(dest, rel))
-
-
-def bytecode_in(root: str) -> list[str]:
-    """The .pyc files under root, relative to it."""
-    return sorted(
-        os.path.relpath(os.path.join(d, n), root) for d, _, names in os.walk(root) for n in names if n.endswith(".pyc")
-    )
 
 
 class NoBytecodeInTheCheckoutTest(unittest.TestCase):
@@ -114,7 +107,7 @@ class NoBytecodeInTheCheckoutTest(unittest.TestCase):
             )
             self.assertNotEqual(proc.returncode, 0)
             self.assertNotIn("Traceback", proc.stderr)
-            self.assertEqual(bytecode_in(copy), [])
+            self.assertEqual(sorted(bytecode_files(copy)), [])
 
     @unittest.skipUnless(os.access(SYSTEM_PYTHON, os.X_OK), "needs /usr/bin/python3")
     def test_entries_run_by_their_shebang_leave_no_bytecode(self) -> None:
@@ -140,7 +133,7 @@ class NoBytecodeInTheCheckoutTest(unittest.TestCase):
                     )
                     self.assertNotIn("Traceback", proc.stderr)
                     self.assertEqual(proc.returncode, rc, proc.stdout + proc.stderr)
-            self.assertEqual(bytecode_in(copy), [])
+            self.assertEqual(sorted(bytecode_files(copy)), [])
 
 
 if __name__ == "__main__":

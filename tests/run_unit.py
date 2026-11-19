@@ -70,6 +70,14 @@ resource was opened; for an exception, its traceback is printed above the
 test results. A test that records warnings itself
 (warnings.catch_warnings(record=True)) keeps them. Code that runs in a
 child process (a helper started with python3 -I) is not seen.
+
+No test may write bytecode into the checkout. `python3 -I` ignores
+PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
+without -B writes __pycache__ folders there (root's, when the code runs as
+root). This runner sets sys.dont_write_bytecode for itself first (run by its
+shebang it has no -B), notes every .pyc of the checkout before the tests
+(.git and virtual environments left out), and fails the run on each one that
+is new or rewritten after them, with a hint (BYTECODE_HINT).
 """
 
 from collections.abc import Callable, Sequence
@@ -243,6 +251,34 @@ LOST_EXCEPTION_HINT: Final = (
 )
 
 
+# What the run prints after the bytecode a test wrote into the checkout.
+BYTECODE_HINT: Final = (
+    "a test started Python on the checkout's code without -B (python3 -I ignores PYTHONDONTWRITEBYTECODE), "
+    "or a program without the bootstrap of tests/test_entrypoints.py: pass -B"
+)
+
+
+def bytecode_files(root: str) -> dict[str, int]:
+    """The .pyc files under root (path relative to root -> mtime in ns), .git and virtual
+    environments (a folder that holds pyvenv.cfg) left out."""
+    found: dict[str, int] = {}
+    for folder, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d != ".git" and not os.path.exists(os.path.join(folder, d, "pyvenv.cfg"))]
+        for name in names:
+            if name.endswith(".pyc"):
+                path = os.path.join(folder, name)
+                try:
+                    found[os.path.relpath(path, root)] = os.stat(path).st_mtime_ns
+                except FileNotFoundError:  # removed while we walked
+                    continue
+    return found
+
+
+def new_bytecode(before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """The .pyc files of after that were not in before, or were rewritten since."""
+    return sorted(path for path, mtime in after.items() if before.get(path) != mtime)
+
+
 # The warnings module's functions that write one warning (WarningMessage) out: _showwarnmsg is the
 # one Python calls; it hands the warning to warnings.showwarning when that was replaced (and its
 # original is _showwarning_orig), and to _showwarnmsg_impl otherwise.
@@ -372,6 +408,7 @@ def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
 
 
 def main(argv: Sequence[str]) -> int:
+    sys.dont_write_bytecode = True  # run by its shebang (no -B): the test modules it imports write none
     verbosity = 2 if "-v" in argv else 1
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(repo)
@@ -404,9 +441,14 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
     theirs.close()
     sys.stdin = open(0, closefd=False)
+    bytecode_before = bytecode_files(repo)
     suite = load(repo, argv)
     result = LeakRecordingRunner(verbosity=verbosity).run(suite)
     ours.close()
+    bytecode = [
+        f"a test wrote bytecode into the checkout: {path}"
+        for path in new_bytecode(bytecode_before, bytecode_files(repo))
+    ]
     if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
         raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
     skipped = [(test.id(), reason) for test, reason in result.skipped]
@@ -414,13 +456,15 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
     leaks, lost = result.leaks, result.lost_exceptions
-    for line in [*problems, *leaks, *lost]:
+    for line in [*problems, *leaks, *lost, *bytecode]:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
         print(LEAK_HINT, file=sys.stderr)
     if lost:
         print(LOST_EXCEPTION_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems and not leaks and not lost else 1
+    if bytecode:
+        print(BYTECODE_HINT, file=sys.stderr)
+    return 0 if result.wasSuccessful() and not problems and not leaks and not lost and not bytecode else 1
 
 
 if __name__ == "__main__":

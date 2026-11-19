@@ -17,8 +17,11 @@ from tests.run_unit import (
     HOST_GUARD_EXIT,
     LEAK_HINT,
     LOST_EXCEPTION_HINT,
+    BYTECODE_HINT,
+    bytecode_files,
     expected_skip,
     load,
+    new_bytecode,
     skip_problems,
 )
 
@@ -281,6 +284,93 @@ class ResourceWarningGateTest(unittest.TestCase):
         done = self.run_probe("test_records_its_own_warning")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn("error:", done.stderr)
+
+
+# A test that starts a child Python without -B on a module that imports a sibling, and one that
+# imports a sibling in its own process (the runner's flag keeps that one from writing bytecode).
+_BYTECODE = """
+import os, subprocess, sys, unittest
+class T(unittest.TestCase):
+    def test_a_child_without_b(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run([sys.executable, "-I", os.path.join(here, "child.py")], check=True, stdin=subprocess.DEVNULL)
+    def test_imports_a_sibling(self):
+        import sibling
+        self.assertEqual(sibling.X, 1)
+"""
+
+
+class BytecodeGateTest(unittest.TestCase):
+    def test_new_or_rewritten_bytecode_is_reported(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-gate-"))
+
+        def put(rel: str) -> None:
+            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "wb"):
+                pass
+
+        put("a/__pycache__/old.cpython-314.pyc")
+        put("a/__pycache__/rewritten.cpython-314.pyc")
+        put(".git/objects/x.pyc")
+        put("venv/pyvenv.cfg")
+        put("venv/lib/__pycache__/v.cpython-314.pyc")
+        before = bytecode_files(tmp)
+        self.assertEqual(
+            sorted(before), ["a/__pycache__/old.cpython-314.pyc", "a/__pycache__/rewritten.cpython-314.pyc"]
+        )
+        put("b/__pycache__/new.cpython-314.pyc")
+        put("venv/lib/__pycache__/w.cpython-314.pyc")
+        put(".git/y.pyc")
+        rewritten = os.path.join(tmp, "a/__pycache__/rewritten.cpython-314.pyc")
+        later = before["a/__pycache__/rewritten.cpython-314.pyc"] + 10**9
+        os.utime(rewritten, ns=(later, later))
+        self.assertEqual(
+            new_bytecode(before, bytecode_files(tmp)),
+            ["a/__pycache__/rewritten.cpython-314.pyc", "b/__pycache__/new.cpython-314.pyc"],
+        )
+
+    def run_copy(
+        self, name: str, *, runner: str = os.path.join(REPO, "tests", "run_unit.py")
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        """A copy of the runner in a temporary checkout of its own, run by its shebang on one test of _BYTECODE."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-pyc-run-"))
+        os.makedirs(os.path.join(tmp, "tests"))
+        shutil.copy2(runner, os.path.join(tmp, "tests", "run_unit.py"))
+        for rel, text in (
+            ("probe_bytecode.py", _BYTECODE),
+            (
+                "child.py",
+                "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport sibling\n",
+            ),
+            ("sibling.py", "X = 1\n"),
+        ):
+            with open(os.path.join(tmp, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        done = subprocess.run(
+            [os.path.join(tmp, "tests", "run_unit.py"), f"probe_bytecode.T.{name}"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+        )
+        return done, tmp
+
+    @unittest.skipUnless(os.access("/usr/bin/python3", os.X_OK), "needs /usr/bin/python3")
+    def test_a_child_that_writes_bytecode_fails_the_run(self) -> None:
+        done, _ = self.run_copy("test_a_child_without_b")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("OK", done.stderr)  # unittest alone lets it pass
+        self.assertRegex(
+            done.stderr, r"error: a test wrote bytecode into the checkout: __pycache__/sibling\.cpython-\d+\.pyc"
+        )
+        self.assertIn(BYTECODE_HINT, done.stderr)
+
+    @unittest.skipUnless(os.access("/usr/bin/python3", os.X_OK), "needs /usr/bin/python3")
+    def test_the_runner_run_by_its_shebang_writes_no_bytecode_itself(self) -> None:
+        done, tmp = self.run_copy("test_imports_a_sibling")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(bytecode_files(tmp), {})
 
 
 class LoadTest(unittest.TestCase):

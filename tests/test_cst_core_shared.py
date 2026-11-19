@@ -945,6 +945,7 @@ class CommandRunnerTest(unittest.TestCase):
             wrapper = [
                 self.py,
                 "-I",
+                "-B",
                 "-c",
                 (
                     "import subprocess, sys\n"

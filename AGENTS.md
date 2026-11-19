@@ -251,3 +251,19 @@ first and holds a fake of each of these commands the code may run. `HostCommandG
 stubs. A command run by its absolute path (`/usr/bin/systemctl`) passes the
 stubs: production code names these commands bare, and a test never adds a
 path to them.
+
+### A child Python without -B writes __pycache__ into the checkout
+
+`python3 -I` ignores `PYTHONDONTWRITEBYTECODE`. A test that starts Python
+on the checkout's code (a program, a `-c` script that imports cst_core)
+without `-B` writes `__pycache__` folders there, and as root they are
+root's.
+
+**Rule:** a test's child Python passes `-B` (`[sys.executable, "-I", "-B",
+...]`). A program run by its shebang is covered by the bootstrap, which
+sets `sys.dont_write_bytecode` from a checkout (`tests/test_entrypoints.py`).
+`tests/run_unit.py` enforces it at run time: it notes the checkout's
+`.pyc` files before the tests and fails the run on each one that is new or
+rewritten after them. `tests/test_bytecode.py` checks production code's
+argv lists and shell scripts, and runs every entry by its shebang from a
+copy of the checkout.
