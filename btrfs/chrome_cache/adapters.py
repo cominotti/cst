@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import contextlib
 import os
 import stat
@@ -190,47 +191,45 @@ def plan_line(home: str) -> str:
     return msg if state in (ChromeFlagsState.ABSENT, ChromeFlagsState.CAP_MISSING) else f"nothing to do ({msg})"
 
 
+def _rewrite_flags(home: str, new_text: Callable[[str], str | None]) -> tuple[str, str | None]:
+    """The flags file rewritten to NEW_TEXT(its text): (the text the last decision was made on, the
+    text written, or None when NEW_TEXT gave nothing to write). The folder is created only when
+    there is something to write, and the text is then read and decided again (it may have changed
+    meanwhile)."""
+    dfd, text, st = current(home, create=False)
+    try:
+        new = new_text(text)
+        if new is None:
+            return text, None
+        if dfd is None:
+            dfd, text, st = current(home, create=True)
+            assert dfd is not None
+            new = new_text(text)
+            if new is None:
+                return text, None
+        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
+        return text, new
+    finally:
+        if dfd is not None:
+            os.close(dfd)
+
+
 def apply(home: str) -> tuple[ChromeFlagsState, str, bool]:
     """(state, message, changed)."""
     if installed(home) is None:
         return ChromeFlagsState.NO_APP, "Chrome Flatpak not installed: nothing to do", False
-    dfd, text, st = current(home, create=False)
-    try:
-        state, new, msg = decide(text)
-        if new is None:
-            return state, msg, False
-        if dfd is None:
-            dfd, text, st = current(home, create=True)
-            assert dfd is not None
-            state, new, msg = decide(text)
-            if new is None:
-                return state, msg, False
-        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
-        return state, msg, True
-    finally:
-        if dfd is not None:
-            os.close(dfd)
+    text, new = _rewrite_flags(home, lambda t: decide(t)[1])
+    state, _, msg = decide(text)
+    return state, msg, new is not None
 
 
 def off(home: str) -> tuple[str, bool, bool]:
     """(message, changed, still_set): STILL_SET when cache flags remain."""
-    dfd, text, st = current(home, create=False)
-    try:
-        new = turn_off(text)
-        if new is None:
-            return "already off: nothing changed", False, False
-        if dfd is None:
-            dfd, text, st = current(home, create=True)
-            assert dfd is not None
-            new = turn_off(text)
-            if new is None:
-                return "already off: nothing changed", False, False
-        write_flags(dfd, os.path.basename(FLAGS_REL), new, st)
-        left = inspect(new)
-        return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
-    finally:
-        if dfd is not None:
-            os.close(dfd)
+    text, new = _rewrite_flags(home, turn_off)
+    if new is None:
+        return "already off: nothing changed", False, False
+    left = inspect(new)
+    return off_message(text, new), True, left["dir"] is not None or left["size"] is not None
 
 
 # ---- the user and the home -----------------------------------------------------------------
