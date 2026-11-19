@@ -60,8 +60,8 @@ proof:
 - **A**, production only: the tests are unchanged and pass on the old code
   and on the new (step 2). A `StrEnum` member equals its plain string, so
   the old tests still pass at run time.
-- **B**, tests only: each raw string that a typed parameter now takes
-  becomes the member of the same value, plus the imports those members need;
+- **B**, tests only: each raw string passed where A types the parameter
+  as the StrEnum becomes the member of the same value, plus the imports those members need;
   assertions keep the raw strings, which pin the values
   ([magic-values](../../rules/magic-values.md)). Its proof is that the diff
   is nothing else: compare each changed test file's syntax tree before

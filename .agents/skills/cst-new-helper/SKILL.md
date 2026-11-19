@@ -70,7 +70,8 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       `# fmt: skip`, `# fmt: off` or `# fmt: on` (`tests/test_python_files.py`).
 - [ ] Its words, numbers and records follow
       [magic-values](../../rules/magic-values.md): `tests/test_magic_values.py`
-      fails on a new hit in a package without an entry in `MAGIC_CEILINGS`.
+      fails on a new hit of a kind its package has no entry for in
+      `MAGIC_CEILINGS`.
 - [ ] `HELP_MODES` in `tests/test_distribution.py`: an argv that returns
       before the program touches the machine, and its exit status.
 - [ ] The same entry in the `entries` table of

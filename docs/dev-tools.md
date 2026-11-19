@@ -192,8 +192,9 @@ repository:
   string arms on one subject, a unit number (3600, 86400, 604800, the exit
   statuses 124, 126, 127, 137), a signature with a loose
   `dict[str, Any | object | Json]` and a `Literal` of 3 or more strings are
-  counted per package in `MAGIC_CEILINGS`, which they may not go above. A
-  package without an entry may have no hit, so a new hit there fails.
+  counted per package and kind in `MAGIC_CEILINGS`, which they may not go
+  above. A package and kind with no entry may have no hit, so a new hit
+  there fails.
   `MAGIC_EXEMPT` names the scopes that keep one, with the reason; a stale
   entry fails. See
   [.agents/rules/magic-values.md](../.agents/rules/magic-values.md).
