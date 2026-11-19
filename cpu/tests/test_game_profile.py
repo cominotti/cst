@@ -30,7 +30,8 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import GameProfile, load_profile, read_settings, user_id, user_name
+from cpu.game.adapters.host import read_settings, user_id, user_name
+from cpu.game.adapters.profile import GameProfile, load_profile
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -458,7 +459,7 @@ class GameProfileOnOffTest(GameProfileCase):
         fd = take_lock(self.paths.lock, wait=False)
         assert fd is not None
         try:
-            with unittest.mock.patch("cpu.game.adapters.take_lock", return_value=None) as held:
+            with unittest.mock.patch("cpu.game.adapters.profile.take_lock", return_value=None) as held:
                 self.assertEqual(p.locked("off"), 1)
             self.assertEqual(held.call_args.kwargs["timeout"], 60)
         finally:
@@ -832,7 +833,7 @@ class UnreadableRecordTest(GameProfileCase):
         err = io.StringIO()
         with (
             unittest.mock.patch(
-                "cpu.game.adapters.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
+                "cpu.game.adapters.profile.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
             ),
             contextlib.redirect_stderr(err),
         ):
@@ -1886,7 +1887,7 @@ class FullRunFolderTest(GameProfileCase):
                     raise OSError(errno.ENOSPC, "No space left on device", path)
             return real(path, flags, encoding=encoding, errors=errors)
 
-        return unittest.mock.patch("cpu.game.adapters.open", fake_open, create=True)
+        return unittest.mock.patch("cpu.game.adapters.profile.open", fake_open, create=True)
 
     def test_on_skips_what_it_cannot_record_and_still_succeeds_then_off_undoes_the_rest(self) -> None:
         self.systemd.actions = []

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """The game profile on the machine: systemctl for both managers, the cgroup tree, /proc, sysfs, its state files.
 
-GameProfile carries what every step needs (where things are, the settings,
+The lookups and reads it shares with cst cpu (the settings, the accounts, a file's text) are in
+cpu.game.adapters.host. GameProfile carries what every step needs (where things are, the settings,
 the command runner, the user's uid) across the steps of on, off, tick and
 state; cpu.game.domain decides what the records and the answers say.
 """
@@ -12,7 +13,6 @@ import dataclasses
 import glob
 import locale
 import os
-import pwd
 import sys
 from typing import Final, TextIO
 
@@ -20,8 +20,9 @@ from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_ato
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
-from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
 from cpu.game.domain import (
     DOCKER_SCOPES,
     GAME_DROPIN,
@@ -57,7 +58,6 @@ from cpu.game.domain import (
     records,
     repaired_text,
     unreadable_lines,
-    game_settings,
     show_values,
     state_uid,
     state_undo,
@@ -73,51 +73,10 @@ from cpu.game.domain import (
 _ONCE: Final = " (fix it; said once per boot)"
 
 
-def collate_as_bash() -> None:
-    """Sort names as bash's globs do: by the collation of the caller's locale (LC_ALL, LC_COLLATE,
-    LANG), C when it has none or an unknown one. The order the boxes next to the game are handled
-    in, and listed by 'state', is then the bash version's."""
-    with contextlib.suppress(locale.Error):
-        locale.setlocale(locale.LC_COLLATE, "")
-
-
-def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]:
-    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults), and its
-    problem lines: lines bash would not read as plain assignments, which set nothing."""
-    text = read_text(conf)
-    if text is None:
-        return game_settings({}), ()
-    parsed = parse_shell_assignments(text)
-    return game_settings(parsed.values), parsed.problems
-
-
 def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
     """The game profile over paths.conf's settings (and its problem lines)."""
     settings, problems = read_settings(paths.conf)
     return GameProfile(paths, settings, runner, problems=problems)
-
-
-def user_id(user: str) -> str:
-    """The user's uid as `id -u USER` prints it, "" for an unknown user (quietly: GameProfile says id's
-    message where it is wanted)."""
-    try:
-        return str(pwd.getpwnam(user).pw_uid)
-    except KeyError:
-        return ""
-
-
-def user_name(uid: str) -> str:
-    """The name of the user with that uid, "" for none."""
-    try:
-        return pwd.getpwuid(int(uid)).pw_name
-    except KeyError, ValueError, OverflowError:
-        return ""
-
-
-def read_stripped(path: str) -> str | None:
-    """A file's text without its last newlines (a shell's $(cat FILE)), None when it cannot be read."""
-    text = read_text(path)
-    return None if text is None else text.rstrip("\n")
 
 
 def _write_line(path: str, value: str) -> bool:
@@ -128,12 +87,6 @@ def _write_line(path: str, value: str) -> bool:
     except OSError:
         return False
     return True
-
-
-def holds(path: str, needle: str) -> bool:
-    """The file holds needle (grep -qsF): False when it cannot be read."""
-    data = read_bytes(path)
-    return data is not None and needle.encode() in data
 
 
 class GameProfile:

@@ -137,8 +137,8 @@ docker-gc-state    | /var/lib/docker-gc/last-used.json          | 1 | btrfs/dock
 docker-gc-last-run | /var/lib/docker-gc/last-run.json           | 1 | btrfs/docker_gc/adapters.py      | btrfs/docker_gc/adapters.py                        | "v" (none: 0)
 vm-index           | /var/lib/cst/vm-backups.json               | 1 | vm/adapters/backup.py            | vm/adapters/backup.py doctor/application/vm.py     | "version"
 install-record     | /var/lib/cst/installed.json                | 1 | cst_core/application/install.py  | cst_core/application/install.py doctor/application/install.py | "format"
-game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters.py             | cpu/game/adapters.py cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
-game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters.py             | cpu/game/adapters.py doctor/application/cpu.py     | first line "cst-game-intended 1" (none: 0)
+game-state         | /run/cpu-setup/game.state                  | 0 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py cpu/cli.py doctor/application/cpu.py | none (its existence is the contract)
+game-intended      | /run/cpu-setup/game.intended               | 1 | cpu/game/adapters/profile.py     | cpu/game/adapters/profile.py doctor/application/cpu.py | first line "cst-game-intended 1" (none: 0)
 """
 
 
