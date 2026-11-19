@@ -205,7 +205,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   and image folder checks import the `vm` package of the same CST copy (no
   second copy of its rules) and read the folders' inode flags with an ioctl; they
   run no extra command.
-- The `cpu` check reads `/run/cpu-setup/game.state`, `game.intended` and
+- The `cpu` check reads `/run/cpu-setup/game.state`, `game.intended` (with
+  the game profile's own reader: a last line cut short is skipped) and
   `manual` (the by-hand mark, which picks the fix command), and `TARGET_USER` in `/etc/cpu-setup/cpu-setup.conf` (all world-readable),
   and asks `systemctl show -p LoadState -p PROP... UNIT` once per unit, of
   the system and of your user manager (`systemctl --user show`; as root,
@@ -476,7 +477,10 @@ the profile off (the exact revert) and on again. For a profile switched on
 by hand (`/run/cpu-setup/manual` exists) the fix is
 `cst cpu game off && cst cpu game on` instead: `off` removes the by-hand
 mark, so after a plain restart the watchdog would switch the profile off
-when no game runs. Details, and why each cause happens: [cpu/README.md, section 7.5](../cpu/README.md#75-when-something-undoes-a-setting-drift).
+when no game runs. A setting whose record is missing from `game.state` is
+one the watchdog does not set again (`off` could not undo it): the check
+still warns about it, and the same fix, which writes fresh records, is the
+right one. Details, and why each cause happens: [cpu/README.md, section 7.5](../cpu/README.md#75-when-something-undoes-a-setting-drift).
 
 A profile switched on by a version of `cpu-game-profile` older than this
 check recorded no values: the check says so (`info`) and compares nothing

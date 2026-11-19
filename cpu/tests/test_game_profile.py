@@ -39,6 +39,7 @@ from cpu.game.domain import (
     cut_tail,
     escapes_in_state,
     expand_cpus,
+    intended_records,
     records,
     game_settings,
     unheld,
@@ -260,6 +261,26 @@ class PureRulesTest(unittest.TestCase):
         self.assertIsNone(cut_tail(b"a\n"))
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
+
+    def test_intended_records(self) -> None:
+        text = (
+            "cst-game-intended 1\n"
+            "prop sys user.slice MemoryLow 16G 17179869184\n"
+            "prop usr app.slice MemoryZSwapWriteback no ''\n"
+            "prop xyz a.slice CPUWeight 1 1\n"
+            "prop sys a.slice CPUWeight 1\n"
+            "cgw $'/sys/fs/cgroup/in\\tner/cpuset.cpus' 12-23 12-23 extra\n"
+            "bogus line\nprop sys 'unclosed\n"
+            "prop sys machine.slice CPUWeight 10 1"
+        )
+        self.assertEqual(
+            intended_records(text),
+            [
+                ("prop", "sys", "user.slice", "MemoryLow", "16G", "17179869184"),
+                ("prop", "usr", "app.slice", "MemoryZSwapWriteback", "no", ""),
+                ("cgw", "/sys/fs/cgroup/in\tner/cpuset.cpus", "12-23", "12-23"),
+            ],
+        )
 
     def test_drift_game_state_holds_no_record_of(self) -> None:
         prop, cgw = (

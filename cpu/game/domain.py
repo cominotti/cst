@@ -260,6 +260,26 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     return out
 
 
+# The fields of a drift record of game.intended: "prop MGR UNIT PROP VALUE SHOWN", "cgw FILE VALUE SHOWN".
+INTENDED_PROP_FIELDS: Final = 6
+INTENDED_CGW_FIELDS: Final = 4
+
+
+def intended_records(text: str) -> list[Record]:
+    """The drift records of game.intended (its text), read as the profile reads the file (records: a
+    last line cut short and a line bash could not read are left out, fields as bash's eval gives them):
+    ("prop", MGR, UNIT, PROP, VALUE, SHOWN) with MGR sys or usr, and ("cgw", FILE, VALUE, SHOWN), any
+    further fields dropped. The format line and other kinds are none."""
+    out: list[Record] = []
+    for r in records(text):
+        kind = r[0] if r else ""
+        if kind == "prop" and len(r) >= INTENDED_PROP_FIELDS and r[1] in ("sys", "usr"):
+            out.append(r[:INTENDED_PROP_FIELDS])
+        elif kind == "cgw" and len(r) >= INTENDED_CGW_FIELDS:
+            out.append(r[:INTENDED_CGW_FIELDS])
+    return out
+
+
 def state_uid(recs: Sequence[Record]) -> str | None:
     """The uid of the user 'on' acted for, from game.state: 'on' records MemoryLow of the system
     manager's user@UID.service (its memory chain) first. None when no such record is there."""

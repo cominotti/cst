@@ -473,22 +473,6 @@ def per_device_allocated(profiles: Mapping[str, Mapping[str, int]], ndev: int) -
     return None
 
 
-def read_intended(text: str) -> list[tuple[str, ...]]:
-    """Records of game.intended (fields written with bash printf %q):
-    ("prop", mgr, unit, prop, value, shown) or ("cgw", file, value, shown).
-    A line that does not parse, or of another kind (the format line
-    "cst-game-intended 1"), is skipped."""
-    out: list[tuple[str, ...]] = []
-    for line in text.splitlines():
-        try:
-            f = shlex.split(line)
-        except ValueError:
-            continue
-        if (len(f) == 6 and f[0] == "prop" and f[1] in ("sys", "usr")) or (len(f) == 4 and f[0] == "cgw"):
-            out.append(tuple(f))
-    return out
-
-
 def parse_cpu_stat_seconds(text: str) -> float | None:
     """Parse cgroup cpu.stat text and return usage_usec in seconds, or None."""
     for line in text.splitlines():
