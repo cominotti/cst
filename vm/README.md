@@ -1070,8 +1070,11 @@ when that forget fails, a listing fails, an ID is ambiguous or its listed
 snapshot lacks a tag, drops one restic no longer lists without forgetting
 it, keeps the entries of other VMs, repositories and
 newer formats, refuses a newer or unreadable record before anything, and
-the record's lock gives up after its timeout. No E2E test covers the NAS
-path: neither tier has a restic repository, a NAS or a running guest.
+the record's lock gives up after its timeout. Tier 1's `test_151` runs the
+torn-snapshot retry, the retention after it and `forget_torn` against the
+real restic over SFTP to its NAS container (restic's own `snapshots --json`,
+a short recorded ID, the record and its lock as root). No E2E test runs a
+whole NAS backup: neither tier has libvirt with a running guest.
 
 For `tune`: the transform of a copy of the real `win11-devbox` definition
 (no diff), of the same VM before its migration (SATA, plain driver,
