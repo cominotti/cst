@@ -224,14 +224,17 @@ def _leaks(node: ast.AST, vocabulary: Mapping[str, str]) -> list[tuple[int, str]
 def _arm_subjects(test: ast.expr) -> set[str]:
     """The subjects (as source text) an if test compares with string literals (inside any and/or)."""
     if isinstance(test, ast.BoolOp):
-        return set().union(*(_arm_subjects(v) for v in test.values))
+        subjects: set[str] = set()
+        for v in test.values:
+            subjects |= _arm_subjects(v)
+        return subjects
     if isinstance(test, ast.Compare):
         return {ast.unparse(subject) for subject, _ in _compared_strings(test)}
     return set()
 
 
 def _chain(node: ast.If) -> list[ast.If]:
-    out = [node]
+    out: list[ast.If] = [node]
     while len(out[-1].orelse) == 1 and isinstance(out[-1].orelse[0], ast.If):
         out.append(out[-1].orelse[0])
     return out

@@ -841,7 +841,7 @@ class _FakeBluetoothHost:
         roles: tuple[bool, str | None] = (True, None),
         stdin_text: str = "",
     ) -> None:
-        self.files = dict(files or {})
+        self.files: dict[str, str] = dict(files) if files is not None else dict[str, str]()
         self.fragments = list(fragments or [])
         self.roles = roles
         self.stdin_text = stdin_text

@@ -2785,11 +2785,13 @@ class HermeticTest(Scratch):
             seen.extend(found)
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
                 return subprocess.CompletedProcess(args, 127, "", "not run: outside the stub folder")
+            if not text:
+                raise AssertionError(f"{args}: the doctor runs its commands in text mode")
             return real_run(
                 args,
                 check=check,
                 capture_output=capture_output,
-                text=text,
+                text=True,
                 timeout=timeout,
                 stdin=stdin,
                 env=env,

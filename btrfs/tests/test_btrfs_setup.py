@@ -40,6 +40,7 @@ from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.shapes import json_object, object_of, parse_json
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
 
@@ -566,7 +567,7 @@ class ComponentInstallTest(unittest.TestCase):
 
     def record(self) -> dict[str, dict[str, object]]:
         with open(os.path.join(self.stage, "var/lib/cst/installed.json")) as f:
-            return json.load(f)
+            return {k: v for k, v in object_of(parse_json(f.read())).items() if json_object(v)}  # its tables
 
     def test_alerts_install_writes_btrfs_alerts(self) -> None:
         self.run_bash("install_pending_alerts")

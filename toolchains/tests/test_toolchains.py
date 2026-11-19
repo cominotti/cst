@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Generator
 from typing import override
 from unittest import mock
 
@@ -145,8 +146,10 @@ class Scratch(unittest.TestCase):
         os.chmod(stub, 0o755)
         return stub
 
-    def failing(self, word: str) -> contextlib.AbstractContextManager[None]:
-        return mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.failing_stub(word)})
+    @contextlib.contextmanager
+    def failing(self, word: str) -> Generator[None]:
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.failing_stub(word)}):
+            yield
 
     def calls(self) -> list[str]:
         try:

@@ -22,7 +22,10 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from typing import IO, override
+from typing import IO, TYPE_CHECKING, override
+
+if TYPE_CHECKING:
+    from _typeshed import OpenTextMode
 
 sys.dont_write_bytecode = True
 
@@ -1257,7 +1260,7 @@ class FullRunFolderTest(GameProfileCase):
         written = {"n": 0}
 
         def fake_open(
-            path: str, flags: str = "r", *, encoding: str | None = None, errors: str | None = None
+            path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
         ) -> IO[str]:
             if path == self.state and flags == mode:
                 written["n"] += 1

@@ -63,6 +63,7 @@ from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import NocowPaths, postponed_line
 from cst_core.adapters import nocow as core_nocow
+from cst_core.domain.shapes import object_of, parse_json
 from cst_core.ports import CommandFault, CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
@@ -1729,7 +1730,7 @@ class PostponedRecordTest(PostponeBase):
     def record(self) -> dict[str, object] | None:
         try:
             with open(self.postponed) as f:
-                return json.load(f)
+                return object_of(parse_json(f.read()))
         except FileNotFoundError:
             return None
 

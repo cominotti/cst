@@ -39,6 +39,8 @@ import stat
 import subprocess
 import tempfile
 from typing import Final
+
+from cst_core.domain.shapes import object_of, parse_json
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -399,8 +401,7 @@ class RuntimeTest(unittest.TestCase):
             json.dump(m, f)
 
     def described(self) -> dict[str, object]:
-        result: dict[str, object] = json.loads(read(self.machine_file))
-        return result
+        return object_of(parse_json(read(self.machine_file)))
 
     def core(self, **answers: Mapping[str, object] | list[Mapping[str, object]]) -> None:
         """btrfs-snapshot-core's answers per command: {"rc": .., "out": .., "err": ..}."""

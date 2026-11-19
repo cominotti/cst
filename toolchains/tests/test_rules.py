@@ -980,7 +980,9 @@ class SccacheConfigTest(RulesBase):
         return tomllib.loads(self.cfg())
 
     def wrapper_value(self) -> str | None:
-        return (self.data().get("build") or {}).get("rustc-wrapper")
+        value = (self.data().get("build") or {}).get("rustc-wrapper")
+        assert value is None or isinstance(value, str), value
+        return value
 
     def test_off_by_default_and_plain_apply_changes_nothing(self) -> None:
         before = self.cfg()

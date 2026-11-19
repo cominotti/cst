@@ -148,7 +148,7 @@ class FakeHost:
         self.execs: list[list[str]] = []
 
     def environ(self) -> Mapping[str, str]:
-        return {}
+        return dict[str, str]()
 
     def euid(self) -> int:
         return self.uid

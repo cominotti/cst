@@ -39,6 +39,9 @@ import sys
 import tarfile
 import tempfile
 from typing import Final
+
+from cst_core.domain.shapes import items_of, object_of, parse_json
+from cst_core.domain.text import group
 import unittest
 
 sys.dont_write_bytecode = True
@@ -277,16 +280,16 @@ def script_parts() -> dict[str, str]:
     parts = {"prelude": text[: text.index(DISPATCH)], "dispatch": text[text.index(DISPATCH) : marks[0].start()]}
     ends = [m.start() for m in marks[1:]] + [len(text)]
     for m, end in zip(marks, ends, strict=True):
-        parts[m.group(1).replace(" ", "-")] = text[m.start() : end]
+        parts[group(m, 1).replace(" ", "-")] = text[m.start() : end]
     return parts
 
 
 def fixture(name: str, *changes: Mapping[str, object]) -> dict[str, object]:
     """A doctor fixture of `rpm-ostree status --json`; changes[i] updates deployment i."""
     with open(os.path.join(DOCTOR_FIXTURES, name), encoding="utf-8") as f:
-        data = json.load(f)
-    for deployment, keys in zip(data["deployments"], changes, strict=False):
-        deployment.update(keys)
+        data = object_of(parse_json(f.read()))
+    for deployment, keys in zip(items_of(data["deployments"]), changes, strict=False):
+        object_of(deployment).update(keys)
     return data
 
 

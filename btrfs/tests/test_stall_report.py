@@ -311,7 +311,7 @@ class ReportCase(unittest.TestCase):
     def run_report(
         self, recs: Sequence[Mapping[str, Any]], until: float | None = None
     ) -> tuple[dict[str, Any], list[str], str]:
-        until = until or max(r.get("ts", 0) for r in recs)
+        until = until or float(max(r.get("ts", 0) for r in recs))
         res, meta_ = self.m.analyse(recs, T0, until, with_below=False, verbose=False)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

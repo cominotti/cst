@@ -51,6 +51,18 @@ def load() -> ModuleType:
 
 M = load()
 
+
+def _strs(value: object) -> list[str]:
+    """A list of strings the helper returned, as such (it is loaded by path: its values are untyped)."""
+    assert isinstance(value, list) and all(isinstance(v, str) for v in value), value
+    return [v for v in value if isinstance(v, str)]
+
+
+def _int(value: object) -> int:
+    assert isinstance(value, int), value
+    return value
+
+
 # Line numbers matter: FunctionRangesTest checks them.
 HELPER_SOURCE = '''#!/usr/bin/python3 -I
 """A helper for the tests."""
@@ -359,7 +371,7 @@ class SandboxTest(unittest.TestCase):
     COPY, OUT, STUBS, VENV = "/tmp/w/copy", "/var/home/u/.cache/cst-mutation/x", "/tmp/w/stubs", "/var/home/u/venv"
 
     def argv(self, hidden: Sequence[str] = ("/run", "/tmp", "/var/home")) -> list[str]:
-        return M.sandbox_argv("/usr/bin/bwrap", self.COPY, self.OUT, self.STUBS, self.VENV, list(hidden))
+        return _strs(M.sandbox_argv("/usr/bin/bwrap", self.COPY, self.OUT, self.STUBS, self.VENV, list(hidden)))
 
     def test_the_profile(self) -> None:
         home = self.COPY + "/.home"
@@ -399,7 +411,7 @@ class SandboxTest(unittest.TestCase):
 
     def test_hidden_trees(self) -> None:
         def fake(dirs: set[str], links: set[str]) -> list[str]:
-            return M.hidden_trees([], isdir=lambda p: p in dirs, islink=lambda p: p in links)
+            return _strs(M.hidden_trees([], isdir=lambda p: p in dirs, islink=lambda p: p in links))
 
         # Silverblue: /home, /mnt and /media are symlinks (to /var/home, /var/mnt and /run/media).
         dirs = {"/run", "/tmp", "/var/home", "/home", "/var/mnt", "/mnt", "/media"}
@@ -453,7 +465,7 @@ class MountsTest(unittest.TestCase):
 
     @staticmethod
     def views(rows: Sequence[str], hidden: Sequence[str], dirs: set[str] | None = None) -> list[str]:
-        return M.other_views(mountinfo(*rows), hidden, lambda p: dirs is None or p in dirs)
+        return _strs(M.other_views(mountinfo(*rows), hidden, lambda p: dirs is None or p in dirs))
 
     def test_parse_mountinfo(self) -> None:
         text = (
@@ -653,7 +665,7 @@ class RunTest(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             rc = M.execute(argv, repo=lambda: self.repo, tools=lambda: tools or self.tools, env={"HOME": self.tmp})
-        return rc, stdout.getvalue(), stderr.getvalue()
+        return _int(rc), stdout.getvalue(), stderr.getvalue()
 
     def config(self) -> dict[str, Any]:
         with open(os.path.join(self.out, "cosmic-ray.toml"), "rb") as fh:
@@ -666,7 +678,7 @@ class RunTest(unittest.TestCase):
             return [json.loads(line) for line in fh]
 
     def steps(self) -> list[str]:
-        out = []
+        out: list[str] = []
         for c in self.calls():
             if "bwrap" in c:
                 continue

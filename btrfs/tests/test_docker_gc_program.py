@@ -33,7 +33,7 @@ if CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import INSTALL_MANIFEST
-from cst_core.domain.shapes import json_object
+from cst_core.domain.shapes import json_object, object_of, parse_json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
@@ -264,7 +264,7 @@ class Program:
 
     def docker(self) -> dict[str, object]:
         with open(self.docker_state) as f:
-            return json.load(f)
+            return object_of(parse_json(f.read()))
 
     def recorded(self, since: float, images: dict[str, float], heartbeat: float) -> None:
         os.makedirs(self.state, exist_ok=True)
@@ -273,7 +273,7 @@ class Program:
 
     def last_used(self) -> dict[str, object]:
         with open(os.path.join(self.state, "last-used.json")) as f:
-            return json.load(f)
+            return object_of(parse_json(f.read()))
 
     def calls(self) -> list[list[str]]:
         try:

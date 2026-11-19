@@ -54,6 +54,7 @@ import tomllib
 from typing import Any
 import unittest
 
+from cst_core.domain.shapes import json_object
 from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 PYTHON_SHEBANG = re.compile(rb"^#!.*\bpython[0-9.]*\b")
@@ -92,9 +93,15 @@ def load_lists(conf: Mapping[str, Any]) -> tuple[list[str], list[str]]:
     """(ruff extend-include, ty gate list) from the parsed pyproject.toml."""
     tool = conf.get("tool", {})
     ruff = tool.get("ruff", {})
-    extend = list(ruff.get("extend-include", []))
-    ty_gate = list(tool.get("ty", {}).get("src", {}).get("include", []))
+    extend = _strings(ruff.get("extend-include", []))
+    ty_gate = _strings(tool.get("ty", {}).get("src", {}).get("include", []))
     return extend, ty_gate
+
+
+def _strings(value: object) -> list[str]:
+    """A TOML array of strings, as a list."""
+    assert isinstance(value, list) and all(isinstance(v, str) for v in value), value
+    return [v for v in value if isinstance(v, str)]
 
 
 def _ignores_ann(rules: object) -> bool:
@@ -104,7 +111,7 @@ def _ignores_ann(rules: object) -> bool:
 def _sub(table: object, key: str) -> dict[str, object]:
     """The sub-table `key` of a parsed TOML table ({} when there is none)."""
     value = table.get(key) if isinstance(table, dict) else None
-    return value if isinstance(value, dict) else {}
+    return value if json_object(value) else {}
 
 
 def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:

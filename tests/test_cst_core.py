@@ -851,7 +851,7 @@ class CstCommandTest(unittest.TestCase):
             pass
         os.killpg(proc.pid, sig)
         out, err = proc.communicate(timeout=30)
-        return out, err, proc.returncode
+        return out, err, int(proc.returncode)  # set by communicate
 
     def test_status_stops_when_a_module_dies_of_ctrl_c(self) -> None:
         out, err, rc = self._status_signalled("echo started\nsleep 10\n", signal.SIGINT)
