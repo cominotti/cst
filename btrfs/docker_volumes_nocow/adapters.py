@@ -42,14 +42,10 @@ def daemon_config(path: str) -> tuple[str | None, str]:
     skipped, as dockerd skips it."""
     try:
         with open(path, encoding="utf-8-sig") as f:
-            text = f.read()
+            data = parse_json(f.read())
     except FileNotFoundError:
         return None, ""
-    except UnicodeDecodeError:  # a ValueError, not an OSError: the bytes are not text, so not JSON
-        return None, f"{path}: not JSON"
-    try:
-        data = parse_json(text)
-    except ValueError, RecursionError:
+    except ValueError, RecursionError:  # a byte that is not UTF-8 too (UnicodeDecodeError, at the read)
         return None, f"{path}: not JSON"
     if not json_object(data):
         return None, f"{path}: not a JSON object"
