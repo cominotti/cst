@@ -50,6 +50,9 @@ LE_SECTION: Final[str] = "monitor.bluez.properties"
 # (unit-relative: %h is the home folder).
 LDAC_UNIT: Final[str] = "cst-bt-ldac48.service"
 LDAC_PROG: Final[str] = "%h/.local/lib/cst/bt-ldac-watch"
+# The two services apply restarts: BlueZ (system) and WirePlumber (the user's session).
+BLUETOOTH_UNIT: Final[str] = "bluetooth.service"
+WIREPLUMBER_UNIT: Final[str] = "wireplumber.service"
 
 # A section header of a WirePlumber config file: `monitor.bluez.properties = {`,
 # also quoted, with `:` or without a separator, with or without `override.`.
@@ -713,7 +716,7 @@ def lw_failure(text: str) -> tuple[str, str, str] | None:
 
 # ---- restarts skipped (--no-restart, a cancelled question, a failed restart) ----------------
 # The units whose restart apply may owe, as bt-helper restart-pending takes their invocation IDs.
-RESTART_UNITS: Final[tuple[str, str]] = ("bluetooth.service", "wireplumber.service")
+RESTART_UNITS: Final[tuple[str, str]] = (BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
 
 
 def parse_pending(text: str | None) -> dict[str, str]:

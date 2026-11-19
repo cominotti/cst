@@ -31,6 +31,7 @@ from cpu.game.adapters import holds, read_stripped
 from cpu.game.domain import GAME_DROPIN, cpuset_in
 from cpu.setup.domain import (
     MANAGED_MARK,
+    TOOLBOX_COMPONENT,
     DROPIN_NAME,
     OLD_DROPIN_NAME,
     CpuRootCommand,
@@ -322,11 +323,11 @@ class CpuSetup:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
         ecores = self.e_cores()
         if ecores:
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, "cpu:toolbox")
-            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user, "cpu:toolbox")
+            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
+            self.install_text(self.helper_dropin(), helper_dropin_text(ecores), user, TOOLBOX_COMPONENT)
         else:
             self.warn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped")
-            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user, "cpu:toolbox")
+            self.install_text(self.toolbox_dropin(), toolbox_dropin_text(""), user, TOOLBOX_COMPONENT)
             self.remove_user_text(self.helper_dropin())
         self.remove_old_dropins()  # the daemon-reloads below then read without them
         link = os.path.join(self.root, "cst-link.bash")
@@ -338,7 +339,7 @@ class CpuSetup:
         self.run(["systemctl", "enable", "--now", "cpu-game-watchdog.timer"])
         self.installer("mark", "--component", "cpu:core", "done")
         home = self.required_home(user, "cst-install.bash")
-        self.installer("mark", "--home", home, "--component", "cpu:toolbox", "done", as_user=user)
+        self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, "done", as_user=user)
         if gamemode:
             self.installer("mark", "--home", home, "--component", "cpu:gamemode", "done", as_user=user)
         for line in install_done_lines(self.prog):

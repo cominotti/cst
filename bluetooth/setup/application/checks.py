@@ -2,7 +2,15 @@
 """The live checks of `cst bluetooth status` (and the end of apply): the services, LE Audio,
 the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
-from bluetooth.domain import ISO_UUID, LDAC_UNIT, RolesState, parse_roles_state, pw_state
+from bluetooth.domain import (
+    BLUETOOTH_UNIT,
+    ISO_UUID,
+    LDAC_UNIT,
+    WIREPLUMBER_UNIT,
+    RolesState,
+    parse_roles_state,
+    pw_state,
+)
 from bluetooth.setup.application.survey import Survey
 from bluetooth.setup.domain import BapState, LeState, RunningState, WpState, is_running, preferred_bearer
 from cst_core.domain.shapes import parse_json
@@ -77,11 +85,11 @@ class Checks(Survey):
         self.section("services")
         # The state this run already read (unit_show: again after each restart CST made), so these
         # rows and the restarts still owed see the same state.
-        if is_running(self.unit_show("bluetooth.service", user=False)[0]):
-            self.check_ok("bluetooth.service", "active")
+        if is_running(self.unit_show(BLUETOOTH_UNIT, user=False)[0]):
+            self.check_ok(BLUETOOTH_UNIT, "active")
         else:
-            self.check_bad("bluetooth.service", "not active")
-        if is_running(self.unit_show("wireplumber.service", user=True)[0]):
+            self.check_bad(BLUETOOTH_UNIT, "not active")
+        if is_running(self.unit_show(WIREPLUMBER_UNIT, user=True)[0]):
             self.check_ok("wireplumber (your session)", "active")
         else:
             self.check_bad("wireplumber (your session)", "not active")

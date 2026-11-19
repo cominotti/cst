@@ -13,9 +13,11 @@ import re
 import time
 
 from bluetooth.domain import (
+    BLUETOOTH_UNIT,
     ISO_UUID,
     LDAC_UNIT,
     MARKER,
+    WIREPLUMBER_UNIT,
     render_le_off,
     render_unit,
     render_wp,
@@ -140,7 +142,7 @@ class Change(Checks):
     def restart_bluetooth(self) -> bool:
         self.out("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n")
         restarted = self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode == 0
-        self.forget_unit("bluetooth.service")  # a new invocation, also after most failures
+        self.forget_unit(BLUETOOTH_UNIT)  # a new invocation, also after most failures
         if not restarted:
             self.err(f"{self.c.prog}: ERROR: bluetooth.service was not restarted. To finish: {self.restart_hint()}\n")
             return False
@@ -156,7 +158,7 @@ class Change(Checks):
         restarted = (
             self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode == 0
         )
-        self.forget_unit("wireplumber.service")
+        self.forget_unit(WIREPLUMBER_UNIT)
         if not restarted:
             self.err(
                 f"{self.c.prog}: ERROR: wireplumber was not restarted. To finish: systemctl --user restart wireplumber\n"
@@ -231,9 +233,9 @@ class Change(Checks):
         """0: done (or nothing to do); 1: cancelled at the question; 2: a restart failed."""
         if not (bt or wp):
             return 0
-        owed = ["wireplumber.service", *(["bluetooth.service"] if bt else [])]
+        owed = [WIREPLUMBER_UNIT, *([BLUETOOTH_UNIT] if bt else [])]
         # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
-        self.forget_unit("bluetooth.service", "wireplumber.service")
+        self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
         if self.restart_state("save", *owed) is None:
             self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
         if self.o.no_restart:

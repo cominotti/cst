@@ -57,6 +57,8 @@ _SAFE_PARTITION_TYPES: Final[frozenset[str]] = frozenset({"", "swap", "crypto_PL
 # manages. Nothing is configured by default; apply refuses until it is (swap/README.md, 2.3).
 SETTINGS_REL: Final[str] = "cst/swap.conf"
 DEFAULT_SWAP_NAME: Final[str] = "swap0"
+# The slice libvirt runs the VM in, whose MemoryLow swap sets.
+MACHINE_SLICE: Final[str] = "machine.slice"
 # GPT PARTUUIDs as /dev/disk/by-partuuid names them (lower case), or the MBR form (disk id-partition).
 _PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{2}")
 # A dm-crypt mapper name that is also safe in a crypttab line, an fstab line and a unit name.

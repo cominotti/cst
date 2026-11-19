@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import posixpath
 import re
+from typing import Final
 
 from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
@@ -13,6 +14,7 @@ from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from swap.domain import (
+    MACHINE_SLICE,
     WSF_EXPERIMENT,
     CgroupSwapRow,
     ConfigSectionReport,
@@ -69,6 +71,8 @@ OLD_DROPIN_ENTRY: InstallEntry = replace(
     src="swap/units/machine.slice.d-50-memory-low.conf",
     dest="/etc/systemd/system/machine.slice.d/50-memory-low.conf",
 )
+# The row of machine.slice's live floor in status.
+_MEMORY_LOW_ROW: Final = f"{MACHINE_SLICE} memory.low"
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -542,33 +546,31 @@ class SwapReports:
         drop-in after CST's; else "-" when systemd says the slice is not active (a cgroup folder left
         behind is not the slice's) or the cgroup has no memory.low (an active slice's row says so: no
         memory controller for it); else the cgroup's memory.low against CST's value (DIFF when it differs)."""
-        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths", "ActiveState"))
+        shown = self._systemd.show(UnitName(MACHINE_SLICE), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
         if source is not None:
             return SettingCheckRow(
-                SettingState.OVER, "machine.slice MemoryLow", human_size(effective), human(want_low)
+                SettingState.OVER, f"{MACHINE_SLICE} MemoryLow", human_size(effective), human(want_low)
             ), source
         active_state = shown.get("ActiveState", "")
-        live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
+        live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, MACHINE_SLICE, "memory.low"))
         if slice_not_active(active_state) or (live_low is None and not active_state):
             return SettingCheckRow(
-                SettingState.INACTIVE, "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+                SettingState.INACTIVE, _MEMORY_LOW_ROW, "slice not active (no VM running)", human(want_low)
             ), ""
         if live_low is None:
             # systemd says the slice is active, and its cgroup has no memory.low: no memory controller for it.
             return SettingCheckRow(
                 SettingState.INACTIVE,
-                "machine.slice memory.low",
+                _MEMORY_LOW_ROW,
                 "slice active, no memory.low (memory controller off)",
                 human(want_low),
             ), ""
         ok = live_low.isdigit() and int(live_low) == want_low
         live = human(int(live_low)) if live_low.isdigit() else live_low
-        return SettingCheckRow(
-            SettingState.OK if ok else SettingState.DIFF, "machine.slice memory.low", live, human(want_low)
-        ), ""
+        return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _MEMORY_LOW_ROW, live, human(want_low)), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
         try:
@@ -603,7 +605,7 @@ class SwapReports:
     def _cgroups(self) -> list[tuple[str, str]]:
         cg = self._env.cgroup_dir
         out = [("(whole system)", cg)]
-        out.extend((name, posixpath.join(cg, name)) for name in ("system.slice", "machine.slice", "builds.slice"))
+        out.extend((name, posixpath.join(cg, name)) for name in ("system.slice", MACHINE_SLICE, "builds.slice"))
         base = posixpath.join(cg, "user.slice")
         try:
             users = [d for d in self._fs.list_dir(base) if re.fullmatch(r"user-\d+\.slice", d)]

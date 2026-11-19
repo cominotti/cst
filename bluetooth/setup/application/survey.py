@@ -14,9 +14,11 @@ from typing import Literal
 
 from cst_core.domain.shapes import parse_json
 from bluetooth.domain import (
+    BLUETOOTH_UNIT,
     ISO_UUID,
     LDAC_UNIT,
     MARKER,
+    WIREPLUMBER_UNIT,
     WholeFileState,
     adapter_path,
     card_state_of,
@@ -311,8 +313,8 @@ class Survey:
     def restart_state(self, mode: str, *units: str) -> str | None:
         """The units whose restart is still owed, one per line (save also records them); None on failure."""
         ids = (
-            self.unit_invocation("bluetooth.service", user=False),
-            self.unit_invocation("wireplumber.service", user=True),
+            self.unit_invocation(BLUETOOTH_UNIT, user=False),
+            self.unit_invocation(WIREPLUMBER_UNIT, user=True),
         )
         try:
             return self.m.host.restart_pending(self.p.pending, ids, units, save=mode == "save")
@@ -359,7 +361,7 @@ class Survey:
         """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state).
         bluetoothd's invocation, running or not (a stopped unit keeps its last one), as unit_show
         has it; fresh: read again (the wait after a restart)."""
-        inv = self.unit_show("bluetooth.service", user=False, fresh=fresh)[1]
+        inv = self.unit_show(BLUETOOTH_UNIT, user=False, fresh=fresh)[1]
         wp_pid = self.quiet(["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"], host=True)
         if not inv or not re.fullmatch(r"[1-9][0-9]*", wp_pid):
             return BapState.UNKNOWN
@@ -454,8 +456,8 @@ class Survey:
         self.lw_plan()
         self.owed = self.restart_state("show") or ""
         owed = self.owed.split("\n")
-        self.bt_owed = "bluetooth.service" in owed
-        self.wp_owed = "wireplumber.service" in owed
+        self.bt_owed = BLUETOOTH_UNIT in owed
+        self.wp_owed = WIREPLUMBER_UNIT in owed
         self.owed = self.owed.rstrip("\n")
         self.bt_restart = self.mc_changed or self.o.force or self.bt_owed
         # A bluetoothd restart takes WirePlumber's endpoints with it; a comment-only renewal restarts nothing.
@@ -739,13 +741,13 @@ class Survey:
         if self.bt_restart:
             self.item(
                 "restart",
-                "bluetooth.service",
+                BLUETOOTH_UNIT,
                 "main.conf changes: apply asks first (Bluetooth keyboards, mice and headsets drop for seconds)",
             )
             if self.bt_owed:
                 self.item("", "", "(still owed: an earlier run did not restart it)")
         else:
-            self.item("ok", "bluetooth.service", "no restart needed")
+            self.item("ok", BLUETOOTH_UNIT, "no restart needed")
         if self.wp_restart:
             self.item("restart", "wireplumber (your session)", "audio stops for a moment; A2DP is restored afterwards")
             if self.le_change:

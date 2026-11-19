@@ -61,6 +61,8 @@ QUIET_ENV: Final = ("QUIET_CPU_PCT", "QUIET_CPU_PSI", "QUIET_IO_PSI", "QUIET_MEM
 DROPIN_NAME: Final = "10-cpu-setup.conf"
 OLD_DROPIN_NAME: Final = "50-cpu-setup.conf"  # until 2026-11; install and uninstall remove it
 MANAGED_MARK: Final = "Managed by cpu-setup.sh"
+# The install record's component of the toolbox drop-ins (a key of COMPONENTS in cst_core/domain/install.py).
+TOOLBOX_COMPONENT: Final = "cpu:toolbox"
 
 # Runtime-only memory experiments, in the order `experiment list` shows them: name -> (file, value).
 EXPERIMENTS: Final[Mapping[str, tuple[str, str]]] = {
