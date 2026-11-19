@@ -452,25 +452,27 @@ def boot_run(
     """btrfs-bulk boot (btrfs-bulk-boot.service, before any login) over the Bulk make() puts
     together. When bulk.conf cannot tell whose home it is: the message to err, for a bad line
     also an alert (nobody reads the boot console; btrfs-notify keeps it for the login), and
-    BOOT_REFUSED_EXIT, which fails the unit. Any other error: a line and its traceback (trace) to err, and
-    SystemExit(BOOT_CRASHED_EXIT), which ends the program and fails the unit too (an uncaught
-    exception exited 1, a success for it). The flag stays: the items wait for the next boot.
-    KeyboardInterrupt, SystemExit and the unit's SIGTERM at its timeout are not caught."""
+    BOOT_REFUSED_EXIT, which fails the unit. Any other error, the alert's own included: a line
+    and its traceback (trace) to err, and SystemExit(BOOT_CRASHED_EXIT), which ends the program
+    and fails the unit too (an uncaught exception exited 1, a success for it). The flag stays:
+    the items wait for the next boot. KeyboardInterrupt, SystemExit and the unit's SIGTERM at
+    its timeout are not caught."""
     try:
-        return boot(make())
-    except BadSettings as e:
-        host.alert(
-            "~/Bulk: nothing moved at boot",
-            f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
-        )
-        err(str(e))
-        return BOOT_REFUSED_EXIT
-    except NoUser as e:
-        err(str(e))
-        return BOOT_REFUSED_EXIT
+        try:
+            return boot(make())
+        except BadSettings as e:
+            err(str(e))
+            host.alert(
+                "~/Bulk: nothing moved at boot",
+                f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
+            )
+            return BOOT_REFUSED_EXIT
+        except NoUser as e:
+            err(str(e))
+            return BOOT_REFUSED_EXIT
     except Exception as e:
         err("btrfs-bulk boot: unexpected error, nothing more is done this boot\n" + trace(e).rstrip("\n"))
-        raise SystemExit(BOOT_CRASHED_EXIT) from e
+        raise SystemExit(BOOT_CRASHED_EXIT) from e  # raised: ruff's BLE001 wants a blind except to raise
 
 
 def keep_ids(state: BulkStatePort, cmd: str, ids: Sequence[str]) -> OSError | None:

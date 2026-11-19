@@ -672,6 +672,35 @@ class BulkTest(BulkBase):
                     with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "boom"):
                         bulk_cli.main(["btrfs-bulk", "plan" if where == "bulk" else "apply"], TOOL, wiring=self.wiring)
 
+    def test_an_alert_that_fails_at_boot_is_an_unexpected_error_too(self) -> None:
+        # An exception of the refusal's alert escaped boot_run (a sibling handler does not catch it):
+        # Python exited 1, which btrfs-bulk-boot.service counts as success.
+        root = self.root_wiring()
+        with open(self.paths.conf, "w") as f:
+            f.write("BULK_USER=$USER\n")
+        with open(self.paths.flag, "w") as f:
+            f.write("apps\n")
+
+        def broken(_title: str, _body: str) -> None:
+            raise OSError(5, "Input/output error")
+
+        self.fake(self.host, "alert", broken)
+        err = io.StringIO()
+        with (
+            contextlib.redirect_stderr(err),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root)
+        self.assertEqual(cm.exception.code, 70)
+        text = err.getvalue()
+        refusal, rest = text.split("\nbtrfs-bulk boot: unexpected error, nothing more is done this boot\n", 1)
+        # The refusal's message comes first: it is in the journal whatever the alert does.
+        self.assertIn(f"{self.paths.conf} line 1: BULK_USER=$USER: $", refusal)
+        self.assertIn("Traceback (most recent call last):", rest)
+        self.assertTrue(text.endswith("OSError: [Errno 5] Input/output error\n"), text)
+        self.assertTrue(os.path.exists(self.paths.flag), "the items wait for the next boot")
+
     def test_the_boot_refusal_reaches_cst_doctor_without_btrfs_notify(self) -> None:
         # btrfs-notify missing (cst btrfs uninstall left snapshots in place, say): the alert of the
         # refusal went nowhere. Now it is kept in the pending alerts folder that cst doctor reads.
