@@ -12,7 +12,7 @@ import os
 import signal
 import sys
 import time
-from typing import TextIO
+from typing import TextIO, override
 
 from btrfs.snapshot_runtime.domain import (
     CORE_HINTS,
@@ -337,9 +337,11 @@ class _OutputFd(io.RawIOBase):
         super().__init__()
         self.fd = fd
 
+    @override
     def writable(self) -> bool:
         return True
 
+    @override
     def write(self, b: Buffer, /) -> int:
         data = bytes(b)
         try:

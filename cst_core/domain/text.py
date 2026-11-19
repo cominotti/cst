@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import re
 import unicodedata
-from typing import Final
+from typing import Final, override
 
 
 def first_line(text: str | None) -> str:
@@ -79,6 +79,7 @@ class SettingsProblem:
     text: str
     reason: str
 
+    @override
     def __str__(self) -> str:
         return f"line {self.line}: {self.text.strip()}: {self.reason}"
 
