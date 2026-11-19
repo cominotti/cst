@@ -2489,6 +2489,32 @@ class HostRunTest(unittest.TestCase):
             )
 
 
+class HostKindTest(unittest.TestCase):
+    """Host.kind's words, as they reach output ("not a subvolume (other)"): plain strings."""
+
+    def test_the_kind_of_each_path(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "dir"))
+            os.symlink("dir", os.path.join(d, "link"))
+            host = snap_adapters.Host()
+            kinds = {name: host.kind(os.path.join(d, name)) for name in ("dir", "link", "gone")}
+        self.assertEqual(kinds, {"dir": "other", "link": "symlink", "gone": "missing"})
+        self.assertEqual(
+            {k.name: k.value for k in snap_domain.PathKind},
+            {"SUBVOL": "subvol", "SYMLINK": "symlink", "MISSING": "missing", "OTHER": "other"},
+        )
+
+    def test_seal_and_scan_words(self) -> None:
+        # Internal words (no output), pinned so a changed value is a visible change.
+        self.assertEqual(
+            {o.name: o.value for o in snap_domain.SealOutcome}, {"SEALED": "sealed", "LEFT": "left", "ERROR": "error"}
+        )
+        self.assertEqual(
+            {v.name: v.value for v in snap_domain.ScanVerdict},
+            {"IGNORED": "ignored", "WRITABLE": "writable", "UNVERIFIABLE": "unverifiable"},
+        )
+
+
 class NotUtf8OutputTest(unittest.TestCase):
     """Host.run: bytes that are not UTF-8 (a path in btrfs's output, say) become U+FFFD (they raised UnicodeDecodeError)."""
 

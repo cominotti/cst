@@ -960,6 +960,23 @@ class CommandRunnerTest(unittest.TestCase):
         own = runner.run([self.py, "-c", "raise SystemExit(127)"])
         self.assertEqual((own.returncode, own.fault, own.cause), (127, None, None))
 
+    def test_fault_and_output_words(self) -> None:
+        # The words of CommandResult.fault and of output=, as plain strings (a changed value fails here).
+        self.assertEqual(
+            {f.name: f.value for f in CommandFault},
+            {"MISSING": "missing", "UNSTARTABLE": "unstartable", "TIMEOUT": "timeout"},
+        )
+        self.assertEqual(
+            {m.name: m.value for m in OutputMode},
+            {
+                "CAPTURE": "capture",
+                "MERGE": "merge",
+                "STDOUT": "stdout",
+                "STDOUT_SHOW_STDERR": "stdout-show-stderr",
+                "INHERIT": "inherit",
+            },
+        )
+
     def test_environment_options(self) -> None:
         runner = core_runner.SubprocessCommandRunner()
         show = [
