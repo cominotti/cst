@@ -40,7 +40,6 @@ from doctor.domain import (
     VM_TIMER_WANTS,
     WARN,
     HostPath,
-    OverlayKind,
     Result,
     parse_offered_features_xml,
     virt_changes,
@@ -48,6 +47,7 @@ from doctor.domain import (
     host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
+from vm.domain import VmOverlayKind
 from vm.domain.tune import guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -361,18 +361,20 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                 continue
             if state in VM_LIVE_STATES:
                 kind = (
-                    OverlayKind.LIVE
+                    VmOverlayKind.LIVE
                     if dev in live
-                    else OverlayKind.DEFINITION
+                    else VmOverlayKind.DEFINITION
                     if sources is not None and sources.get(dev) == base
-                    else OverlayKind.UNKNOWN
+                    else VmOverlayKind.UNKNOWN
                 )
             elif state in ("shut off", "crashed"):
-                kind = OverlayKind.OFFLINE if file_newer(host, HostPath(path), HostPath(base)) else OverlayKind.UNKNOWN
+                kind = (
+                    VmOverlayKind.OFFLINE if file_newer(host, HostPath(path), HostPath(base)) else VmOverlayKind.UNKNOWN
+                )
             else:
-                kind = OverlayKind.UNKNOWN
+                kind = VmOverlayKind.UNKNOWN
             match kind:
-                case OverlayKind.LIVE:
+                case VmOverlayKind.LIVE:
                     yield Result(
                         WARN,
                         f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
@@ -382,7 +384,7 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                         f"--inactive) shows {base}, and remove the overlay file {guide}",
                         f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
                     )
-                case OverlayKind.DEFINITION:
+                case VmOverlayKind.DEFINITION:
                     yield Result(
                         WARN,
                         f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
@@ -392,7 +394,7 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                         f"then remove the overlay file {guide}",
                         f"{v} edit {q(vm)}",
                     )
-                case OverlayKind.OFFLINE:
+                case VmOverlayKind.OFFLINE:
                     yield Result(
                         WARN,
                         f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "

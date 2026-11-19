@@ -62,16 +62,6 @@ class UnitScope(StrEnum):
     USER = "user"
 
 
-class OverlayKind(StrEnum):
-    """What a VM disk left on a backup overlay is: written live, named only by a stale definition,
-    newer than its image with the VM off, or not known."""
-
-    LIVE = "live"
-    DEFINITION = "definition"
-    OFFLINE = "offline"
-    UNKNOWN = "unknown"
-
-
 STAGED_OLD_DAYS = 7  # a staged deployment waiting longer gets a note
 ALERT_KEEP_DAYS = 7  # as btrfs-notify and cst-pending-alerts
 ALERT_MAX_FILE = 16384
