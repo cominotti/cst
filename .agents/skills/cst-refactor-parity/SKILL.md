@@ -32,6 +32,20 @@ the refactor brings a budget or ceiling down, `invowk cmd fix budgets
   tree (`python3 -I -B tests/run_unit.py` in `$tmp/old`, after copying the
   new test files there when they only moved). Both pass.
 
+## 2b. A refactor made for a checker rule
+
+When the refactor clears the hits of a ty or ruff rule (a rule about to be
+turned on, or one the merge of two branches broke), show the checker on both
+sides as well: the rule's hits on the commit before, none on the commit after
+(`tests/uv-dev ty check --error RULE FILE...`, `tests/uv-dev ruff check
+--select RULE FILE...`; ty already runs every rule as an error, so
+`--error` matters only for a rule `pyproject.toml` does not raise yet).
+Put the counts in the commit message next to the unchanged tests. A form the
+checker accepts is not proof by itself: a truthiness fix such as `x is not
+None` in place of `x` is a behaviour change where `""` or 0 reached the
+test, so say in the message why it cannot
+([docs/dev-tools.md, "What each gate checks"](../../../docs/dev-tools.md#what-each-gate-checks)).
+
 ## 3. Review the test diff
 
 A refactor must not:

@@ -11,11 +11,11 @@ A conversion is a refactor: it changes no behaviour
 module's README and every caller of the script first: `cst_core/domain/dispatch.py`,
 other scripts that source it, units that run it, E2E tests.
 
-## The precedents: swap, cpu, bluetooth, the health check
+## The precedents: swap, cpu, bluetooth, the health check, btrfs-snapshot
 
-Commit 8d8fc94 (pull request #27) turned `swap-setup.sh`, `swap/swap-lib.bash`
+Commit 2865a78 (pull request #27) turned `swap-setup.sh`, `swap/swap-lib.bash`
 and `swap/swap-status` into the `swap/` package. Read it with
-`git show 8d8fc94 -- swap-setup.sh swap/`. What it kept:
+`git show 2865a78 -- swap-setup.sh swap/`. What it kept:
 
 - `swap-setup.sh` is now a shim: it sets `CST_PROG` and runs
   `/usr/bin/python3 -I -B swap/cli.py "$@"`. `swap/cli.py` is in
@@ -25,15 +25,27 @@ and `swap/swap-status` into the `swap/` package. Read it with
   `test_sysctl_payload_matches_old_script` adopts the files the old script
   wrote (the upgrade path).
 
-The cpu port (cpu-setup.sh over `cpu/cpu-setup` and the `cpu.setup`
+The cpu port (commit 086c2c3, #60: cpu-setup.sh over `cpu/cpu-setup` and the `cpu.setup`
 package; `cpu/game-profile` as a python-entry zipapp of `cpu.game`) kept
 the installed bash copy working next to the new one: see the checklist's
-last items. Then commit 323d5bc (#66: `btrfs-health-check` and
+last items. Then commit b819032 (#66: `btrfs-health-check` and
 `cst-pending-alerts`, installed programs that became zipapps of
-`btrfs/health_check` and `btrfs/pending_alerts`) and commit 535aea1 (#67:
+`btrfs/health_check` and `btrfs/pending_alerts`) and commit c94600a (#67:
 `bluetooth-setup.sh` over `bluetooth/bt-setup` and the `bluetooth.setup`
 package, with tier 1's `test_95` running the old bash and the new Python
 against each other).
+
+The btrfs-snapshot port (the merge e31e8b3, "Merge the btrfs-snapshot
+port"; read it with `git log e31e8b3^1..e31e8b3^2`) moved only part of a
+program: the bash front `btrfs/btrfs-snapshot` keeps its conversion engine
+and `busy` for good and execs `btrfs/btrfs-snapshot-runtime` (a zipapp of
+`btrfs/snapshot_runtime`, installed next to it) for `hourly`, `nas`,
+`list`, `caches`, `prune`, `purge` and `configure`, handing over
+`CST_LC_CTYPE` and `CST_SIGPIPE_IGNORED`. `btrfs/tests/test_snapshot_mixed.py`
+runs the last bash version (`tests/fixtures/legacy/btrfs-snapshot@47038aa`)
+and the new one on the same state, both ways; tier 1's `test_110` and
+`test_111` run the installed pair as root. Its fix commits gave the last
+items of the checklist below.
 
 ## The port checklist (from PR-A's regressions)
 
@@ -83,7 +95,23 @@ command, against the bash, with a test:
       and the reverse (a parity harness, and a tier 1 test that runs the
       bash version next to the checkout: vendored as
       `tests/fixtures/legacy/<file>@<short-sha>`, never read from the git
-      history; tests/e2e/README.md, "Mixed-version tests").
+      history, which was rewritten once: the short SHAs of the older
+      fixtures, such as d4d8c91 and cfb496a, no longer resolve;
+      tests/e2e/README.md, "Mixed-version tests").
+- [ ] **What the commands get, as bash gave it.** A program with cleanup
+      leaves SIGPIPE ignored, but its children get the disposition bash's
+      children got (`keep_signals` of the runner when the front says
+      SIGPIPE was ignored, as under a systemd unit); output bytes that are
+      not UTF-8 reach the next command and the files unchanged
+      (`decode_errors="surrogateescape"`); lines are split at newlines only,
+      as `read` splits them (`on_line`); the run goes on when its stderr is
+      gone.
+- [ ] **Settings and state as bash read and wrote them.** A settings file
+      bash sourced is read as data (`parse_snapshots_conf`,
+      `parse_shell_assignments`), never run; a number bash evaluated as
+      arithmetic keeps bash's rules (64-bit wrap, `BASE#DIGITS`, powers); a
+      state record is replaced whole (`write_atomic`), never rewritten in
+      place.
 - [ ] **What a caller can tell apart.** Every difference the harness finds
       that a caller or a script could notice (an exit code, a file, stdout,
       the order of lines) is either made the same as the bash's or moved
@@ -105,15 +133,22 @@ command, against the bash, with a test:
    commands called. A subprocess that runs bash passes `stdin=`
    ([AGENTS.md, "Test gotchas"](../../../AGENTS.md#test-gotchas)). Commit these tests while
    the bash still passes them.
-2. **Write the Python package** (domain, ports, adapters, application,
-   presenter, cli). Skill [cst-new-helper](../cst-new-helper/SKILL.md) has the
-   lists a new Python file must join.
+2. **Write the Python package**, in the light profile (domain, adapters,
+   cli) unless a layer of the full one pays for itself
+   ([docs/architecture.md, "Package profile"](../../../docs/architecture.md#package-profile)).
+   Its words, numbers and records follow
+   [magic-values](../../rules/magic-values.md) from the start: the port is
+   the border where bash's strings become enums and checked shapes. Skill
+   [cst-new-helper](../cst-new-helper/SKILL.md) has the lists a new Python
+   file must join.
 3. **Replace the entry point with a shim** like `swap-setup.sh`, so
    `cst MODULE ...` and the help text stay the same.
 4. **Run the step 1 tests, unchanged, against the Python.** The test diff
    must not loosen or delete an assertion (skill
    [cst-refactor-parity](../cst-refactor-parity/SKILL.md)).
-5. **Delete the bash**: the old files, and their `INSTALL_MANIFEST` rows
+5. **Delete the bash** (or, as btrfs-snapshot did, keep a bash front for
+   the part that stays bash and say so in the module README): the old
+   files, and their `INSTALL_MANIFEST` rows
    (kind `shell`) or `SETUP_ENTRYPOINTS` entries (`cst_core/domain/install.py`)
    when they go away. `test lint` finds the shell files by itself
    (`tests/shell_files.py`); only a test-only script is listed by hand there

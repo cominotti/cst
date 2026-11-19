@@ -58,6 +58,19 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       (ruff's ANN rules apply to every file; no per-file-ignores entry may
       switch them off). `tests/test_python_files.py` checks it;
       `NOT_YET_CLEAN` stays empty; no ignore comments.
+- [ ] ty passes with every rule an error (`[tool.ty.rules] all = "error"`,
+      [docs/dev-tools.md, "What each gate checks"](../../../docs/dev-tools.md#what-each-gate-checks)):
+      a method that overrides one (`setUp` included) carries `@override`
+      from `typing`; a test on `X | None` says which case it means
+      (`is not None`, `!= ""`); JSON and TOML are parsed only through
+      `cst_core.domain.shapes` and their shape is checked before a typed
+      value gets them; a regex group comes from `group` or `group_or_none`
+      and the standard streams from `cst_core.adapters.terminal`. ruff's
+      selected families (preview rules included) pass too, and no
+      `# fmt: skip`, `# fmt: off` or `# fmt: on` (`tests/test_python_files.py`).
+- [ ] Its words, numbers and records follow
+      [magic-values](../../rules/magic-values.md): `tests/test_magic_values.py`
+      has no ceiling left to spend (`MAGIC_CEILINGS` is empty).
 - [ ] `HELP_MODES` in `tests/test_distribution.py`: an argv that returns
       before the program touches the machine, and its exit status.
 - [ ] The same entry in the `entries` table of
@@ -74,7 +87,9 @@ Background: [docs/architecture.md](../../../docs/architecture.md)
       (`cst_installed_dests`, or `installer.py remove --component`). The copy on
       the machine changes only when that install runs again.
 - [ ] Unit tests in the module's `tests/`, importing the package and injecting
-      fakes: through cst_core's `CommandRunnerPort` / `FileSystemPort` (or
+      fakes (and closing what they open: `tests/run_unit.py` fails the run on
+      a ResourceWarning,
+      [AGENTS.md, "Test gotchas"](../../../AGENTS.md#test-gotchas)): through cst_core's `CommandRunnerPort` / `FileSystemPort` (or
       the adapter functions) in a light package, through its ports in a full
       one. A command that changes the machine: skill
       [cst-new-command](../cst-new-command/SKILL.md).
