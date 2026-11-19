@@ -72,9 +72,11 @@ test results. A test that records warnings itself
 child process (a helper started with python3 -I) is not seen. The filters
 are put back at the end of each test too, so an object freed after a test
 that changed them for good, before the next one starts, is still recorded.
-A test (or a class or module set-up) that replaces sys.unraisablehook and
-does not restore it fails the run, with the place it was found, and the
-runner's hook is put back.
+A test that replaces sys.unraisablehook and does not restore it fails the
+run, and the runner's hook is put back. A class or module set-up may
+replace it until its tear-down; one its tear-down does not restore fails
+the run, found when the next module starts (the runner's hook is put back
+then) or after the last tear-down.
 
 No test may write bytecode into the checkout. `python3 -I` ignores
 PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
@@ -292,6 +294,9 @@ _SHOW_ENTRY: Final = "_showwarnmsg"
 _SHOWWARNING_ORIG: Final = "_showwarning_orig"
 
 
+type _UnraisableHook = Callable[[sys.UnraisableHookArgs], object]
+
+
 class LeakRecordingResult(unittest.TextTestResult):
     """A TextTestResult that also records every ResourceWarning (a file, socket or child process
     left open, found when it is freed; in leaks) and every exception Python could only print
@@ -311,6 +316,12 @@ class LeakRecordingResult(unittest.TextTestResult):
         self.lost_exceptions = []
         self.hook_problems = []
         self._in_replaced = False
+        # A class or module set-up may replace sys.unraisablehook until its tear-down: the one
+        # found in place at a startTest (its first test's), where, and in which module.
+        self._fixture_hook: _UnraisableHook | None = None
+        self._fixture_where = ""
+        self._fixture_module = ""
+        self._hook_at_start: _UnraisableHook = self._unraisable
         self._running = "before the first test"
         # A leak the garbage collector frees (an object in a reference cycle) may come from any
         # test before the one running: _where says so (gc.callbacks tell when it collects).
@@ -340,7 +351,8 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     @override
     def startTest(self, test: unittest.TestCase) -> None:
-        self._keep_hook(f"a class or module set-up or tear-down before {test.id()}")
+        self._note_fixture_hook(test)
+        self._hook_at_start = sys.unraisablehook
         self._running = test.id()
         self._keep_recording()
         super().startTest(test)
@@ -348,7 +360,9 @@ class LeakRecordingResult(unittest.TextTestResult):
     @override
     def stopTest(self, test: unittest.TestCase) -> None:
         # The suite drops the test case after this: what it held is freed before the next startTest.
-        self._keep_hook(test.id())
+        if sys.unraisablehook != self._hook_at_start:  # the test itself replaced it
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {test.id()}")
+            sys.unraisablehook = self._hook_at_start
         self._keep_recording()
         super().stopTest(test)
 
@@ -357,7 +371,10 @@ class LeakRecordingResult(unittest.TextTestResult):
         # An object in a reference cycle is freed only by the collector: run it now, while the
         # hooks still record, instead of at exit.
         self._found_by = "the last garbage collection"
-        self._keep_hook("a class or module tear-down after the last test")
+        if sys.unraisablehook != self._unraisable:  # every tear-down has run
+            where = self._fixture_where or "a class or module tear-down after the last test"
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {where}")
+            sys.unraisablehook = self._unraisable
         self._keep_recording()
         gc.collect()
         gc.callbacks.remove(self._gc_phase)
@@ -373,11 +390,26 @@ class LeakRecordingResult(unittest.TextTestResult):
         if warnings.filters[:1] != [self._always]:
             warnings.simplefilter("always", ResourceWarning)
 
-    def _keep_hook(self, where: str) -> None:
-        """Put the runner's sys.unraisablehook back when something replaced it, and say where."""
-        if sys.unraisablehook != self._unraisable:  # a bound method: equal, not the same object
-            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {where}")
+    def _note_fixture_hook(self, test: unittest.TestCase) -> None:
+        """Before a test: note a sys.unraisablehook that a class or module set-up put in place
+        (its tear-down may restore it, so it is no error yet). The same hook still in place when
+        the next module starts is one a tear-down did not restore: an error, and the runner's
+        hook is put back. stopTestRun reports one still in place after the last tear-down."""
+        hook, module = sys.unraisablehook, type(test).__module__
+        if hook == self._unraisable:  # a bound method: equal, not the same object
+            self._fixture_hook = None
+            self._fixture_where = ""
+            return
+        if hook == self._fixture_hook and module != self._fixture_module:
+            self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {self._fixture_where}")
             sys.unraisablehook = self._unraisable
+            self._fixture_hook = None
+            self._fixture_where = ""
+            return
+        if hook != self._fixture_hook:
+            self._fixture_hook = hook
+            self._fixture_where = f"a class or module set-up or tear-down before {test.id()}"
+            self._fixture_module = module
 
     def _gc_phase(self, phase: str, _info: dict[str, int]) -> None:
         self._collecting = phase == "start"

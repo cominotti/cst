@@ -192,6 +192,32 @@ class H(unittest.TestCase):
         sys.unraisablehook = lambda unraisable: None  # and does not restore it
     def test_b_a_weakref_callback_raises(self):
         U.test_a_weakref_callback_raises(self)
+class R(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        cls.saved = sys.unraisablehook
+        sys.unraisablehook = cls.own_hook  # restored by tearDownClass
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+        sys.unraisablehook = cls.saved
+    @staticmethod
+    def own_hook(unraisable):
+        pass
+    def test_a_sees_its_own_hook(self):
+        import sys
+        self.assertIs(sys.unraisablehook, R.own_hook)
+    def test_b_sees_its_own_hook(self):
+        import sys
+        self.assertIs(sys.unraisablehook, R.own_hook)
+class Q(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        sys.unraisablehook = lambda unraisable: None  # and no tearDownClass restores it
+    def test_runs(self):
+        pass
 class N(unittest.TestCase):
     def test_a_showwarning_that_warns_once_then_calls_the_original(self):
         shown = []
@@ -213,6 +239,33 @@ class F(unittest.TestCase):
     def test_b_leaks_a_file(self):
         f = open(os.devnull)
         del f
+"""
+
+
+# A module whose set-up replaces sys.unraisablehook and whose tear-down does not restore it.
+_HOOK_LEFT_BY_A_MODULE = """
+import sys, unittest
+def setUpModule():
+    sys.unraisablehook = lambda unraisable: None
+class T(unittest.TestCase):
+    def test_a(self):
+        pass
+    def test_b(self):
+        pass
+"""
+
+# A module whose test loses an exception in a weakref callback.
+_LOSES_AN_EXCEPTION = """
+import unittest, weakref
+class T(unittest.TestCase):
+    def test_a_weakref_callback_raises(self):
+        class Freed:
+            pass
+        thing = Freed()
+        def boom_callback(ref):
+            raise ZeroDivisionError("boom")
+        self.ref = weakref.ref(thing, boom_callback)
+        del thing
 """
 
 
@@ -327,6 +380,53 @@ class ResourceWarningGateTest(unittest.TestCase):
             done.stderr,
         )
         self.assertIn("error: exception in probe_leaks.H.test_b_a_weakref_callback_raises: ", done.stderr)
+
+    def test_a_class_set_up_may_replace_the_unraisable_hook_until_its_tear_down(self) -> None:
+        done = self.run_probe("", cls="R")
+        self.assertEqual(done.returncode, 0, done.stderr)  # its tests see their own hook
+        self.assertNotIn("error:", done.stderr)
+
+    def test_a_class_set_up_that_never_restores_the_unraisable_hook_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="Q")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by a class or module set-up or tear-down "
+            "before probe_leaks.Q.test_runs",
+            done.stderr,
+        )
+
+    def test_a_module_set_up_hook_left_in_place_is_found_at_the_next_module(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
+        for name, text in (
+            ("probe_first.py", _HOOK_LEFT_BY_A_MODULE),
+            ("probe_second.py", _LOSES_AN_EXCEPTION),
+        ):
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        done = subprocess.run(
+            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_first", "probe_second"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env={**os.environ, "PYTHONPATH": tmp},
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 2, done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by a class or module set-up or tear-down "
+            "before probe_first.T.test_a",
+            error,
+        )
+        # The runner's hook is back for the next module: its lost exception is recorded.
+        self.assertTrue(
+            any(
+                line.startswith("error: exception in probe_second.T.test_a_weakref_callback_raises: ") for line in error
+            ),
+            error,
+        )
 
     def test_a_warning_raised_inside_a_replaced_showwarning_is_one_line_each(self) -> None:
         done = self.run_probe("", cls="N")
