@@ -478,6 +478,11 @@ class BytecodeGateTest(unittest.TestCase):
         put(".git/objects/x.pyc")
         put("venv/pyvenv.cfg")
         put("venv/lib/__pycache__/v.cpython-314.pyc")
+        # A checkout nested in this one (a linked worktree: its .git is a file; a clone: a folder).
+        put(".claude/worktrees/w/.git")
+        put(".claude/worktrees/w/__pycache__/w.cpython-314.pyc")
+        put("clone/.git/HEAD")
+        put("clone/a/__pycache__/c.cpython-314.pyc")
         before = bytecode_files(tmp)
         self.assertEqual(
             sorted(before), ["a/__pycache__/old.cpython-314.pyc", "a/__pycache__/rewritten.cpython-314.pyc"]
@@ -485,6 +490,8 @@ class BytecodeGateTest(unittest.TestCase):
         put("b/__pycache__/new.cpython-314.pyc")
         put("venv/lib/__pycache__/w.cpython-314.pyc")
         put(".git/y.pyc")
+        put(".claude/worktrees/w/b/__pycache__/x.cpython-314.pyc")  # another checkout's run wrote it
+        put("clone/b/__pycache__/d.cpython-314.pyc")
         rewritten = os.path.join(tmp, "a/__pycache__/rewritten.cpython-314.pyc")
         later = before["a/__pycache__/rewritten.cpython-314.pyc"] + 10**9
         os.utime(rewritten, ns=(later, later))

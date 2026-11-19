@@ -83,8 +83,9 @@ PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
 without -B writes __pycache__ folders there (root's, when the code runs as
 root). This runner sets sys.dont_write_bytecode for itself first (run by its
 shebang it has no -B), notes every .pyc of the checkout before the tests
-(.git and virtual environments left out), and fails the run on each one that
-is new or rewritten after them, with a hint (BYTECODE_HINT).
+(.git, virtual environments and other checkouts nested in it, such as an
+agent's worktree under .claude/worktrees, left out), and fails the run on
+each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 """
 
 from collections.abc import Callable, Sequence
@@ -265,12 +266,21 @@ BYTECODE_HINT: Final = (
 )
 
 
+def _not_ours(folder: str) -> bool:
+    """A folder under the checkout whose bytecode is not this run's: .git, a virtual environment
+    (it holds pyvenv.cfg), or another checkout nested in it (it holds a .git: a folder for a clone,
+    a file for a linked worktree, such as an agent's under .claude/worktrees)."""
+    return os.path.basename(folder) == ".git" or any(
+        os.path.lexists(os.path.join(folder, name)) for name in ("pyvenv.cfg", ".git")
+    )
+
+
 def bytecode_files(root: str) -> dict[str, int]:
-    """The .pyc files under root (path relative to root -> mtime in ns), .git and virtual
-    environments (a folder that holds pyvenv.cfg) left out."""
+    """The .pyc files under root (path relative to root -> mtime in ns), the folders _not_ours
+    names left out."""
     found: dict[str, int] = {}
     for folder, dirs, names in os.walk(root):
-        dirs[:] = [d for d in dirs if d != ".git" and not os.path.exists(os.path.join(folder, d, "pyvenv.cfg"))]
+        dirs[:] = [d for d in dirs if not _not_ours(os.path.join(folder, d))]
         for name in names:
             if name.endswith(".pyc"):
                 path = os.path.join(folder, name)
