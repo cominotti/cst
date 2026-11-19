@@ -594,6 +594,10 @@ A VM that is **shut off** (and not saved: see the managed-save note in
 section 3) is read directly, without a snapshot. CST checks the state again
 afterwards, and that no file changed while restic read it. If the VM was
 started in between, that restic snapshot is forgotten and the backup fails.
+The same for a snapshot restic could not finish (some files not read). When
+restic cannot forget it (the repository locked, the NAS gone), the message
+says so and names the snapshot to forget by hand (`restic forget ID`, with
+the variables of section 10.9).
 
 **Paused**, suspended or other states: refused. Resume the VM or shut it down.
 

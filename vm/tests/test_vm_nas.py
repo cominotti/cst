@@ -193,6 +193,8 @@ if cmd == "backup":
     sys.exit(rc)
 if cmd == "forget":
     print("remove 1 snapshots:" if cfg.get("forgot") else "keep 2 snapshots:")
+    if "forget_err" in cfg:
+        print(cfg["forget_err"], file=sys.stderr)
     sys.exit(cfg.get("forget_rc", 0))
 if cmd == "snapshots":
     print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
@@ -530,6 +532,24 @@ class LiveBackupTest(Nas):
         forgets = [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
+
+    def test_an_incomplete_snapshot_restic_does_not_forget_is_named(self) -> None:
+        # The forget's answer was dropped: a torn snapshot stayed in the repository unsaid. These runs
+        # stop before the retention, whose forget forget_rc would fail too.
+        self.restic_cfg(backup_rc=3, forget_rc=1)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"restic backup failed: some files could not be read; no backup recorded; restic snapshot {SNAP_ID[:8]} "
+            f"could NOT be forgotten (exit 1): it is no backup; forget it by hand, restic forget {SNAP_ID}, with "
+            'the repository\'s variables of vm/README.md, section "Restore from the NAS"',
+            r.stderr,
+        )
+        self.assertFalse(os.path.exists(self.index))
+        self.restic_cfg(backup_rc=3)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertIn("some files could not be read; no backup recorded\n", r.stderr)
+        self.assertNotIn("forgotten", r.stderr)
 
     def test_commit_failure_is_loud_and_leaves_everything(self) -> None:
         self.vm(fail=["commit"], agent="connected")
@@ -923,6 +943,30 @@ class ShutOffAndRefusalTest(Nas):
         forgets = [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertFalse(os.path.exists(self.index))
+
+    def test_a_torn_snapshot_restic_does_not_forget_is_named(self) -> None:
+        # "(restic snapshot X forgotten)" was said whatever forget answered. These runs stop before the
+        # retention, whose forget forget_rc would fail too.
+        lock = "Fatal: unable to create lock in backend: repository is already locked"
+        for fail, what in (
+            ("start-during-backup", "the VM's state changed during the backup, the copy is not consistent ("),
+            ("touch-nvram", "changed during the backup (the VM was started?), the copy is not consistent ("),
+        ):
+            for cfg, said in (
+                ({"forget_rc": 1, "forget_err": lock}, f"could NOT be forgotten ({lock}): it is no backup; "),
+                ({"forget_rc": 1}, "could NOT be forgotten (exit 1): it is no backup; "),
+                ({}, "forgotten): "),
+            ):
+                with self.subTest(fail=fail, cfg=cfg):
+                    self.vm(state="shut off", fail=[fail])
+                    self.restic_cfg(**cfg)
+                    r = self.run_tool("backup", "win", "--nas")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(f"{what}restic snapshot {SNAP_ID[:8]} {said}", r.stderr)
+                    if cfg:
+                        self.assertIn(f"forget it by hand, restic forget {SNAP_ID}, with the repository's", r.stderr)
+                        self.assertNotIn("forgotten)", r.stderr)
+                    self.assertFalse(os.path.exists(self.index))
 
     def test_refused_states(self) -> None:
         for state in ("paused", "pmsuspended", "in shutdown"):
