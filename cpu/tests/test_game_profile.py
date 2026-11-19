@@ -1034,6 +1034,64 @@ class OffWithoutTargetUserTest(GameProfileCase):
             self.assertEqual(p.off(), 0)
         self.assertEqual(err.getvalue(), f"id: '{nobody}': no such user\n")
 
+    STEAM = "app-flatpak-com.valvesoftware.Steam-7.scope"
+
+    def quiet_ticks(self, target: str) -> None:
+        """Two ticks for target with the real uid lookup and no account for the recorded uid: each ends
+        in success and prints nothing on stderr. Each meets every uid lookup of the tick: the user
+        manager's cgroup (twice) and setp's override path (a Steam scope started after 'on')."""
+        self.systemd.units["usr"] = [self.STEAM]
+        for _ in range(2):
+            err = io.StringIO()
+            p = GameProfile(
+                self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=io.StringIO()
+            )
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.tick(), 0)
+            self.assertEqual(err.getvalue(), "")
+        self.assertIn(f" {self.STEAM} MemoryLow ", self.read(self.state))  # the tick reached setp
+
+    def off_err(self, target: str) -> str:
+        """'off' for target with the real uid lookup and no account for the recorded uid: its stderr."""
+        err = io.StringIO()
+        p = GameProfile(
+            self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=io.StringIO()
+        )
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(self.state))
+        return err.getvalue()
+
+    def test_tick_says_nothing_when_the_account_of_the_recorded_uid_is_gone(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.quiet_ticks("cst-test-no-such-user")
+
+    def test_tick_says_nothing_with_target_user_empty_and_the_account_gone(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.quiet_ticks("")
+
+    def test_off_says_no_such_user_once(self) -> None:
+        self.run_profile("on")
+        self.assertGreater(self.read(self.state).count("\nprop usr "), 1)  # each one asks for the uid
+        self.assertEqual(self.off_err("cst-test-no-such-user"), "id: 'cst-test-no-such-user': no such user\n")
+
+    def test_tick_and_off_after_an_older_on_for_a_name_without_account(self) -> None:
+        # An 'on' of an older version switched on for a TARGET_USER that names no account: its records
+        # name user@.service (no uid), and its user manager's ones need the uid of that name.
+        self.write(
+            self.state,
+            "prop sys user@.service MemoryLow new -\n"
+            "prop sys user-.slice MemoryLow new -\n"
+            "prop sys user.slice MemoryLow new -\n"
+            "prop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice MemoryLow new -\n",
+        )
+        self.write(self.manual, "")
+        self.quiet_ticks("cst-test-no-such-user")
+        self.assertEqual(self.off_err("cst-test-no-such-user"), "id: 'cst-test-no-such-user': no such user\n")
+
     def test_on_records_the_user_first(self) -> None:
         self.run_profile("on")
         self.assertTrue(self.read(self.state).startswith(f"prop sys user@{UID}.service MemoryLow new -\n"))

@@ -154,6 +154,8 @@ class GameProfile:
         self._uid_of = uid_of
         self._name_of = name_of
         self._out = out
+        self._say_lookups = True  # tick and state turn it off: see _lookup_uid
+        self._uids: dict[str, str] = {}
 
     # ---- output ----------------------------------------------------------------------
     def _stream(self) -> TextIO:
@@ -182,9 +184,13 @@ class GameProfile:
         return self._lookup_uid(self.s.target_user, say=True)
 
     def _lookup_uid(self, user: str, *, say: bool) -> str:
-        """The uid of user ("" for none); id's "no such user" line on stderr only when say."""
-        with contextlib.nullcontext() if say else contextlib.redirect_stderr(io.StringIO()):
-            return self._uid_of(user)
+        """The uid of user ("" for none), looked up once per run. id's "no such user" line only when say (False
+        from _target_refusal: its caller logs a line of its own), never in tick or state (_say_lookups), once."""
+        if user not in self._uids:
+            quiet = not (say and self._say_lookups)
+            with contextlib.redirect_stderr(io.StringIO()) if quiet else contextlib.nullcontext():
+                self._uids[user] = self._uid_of(user)
+        return self._uids[user]
 
     def _argv(self, mgr: Manager, args: Sequence[str]) -> list[str]:
         if mgr == "usr":
@@ -550,9 +556,9 @@ class GameProfile:
     def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
         also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
-        The tick and 'state' act for that user too (say False: quietly, also about a TARGET_USER that
-        names no account: the tick runs every 30 s), so what the tick sets in the user manager is what
-        'off' undoes."""
+        The tick and 'state' act for that user too, quietly (say False; _lookup_uid: never id's "no such
+        user" line there, 'off' says it once), so what the tick sets in the user manager is what 'off'
+        undoes."""
         uid = state_uid(recs)
         if uid is None:
             return
@@ -649,6 +655,7 @@ class GameProfile:
 
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
+        self._say_lookups = False
         p = self.paths
         why = None if self.problems else self._target_refusal()  # 'on' would refuse for TARGET_USER
         if not self.problems and why is None:  # fixed: a line or a name that breaks again is said again
@@ -719,6 +726,7 @@ class GameProfile:
     def state(self) -> int:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
+        self._say_lookups = False
         on = os.path.exists(self.paths.state)
         if on:
             self._user_from_state(records(self._state_text()), say=False)

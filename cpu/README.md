@@ -326,8 +326,9 @@ can write there, replaced and never followed), and its unit does not fail. `off`
 still undoes everything (for the user `on` acted for, the uid of its
 `user@UID.service` record in `game.state`, also when `TARGET_USER` sets
 nothing or names another user now; the watchdog's `tick` acts for that
-user too, without a word every 30 s about a `TARGET_USER` that names no
-account), and `cst cpu game state` shows the line.
+user too, and never prints `id`'s `no such user` line, neither for a
+`TARGET_USER` that names no account nor when the account of the recorded
+uid is gone; `off` prints it once), and `cst cpu game state` shows the line.
 
 A `TARGET_USER` that is not set, or that names no account, does not switch
 the profile on either: `cpu-game.service` fails, its journal says
