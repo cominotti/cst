@@ -76,14 +76,13 @@ _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 
 # The highest count per "<package> <rule>" (tests/budgets.py; a missing key is 0).
 MAGIC_CEILINGS: Final[dict[str, int]] = {}
-# "path:qualname" -> why the hits in that scope stay.
-# The reason of the stall monitor's exemptions: its own StrEnum is owed, but the kind words are a format
-# two programs share (the daemon writes them in its records, stall-report reads them), so it must be
-# defined once for both, in a change of its own.
+# The reason of the stall monitor's exemptions (its StrEnum, shared by the daemon and stall-report, is
+# a change of its own).
 _STALL_WAIT_KIND: Final = (
     'the stall monitor\'s wait kind "maintenance" (a format the daemon writes and stall-report reads),'
     " not systemd's ActiveState; its own StrEnum, shared by both, is owed"
 )
+# "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/shapes.py:json_object": (
         "the one generic JSON-object guard; every record type is a TypedDict narrowed from it"

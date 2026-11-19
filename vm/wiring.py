@@ -102,8 +102,8 @@ def timer_port(cfg: VmSettings, entry_file: str) -> TimerFilesPort:
 
 
 def systemd() -> SystemdPort:
-    """systemctl as cst-vm runs it: the systemd it runs under (show too), in the C locale, 120 s at most, with its own words for a
-    systemctl that is missing or does not answer (fault_words)."""
+    """systemctl as cst-vm runs it: the systemd it runs under (show too), in the C locale, 120 s at
+    most, with its own words for a systemctl that is missing or does not answer (fault_words)."""
     return SystemctlAdapter(
         SubprocessCommandRunner(words=fault_words), timeout=120, locale_c=True, on_host=SystemctlHost.LOCAL
     )
