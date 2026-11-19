@@ -11,6 +11,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import pwd
 import shutil
 import signal
 import stat
@@ -32,6 +33,7 @@ from cst_core.adapters.runtime import (
 )
 from cst_core.adapters.zipapp import build_python_zipapp, entry_payload, import_closure
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService
+from cst_core.domain.dispatch import step_down_argv
 from cst_core.domain.install import (
     INSTALL_MANIFEST,
     ArtifactKind,
@@ -874,6 +876,37 @@ class RuntimeResolverTest(unittest.TestCase):
     def test_neither(self) -> None:
         with self.assertRaises(FileNotFoundError):
             install_payload("cpu/vm-pin", os.path.join(self.tmp, "x", "y"))
+
+
+class CstAsUserTest(unittest.TestCase):
+    """cst_as_user (cst-install.bash) is the bash copy of cst_core.domain.dispatch.step_down_argv:
+    runuser is a function that prints its argument list (NUL-separated) instead of running it."""
+
+    def run_bash(self, script: str) -> subprocess.CompletedProcess[bytes]:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            # What sudo hands root: its own runtime folder and bus, and SUDO_USER.
+            "XDG_RUNTIME_DIR": "/run/user/0",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus",
+            "SUDO_USER": "someone",
+        }
+        body = f'source "{LIB}"\nrunuser() {{ printf "%s\\0" runuser "$@"; }}\n{script}'
+        return subprocess.run(
+            ["bash", "-c", body], check=False, capture_output=True, env=env, stdin=subprocess.DEVNULL, timeout=60
+        )
+
+    def test_the_argument_list_is_step_down_argvs(self) -> None:
+        me = pwd.getpwuid(os.getuid())
+        cmd = ["CST_PROG=cst toolchains", "python3", "-c", "a b", "--x", ""]
+        r = self.run_bash('cst_as_user "$(id -un)" "CST_PROG=cst toolchains" python3 -c "a b" --x ""')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = [w.decode() for w in r.stdout.split(b"\0")[:-1]]
+        self.assertEqual(got, step_down_argv(me.pw_name, me.pw_uid, me.pw_dir, unset=(), then=cmd))
+
+    def test_a_user_without_a_passwd_entry_runs_nothing(self) -> None:
+        r = self.run_bash("cst_as_user no-such-user-cst-test true")
+        self.assertEqual((r.returncode, r.stdout), (1, b""))
+        self.assertIn(b"no home folder for user 'no-such-user-cst-test'", r.stderr)
 
 
 if __name__ == "__main__":

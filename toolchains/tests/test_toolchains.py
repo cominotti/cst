@@ -434,14 +434,16 @@ class ConfigTest(Scratch):
 
 class SnapshotsSetupTest(Scratch):
     """snap_user_configs of btrfs/setup-snapshots.bash, sourced like the
-    frontend does, with runuser and Chrome's step as stubs: the cargo and uv
+    frontend does, with cst_as_user and Chrome's step as stubs: the cargo and uv
     lines are still written (by the toolchains module), and the timer is
     turned on only when the user did not turn it off."""
 
     def run_setup(self, prog: str = "cst btrfs", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-            'runuser() { shift 3; "$@"; }\n'  # runuser -u USER -- CMD...: CMD as is
+            # cst_as_user USER CMD...: CMD as the current user, none of the session's variables
+            # (cst-install.bash's own is tested in tests/test_install.py).
+            'cst_as_user() { shift; env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "$@"; }\n'
             'snap_home() { echo "$H"; }\n'
             'snap_chrome() { echo "chrome $1"; }\n'
             'snap_user_configs "$H"\n'
@@ -502,7 +504,7 @@ class SnapshotsSetupTest(Scratch):
         self.assertIn("Apply with:", out)  # the plain command still has it
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-            'runuser() { shift 3; "$@"; }\n'
+            'cst_as_user() { shift; env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "$@"; }\n'
             'snap_home() { echo "$H"; }\n'
             "snap_toolchains_config_preview\n"
         )

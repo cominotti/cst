@@ -16,6 +16,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -1322,7 +1323,7 @@ class ScrubLimitTest(unittest.TestCase):
 # A toolchains or chrome-cache program as setup runs it: prints what reached it (the session
 # variables, CST_PROG, the arguments) as JSON; exits with FAKE_RC.
 FAKE_USER_TOOL = """import json, os, sys
-keys = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "CST_PROG")
+keys = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "CST_PROG", "SUDO_USER", "HOME", "USER", "LOGNAME")
 with open(os.environ["TOOL_LOG"], "a") as f:
     f.write(json.dumps({"argv": sys.argv[1:], **{k: os.environ.get(k) for k in keys}}) + "\\n")
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
@@ -1336,13 +1337,18 @@ class SeenCall(TypedDict):
     XDG_RUNTIME_DIR: str | None
     DBUS_SESSION_BUS_ADDRESS: str | None
     CST_PROG: str | None
+    SUDO_USER: str | None
+    HOME: str | None
+    USER: str | None
+    LOGNAME: str | None
 
 
 class UserStepsTest(unittest.TestCase):
     """setup's steps as the user (snap_toolchains, snap_chrome, snap_user_configs) run through
-    runuser with that user's session variables, whatever root's environment holds. runuser is
-    a function that logs and runs the command as the current user; the programs are a fake
-    that records what reached it; the user's runtime folder is in the test's folder."""
+    cst_as_user: runuser with that user's session variables, whatever root's environment holds.
+    runuser is a function that logs and runs the command as the current user; the programs are a
+    fake that records what reached it; the user's runtime folder of the systemd/private check is
+    in the test's folder (SNAP_USER_RUN)."""
 
     @override
     def setUp(self) -> None:
@@ -1353,6 +1359,16 @@ class UserStepsTest(unittest.TestCase):
         with open(self.tool, "w") as f:
             f.write(FAKE_USER_TOOL)
         self.tool_log = os.path.join(self.tmp, "tool.log")
+        me = pwd.getpwuid(os.getuid())
+        # What a login of the user sets (step_down_argv's session); never root's.
+        self.session = {
+            "XDG_RUNTIME_DIR": f"/run/user/{me.pw_uid}",
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{me.pw_uid}/bus",
+            "SUDO_USER": None,
+            "HOME": me.pw_dir,
+            "USER": me.pw_name,
+            "LOGNAME": me.pw_name,
+        }
 
     def socket_at(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1365,6 +1381,7 @@ class UserStepsTest(unittest.TestCase):
             [
                 "set -Eeuo pipefail",
                 f"SRC={BTRFS}; PROG='cst btrfs'",
+                f'. "{REPO}/cst-install.bash"',
                 '. "$SRC/setup-snapshots.bash"',
                 'SNAP_USER_RUN="$T/run"; target_user="$(id -un)"; TOOLCHAINS_TOOL="$TOOL"; CHROME_TOOL="$TOOL"',
                 'snap_home() { echo "$T/home"; }',
@@ -1379,9 +1396,12 @@ class UserStepsTest(unittest.TestCase):
             "TOOL_LOG": self.tool_log,
             "FAKE_RC": str(fake_rc),
             "HOME": self.tmp,
-            # What sudo can hand root: its own runtime folder and bus.
+            # What sudo hands root: its own runtime folder and bus, and SUDO_USER.
             "XDG_RUNTIME_DIR": "/run/user/0",
             "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus",
+            "SUDO_USER": "someone",
+            "USER": "root",
+            "LOGNAME": "root",
         }
         return subprocess.run(
             ["bash", "-c", script], check=False, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL
@@ -1391,30 +1411,35 @@ class UserStepsTest(unittest.TestCase):
         with open(self.tool_log) as f:
             return [json.loads(line) for line in f]
 
-    def test_the_users_runtime_folder_and_bus_replace_roots(self) -> None:
-        self.socket_at(os.path.join(self.run_dir, "bus"))
-        r = self.run_bash("snap_toolchains auto on --unless-off\nsnap_chrome apply")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        session = {"XDG_RUNTIME_DIR": self.run_dir, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.run_dir}/bus"}
+    def test_the_users_session_variables_replace_roots(self) -> None:
+        # Whatever exists in the user's runtime folder (a bus, only the folder, nothing): the
+        # variables a login of the user sets, SUDO_USER removed. Before, XDG_RUNTIME_DIR and the bus
+        # were set only when they existed, and SUDO_USER reached the programs.
         home = os.path.join(self.tmp, "home")
-        self.assertEqual(
-            self.seen(),
-            [
-                {"argv": ["auto", "on", "--unless-off", "--home", home], "CST_PROG": "cst toolchains", **session},
-                {"argv": ["apply", "--home", home], "CST_PROG": None, **session},
-            ],
-        )
-
-    def test_a_runtime_folder_without_a_bus_sets_only_xdg_runtime_dir(self) -> None:
-        os.makedirs(self.run_dir)
-        self.assertEqual(self.run_bash("snap_toolchains config plan").returncode, 0)
-        got = self.seen()[0]
-        self.assertEqual((got["XDG_RUNTIME_DIR"], got["DBUS_SESSION_BUS_ADDRESS"]), (self.run_dir, None))
-
-    def test_no_runtime_folder_drops_both_variables(self) -> None:
-        self.assertEqual(self.run_bash("snap_toolchains config plan").returncode, 0)
-        got = self.seen()[0]
-        self.assertEqual((got["XDG_RUNTIME_DIR"], got["DBUS_SESSION_BUS_ADDRESS"]), (None, None))
+        for case in ("bus", "folder only", "nothing"):
+            with self.subTest(case):
+                if case == "bus":
+                    self.socket_at(os.path.join(self.run_dir, "bus"))
+                elif case == "folder only":
+                    shutil.rmtree(self.run_dir)
+                    os.makedirs(self.run_dir)
+                else:
+                    shutil.rmtree(os.path.join(self.tmp, "run"))
+                if os.path.exists(self.tool_log):
+                    os.remove(self.tool_log)
+                r = self.run_bash("snap_toolchains auto on --unless-off\nsnap_chrome apply")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(
+                    self.seen(),
+                    [
+                        {
+                            "argv": ["auto", "on", "--unless-off", "--home", home],
+                            "CST_PROG": "cst toolchains",
+                            **self.session,
+                        },
+                        {"argv": ["apply", "--home", home], "CST_PROG": None, **self.session},
+                    ],
+                )
 
     def user_configs(self, fake_rc: int) -> subprocess.CompletedProcess[str]:
         r = self.run_bash('snap_user_configs "$T/home"', fake_rc=fake_rc)
@@ -1441,6 +1466,77 @@ class UserStepsTest(unittest.TestCase):
     def test_auto_on_that_works_prints_no_note(self) -> None:
         self.socket_at(os.path.join(self.run_dir, "systemd", "private"))
         self.assertEqual(self.user_configs(0).stderr, "")
+
+
+class PendingAlertsStatusTest(unittest.TestCase):
+    """status_pending_alerts (btrfs-setup.sh) runs the reader as the user who ran sudo through
+    cst_as_user, with that user's session variables; as root itself without runuser. runuser
+    is a function that logs and runs the command as the current user; the reader is a fake that
+    prints what reached it."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-pending-status-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        with open(os.path.join(self.tmp, "cst-pending-alerts"), "w") as f:
+            f.write(
+                "import os, sys\nprint(sys.argv[1:], *(os.environ.get(k) for k in "
+                '("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SUDO_USER", "HOME")))\n'
+            )
+        self.runuser_log = os.path.join(self.tmp, "runuser.log")
+
+    def status(self, target_user: str) -> str:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                f'. "{REPO}/cst-install.bash"',
+                shell_function(SETUP, "status_pending_alerts"),
+                'SRC="$T"; PROG=cst-btrfs-test; USER_UNIT_DIR="$T"; PENDING_UNIT=unit; OLD_ALERTS_DIR="$T/old"',
+                'touch "$T/unit"',
+                'runuser() { echo "runuser $*" >>"$T/runuser.log"; shift 3; "$@"; }',
+                f"target_user={target_user}",
+                "status_pending_alerts",
+            ]
+        )
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "T": self.tmp,
+            "HOME": self.tmp,
+            # What sudo hands root.
+            "XDG_RUNTIME_DIR": "/run/user/0",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/0/bus",
+            "SUDO_USER": "someone",
+        }
+        r = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        return r.stdout
+
+    def test_the_reader_runs_as_the_user_with_the_users_session(self) -> None:
+        # Before, plain runuser: root's runtime folder, bus and SUDO_USER reached the reader.
+        me = pwd.getpwuid(os.getuid())
+        out = self.status(me.pw_name)
+        run = f"/run/user/{me.pw_uid}"
+        self.assertEqual(out, f"  ['--list'] {run} unix:path={run}/bus None {me.pw_dir}\n")
+        with open(self.runuser_log) as f:
+            self.assertEqual(
+                f.read(),
+                f"runuser -u {me.pw_name} -- env -u SUDO_USER HOME={me.pw_dir} USER={me.pw_name} "
+                f"LOGNAME={me.pw_name} XDG_RUNTIME_DIR={run} DBUS_SESSION_BUS_ADDRESS=unix:path={run}/bus "
+                f"python3 -I -B {self.tmp}/cst-pending-alerts --list\n",
+            )
+
+    def test_without_a_user_it_runs_as_root_without_runuser(self) -> None:
+        out = self.status('""')
+        self.assertEqual(out, f"  ['--list'] /run/user/0 unix:path=/run/user/0/bus someone {self.tmp}\n")
+        self.assertFalse(os.path.exists(self.runuser_log))
 
 
 if __name__ == "__main__":

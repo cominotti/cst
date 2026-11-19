@@ -934,7 +934,7 @@ class LeanDebugInfoTest(RulesBase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         script = (
             'set -Eeuo pipefail; SRC="$1"; H="$2"; PROG="$3"; . "${SRC}/setup-snapshots.bash"; target_user=u\n'
-            'runuser() { shift 3; "$@"; }\n'
+            'cst_as_user() { shift; env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "$@"; }\n'
             'snap_home() { echo "$H"; }\n'
             "snap_chrome() { :; }\n"
             "snap_toolchains_config_preview\n"

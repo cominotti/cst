@@ -3800,7 +3800,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             fi
             [[ -S /run/user/1000/systemd/private ]]
             out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
-                . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
             sed 's/^/test_81: /' <<<"$out" >&2
             if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
             grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
@@ -3808,6 +3808,41 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             as_tester systemctl --user is-active cst-toolchains-prune.timer
             python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["components"].get("toolchains:auto") != "done")' \
                 "$H/.local/state/cst/installed.json"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_115_cst_as_user_gives_the_command_the_users_session(self) -> None:
+        """cst_as_user (cst-install.bash), as root with what sudo hands root (SUDO_USER, its own
+        XDG_RUNTIME_DIR and bus): the real runuser runs the command as tester with HOME, USER,
+        LOGNAME, tester's /run/user/1000 and bus, and no SUDO_USER; systemctl --user reaches
+        tester's manager, which root's variables do not (checked first, else the test proves
+        nothing). What a fake runuser cannot show: what the real one keeps or resets."""
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_115 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export SUDO_USER=tester XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+            [[ -S /run/user/1000/systemd/private ]]
+            if runuser -u tester -- systemctl --user show-environment >/dev/null 2>&1; then
+                echo "root's variables still reach tester's manager: the test would prove nothing" >&2
+                exit 1
+            fi
+            . /opt/cst-rw/cst-install.bash
+            seen="$(cst_as_user tester sh -c 'id -un; env')"
+            [[ "$(head -n1 <<<"$seen")" == tester ]]
+            for want in HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus; do
+                grep -qxF "$want" <<<"$seen" || { echo "no $want in: $seen" >&2; exit 1; }
+            done
+            if grep -q '^SUDO_USER=' <<<"$seen"; then echo "SUDO_USER reached the command" >&2; exit 1; fi
+            state="$(cst_as_user tester systemctl --user is-system-running 2>&1 || true)"
+            case "$state" in
+                running | degraded | starting | initializing) ;;
+                *) echo "tester's manager not reached: $state" >&2; exit 1 ;;
+            esac
             echo E2E-OK
             """,
         ).stdout

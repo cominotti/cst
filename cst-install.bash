@@ -9,6 +9,8 @@
 # `*.in` template with --set KEY=VALUE filled in), only when it changed,
 # atomically, and prints `unchanged: DEST` or `written:   DEST`.
 # Always on the system Python, so the zipapp bytes do not depend on PATH.
+# cst_as_user (at the end) runs a command as the user with that user's
+# session variables, for the steps a setup script runs as the user.
 
 CST_INSTALLER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cst_core/installer.py"
 
@@ -136,4 +138,22 @@ cst_component_units() {
         [[ -n "${d}" ]] || continue
         [[ "${d%/*}" == *.d ]] || printf '%s\n' "${d##*/}"
     done <<<"${dests}"
+}
+
+# cst_as_user USER CMD...: CMD as USER (from root, through runuser) with the
+# session variables a login of USER sets: HOME, USER, LOGNAME, the runtime
+# folder /run/user/UID and its bus; SUDO_USER is removed. sudo can hand root
+# its own XDG_RUNTIME_DIR (/run/user/0) and bus, and runuser keeps them:
+# systemctl --user then fails ("Operation not permitted"). CMD may start with
+# NAME=VALUE words (env reads them). The bash copy of
+# cst_core.domain.dispatch.step_down_argv (unset=()): a unit test keeps the
+# two argument lists equal.
+cst_as_user() {
+    local user="$1" uid home
+    shift
+    home="$(_cst_user_home "${user}")" || return 1
+    uid="$(id -u "${user}")" || return 1
+    runuser -u "${user}" -- env -u SUDO_USER \
+        "HOME=${home}" "USER=${user}" "LOGNAME=${user}" \
+        "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" "$@"
 }
