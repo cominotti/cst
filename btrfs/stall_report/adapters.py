@@ -102,14 +102,20 @@ def _file_lines(path: str, opener: Callable[..., IO[str]]) -> tuple[list[object]
         elif i < len(lines) - 1 or line.endswith("\n"):
             bad.append(i)
     day = os.path.basename(path)[6:16]
-    file_day = time.mktime(time.strptime(day, "%Y-%m-%d"))
+    return objects, _damaged_times(seen, bad, time.mktime(time.strptime(day, "%Y-%m-%d"))), error
+
+
+def _damaged_times(seen: Sequence[float | None], bad: Sequence[int], file_day: float) -> list[float]:
+    """The time each damaged line (BAD: its index in the file) belongs to: its own (SEEN: each
+    line's record time, None for a damaged line without one), else the time of the record before
+    it, else of the one after it, else FILE_DAY."""
     out: list[float] = []
     for i in bad:
         own = seen[i]
         before = [t for t in seen[:i] if t is not None]
         after = [t for t in seen[i + 1 :] if t is not None]
         out.append(own if own is not None else before[-1] if before else after[0] if after else file_day)
-    return objects, out, error
+    return out
 
 
 def load(log_dir: str, since: float, until: float) -> Loaded:
