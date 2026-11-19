@@ -41,7 +41,7 @@ from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import describe_problems, parse_shell_assignments
+from cst_core.domain.text import cgroup_v2_path, describe_problems, parse_shell_assignments
 from cst_core.domain.values import CpuSet
 from cst_core.ports import CommandFault, VirshPort
 
@@ -179,8 +179,7 @@ def find_game(name: str | None) -> int | None:
 
 
 def game_cgroup(pid: int) -> str:
-    line = read_text(f"/proc/{pid}/cgroup", "").strip()
-    return line.split("::", 1)[1].lstrip("/") if "::" in line else ""
+    return (cgroup_v2_path(read_text(f"/proc/{pid}/cgroup", "")) or "").lstrip("/")
 
 
 def invol(pid: int) -> int:

@@ -79,6 +79,29 @@ class CpusOfTest(unittest.TestCase):
                 self.cpus(text)
 
 
+class GameCgroupTest(unittest.TestCase):
+    """game_cgroup reads the game's cgroup v2 path from /proc/PID/cgroup (cst_core cgroup_v2_path),
+    without its leading slash."""
+
+    def cgroup(self, text: str) -> str:
+        with unittest.mock.patch.object(cpu_adapters, "read_text", lambda _path, default="": text or default):
+            return cpu_adapters.game_cgroup(4242)
+
+    def test_the_path_of_the_0_line_without_its_leading_slash(self) -> None:
+        scope = "user.slice/user-1000.slice/user@1000.service/app.slice/app-steam-1.scope"
+        self.assertEqual(self.cgroup(f"0::/{scope}\n"), scope)
+        self.assertEqual(self.cgroup(f"12:cpuset:/\n1:name=systemd:/{scope}\n0::/{scope}\n"), scope)
+
+    def test_only_the_0_line_when_other_lines_follow_it(self) -> None:
+        text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
+        self.assertEqual(self.cgroup(text), "user.slice/x.scope")
+
+    def test_no_0_line_or_no_file_is_no_cgroup(self) -> None:
+        for text in ("", "1:name=systemd:/user.slice/x.scope\n", "1:name=systemd:/a::b\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.cgroup(text), "")
+
+
 class VmPinTest(unittest.TestCase):
     @override
     def setUp(self) -> None:
