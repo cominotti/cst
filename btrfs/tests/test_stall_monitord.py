@@ -540,8 +540,13 @@ def monitor(m: _StallMonitordModule) -> _MonitorProto:
     mon.topo = types.SimpleNamespace(fs={}, disks={}, top_devs=set(), containers={}, scan_cgroups=_scan_cgroups)
     mon.alert = _alert
     mon.describe = _describe
-    # The command lines through the view's read_text at each read (FakeProc and the tests replace it).
-    mon.cmdlines = md_proc.TimedReader(md_domain.CMDLINE_WAIT, lambda path: m.read_text(path))
+
+    # The command lines through the view's read_text, looked up at each read: FakeProc and the
+    # tests replace it later (passing m.read_text itself would keep the real reader of /proc).
+    def read_cmdline(path: str) -> str | None:
+        return m.read_text(path)
+
+    mon.cmdlines = md_proc.TimedReader(md_domain.CMDLINE_WAIT, read_cmdline)
     return mon
 
 

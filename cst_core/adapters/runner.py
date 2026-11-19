@@ -2,6 +2,7 @@
 """The command runner (SubprocessCommandRunner, CommandRunnerPort) and the host or container detection it asks (HostExecutionContext)."""
 
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 import functools
 import os
 import shutil
@@ -56,10 +57,8 @@ class _RunKwargs(TypedDict, total=False):
 
 def _renice(increment: int) -> None:
     """In the child, before exec: nice(increment); a refusal is ignored (the command still runs)."""
-    try:
+    with contextlib.suppress(OSError):
         os.nice(increment)
-    except OSError:
-        pass
 
 
 def _additions(env: Mapping[str, str] | None, *, locale_c: bool) -> dict[str, str]:

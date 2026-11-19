@@ -201,12 +201,13 @@ def frontmatter(text: str) -> dict[str, str]:
 
 def agent_file_problems(repo: str) -> list[str]:
     """Skills without a valid SKILL.md, rules without a description."""
-    problems: list[str] = []
     skills = os.path.join(repo, ".agents", "skills")
     rules = os.path.join(repo, ".agents", "rules")
-    for base in (skills, rules):
-        if not os.path.isdir(base) or not os.listdir(base):
-            problems.append(f"{os.path.relpath(base, repo)}: missing or empty")
+    problems = [
+        f"{os.path.relpath(base, repo)}: missing or empty"
+        for base in (skills, rules)
+        if not os.path.isdir(base) or not os.listdir(base)
+    ]
     for name in sorted(os.listdir(skills)) if os.path.isdir(skills) else []:
         where = f".agents/skills/{name}"
         if not os.path.isdir(os.path.join(skills, name)):

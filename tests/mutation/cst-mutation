@@ -177,8 +177,8 @@ def parse_args(argv: Sequence[str]) -> Options:
         raise UsageError(f"{test_module}: not a dotted Python module name (such as swap.tests.test_swap)")
     functions: list[str] = []
     for item in a.functions:
-        for name in str(item).split(","):
-            name = name.strip()
+        for part in str(item).split(","):
+            name = part.strip()
             if not FUNCTION_NAME.match(name):
                 raise UsageError(f"--functions {item!r}: {name!r} is not a function name")
             if name not in functions:
@@ -598,9 +598,9 @@ def session_counts(session: str) -> Counts:
         # Another cosmic-ray version can store its session differently.
         raise StepError(f"cannot read the numbers from {session} ({e}); report.txt has the mutants") from None
     total = skipped = killed = timeouts = survived = incompetent = 0
-    for worker, test, timed_out in rows:
+    for raw_worker, raw_test, timed_out in rows:
         total += 1
-        worker, test = _enum(worker), _enum(test)
+        worker, test = _enum(raw_worker), _enum(raw_test)
         if worker == "SKIPPED":
             skipped += 1
         elif test == "SURVIVED":

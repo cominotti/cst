@@ -85,9 +85,11 @@ class PinInvowkTests(unittest.TestCase):
     def test_rejects_bad_tag_and_missing_cosign(self) -> None:
         with self.assertRaises(pin.PinError):
             pin.run("0.16.0", skip_cosign=True)
-        with mock.patch.object(pin.shutil, "which", return_value=None):
-            with self.assertRaisesRegex(pin.PinError, "cosign"):
-                pin.run("v0.16.0", skip_cosign=False)
+        with (
+            mock.patch.object(pin.shutil, "which", return_value=None),
+            self.assertRaisesRegex(pin.PinError, "cosign"),
+        ):
+            pin.run("v0.16.0", skip_cosign=False)
 
     def test_case_line_matches_the_action_pin_table(self) -> None:
         line = pin.case_line("v0.16.0", "amd64", "1" * 64, "2" * 64)

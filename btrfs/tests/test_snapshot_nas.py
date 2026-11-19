@@ -271,7 +271,7 @@ class BackupTest(Base):
     def test_a_snapshot_already_in_this_repository_is_not_sent_again(self) -> None:
         self.write(self.state_file("nas-repo-id"), REPO_ID + "\n")
         self.write(self.state_file("nas-done-home"), f"{SNAP} {REPO_ID}\n")
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(lines[0], log(6, f"NAS: {SNAP} is already in the repository"))
         self.assertNotIn("backup", self.restic_commands())
         self.assertEqual(self.calls("mount"), [])
@@ -286,7 +286,7 @@ class BackupTest(Base):
         self.days_ago("nas-last-check", 0)
         # The record of a source this run does not back up goes too.
         self.write(self.state_file("nas-done-Workspace"), f"Workspace.20261118T0905 {old}\n")
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(
             lines[0], log(5, "NAS: another repository than last time (id cdcdcdcd -> abababab); its records start over")
         )
@@ -356,7 +356,7 @@ class BackupTest(Base):
 
     def test_files_that_could_not_be_read_still_count_as_backed_up(self) -> None:
         self.restic(backup={"rc": 3})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertIn(log(4, "NAS: home: some files could not be read; the rest was backed up"), lines)
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
         self.assertTrue(os.path.exists(self.state_file("nas-done-home")))
@@ -385,7 +385,7 @@ class BackupTest(Base):
 
     def test_the_time_budget(self) -> None:
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="1m")
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(
             lines,
             [
@@ -395,7 +395,7 @@ class BackupTest(Base):
         )
         # Unreadable: 6 hours.
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_TIMEOUT="soon")
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
 
     def test_a_time_budget_bash_arithmetic_refuses_stops_the_run(self) -> None:
@@ -431,7 +431,7 @@ class BackupTest(Base):
 class RepositoryTest(Base):
     def test_no_repository_is_never_created_on_its_own(self) -> None:
         self.restic(cat={"rc": 10, "out": "Fatal: repository does not exist\n"})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(
             lines,
             [
@@ -447,7 +447,7 @@ class RepositoryTest(Base):
         self.write(self.state_file("nas-init-pending"), "")
         config = json.dumps({"id": REPO_ID}) + "\n"
         self.restic(cat=[{"rc": 10}, {"out": config}], init={"out": "created restic repository\n"})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         title = "NAS backup: repository created"
         body = (
             f"Encrypted with the password in {self.password}: store a copy in your password manager now "
@@ -469,7 +469,7 @@ class RepositoryTest(Base):
     def test_a_failed_creation(self) -> None:
         self.write(self.state_file("nas-init-pending"), "")
         self.restic(cat={"rc": 10}, init={"rc": 1, "out": "Fatal: create repository failed\n"})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(
             lines[1:], [log(4, "restic: Fatal: create repository failed"), log(4, "NAS: restic init failed")]
         )
@@ -477,7 +477,7 @@ class RepositoryTest(Base):
 
     def test_wrong_password(self) -> None:
         self.restic(cat={"rc": 12})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         title, body = (
             "NAS backup: wrong repository password",
             f"{self.password} does not open {self.repo}; put the saved password there.",
@@ -487,7 +487,7 @@ class RepositoryTest(Base):
 
     def test_cannot_open(self) -> None:
         self.restic(cat={"rc": 1, "out": "Fatal: unable to open config file\n"})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(
             lines, [log(4, "NAS: cannot open the repository (restic rc=1): Fatal: unable to open config file")]
         )
@@ -519,14 +519,14 @@ class LeftoverMountTest(Base):
         stacked = self.path("run/btrfs-snapshot/nas/Workspace")
         os.makedirs(stacked)
         self.machine(mountpoints=[stacked])
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(lines[-1], log(5, f"NAS backup ok: {SNAP}"))
         self.assertEqual(self.calls("umount")[0], ["umount", stacked])
         self.assertFalse(os.path.exists(stacked))
 
     def test_a_mount_that_cannot_be_made(self) -> None:
         self.machine(mount_rc=32)
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertEqual(lines[0], log(4, f"NAS: home: cannot bind-mount {self.snap} at {self.mnt}"))
         self.assertNotIn("backup", self.restic_commands())
 
@@ -632,7 +632,7 @@ class MaintenanceTest(Base):
 
     def test_a_failed_prune_is_retried_next_run(self) -> None:
         self.restic(forget={"rc": 1})
-        rc, lines, _ = self.nas()
+        _rc, lines, _ = self.nas()
         self.assertIn(log(4, "NAS: restic forget --prune failed (rc=1); retried next run"), lines)
         self.assertFalse(os.path.exists(self.state_file("nas-last-prune")))
         self.assertTrue(os.path.exists(self.state_file("nas-last-ok")))

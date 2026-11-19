@@ -45,8 +45,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
 
 def load() -> ModuleType:
     # The helper has no .py extension, so it is loaded from its path.
-    mod = load_script(TOOL, "cst_mutation")
-    return mod
+    return load_script(TOOL, "cst_mutation")
 
 
 M = load()
@@ -576,7 +575,7 @@ class SessionCountsTest(unittest.TestCase):
                     ("g", "NORMAL", "INCOMPETENT", "Traceback"),
                     ("h", "EXCEPTION", None, "Traceback"),
                 ]
-                for job, *_ in rows + [("pending",)]:
+                for job, *_ in [*rows, ("pending",)]:
                     db.execute("INSERT INTO work_items VALUES (?)", (job,))
                 db.executemany("INSERT INTO work_results VALUES (?, ?, ?, ?)", rows)
                 db.commit()
@@ -767,7 +766,7 @@ class RunTest(unittest.TestCase):
     def test_without_bwrap_it_refuses_and_runs_nothing(self) -> None:
         tools = M.Tools(bwrap=None, python=sys.executable, venv=self.venv)
         before = snapshot(self.repo)
-        rc, stdout, stderr = self.execute("--all", tools=tools)
+        rc, _stdout, stderr = self.execute("--all", tools=tools)
         self.assertEqual(rc, 2)
         self.assertIn("bubblewrap (bwrap) is not installed", stderr)
         self.assertIn("does not run without it", stderr)

@@ -3,6 +3,7 @@
 waits, btrfs-snapshot-core's runs and their alerts, as btrfs/btrfs-snapshot (bash) had them."""
 
 from collections.abc import Sequence
+import contextlib
 import glob
 import json
 import os
@@ -439,9 +440,7 @@ def purge(m: SnapshotRun, args: Sequence[str]) -> int:
             "(not owned by btrfs-snapshot-core, or pinned): not deleted."
         )
     else:
-        try:
+        with contextlib.suppress(OSError):
             os.rmdir(m.snapdir)
-        except OSError:
-            pass
     m.rm_f(f"{m.state}/core-unfinished", f"{m.state}/core-writable")
     return 0

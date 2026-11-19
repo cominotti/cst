@@ -110,8 +110,10 @@ def zipapp_import_problems(src: str, data: bytes) -> list[str]:
                 top = mod.split(".", 1)[0]
                 if not _stdlib(mod) and top not in provided:
                     problems.append(f"{src}: {member} imports {mod}, which the zipapp does not hold")
-            for line in loads_code_by_path(text, member):
-                problems.append(f"{src}: {member}:{line} loads code from a file path (invisible to the bundle)")
+            problems.extend(
+                f"{src}: {member}:{line} loads code from a file path (invisible to the bundle)"
+                for line in loads_code_by_path(text, member)
+            )
     return problems
 
 

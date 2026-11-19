@@ -403,10 +403,8 @@ class CounterFile:
 
     def forget(self) -> None:
         """Remove the file if there is one."""
-        try:
+        with contextlib.suppress(OSError):  # none: nothing to forget
             os.remove(self.path)
-        except OSError:
-            pass  # none: nothing to forget
 
 
 def write_bytes_atomic(dest: str, content: bytes, mode: int = 0o644) -> None:

@@ -413,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check_only:
         return 0
 
-    run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+    run_id = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     artifact_dir = ARTIFACTS_BASE / run_id
     all_ok = True
     try:

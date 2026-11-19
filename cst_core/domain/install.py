@@ -198,6 +198,7 @@ SETUP_ENTRYPOINTS: Final[frozenset[str]] = frozenset(
 
 CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
     [
+        ".github/scripts/audit_summary.py",
         ".github/scripts/pin_invowk.py",
         "bluetooth/bt-helper",
         "bluetooth/bt-setup",

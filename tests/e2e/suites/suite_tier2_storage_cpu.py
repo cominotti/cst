@@ -8,6 +8,7 @@ import glob
 import os
 import shlex
 import subprocess
+from typing import ClassVar
 import unittest
 
 
@@ -830,7 +831,7 @@ def read_host_guard_snapshot() -> dict[str, str]:
 class Tier2StorageCpuE2ETest(unittest.TestCase):
     PRIV_CONTAINER = os.environ["CST_E2E_PRIV_CONTAINER"]
     NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
-    HOST_GUARD_BEFORE: dict[str, str] = {}
+    HOST_GUARD_BEFORE: ClassVar[dict[str, str]] = {}
 
     @classmethod
     def setUpClass(cls) -> None:

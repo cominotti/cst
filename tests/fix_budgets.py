@@ -28,7 +28,7 @@ Standard library only.
 """
 
 import ast
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 import functools
 import os
@@ -51,7 +51,7 @@ from tests import (
 from tests.budgets import lowered
 
 type Kind = Literal["budget", "ceiling", "names"]
-type Measured = Mapping[str, float] | Set[str]
+type Measured = Mapping[str, float] | AbstractSet[str]
 
 # What may follow the value of an entry on its line: the parentheses around
 # it closing, its comma and a comment; and a line after it that only closes

@@ -120,9 +120,11 @@ def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:
                         f"[{section}.{table}] {key!r} = {rules!r}: ignores ANN; annotate the files instead "
                         "(every Python file is fully annotated)"
                     )
-        for key in ("ignore", "extend-ignore"):
-            if _ignores_ann(settings.get(key)):
-                out.append(f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead")
+        out.extend(
+            f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead"
+            for key in ("ignore", "extend-ignore")
+            if _ignores_ann(settings.get(key))
+        )
     return out
 
 
@@ -205,13 +207,16 @@ def problems(
 
     ignored: the tracked files a git ignore rule matches (ignored_tracked_files()).
     """
-    out: list[str] = []
     gated = ty_gated(py_files, ty_gate, ignored)
     extensionless = {p for p in py_files if not p.endswith(".py")}
-    for p in sorted(extensionless - set(extend)):
-        out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
-    for p in sorted(set(extend) - extensionless):
-        out.append(f"{p}: in [tool.ruff] extend-include but not an extensionless Python file of the repository")
+    out = [
+        f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include"
+        for p in sorted(extensionless - set(extend))
+    ]
+    out.extend(
+        f"{p}: in [tool.ruff] extend-include but not an extensionless Python file of the repository"
+        for p in sorted(set(extend) - extensionless)
+    )
     for name, items in (("extend-include", extend), ("[tool.ty.src] include", ty_gate)):
         dups = sorted({p for p in items if items.count(p) > 1})
         out += [f"{p}: listed twice in {name}" for p in dups]
@@ -251,11 +256,10 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
             "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
             "no longer applies; delete it"
         )
-    for rel in sorted(f for f in files if os.path.basename(f) == ".ignore"):
-        out.append(
-            f"{rel}: ty leaves the files an .ignore file matches out of its check, and git does not see "
-            "the rule; delete it"
-        )
+    out.extend(
+        f"{rel}: ty leaves the files an .ignore file matches out of its check, and git does not see the rule; delete it"
+        for rel in sorted(f for f in files if os.path.basename(f) == ".ignore")
+    )
     ty = conf.get("tool", {}).get("ty", {})
     names: set[str] = set()
     for table, value in ty.items():
@@ -268,12 +272,12 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
                 f'[tool.ty] rules.{name} = {level!r}: a rule may only be raised to "error" here; '
                 "a lower level takes its diagnostics out of the gate"
             )
-    for name in sorted(names - TY_SETTINGS):
-        out.append(
-            f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take files or "
-            "diagnostics out of ty's check; allow it in TY_SETTINGS of tests/test_python_files.py "
-            "only once it is known not to"
-        )
+    out.extend(
+        f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take files or "
+        "diagnostics out of ty's check; allow it in TY_SETTINGS of tests/test_python_files.py "
+        "only once it is known not to"
+        for name in sorted(names - TY_SETTINGS)
+    )
     for name, want in sorted(TY_VALUES.items()):
         table, key = name.split(".", 1)
         section = ty.get(table, {})
@@ -292,11 +296,11 @@ def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
     out: list[str] = []
     for rel in sorted(paths):
         with open(os.path.join(repo, rel), "rb") as fh:
-            for tok in tokenize.tokenize(fh.readline):
-                if tok.type == tokenize.COMMENT and IGNORE_COMMENT.search(tok.string):
-                    out.append(
-                        f"{rel}:{tok.start[0]}: an ignore comment in a ty-gated file; fix what ty reports instead"
-                    )
+            out.extend(
+                f"{rel}:{tok.start[0]}: an ignore comment in a ty-gated file; fix what ty reports instead"
+                for tok in tokenize.tokenize(fh.readline)
+                if tok.type == tokenize.COMMENT and IGNORE_COMMENT.search(tok.string)
+            )
     return out
 
 

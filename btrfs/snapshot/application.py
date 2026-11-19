@@ -14,6 +14,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Sequence
+import contextlib
 import dataclasses
 import datetime as dt
 import os
@@ -117,7 +118,7 @@ class Run:
     def list_add(self, name: str, entry: str) -> None:
         entries = self.state.read_list(name)
         if entry not in entries:
-            self.state.write_list(name, entries + [entry])
+            self.state.write_list(name, [*entries, entry])
 
     def list_remove(self, name: str, entry: str) -> None:
         entries = self.state.read_list(name)
@@ -643,10 +644,8 @@ def create_snapshot(run: Run, src: Source, info: SubvolInfo, dest: str, entry: s
     if rc != 0:
         run.log(3, f"{src.name}: creating {dest} failed (rc={rc}): {err.strip()}")
         if tracked and run.host.kind(dest) == PathKind.MISSING:
-            try:
+            with contextlib.suppress(OSError):  # the next run sees it missing and forgets it
                 run.list_remove(UNFINISHED_FILE, entry)
-            except OSError:
-                pass  # the next run sees it missing and forgets it
         return False
     run.log(5, f"{src.name}: created {entry} ({reason})")
     return seal(run, src, dest, entry, info["uuid"], created=True) == SealOutcome.SEALED if tracked else True
@@ -989,15 +988,16 @@ def ignored_entries(
     """SCAN's ignored entries, those an interrupted run left writable said so."""
     ignored: list[tuple[str, str]] = []
     writable = set(scan.writable)
-    for p, r in scan.ignored:
+    for p, why in scan.ignored:
+        reason = why
         entry_name = os.path.basename(p)
         if p in writable and entry_name in unfinished:
             problem, _ = ours_writable(run, src, p, entry_name, source_uuid)
             if problem is None:
-                r += ", left by an interrupted run: the next run finishes it"
+                reason += ", left by an interrupted run: the next run finishes it"
             else:
-                r += f", listed as left by an interrupted run but {problem}: left alone"
-        ignored.append((p, r))
+                reason += f", listed as left by an interrupted run but {problem}: left alone"
+        ignored.append((p, reason))
     return ignored
 
 

@@ -24,7 +24,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from typing import Final
+from typing import ClassVar, Final
 import unittest
 
 REPO: Final = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -445,7 +445,7 @@ class _ExecChecks(_Copy):
     """What exec gives: the program is the process the caller started (signals, status, pipes, locale)."""
 
     read_args: tuple[str, ...] = ()
-    caller_extra: Mapping[str, str] = {}
+    caller_extra: ClassVar[Mapping[str, str]] = {}
 
     def _popen(self, extra: Mapping[str, str], prefix: Sequence[str] = ()) -> subprocess.Popen[str]:
         return subprocess.Popen(
@@ -534,7 +534,7 @@ class _ExecTests(_ExecChecks):
 class VmExecTest(_ExecTests):
     module = "vm"
     read_args = ("status", "w")
-    caller_extra = {"CST_VM_CONTAINER": "0"}
+    caller_extra: ClassVar[Mapping[str, str]] = {"CST_VM_CONTAINER": "0"}
 
 
 class ToolchainsExecTest(_ExecTests):

@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 import os
 import shlex
 import subprocess
+from typing import ClassVar
 import time
 import unittest
 
@@ -2445,7 +2446,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
     # systemd-analyze security's exposure of every service CST installs or
     # generates, on its 0-100 scale (--threshold takes it so: 25 = 2.5). Only
     # goes down: a hardened unit lowers its line in the same change.
-    SECURITY_CEILINGS: dict[str, int] = {
+    SECURITY_CEILINGS: ClassVar[dict[str, int]] = {
         "btrfs-bulk-boot.service": 94,
         "btrfs-degraded-boot-record.service": 94,
         "btrfs-health-check.service": 94,
