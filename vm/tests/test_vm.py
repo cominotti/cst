@@ -159,6 +159,9 @@ fi
 if [ -n "$FIX_CP_STARTS_VM" ]; then
   echo "$FIX_CP_STARTS_VM" >"$FIX/state.txt"; touch -d '+1 min' "$FIX_CP_TOUCH"
 fi
+if [ -n "$FIX_CP_WRITES_INDEX" ]; then
+  cat "$FIX_CP_WRITES_INDEX" >"$CST_VM_INDEX"
+fi
 args=""
 for a in "$@"; do
   case "$a" in --reflink=*|--sparse=*) ;; *) set -- "$@" "$a" ;; esac
@@ -539,6 +542,44 @@ class BackupTest(Scratch):
         self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
+
+    def test_an_index_changed_during_the_copy_keeps_the_backup_and_says_it_is_not_indexed(self) -> None:
+        # A newer cst vm (or a damage) rewrote the index while this one copied. The backup was made,
+        # but the message said "nothing is backed up".
+        newer = os.path.join(self.tmp, "index-written-during-the-copy")
+        for text, problem, advice in (
+            (
+                json.dumps({"version": 2, "backups": []}),
+                f"{self.index} is format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST",
+                "use the cst vm of that CST (in that checkout: cst vm backup-timer on installs it)",
+            ),
+            (
+                "{",
+                f"{self.index} cannot be read as cst vm's backup index (not JSON)",
+                f"move it aside (mv {self.index} {self.index}.bad) to start a new index",
+            ),
+        ):
+            with self.subTest(problem=problem):
+                shutil.rmtree(os.path.dirname(self.index), ignore_errors=True)
+                shutil.rmtree(self.backups, ignore_errors=True)
+                with open(newer, "w") as f:
+                    f.write(text)
+                self.env["FIX_CP_WRITES_INDEX"] = newer
+                os.makedirs(os.path.dirname(self.index))
+                r = self.run_tool("backup", "win")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(
+                    f"cst vm: the backup {self.dest()} is complete but not in the index: {problem}, so the index "
+                    "was left as it is and cst vm does not list this backup; the folder stays until removed by "
+                    "hand, and its manifest.json says what it holds (restore by hand: vm/README.md, section 5). "
+                    f"Then: {advice}",
+                    r.stderr,
+                )
+                self.assertNotIn("nothing is backed up", r.stderr)
+                self.assertNotIn("incomplete backup removed", r.stdout + r.stderr)
+                self.assertTrue(os.path.isfile(os.path.join(self.dest(), "manifest.json")))
+                with open(self.index) as f:
+                    self.assertEqual(f.read(), text)
 
     def test_a_damaged_index_stops_backup_and_list_and_is_left_as_it_is(self) -> None:
         # Read as empty, the next backup wrote an index with only itself: every older entry lost.

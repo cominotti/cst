@@ -178,6 +178,8 @@ if cmd == "backup":
     if "slow-backup" in vm.get("fail", []):
         open(os.path.join(fix, "backup-started"), "w").close()
         import time; time.sleep(3)
+    if "write_index" in cfg:  # [path, text]: a newer cst vm rewrote the index meanwhile
+        open(cfg["write_index"][0], "w").write(cfg["write_index"][1])
     for line in cfg.get("backup_lines", []):
         print(line)
     print(json.dumps({"message_type": "status", "percent_done": 0.5, "total_bytes": 10, "bytes_done": 5}))
@@ -532,6 +534,27 @@ class LiveBackupTest(Nas):
         forgets = [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
         self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
         self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
+
+    def test_an_index_changed_during_the_backup_keeps_the_snapshot_and_says_it_is_not_indexed(self) -> None:
+        # A newer cst vm rewrote the index while restic ran: the message said "nothing is backed up".
+        text = json.dumps({"version": 2, "backups": []})
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        self.restic_cfg(write_index=[self.index, text])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            f"cst vm: the restic snapshot {SNAP_ID[:8]} of win is complete but not in the index: {self.index} is "
+            "format 2 of the vm-index (this CST reads format 1 and older): written by a newer CST, so the index was "
+            "left as it is and cst vm does not list this backup; the snapshot stays in the repository, where the "
+            'retention sees it as any VM backup of its tags (restore it by its ID: vm/README.md, section "Restore '
+            'from the NAS"). Then: use the cst vm of that CST',
+            r.stderr,
+        )
+        self.assertNotIn("nothing is backed up", r.stderr)
+        self.assertEqual([c["args"][0] for c in self.restic_calls()], ["cat", "backup", "forget"])
+        self.assertFalse(os.path.exists(self.overlay))
+        with open(self.index) as f:
+            self.assertEqual(f.read(), text)
 
     def test_an_incomplete_snapshot_restic_does_not_forget_is_named(self) -> None:
         # The forget's answer was dropped: a torn snapshot stayed in the repository unsaid. These runs

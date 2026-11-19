@@ -83,6 +83,27 @@ def is_index_entry(e: object) -> TypeIs[IndexEntry]:
 NO_BACKUPS_LIST = 'no "backups" list'
 
 
+class IndexRefused(Refused):
+    """The index cannot be used: it cannot be read as one, or a newer cst vm wrote it. problem says
+    what is wrong with the file, advice what to do about it; the message is the two around the
+    words that nothing is backed up or listed with it."""
+
+    def __init__(self, problem: str, advice: str) -> None:
+        super().__init__(f"{problem}: left as it is, and nothing is backed up or listed with it; {advice}")
+        self.problem = problem
+        self.advice = advice
+
+
+def not_indexed_text(backup: str, kept: str, e: IndexRefused) -> str:
+    """The message of a backup that is made but cannot be recorded: the index changed while it ran
+    (a newer cst vm rewrote it, or it was damaged). backup names it, kept says where it stays and
+    how it is restored."""
+    return (
+        f"{backup} is complete but not in the index: {e.problem}, so the index was left as it is and "
+        f"cst vm does not list this backup; {kept}. Then: {e.advice}"
+    )
+
+
 def stored_list(data: object) -> list[object] | None:
     """The "backups" list of a parsed index, each entry as stored; None when data is not an object
     with one (NO_BACKUPS_LIST). cst vm's stored_backups and cst doctor read the index with it."""

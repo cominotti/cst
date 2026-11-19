@@ -39,7 +39,16 @@ from vm.domain import (
     overlay_recovery,
     quiesce_skipped,
 )
-from vm.domain.backup import Fingerprint, Manifest, ResticSummary, Uncertain, is_restic_snapshot, manifest_text
+from vm.domain.backup import (
+    Fingerprint,
+    IndexRefused,
+    Manifest,
+    ResticSummary,
+    Uncertain,
+    is_restic_snapshot,
+    manifest_text,
+    not_indexed_text,
+)
 from vm.ports import (
     BackupStorePort,
     LockPort,
@@ -441,37 +450,46 @@ def nas_run(
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
     retention(cfg, p, vm, nas)
-    entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
-    entries.append(
-        {
-            "vm": vm,
-            "timestamp": stamp,
-            "epoch": int(epoch),
-            "mode": "nas",
-            "snapshot": snap,
-            "repository": nas["repo"],
-            "host": nas["host"],
-            "consistency": consistency,
-            "keep": keep,
-            "versions": versions,
-            "deployment": deployment,
-        }
-    )
-    alive = nas_snapshot_ids(p.restic, vm, nas)
-    if alive is not None:
-        alive.add(snap)
-        entries = [
-            e
-            for e in entries
-            if not (
-                e["vm"] == vm
-                and e.get("mode") == "nas"
-                and e.get("repository") == nas["repo"]
-                and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
-            )
-        ]
-    entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-    store.write_index(entries)
+    # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
+    # since: the snapshot stays.
+    try:
+        entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
+        entries.append(
+            {
+                "vm": vm,
+                "timestamp": stamp,
+                "epoch": int(epoch),
+                "mode": "nas",
+                "snapshot": snap,
+                "repository": nas["repo"],
+                "host": nas["host"],
+                "consistency": consistency,
+                "keep": keep,
+                "versions": versions,
+                "deployment": deployment,
+            }
+        )
+        alive = nas_snapshot_ids(p.restic, vm, nas)
+        if alive is not None:
+            alive.add(snap)
+            entries = [
+                e
+                for e in entries
+                if not (
+                    e["vm"] == vm
+                    and e.get("mode") == "nas"
+                    and e.get("repository") == nas["repo"]
+                    and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
+                )
+            ]
+        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+        store.write_index(entries)
+    except IndexRefused as e:
+        kept = (
+            "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
+            '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
+        )
+        raise Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e)) from None
     for n in notes:
         out.say(f"  note: {n}")
     out.say(

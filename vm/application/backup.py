@@ -16,10 +16,12 @@ from vm.domain.backup import (
     DOMAIN_XML,
     MANIFEST_JSON,
     Fingerprint,
+    IndexRefused,
     Manifest,
     copied_kind,
     index_entry,
     manifest_text,
+    not_indexed_text,
     utc_stamp,
 )
 from vm.ports import BackupStorePort, ProgressPort, VmCommandsPort
@@ -198,13 +200,23 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         store.remove_tree(dest_dir)
         out.warn(f"  incomplete backup removed: {dest_dir}")
         raise
-    # Entries whose folder was removed by hand leave the index here.
-    entries = [
-        e for e in store.read_index() if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
-    ]
-    entries.append(index_entry(manifest, dest_dir))
-    entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-    store.write_index(entries)
+    # Entries whose folder was removed by hand leave the index here. The index was read before the
+    # copy too, but a newer cst vm (or a damage) can have changed it since: the backup stays.
+    try:
+        entries = [
+            e
+            for e in store.read_index()
+            if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
+        ]
+        entries.append(index_entry(manifest, dest_dir))
+        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+        store.write_index(entries)
+    except IndexRefused as e:
+        kept = (
+            f"the folder stays until removed by hand, and its {MANIFEST_JSON} says what it holds "
+            "(restore by hand: vm/README.md, section 5)"
+        )
+        raise Refused(not_indexed_text(f"the backup {dest_dir}", kept, e)) from None
     for n in notes:
         out.say(f"  note: {n}")
     out.say(f"Done: {len(copied)} item(s), definition and manifest in {dest_dir}")

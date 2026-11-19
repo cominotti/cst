@@ -141,7 +141,10 @@ cannot be read as one (not JSON, or no `"backups"` list, or a read error other
 than a missing file): read as empty, the next backup would have written an index
 with only itself. The message names the file; move it aside (`mv
 /var/lib/cst/vm-backups.json /var/lib/cst/vm-backups.json.bad`) to start a new
-index. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+index. If the index changes that way while a backup runs (a newer `cst vm`
+rewrote it, or it was damaged), the backup is finished and kept (the folder,
+or the restic snapshot), but it is not added to the index: the backup ends with
+exit 1 and a message that names it and says how to restore it by hand. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 

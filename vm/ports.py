@@ -164,11 +164,12 @@ class BackupStorePort(Protocol):
         ...
 
     def read_index(self) -> list[IndexEntry]:
-        """The backups in the index ([] when there is none); Refused for one of a newer cst vm."""
+        """The backups in the index ([] when there is none); IndexRefused for one of a newer cst vm or one
+        that cannot be read as an index."""
         ...
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
-        """Replace the index, durably."""
+        """Replace the index, durably; IndexRefused as read_index (it reads the index again)."""
         ...
 
 
