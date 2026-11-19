@@ -2538,7 +2538,7 @@ assert d["samples"] >= 1, d["samples"]
             # 6. No limit: the drop-in goes, and a run has none.
             set_limit ''
             out="$(cst btrfs install --no-below 2>&1)" || { show "install, no limit" "$out"; exit 1; }
-            grep -qF "removed '$dropin'" <<<"$out"
+            grep -qxF "removed:   $dropin" <<<"$out"
             test ! -e "$(dirname "$dropin")"
             if systemctl show -p ExecStartPre "$svc" | grep -qF 'scrub limit'; then echo "a limit is still set" >&2; exit 1; fi
             run_scrub success
