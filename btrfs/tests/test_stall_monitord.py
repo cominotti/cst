@@ -440,6 +440,17 @@ class ShortCgroupTest(unittest.TestCase):
         text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
         self.assertEqual(self.short(text), "x.scope")
 
+    def test_a_carriage_return_in_the_real_file_is_kept(self) -> None:
+        # The daemon's own read_text decodes the file's bytes (no universal newlines), so a "\r"
+        # in a cgroup's name reaches cgroup_v2_path as it is. Only the path is redirected.
+        real = md_proc.read_text
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cgroup")
+            with open(path, "wb") as f:
+                f.write(b"0::/user.slice/a\rb.scope\n")
+            with mock.patch.object(md_proc, "read_text", lambda _path: real(path)):
+                self.assertEqual(md_proc.short_cgroup(4242), "a\rb.scope")
+
     def test_unreadable_empty_or_without_a_0_line(self) -> None:
         self.assertEqual(self.short(None), "?")
         self.assertEqual(self.short(""), "?")
