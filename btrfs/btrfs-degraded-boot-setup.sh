@@ -895,7 +895,9 @@ else
     fi
     if (( ! selftest_ok )); then
         if (( ! rule_was_present )); then
-            cst_remove_text "${RULE}" >/dev/null
+            # An installer that fails here (a record of a newer CST) must not stop the cleanup:
+            # the rule that failed goes without its record line.
+            cst_remove_text "${RULE}" >/dev/null || rm -f "${RULE}"
             udevadm control --reload
         fi
         die "udev self-test failed; no initramfs change made"

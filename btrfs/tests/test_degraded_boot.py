@@ -925,8 +925,10 @@ echo "[$ov] $rc"
         rule_was_present: int = 0,
         env: dict[str, str] | None = None,
         ndev: int | None = None,
+        prelude: str = "",
     ) -> subprocess.CompletedProcess[str]:
-        """The self-test with these lsblk members; ndev (the guards' btrfs device count) defaults to their number."""
+        """The self-test with these lsblk members; ndev (the guards' btrfs device count) defaults to their number;
+        prelude: shell code run before it (a function replaced)."""
         self.install()
         lsblk = "".join(f"{name} btrfs {UUID}\n" for name in ready) + "nvme2n1p1 vfat 1234-ABCD\n"
         self.put("lsblk", lsblk)
@@ -936,7 +938,7 @@ echo "[$ov] $rc"
             self.put(f"udev-info-{name}", props)
         self.put("calls", "")
         count = len(ready) if ndev is None else ndev
-        code = f"UUID={UUID}\nndev={count}\nrule_was_present={rule_was_present}\n" + self.section("self-test")
+        code = prelude + f"UUID={UUID}\nndev={count}\nrule_was_present={rule_was_present}\n" + self.section("self-test")
         return self.run_bash(code, env=env)
 
     def test_selftest_passes_when_every_member_is_ready(self) -> None:
@@ -957,6 +959,17 @@ echo "[$ov] $rc"
         r = self.selftest(ready={"dm-0": True, "dm-1": False})
         self.assertEqual(r.returncode, 1)
         self.assertIn("self-test: dm-1: NOT ready: ID_BTRFS_READY=0 SYSTEMD_READY=0", r.stderr)
+        self.assertIn("ERROR: udev self-test failed; no initramfs change made", r.stderr)
+        self.assertFalse(os.path.exists(self.at(RULE)))
+        self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
+
+    def test_selftest_failure_removes_a_new_rule_when_the_installer_fails(self) -> None:
+        # The installer refuses (a record of a newer CST): the rule still goes, udev reloads, and the
+        # self-test's error is the one the run ends with.
+        failing = 'cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\n'
+        r = self.selftest(ready={"dm-0": True, "dm-1": False}, prelude=failing)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cst installer: cannot remove", r.stderr)
         self.assertIn("ERROR: udev self-test failed; no initramfs change made", r.stderr)
         self.assertFalse(os.path.exists(self.at(RULE)))
         self.assertEqual(self.mutating_calls()[-1], "udevadm control --reload")
