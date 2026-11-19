@@ -1421,6 +1421,31 @@ class SwapSettingsDoctorTest(Scratch):
         self.close("etc/cst/swap.conf")
         self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
 
+    def test_root_in_a_toolbox_who_cannot_read_swap_conf_is_asked_to_read_it_on_the_host(self) -> None:
+        # sudo cst doctor in a toolbox: root of the user namespace may not read a host root's 0600 file.
+        # cst swap status --root on the host reads it: the info row, not "cannot be read" (apply refuses).
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.close("etc/cst/swap.conf")
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1"))
+        host.uid = 0
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [Result("info", UNREADABLE.removeprefix("  info   "))],
+        )
+        # Root on the host itself is never sent to --root: a file it cannot read stops apply.
+        host = doc_adapters.Host(dict(self.env))
+        host.uid = 0
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf cannot be read: cst swap apply refuses until it is fixed",
+                )
+            ],
+        )
+
     def test_a_swap_conf_whose_read_fails_otherwise_stops_apply(self) -> None:
         # A file this user may read whose read fails (EIO): cst swap plan says "cannot be read" and
         # apply refuses; --root would not help, so no "cst swap status --root reads it" row.

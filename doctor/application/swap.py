@@ -171,7 +171,9 @@ def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
     /etc/crypttab; WARN "not configured" where swap is set up without one. Nothing where swap is not
     set up."""
     facts = _HostSettingsFacts(host)
-    res = resolve_settings(facts, as_root=host.uid == 0)
+    # Root in a toolbox is root of its user namespace only: a host file it may not read is one
+    # cst swap status --root reads on the host (cst swap's root commands refuse in a toolbox).
+    res = resolve_settings(facts, as_root=host.uid == 0 and not host.container)
     match res.state:
         case SwapSpecState.OK if res.spec is not None:
             spec = res.spec
