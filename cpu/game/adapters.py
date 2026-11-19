@@ -126,24 +126,6 @@ def _write_line(path: str, value: str) -> bool:
     return True
 
 
-def _cut_candidate(path: str) -> bytes:
-    """The file's bytes when its last byte is not a newline (its last line may be a record cut short),
-    else b"" (also for an empty file or one that cannot be read): of a whole file only the last byte is
-    read, since every record 'on' appends checks the file again."""
-    try:
-        with open(path, "rb") as fh:
-            size = fh.seek(0, os.SEEK_END)
-            if size == 0:
-                return b""
-            fh.seek(size - 1)
-            if fh.read(1) == b"\n":
-                return b""
-            fh.seek(0)
-            return fh.read()
-    except OSError:
-        return b""
-
-
 def holds(path: str, needle: str) -> bool:
     """The file holds needle (grep -qsF): False when it cannot be read."""
     data = read_bytes(path)
@@ -255,7 +237,7 @@ class GameProfile:
         wrote it) and name it in the journal: a record glued onto it would become one line with the
         cut fields, which 'off' would read as a whole record (an old IOWeight "1" of "100"). False when
         the file cannot be cut (said on stderr, as a failed write)."""
-        data = _cut_candidate(path)
+        data = read_bytes(path) or b""
         cut = cut_tail(data)
         if cut is None:
             return True
