@@ -71,8 +71,8 @@ declared once and used by name.
 - `tests/test_magic_values.py` counts, per package of production code (tests
   keep the raw words), string comparisons with an enum's word (leak), if/elif
   or match chains of 3 string arms, unit numbers, loose dicts in signatures
-  and `Literal`s of 3 strings, under `MAGIC_CEILINGS` (never above). Every
-  package is at 0 and the table is empty: any new hit fails. `MAGIC_EXEMPT`
+  and `Literal`s of 3 strings, under `MAGIC_CEILINGS` (never above). A
+  package without an entry may have no hit at all, so a new hit there fails. `MAGIC_EXEMPT`
   names a scope that keeps one (`path:qualname`), with its reason; a stale
   entry fails. No ignore comments.
 - ruff's `PLR2004` (a number compared with a literal) is counted in

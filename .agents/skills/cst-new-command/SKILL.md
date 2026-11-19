@@ -54,8 +54,8 @@ replace them.
       through `cst_core.domain.shapes` (`parse_json`, `parse_toml`, then a
       shape check), never `json.loads` (`PRIMITIVE_OWNERS` in
       `tests/test_architecture.py`, and ty's `unsound-return` and
-      `unsound-assignment`). `tests/test_magic_values.py` has no ceiling
-      left (`MAGIC_CEILINGS` is empty): a new hit fails.
+      `unsound-assignment`). `tests/test_magic_values.py` fails on a new
+      hit in a package without an entry in `MAGIC_CEILINGS`.
 - [ ] A need another module already has (sizes, managed files, units, locks,
       systemd, virsh) uses the `cst_core` primitive
       ([reuse-primitives](../../rules/reuse-primitives.md)) instead of
