@@ -1255,6 +1255,25 @@ class OnTargetUserWithoutAccountTest(GameProfileCase):
         self.assertTrue(out.startswith("game profile: off\n"), out)
         self.run_profile("off")
 
+    def test_state_says_why_on_refuses(self) -> None:
+        # 'state' names the reason (as it names a problem line) and asks no user manager of no one.
+        for name, why in (
+            (self.NOBODY, f"TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})"),
+            ("", f"TARGET_USER not set in {self.paths.conf}"),
+        ):
+            out, err = io.StringIO(), io.StringIO()
+            p = GameProfile(self.paths, GameSettings(target_user=name), self.systemd, uid_of=user_id, out=out)
+            self.systemd.actions = []
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.state(), 0)
+            text = out.getvalue()
+            self.assertTrue(
+                text.startswith(f"game profile: off\n  settings: {why} ('on' refuses until it is fixed)\n"), text
+            )
+            self.assertNotIn("toolboxes", text)
+            self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+            self.assertEqual(err.getvalue(), "")
+
     def test_the_same_name_with_an_account_switches_on(self) -> None:
         # The check reads the lookup, not the name.
         out, _ = self.run_profile("on", GameSettings(target_user=self.NOBODY))

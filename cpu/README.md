@@ -342,7 +342,9 @@ for such a `TARGET_USER` while a game runs either (it would fail again every
 profile not switched on: ...`; again after a tick found the name fixed; the
 same mark as for a settings line, `/run/cpu-setup/settings-warned`, whose
 word on a line is still forgotten once the line is fixed), and its unit does
-not fail. It looks the name up only when it needs the answer: when it would
+not fail. `cst cpu game state` names the reason too (`settings: TARGET_USER
+names no account: NAME (in ...) ('on' refuses until it is fixed)`), and
+prints no `toolboxes` lines then: there is no user manager to ask. It looks the name up only when it needs the answer: when it would
 switch the profile on, while that mark is there, and with the profile on; not
 at every run (on a machine whose accounts come from sssd or LDAP, each lookup
 can be slow).

@@ -758,6 +758,7 @@ class GameProfile:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
         on = os.path.exists(self.paths.state)
+        why = None if self.problems else self._target_refusal()  # as 'on' reads TARGET_USER
         if on:
             self._user_from_state(records(self._state_text()), say=False)
         p, s = self.paths, self.s
@@ -767,10 +768,12 @@ class GameProfile:
             self.say(
                 f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
             )
+        if why is not None:
+            self.say(f"  settings: {why} ('on' refuses until it is fixed)")
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line("builds.slice")
-        if s.target_user:
+        if self._target_refusal() is None:  # a user manager to ask (the user 'on' acted for, with the profile on)
             self.say(f"  toolboxes       weight={self.prop('usr', 'user.slice', 'CPUWeight')}")
             self.say(f"  app.slice       zswap writeback={self.prop('usr', 'app.slice', 'MemoryZSwapWriteback')}")
             cg = self.ask("usr", "show", "-P", "ControlGroup", "user.slice").stdout.rstrip("\n")
