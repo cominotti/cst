@@ -4310,7 +4310,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_112_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
+    def test_145_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
         """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
         a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
         record and the key ("nothing done"), twice; docker is asked to remove nothing, its objects and
