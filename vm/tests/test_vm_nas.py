@@ -556,6 +556,19 @@ class LiveBackupTest(Nas):
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
 
+    def test_a_snapshot_not_indexed_still_prints_its_notes_and_how_to_restore_it(self) -> None:
+        # The refusal came before the notes: a missing TPM state went unsaid, and restic keeps no
+        # manifest with them.
+        shutil.rmtree(os.path.join(self.swtpm, UUID))
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        self.restic_cfg(write_index=[self.index, json.dumps({"version": 2, "backups": []})])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("is complete but not in the index", r.stderr)
+        self.assertIn("  note: TPM state", r.stdout)
+        self.assertIn("BitLocker", r.stdout)
+        self.assertIn(f"restic restore {SNAP_ID[:8]} --sparse", r.stdout)
+
     def test_an_incomplete_snapshot_restic_does_not_forget_is_named(self) -> None:
         # The forget's answer was dropped: a torn snapshot stayed in the repository unsaid. These runs
         # stop before the retention, whose forget forget_rc would fail too.

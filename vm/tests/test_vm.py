@@ -581,6 +581,24 @@ class BackupTest(Scratch):
                 with open(self.index) as f:
                     self.assertEqual(f.read(), text)
 
+    def test_a_backup_not_indexed_still_prints_its_notes_and_how_to_restore_it(self) -> None:
+        # The refusal came before the notes and the restore lines: a missing TPM state went unsaid, and
+        # the backup cst vm does not list had only the README to restore it by.
+        shutil.rmtree(os.path.join(self.swtpm, UUID))
+        newer = os.path.join(self.tmp, "index-written-during-the-copy")
+        with open(newer, "w") as f:
+            f.write(json.dumps({"version": 2, "backups": []}))
+        self.env["FIX_CP_WRITES_INDEX"] = newer
+        os.makedirs(os.path.dirname(self.index))
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("is complete but not in the index", r.stderr)
+        self.assertIn("  note: TPM state", r.stdout)
+        self.assertIn("BitLocker", r.stdout)
+        self.assertIn("To restore (never done automatically; read each line first):", r.stdout)
+        self.assertIn(self.dest(), r.stdout.split("To restore", 1)[1])
+        self.assertNotIn("the next backup drops it from", r.stdout)
+
     def test_a_damaged_index_stops_backup_and_list_and_is_left_as_it_is(self) -> None:
         # Read as empty, the next backup wrote an index with only itself: every older entry lost.
         os.makedirs(os.path.dirname(self.index))

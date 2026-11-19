@@ -451,7 +451,8 @@ def nas_run(
     )
     retention(cfg, p, vm, nas)
     # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
-    # since: the snapshot stays.
+    # since: the snapshot stays, and its notes and restore line are printed before the refusal.
+    refused: Refused | None = None
     try:
         entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
         entries.append(
@@ -489,7 +490,7 @@ def nas_run(
             "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
             '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
         )
-        raise Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e)) from None
+        refused = Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e))
     for n in notes:
         out.say(f"  note: {n}")
     out.say(
@@ -500,6 +501,8 @@ def nas_run(
         'Restore: vm/README.md in CST, section "Restore from the NAS" (restic restore '
         f"{snap[:8]} --sparse --target <a NOCOW folder>)."
     )
+    if refused is not None:
+        raise refused
 
 
 def take_snapshot(

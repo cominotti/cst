@@ -201,7 +201,9 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         out.warn(f"  incomplete backup removed: {dest_dir}")
         raise
     # Entries whose folder was removed by hand leave the index here. The index was read before the
-    # copy too, but a newer cst vm (or a damage) can have changed it since: the backup stays.
+    # copy too, but a newer cst vm (or a damage) can have changed it since: the backup stays, and its
+    # notes and restore lines are printed before the refusal.
+    refused: Refused | None = None
     try:
         entries = [
             e
@@ -216,7 +218,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
             f"the folder stays until removed by hand, and its {MANIFEST_JSON} says what it holds "
             "(restore by hand: vm/README.md, section 5)"
         )
-        raise Refused(not_indexed_text(f"the backup {dest_dir}", kept, e)) from None
+        refused = Refused(not_indexed_text(f"the backup {dest_dir}", kept, e))
     for n in notes:
         out.say(f"  note: {n}")
     out.say(f"Done: {len(copied)} item(s), definition and manifest in {dest_dir}")
@@ -229,6 +231,8 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     out.say("\nTo restore (never done automatically; read each line first):")
     for line in restore_lines(vm, dest_dir, copied, tpm_dir):
         out.say(f"  {line}")
+    if refused is not None:
+        raise refused
     out.say(
         f"\nRemove an old backup by hand: sudo rm -r {shlex.quote(vm_dir)}/TIMESTAMP "
         f"(the next backup drops it from {cfg.cst} vm list)"

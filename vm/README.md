@@ -145,7 +145,9 @@ with only itself. The message names the file; move it aside (`mv
 index. If the index changes that way while a backup runs (a newer `cst vm`
 rewrote it, or it was damaged), the backup is finished and kept (the folder,
 or the restic snapshot), but it is not added to the index: the backup ends with
-exit 1 and a message that names it and says how to restore it by hand. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+exit 1 and a message that names it and says how to restore it by hand, after
+its notes (a TPM state not found, ...) and its restore lines, as a backup that
+is indexed prints them. An entry this `cst vm` does not understand (no `vm`, a NAS entry
 without its snapshot, a local one without its folder, a known key of another
 type) is not listed or pruned, and is written back as it is after the others.
 
