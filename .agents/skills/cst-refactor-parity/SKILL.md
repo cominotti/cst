@@ -37,9 +37,12 @@ the refactor brings a budget or ceiling down, `invowk cmd fix budgets
 When the refactor clears the hits of a ty or ruff rule (a rule about to be
 turned on, or one the merge of two branches broke), show the checker on both
 sides as well: the rule's hits on the commit before, none on the commit after
-(`tests/uv-dev ty check --error RULE FILE...`, `tests/uv-dev ruff check
---select RULE FILE...`; ty already runs every rule as an error, so
-`--error` matters only for a rule `pyproject.toml` does not raise yet).
+(`tests/uv-dev ty check --output-format concise FILE... | grep -c
+'\[RULE\]'`, `tests/uv-dev ruff check --select RULE FILE...`). ty has no
+`--select`: `--error RULE` only raises that rule, which `pyproject.toml`
+already does for every rule (`all = "error"`), so it still prints every
+other rule's hits. The concise output names the rule on each line
+(`error[RULE]`), and grep counts them.
 Put the counts in the commit message next to the unchanged tests. A form the
 checker accepts is not proof by itself: a truthiness fix such as `x is not
 None` in place of `x` is a behaviour change where `""` or 0 reached the

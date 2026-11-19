@@ -23,10 +23,11 @@ called, for every input. Prove it in one of two ways:
 
 A refactor made for a checker rule (a ty or ruff rule it clears) also shows
 the checker on both sides: the rule's hits on the commit before it and none
-after, for example `tests/uv-dev ty check --error RULE FILE...` or
-`tests/uv-dev ruff check --select RULE FILE...` on each. Put the counts in
-the message. A typing refactor whose tests must then pass members (a
-StrEnum member where a plain string was) is two commits: production only,
+after, for example `tests/uv-dev ty check --output-format concise FILE... |
+grep -c '\[RULE\]'` or `tests/uv-dev ruff check --select RULE FILE...` on
+each. Put the counts in the message. A typing refactor whose tests must
+then pass members (a StrEnum member where a plain string was) is two
+commits: production only,
 proved by the unchanged tests; then tests only, where each raw string
 becomes the member of the same value and nothing else changes (the skill's
 "A and B").
