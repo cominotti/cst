@@ -40,9 +40,9 @@ RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 def _run(argv: list[str], timeout: float | None = None) -> CommandResult:
     """One of the report's commands (date, docker/podman ps, below dump): stdin left to the report's
-    own, output decoded strictly (output that is not UTF-8 raises), as subprocess.run(capture_output,
-    text) did."""
-    return RUNNER.run(argv, timeout=timeout, stdin="inherit", decode_errors="strict")
+    own; output that is not UTF-8 is read with U+FFFD for each bad byte (a process name below
+    reports, a container name)."""
+    return RUNNER.run(argv, timeout=timeout, stdin="inherit")
 
 
 def parse_time(s: str | None, default: float) -> float:

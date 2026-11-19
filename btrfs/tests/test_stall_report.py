@@ -1153,13 +1153,16 @@ class ReportCommandsTest(unittest.TestCase):
             (None, "below dump failed: [Errno 2] No such file or directory: 'below'"),
         )
 
-    def test_output_that_is_not_utf8_escapes(self) -> None:
-        self.fake("below", b"\xff\xfe[]\n")
-        with self.assertRaises(UnicodeDecodeError):
-            rp_adapters.below_top(1, 2, "io.rbytes_per_sec")
-        self.fake("docker", b"\xff\tweb\n")
-        with self.assertRaises(UnicodeDecodeError):
-            rp_adapters.container_names()
+    def test_output_that_is_not_utf8_is_read_with_replacement_characters(self) -> None:
+        # A process or container name with bytes that are not UTF-8 used to end the report with
+        # UnicodeDecodeError; it is now read with U+FFFD for each bad byte.
+        self.fake("below", b'[{"comm": "a\xffb", "cgroup": "/system.slice/a.service", "io.rbytes_per_sec": 2}]')
+        self.assertEqual(
+            rp_adapters.below_top(1, 2, "io.rbytes_per_sec"),
+            ([{"comm": "a\ufffdb", "cgroup": "a.service", "bytes": 10}], None),
+        )
+        self.fake("docker", b"0123456789abcdef\tw\xffeb\n")
+        self.assertEqual(rp_adapters.container_names(), {"docker-0123456789ab": "w\ufffdeb"})
 
 
 if __name__ == "__main__":
