@@ -146,6 +146,15 @@ class ResticSummary(TypedDict, total=False):
     data_added: int
 
 
+_SUMMARY_KEYS: KeyTypes = {"snapshot_id": (str,), "total_bytes_processed": (int,), "data_added": (int,)}
+
+
+def is_restic_summary(value: object) -> TypeIs[ResticSummary]:
+    """The summary line of restic backup --json as a backup reads it: snapshot_id, when there, a
+    non-empty string; total_bytes_processed and data_added, when there, whole numbers."""
+    return has_shape(value, {}, _SUMMARY_KEYS) and json_object(value) and value.get("snapshot_id") != ""
+
+
 def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:
     """What a copied source is in the manifest: a disk (big), the TPM folder or the UEFI variables."""
     if big:
