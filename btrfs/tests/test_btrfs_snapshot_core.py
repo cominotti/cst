@@ -1359,12 +1359,12 @@ class EmptyProblemTests(CliTestCase):
     """A "why not" value (str | None) refuses whenever it is not None, also when it is "". No adapter of
     the harness gives "" today, so each test patches the producer and runs the command as usual."""
 
-    def history(self) -> tuple[FakeHost, list[str]]:
+    def history(self) -> FakeHost:
         h = self.host("2026-10-13 14:07", gen=10)
-        old = self.add_history(h, "2026-06-01 00:00", "2026-06-01 03:00")
+        self.add_history(h, "2026-06-01 00:00", "2026-06-01 03:00")
         for e in ("home.20261013T1000", "home.20261013T1100", "home.20261013T1200"):
             h.add_snapshot(e, "/top/home", 500 + int(e[-4:-2]))
-        return h, old
+        return h
 
     def recorded(self) -> bool:
         return os.path.exists(os.path.join(self.state, core.STATE_FILE))
@@ -1375,7 +1375,7 @@ class EmptyProblemTests(CliTestCase):
             f.write(entry + "\n")
 
     def test_an_empty_pin_file_problem_blocks_deletions(self) -> None:
-        h, _ = self.history()
+        h = self.history()
         before = h.snapshots()
         with mock.patch.object(snap_adapters.PinFile, "read", lambda _self: (set(), "")):
             self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4, self.out)
@@ -1387,7 +1387,7 @@ class EmptyProblemTests(CliTestCase):
         # before each delete (the re-check): the first good reads let it reach the later ones.
         for good_reads, words in ((1, "deletions blocked on re-check"), (2, "not deleting")):
             with self.subTest(good_reads=good_reads):
-                h, _ = self.history()
+                h = self.history()
                 before = h.snapshots()
                 reads = [(set[str](), None)] * good_reads
 
@@ -1400,7 +1400,7 @@ class EmptyProblemTests(CliTestCase):
                 self.assertIn(words, self.out)
 
     def test_an_empty_ntp_problem_blocks_deletions(self) -> None:
-        h, _ = self.history()
+        h = self.history()
         before = h.snapshots()
         with mock.patch.object(snap_app.Run, "ntp_problem", lambda _self: ""):
             self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h"), 4, self.out)
