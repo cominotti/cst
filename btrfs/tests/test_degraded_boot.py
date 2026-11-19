@@ -1528,6 +1528,23 @@ status
         self.assertTrue(r.stdout.endswith("Uninstalled (initramfs: from the next deployment on).\n"), r.stdout)
         self.assertEqual(self.read(f"home/{USER_RECORD_REL}"), newer)
 
+    def test_uninstall_removes_the_files_itself_when_the_installer_removed_none(self) -> None:
+        # The installer fails before it removes anything: uninstall removes the files as before the
+        # record, and systemd and udev are still reloaded.
+        self.install()
+        self.put("root" + SYNCED, "sums\n")
+        self.tracked_json([], nxt=list(TRACKED))
+        self.put("calls", "")
+        r = self.run_bash('cst_remove_text() { echo "cst installer: cannot remove" >&2; return 1; }\nuninstall')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for dest in (*TRACKED, RECORD, SYNCED):
+            self.assertIn(f"removed '{self.at(dest)}'\n", r.stdout)
+        self.assertNotIn("removed:   ", r.stdout)
+        self.assertEqual(self.mutating_calls()[-2:], ["systemctl daemon-reload", "udevadm control --reload"])
+        self.assertEqual(
+            sorted(os.path.relpath(p, self.root) for p in self.tree()), ["usr/lib/udev/rules.d/64-btrfs.rules"]
+        )
+
     def test_uninstall_keeps_a_foreign_64_btrfs_rule_and_past_markers(self) -> None:
         self.install()
         self.put("root" + OLD_RULE, "someone else's rule\n")
