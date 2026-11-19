@@ -2442,6 +2442,25 @@ class RealTreeHost(FakeHost):
         return core.walk_caches(root, skips, mode)
 
 
+class RealKindHost(FakeHost):
+    """FakeHost that asks the real Host.kind (lstat, on the real file system) what a path is."""
+
+    def kind(self, path: str) -> str:
+        return snap_adapters.Host().kind(path)
+
+
+class RealKindTests(CliTestCase):
+    def test_a_plain_folder_or_file_as_source_is_not_a_subvolume_other(self) -> None:
+        # PathKind.OTHER's value reaches the message (source_info's ParseError).
+        for name, make in (("folder", os.mkdir), ("file", lambda p: put(os.path.dirname(p), os.path.basename(p)))):
+            with self.subTest(name):
+                src = os.path.join(self.tmp.name, name)
+                make(src)
+                h = RealKindHost(at("2026-10-13 14:07", BERLIN))
+                self.assertEqual(self.cli(h, "caches", source=f"home={src}:1h"), 1)
+                self.assertIn(f"{src} is not a subvolume (other)", self.out)
+
+
 class RealTreeTests(CliTestCase):
     def test_end_to_end_on_real_folders(self) -> None:
         top = os.path.join(self.tmp.name, "top")
@@ -2495,10 +2514,12 @@ class HostKindTest(unittest.TestCase):
     def test_the_kind_of_each_path(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             os.mkdir(os.path.join(d, "dir"))
+            with open(os.path.join(d, "file"), "w"):
+                pass
             os.symlink("dir", os.path.join(d, "link"))
             host = snap_adapters.Host()
-            kinds = {name: host.kind(os.path.join(d, name)) for name in ("dir", "link", "gone")}
-        self.assertEqual(kinds, {"dir": "other", "link": "symlink", "gone": "missing"})
+            kinds = {name: host.kind(os.path.join(d, name)) for name in ("dir", "file", "link", "gone")}
+        self.assertEqual(kinds, {"dir": "other", "file": "other", "link": "symlink", "gone": "missing"})
         self.assertEqual(
             {k.name: k.value for k in snap_domain.PathKind},
             {"SUBVOL": "subvol", "SYMLINK": "symlink", "MISSING": "missing", "OTHER": "other"},
