@@ -800,7 +800,9 @@ scc_setup() {
     # $st/listen, the daemon itself (same PID) listens on it, as the real
     # server does, so that status can ask it who it is (SO_PEERCRED),
     # and a start returns once it listens: it clears the socket path first
-    # (a socket file a stopped server left would make its bind fail), and
+    # (a socket file a stopped server left would make its bind fail) and
+    # waits for $st/listening, which the daemon writes after listen() (the
+    # socket file is there from bind() on, before a connect can succeed);
     # a listener that is not up within 5 s adds no-listener to $st/starts.
     cat >"$w/bin/sccache" <<'EOF'
 #!/bin/sh
@@ -811,6 +813,7 @@ time.sleep(0.3)
 s = socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])
 s.listen()
+open(sys.argv[2], "w").close()
 end = time.monotonic() + 300
 while (left := end - time.monotonic()) > 0:
     s.settimeout(left)
@@ -820,19 +823,19 @@ while (left := end - time.monotonic()) > 0:
         break
 '
 serve() {
-    if [ -e "$st/listen" ]; then rm -f "$SCCACHE_SERVER_UDS"; fi
+    if [ -e "$st/listen" ]; then rm -f "$SCCACHE_SERVER_UDS" "$st/listening"; fi
     setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"
-        [ -e "$1/listen" ] && exec python3 -I -c "$2" "$SCCACHE_SERVER_UDS"; exec sleep 300' \
+        [ -e "$1/listen" ] && exec python3 -I -c "$2" "$SCCACHE_SERVER_UDS" "$1/listening"; exec sleep 300' \
         sh "$st" "$listener" </dev/null >/dev/null 2>&1 &
     for _ in $(seq 50); do [ -s "$st/live" ] && break; sleep 0.1; done
 }
 sock() {
     if [ -e "$st/listen" ]; then
-        for _ in $(seq 50); do [ -S "$SCCACHE_SERVER_UDS" ] && return 0; sleep 0.1; done
+        for _ in $(seq 50); do [ -e "$st/listening" ] && return 0; sleep 0.1; done
         echo no-listener >>"$st/starts"
         return 1
     fi
-    python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"
+    [ -e "$SCCACHE_SERVER_UDS" ] || python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"
 }
 live() { [ -s "$st/live" ] && kill -0 "$(cat "$st/live")" 2>/dev/null; }
 if [ "${1:-}" = --start-server ]; then
@@ -840,14 +843,14 @@ if [ "${1:-}" = --start-server ]; then
     rm -f "$st/live"
     serve
     sleep 0.3
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
+    sock
     exit 0
 fi
 if ! live || [ ! -e "$SCCACHE_SERVER_UDS" ]; then
     echo auto >>"$st/starts"
     rm -f "$st/live"
     serve
-    [ -e "$SCCACHE_SERVER_UDS" ] || sock
+    sock
 fi
 cat /proc/self/cgroup >>"$st/compiles"
 exec "$@"
