@@ -23,13 +23,12 @@ copy of another version of CST reads and writes the same record.
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 import posixpath
 import re
 import time
 from typing import Final
 
-from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
 from cst_core.domain.text import file_lines, read_fields
 from cst_core.domain.values import MINUTE
 
@@ -98,18 +97,15 @@ def alert_paths(environ: Mapping[str, str]) -> PendingPaths | str:
     )
 
 
-class AlertUrgency(StrEnum):
-    """A pending alert's urgency= (btrfs-notify keeps every other -u as normal)."""
-
-    CRITICAL = "critical"
-    NORMAL = "normal"
+# The urgency= words a pending alert may hold (btrfs-notify keeps every other -u as normal).
+SPOOL_URGENCIES: Final = (Urgency.CRITICAL, Urgency.NORMAL)
 
 
 @dataclass(frozen=True, slots=True)
 class Alert:
     """One pending alert, its fields checked and bounded."""
 
-    urgency: AlertUrgency
+    urgency: Urgency
     app: str
     title: str
     body: str
@@ -137,7 +133,7 @@ def parse_alert(text: str) -> Alert | None:
             body.append(line)
     word, app, title = head.get("urgency", ""), head.get("app", ""), head.get("title", "")
     first, last, count = head.get("first", "0"), head.get("last", "0"), head.get("count", "1")
-    urgency = AlertUrgency(word) if word in AlertUrgency else None
+    urgency = Urgency(word) if word in SPOOL_URGENCIES else None
     if urgency is None or not _APP.fullmatch(app):
         return None
     if not (_EPOCH.fullmatch(first) and _EPOCH.fullmatch(last) and _COUNT.fullmatch(count)) or not title:
@@ -232,11 +228,11 @@ def list_line(alert: Alert, at: Callable[[int], str], mark: str) -> str:
     return f"{at(alert.last)}  {alert.urgency:<8} {alert.app}: {alert.title}{times}{mark}"
 
 
-def plan_login(urgencies: Sequence[AlertUrgency]) -> tuple[list[int], list[int]]:
+def plan_login(urgencies: Sequence[Urgency]) -> tuple[list[int], list[int]]:
     """(summed up, shown one by one) indexes of the alerts of one login, oldest first: every critical
     one, then the newest normal ones up to MAX_SHOWN; older normal ones go into one summary."""
-    crit = [i for i, u in enumerate(urgencies) if u == AlertUrgency.CRITICAL]
-    norm = [i for i, u in enumerate(urgencies) if u != AlertUrgency.CRITICAL]
+    crit = [i for i, u in enumerate(urgencies) if u == Urgency.CRITICAL]
+    norm = [i for i, u in enumerate(urgencies) if u != Urgency.CRITICAL]
     room = max(MAX_SHOWN - len(crit), 0)
     nskip = max(len(norm) - room, 0)
     return norm[:nskip], sorted(crit + norm[nskip:])

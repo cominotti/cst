@@ -26,7 +26,6 @@ from btrfs.pending_alerts.domain import (
     TAG,
     USAGE,
     Alert,
-    AlertUrgency,
     PendingPaths,
     Seen,
     alert_paths,
@@ -41,6 +40,7 @@ from cst_core.adapters.dispatch import default_ctrl_c
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import restore_default_signals
+from cst_core.domain.contracts import Urgency
 from cst_core.ports import CommandRunnerPort
 
 
@@ -90,7 +90,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
         return 0
     skip, pick = plan_login([a.urgency for _, _, a in todo])
     done: dict[str, Seen] = {}
-    if skip and show_notification(runner, AlertUrgency.NORMAL, TAG, SUMMARY_TITLE.format(n=len(skip)), SUMMARY_BODY):
+    if skip and show_notification(runner, Urgency.NORMAL, TAG, SUMMARY_TITLE.format(n=len(skip)), SUMMARY_BODY):
         for i in skip:
             mtime, name, alert = todo[i]
             done[name] = Seen(mtime, "summarized", alert.count, alert.first)
