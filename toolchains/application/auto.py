@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import OwnedState
@@ -20,18 +20,24 @@ from toolchains.domain.common import (
     LIB_REL,
     OFF_REL,
     OLD_CONF_REL,
+    NAME,
     OLD_TIMER,
     SERVICE,
     TIMER,
     UNIT_DIR_REL,
     WANTS_REL,
     tilde,
+    timer_stamp_rel,
 )
 from toolchains.domain.prune import SPECS
+
+# Why a stamp is still there after disable_timer: its clean is not checked.
+CLEAN_LEFT: Final = "which `systemctl --user clean` left"
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cst_core.domain.files import UnitFileState
     from toolchains.application.prune import Target
     from toolchains.domain.prune import Settings
     from toolchains.ports import HomeFilesPort, RunOutputPort, RunStatePort, UserUnitsPort
@@ -54,15 +60,28 @@ class AutoTimer:
 
     def remove_stale(self) -> bool:
         """Remove what the earlier `cst btrfs cargo-gc` left. True when all went
-        well; False when the daemon-reload after the removal failed (reported).
-        Refused (nothing removed) when its timer could not be stopped."""
+        well; False when the daemon-reload after the removal failed, or its
+        timer's stamp could not be removed (reported). Refused (nothing removed)
+        when its timer could not be stopped."""
         home = self.home
         found = self.files.stale_files()
-        if not found:
-            return True
         timer = os.path.join(home, UNIT_DIR_REL, OLD_TIMER)
+        stamp_ok = True
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
+            stamp_ok = self.forget_stamp(
+                OLD_TIMER, f"the last run of the earlier `cst btrfs cargo-gc` timer, {CLEAN_LEFT}"
+            )
+        elif timer not in (path for path, _ in found) and self.files.present(
+            os.path.join(home, timer_stamp_rel(OLD_TIMER))
+        ):
+            # Its stamp says it ran: it may still run although its file is gone.
+            self.stop_orphan_timer(OLD_TIMER)
+            stamp_ok = self.forget_stamp(
+                OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone"
+            )
+        if not found:
+            return stamp_ok
         reload = False
         for path, ours in found:
             if not ours:
@@ -71,7 +90,7 @@ class AutoTimer:
             self.files.remove(path)
             self.out.say(f"removed:   {tilde(path, home)} (left by the earlier `cst btrfs cargo-gc`)")
             reload = reload or path.startswith(os.path.join(home, UNIT_DIR_REL) + "/")
-        return not (reload and self.units.reload_failed())
+        return not (reload and self.units.reload_failed()) and stamp_ok
 
     def on(self, *, unless_off: bool = False) -> int:
         rc = 0 if self.remove_stale() else 1
@@ -142,24 +161,58 @@ class AutoTimer:
         self.old_conf_note()
         return rc
 
-    def stop_orphan_timer(self) -> None:
-        """The timer file is gone, but the user manager may still run the
-        timer: what `auto off` left before it checked its `disable` (it removed
-        the files anyway). Stopped when the manager does not say it is stopped;
-        Refused when the manager gives no answer."""
-        if self.units.stop_if_running(TIMER):
-            self.out.say(f"stopped:   {TIMER} (it was still running although its file was gone)")
+    def stop_orphan_timer(self, name: str = TIMER) -> None:
+        """The file of timer NAME is gone, but the user manager may still run
+        the timer: what `auto off` left before it checked its `disable` (it
+        removed the files anyway). Stopped when the manager does not say it is
+        stopped; Refused when the manager gives no answer."""
+        if self.units.stop_if_running(name):
+            self.out.say(f"stopped:   {name} (it was still running although its file was gone)")
+
+    def forget_stamp(self, name: str, why: str) -> bool:
+        """Remove the stamp of timer NAME (its last run, which systemd keeps for a Persistent= timer),
+        once the timer is stopped: when its unit file is gone (`systemctl --user clean` needs the
+        timer loaded, so it cannot), or what a failed clean left. False (and an
+        error line) when it is there and cannot be removed: the rest of the job
+        goes on."""
+        rel = timer_stamp_rel(name)
+        try:
+            removed = self.files.remove_if_present(os.path.join(self.home, rel))
+        except OSError as e:
+            self.out.say(
+                f"{NAME}: cannot remove ~/{rel} ({why}): {e.strerror or e}; systemd keeps that last run "
+                "until the file is removed",
+                3,
+                err=True,
+            )
+            return False
+        if removed:
+            self.out.say(f"removed:   ~/{rel} ({why})")
+        return True
+
+    def forget_timer_stamp(self, state: UnitFileState) -> bool:
+        """The timer's stamp, once both timers are stopped: when its file is gone, or is CST's
+        (what a failed clean left); never for a file that is not CST's or is masked. False when
+        it could not be removed (reported)."""
+        if state == OwnedState.MISSING:
+            return self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
+        if state in (OwnedState.OK, OwnedState.CHANGE):
+            return self.forget_stamp(TIMER, f"the last run of the timer, {CLEAN_LEFT}")
+        return True
 
     def off(self) -> int:
         home = self.home
         st = self.files.auto_states()
         # Both timers are stopped, checked, before anything is removed (see
-        # UserUnitsPort); remove_stale stops the earlier one first.
+        # UserUnitsPort): remove_stale stops the earlier one before it removes
+        # a file, so the timer's stamp goes only after remove_stale.
         if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE):
             self.units.disable_timer(TIMER)
         elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
-        rc = 0 if self.remove_stale() else 1
+        stale_ok = self.remove_stale()
+        stamp_ok = self.forget_timer_stamp(st[TIMER])
+        rc = 0 if stale_ok and stamp_ok else 1
         removed = False
         for name in AUTO_UNITS:
             if st[name] in (OwnedState.OK, OwnedState.CHANGE):

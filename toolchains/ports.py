@@ -175,7 +175,8 @@ class UserUnitsPort(Protocol):
         ...
 
     def disable_timer(self, name: str) -> None:
-        """`disable --now` the timer NAME, checked, then forget its last run."""
+        """`disable --now` the timer NAME, checked, then ask the manager to forget its last run
+        (clean, not checked: the caller removes a stamp it left)."""
         ...
 
     def reload(self) -> None:
@@ -246,6 +247,14 @@ class HomeFilesPort(Protocol):
 
     def remove(self, path: str) -> None:
         """Remove the file (or link) PATH; OSError when that fails."""
+        ...
+
+    def present(self, path: str) -> bool:
+        """Something is at PATH (a link to nothing counts)."""
+        ...
+
+    def remove_if_present(self, path: str) -> bool:
+        """Remove the file (or link) PATH; False when nothing was there; OSError when that fails."""
         ...
 
     def dangling_link(self, path: str) -> bool:

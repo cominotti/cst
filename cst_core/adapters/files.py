@@ -234,10 +234,13 @@ class LocalFileSystemAdapter:
         if not os.path.lexists(dest) and os.path.exists(src):
             shutil.copy2(src, dest)
 
-    def remove_file(self, path: str) -> None:
-        """Remove path if present (no error if already absent)."""
-        with contextlib.suppress(FileNotFoundError):
+    def remove_file(self, path: str) -> bool:
+        """Remove path if present (no error if already absent): True when something was there."""
+        try:
             os.unlink(path)
+        except FileNotFoundError:
+            return False
+        return True
 
     def force_symlink(self, target: str, link_path: str) -> None:
         """Ensure link_path is a symlink pointing to target.

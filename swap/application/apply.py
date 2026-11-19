@@ -158,16 +158,7 @@ class SwapApplicationService(SwapReports):
 
     def _placement(self, entry: InstallEntry, path: str) -> Placement:
         """entry's file at path (under this run's /etc), listed in this run's install record."""
-        return Placement(
-            path=path,
-            dest=entry.dest,
-            record=self._env.install_record,
-            component=entry.component,
-            src=entry.src,
-            kind=entry.kind,
-            owner=entry.owner,
-            mode=entry.mode.bits,
-        )
+        return Placement.of(entry, path=path, dest=entry.dest, record=self._env.install_record)
 
     def _apply_managed_file(self, entry: InstallEntry, src: str, dest: str, events: list[ApplyEvent]) -> bool:
         """Ensure dest matches src, through the installer (atomic; listed in the install record, also when

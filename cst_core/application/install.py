@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import itertools
 import posixpath
+from typing import Self
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.files import checked_path
@@ -84,6 +85,24 @@ class Placement:
     owner: Owner
     mode: int
     values: Mapping[str, str] | None = None
+
+    @classmethod
+    def of(
+        cls, entry: InstallEntry, *, path: str, dest: str, record: str, values: Mapping[str, str] | None = None
+    ) -> Self:
+        """entry's file written at path and listed as dest in record: its component, source, kind, owner
+        and mode come from the manifest entry (values: a template's)."""
+        return cls(
+            path=path,
+            dest=dest,
+            record=record,
+            component=entry.component,
+            src=entry.src,
+            kind=entry.kind,
+            owner=entry.owner,
+            mode=entry.mode.bits,
+            values=values,
+        )
 
 
 def staged(root: str, path: str) -> str:
@@ -166,17 +185,8 @@ class InstallService:
     def placement(self, entry: InstallEntry, req: InstallRequest, values: Mapping[str, str] | None = None) -> Placement:
         """Where the entry is written for this request, and its line in the record (values: a template's)."""
         dest = expand_dest(entry.dest, req.home)
-        return Placement(
-            path=staged(req.root, dest),
-            dest=dest,
-            record=record_file(entry.owner, req.home, req.root) if self._record else "",
-            component=entry.component,
-            src=entry.src,
-            kind=entry.kind,
-            owner=entry.owner,
-            mode=entry.mode.bits,
-            values=values,
-        )
+        record = record_file(entry.owner, req.home, req.root) if self._record else ""
+        return Placement.of(entry, path=staged(req.root, dest), dest=dest, record=record, values=values)
 
     def _check(self, entries: Sequence[InstallEntry], req: InstallRequest) -> None:
         for entry in entries:
