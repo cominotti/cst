@@ -71,8 +71,8 @@ from btrfs.health_check import domain as hc_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
-from cst_core.application.install import InstallRequest, InstallService
-from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.application.install import InstallRequest, InstallService, Placement
+from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner
 from cst_core.domain.record import InstallRecord
 from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
@@ -2657,7 +2657,7 @@ class InstallAreaTest(Scratch):
         msgs = sorted(r.message for r in self.warns())
         self.assertEqual(len(msgs), 2, msgs)
         self.assertIn("/etc/systemd/system/docker-gc.service: missing (CST installed it, btrfs:docker-gc)", msgs[0])
-        self.assertIn("/etc/systemd/system/docker-gc.timer: changed since CST installed it", msgs[1])
+        self.assertIn("/etc/systemd/system/docker-gc.timer: differs from its install record", msgs[1])
         self.assertTrue(all(r.fix == "cst btrfs docker-gc enable" for r in self.warns()))
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
@@ -2769,6 +2769,50 @@ class InstallAreaTest(Scratch):
         list(self.svc.install(entries, InstallRequest(root=self.root, home=home)))
         self.svc.mark(self.root + home + "/.local/state/cst/installed.json", "bluetooth:ldac")
         self.assertEqual([r.status for r in self.results()], [doc_domain.OK])
+
+    def launcher(self) -> tuple[str, str]:
+        """The stall-report launcher's destination in the fixture home, and the user's record (both staged)."""
+        home = self.env["HOME"]
+        return home + "/.local/bin/btrfs-stall-report", self.root + home + "/.local/state/cst/installed.json"
+
+    def test_a_file_that_differs_from_its_record_is_not_called_a_hand_edit(self) -> None:
+        # An install wrote the launcher again (new text) and could not update its record line (its folder
+        # not writable, a full disk): the line still has the older sha. Two causes fit; the WARN names both.
+        dest, record = self.launcher()
+        place = Placement(
+            path=self.root + dest,
+            dest=dest,
+            record=record,
+            component="btrfs:report-launcher",
+            src=None,
+            kind=GeneratedKind.TEXT,
+            owner=Owner.USER,
+            mode=0o755,
+        )
+        self.svc.put(place, b"#!/bin/sh\n# older\n", as_root=False)
+        self.svc.mark(record, "btrfs:report-launcher")
+        with open(self.root + dest, "wb") as f:
+            f.write(b"#!/bin/sh\n# newer\n")
+        want = (
+            f"{dest}: differs from its install record (btrfs:report-launcher): changed by hand, or written "
+            "by an install that could not update the record"
+        )
+        self.assertEqual([(r.message, r.fix) for r in self.warns()], [(want, "cst btrfs install")])
+
+    def test_a_launcher_without_a_record_line_is_neither_warned_about_nor_counted_ok(self) -> None:
+        # The first install wrote the launcher and could not record it: no line, so doctor makes no claim.
+        home = self.env["HOME"]
+        dest, record = self.launcher()
+        entries = [e for e in INSTALL_MANIFEST if e.component == "bluetooth:ldac"]
+        list(self.svc.install(entries, InstallRequest(root=self.root, home=home)))
+        self.svc.mark(record, "bluetooth:ldac")
+        os.makedirs(os.path.dirname(self.root + dest))
+        with open(self.root + dest, "wb") as f:
+            f.write(b"#!/bin/sh\n")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertNotIn(dest, "\n".join(r.message for r in res))
+        self.assertIn(f"{len(entries)} file(s) as CST installed them", res[0].message)
 
     def test_a_vm_backup_timer_without_btrfs_notify_warns(self) -> None:
         wants = os.path.join(self.root, "etc/systemd/system/timers.target.wants")

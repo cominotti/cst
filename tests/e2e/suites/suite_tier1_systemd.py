@@ -2368,7 +2368,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
             # cst doctor, pointed at the stage, names it (its install area reads the stage's record).
             doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
-            grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
+            grep -qF "/usr/local/sbin/docker-gc: differs from its install record (btrfs:docker-gc)" <<<"$doc" ||
                 {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
             # Captured first: under pipefail, `install | grep -q` fails when grep stops reading at the
             # match and the installer, still printing, ends on SIGPIPE (141).
@@ -6455,8 +6455,10 @@ echo E2E-OK
         tester's record lists (done). With tester's record folder not writable by tester (0555: tester is
         not root, so the real permission check applies), install_report_launcher writes the new launcher,
         prints the warning that it may not have been installed and its record was not updated, does not
-        mark it, and the record keeps its bytes. With the folder writable again, install records the
-        launcher. The cleanup makes the folder writable first, then removes the launcher and its line."""
+        mark it, and the record keeps its bytes; tester's cst doctor then names the launcher in a WARN
+        (it differs from its install record: changed by hand, or written by an install that could not
+        update the record). With the folder writable again, install records the launcher and doctor has no
+        WARN about it. The cleanup makes the folder writable first, then removes the launcher and its line."""
         c = self.SYSTEMD_CONTAINER
         shim = "/home/tester/.local/bin/btrfs-stall-report"
         state = "/home/tester/.local/state/cst"
@@ -6503,11 +6505,21 @@ echo E2E-OK
                 {{ echo "install said: $(cat "$err")" >&2; exit 1; }}
             cmp -s "$shim" <(shim_content) || {{ echo "the launcher was not written" >&2; exit 1; }}
             [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "the record changed" >&2; exit 1; }}
+            # tester's cst doctor names the launcher: it differs from its record line, for one of two causes.
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            grep -E '^ *WARN' <<<"$inst" | grep -qF "{shim}: differs from its install record (btrfs:report-launcher): changed by hand, or written by an install that could not update the record" ||
+                {{ echo "doctor did not name the launcher: $inst" >&2; exit 1; }}
             chmod 0755 {state}
             install_report_launcher >/dev/null
             mark_report_launcher
             [[ "$(launcher_lines)" == "{shim} done" ]]
             grep -qF "\"$(sha256sum <"$shim" | cut -d' ' -f1)\"" "$U" || {{ echo "the record lacks the new launcher" >&2; exit 1; }}
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor still warns about the launcher" >&2; exit 1
+            fi
             rm -f "$err"
             echo E2E-OK
             """,
