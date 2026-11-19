@@ -4,6 +4,9 @@
 - recorded_fsyncs and assert_replaced_durably: which paths a write fsyncs,
   and whether a file was replaced through cst_core's write_atomic with its
   file and its folder fsynced (durable=True);
+- python_program: a program made of given Python lines, run by this
+  interpreter (a Python program, not sh: a test that hands on its stdin
+  would run bash with a socket there, and bash then reads ~/.bashrc);
 - bytes_program: a program that prints given bytes, which need not be UTF-8.
 """
 
@@ -38,10 +41,15 @@ def assert_replaced_durably(test: unittest.TestCase, path: str, synced: Sequence
     test.assertIn(folder, synced[temps[0] + 1 :], synced)  # the rename's folder entry
 
 
-def bytes_program(folder: str, name: str, out: bytes) -> str:
-    """An executable FOLDER/NAME that writes OUT to its stdout as it is; its path."""
+def python_program(folder: str, name: str, body: str) -> str:
+    """An executable FOLDER/NAME that runs BODY (Python, after "import sys"); its path."""
     path = os.path.join(folder, name)
     with open(path, "w") as f:
-        f.write(f"#!{sys.executable} -I\nimport sys\nsys.stdout.buffer.write({out!r})\n")
+        f.write(f"#!{sys.executable} -I\nimport sys\n{body}")
     os.chmod(path, 0o755)
     return path
+
+
+def bytes_program(folder: str, name: str, out: bytes) -> str:
+    """An executable FOLDER/NAME that writes OUT to its stdout as it is; its path."""
+    return python_program(folder, name, f"sys.stdout.buffer.write({out!r})\n")

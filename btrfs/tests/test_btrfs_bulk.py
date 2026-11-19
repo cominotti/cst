@@ -48,7 +48,7 @@ from cst_core.adapters.files import CounterFile
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import json_object
 from cst_core.domain.values import Json
-from tests.probes import assert_replaced_durably, recorded_fsyncs
+from tests.probes import assert_replaced_durably, python_program, recorded_fsyncs
 
 sys.dont_write_bytecode = True
 
@@ -1969,15 +1969,6 @@ class GibTest(unittest.TestCase):
         self.assertEqual(bulk_domain.gib((5 << 20) + (1 << 19)), "5 MiB")  # floored
 
 
-def _fake_tool(folder: str, name: str, body: str) -> None:
-    """An executable FOLDER/NAME: a Python program (not sh: Primitives.run
-    hands on stdin, and bash with a socket as stdin reads ~/.bashrc)."""
-    path = os.path.join(folder, name)
-    with open(path, "w") as f:
-        f.write(f"#!/usr/bin/python3 -I\nimport sys\n{body}")
-    os.chmod(path, 0o755)
-
-
 _BAD_CP = "sys.stderr.buffer.write(b\"cp: cannot open 'src/\\xff' for reading: Permission denied\\n\")\nsys.exit(1)\n"
 _BAD_SYNC = "sys.stderr.buffer.write(b\"sync: error syncing '\\xff': Input/output error\\n\")\nsys.exit(1)\n"
 _BAD_FLATPAK = (
@@ -2010,9 +2001,9 @@ class ToolMessagesTest(unittest.TestCase):
             f.write("data\n")
 
     def bad_tools(self) -> None:
-        _fake_tool(self.bin, "cp", _BAD_CP)
-        _fake_tool(self.bin, "sync", _BAD_SYNC)
-        _fake_tool(self.bin, "flatpak", _BAD_FLATPAK)
+        python_program(self.bin, "cp", _BAD_CP)
+        python_program(self.bin, "sync", _BAD_SYNC)
+        python_program(self.bin, "flatpak", _BAD_FLATPAK)
 
     def test_copy_tree_shows_cp_message(self) -> None:
         self.bad_tools()
@@ -2072,8 +2063,8 @@ class ToolMessagesTest(unittest.TestCase):
 
     def test_clean_run_unchanged(self) -> None:
         # Control: passes on the old code too; replace changes nothing for a clean run.
-        _fake_tool(self.bin, "cp", "sys.exit(0)\n")
-        _fake_tool(self.bin, "sync", "sys.exit(0)\n")
+        python_program(self.bin, "cp", "sys.exit(0)\n")
+        python_program(self.bin, "sync", "sys.exit(0)\n")
         dst = os.path.join(self.tmp, "dst")
         os.mkdir(dst)
         self.assertIsNone(self.machine.copy_tree(self.src, dst, nocow=False))
