@@ -59,6 +59,13 @@ cst_remove_text() {
     cst_installer remove-text "$@"
 }
 
+# cst_forget (--component C | SRC...): root-owned manifest files dropped
+# from the install record, the files left as they are (one a setup script
+# keeps because it did not write it); prints nothing.
+cst_forget() {
+    cst_installer forget "$@"
+}
+
 # cst_install_as USER [--set KEY=VALUE]... SRC...: files of USER's
 # home (dest `~/...`), written by a process running as
 # USER: no root-owned folders in the home, no link followed with root rights.
@@ -78,18 +85,31 @@ _cst_user_home() {
     printf '%s\n' "${home}"
 }
 
+# _cst_installer_home_as USER COMMAND ARGS...: the installer COMMAND as USER,
+# with --home USER's home (whose install record it keeps).
+_cst_installer_home_as() {
+    local home
+    home="$(_cst_user_home "$1")" || return 1
+    _cst_installer_as "$1" "$2" --home "${home}" "${@:3}"
+}
+
 # cst_mark_as USER COMPONENT / cst_remove_as USER (--component C | SRC...):
 # cst_mark and cst_remove for a component of USER's home, run as USER.
 cst_mark_as() {
-    local home
-    home="$(_cst_user_home "$1")" || return 1
-    _cst_installer_as "$1" mark --home "${home}" --component "$2" "done"
+    _cst_installer_home_as "$1" mark --component "$2" "done"
 }
 cst_remove_as() {
-    local user="$1" home
-    shift
-    home="$(_cst_user_home "${user}")" || return 1
-    _cst_installer_as "${user}" remove --home "${home}" "$@"
+    _cst_installer_home_as "$1" remove "${@:2}"
+}
+
+# cst_remove_text_as USER DEST... / cst_forget_text_as USER DEST...: generated
+# files of USER (cst_install_text DEST MODE USER COMPONENT) removed with their
+# record lines, or only their lines dropped (the files left as they are), as USER.
+cst_remove_text_as() {
+    _cst_installer_home_as "$1" remove-text "${@:2}"
+}
+cst_forget_text_as() {
+    _cst_installer_home_as "$1" forget-text "${@:2}"
 }
 
 # _cst_installer_text COMMAND DEST MODE [OWNER [COMPONENT]] < content: installer.py text

@@ -16,6 +16,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import json
 import os
+from pathlib import Path
 import pwd
 import re
 import shutil
@@ -40,6 +41,7 @@ if REPO not in sys.path:
 from btrfs.docker_gc import wiring as gc_wiring
 from cst_core.adapters.files import read_text
 from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.record import USER_RECORD_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
@@ -489,6 +491,29 @@ _cst_installer_as() {{
 """
 
 
+# cst-install.bash with the real installer as this user, every install record in $T/home (a run as a
+# user records under the home it is given): never the developer's own record. Paths are not staged.
+HOME_INSTALLER = f"""
+. "{REPO}/cst-install.bash"
+_cst_installer_as() {{
+    shift
+    local command="$1"
+    shift
+    /usr/bin/python3 -I -B "$CST_INSTALLER" "$command" --home "$T/home" "$@"
+}}
+_cst_user_home() {{ printf '%s\\n' "$T/home"; }}
+"""
+
+
+def home_record(tmp: str) -> dict[str, dict[str, object]]:
+    """The files and the components of the install record HOME_INSTALLER keeps in tmp/home."""
+    path = os.path.join(tmp, "home", USER_RECORD_REL)
+    if not os.path.exists(path):
+        return {"files": {}, "components": {}}
+    with open(path) as f:
+        return {k: v for k, v in object_of(parse_json(f.read())).items() if json_object(v)}
+
+
 # docker-gc's settings file and installed program, staged (never the machine's /etc/cst, /usr/local/sbin).
 DOCKER_GC_STAGED = (
     'DOCKER_GC_STATE="$T/docker-gc-state"; DOCKER_GC_CONF="$T/stage/etc/cst/docker-gc.conf"; '
@@ -714,6 +739,27 @@ class ComponentInstallTest(unittest.TestCase):
             f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
         )
         self.assertEqual(self.staged(), [])
+        self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
+
+    def test_uninstall_keeps_a_reclaim_file_it_did_not_create_and_drops_its_line(self) -> None:
+        # The reclaim file, installed (staged) and recorded, then rewritten by hand without CST's
+        # marker: remove_tuning_files keeps it as it is and drops its record line, so cst doctor
+        # stops calling it changed. The sysctl file and its line go as before.
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        self.run_bash(
+            "cst_install --set UUID=00000000-0000-0000-0000-000000000000 "
+            "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in >/dev/null"
+        )
+        mine = b"w /sys/fs/btrfs/x/allocation/data/dynamic_reclaim - - - - 0\n"
+        Path(self.stage + reclaim).write_bytes(mine)
+        r = self.run_bash(
+            f'SYSCTL_FILE="$T/stage{sysctl}"; RECLAIM_FILE="$T/stage{reclaim}"\n'
+            f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
+        )
+        self.assertIn(f"Kept {self.stage}{reclaim}: not created by this script.", r.stdout)
+        self.assertEqual(self.staged(), [reclaim])
+        self.assertEqual(Path(self.stage + reclaim).read_bytes(), mine)
         self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
 
     def test_a_program_that_does_not_parse_installs_nothing(self) -> None:
@@ -1188,7 +1234,7 @@ class ScrubLimitTest(unittest.TestCase):
         script = "\n".join(
             [
                 "set -Eeuo pipefail",
-                f'. "{REPO}/cst-install.bash"',
+                HOME_INSTALLER,
                 assignment("SCRUB_SIZE_RE"),
                 assignment("SCRUB_LINE_RE"),
                 f'BTRFS_CONF="{self.conf}"; SCRUB_DROPIN="{self.dropin}"; BTRFS_SYSFS="{self.tmp}/sys"',
@@ -1202,10 +1248,34 @@ class ScrubLimitTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": self.tmp, "LC_ALL": "C"},
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": self.tmp, "LC_ALL": "C", "T": self.tmp},
             stdin=subprocess.DEVNULL,
             timeout=60,
         )
+
+    def test_the_drop_in_is_in_the_install_record_until_it_is_removed(self) -> None:
+        r = self.bash("install_scrub_limit 500M")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        f = object_of(home_record(self.tmp)["files"][self.dropin])
+        self.assertEqual((f["component"], f["kind"], f["mode"]), ("btrfs:core", "text", "0644"))
+        r = self.bash('install_scrub_limit ""')
+        self.assertEqual((r.returncode, r.stdout), (0, f"removed:   {self.dropin}\n"), r.stderr)
+        self.assertEqual(home_record(self.tmp)["files"], {})
+        # Deleted by hand: no limit drops the line left over.
+        self.bash("install_scrub_limit 1G")
+        os.unlink(self.dropin)
+        r = self.bash('install_scrub_limit ""')
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertEqual(home_record(self.tmp)["files"], {})
+
+    def test_a_drop_in_from_before_the_record_is_adopted(self) -> None:
+        # What an older CST wrote: the same drop-in, no record line.
+        r = self.bash('scrub_limit_dropin 1G | cst_install_text "$SCRUB_DROPIN" 0644')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(home_record(self.tmp)["files"], {})
+        r = self.bash("install_scrub_limit 1G")
+        self.assertEqual(r.stdout, f"unchanged: {self.dropin}\n", r.stderr)
+        self.assertIn(self.dropin, home_record(self.tmp)["files"])
 
     def write_conf(self, text: str) -> None:
         with open(self.conf, "w", newline="") as f:
@@ -1333,6 +1403,131 @@ with open(os.environ["TOOL_LOG"], "a") as f:
     f.write(json.dumps({"argv": sys.argv[1:], **{k: os.environ.get(k) for k in keys}}) + "\\n")
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
 """
+
+
+class ReportLauncherTest(unittest.TestCase):
+    """btrfs-setup.sh's install_report_launcher and remove_report_launcher: the stall-report launcher in
+    the target user's home, listed in that user's install record (HOME_INSTALLER keeps it in the test's
+    folder) under btrfs:report-launcher, and removed or kept with its line dropped."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-launcher-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.shim = os.path.join(self.tmp, "home", ".local", "bin", "btrfs-stall-report")
+
+    def bash(self, *lines: str) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                HOME_INSTALLER,
+                *(
+                    shell_function(SETUP, f)
+                    for f in ("shim_content", "install_report_launcher", "remove_report_launcher")
+                ),
+                f'target_user="$(id -un)"; shim="{self.shim}"',
+                *lines,
+            ]
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": self.tmp, "LC_ALL": "C"},
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_install_records_the_launcher_and_marks_it(self) -> None:
+        self.bash("install_report_launcher", 'cst_mark_as "$target_user" btrfs:report-launcher')
+        self.assertEqual(os.stat(self.shim).st_mode & 0o777, 0o755)
+        rec = home_record(self.tmp)
+        f = object_of(rec["files"][self.shim])
+        self.assertEqual((f["component"], f["kind"], f["mode"]), ("btrfs:report-launcher", "text", "0755"))
+        self.assertEqual(rec["components"], {"btrfs:report-launcher": "done"})
+        r = self.bash("install_report_launcher")
+        self.assertEqual(r.stdout, f"unchanged: {self.shim}\n")
+
+    def test_remove_takes_our_launcher_and_its_line(self) -> None:
+        self.bash("install_report_launcher")
+        r = self.bash("remove_report_launcher")
+        self.assertEqual(r.stdout, f"removed:   {self.shim}\n")
+        self.assertFalse(os.path.lexists(self.shim))
+        self.assertEqual(home_record(self.tmp), {"files": {}, "components": {}})
+
+    def test_remove_keeps_a_file_without_the_marker_and_drops_its_line(self) -> None:
+        self.bash("install_report_launcher")
+        Path(self.shim).write_text("#!/bin/sh\necho mine\n")
+        r = self.bash("remove_report_launcher")
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(Path(self.shim).read_text(), "#!/bin/sh\necho mine\n")
+        self.assertEqual(home_record(self.tmp)["files"], {})
+
+    def test_an_installer_that_fails_does_not_stop_the_removal(self) -> None:
+        # The user's install record was written by a newer CST: the installer refuses it. Uninstall
+        # goes on: our launcher goes as before the record, a file of the user stays, the record is
+        # left as it is.
+        newer = '{"format": 999, "files": {}, "components": {}}\n'
+        record = os.path.join(self.tmp, "home", USER_RECORD_REL)
+        for mine in (False, True):
+            with self.subTest(users_own_file=mine):
+                self.bash("install_report_launcher")
+                if mine:
+                    Path(self.shim).write_text("#!/bin/sh\necho mine\n")
+                Path(record).write_text(newer)
+                r = self.bash("remove_report_launcher", "echo went-on")
+                self.assertTrue(r.stdout.endswith("went-on\n"), r.stdout)
+                self.assertIn("written by a newer CST", r.stderr)
+                self.assertIn(f"was not changed (see above); {self.shim} goes only if this script wrote it\n", r.stderr)
+                self.assertEqual(os.path.exists(self.shim), mine)
+                self.assertEqual(Path(record).read_text(), newer)
+            os.unlink(record)
+            if mine:
+                os.unlink(self.shim)
+
+    def test_a_user_without_a_home_folder_does_not_stop_the_removal(self) -> None:
+        # The installer cannot run as the user (no home folder to keep the record in): our launcher
+        # goes as before the record, and uninstall goes on.
+        self.bash("install_report_launcher")
+        no_home = """_cst_user_home() { echo "cst-install.bash: no home folder for user '$1'" >&2; return 1; }"""
+        r = self.bash(no_home, "remove_report_launcher", "echo went-on")
+        self.assertEqual(r.stdout, f"removed '{self.shim}'\nwent-on\n")
+        self.assertIn("no home folder for user", r.stderr)
+        self.assertFalse(os.path.lexists(self.shim))
+
+    def test_remove_keeps_a_link_of_the_user_that_leads_nowhere(self) -> None:
+        # The user's own launcher, a link into a folder that is not mounted now: it is not "no file",
+        # so it is kept (as before the record), and its line dropped.
+        self.bash("install_report_launcher")
+        os.unlink(self.shim)
+        os.symlink(os.path.join(self.tmp, "not-mounted", "stall-report"), self.shim)
+        r = self.bash("remove_report_launcher")
+        self.assertEqual(r.stdout, "")
+        self.assertTrue(os.path.islink(self.shim))
+        self.assertEqual(home_record(self.tmp)["files"], {})
+
+    def test_remove_drops_the_line_of_a_launcher_already_gone(self) -> None:
+        self.bash("install_report_launcher")
+        os.unlink(self.shim)
+        r = self.bash("remove_report_launcher")
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(home_record(self.tmp)["files"], {})
+
+    def test_no_target_user_writes_and_removes_nothing(self) -> None:
+        r = self.bash('shim=""; target_user=""', "install_report_launcher", "remove_report_launcher")
+        self.assertEqual(r.stdout, "")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "home")))
+
+    def test_a_launcher_from_before_the_record_is_adopted(self) -> None:
+        # What an older CST wrote: the same launcher, no record line.
+        self.bash('shim_content | cst_install_text "$shim" 0755 "$target_user"')
+        self.assertEqual(home_record(self.tmp)["files"], {})
+        r = self.bash("install_report_launcher")
+        self.assertEqual(r.stdout, f"unchanged: {self.shim}\n")
+        self.assertIn(self.shim, home_record(self.tmp)["files"])
 
 
 class SeenCall(TypedDict):

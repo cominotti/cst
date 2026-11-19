@@ -202,13 +202,19 @@ written first: the units of the next one run `btrfs-notify`), `btrfs:core`
 `docker-gc enable`, `btrfs:docker-gc`. `uninstall` removes the files of the
 manifest's components, not a list of its own, and their lines in the install
 record (also of a writeback or reclaim file that was already deleted by hand).
+A reclaim file that CST did not create (no "Managed by btrfs-setup.sh" line)
+is kept, and its line is dropped from the install record, so `cst doctor` no
+longer reports it as changed.
 `docker-gc disable` stops with an error, before it disables anything, when the
 installer cannot list docker-gc's units.
 
 The launcher `~/.local/bin/btrfs-stall-report` and the link
 `~/.local/bin/cst` are created for **the user who ran `sudo`** (the script
 reads this from `sudo`). If you run `install` directly as root (not through
-`sudo`), neither is created.
+`sudo`), neither is created. The launcher is listed in that user's install
+record (`~/.local/state/cst/installed.json`, component
+`btrfs:report-launcher`), so `cst doctor` run as that user reports it
+missing or changed.
 
 At the end, `install` runs the health check once and prints its result, checks
 that the stall monitor is running (it stops with `ERROR:` if not), and prints
@@ -324,7 +330,9 @@ SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limi
   it back to 0 after it (`ExecStopPost`, which also runs when the scrub
   fails or is stopped; the kernel forgets the limit at the next mount anyway).
   With no limit there is no drop-in, and `install` removes an old one.
-  `uninstall` removes it too.
+  `uninstall` removes it too. The drop-in is listed in the install record
+  (component `btrfs:core`), so `cst doctor` reports it missing or changed;
+  its removal drops the line, also when the file was deleted by hand.
 - The value is read with the same rules as `cst doctor` reads this file: a
   plain size (digits, then K, M, G or T), as `SCRUB_LIMIT=1G`,
   `SCRUB_LIMIT='1G'` or `SCRUB_LIMIT="1G"`. Any other form, or a value
@@ -876,7 +884,10 @@ It does not ask for confirmation; it starts at once. It stops and removes:
 - the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
   section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed programs in `/usr/local/sbin` and `/usr/local/bin`, and the
-  `~/.local/bin/btrfs-stall-report` launcher;
+  `~/.local/bin/btrfs-stall-report` launcher (only CST's: a file there without
+  its "btrfs-setup.sh" line, or a link that leads nowhere, is kept, and dropped
+  from the install record; when the installer cannot change that user's
+  record, CST's launcher still goes, with a warning, and uninstall goes on);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
 - the writeback file. Then it restarts `tuned` so its own values come back. If
@@ -1212,7 +1223,15 @@ own checks:
   would apply to them). A problem such as a typo (an
   unknown key) stops the install before it writes anything: the files of a
   previous install stay as they are, and the initramfs is **not** changed.
-  Only then it writes each file, atomically.
+  Only then it writes each file, atomically. Each file it writes (the rule,
+  the two units, the record unit, the helper and `initramfs-synced.sha256`)
+  is listed in the install record under the component `btrfs:degraded-boot`,
+  so `cst doctor` reports one that is missing or was changed by hand. The
+  component is marked done only when every step ran: after a failed
+  self-test, or a `files-only` run that wrote a file or adopted one (the
+  first run after an upgrade from a CST without the record), `cst doctor`
+  says its install did not finish. Files of an install from before the record
+  are adopted by the next install, without being written again.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
@@ -1237,7 +1256,11 @@ on every run; `plan` does not list that.
 `status` ends with `verdict: OK - an NVMe failure at boot would mount degraded
 after 45 s and alert` when everything is in place.
 
-**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It
+**To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It removes
+the files with their install record lines (`removed:   PATH` for each;
+`removed 'PATH'` for a file an older version left, which the record never
+listed). When the installer cannot change the install record (one written by a newer
+CST), it removes the files without it, with a warning, and goes on. It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
 

@@ -463,6 +463,16 @@ class CpuSetupCase(unittest.TestCase):
 INSTALLER = [SYSTEM_PYTHON, "-I", "-B", os.path.join(REPO, "cst_core", "installer.py")]
 
 
+def remove_text_files(argv: list[str]) -> None:
+    """For FakeRunner.on_call: what the installer's remove-text does to the files it names."""
+    if "remove-text" not in argv:
+        return
+    words = argv[argv.index("remove-text") + 1 :]
+    for i, w in enumerate(words):
+        if not w.startswith("--") and (i == 0 or words[i - 1] != "--home") and os.path.lexists(w):
+            os.remove(w)
+
+
 class InstallTest(CpuSetupCase):
     def test_install_writes_in_order_and_reloads_after_the_old_names_are_gone(self) -> None:
         old = [
@@ -486,9 +496,9 @@ class InstallTest(CpuSetupCase):
         expected = [
             f"{inst} text {self.paths.conf} 0644",
             f"{inst} install --set USER=tester --component cpu:core",
-            f"{inst} text {self.paths.hwp_tmpfiles} 0644",
-            f"{runuser} text {toolbox_dropin(self.home)} 0644",
-            f"{runuser} text {helper_dropin(self.home)} 0644",
+            f"{inst} text {self.paths.hwp_tmpfiles} 0644 --component cpu:core",
+            f"{runuser} text {toolbox_dropin(self.home)} 0644 --component cpu:toolbox",
+            f"{runuser} text {helper_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} install --home {self.home} --component cpu:gamemode",
             "id -nG tester",
             "usermod -aG gamemode tester",
@@ -496,6 +506,7 @@ class InstallTest(CpuSetupCase):
             "systemctl --user -M tester@ daemon-reload",
             "systemctl enable --now cpu-game-watchdog.timer",
             f"{inst} mark --component cpu:core done",
+            f"{runuser} mark --home {self.home} --component cpu:toolbox done",
             f"{runuser} mark --home {self.home} --component cpu:gamemode done",
         ]
         got = [c for c in calls if not c.startswith(("python3 -I -c", "bash "))]
@@ -548,11 +559,16 @@ class InstallTest(CpuSetupCase):
             f"NOTE: {gamemode_ini(self.home)} is your own: add [custom] start/end from {REPO}/cpu/gamemode.ini by hand",
             err,
         )
-        self.assertIn(f"removed '{helper_dropin(self.home)}'\n", out)
         calls = self.runner.joined()
+        runuser = f"runuser -u tester -- {' '.join(INSTALLER)}"
+        # The helper's drop-in, which only E-cores need, goes with its install record line.
+        self.assertIn(f"{runuser} remove-text --home {self.home} {helper_dropin(self.home)}", calls)
+        self.assertNotIn("removed '", out)
         self.assertFalse(
             [c for c in calls if "cpu:gamemode" in c or "usermod" in c or f"text {self.paths.conf}" in c], calls
         )
+        # The toolboxes' drop-in is marked whatever happened to gamemode.ini.
+        self.assertEqual(calls[-1], f"{runuser} mark --home {self.home} --component cpu:toolbox done")
 
     def test_install_refuses_without_a_user_to_install_for(self) -> None:
         for user in ("", "root"):
@@ -579,8 +595,17 @@ class InstallTest(CpuSetupCase):
         self.assertEqual(self.command("install")[0], 1)
 
     def test_a_group_missing_from_usr_lib_group_stops_install(self) -> None:
+        # NSS has the group, but neither /etc/group nor /usr/lib/group has its line: usermod cannot add
+        # the user, and install says why.
         self.write(self.paths.lib_group, "other:x:1:\n")
-        self.assertEqual(self.command("install")[0], 1)
+        rc, _, err = self.command("install")
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            err.splitlines()[-1],
+            "cpu-setup.sh: the 'gamemode' group comes from NSS, not /etc/group or /usr/lib/group: "
+            "add its line to /etc/group by hand, then run install again",
+        )
+        self.assertFalse([c for c in self.runner.joined() if c.startswith("usermod")])
         self.groups.clear()
         rc, _, err = self.command("install")
         self.assertEqual(rc, 0)
@@ -622,6 +647,7 @@ class UninstallTest(CpuSetupCase):
         for f in [*left, *old, keep, self.paths.hwp_tmpfiles, toolbox_dropin(self.home), helper_dropin(self.home)]:
             self.write(f, "")
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
+        self.runner.on_call = remove_text_files
         rc, out, err = self.command("uninstall")
         self.assertEqual((rc, err), (0, ""))
         for f in left:
@@ -635,6 +661,7 @@ class UninstallTest(CpuSetupCase):
         self.assertEqual(self.read(self.paths.hwp_boost), "0\n")
         self.assertFalse(os.path.exists(os.path.dirname(toolbox_dropin(self.home))))
         inst = " ".join(INSTALLER)
+        dropins = f"{toolbox_dropin(self.home)} {helper_dropin(self.home)}"
         self.assertEqual(
             self.runner.joined(),
             [
@@ -643,6 +670,9 @@ class UninstallTest(CpuSetupCase):
                 "systemctl disable --now cpu-game-watchdog.timer",
                 "systemctl stop cpu-game.service",
                 f"{inst} remove --component cpu:core",
+                # Through the installer, with their install record lines (the hwp file also when gone).
+                f"{inst} remove-text {self.paths.hwp_tmpfiles}",
+                f"runuser -u tester -- {inst} remove-text --home {self.home} {dropins}",
                 f"runuser -u tester -- {inst} remove --home {self.home} --component cpu:gamemode",
                 "systemctl --user -M tester@ daemon-reload",
                 "systemctl daemon-reload",
@@ -651,11 +681,33 @@ class UninstallTest(CpuSetupCase):
         self.assertTrue(out.endswith("the previous one is in /etc/cpu-setup/*.xml.before-vm-pin).\n"), out)
         self.assertIn("('cst cpu docker-slice uninstall')", out)
         # Again: nothing left to remove, the same reloads; without a user, only the system side.
+        self.write(self.paths.hwp_boost, "1\n")
         _, out, _ = self.command("uninstall")
         self.assertNotIn("removed", out)
+        self.assertEqual(self.read(self.paths.hwp_boost), "1\n", "no hwp file: the boost is left as it is")
+        self.assertIn(f"{inst} remove-text {self.paths.hwp_tmpfiles}", self.runner.joined())
         self.runner.calls.clear()
         self.command("uninstall", user="")
         self.assertNotIn("systemctl --user -M @ daemon-reload", self.runner.joined())
+
+    def test_an_installer_that_fails_on_the_user_drop_ins_does_not_stop_uninstall(self) -> None:
+        # The user's install record was written by a newer CST (or their drop-in folder is not theirs):
+        # the installer fails. The drop-ins go as before the record, and both managers are reloaded.
+        dropins = [toolbox_dropin(self.home), helper_dropin(self.home)]
+        for f in dropins:
+            self.write(f, "")
+        self.runner.answers = [("remove-text --home", CommandResult(1, "", ""))]
+        rc, out, err = self.command("uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            err, "WARNING: the install record of tester was not changed (see above); removing the drop-ins without it\n"
+        )
+        for f in dropins:
+            self.assertFalse(os.path.exists(f), f)
+            self.assertIn(f"removed '{f}'\n", out)
+        self.assertEqual(
+            self.runner.joined()[-2:], ["systemctl --user -M tester@ daemon-reload", "systemctl daemon-reload"]
+        )
 
     def test_the_game_drop_ins_go_in_the_order_of_the_locale_s_collation(self) -> None:
         # bash's glob lists them by the locale's collation (en_US puts user@1000.service.d before
@@ -806,6 +858,18 @@ class ExperimentTest(CpuSetupCase):
         )
         self.assertEqual(self.read(f"{t}/sys/defrag"), "madvise\n")
         self.assertEqual(self.command("experiment", "off", "thp-defer"), (0, "thp-defer: not on\n", ""))
+
+    def test_a_value_that_cannot_be_read_saves_nothing(self) -> None:
+        # The knob's file cannot be read (a folder: open fails for any user, root too): on stops before
+        # it saves anything, so off has nothing to put back and writes nothing into the knob.
+        knob = f"{self.tmp}/sys/defrag"
+        os.remove(knob)
+        os.makedirs(knob)
+        rc, out, err = self.command("experiment", "on", "thp-defer")
+        self.assertEqual((rc, out, err), (2, "", f"sed: can't read {knob}: Is a directory\n"))
+        self.assertFalse(os.path.exists(self.paths.saved("thp-defer")))
+        self.assertEqual(self.command("experiment", "off", "thp-defer"), (0, "thp-defer: not on\n", ""))
+        self.assertEqual(os.listdir(knob), [])
 
     def test_usage_and_unknown_names(self) -> None:
         self.assertEqual(self.command("experiment", "bogus"), (2, "", "experiment: list|on NAME|off NAME\n"))

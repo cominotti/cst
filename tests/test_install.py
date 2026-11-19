@@ -479,6 +479,13 @@ class InstallerCliTest(unittest.TestCase):
     def cli(self, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
         return _run([SYSTEM_PYTHON, "-I", "-B", INSTALLER, *args], stdin=stdin)
 
+    def test_help_names_home_for_the_generated_files_removals(self) -> None:
+        # cst_remove_text_as and cst_forget_text_as pass --home to pick the user's record: help says so.
+        r = self.cli("help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for usage in ("remove-text DEST... [--home DIR] [--root DIR]", "forget-text DEST... [--home DIR] [--root DIR]"):
+            self.assertIn(f"  installer.py {usage}\n", r.stdout.decode())
+
     def test_payload_into_a_closed_pipe_stops_quietly(self) -> None:
         # bluetooth-setup.sh runs `cmp -s <(cst_installer payload ...) DEST`: cmp stops reading at the first
         # difference, and the installer must then end without a BrokenPipeError on the user's terminal.

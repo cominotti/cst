@@ -63,6 +63,20 @@ def as_tester_bash(container: str, script: str, *, check: bool = True) -> subpro
 # tests/e2e test_13: the fakes `btrfs-degraded-boot-setup.sh` runs against
 # (sourced by every step) and the fake deployment, boot entry and overlay.
 DEGRADED_BOOT_DIR = "/var/tmp/e2e-degraded-boot"
+# RECORD_COMPONENT RECORD COMPONENT: the destinations a record lists under the component, sorted, then its
+# state ("-": none; no record: "- -"). RECORD_STRIP RECORD COMPONENT: the record as an install from before
+# the component was recorded left it (its lines and its state taken out).
+RECORD_COMPONENT = r"""import json, os, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p)) if os.path.exists(p) else {"files": {}, "components": {}}
+files = sorted(k for k, v in d["files"].items() if v["component"] == comp)
+print(" ".join(files) or "-", d["components"].get(comp, "-"))"""
+RECORD_STRIP = r"""import json, sys
+p, comp = sys.argv[1:3]
+d = json.load(open(p))
+d["files"] = {k: v for k, v in d["files"].items() if v["component"] != comp}
+d["components"].pop(comp, None)
+open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\n")"""
 DEGRADED_BOOT_UUID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
 DEGRADED_BOOT_FAKES = (
     f"export E2E_W={DEGRADED_BOOT_DIR}\nexport E2E_UUID={DEGRADED_BOOT_UUID}\n"
@@ -2103,7 +2117,13 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         made_stub = exec_bash(c, f"[[ -e {stub} ]] || {{ install -m 0755 /dev/null {stub}; echo made; }}").stdout
         if "made" in made_stub:
             self.addCleanup(exec_bash, c, f"rm -f {stub}", check=False)
-        script = 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.domain.install import COMPONENTS; print(" ".join(COMPONENTS))'
+        # The components of generated files only have no manifest file to install: test_13 (degraded-boot),
+        # test_119 (the stall-report launcher) and test_84 (cpu's toolbox drop-ins) run their cycles.
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import COMPONENTS, GENERATED_COMPONENTS; "
+            'print(" ".join(c for c in COMPONENTS if c not in GENERATED_COMPONENTS))'
+        )
         components = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
         self.assertIn("btrfs:core", components)
         for comp in components:
@@ -2327,7 +2347,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         reads with the copy) stops plan and an install at their
         `systemd-analyze verify`, before they write anything (a hand edit of
         the timer stays) and before any rpm-ostree change; uninstall removes
-        everything and untracks it. rpm-ostree, findmnt, btrfs, lsblk, cpio and
+        everything and untracks it. The install record lists the six files under
+        btrfs:degraded-boot, done, doctor warns of none, a second install keeps
+        the record's bytes, an install whose record lacks them (an older CST's)
+        adopts them without writing, and uninstall drops their lines. rpm-ostree, findmnt, btrfs, lsblk, cpio and
         the udevd parts of udevadm (udevd does not run here) are exported bash
         functions, because the script resets PATH: nothing in /usr/bin is
         replaced. The fake rpm-ostree keeps one booted deployment (no staged
@@ -2351,6 +2374,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             systemctl disable btrfs-degraded-boot-record.service 2>/dev/null || true
             rm -rf {w} /ostree /boot/loader /boot/ostree /run/ostree-booted /etc/btrfs-degraded-boot \
                 /run/btrfs-allow-degraded /var/lib/btrfs-degraded-boot {" ".join(files)} {record} {typo}
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py forget-text {" ".join(files)} {record} {synced}
             systemctl daemon-reload
             """,
             check=False,
@@ -2390,6 +2414,14 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         modes = step(f"stat -c '%a %U %n' {' '.join(files)} {record}").splitlines()
         self.assertEqual(modes, [f"{'755' if f.endswith('last-resort') else '644'} root {f}" for f in (*files, record)])
         self.assertEqual(step("systemctl is-enabled btrfs-degraded-boot-record.service").strip(), "enabled")
+        # Every file is in root's install record, the component done; cst doctor has nothing to say of it.
+        root_record = "/var/lib/cst/installed.json"
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {root_record} btrfs:degraded-boot"
+        six = " ".join(sorted((*files, record, synced)))
+        self.assertEqual(step(lines), f"{six} done\n")
+        doc = step("env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true")
+        inst = doc.split("== install", 1)[1].split("\n== ", 1)[0] if "== install" in doc else ""
+        self.assertEqual([x for x in inst.splitlines() if "WARN" in x and "degraded" in x], [], doc)
 
         # The install already ran the real `udevadm verify` on the rule it
         # wrote (it stops when verify fails), so this needs no skip.
@@ -2406,10 +2438,19 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             )
 
         n = len(calls())
+        recorded = step(f"sha256sum {root_record}")
         second = step("/opt/cst-rw/cst btrfs degraded-boot")
         self.assertNotIn("written:", second)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)", second)
         self.assertEqual([x for x in calls()[n:] if x.startswith("rpm-ostree initramfs-etc")], [])
+        self.assertEqual(step(f"sha256sum {root_record}"), recorded)
+        # The upgrade: an install from before the record listed these files left the same bytes and no
+        # line of them; the next install adopts them, writing nothing.
+        step(f"/usr/bin/python3 -I -c {shlex.quote(RECORD_STRIP)} {root_record} btrfs:degraded-boot")
+        self.assertEqual(step(lines), "- -\n")
+        adopted = step("/opt/cst-rw/cst btrfs degraded-boot")
+        self.assertNotIn("written:", adopted)
+        self.assertEqual(step(lines), f"{six} done\n")
         again = step("/opt/cst-rw/cst btrfs degraded-boot plan")
         self.assertNotIn("would ", again)
         self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", again)
@@ -2494,6 +2535,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         gone = step("/opt/cst-rw/cst btrfs degraded-boot uninstall")
         self.assertIn("rpm-ostree initramfs-etc " + " ".join(f"--untrack={f}" for f in files), calls())
         self.assertIn("Uninstalled (initramfs: from the next deployment on).", gone)
+        self.assertEqual(step(lines), "- -\n")
         self.assertEqual(step(exists), "")
         self.assertEqual(step(f"cat {w}/tracked"), "")
         self.assertNotEqual(
@@ -3441,6 +3483,154 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_118_btrfs_uninstall_keeps_a_reclaim_file_it_did_not_create_and_forgets_it(self) -> None:
+        """btrfs-setup.sh's remove_tuning_files as root on the container's /, with the real installer,
+        record and cst doctor: the writeback and reclaim files installed and recorded, the reclaim file
+        then rewritten by hand without CST's marker. A control first runs the function as main had it
+        (its Kept branch only said so): the file stays, its record line too, and doctor's install area
+        warns that it changed (the problem fixed). Then the script's function: the file is kept with
+        its bytes, its line is gone and doctor names it in no WARN; a second run changes nothing, the
+        record's sha256 included."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        srcs = "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"
+        if exec_bash(c, f"for f in {reclaim} {sysctl}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a tuning file is there already (another test's)")
+        self.addCleanup(exec_bash, c, f"{installer} remove {srcs} >/dev/null; rm -f {reclaim} {sysctl}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_118 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(SYSCTL|RECLAIM)_(FILE|SRC)=' /opt/cst-rw/btrfs-setup.sh)"
+            eval "$(sed -n '/^remove_tuning_files() {{/,/^}}/p' /opt/cst-rw/btrfs-setup.sh)"
+            declare -F remove_tuning_files >/dev/null
+            [[ "$RECLAIM_FILE" == {reclaim} && "$SYSCTL_FILE" == {sysctl} ]]
+            # As main had it: the Kept branch without the forget.
+            main_remove_tuning_files() {{
+                if grep -qs 'Managed by btrfs-setup.sh' "$RECLAIM_FILE"; then
+                    cst_remove "$RECLAIM_SRC"
+                elif [[ -e "$RECLAIM_FILE" ]]; then
+                    echo "Kept $RECLAIM_FILE: not created by this script."
+                else
+                    cst_remove "$RECLAIM_SRC"
+                fi
+                cst_remove "$SYSCTL_SRC"
+            }}
+            doctor_warns() {{
+                local doc inst
+                doc="$(env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+                inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+                # An empty record gives no install area at all: nothing to warn about.
+                grep -E '^ *WARN' <<<"$inst" | grep -F {reclaim}
+            }}
+            mine='# the owner'"'"'s own reclaim settings'
+            cst_install --set UUID=00000000-0000-0000-0000-000000000000 {srcs} >/dev/null
+            grep -qF '"{reclaim}"' "$R"
+            printf '%s
+' "$mine" >{reclaim}
+            # Control: the old function keeps the file and its line, and doctor warns.
+            out="$(main_remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            grep -qF '"{reclaim}"' "$R" || {{ echo "control: main's function dropped the line" >&2; exit 1; }}
+            doctor_warns >/dev/null || {{ echo "control: doctor does not warn about the kept file" >&2; exit 1; }}
+            # The script's function, over the same state (the writeback file installed again).
+            cst_install "$SYSCTL_SRC" >/dev/null
+            out="$(remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            [[ "$(cat {reclaim})" == "$mine" ]] || {{ echo "the kept file changed" >&2; exit 1; }}
+            [[ ! -e {sysctl} ]]
+            if grep -qF '"{reclaim}"' "$R"; then echo "the kept file is still in the record" >&2; exit 1; fi
+            if doctor_warns; then echo "doctor still warns about the kept file" >&2; exit 1; fi
+            before="$(sha256sum "$R")"
+            again="$(remove_tuning_files)"
+            [[ "$again" == "Kept {reclaim}: not created by this script." ]] || {{ echo "a second run said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R")" == "$before" ]] || {{ echo "a second run changed the record" >&2; exit 1; }}
+            [[ "$(cat {reclaim})" == "$mine" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_119_btrfs_scrub_dropin_and_stall_report_launcher_recorded_and_removed(self) -> None:
+        """btrfs-setup.sh's install_scrub_limit, install_report_launcher and remove_report_launcher as
+        root on the container's /, the launcher written for tester through the real runuser. Over the
+        two files as the previous version wrote them (no record line), install writes nothing and
+        lists the drop-in in root's install record (btrfs:core) and the launcher in tester's
+        (btrfs:report-launcher); once marked, tester's cst doctor names the launcher in no WARN; a
+        second install changes nothing, both records included; no limit and remove_report_launcher
+        remove both files and both lines."""
+        c = self.SYSTEMD_CONTAINER
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {dropin} {shim}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("the drop-in or the launcher is there already (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {dropin} {shim}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; {installer} forget-text {dropin}; "
+            f"runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_119 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            U=/home/tester/.local/state/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(UNIT_DIR|SCRUB_SERVICE|SCRUB_DROPIN|BTRFS_CONF)=' /opt/cst-rw/btrfs-setup.sh)"
+            for f in shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher >/dev/null
+            [[ "$SCRUB_DROPIN" == {dropin} ]]
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            # The previous version: the same files, written without a component.
+            scrub_limit_dropin 500M | cst_install_text "$SCRUB_DROPIN" 0644 >/dev/null
+            shim_content | cst_install_text "$shim" 0755 tester >/dev/null
+            if grep -qsF '"{dropin}"' "$R"; then echo "the previous version is recorded" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            out="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$out" == "unchanged: {dropin}"$'
+'"unchanged: {shim}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            grep -qF '"{dropin}"' "$R"
+            {lines} "$R" btrfs:core | grep -qF '{dropin}'
+            [[ "$(launcher_lines)" == "{shim} pending" ]]
+            cst_mark_as tester btrfs:report-launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            [[ -n "$inst" ]] || {{ echo "doctor has no install area: $doc" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor warns about the launcher" >&2; exit 1
+            fi
+            before="$(sha256sum "$R" "$U")"
+            again="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$again" == "$out" ]] || {{ echo "a second install said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R" "$U")" == "$before" ]] || {{ echo "a second install changed a record" >&2; exit 1; }}
+            gone="$(install_scrub_limit ""; remove_report_launcher)"
+            [[ "$gone" == "removed:   {dropin}"$'
+'"removed:   {shim}" ]] || {{ echo "removal said: $gone" >&2; exit 1; }}
+            [[ ! -e {dropin} && ! -e {shim} && ! -e {dropin.rsplit("/", 1)[0]} ]]
+            if grep -qF '"{dropin}"' "$R"; then echo "root's record still lists the drop-in" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
@@ -4357,9 +4547,12 @@ EOF
         """`cst cpu install` as root for tester with the real systemd, over what the bash
         cpu-setup.sh (main before the port) installed: only the programs are written again (the game
         profile becomes a zipapp; the other zipapps carry the new cst_core), every unit, drop-in, rule
-        and setting stays as it was; `status` runs; a second install writes nothing; `uninstall`
+        and setting stays as it was; the toolboxes' drop-ins are adopted into tester's install record
+        (cpu:toolbox, done; no doctor WARN), the hwp file into root's where the knob exists; `status`
+        runs; a second install writes nothing; `uninstall`
         removes the units, programs, rule and drop-ins (and their record lines) and stops the timer; a
-        second uninstall works too. The bash version's uninstall then finds nothing left."""
+        second uninstall works too, and no record line of them is left. The bash version's uninstall then
+        finds nothing left."""
         old = self.legacy_cpu_tree()
         self.addCleanup(
             exec_bash,
@@ -4394,6 +4587,24 @@ EOF
             grep -q 'unchanged: /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf' /tmp/e2e-84-new.txt
             systemctl is-active cpu-game-watchdog.timer
             grep -q 'cpu-game-profile' /var/lib/cst/installed.json
+            # The toolboxes' drop-ins (unchanged above: adopted) are in tester's install record under
+            # cpu:toolbox, done; the hwp file is in root's only where the container has the boost knob.
+            U=/home/tester/.local/state/cst/installed.json
+            hwp=/etc/tmpfiles.d/cpu-setup-hwp-boost.conf
+            toolbox_lines() {{ runuser -u tester -- /usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} "$U" cpu:toolbox; }}
+            want=/home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf
+            helper=/home/tester/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf
+            [[ ! -e "$helper" ]] || want="$helper $want"
+            [[ "$(toolbox_lines)" == "$want done" ]] || {{ echo "tester's record: $(toolbox_lines)" >&2; exit 1; }}
+            if [[ -e "$hwp" ]]; then
+                grep -qF "\"$hwp\"" /var/lib/cst/installed.json
+            elif grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then
+                echo "root's record lists a hwp file that is not there" >&2; exit 1
+            fi
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            if sed -n '/^== install/,/^== /p' <<<"$doc" | grep -E '^ *WARN' | grep -F -e cpu:toolbox -e 10-cpu-setup.conf; then
+                echo "doctor warns about the toolbox drop-ins" >&2; exit 1
+            fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
             for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
@@ -4409,6 +4620,8 @@ EOF
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
             if grep -q 'cpu-game-profile' /var/lib/cst/installed.json; then echo "the record still lists the game profile" >&2; exit 1; fi
+            [[ "$(toolbox_lines)" == "- -" ]] || {{ echo "tester's record after uninstall: $(toolbox_lines)" >&2; exit 1; }}
+            if grep -qF "\"$hwp\"" /var/lib/cst/installed.json; then echo "the record still lists the hwp file" >&2; exit 1; fi
             as_root /opt/cst-rw/cst cpu uninstall >/dev/null
             as_root bash {old}/cpu-setup.sh uninstall >/dev/null
             rm -f /etc/cpu-setup/cpu-setup.conf

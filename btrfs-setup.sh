@@ -396,12 +396,14 @@ ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var
 EOF
 }
 
-# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none.
+# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none
+# (listed in the install record under btrfs:core).
 install_scrub_limit() {
     if [[ -n "$1" ]]; then
-        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644
-    elif [[ -e "${SCRUB_DROPIN}" ]]; then
-        rm -fv "${SCRUB_DROPIN}"
+        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644 root btrfs:core
+    else
+        # Through the installer, with its install record line (also when the file is gone already).
+        cst_remove_text "${SCRUB_DROPIN}"
         rmdir "$(dirname "${SCRUB_DROPIN}")" 2>/dev/null || true
     fi
 }
@@ -536,6 +538,32 @@ if [ -e /run/.containerenv ] || [ -e /.dockerenv ]; then
 fi
 exec /usr/local/bin/btrfs-stall-report "$@"
 EOF
+}
+
+# install_report_launcher: btrfs-stall-report in the target user's ~/.local/bin,
+# for the host and toolboxes alike (no target user: none); listed in that
+# user's install record under btrfs:report-launcher.
+install_report_launcher() {
+    if [[ -n "${shim}" ]]; then
+        shim_content | cst_install_text "${shim}" 0755 "${target_user}" btrfs:report-launcher
+    fi
+}
+
+# remove_report_launcher: that launcher, with its record line, only when this
+# script wrote it; a file there without its marker (also a link that leads
+# nowhere) is kept, and its line dropped. No file: a line left over is dropped.
+# When the installer fails (no home, a record of a newer CST, a folder the user
+# cannot write), the record stays as it is, the launcher goes as before the
+# record (only when this script wrote it), and uninstall goes on.
+remove_report_launcher() {
+    [[ -n "${shim}" ]] || return 0
+    if [[ ! -e "${shim}" && ! -L "${shim}" ]] || grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
+        cst_remove_text_as "${target_user}" "${shim}" && return 0
+    else
+        cst_forget_text_as "${target_user}" "${shim}" && return 0
+    fi
+    echo "WARNING: the install record of ${target_user} was not changed (see above); ${shim} goes only if this script wrote it" >&2
+    if grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then rm -fv "${shim}"; fi
 }
 
 # ---- status ----------------------------------------------------------------------
@@ -856,13 +884,15 @@ stop_monitoring() {
 
 # remove_tuning_files: the tmpfiles and sysctl files of btrfs:core, with their
 # lines in the install record, also when a file is already gone (cst doctor
-# would call it missing). A reclaim file without CST's marker is kept.
+# would call it missing). A reclaim file without CST's marker is kept, and its
+# line dropped (cst doctor would call it changed).
 remove_tuning_files() {
     if grep -qs 'Managed by btrfs-setup.sh' "${RECLAIM_FILE}"; then
         cst_remove "${RECLAIM_SRC}"
         echo "Automatic reclaim stays enabled in sysfs until the next reboot."
     elif [[ -e "${RECLAIM_FILE}" ]]; then
         echo "Kept ${RECLAIM_FILE}: not created by this script."
+        cst_forget "${RECLAIM_SRC}"
     else
         cst_remove "${RECLAIM_SRC}"
     fi
@@ -907,9 +937,7 @@ uninstall() {
     remove_tuning_files
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
-    if [[ -n "${shim}" ]] && grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
-        rm -fv "${shim}"
-    fi
+    remove_report_launcher
     systemctl daemon-reload
     echo "Not touched: snapshots and the NAS backup ('${PROG} snapshots disable [--purge]' stops them / deletes"
     echo "             the local snapshots; the restic repository on the NAS, its password in"
@@ -948,9 +976,7 @@ install_all() {
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
     systemd-tmpfiles --create "${RECLAIM_FILE}"
-    if [[ -n "${shim}" ]]; then
-        shim_content | cst_install_text "${shim}" 0755 "${target_user}"
-    fi
+    install_report_launcher
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
     link_cst_command "${target_user}"
@@ -1024,6 +1050,7 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
     # Every component of install is complete (the record says done; see cst doctor).
     cst_mark btrfs:core
     if (( with_below )); then cst_mark btrfs:below; fi
+    if [[ -n "${shim}" ]]; then cst_mark_as "${target_user}" btrfs:report-launcher; fi
     echo
     echo "Overview:            ${PROG} status"
     echo "Stalls (as ${target_user:-your user}, also in toolbox): btrfs-stall-report --since '5 min ago'"

@@ -1418,7 +1418,8 @@ EOF
         (enabled) and below's drop-in move to the new names; the old folder
         becomes a link that the second install removes; a third install writes
         nothing (every file `unchanged:`, the same files before and after);
-        `uninstall` leaves none of the old names."""
+        `uninstall` leaves none of the old names. The stall-report launcher is
+        in tester's install record, done, and `uninstall` removes it and its line."""
         out = exec_bash(
             self.PRIV_CONTAINER,
             r"""
@@ -1495,6 +1496,9 @@ EOF
             grep -qxF '# e2e: the drop-in of a version named f44-tools' "$new_dropin"
             [[ "$(systemctl --global is-enabled cst-pending-alerts.service)" == enabled ]]
             systemctl is-active btrfs-stall-monitor.service
+            # The stall-report launcher is in tester's install record, done.
+            grep -qF '"/home/tester/.local/bin/btrfs-stall-report"' /home/tester/.local/state/cst/installed.json
+            grep -qF '"btrfs:report-launcher": "done"' /home/tester/.local/state/cst/installed.json
 
             # 2. The second install removes the link left for an old btrfs-notify, and writes no file.
             out="$(cst btrfs install --no-below 2>&1)" || { show "second install" "$out"; exit 1; }
@@ -1531,7 +1535,12 @@ EOF
             # 4. Undo: none of the old names, nor the drop-in they became.
             cst btrfs uninstall >/dev/null
             gone "$old" "$old_unit" "$wants" "$old_reader" "$old_dropin" "$new_dropin" \
-                /etc/systemd/system/btrfs-stall-monitor.service /usr/local/sbin/btrfs-stall-monitord
+                /etc/systemd/system/btrfs-stall-monitor.service /usr/local/sbin/btrfs-stall-monitord \
+                /home/tester/.local/bin/btrfs-stall-report
+            if grep -qsF btrfs:report-launcher /home/tester/.local/state/cst/installed.json; then
+                echo "uninstall left the launcher's record line" >&2
+                exit 1
+            fi
             echo E2E-OK
             """,
         ).stdout
@@ -2529,7 +2538,7 @@ assert d["samples"] >= 1, d["samples"]
             # 6. No limit: the drop-in goes, and a run has none.
             set_limit ''
             out="$(cst btrfs install --no-below 2>&1)" || { show "install, no limit" "$out"; exit 1; }
-            grep -qF "removed '$dropin'" <<<"$out"
+            grep -qxF "removed:   $dropin" <<<"$out"
             test ! -e "$(dirname "$dropin")"
             if systemctl show -p ExecStartPre "$svc" | grep -qF 'scrub limit'; then echo "a limit is still set" >&2; exit 1; fi
             run_scrub success

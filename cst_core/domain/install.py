@@ -168,14 +168,26 @@ COMPONENTS: Final[Mapping[str, str]] = {
     "btrfs:snapshots": "cst btrfs snapshots setup",
     "btrfs:top-mount": "cst btrfs snapshots setup",
     "btrfs:docker-gc": "cst btrfs docker-gc enable",
+    "btrfs:degraded-boot": "cst btrfs degraded-boot install",
+    "btrfs:report-launcher": "cst btrfs install",
     "cpu:core": "cst cpu install",
     "cpu:gamemode": "cst cpu install",
     "cpu:docker-slice": "cst cpu docker-slice install",
+    "cpu:toolbox": "cst cpu install",
     "bluetooth:ldac": "cst bluetooth apply",
     "swap:core": "cst swap apply",
     "toolchains:auto": "cst toolchains auto on",
     "toolchains:sccache": "cst toolchains config apply",
     "vm:backup-timer": "cst vm backup-timer on",
+}
+
+
+# The components whose files are all generated text (cst_install_text DEST MODE OWNER COMPONENT), so
+# no manifest entry names their owner: each with its owner (whose install record lists them).
+GENERATED_COMPONENTS: Final[Mapping[str, Owner]] = {
+    "btrfs:degraded-boot": Owner.ROOT,
+    "btrfs:report-launcher": Owner.USER,
+    "cpu:toolbox": Owner.USER,
 }
 
 
