@@ -536,7 +536,6 @@ class BulkTest(BulkBase):
                     self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
                 self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
 
-    @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
     def test_root_refuses_a_user_no_account_has(self) -> None:
         # pwd's KeyError went up uncaught: a traceback by hand, and at boot the catch-all's exit 70
         # with no alert, every boot (the account was deleted after bulk.conf named it).
