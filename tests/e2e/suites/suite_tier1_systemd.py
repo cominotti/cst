@@ -2929,8 +2929,10 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         systemd leaves the stamp (guarded); auto off removes it itself, a
         second auto off has nothing left to remove, and auto on still works.
         Last, the earlier cst-cargo-build-gc.timer left running with its files
-        gone (its stamp made when it started): auto on stops it before it
-        removes that stamp, and a second auto on leaves it alone."""
+        gone (its stamp made when it started; removed with no daemon-reload
+        after, so systemd keeps it loaded and running: a daemon-reload here
+        stops it, as a first run of this test showed): auto on stops it before
+        it removes that stamp, and a second auto on leaves it alone."""
         out = as_tester_bash(
             self.SYSTEMD_CONTAINER,
             """
@@ -2975,7 +2977,6 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             systemctl --user start "$old"
             [ -e "$oldstamp" ] || { echo "no $oldstamp after $old started: the check below would prove nothing" >&2; exit 1; }
             rm -f "$units/$old" "$units/cst-cargo-build-gc.service"
-            systemctl --user daemon-reload
             if ! systemctl --user is-active "$old" >/dev/null; then
                 echo "$old stopped with its files: the check below would prove nothing" >&2
                 exit 1
