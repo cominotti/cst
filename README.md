@@ -452,8 +452,9 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `.claude/workflows` are links to them).
   `tests/test_docs.py` checks the links of every Markdown file, that each
   document is in the AGENTS.md index, that each skill has a SKILL.md with its
-  name and a description and each rule a description, and that `.claude/rules` and `.claude/skills` are relative
-  links into `.agents` (not `.claude/workflows`).
+  name and a description and each rule a description, and that
+  `.claude/rules` and `.claude/skills` are relative links into `.agents`
+  (not `.claude/workflows`).
 - `pyproject.toml`, `uv.lock`, `tests/uv-dev`, `tests/mutation/`, `docs/dev-tools.md`: the
   developer tools for the Python code (the ruff linter and formatter, the
   ty type checker, the zizmor workflow audit, coverage.py and the cosmic-ray

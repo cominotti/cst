@@ -73,7 +73,8 @@ ty setting in `pyproject.toml`) follows the same rule:
 ## No behaviour at all: docs
 
 A commit that changes only documents, comments (a comment-only edit of a
-code file included), agent rules or skills says so in its message ("docs, no behaviour change") and needs no new test
+code file included), agent rules or skills says so in its message ("docs,
+no behaviour change") and needs no new test
 ([AGENTS.md, "Rules"](../../AGENTS.md#rules)); the docs gate
 (`invowk cmd test docs`) still runs. It changes no code CST installs or runs:
 a docs fix that finds a bug writes it down for a behaviour change of its own.

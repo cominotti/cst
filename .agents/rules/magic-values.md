@@ -73,8 +73,9 @@ declared once and used by name.
   or match chains of 3 string arms, unit numbers, loose dicts in signatures
   and `Literal`s of 3 strings, under `MAGIC_CEILINGS` (never above), one entry
   per package and kind of hit. A package and kind with no entry may have no
-  hit at all, so a new hit there fails. `MAGIC_EXEMPT` names a scope that keeps one (`path:qualname`), with its reason; a stale
-  entry fails. No ignore comments.
+  hit at all, so a new hit there fails. `MAGIC_EXEMPT` names a scope that
+  keeps one (`path:qualname`), with its reason; a stale entry fails. No
+  ignore comments.
 - ruff's `PLR2004` (a number compared with a literal) is counted in
   `RUFF_BUDGETS` (`tests/ruff_budget.py`), production code only.
 - A test passes the member where ty asks for it and keeps the raw string in
