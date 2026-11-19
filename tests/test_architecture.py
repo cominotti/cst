@@ -300,8 +300,6 @@ CORE_NAMES_WITHOUT_USER: Final[dict[str, str]] = {
     "cst_core/domain/install.py:manifest_by_dest": "read by the gate tests/test_unit_contract.py; no module looks a dest up",
     "cst_core/domain/install.py:python_entry_srcs": "read by the static gates in tests/",
     "cst_core/domain/text.py:Assignment": "the record parse_shell_assignments returns, used only inside text.py",
-    # The duration names (magic values, rule 3 of tests/test_magic_values.py): the packages adopt them
-    # where they write 60, 3600 or 604800 today; each line goes once a package uses the name.
 }
 
 
