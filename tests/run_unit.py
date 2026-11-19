@@ -487,8 +487,9 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    leaks, lost, hooks = result.leaks, result.lost_exceptions, result.hook_problems
-    for line in [*problems, *leaks, *lost, *hooks, *bytecode]:
+    leaks, lost = result.leaks, result.lost_exceptions
+    errors = [*problems, *leaks, *lost, *result.hook_problems, *bytecode]
+    for line in errors:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
         print(LEAK_HINT, file=sys.stderr)
@@ -496,7 +497,7 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
         print(LOST_EXCEPTION_HINT, file=sys.stderr)
     if bytecode:
         print(BYTECODE_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems and not leaks and not lost and not hooks and not bytecode else 1
+    return 0 if result.wasSuccessful() and not errors else 1
 
 
 if __name__ == "__main__":
