@@ -322,6 +322,41 @@ def sample_too_early(taken: list[int]) -> cpu_domain.QuietSample:
     raise AssertionError("sampled before the usage check")
 
 
+class WatchArgsTest(unittest.TestCase):
+    """`cpu-watch watch`'s options, as the user types them (no run is recorded here)."""
+
+    def watch(self, *argv: str) -> tuple[int, dict[str, object], str]:
+        calls: list[dict[str, object]] = []
+
+        def record_run(runs: str, **kw: object) -> tuple[str, int]:
+            del runs
+            calls.append(kw)
+            return "/nonexistent/run", 3
+
+        err = io.StringIO()
+        with (
+            unittest.mock.patch.object(cpu_cli, "record_run", record_run),
+            unittest.mock.patch.object(cpu_cli, "summarize", lambda run_dir: f"summary of {run_dir}"),
+            unittest.mock.patch("sys.stdout", io.StringIO()),
+            unittest.mock.patch("sys.stderr", err),
+        ):
+            rc = cpu_cli.watch(list(argv))
+        return rc, (calls[0] if calls else {}), err.getvalue()
+
+    def test_every_option(self) -> None:
+        argv = ("-l", "a b", "--game", "g", "--seconds", "5", "--mangohud", "/m", "--", "x", "--label", "y")
+        rc, kw, _ = self.watch(*argv)
+        self.assertEqual(rc, 3)
+        self.assertEqual(
+            kw, {"label": "a_b", "game": "g", "seconds": 5, "mangohud": "/m", "cmd": ["x", "--label", "y"]}
+        )
+        self.assertEqual(self.watch("--label", "z")[1]["label"], "z")
+
+    def test_an_unknown_option_is_a_usage_error(self) -> None:
+        rc, kw, err = self.watch("--mangohudX", "/m")
+        self.assertEqual((rc, kw, err), (2, {}, "unknown argument --mangohudX\n"))
+
+
 class WatchRowTest(unittest.TestCase):
     """cpu-watch watch: one samples.csv row from two readings of the counters."""
 
