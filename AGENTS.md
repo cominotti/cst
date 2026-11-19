@@ -213,6 +213,20 @@ the runner's children: a command handed to a daemon (`flatpak-spawn --host`,
 docker, `systemd-run`) does not inherit it, so a unit test never starts one
 of those either.
 
+### An unclosed file or socket fails the run
+
+Python reports a file, socket or child process that was never closed only
+when the object is freed, as a ResourceWarning it prints, and the test
+still passes. `tests/run_unit.py` records each one (and each exception
+raised in a `__del__`) with the test that was running, collects garbage
+once more after the last test, and fails the run on any.
+
+**Rule:** close what a test opens: a `with` block, or `self.addCleanup(x.close)`.
+To see where a reported object was opened, run that test again with
+`/usr/bin/python3 -I -B -X tracemalloc=8 tests/run_unit.py NAME`. A test that
+checks a warning itself (`warnings.catch_warnings(record=True)`) keeps
+it. Code that runs in a child process is not covered.
+
 ### A test that reaches systemctl changes the host from a toolbox
 
 From a toolbox, `systemctl`, `busctl`, `loginctl` and `systemd-run` talk

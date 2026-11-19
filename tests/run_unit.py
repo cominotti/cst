@@ -51,18 +51,33 @@ kernel's no_new_privs flag (prctl PR_SET_NO_NEW_PRIVS) on itself, which
 every child inherits and no child can clear: a setuid program then runs
 without its privileges, and sudo refuses to start. bwrap (the mutation
 test's sandbox) works under it; it sets the same flag itself.
+
+No test may leave a file, a socket or a child process open. Python finds
+such a leak when the object is freed and only prints a ResourceWarning
+(an exception raised in a __del__ is only printed too), so the test still
+passes; a daemon that leaks a descriptor per event fails slowly. This
+runner records every ResourceWarning and every exception raised in a
+__del__ with the test that was running (LeakRecordingResult), runs the
+garbage collector once more after the last test, and fails the run on
+each one, with a hint: run the test again with -X tracemalloc=8 to see
+where the resource was opened. A test that records warnings itself
+(warnings.catch_warnings(record=True)) keeps them. Code that runs in a
+child process (a helper started with python3 -I) is not seen.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import ctypes
+import gc
 import os
 import shlex
 import shutil
 import socket
 import sys
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
+from unittest import mock
+import warnings
 
 # The static gates: tests that read the repository (layers, budgets,
 # entry points, the manifest, the Python and shell lists, docs, license
@@ -209,6 +224,76 @@ def guard_host_commands(folder: str) -> None:
     os.environ[HOST_GUARD_ENV] = folder
 
 
+# What the run prints after the leaks it found: how to see where each one was opened.
+LEAK_HINT: Final = (
+    "a file, socket or other resource was left open (or an exception was raised in a __del__); "
+    "run the test again with python3 -I -B -X tracemalloc=8 tests/run_unit.py NAME to see where it was opened"
+)
+
+
+# The warnings module's function that writes one warning (WarningMessage) out.
+_SHOW_HOOK: Final = "_showwarnmsg_impl"
+
+
+class LeakRecordingResult(unittest.TextTestResult):
+    """A TextTestResult that also records every ResourceWarning (a file, socket or child process
+    left open, found when it is freed) and every exception raised in a __del__, with the test
+    that was running. unittest only prints them, and a test that leaks still passes; the runner
+    fails the run on each one. A test that records warnings itself (warnings.catch_warnings with
+    record=True) keeps them: the hook does not see those."""
+
+    leaks: list[str]
+
+    @override
+    def startTestRun(self) -> None:
+        super().startTestRun()
+        self.leaks = []
+        self._running = "before the first test"
+        # TextTestRunner.run has set its own filter ("default") inside a catch_warnings block,
+        # which also restores showwarning when the run ends.
+        warnings.simplefilter("always", ResourceWarning)
+        # The hook below warnings.showwarning: it still gets the warning's source, so the
+        # original prints where the object was allocated (with -X tracemalloc), and a test's
+        # warnings.catch_warnings(record=True) replaces it for the test's own warnings.
+        self._show: Callable[[warnings.WarningMessage], None] = getattr(warnings, _SHOW_HOOK)
+        self._hook = mock.patch.object(warnings, _SHOW_HOOK, self._warned)
+        self._hook.start()
+        self._unraisablehook = sys.unraisablehook
+        sys.unraisablehook = self._unraisable
+
+    @override
+    def startTest(self, test: unittest.TestCase) -> None:
+        self._running = test.id()
+        super().startTest(test)
+
+    @override
+    def stopTestRun(self) -> None:
+        # An object in a reference cycle is freed only by the collector: run it now, while the
+        # hooks still record, instead of at exit.
+        self._running = f"{self._running} (or one before it: found by the last garbage collection)"
+        gc.collect()
+        self._hook.stop()
+        sys.unraisablehook = self._unraisablehook
+        super().stopTestRun()
+
+    def _warned(self, msg: warnings.WarningMessage) -> None:
+        if issubclass(msg.category, ResourceWarning):
+            self.leaks.append(f"ResourceWarning in {self._running}: {msg.message} ({msg.filename}:{msg.lineno})")
+        self._show(msg)
+
+    def _unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
+        self.leaks.append(f"exception in {self._running}, ignored in {unraisable.object!r}: {unraisable.exc_value!r}")
+        self._unraisablehook(unraisable)
+
+
+class LeakRecordingRunner(unittest.TextTestRunner):
+    """unittest's TextTestRunner with a LeakRecordingResult."""
+
+    @override
+    def _makeResult(self) -> LeakRecordingResult:
+        return LeakRecordingResult(self.stream, self.descriptions, self.verbosity, durations=self.durations)
+
+
 def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
     """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
     names = [a for a in args if a != "-v"]
@@ -255,15 +340,18 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     theirs.close()
     sys.stdin = open(0, closefd=False)
     suite = load(repo, argv)
-    result = unittest.TextTestRunner(verbosity=verbosity).run(suite)
+    result = LeakRecordingRunner(verbosity=verbosity).run(suite)
     ours.close()
     skipped = [(test.id(), reason) for test, reason in result.skipped]
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    for line in problems:
+    leaks = result.leaks if isinstance(result, LeakRecordingResult) else []
+    for line in [*problems, *leaks]:
         print(f"error: {line}", file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems else 1
+    if leaks:
+        print(LEAK_HINT, file=sys.stderr)
+    return 0 if result.wasSuccessful() and not problems and not leaks else 1
 
 
 if __name__ == "__main__":

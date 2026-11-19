@@ -1121,6 +1121,7 @@ class NotifyLoopTest(unittest.TestCase):
         notifier = made[0][3]
         if not isinstance(notifier, ServiceNotifier):
             self.fail(f"main handed the monitor {notifier!r}, not a ServiceNotifier")
+        self.addCleanup(notifier.close)
         self.assertTrue(notifier.ready())
         self.assertEqual(sock.recv(64), b"READY=1")
 
