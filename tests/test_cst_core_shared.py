@@ -867,10 +867,12 @@ class CommandRunnerTest(unittest.TestCase):
         runner = core_runner.SubprocessCommandRunner(_container(inside=False))
         failed = runner.run([self.py, "-I", "-c", "import sys; sys.exit(3)"])
         self.assertIs(failed.raise_cause(), failed)  # it ran: any exit status is the caller's
+        missing = runner.run(["cst-test-no-such-command"])
         with self.assertRaises(FileNotFoundError):
-            runner.run(["cst-test-no-such-command"]).raise_cause()
+            missing.raise_cause()
+        timed_out = runner.run([self.py, "-I", "-c", "import time; time.sleep(5)"], timeout=0.2)
         with self.assertRaises(subprocess.TimeoutExpired):
-            runner.run([self.py, "-I", "-c", "import time; time.sleep(5)"], timeout=0.2).raise_cause()
+            timed_out.raise_cause()
         plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
         self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
 
