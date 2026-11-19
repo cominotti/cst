@@ -422,6 +422,31 @@ STACKS = {
 }
 
 
+class ShortCgroupTest(unittest.TestCase):
+    """short_cgroup names a task's cgroup in an event line: the last part of its cgroup v2 path
+    (cst_core cgroup_v2_path), a docker or podman scope cut to its id's first 12 characters."""
+
+    def short(self, text: str | None) -> str:
+        with mock.patch.object(md_proc, "read_text", lambda _path: text):
+            return md_proc.short_cgroup(4242)
+
+    def test_the_leaf_of_the_0_line(self) -> None:
+        self.assertEqual(self.short("0::/user.slice/user-1000.slice/session-2.scope\n"), "session-2.scope")
+        self.assertEqual(self.short("0::/\n"), "/")
+        docker = "0::/system.slice/docker-0123456789abcdef0123.scope\n"
+        self.assertEqual(self.short(docker), "docker-0123456789ab")
+
+    def test_the_0_line_not_the_last_line(self) -> None:
+        text = "0::/user.slice/x.scope\n1:name=systemd:/user.slice/x.scope\n"
+        self.assertEqual(self.short(text), "x.scope")
+
+    def test_unreadable_empty_or_without_a_0_line(self) -> None:
+        self.assertEqual(self.short(None), "?")
+        self.assertEqual(self.short(""), "?")
+        self.assertEqual(self.short("1:name=systemd:/user.slice/x.scope\n"), "/")
+        self.assertEqual(self.short("\n"), "/")  # only blanks: no 0:: line (it raised IndexError before)
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 

@@ -18,6 +18,7 @@ from btrfs.stall_monitord.domain import (
     FsTopo,
 )
 from cst_core.adapters.journal import log as journal_log
+from cst_core.domain.text import cgroup_v2_path
 from cst_core.domain.values import DAY
 
 CGROUP_ROOT = "/sys/fs/cgroup"
@@ -222,7 +223,7 @@ def short_cgroup(pid: str | int) -> str:
     text = read_text(f"/proc/{pid}/cgroup")
     if text is None or text == "":
         return "?"
-    path = text.strip().splitlines()[-1].partition("::")[2] or "/"
+    path = cgroup_v2_path(text) or "/"
     leaf = path.rstrip("/").rsplit("/", 1)[-1] or "/"
     if leaf.startswith(("docker-", "libpod-")) and leaf.endswith(".scope"):
         kind, _, rest = leaf.partition("-")
