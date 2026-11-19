@@ -4727,7 +4727,7 @@ echo E2E-OK
             if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
             if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
             if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
-            rm -rf "$s" /run/e2e-gc-fake
+            rm -rf "$s" /usr/local/libexec/e2e-gc-fake
             systemctl daemon-reload
             """,
             check=False,
@@ -4806,14 +4806,12 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
         # docker events itself ending with 65 is not docker-gc's refusal: record exits 1 for it, and the
         # recorder is restarted. This checkout's docker-gc record with a fake docker first on PATH, under
-        # /run (PrivateTmp= hides /var/tmp from the unit): ps lists nothing, events exits 65.
+        # /usr/local/libexec (PrivateTmp= hides /var/tmp from the unit, and the container's /run is a
+        # noexec tmpfs): ps lists nothing, events exits 65.
+        fake = "/usr/local/libexec/e2e-gc-fake"
         docker_exec(
             self.SYSTEMD_CONTAINER,
-            [
-                "bash",
-                "-c",
-                "mkdir -p /run/e2e-gc-fake && cat >/run/e2e-gc-fake/docker && chmod 0755 /run/e2e-gc-fake/docker",
-            ],
+            ["bash", "-c", f"mkdir -p {fake} && cat >{fake}/docker && chmod 0755 {fake}/docker"],
             input_text=(
                 "#!/usr/bin/python3 -I\n"
                 "import sys\n"
@@ -4830,7 +4828,7 @@ echo E2E-OK
             self.SYSTEMD_CONTAINER,
             ["bash", "-c", f"cat >{path}"],
             input_text=derived(
-                "/usr/bin/env PATH=/run/e2e-gc-fake:/usr/bin:/bin /usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"
+                f"/usr/bin/env PATH={fake}:/usr/bin:/bin /usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"
             ),
         )
         out = exec_bash(
