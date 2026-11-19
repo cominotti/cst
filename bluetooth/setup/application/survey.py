@@ -47,12 +47,14 @@ from bluetooth.setup.domain import (
     WpState,
     bap_state,
     bearer_matches,
+    is_running,
     item,
     no_headset_note,
     read_settings_output,
     rule_device,
     senders_of,
     home_tilde,
+    unit_activity,
     wp_label,
     wp_note,
     wp_word,
@@ -185,6 +187,7 @@ class Survey:
         self.wp_owed = False
         self.bt_restart = False
         self.wp_restart = False
+        self.unit_states: dict[str, tuple[str, str]] = {}  # unit -> (ActiveState, InvocationID), see unit_show
 
     # ---- running commands ------------------------------------------------------------------
     def out(self, text: str) -> None:
@@ -282,12 +285,25 @@ class Survey:
         return self.wp_conf or "no LDAC rule (no headset)"
 
     # ---- the restarts still owed -----------------------------------------------------------
+    def unit_show(self, unit: str, *, user: bool, fresh: bool = False) -> tuple[str, str]:
+        """(ActiveState, InvocationID) of the unit from one `systemctl show`, read once per run and
+        kept until CST restarts the unit (forget_unit); fresh: read it again (and keep that)."""
+        if fresh or unit not in self.unit_states:
+            scope = ["--user"] if user else []
+            shown = self.quiet(
+                ["systemctl", *scope, "show", "-p", "ActiveState", "-p", "InvocationID", unit], host=True
+            )
+            self.unit_states[unit] = unit_activity(shown)
+        return self.unit_states[unit]
+
+    def forget_unit(self, unit: str) -> None:
+        """The unit was restarted: the next unit_show reads it again."""
+        self.unit_states.pop(unit, None)
+
     def unit_invocation(self, unit: str, *, user: bool) -> str:
-        """The unit's InvocationID while it is active, else ''."""
-        scope = ["--user"] if user else []
-        if not self.ok(["systemctl", *scope, "is-active", "--quiet", unit], host=True):
-            return ""
-        return self.quiet(["systemctl", *scope, "show", "-P", "InvocationID", unit], host=True)
+        """The unit's InvocationID while it runs (as `systemctl is-active` sees it), else ''."""
+        active, inv = self.unit_show(unit, user=user)
+        return inv if is_running(active) else ""
 
     def restart_state(self, mode: str, *units: str) -> str | None:
         """The units whose restart is still owed, one per line (save also records them); None on failure."""
@@ -336,9 +352,11 @@ class Survey:
             path = None
         return path or "", r.returncode == 0 and path is not None
 
-    def bap_endpoint_state(self) -> BapState:
-        """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state)."""
-        inv = self.quiet(["systemctl", "show", "-p", "InvocationID", "--value", "bluetooth"], host=True)
+    def bap_endpoint_state(self, *, fresh: bool = False) -> BapState:
+        """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state).
+        bluetoothd's invocation, running or not (a stopped unit keeps its last one), as unit_show
+        has it; fresh: read again (the wait after a restart)."""
+        inv = self.unit_show("bluetooth.service", user=False, fresh=fresh)[1]
         wp_pid = self.quiet(["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"], host=True)
         if not inv or not re.fullmatch(r"[1-9][0-9]*", wp_pid):
             return BapState.UNKNOWN

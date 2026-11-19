@@ -17,7 +17,17 @@ from bluetooth.setup import wiring
 from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.setup.application.change import Change
 from bluetooth.setup.application.survey import SetupMachine
-from bluetooth.setup.domain import BapState, Exit, Options, Paths, bap_state, parse_command_line, resolve
+from bluetooth.setup.domain import (
+    BapState,
+    Exit,
+    Options,
+    Paths,
+    bap_state,
+    is_running,
+    parse_command_line,
+    resolve,
+    unit_activity,
+)
 from bluetooth.tests.setup_fakes import ISO, MAC, REPO, Machine
 from bluetooth.tests.test_ldac_watch import pw_dump
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -104,6 +114,26 @@ class BapStateTest(unittest.TestCase):
                 "UNKNOWN": "unknown",
             },
         )
+
+
+class UnitActivityTest(unittest.TestCase):
+    """What `systemctl show -p ActiveState -p InvocationID` says of a unit, and when it runs."""
+
+    def test_the_two_properties_in_either_order(self) -> None:
+        self.assertEqual(unit_activity("ActiveState=active\nInvocationID=0a1b\n"), ("active", "0a1b"))
+        self.assertEqual(unit_activity("InvocationID=0a1b\nActiveState=reloading"), ("reloading", "0a1b"))
+
+    def test_missing_empty_and_odd_lines(self) -> None:
+        self.assertEqual(unit_activity(""), ("", ""))
+        self.assertEqual(unit_activity("ActiveState=inactive\nInvocationID=\n"), ("inactive", ""))
+        self.assertEqual(unit_activity("no equals sign\nActiveState=failed\n"), ("failed", ""))
+        self.assertEqual(unit_activity("InvocationID=0a1b\n"), ("", "0a1b"))
+
+    def test_running_as_systemctl_is_active_sees_it(self) -> None:
+        for word in ("active", "reloading", "refreshing"):
+            self.assertTrue(is_running(word), word)
+        for word in ("inactive", "failed", "activating", "deactivating", "maintenance", "", "Active", "unknown"):
+            self.assertFalse(is_running(word), word)
 
 
 class ApplyDoneTest(unittest.TestCase):
@@ -205,6 +235,10 @@ class WaitTest(unittest.TestCase):
         self.assertTrue(run.restart_wireplumber())
         self.assertEqual(clock.slept, [1] + [0.5] * 30)
         self.assertIn("WARNING: WirePlumber did not register the BAP endpoint within 15 s\n", console.stderr)
+        # Each look reads bluetoothd's invocation again (it may restart by itself meanwhile).
+        with open(os.path.join(m.state, "log"), encoding="utf-8") as f:
+            shows = f.read().splitlines().count("systemctl show -p ActiveState -p InvocationID bluetooth.service")
+        self.assertEqual(shows, 30)
         # Registered: no wait beyond the first second.
         m.put("bt-journal", "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n")
         run, console, clock = change(m, "apply", "--yes", settings={"LE_AUDIO": "on"})

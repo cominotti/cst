@@ -233,7 +233,10 @@ reads, also works in a toolbox).
 **Restarts still owed.** A restart that `apply`, `revert` or `le-audio` did
 not make (`--no-restart`, the question answered no, a restart that failed)
 is remembered in `~/.local/state/cst/bluetooth-restart-pending.json`, with
-the invocation ID the service had then (`systemctl show -P InvocationID`).
+the invocation ID the service had then (`systemctl show -p ActiveState -p
+InvocationID`: one call per service, read again only where it may have
+changed: before the record is written and after CST restarts the service;
+the wait for the BAP endpoint after a restart reads bluetoothd's at each look).
 While the service keeps running with that ID, `plan` lists the restart
 ("still owed", exit 10), `status` says so, and the next `apply` makes it
 (asking first for Bluetooth). Any restart of the service (by `apply`, by
@@ -242,7 +245,8 @@ goes with the next restart that `apply`, `revert` or `le-audio` makes;
 until then a record whose restarts were made is only ignored. A file that
 cannot be read counts as no record, and the next one written replaces it.
 A service that does not run owes nothing: it reads the new files when it
-starts.
+starts (running is what `systemctl is-active` counts: active, reloading or
+refreshing).
 
 **The headset.** CST ships no headset address: `DEVICE` is empty in
 [`bluetooth.conf`](bluetooth.conf). Put yours into

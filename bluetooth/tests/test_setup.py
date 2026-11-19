@@ -17,6 +17,7 @@ import pwd
 import re
 import signal
 import stat
+from typing import Final
 import unittest
 
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
@@ -721,7 +722,9 @@ class RestartTest(SetupCase):
             "systemctl --user restart wireplumber",
         )
         after = self.after(r.calls, "systemctl --user restart wireplumber")
-        self.assertTrue(after[0].startswith("systemctl show -p InvocationID --value bluetooth"), after)  # the BAP wait
+        self.assertEqual(
+            after[0], "systemctl show -p ActiveState -p InvocationID bluetooth.service", after
+        )  # the BAP wait
         self.assertIn("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n", r.stdout)
         self.assertIn("restart:   wireplumber (your session; audio stops for a moment)\n", r.stdout)
         self.assertFalse(os.path.exists(m.pending))
@@ -889,6 +892,61 @@ class RestartOwedTest(SetupCase):
         self.assertNotIn("still owed", m.run("plan").stdout)
         m.run("apply", "--no-restart")
         self.assertEqual(json.loads(self.text(m.pending)), {"wireplumber.service": "wp-0"})
+
+
+class InvocationReadTest(SetupCase):
+    """One `systemctl show` per service for its state and invocation ID, read again only after CST
+    restarts it (the BAP wait reads bluetoothd's at each look)."""
+
+    BT: Final = "systemctl show -p ActiveState -p InvocationID bluetooth.service"
+    WP: Final = "systemctl --user show -p ActiveState -p InvocationID wireplumber.service"
+    RESTARTS: Final = ("sudo systemctl restart bluetooth", "systemctl --user restart wireplumber")
+
+    def reads(self, calls: Sequence[str]) -> list[str]:
+        """The calls that read an invocation ID or restart a service, in order."""
+        return [c for c in calls if "InvocationID" in c or "is-active --quiet" in c or c in self.RESTARTS]
+
+    def test_plan_reads_each_once(self) -> None:
+        m = self.machine()
+        self.assertEqual(self.reads(m.run("plan").calls), [self.BT, self.WP])
+
+    def test_apply_reads_again_only_after_a_restart(self) -> None:
+        m = self.machine(settings="LE_AUDIO=on\n")
+        m.put("bt-journal", BAP_REGISTERED)
+        m.adapter(listed=False)
+        r = m.run("apply", "--yes")
+        self.assertEqual(
+            self.reads(r.calls),
+            [
+                self.BT,  # plan
+                self.WP,
+                self.BT,  # read again for the record of what is owed (either may have restarted meanwhile)
+                self.WP,
+                "sudo systemctl restart bluetooth",
+                "systemctl --user restart wireplumber",
+                self.BT,  # the BAP wait's look (registered at once); the checks reuse it
+                self.WP,  # the record after the restarts
+                "systemctl is-active --quiet bluetooth",  # the checks' services rows
+                "systemctl --user is-active --quiet wireplumber",
+            ],
+        )
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_status_reads_each_once(self) -> None:
+        m = self.machine()
+        m.put("bt-journal", BAP_REGISTERED)
+        r = m.run("status")
+        self.assertEqual([c for c in self.reads(r.calls) if "InvocationID" in c], [self.BT, self.WP])
+
+    def test_reloading_still_runs_activating_does_not(self) -> None:
+        """As `systemctl is-active`: a reloading unit still runs its invocation (its restart stays
+        owed), an activating one does not run yet (it reads main.conf when it starts)."""
+        m = self.machine()
+        m.run("apply", "--yes", "--no-restart")
+        m.unit_active_state("system", "bluetooth", "reloading")
+        self.assertEqual(m.run("plan").stdout.count("still owed"), 2)
+        m.unit_active_state("system", "bluetooth", "activating")
+        self.assertEqual(m.run("plan").stdout.count("still owed"), 1)
 
 
 class LeAudioTest(SetupCase):

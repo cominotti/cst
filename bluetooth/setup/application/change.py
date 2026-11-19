@@ -139,7 +139,9 @@ class Change(Checks):
     # ---- restarts --------------------------------------------------------------------------
     def restart_bluetooth(self) -> bool:
         self.out("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n")
-        if self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode != 0:
+        restarted = self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode == 0
+        self.forget_unit("bluetooth.service")  # a new invocation, also after most failures
+        if not restarted:
             self.err(f"{self.c.prog}: ERROR: bluetooth.service was not restarted. To finish: {self.restart_hint()}\n")
             return False
         path, found = self.adapter()
@@ -151,13 +153,20 @@ class Change(Checks):
 
     def restart_wireplumber(self) -> bool:
         self.out("restart:   wireplumber (your session; audio stops for a moment)\n")
-        if self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode != 0:
+        restarted = (
+            self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode == 0
+        )
+        self.forget_unit("wireplumber.service")
+        if not restarted:
             self.err(
                 f"{self.c.prog}: ERROR: wireplumber was not restarted. To finish: systemctl --user restart wireplumber\n"
             )
             return False
         self.m.clock.sleep(1)  # let the old WirePlumber unregister before checking
-        if not self.le_off_active() and not self.wait_for(15, lambda: self.bap_endpoint_state() == BapState.REGISTERED):
+        # Each look reads bluetoothd's invocation again: it may restart by itself during the wait.
+        if not self.le_off_active() and not self.wait_for(
+            15, lambda: self.bap_endpoint_state(fresh=True) == BapState.REGISTERED
+        ):
             self.err("WARNING: WirePlumber did not register the BAP endpoint within 15 s\n")
         self.restore_a2dp()
         return True
@@ -223,6 +232,9 @@ class Change(Checks):
         if not (bt or wp):
             return 0
         owed = ["wireplumber.service", *(["bluetooth.service"] if bt else [])]
+        # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
+        self.forget_unit("bluetooth.service")
+        self.forget_unit("wireplumber.service")
         if self.restart_state("save", *owed) is None:
             self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
         if self.o.no_restart:

@@ -59,6 +59,9 @@ unit() { # unit SCOPE NAME: the file prefix of a unit's state
     local n="${2%.service}"
     echo "$S/units/$1-$n"
 }
+active_state() { # active_state PREFIX: the unit's ActiveState (PREFIX.state, else active or inactive)
+    if [[ -e "$1.state" ]]; then cat "$1.state"; elif [[ -e "$1.active" ]]; then echo active; else echo inactive; fi
+}
 new_id() { # new_id PREFIX: a new invocation ID for the unit
     local n
     n=$(( $(cat "$S/counter" 2>/dev/null || echo 0) + 1 ))
@@ -100,7 +103,11 @@ case "$me" in
         mkdir -p "$S/units"
         case "$1" in
             is-active)
-                if [[ "$2" == --quiet ]]; then [[ -e "$(unit "$scope" "$3").active" ]]; exit; fi
+                if [[ "$2" == --quiet ]]; then
+                    st="$(active_state "$(unit "$scope" "$3")")"
+                    [[ "$st" == active || "$st" == reloading || "$st" == refreshing ]]
+                    exit
+                fi
                 if [[ -e "$(unit "$scope" "$2").active" ]]; then echo active; exit 0; fi
                 echo inactive
                 exit 3
@@ -113,6 +120,11 @@ case "$me" in
             show)
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
+                    *ActiveState*)   # systemd prints ActiveState= before InvocationID=
+                        echo "ActiveState=$(active_state "$u")"
+                        echo "InvocationID=$(cat "$u.inv" 2>/dev/null)"
+                        exit 0
+                        ;;
                     *InvocationID*) cat "$u.inv" 2>/dev/null; exit 0 ;;
                     *MainPID*) cat "$u.pid" 2>/dev/null || echo 0; exit 0 ;;
                 esac
@@ -280,6 +292,10 @@ class Machine:
             self.put(base + ".inv", inv + "\n")
         if pid is not None:
             self.put(base + ".pid", f"{pid}\n")
+
+    def unit_active_state(self, scope: str, name: str, state: str) -> None:
+        """The ActiveState word the fake systemctl gives for a unit (without it: active or inactive)."""
+        self.put(os.path.join("units", f"{scope}-{name}.state"), state + "\n")
 
     def unit_inv(self, scope: str, name: str) -> str:
         """The invocation ID the fake systemd has for a unit now."""
