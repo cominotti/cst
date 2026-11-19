@@ -236,8 +236,7 @@ class WaitTest(unittest.TestCase):
         self.assertEqual(clock.slept, [1] + [0.5] * 30)
         self.assertIn("WARNING: WirePlumber did not register the BAP endpoint within 15 s\n", console.stderr)
         # Each look reads bluetoothd's invocation again (it may restart by itself meanwhile).
-        with open(os.path.join(m.state, "log"), encoding="utf-8") as f:
-            shows = f.read().splitlines().count("systemctl show -p ActiveState -p InvocationID bluetooth.service")
+        shows = m.read("log").splitlines().count("systemctl show -p ActiveState -p InvocationID bluetooth.service")
         self.assertEqual(shows, 30)
         # Registered: no wait beyond the first second.
         m.put("bt-journal", "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n")
