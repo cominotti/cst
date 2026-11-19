@@ -270,8 +270,9 @@ class ImageProbe:
 
 
 def of_vm(vm: str | None) -> str:
-    """' of VM' for a line about one VM's backups; "" when it names none (no name, or an empty one)."""
-    return f" of {vm}" if vm is not None and vm != "" else ""
+    """' of VM' for a line about one VM's backups; "" when it names none (parse_args gives None for an
+    empty name)."""
+    return f" of {vm}" if vm is not None else ""
 
 
 def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
@@ -735,7 +736,7 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
     a = VmArgs(
         cmd=cmd,
         sub=sub,
-        vm=vm,
+        vm=None if vm == "" else vm,  # an empty name names no VM, for every command
         full="--full" in seen,
         guest_virtio="--guest-has-virtio" in seen,
         root="--root" in seen,

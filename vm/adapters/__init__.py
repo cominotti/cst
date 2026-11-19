@@ -211,9 +211,7 @@ def conf_files(paths: VmPaths, cmd: VmCommand, nas: bool, vm: str | None) -> lis
     files = [(paths.vm_conf, False)]
     # cpu-setup.conf: VM_NAME when no VM is named, VM_CPU_DISABLE for status and tune.
     # A backup (or backup-timer) of a named VM reads neither: a line there must not stop it.
-    if cmd != VmCommand.NOCOW and not (
-        vm is not None and vm != "" and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)
-    ):
+    if cmd != VmCommand.NOCOW and not (vm is not None and cmd in (VmCommand.BACKUP, VmCommand.BACKUP_TIMER)):
         files.append((paths.cpu_conf, True))
     if nas or cmd == VmCommand.BACKUP_TIMER:
         files.append((paths.nas_conf, True))
