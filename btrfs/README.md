@@ -211,7 +211,10 @@ installer cannot list docker-gc's units.
 The launcher `~/.local/bin/btrfs-stall-report` and the link
 `~/.local/bin/cst` are created for **the user who ran `sudo`** (the script
 reads this from `sudo`). If you run `install` directly as root (not through
-`sudo`), neither is created.
+`sudo`), neither is created. The launcher is listed in that user's install
+record (`~/.local/state/cst/installed.json`, component
+`btrfs:report-launcher`), so `cst doctor` run as that user reports it
+missing or changed.
 
 At the end, `install` runs the health check once and prints its result, checks
 that the stall monitor is running (it stops with `ERROR:` if not), and prints
@@ -321,7 +324,9 @@ SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limi
   it back to 0 after it (`ExecStopPost`, which also runs when the scrub
   fails or is stopped; the kernel forgets the limit at the next mount anyway).
   With no limit there is no drop-in, and `install` removes an old one.
-  `uninstall` removes it too.
+  `uninstall` removes it too. The drop-in is listed in the install record
+  (component `btrfs:core`), so `cst doctor` reports it missing or changed;
+  its removal drops the line, also when the file was deleted by hand.
 - The value is read with the same rules as `cst doctor` reads this file: a
   plain size (digits, then K, M, G or T), as `SCRUB_LIMIT=1G`,
   `SCRUB_LIMIT='1G'` or `SCRUB_LIMIT="1G"`. Any other form, or a value
@@ -873,7 +878,8 @@ It does not ask for confirmation; it starts at once. It stops and removes:
 - the scrub's speed-limit drop-in (`btrfs-scrub-weekly.service.d/10-cst-limit.conf`,
   section 4.3); `SCRUB_LIMIT` stays in `snapshots.conf`;
 - the installed programs in `/usr/local/sbin` and `/usr/local/bin`, and the
-  `~/.local/bin/btrfs-stall-report` launcher;
+  `~/.local/bin/btrfs-stall-report` launcher (only CST's: a file there without
+  its "btrfs-setup.sh" line is kept, and dropped from the install record);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
 - the writeback file. Then it restarts `tuned` so its own values come back. If

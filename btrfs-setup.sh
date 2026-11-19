@@ -396,12 +396,14 @@ ExecStopPost=-/usr/sbin/btrfs scrub limit -a -l 0 /var
 EOF
 }
 
-# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none.
+# install_scrub_limit LIMIT: the drop-in written for a limit, removed for none
+# (listed in the install record under btrfs:core).
 install_scrub_limit() {
     if [[ -n "$1" ]]; then
-        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644
-    elif [[ -e "${SCRUB_DROPIN}" ]]; then
-        rm -fv "${SCRUB_DROPIN}"
+        scrub_limit_dropin "$1" | cst_install_text "${SCRUB_DROPIN}" 0644 root btrfs:core
+    else
+        # Through the installer, with its install record line (also when the file is gone already).
+        cst_remove_text "${SCRUB_DROPIN}"
         rmdir "$(dirname "${SCRUB_DROPIN}")" 2>/dev/null || true
     fi
 }
@@ -539,17 +541,23 @@ EOF
 }
 
 # install_report_launcher: btrfs-stall-report in the target user's ~/.local/bin,
-# for the host and toolboxes alike (no target user: none).
+# for the host and toolboxes alike (no target user: none); listed in that
+# user's install record under btrfs:report-launcher.
 install_report_launcher() {
     if [[ -n "${shim}" ]]; then
-        shim_content | cst_install_text "${shim}" 0755 "${target_user}"
+        shim_content | cst_install_text "${shim}" 0755 "${target_user}" btrfs:report-launcher
     fi
 }
 
-# remove_report_launcher: that launcher, only when this script wrote it.
+# remove_report_launcher: that launcher, with its record line, only when this
+# script wrote it; a file there without its marker is kept, and its line
+# dropped. No file: a line left over is dropped.
 remove_report_launcher() {
-    if [[ -n "${shim}" ]] && grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
-        rm -fv "${shim}"
+    [[ -n "${shim}" ]] || return 0
+    if [[ ! -e "${shim}" ]] || grep -q 'btrfs-setup.sh' "${shim}" 2>/dev/null; then
+        cst_remove_text_as "${target_user}" "${shim}"
+    else
+        cst_forget_text_as "${target_user}" "${shim}"
     fi
 }
 
@@ -1037,6 +1045,7 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
     # Every component of install is complete (the record says done; see cst doctor).
     cst_mark btrfs:core
     if (( with_below )); then cst_mark btrfs:below; fi
+    if [[ -n "${shim}" ]]; then cst_mark_as "${target_user}" btrfs:report-launcher; fi
     echo
     echo "Overview:            ${PROG} status"
     echo "Stalls (as ${target_user:-your user}, also in toolbox): btrfs-stall-report --since '5 min ago'"

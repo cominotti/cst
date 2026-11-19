@@ -97,6 +97,21 @@ cst_remove_as() {
     _cst_installer_as "${user}" remove --home "${home}" "$@"
 }
 
+# cst_remove_text_as USER DEST... / cst_forget_text_as USER DEST...: generated
+# files of USER (cst_install_text DEST MODE USER COMPONENT) removed with their
+# record lines, or only their lines dropped (the files left as they are), as USER.
+cst_remove_text_as() {
+    _cst_text_as "$1" remove-text "${@:2}"
+}
+cst_forget_text_as() {
+    _cst_text_as "$1" forget-text "${@:2}"
+}
+_cst_text_as() {
+    local home
+    home="$(_cst_user_home "$1")" || return 1
+    _cst_installer_as "$1" "$2" --home "${home}" "${@:3}"
+}
+
 # _cst_installer_text COMMAND DEST MODE [OWNER [COMPONENT]] < content: installer.py text
 # or text-plan, as OWNER unless OWNER is root (the default).
 _cst_installer_text() {

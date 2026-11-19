@@ -3466,6 +3466,80 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_119_btrfs_scrub_dropin_and_stall_report_launcher_recorded_and_removed(self) -> None:
+        """btrfs-setup.sh's install_scrub_limit, install_report_launcher and remove_report_launcher as
+        root on the container's /, the launcher written for tester through the real runuser. Over the
+        two files as the previous version wrote them (no record line), install writes nothing and
+        lists the drop-in in root's install record (btrfs:core) and the launcher in tester's
+        (btrfs:report-launcher); once marked, tester's cst doctor names the launcher in no WARN; a
+        second install changes nothing, both records included; no limit and remove_report_launcher
+        remove both files and both lines."""
+        c = self.SYSTEMD_CONTAINER
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {dropin} {shim}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("the drop-in or the launcher is there already (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {dropin} {shim}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; {installer} forget-text {dropin}; "
+            f"runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_119 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            U=/home/tester/.local/state/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(UNIT_DIR|SCRUB_SERVICE|SCRUB_DROPIN|BTRFS_CONF)=' /opt/cst-rw/btrfs-setup.sh)"
+            for f in shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content scrub_limit_dropin install_scrub_limit install_report_launcher remove_report_launcher >/dev/null
+            [[ "$SCRUB_DROPIN" == {dropin} ]]
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            # The previous version: the same files, written without a component.
+            scrub_limit_dropin 500M | cst_install_text "$SCRUB_DROPIN" 0644 >/dev/null
+            shim_content | cst_install_text "$shim" 0755 tester >/dev/null
+            if grep -qsF '"{dropin}"' "$R"; then echo "the previous version is recorded" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            out="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$out" == "unchanged: {dropin}"$'
+'"unchanged: {shim}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            grep -qF '"{dropin}"' "$R"
+            {lines} "$R" btrfs:core | grep -qF '{dropin}'
+            [[ "$(launcher_lines)" == "{shim} pending" ]]
+            cst_mark_as tester btrfs:report-launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            [[ -n "$inst" ]] || {{ echo "doctor has no install area: $doc" >&2; exit 1; }}
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor warns about the launcher" >&2; exit 1
+            fi
+            before="$(sha256sum "$R" "$U")"
+            again="$(install_scrub_limit 500M; install_report_launcher)"
+            [[ "$again" == "$out" ]] || {{ echo "a second install said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R" "$U")" == "$before" ]] || {{ echo "a second install changed a record" >&2; exit 1; }}
+            gone="$(install_scrub_limit ""; remove_report_launcher)"
+            [[ "$gone" == "removed:   {dropin}"$'
+'"removed:   {shim}" ]] || {{ echo "removal said: $gone" >&2; exit 1; }}
+            [[ ! -e {dropin} && ! -e {shim} && ! -e {dropin.rsplit("/", 1)[0]} ]]
+            if grep -qF '"{dropin}"' "$R"; then echo "root's record still lists the drop-in" >&2; exit 1; fi
+            [[ "$(launcher_lines)" == "- -" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
