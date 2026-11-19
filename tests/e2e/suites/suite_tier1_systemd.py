@@ -570,6 +570,25 @@ echo E2E-OK
 # the fake docker and systemctl of btrfs/tests/test_docker_gc_program.py and its scenario (an old image of
 # its protected registry, registry.example.com/team/db:1, and old unprotected ones), with the recorder
 # running and a fresh record: a protected image is "held back", the others are listed for removal.
+# legacy_cpu_tree: argv[2], this checkout's cst_core/domain/install.py, with the install manifest table of
+# argv[1] (the previous version's install.py) in place of its own. The previous version's whole module
+# would not import next to this checkout's cst_core (its types are not the ones record.py now uses).
+LEGACY_MANIFEST = r"""
+import sys
+Q = '"' * 3
+def table(text):
+    start = text.index("r" + Q, text.index("INSTALL_MANIFEST: ")) + 4
+    return start, text.index(Q, start)
+with open(sys.argv[1]) as f:
+    old = f.read()
+with open(sys.argv[2]) as f:
+    new = f.read()
+(a, b), (c, d) = table(old), table(new)
+with open(sys.argv[2], "w") as f:
+    f.write(new[:c] + old[a:b] + new[d:])
+"""
+
+
 GC_DRY_RUN = r"""
 import json, os, subprocess, sys, tempfile, time
 sys.path.insert(0, "/opt/cst-rw")
@@ -3907,7 +3926,8 @@ EOF
 
     def legacy_cpu_tree(self) -> str:
         """A copy of this checkout with the previous version's cpu-setup.sh, game-profile and install
-        manifest (the files the port changed that the old install reads) put back."""
+        manifest (the files the port changed that the old install reads) put back. The manifest is
+        only the table of the previous install.py, put into this checkout's (LEGACY_MANIFEST)."""
         d, src = self.LEGACY_CPU_DIR, self.LEGACY
         exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -3915,7 +3935,7 @@ EOF
             rm -rf {d} && cp -a /opt/cst-rw {d}
             install -m 0644 {src}/cpu-setup.sh@cfb496a {d}/cpu-setup.sh
             install -m 0644 {src}/game-profile@cfb496a {d}/cpu/game-profile
-            install -m 0644 {src}/install.py@cfb496a {d}/cst_core/domain/install.py
+            /usr/bin/python3 -I -c {shlex.quote(LEGACY_MANIFEST)} {src}/install.py@cfb496a {d}/cst_core/domain/install.py
             find {d} -name __pycache__ -prune -exec rm -rf {{}} +
             chmod -R a+rX {d}
             """,
