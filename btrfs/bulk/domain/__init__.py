@@ -352,9 +352,6 @@ def present[T](value: T | None, what: str) -> T:
 
 
 # ---- the journals (root-owned JSON in BulkPaths.state; read back by any later version) ----
-# The field order of these TypedDicts was chosen so that no eight lines repeat
-# another record (tests/test_duplication.py, type 2): reordering them can fail
-# that gate. JSON keys do not depend on it.
 class BulkJournalKind(StrEnum):
     """The kind of a journal: an item's copy or subvolume move, a Steam game's move."""
 
@@ -370,13 +367,13 @@ class ItemJournal(TypedDict):
     src: str
     target: str
     new: str
-    stamp2: NotRequired[int]
-    bulk_only: NotRequired[bool]
     old: str
+    link: str | None
     stamp: int
+    bulk_only: NotRequired[bool]
+    stamp2: NotRequired[int]
     conflict: NotRequired[bool]
     undo: NotRequired[bool]
-    link: str | None
     finishing: NotRequired[bool]
 
 
