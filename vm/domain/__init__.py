@@ -272,7 +272,7 @@ class ImageProbe:
 
 
 def of_vm(vm: str | None) -> str:
-    """' of VM' for a line about one VM's backups; "" for all of them (no name, or an empty one)."""
+    """' of VM' for a line about one VM's backups; "" when it names none (no name, or an empty one)."""
     return f" of {vm}" if vm is not None and vm != "" else ""
 
 
