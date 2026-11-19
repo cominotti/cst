@@ -407,9 +407,14 @@ class StatusMathTest(unittest.TestCase):
         self.assertIn("MISSING zswap shrinker_enabled       this kernel has no such parameter   (desired 1)", text)
 
     def test_no_zswap_at_all_is_one_bad_row(self) -> None:
-        rows, _ = self.zswap_rows({})
+        rows, text = self.zswap_rows({})
         self.assertEqual(
             rows, [SettingCheckRow(D.SettingState.BAD, "zswap", "not in this kernel (no /sys/module/zswap)", "")]
+        )
+        # The state word as status prints it (a member's value that changes fails here).
+        self.assertEqual(
+            [ln for ln in text.splitlines() if " zswap " in f"{ln} "],
+            ["  BAD   zswap                        not in this kernel (no /sys/module/zswap)"],
         )
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
@@ -1653,6 +1658,16 @@ class MemoryLowOverrideTest(_SwapScratch):
         rc, out, err = self._run(D.SwapCommand.APPLY, shown)
         self.assertEqual(rc, 1)
         self.assertIn("one or more settings did not apply as expected", err)
+
+    def test_without_a_running_vm_the_floor_is_not_checked(self) -> None:
+        # No memory.low in machine.slice's cgroup (no VM running): the row's state is "-".
+        os.remove(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"))
+        rc, out, _err = self._run(D.SwapCommand.STATUS, {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
+            ["  -     machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
+        )
 
     def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
         self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
