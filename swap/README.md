@@ -351,7 +351,10 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
 **files** and **runtime**: the `plan` view (section 4).
 
 **live settings vs desired**: each zswap parameter, sysctl and the VM's
-`memory.low`, live and desired.
+`memory.low`, live and desired. `-` for `machine.slice memory.low` means
+systemd reports the slice not active (no VM running): a cgroup folder left
+behind is not read as the slice's. When systemd cannot be asked, a missing
+`memory.low` means the same.
 
 **zswap pool**:
 

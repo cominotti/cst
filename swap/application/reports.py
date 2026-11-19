@@ -49,6 +49,7 @@ from swap.domain import (
     parse_tmpfiles_params,
     psi_value,
     same_param,
+    slice_not_active,
     state_note,
     zswap_summary,
 )
@@ -490,8 +491,10 @@ class SwapReports:
 
     def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
         """machine.slice's floor: "over" (and the drop-in that sets it) when systemd takes MemoryLow from a
-        drop-in after CST's; else the cgroup's memory.low against CST's value (DIFF when it differs)."""
-        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths"))
+        drop-in after CST's; else "-" when systemd says the slice is not active (a cgroup folder left
+        behind is not the slice's) or the cgroup has no memory.low; else the cgroup's memory.low against
+        CST's value (DIFF when it differs)."""
+        shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
         source = memory_low_override(effective, dropins, DROPIN_ENTRY.dest, want_low) if effective else None
@@ -500,7 +503,7 @@ class SwapReports:
                 SettingState.OVER, "machine.slice MemoryLow", human_size(effective), human(want_low)
             ), source
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
-        if live_low is None:
+        if live_low is None or slice_not_active(shown.get("ActiveState", "")):
             return SettingCheckRow(
                 SettingState.INACTIVE, "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
             ), ""

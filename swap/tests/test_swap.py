@@ -749,8 +749,8 @@ class _FakeSystemd:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
     def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
-        del props, on_host
-        return dict(self.shown) if unit == "machine.slice" else {}
+        del on_host
+        return {k: v for k, v in self.shown.items() if k in props} if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         cleaned = path.lstrip("/").replace("/", "-")
@@ -1656,7 +1656,7 @@ class MemoryLowOverrideTest(_SwapScratch):
 
     def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
         self._cgroup_low(2**30)
-        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
         rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
         self.assertEqual(rc, 0)
         self.assertIn("  DIFF    machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
@@ -1664,6 +1664,39 @@ class MemoryLowOverrideTest(_SwapScratch):
         rc, out, err = self._run(D.SwapCommand.APPLY, shown)
         self.assertEqual(rc, 1)
         self.assertIn("one or more settings did not apply as expected", err)
+
+    def test_a_slice_systemd_reports_not_active_is_not_checked_whatever_its_cgroup_folder_holds(self) -> None:
+        # A cgroup folder an inactive machine.slice left behind reads memory.low 0: not the slice's floor.
+        self._cgroup_low(0)
+        for active in ("inactive", "failed", "deactivating", "a-word-systemd-adds-later"):
+            with self.subTest(active=active):
+                shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": active}
+                for cmd in (D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+                    rc, out, err = self._run(cmd, shown)
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertEqual(
+                        [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
+                        [
+                            "  -       machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"
+                        ],
+                    )
+                    self.assertNotIn("  DIFF", out)
+
+    def test_an_active_slice_s_cgroup_is_compared(self) -> None:
+        self._cgroup_low(0)
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
+        rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF    machine.slice memory.low     0 B   (desired 48.0 GiB)\n", out)
+
+    def test_a_runtime_value_is_an_over_row_also_on_a_slice_not_active(self) -> None:
+        # The over row comes first: a stopped slice does not hide a drop-in that wins over CST's.
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        shown = {"MemoryLow": str(2**30), "DropInPaths": f"{self.CST} {self.RUNTIME}", "ActiveState": "inactive"}
+        rc, out, err = self._run(D.SwapCommand.STATUS, shown)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertNotIn("machine.slice memory.low", out)
 
     def test_without_a_running_vm_the_floor_is_not_checked(self) -> None:
         # No memory.low in machine.slice's cgroup (no VM running): the row's state is "-".
@@ -2204,7 +2237,10 @@ class SwapWiringTest(unittest.TestCase):
         runner = _ScriptedRunner({})  # never the real systemctl (nor flatpak-spawn --host from a toolbox)
         self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), runner=runner, ctx=ctx), 0)
         self.assertRegex(out.getvalue(), r"DIFF    vm\.swappiness +77 ")
-        self.assertEqual(runner.calls, [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"]])
+        self.assertEqual(
+            runner.calls,
+            [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "-p", "ActiveState", "machine.slice"]],
+        )
 
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")

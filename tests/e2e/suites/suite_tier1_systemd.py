@@ -227,8 +227,8 @@ EOF
     # Stopped while apply writes the drop-in: a daemon-reload does not put a new MemoryLow into the
     # memory.low of a slice that is already running (a start does), and apply checks memory.low.
     if [[ "$(cat "$W/orig/slice-state")" == active ]]; then systemctl stop machine.slice; fi
-    # A cgroup folder an inactive machine.slice left in the container (memory.low 0 there would be
-    # read as the slice's): removed when it is empty, as systemd removes it at a stop.
+    # A cgroup folder an inactive machine.slice left in the container: removed when it is empty, as
+    # systemd removes it at a stop, so every swap test starts from the same tree (test_88 plants one).
     if [[ -d /sys/fs/cgroup/machine.slice ]] && ! systemctl -q is-active machine.slice; then
         rmdir /sys/fs/cgroup/machine.slice || { slice_facts; exit 1; }
     fi
@@ -1301,8 +1301,16 @@ grep -qF "  write     crypttab: swap0 line" <<<"$out" || fail "crypttab row"
 grep -qF "  ok        partition 0e2e5a5a...                  /dev/e2e-swap0, $SIZE bytes as expected" <<<"$out" || fail "partition row"
 grep -qF "  later     swap0" <<<"$out" || fail "swap0 row"
 [[ "$(snap)" == "$s1" ]] || fail "plan changed something"
+# A cgroup folder of machine.slice while systemd reports the slice inactive (as one left behind; its
+# memory.low reads 0): plan and apply do not read it as the slice's floor.
+! systemctl -q is-active machine.slice || fail "machine.slice active before apply"
+mkdir /sys/fs/cgroup/machine.slice || fail "cannot plant a cgroup folder for the inactive machine.slice"
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a stale cgroup folder"
+grep -qF "  -       machine.slice memory.low     slice not active (no VM running)" <<<"$out" || fail "plan, stale cgroup folder"
+[[ "$out" != *"  DIFF    machine.slice"* ]] || fail "plan DIFF with a stale cgroup folder"
 
-# 3. apply.
+# 3. apply (the stale cgroup folder still there).
 swap_run apply
 [[ $rc == 0 ]] || fail "apply"
 grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
@@ -1326,6 +1334,7 @@ assert want <= set(rec["files"]), sorted(rec["files"])
 assert d + "50-memory-low.conf" not in rec["files"]
 assert rec["components"]["swap:core"] == "done", rec["components"]
 PY
+rmdir /sys/fs/cgroup/machine.slice || fail "the stale cgroup folder"
 
 # 4. The real systemd merges both 10- drop-ins of machine.slice, and a start puts the floor
 # into the cgroup (where the memory controller is there).

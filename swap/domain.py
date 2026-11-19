@@ -548,6 +548,25 @@ class SettingState(StrEnum):
     INACTIVE = "-"
 
 
+class SliceActiveState(StrEnum):
+    """machine.slice's ActiveState as `systemctl show` prints it (systemd's words)."""
+
+    ACTIVE = "active"
+    RELOADING = "reloading"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    ACTIVATING = "activating"
+    DEACTIVATING = "deactivating"
+    MAINTENANCE = "maintenance"
+    REFRESHING = "refreshing"
+
+
+def slice_not_active(active_state: str) -> bool:
+    """systemd says the slice is not active: an ActiveState other than "active" (any word, known or not).
+    "" (systemd gave no answer) is False: not known, so the cgroup is read as before."""
+    return bool(active_state) and enum_member(SliceActiveState, active_state) != SliceActiveState.ACTIVE
+
+
 # The width of the state column of the settings rows and of apply's verification notes under them:
 # the longest word, so every label starts in the same column.
 SETTING_STATE_WIDTH: Final = max(len(state.value) for state in SettingState)
