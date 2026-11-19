@@ -109,12 +109,22 @@ def _damaged_times(seen: Sequence[float | None], bad: Sequence[int], file_day: f
     """The time each damaged line (BAD: its index in the file) belongs to: its own (SEEN: each
     line's record time, None for a damaged line without one), else the time of the record before
     it, else of the one after it, else FILE_DAY."""
+    # One pass each way, not one per damaged line: the last record time before each line, the
+    # first one after it.
+    before: list[float | None] = []
+    last: float | None = None
+    for t in seen:
+        before.append(last)
+        last = t if t is not None else last
+    after: list[float | None] = [None] * len(seen)
+    last = None
+    for i in range(len(seen) - 1, -1, -1):
+        after[i] = last
+        last = seen[i] if seen[i] is not None else last
     out: list[float] = []
     for i in bad:
-        own = seen[i]
-        before = [t for t in seen[:i] if t is not None]
-        after = [t for t in seen[i + 1 :] if t is not None]
-        out.append(own if own is not None else before[-1] if before else after[0] if after else file_day)
+        found = next((t for t in (seen[i], before[i], after[i]) if t is not None), file_day)
+        out.append(found)
     return out
 
 
