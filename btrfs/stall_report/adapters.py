@@ -9,7 +9,6 @@ import gzip
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 import zlib
@@ -28,11 +27,17 @@ from btrfs.stall_report.domain.records import (
     record_ts,
 )
 from btrfs.stall_report.domain.window import summarise
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import DAY, MINUTE
+from cst_core.ports import CommandRunnerPort
 
 LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
+
+# The report's commands (date, docker/podman ps, below dump): stdin left to the report's own, output
+# decoded strictly (output that is not UTF-8 raises), as subprocess.run(capture_output, text) did.
+RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 
 def parse_time(s: str | None, default: float) -> float:
@@ -45,7 +50,9 @@ def parse_time(s: str | None, default: float) -> float:
         return float(s)
     except ValueError:
         pass
-    out = subprocess.run(["date", "-d", s, "+%s"], check=False, capture_output=True, text=True)
+    out = RUNNER.run(["date", "-d", s, "+%s"], stdin="inherit", decode_errors="strict")
+    if out.cause is not None:  # missing or cannot start: the error escapes, as it always did
+        raise out.cause
     if out.returncode != 0:
         sys.exit(f"cannot parse time: {s!r} ({out.stderr.strip()})")
     return float(out.stdout.strip())
@@ -224,15 +231,13 @@ def container_names() -> dict[str, str]:
     for tool, prefix in (("docker", "docker-"), ("podman", "libpod-")):
         if shutil.which(tool) is None:
             continue
-        try:
-            out = subprocess.run(
-                [tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except OSError, subprocess.TimeoutExpired:
+        out = RUNNER.run(
+            [tool, "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"],
+            timeout=5,
+            stdin="inherit",
+            decode_errors="strict",
+        )
+        if out.fault is not None:  # missing, cannot start or timed out
             continue
         for line in out.stdout.splitlines():
             cid, _, name = line.partition("\t")
@@ -267,10 +272,9 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         "--top",
         str(top),
     ]
-    try:
-        out = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=90)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return None, f"below dump failed: {e}"
+    out = RUNNER.run(cmd, timeout=90, stdin="inherit", decode_errors="strict")
+    if out.cause is not None:  # missing, cannot start or timed out
+        return None, f"below dump failed: {out.cause}"
     if out.returncode != 0:
         return None, f"below dump failed: {(out.stderr or out.stdout).strip()[:200]}"
     try:
