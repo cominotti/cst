@@ -7,13 +7,13 @@ tests replace these) and the read-only inspection of the home built on them
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import errno
 import fcntl
 import os
 import re
 import shutil
 import stat
-from collections.abc import Sequence
 import struct
 import subprocess
 import tempfile
