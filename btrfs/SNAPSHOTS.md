@@ -1589,6 +1589,17 @@ boot. Fix the line (`cst btrfs install` writes the file again), then run
 btrfs-bulk-boot.service` clears the failed mark at once; the next boot
 clears it too.
 
+**`btrfs-bulk-boot.service` failed with status 70.** The boot step hit an
+error it did not expect and stopped. As with status 78 above,
+`systemctl is-system-running` says `degraded` until the unit runs again
+without the error or `sudo systemctl reset-failed btrfs-bulk-boot.service`
+clears it. The error and its traceback are in
+`journalctl -b -u btrfs-bulk-boot`. Nothing is left half done that the move
+journals do not cover: the next run repairs an interrupted move, and the
+items keep waiting for the boot. One known cause: `BULK_USER` in
+`/etc/btrfs-setup/bulk.conf` names an account that no longer exists (a
+`KeyError` in the traceback); `cst btrfs install` writes the file again.
+
 **`bulk status` says `an interrupted move is recorded`.**
 A move was interrupted (power loss, kill). Nothing is lost. Normally the next
 boot already handled it, before the login screen (`btrfs-bulk-boot.service`

@@ -227,6 +227,10 @@ class NoUser(Exception):
 # user): EX_CONFIG of sysexits.h. It is not in the SuccessExitStatus= of btrfs-bulk-boot.service
 # (1 3 4), so the unit fails and cst doctor lists it; 1, 3 and 4 keep their meaning.
 BOOT_REFUSED_EXIT: Final = 78
+# The exit status of btrfs-bulk boot after an error it did not expect (its traceback goes to the
+# unit's journal): EX_SOFTWARE of sysexits.h, not in SuccessExitStatus= either. Python's own exit
+# status for an uncaught exception, 1, counted as success there.
+BOOT_CRASHED_EXIT: Final = 70
 
 
 KEEP_HEADER = (

@@ -59,8 +59,8 @@ Exit status of apply/boot: 0 everything in place (kept items count as in
 place), 1 something needs a look (unexpected or failed; busy ones may wait
 too), 4 only something inside ~/Bulk needs a look (the in-place NOCOW rewrite: no
 data of it in /home; busy ones may wait too), 3 only busy items wait for the boot, 2 usage error.
-Boot only: 78 bulk.conf cannot tell whose home it is (a bad line, no user), which
-fails btrfs-bulk-boot.service.
+Boot only: 78 bulk.conf cannot tell whose home it is (a bad line, no user), 70 an
+unexpected error (its traceback in the journal); both fail btrfs-bulk-boot.service.
 """
 
 import os.path as _cst_path

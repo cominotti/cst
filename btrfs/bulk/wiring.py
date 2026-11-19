@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 import os
 
-from btrfs.bulk.adapters.host import Host, Output, default_home, is_root, lookup_user, real_path
+from btrfs.bulk.adapters.host import Host, Output, default_home, error_trace, is_root, lookup_user, real_path
 from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.state import StateFiles, bulk_user
 from btrfs.bulk.adapters.user import Account, UserFiles
@@ -91,6 +91,10 @@ class Wiring:
         if not self.entry_file:
             raise RuntimeError("btrfs-bulk's entry file is not known: main() names it")
         return sibling_program("btrfs/btrfs-snapshot", self.entry_file)
+
+    def trace(self, e: Exception) -> str:
+        """e and its traceback, as Python prints an uncaught exception."""
+        return error_trace(e)
 
     def state(self) -> StateFiles:
         return StateFiles(self.paths)

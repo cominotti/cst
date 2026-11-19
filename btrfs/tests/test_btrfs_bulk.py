@@ -591,6 +591,43 @@ class BulkTest(BulkBase):
         success = set(line.removeprefix("SuccessExitStatus=").split())
         self.assertEqual(success, {"1", "3", "4"})
         self.assertNotIn(str(bulk_domain.BOOT_REFUSED_EXIT), success)
+        self.assertNotIn(str(bulk_domain.BOOT_CRASHED_EXIT), success)
+
+    def test_an_unexpected_error_at_boot_is_logged_with_its_traceback_and_fails_the_unit(self) -> None:
+        # An uncaught exception exited 1, which btrfs-bulk-boot.service counts as success.
+        with open(self.paths.flag, "w") as f:
+            f.write("apps\n")
+        sent: list[str] = []
+        self.fake(self.host, "alert", lambda title, body: sent.append(title))
+
+        def boom(*_a: object) -> object:
+            raise RuntimeError("boom")
+
+        for where in ("bulk", "apply"):
+            with self.subTest(where=where):
+                owners = [self.wiring] if where == "bulk" else [bulk_commands, bulk_cli]
+                with contextlib.ExitStack() as patches:
+                    for owner in owners:
+                        patches.enter_context(mock.patch.object(owner, where, boom))
+                    err = io.StringIO()
+                    with (
+                        contextlib.redirect_stderr(err),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        self.assertRaises(SystemExit) as cm,
+                    ):
+                        bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=self.wiring)
+                    self.assertEqual(cm.exception.code, 70)
+                    text = err.getvalue()
+                    self.assertTrue(
+                        text.startswith("btrfs-bulk boot: unexpected error, nothing more is done this boot\n"), text
+                    )
+                    self.assertIn("Traceback (most recent call last):", text)
+                    self.assertTrue(text.endswith("RuntimeError: boom\n"), text)
+                    self.assertEqual(sent, [])
+                    self.assertTrue(os.path.exists(self.paths.flag), "the items wait for the next boot")
+                    # Only boot catches: run by hand, the error propagates as before.
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "boom"):
+                        bulk_cli.main(["btrfs-bulk", "plan" if where == "bulk" else "apply"], TOOL, wiring=self.wiring)
 
     def test_the_boot_refusal_reaches_cst_doctor_without_btrfs_notify(self) -> None:
         # btrfs-notify missing (cst btrfs uninstall left snapshots in place, say): the alert of the

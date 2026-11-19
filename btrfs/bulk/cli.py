@@ -83,7 +83,7 @@ def run(w: Wiring, argv: Sequence[str]) -> int:
         case BulkCommand.STEAM:
             return steam_cmd(w, argv[2:])
         case BulkCommand.BOOT:
-            return boot_run(lambda: w.bulk(argv[2:]), w.host, lambda s: print(s, file=sys.stderr))
+            return boot_run(lambda: w.bulk(argv[2:]), w.host, lambda s: print(s, file=sys.stderr), w.trace)
         case None:
             print(USAGE, file=sys.stderr)
             return 2

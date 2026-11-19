@@ -4525,7 +4525,7 @@ print("RAN", os.geteuid(), e.get("HOME"), e.get("USER"), e.get("LOGNAME"), e.get
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77) ----------------------
+    # ---- btrfs-bulk-boot.service under the real systemd (test_76, test_77, test_122) ------------
     # The unit as the manifest installs it (copied to /etc when the container has none), running this
     # checkout's btrfs-bulk through a drop-in in /run; the settings, journals, boot flag, btrfs-notify
     # and new pending alerts are put back by the cleanup (btrfs-notify is moved aside, never removed).
@@ -4668,6 +4668,30 @@ echo E2E-OK
             self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"
         ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
+
+    def test_122_bulk_boot_failure_is_a_failed_unit_with_its_traceback(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) with a BULK_USER that names no account and the boot
+        flag: the lookup's KeyError is an error the boot step does not expect. The unit exits 70 and
+        is failed (an uncaught exception exited 1, which its SuccessExitStatus= counts as success),
+        its journal holds the traceback, the flag stays for the next boot, and no alert is kept."""
+        out = self.bulk_boot(
+            r"""
+printf 'BULK_USER=cste2ebulkgone
+' >/etc/btrfs-setup/bulk.conf
+printf 'apps
+' >/etc/btrfs-setup/bulk-at-boot
+if id cste2ebulkgone >/dev/null 2>&1; then echo "the account cste2ebulkgone exists" >&2; exit 1; fi
+boot_unit "70 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk boot: unexpected error, nothing more is done this boot"
+unit_log_has "Traceback (most recent call last):"
+unit_log_has "KeyError"
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+[ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-before")" ]   # no alert kept
+echo E2E-OK
+"""
+        )
+        self.assertIn("E2E-OK", out)
 
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this

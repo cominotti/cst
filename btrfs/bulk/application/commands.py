@@ -23,6 +23,7 @@ from btrfs.bulk.application.steam import (
     steam_target,
 )
 from btrfs.bulk.domain import (
+    BOOT_CRASHED_EXIT,
     BOOT_REFUSED_EXIT,
     BY_ID,
     MARGIN,
@@ -445,11 +446,16 @@ def boot(b: Bulk) -> int:
     return exit_status(b, deferred, problems)
 
 
-def boot_run(make: Callable[[], Bulk], host: HostPort, err: Callable[[str], None]) -> int:
+def boot_run(
+    make: Callable[[], Bulk], host: HostPort, err: Callable[[str], None], trace: Callable[[Exception], str]
+) -> int:
     """btrfs-bulk boot (btrfs-bulk-boot.service, before any login) over the Bulk make() puts
     together. When bulk.conf cannot tell whose home it is: the message to err, for a bad line
     also an alert (nobody reads the boot console; btrfs-notify keeps it for the login), and
-    BOOT_REFUSED_EXIT, which fails the unit. The flag stays: the items wait for the next boot."""
+    BOOT_REFUSED_EXIT, which fails the unit. Any other error: a line and its traceback (trace) to err, and
+    SystemExit(BOOT_CRASHED_EXIT), which ends the program and fails the unit too (an uncaught
+    exception exited 1, a success for it). The flag stays: the items wait for the next boot.
+    KeyboardInterrupt, SystemExit and the unit's SIGTERM at its timeout are not caught."""
     try:
         return boot(make())
     except BadSettings as e:
@@ -462,6 +468,9 @@ def boot_run(make: Callable[[], Bulk], host: HostPort, err: Callable[[str], None
     except NoUser as e:
         err(str(e))
         return BOOT_REFUSED_EXIT
+    except Exception as e:
+        err("btrfs-bulk boot: unexpected error, nothing more is done this boot\n" + trace(e).rstrip("\n"))
+        raise SystemExit(BOOT_CRASHED_EXIT) from e
 
 
 def keep_ids(state: BulkStatePort, cmd: str, ids: Sequence[str]) -> OSError | None:

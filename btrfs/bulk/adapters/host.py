@@ -14,6 +14,7 @@ import re
 import secrets
 import stat
 import time
+import traceback
 
 from btrfs.bulk.adapters.machine import HomeTree, kind, log, ran
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -31,6 +32,11 @@ SNAPSHOT_SEAM = "CST_SNAPSHOT_ROOT"
 def snapshot_env() -> dict[str, str]:
     """This process's environment for a btrfs-snapshot run: without its test seam."""
     return {k: v for k, v in os.environ.items() if k != SNAPSHOT_SEAM}
+
+
+def error_trace(e: BaseException) -> str:
+    """e and its traceback, as Python prints an uncaught exception (it reads the source lines)."""
+    return "".join(traceback.format_exception(e))
 
 
 def is_root() -> bool:
