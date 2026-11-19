@@ -246,7 +246,9 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
 
 
 # What sets a variable for a task: an env block (vars or files) or a uv or zizmor variable named.
-_TASK_ENV = re.compile(r"^\s*env\s*:")
+# The env key may be quoted ("env": {...}) or inside a struct on one line ({name: "native", env:
+# {...}}); a longer word that holds it (environment:, my_env:) is not one.
+_TASK_ENV = re.compile(r'(?<![\w"-])"?env"?\s*:')
 _TOOL_VARIABLE = re.compile(r"\b(?:UV|ZIZMOR)_[A-Z0-9_]*")
 
 
@@ -262,7 +264,7 @@ def _task_variables(block: str) -> list[str]:
     for line in block.splitlines():
         if line.lstrip().startswith("//"):
             continue
-        if _TASK_ENV.match(line):
+        if _TASK_ENV.search(line):
             out.append("env")
         out += _TOOL_VARIABLE.findall(line)
     return out
@@ -572,6 +574,9 @@ class WorkflowAuditTest(unittest.TestCase):
         for env, words in (
             ('\t\tenv: {vars: {ZIZMOR_OFFLINE: "0"}}\n', ["env", "ZIZMOR_OFFLINE"]),
             ('\t\tenv: {files: [".env"]}\n', ["env"]),
+            ('\t\t"env": {vars: {A: "1"}}\n', ["env"]),
+            ('\t\truntimes: [{name: "native", env: {vars: {A: "1"}}}]\n', ["env"]),
+            ('\t\tenvironment: "x"\n\t\tmy_env: "x"\n', []),
             ("\t\t// ZIZMOR_X is only a comment\n", []),
         ):
             with self.subTest(env=env):
