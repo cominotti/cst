@@ -155,7 +155,8 @@ class UserUnits:
         last run: systemd keeps the stamp of a Persistent= timer
         (~/.local/share/systemd/timers/stamp-NAME) after the timer is gone.
         `clean` needs the timer loaded and stopped, so this runs before its file
-        is removed; a failed clean only leaves that empty file behind."""
+        is removed; a failed clean leaves that file, which auto on and auto off
+        then remove themselves (AutoTimer.forget_stamp)."""
         self.before_removal(name, "disable", "--now")
         self.systemctl("clean", "--what=state", name)
 

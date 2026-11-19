@@ -837,8 +837,9 @@ cst toolchains auto off
 stops the timer and removes the program copies and the unit files. Before the
 timer file goes, it makes systemd forget the timer's last run
 (`systemctl --user clean --what=state`, which removes
-`~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer`); the same for
-the timer of the earlier `cst btrfs cargo-gc`. When the timer file is already
+`~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer`; if `clean`
+fails, `auto off` removes that stamp itself once the timer is stopped); the
+same for the timer of the earlier `cst btrfs cargo-gc`. When the timer file is already
 gone (removed by hand, or by an older `auto off`), `clean` cannot work (systemd
 needs the unit loaded): `auto off` then stops the timer if it still runs and
 removes that stamp itself (`removed:`); `auto on` and `auto off` do the same

@@ -664,6 +664,33 @@ class AutoTest(Scratch):
         )
         self.assertFalse(os.path.exists(self.unit("cst-toolchains-prune.timer")))
 
+    def test_auto_off_removes_the_stamp_that_a_failed_clean_left(self) -> None:
+        self.csts_cargo_config()
+        self.assertEqual(self.run_main("auto", "on")[0], 0)
+        stamp = self.write(".local/share/systemd/timers/stamp-cst-toolchains-prune.timer", "")
+        with self.failing("clean"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "removed:   ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer "
+            "(the last run of the timer, which `systemctl --user clean` left)",
+            out,
+        )
+        self.assertFalse(os.path.lexists(stamp))
+        # The earlier timer's stamp too, after its disable and its failed clean.
+        self.csts_cargo_config()
+        self.stale()
+        stamp = self.write(".local/share/systemd/timers/stamp-cst-cargo-build-gc.timer", "")
+        with self.failing("clean"):
+            rc, out = self.run_main("auto", "on")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "removed:   ~/.local/share/systemd/timers/stamp-cst-cargo-build-gc.timer "
+            "(the last run of the earlier `cst btrfs cargo-gc` timer, which `systemctl --user clean` left)",
+            out,
+        )
+        self.assertFalse(os.path.lexists(stamp))
+
     def test_auto_off_goes_on_when_clean_fails(self) -> None:
         self.csts_cargo_config()
         self.assertEqual(self.run_main("auto", "on")[0], 0)

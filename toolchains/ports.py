@@ -175,7 +175,8 @@ class UserUnitsPort(Protocol):
         ...
 
     def disable_timer(self, name: str) -> None:
-        """`disable --now` the timer NAME, checked, then forget its last run."""
+        """`disable --now` the timer NAME, checked, then ask the manager to forget its last run
+        (clean, not checked: the caller removes a stamp it left)."""
         ...
 
     def reload(self) -> None:
