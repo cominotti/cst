@@ -526,9 +526,14 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
     return problems
 
 
+def blank_bootstrap(source: str) -> str:
+    """source with the entry-point bootstrap (BOOTSTRAP) turned into empty lines: same line numbers."""
+    return source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)
+
+
 def cli_code_lines(source: str) -> int:
-    """Lines of a module's top-level statements, imports and the docstring left out."""
-    body = ast.parse(source).body
+    """Lines of a module's top-level statements, imports, the docstring and the bootstrap left out."""
+    body = ast.parse(blank_bootstrap(source)).body
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]
     return sum(
@@ -590,7 +595,7 @@ def hard_io_lines(source: str, rel: str, *, light_cli: bool = False) -> list[int
     `light_cli` (a light package's cli.py, see light_cli_modules) a cli.py may
     also read the environment (LIGHT_CLI_ALLOWED); its writes still count.
     """
-    blanked = source.replace(BOOTSTRAP, "\n" * BOOTSTRAP.count("\n"), 1)  # same line numbers
+    blanked = blank_bootstrap(source)
     light = light_cli and module_role(rel) == "cli"
     if module_role(rel) == "wiring":
         allowed = CLI_ALLOWED | WIRING_ALLOWED
@@ -1014,6 +1019,8 @@ class ArchitectureGateTest(unittest.TestCase):
         self.assertEqual(
             cli_code_lines('"""Doc."""\nimport os\nfrom a import (\n    b,\n)\n\n\ndef f():\n    return 1\n'), 2
         )
+        # The entry-point bootstrap is mandated text, not cli logic: it is not counted.
+        self.assertEqual(cli_code_lines('"""Doc."""\n' + BOOTSTRAP + "X = 1\n"), 1)
 
     def test_module_roles(self) -> None:
         for rel, role in (
