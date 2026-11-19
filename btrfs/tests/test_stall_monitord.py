@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fnmatch
 import json
 import os
 import queue
@@ -48,6 +49,7 @@ from btrfs.stall_monitord import domain as md_domain
 from btrfs.stall_monitord.adapters import monitor as md_monitor
 from btrfs.stall_monitord.adapters import proc as md_proc
 from cst_core.adapters.sd_notify import ServiceNotifier
+from cst_core.domain.contracts import StateFormatKey, state_format
 from tests.package_view import PackageView
 
 sys.dont_write_bytecode = True
@@ -1277,6 +1279,19 @@ class AlertHandOffTest(unittest.TestCase):
         self.assertTrue(_eventually(lambda: len(self.started) == 2))
         time.sleep(0.2)
         self.assertEqual(self.started, [list(self.ALERT_ARGV)] * 2)  # the service sends all three at its start
+
+    def test_an_alert_creates_a_missing_runtime_folder(self) -> None:
+        run_dir = os.path.join(self.run_dir, "gone")  # not made: only a run by hand with --run-dir meets this
+        mon = self.monitor(run_dir)
+        mon.alert("hung", "warn", "Task stuck", "body")
+        self.assertTrue(os.path.isdir(run_dir))
+        names = os.listdir(run_dir)
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(fnmatch.fnmatch(names[0], state_format(StateFormatKey.STALL_QUEUE).file_name), names)
+        with open(os.path.join(run_dir, names[0]), "rb") as f:
+            self.assertEqual(f.read(), md_domain.alert_text("warn", "Task stuck", "body").encode("utf-8"))
+        self.assertTrue(_eventually(lambda: self.started == [list(self.ALERT_ARGV)]), self.started)
+        self.assertFalse([ln for ln in self.lines if ln.startswith("alert hand-off failed")], self.lines)
 
     def test_without_a_runtime_folder_nothing_is_started(self) -> None:
         mon = self.monitor("")

@@ -561,7 +561,9 @@ and also warns that the installed units alert through a missing `btrfs-notify`
 bad `bulk.conf` line reaches you even after `btrfs-notify` was removed.
 
 The stall monitor cannot show alerts itself (it is sandboxed), so it leaves a
-small file in `/run/btrfs-stall-monitor` and starts `btrfs-stall-alert.service`,
+small file in `/run/btrfs-stall-monitor` (the folder is made when missing,
+which only a run by hand with `--run-dir` meets: under systemd
+`RuntimeDirectory=` makes it) and starts `btrfs-stall-alert.service`,
 which sends it. It starts that service from a helper thread: starting a program
 waits until the program is read from the disk, which during a stall can take
 minutes, and the sampling must not wait for it. Alerts that come while a start
