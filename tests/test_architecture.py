@@ -543,15 +543,31 @@ def cli_code_lines(source: str) -> int:
     )
 
 
+def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
+    """The nodes of one scope (a module or a function body); a nested function or lambda is a node
+    of it, but its body is a scope of its own."""
+    found: list[ast.AST] = []
+    todo = list(ast.iter_child_nodes(scope))
+    while todo:
+        node = todo.pop()
+        found.append(node)
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            todo.extend(ast.iter_child_nodes(node))
+    return found
+
+
 def env_write_lines(source: str, rel: str) -> list[int]:
     """Lines that change os.environ: an item set or deleted, a method of ENV_WRITERS called, or os.environ rebound.
 
-    A write through another name (`env = os.environ; env["A"] = "1"`) is not seen.
+    A write through another name bound to os.environ in the same scope (the module, or one function
+    body) counts too: `env = os.environ; env["A"] = "1"`, `e: Mapping = os.environ`,
+    `(w := os.environ).pop("B")`. Such a name counts in its whole scope, even where it was bound
+    to something else (conservative). os.environ handed to a function that writes it is not seen.
     """
     tree = ast.parse(source, filename=rel)
     bound = _bindings(tree)
 
-    def is_environ(node: ast.expr) -> bool:
+    def is_os_environ(node: ast.expr) -> bool:
         name = _dotted(node)
         if name is None:
             return False
@@ -559,20 +575,37 @@ def env_write_lines(source: str, rel: str) -> list[int]:
         return head in bound and (f"{bound[head]}.{rest}" if rest else bound[head]) == "os.environ"
 
     lines: set[int] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value)
-        ) or (isinstance(node, ast.AugAssign) and is_environ(node.target)):
-            lines.add(node.lineno)
-        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node):
-            lines.add(node.lineno)  # os.environ = ..., del os.environ
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in ENV_WRITERS
-            and is_environ(node.func.value)
-        ):
-            lines.add(node.lineno)
+    scopes = [tree, *(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda))]
+    for scope in scopes:
+        nodes = _scope_nodes(scope)
+        aliases: set[str] = set()
+        for node in nodes:
+            if isinstance(node, ast.Assign) and is_os_environ(node.value):
+                aliases |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif (
+                isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None and is_os_environ(node.value)
+            ):
+                aliases |= {node.target.id} if isinstance(node.target, ast.Name) else set()
+
+        def is_environ(node: ast.expr, aliases: set[str] = aliases) -> bool:
+            if isinstance(node, ast.NamedExpr):
+                node = node.value
+            return is_os_environ(node) or (isinstance(node, ast.Name) and node.id in aliases)
+
+        for node in nodes:
+            if (
+                isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value)
+            ) or (isinstance(node, ast.AugAssign) and is_environ(node.target)):
+                lines.add(node.lineno)
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_os_environ(node):
+                lines.add(node.lineno)  # os.environ = ..., del os.environ
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ENV_WRITERS
+                and is_environ(node.func.value)
+            ):
+                lines.add(node.lineno)
     return sorted(lines)
 
 
@@ -1147,6 +1180,16 @@ class ArchitectureGateTest(unittest.TestCase):
         )
         self.assertEqual(hard_io_lines(writes, "vm/cli.py", light_cli=True), [5, 6, 7, 8, 9, 10, 11, 12])
         self.assertEqual(env_write_lines(writes, "vm/cli.py"), [5, 6, 7, 8, 9, 12])
+        # A write through a name bound to os.environ in the same scope counts; a same-named dict
+        # of another function does not.
+        aliased = (
+            "import os\nfrom typing import Mapping\n"
+            "def main():\n    env = os.environ\n    env['A'] = '1'\n    del env['C']\n    env |= {}\n"
+            "    e: Mapping = os.environ\n    e.update({})\n    (w := os.environ).pop('B')\n"
+            "def other():\n    env = {}\n    env['A'] = 1\n    env.update({})\n"
+            "top = os.environ\ntop.setdefault('D', '')\n"
+        )
+        self.assertEqual(env_write_lines(aliased, "vm/cli.py"), [5, 6, 7, 9, 10, 16])
         rebound = "import os\ndef main():\n    os.environ = {}\n    del os.environ\n    environ = {}\n"
         self.assertEqual(
             hard_io_lines(rebound, "vm/cli.py", light_cli=True), [3, 4], "a local named environ is no write"
