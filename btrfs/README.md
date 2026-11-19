@@ -460,6 +460,8 @@ kernel shows its own state as files) and in the cgroup tree.
 - Data goes to `/var/log/btrfs-stall-monitor`, one file per day, **8 days** kept.
   Only members of the `wheel` group (the users who are allowed to use `sudo`)
   can read it, because it contains process names and kernel messages.
+  Run by hand with `--log-dir DIR`, the daemon creates a missing DIR (and its
+  missing parents) with mode 0750, as the unit's `LogsDirectoryMode=`.
 - Note on zswap numbers: daemons before version 7 read only the first 4 KiB
   of `/proc/vmstat`, so they recorded `zswpin`, `zswpout` and `zswpwb` as 0.
   The report ignores those counters in old logs: it prints `n/a (daemon < v7)`,

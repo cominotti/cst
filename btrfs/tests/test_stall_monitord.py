@@ -26,6 +26,7 @@ import queue
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -791,6 +792,35 @@ class TimedReaderTest(unittest.TestCase):
                 time.sleep(0.01)
         self.assertEqual(value, "text of b")
         self.assertEqual(reader.read("c"), "text of c")
+
+
+class PrepareLogDirTest(unittest.TestCase):
+    """prepare_log_dir: a missing log folder (a run by hand with --log-dir) is made with the unit's
+    LogsDirectoryMode= (0750), whatever the umask; one that is there is left as it is."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-stall-logdir-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def mode(self, path: str) -> int:
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def test_a_missing_folder_and_its_parents_get_0750_under_any_umask(self) -> None:
+        logs = os.path.join(self.tmp, "a", "logs")
+        old = os.umask(0)
+        self.addCleanup(os.umask, old)
+        md_proc.prepare_log_dir(logs)
+        os.umask(old)
+        self.assertEqual(oct(self.mode(logs)), "0o750")
+        self.assertEqual(oct(self.mode(os.path.join(self.tmp, "a"))), "0o750")
+
+    def test_a_folder_that_is_there_keeps_its_mode(self) -> None:
+        logs = os.path.join(self.tmp, "logs")
+        os.mkdir(logs)
+        os.chmod(logs, 0o700)
+        md_proc.prepare_log_dir(logs)
+        self.assertEqual(oct(self.mode(logs)), "0o700")
 
 
 class CmdlineReadTest(unittest.TestCase):
