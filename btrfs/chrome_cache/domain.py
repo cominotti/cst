@@ -9,6 +9,7 @@ from typing import TypedDict
 import shlex
 
 from cst_core.domain.values import GIB, MIB
+from cst_core.domain.text import enum_member
 
 APP = "com.google.Chrome"
 CACHE_DIR = "/tmp/chrome-cache"
@@ -49,7 +50,7 @@ class ChromeCacheCommand(StrEnum):
 
 def chrome_command(word: str) -> ChromeCacheCommand | None:
     """The command the word names; None for any other word."""
-    return ChromeCacheCommand(word) if word in ChromeCacheCommand else None
+    return enum_member(ChromeCacheCommand, word)
 
 
 class ChromeFlagsState(StrEnum):

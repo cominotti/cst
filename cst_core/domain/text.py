@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 import re
 import unicodedata
 from typing import Final
@@ -44,6 +45,13 @@ def read_fields(line: str, n: int) -> list[str]:
 def is_yes(answer: str) -> bool:
     """A [y/N] prompt's answer is yes: it starts with y or s (sim), any case."""
     return answer.strip().lower().startswith(("y", "s"))
+
+
+def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
+    """The member of cls whose value is word (a word from outside: argv, a file, another program's
+    answer), or None for any other word: the caller keeps its own fall-through (never cls(word),
+    which raises)."""
+    return next((m for m in cls if m == word), None)
 
 
 _KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

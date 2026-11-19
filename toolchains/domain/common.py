@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.text import enum_member, parse_shell_assignments
 from cst_core.domain.values import (
     DAY,
     HOUR,
@@ -295,7 +295,7 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
     if not args or args[0] in (ToolchainsCommand.HELP, "-h", "--help"):
         return out
     cmd, rest = args[0], args[1:]
-    command = ToolchainsCommand(cmd) if cmd in ToolchainsCommand else None
+    command = enum_member(ToolchainsCommand, cmd)
     match command:
         case ToolchainsCommand.STATUS:
             for a in rest:

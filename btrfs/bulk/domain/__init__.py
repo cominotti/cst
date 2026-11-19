@@ -17,6 +17,7 @@ import os
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
+from cst_core.domain.text import enum_member
 
 SUBVOL_CREATE = 0x5000940E  # BTRFS_IOC_SUBVOL_CREATE, struct btrfs_ioctl_vol_args
 BTRFS_MAGIC = 0x9123683E
@@ -111,7 +112,7 @@ class BulkCommand(StrEnum):
 
 def bulk_command(word: str) -> BulkCommand | None:
     """The command argv names; None for any other word (the usage, exit 2)."""
-    return next((c for c in BulkCommand if c == word), None)
+    return enum_member(BulkCommand, word)
 
 
 class LstatKind(StrEnum):

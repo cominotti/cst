@@ -12,7 +12,7 @@ import re
 from typing import Final, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
-from cst_core.domain.text import SettingsProblem, parse_shell_assignments
+from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem
 from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
@@ -379,7 +379,7 @@ def roles_state(value: str | None) -> RolesState:
 
 def parse_roles_state(word: str) -> RolesState | None:
     """The RolesState bt-helper wp-roles printed, or None for any other word."""
-    return next((state for state in RolesState if state == word), None)
+    return enum_member(RolesState, word)
 
 
 # ---- settings -------------------------------------------------------------------------------

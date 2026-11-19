@@ -9,6 +9,7 @@ import sys
 from btrfs.docker_gc import wiring
 from btrfs.docker_gc.application import DockerGc
 from btrfs.docker_gc.domain import GcCommand
+from cst_core.domain.text import enum_member
 
 USAGE = "usage: docker-gc record|run [--dry-run]|cleanup-now|status|settings [--write]"
 
@@ -23,7 +24,7 @@ def run_cli(
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else GcCommand.STATUS
     dry, write = "--dry-run" in args[1:], "--write" in args[1:]
-    known = next((c for c in GcCommand if c == cmd), None)
+    known = enum_member(GcCommand, cmd)
     if (known in (GcCommand.STATUS, GcCommand.SETTINGS) and not write) or (known == GcCommand.RUN and dry):
         # status, settings and a dry run only read: `| head` ends them quietly
         (wiring.quiet_sigpipe if restore_signals is None else restore_signals)()

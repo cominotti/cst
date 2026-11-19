@@ -16,6 +16,7 @@ from typing import Final
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.dispatch import HELP_WORDS
+from cst_core.domain.text import enum_member
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).
@@ -144,7 +145,7 @@ def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | 
     words = (word0, *rest)
     if word0 in HELP_WORDS:
         return Exit(0, out=usage)
-    cmd = next((c for c in BluetoothCommand if c == word0), None)
+    cmd = enum_member(BluetoothCommand, word0)
     if cmd is None:
         return Exit(2, err=f"Unknown command: {word0}\n{usage}")
     le_set = ""

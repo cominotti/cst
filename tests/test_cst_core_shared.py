@@ -9,6 +9,7 @@ those modules can switch to it without changing a byte.
 
 from collections.abc import Callable, Sequence
 import contextlib
+from enum import StrEnum
 import hashlib
 import io
 import os
@@ -55,6 +56,7 @@ from cst_core.domain.files import checked_path
 from cst_core.domain.install import Owner
 from cst_core.domain.text import (
     describe_problems,
+    enum_member,
     first_line,
     is_yes,
     parse_shell_assignments,
@@ -96,6 +98,17 @@ class DomainTest(unittest.TestCase):
             self.assertTrue(is_yes(answer), answer)
         for answer in ("", "n", "N", "no", " ", "x y", "não"):
             self.assertFalse(is_yes(answer), answer)
+
+    def test_enum_member_is_the_member_of_a_word_or_none(self) -> None:
+        class Word(StrEnum):
+            ONE = "one"
+            TWO_WORDS = "two-words"
+
+        self.assertIs(enum_member(Word, "one"), Word.ONE)
+        self.assertIs(enum_member(Word, "two-words"), Word.TWO_WORDS)
+        for word in ("", "ONE", "TWO_WORDS", " one", "one ", "two"):
+            with self.subTest(word=word):
+                self.assertIsNone(enum_member(Word, word))
 
     def test_read_fields_as_bash_read_assigns_them(self) -> None:
         lines = ["  a  b   c  d  ", "a", "", "\ta\tb", "a b c\t", "x  y", "a\x0bb c", " \t "]

@@ -9,6 +9,7 @@ import sys
 from btrfs.docker_volumes_nocow import wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import NocowCommand
+from cst_core.domain.text import enum_member
 
 USAGE = "usage: docker-volumes-nocow status|mark|migrate|unmark"
 
@@ -17,11 +18,11 @@ def nocow_cli(argv: Sequence[str] | None = None, *, service: DockerVolumesNocow 
     """Run docker-volumes-nocow with argv (default: this process's); its exit status."""
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else NocowCommand.STATUS
-    for known in NocowCommand:
-        if cmd == known:
-            return (wiring.build_nocow() if service is None else service).execute(known)
-    print(USAGE, file=sys.stderr)
-    return 2
+    known = enum_member(NocowCommand, cmd)
+    if known is None:
+        print(USAGE, file=sys.stderr)
+        return 2
+    return (wiring.build_nocow() if service is None else service).execute(known)
 
 
 def main() -> int:
