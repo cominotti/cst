@@ -7,7 +7,8 @@ description: A change is either a refactor (no behaviour change, proved) or a be
 # Refactor or behaviour change: one kind per change
 
 Every commit and every pull request is one of two kinds, a refactor or a
-behaviour change, unless it changes no behaviour at all (docs, below).
+behaviour change, unless it changes no behaviour at all (docs and comments,
+below).
 Say which one in the message, with its proof.
 
 ## A refactor changes no behaviour
@@ -71,8 +72,8 @@ ty setting in `pyproject.toml`) follows the same rule:
 
 ## No behaviour at all: docs
 
-A commit that changes only documents, comments, agent rules or skills says
-so in its message ("docs, no behaviour change") and needs no new test
+A commit that changes only documents, comments (a comment-only edit of a
+code file included), agent rules or skills says so in its message ("docs, no behaviour change") and needs no new test
 ([AGENTS.md, "Rules"](../../AGENTS.md#rules)); the docs gate
 (`invowk cmd test docs`) still runs. It changes no code CST installs or runs:
 a docs fix that finds a bug writes it down for a behaviour change of its own.
