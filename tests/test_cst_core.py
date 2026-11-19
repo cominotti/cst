@@ -53,7 +53,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import CommandFailed, CommandResult, UnitName
+from cst_core.ports import CommandFailed, CommandFault, CommandResult, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -400,6 +400,90 @@ class AdaptersTest(unittest.TestCase):
         local = SystemctlAdapter(Recording(CommandResult(0, "Result=success\n", "")), timeout=120)
         self.assertEqual(local.show(UnitName("a.service"), ("Result",), on_host=False), {"Result": "success"})
         self.assertEqual(seen[0][1], {"check": False, "timeout": 120, "locale_c": True, "on_host": False})
+
+    def test_systemctl_adapter_user_scope(self) -> None:
+        unit = UnitName("cst-toolchains-prune.timer")
+
+        def every_call(sysd: SystemctlAdapter) -> None:
+            sysd.start(unit)
+            sysd.stop(unit)
+            sysd.restart(unit)
+            sysd.enable(unit, now=True)
+            sysd.disable(unit, now=True)
+            sysd.clean(unit, what="state")
+            sysd.daemon_reload()
+            sysd.daemon_reload_result()
+            sysd.is_active(unit)
+            sysd.is_enabled(unit)
+            sysd.show_environment()
+            sysd.show_value(unit, "NextElapseUSecRealtime")
+            sysd.show(unit, ("Result",))
+
+        def words(head: list[str]) -> list[list[str]]:
+            return [
+                [*head, *args]
+                for args in (
+                    ["start", unit],
+                    ["stop", unit],
+                    ["restart", unit],
+                    ["enable", "--now", unit],
+                    ["disable", "--now", unit],
+                    ["clean", "--what=state", unit],
+                    ["daemon-reload"],
+                    ["daemon-reload"],
+                    ["is-active", unit],
+                    ["is-enabled", unit],
+                    ["show-environment"],
+                    ["show", "-p", "NextElapseUSecRealtime", "--value", unit],
+                    ["show", "-p", "Result", unit],
+                )
+            ]
+
+        # user: --user right after the program, on every call; nothing else changes.
+        user = FakeRunner()
+        every_call(SystemctlAdapter(user, user=True))
+        self.assertEqual(user.calls, words(["systemctl", "--user"]))
+        self.assertEqual([set(o) for o in user.options[:-1]], [{"timeout", "locale_c"}] * 12)
+        self.assertEqual(user.options[-1], {"timeout": 20, "locale_c": True, "on_host": True})
+        # on_host: every call but show through the runner's on_host; show keeps its own.
+        host = FakeRunner()
+        sysd = SystemctlAdapter(host, user=True, on_host=True)
+        every_call(sysd)
+        sysd.show(unit, ("Result",), on_host=False)
+        self.assertEqual([o.get("on_host") for o in host.options], [True] * 13 + [False])
+        # program: a stub in place of systemctl, never on the host (show neither); base_env and stdin
+        # reach every systemctl call, with the adapter's timeout and locale.
+        stub = FakeRunner()
+        env = {"PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": "/run/user/1000"}
+        stubbed = SystemctlAdapter(
+            stub, timeout=60, user=True, program="/stub/systemctl", on_host=True, base_env=env, stdin="inherit"
+        )
+        every_call(stubbed)
+        self.assertEqual(stub.calls, words(["/stub/systemctl", "--user"]))
+        scope = {"timeout": 60, "locale_c": False, "base_env": env, "stdin": "inherit"}
+        self.assertEqual(stub.options, [scope] * 12 + [{**scope, "locale_c": True, "on_host": False}])
+        # Without the scope: the runner gets exactly the options it always got.
+        plain = FakeRunner()
+        every_call(SystemctlAdapter(plain))
+        self.assertEqual(plain.calls, words(["systemctl"]))
+        self.assertEqual(plain.options, [{"timeout": None, "locale_c": False}] * 12 + [user.options[-1]])
+
+    def test_systemctl_adapter_user_scope_over_the_real_runner(self) -> None:
+        # is-active exits 3 for a unit that is not active: its state and status come back, nothing raised.
+        tmp = tempfile.mkdtemp(prefix="cst-systemctl-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "systemctl")
+        with open(stub, "w") as f:
+            f.write('#!/bin/sh\necho "$*"\nexit 3\n')
+        os.chmod(stub, 0o755)
+        sysd = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=stub, base_env={"PATH": "/usr/bin:/bin"})
+        res = sysd.is_active(UnitName("a.timer"))
+        self.assertEqual((res.returncode, res.stdout), (3, "--user is-active a.timer\n"))
+        # A program that is not there: daemon_reload_result gives the fault and its cause, no CommandFailed.
+        gone = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=os.path.join(tmp, "missing"))
+        res = gone.daemon_reload_result()
+        self.assertEqual((res.returncode, res.fault), (127, CommandFault.MISSING))
+        self.assertIsInstance(res.cause, FileNotFoundError)
 
     def test_host_execution_context_and_clock(self) -> None:
         host = HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000)
