@@ -2,7 +2,7 @@
 """The install record (cst_core/domain/record.py): its format, how InstallService
 keeps it, the JSON adapter (modes, lock, a newer or broken file) and the
 installer commands that read or change it (install, text --component, remove,
-remove-text, mark).
+remove-text, forget, forget-text, mark).
 
 Nothing here touches the machine: the service runs on an in-memory target and
 record, the adapter and the installer under temporary folders.
@@ -12,7 +12,9 @@ Run from the repository root (-B: no __pycache__ in the repository):
 """
 
 from collections.abc import Callable, Mapping, Sequence
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -25,6 +27,7 @@ from typing import override
 import unittest
 from unittest import mock
 
+from cst_core import installer
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
@@ -575,6 +578,70 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn(b"newer CST", r.stderr)
         self.assertFalse(os.path.exists(self.stage + "/usr/local/sbin/docker-gc"))
+
+    def test_forget_drops_the_record_line_and_leaves_the_file(self) -> None:
+        self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)
+        prog = self.stage + "/usr/local/sbin/docker-gc"
+        before = (Path(prog).read_bytes(), os.stat(prog).st_mode)
+        r = self.cli("forget", "btrfs/docker-gc")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
+        self.assertNotIn("/usr/local/sbin/docker-gc", self.doc().files)
+        self.assertEqual((Path(prog).read_bytes(), os.stat(prog).st_mode), before)
+        # The other files of the component stay listed, and the component pending.
+        self.assertEqual(self.doc().components, {"btrfs:docker-gc": "pending"})
+        # A second forget changes nothing, not even the record's bytes.
+        record = Path(self.record).read_bytes()
+        self.assertEqual(self.cli("forget", "btrfs/docker-gc").returncode, 0)
+        self.assertEqual(Path(self.record).read_bytes(), record)
+
+    def test_forget_of_a_component_drops_its_lines_and_its_state(self) -> None:
+        self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)
+        self.assertEqual(self.cli("mark", "--component", "btrfs:docker-gc", "done").returncode, 0)
+        self.assertEqual(self.cli("forget", "--component", "btrfs:docker-gc").returncode, 0)
+        self.assertEqual(self.doc(), EMPTY_RECORD)
+        want = [e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc"]
+        self.assertTrue(all(os.path.isfile(self.stage + d) for d in want))
+
+    def test_forget_without_a_record_writes_none(self) -> None:
+        r = self.cli("forget", "btrfs/docker-gc")
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertFalse(os.path.exists(self.record))
+
+    def test_forget_text_drops_a_generated_line_and_leaves_the_file(self) -> None:
+        dest = "/etc/systemd/system/x.service"
+        self.assertEqual(self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=b"[Unit]\n").returncode, 0)
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        self.assertIn(dest, parse_record(user_record.read_text()).files)
+        r = self.cli("forget-text", dest)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
+        self.assertEqual(parse_record(user_record.read_text()), EMPTY_RECORD)
+        self.assertEqual(Path(self.stage + dest).read_bytes(), b"[Unit]\n")
+
+    def test_forget_usage_errors(self) -> None:
+        for args in (
+            ("forget", "btrfs/docker-gc", "--component", "btrfs:docker-gc"),
+            ("forget", "--component", "btrfs:nope"),
+            ("forget",),
+            ("forget-text",),
+        ):
+            with self.subTest(args=args):
+                r = self.cli(*args)
+                self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(os.path.exists(self.record))
+
+    def test_files_of_the_user_are_not_forgotten_as_root(self) -> None:
+        # As root on the real root (no --root), a user's file is forgotten as that user, not here.
+        err = io.StringIO()
+        with (
+            mock.patch("cst_core.wiring.start_installer"),
+            mock.patch("cst_core.wiring.installer_identity", return_value=(True, "/root")),
+            mock.patch("cst_core.wiring.install_service", return_value=mock.Mock(spec=InstallService)) as service,
+            contextlib.redirect_stderr(err),
+        ):
+            rc = installer.main(["forget", "--home", "/home/u", "--component", "cpu:gamemode"])
+        self.assertEqual(rc, 1)
+        self.assertIn("files of the user are forgotten as the user, not as root", err.getvalue())
+        service.return_value.forget.assert_not_called()
 
     def test_mark_needs_a_known_component_and_the_word_done(self) -> None:
         for args in (("mark", "--component", "btrfs:nope", "done"), ("mark", "--component", "btrfs:core")):

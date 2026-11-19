@@ -871,13 +871,15 @@ stop_monitoring() {
 
 # remove_tuning_files: the tmpfiles and sysctl files of btrfs:core, with their
 # lines in the install record, also when a file is already gone (cst doctor
-# would call it missing). A reclaim file without CST's marker is kept.
+# would call it missing). A reclaim file without CST's marker is kept, and its
+# line dropped (cst doctor would call it changed).
 remove_tuning_files() {
     if grep -qs 'Managed by btrfs-setup.sh' "${RECLAIM_FILE}"; then
         cst_remove "${RECLAIM_SRC}"
         echo "Automatic reclaim stays enabled in sysfs until the next reboot."
     elif [[ -e "${RECLAIM_FILE}" ]]; then
         echo "Kept ${RECLAIM_FILE}: not created by this script."
+        cst_forget "${RECLAIM_SRC}"
     else
         cst_remove "${RECLAIM_SRC}"
     fi

@@ -202,6 +202,9 @@ written first: the units of the next one run `btrfs-notify`), `btrfs:core`
 `docker-gc enable`, `btrfs:docker-gc`. `uninstall` removes the files of the
 manifest's components, not a list of its own, and their lines in the install
 record (also of a writeback or reclaim file that was already deleted by hand).
+A reclaim file that CST did not create (no "Managed by btrfs-setup.sh" line)
+is kept, and its line is dropped from the install record, so `cst doctor` no
+longer reports it as changed.
 `docker-gc disable` stops with an error, before it disables anything, when the
 installer cannot list docker-gc's units.
 

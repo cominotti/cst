@@ -3350,6 +3350,80 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_118_btrfs_uninstall_keeps_a_reclaim_file_it_did_not_create_and_forgets_it(self) -> None:
+        """btrfs-setup.sh's remove_tuning_files as root on the container's /, with the real installer,
+        record and cst doctor: the writeback and reclaim files installed and recorded, the reclaim file
+        then rewritten by hand without CST's marker. A control first runs the function as main had it
+        (its Kept branch only said so): the file stays, its record line too, and doctor's install area
+        warns that it changed (the problem fixed). Then the script's function: the file is kept with
+        its bytes, its line is gone and doctor names it in no WARN; a second run changes nothing, the
+        record's sha256 included."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        srcs = "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in"
+        if exec_bash(c, f"for f in {reclaim} {sysctl}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a tuning file is there already (another test's)")
+        self.addCleanup(exec_bash, c, f"{installer} remove {srcs} >/dev/null; rm -f {reclaim} {sysctl}", check=False)
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_118 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            R=/var/lib/cst/installed.json
+            . /opt/cst-rw/cst-install.bash
+            eval "$(grep -E '^(SYSCTL|RECLAIM)_(FILE|SRC)=' /opt/cst-rw/btrfs-setup.sh)"
+            eval "$(sed -n '/^remove_tuning_files() {{/,/^}}/p' /opt/cst-rw/btrfs-setup.sh)"
+            declare -F remove_tuning_files >/dev/null
+            [[ "$RECLAIM_FILE" == {reclaim} && "$SYSCTL_FILE" == {sysctl} ]]
+            # As main had it: the Kept branch without the forget.
+            main_remove_tuning_files() {{
+                if grep -qs 'Managed by btrfs-setup.sh' "$RECLAIM_FILE"; then
+                    cst_remove "$RECLAIM_SRC"
+                elif [[ -e "$RECLAIM_FILE" ]]; then
+                    echo "Kept $RECLAIM_FILE: not created by this script."
+                else
+                    cst_remove "$RECLAIM_SRC"
+                fi
+                cst_remove "$SYSCTL_SRC"
+            }}
+            doctor_warns() {{
+                local doc inst
+                doc="$(env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+                inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+                # An empty record gives no install area at all: nothing to warn about.
+                grep -E '^ *WARN' <<<"$inst" | grep -F {reclaim}
+            }}
+            mine='# the owner'"'"'s own reclaim settings'
+            cst_install --set UUID=00000000-0000-0000-0000-000000000000 {srcs} >/dev/null
+            grep -qF '"{reclaim}"' "$R"
+            printf '%s
+' "$mine" >{reclaim}
+            # Control: the old function keeps the file and its line, and doctor warns.
+            out="$(main_remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            grep -qF '"{reclaim}"' "$R" || {{ echo "control: main's function dropped the line" >&2; exit 1; }}
+            doctor_warns >/dev/null || {{ echo "control: doctor does not warn about the kept file" >&2; exit 1; }}
+            # The script's function, over the same state (the writeback file installed again).
+            cst_install "$SYSCTL_SRC" >/dev/null
+            out="$(remove_tuning_files)"
+            grep -qxF "Kept {reclaim}: not created by this script." <<<"$out"
+            [[ "$(cat {reclaim})" == "$mine" ]] || {{ echo "the kept file changed" >&2; exit 1; }}
+            [[ ! -e {sysctl} ]]
+            if grep -qF '"{reclaim}"' "$R"; then echo "the kept file is still in the record" >&2; exit 1; fi
+            if doctor_warns; then echo "doctor still warns about the kept file" >&2; exit 1; fi
+            before="$(sha256sum "$R")"
+            again="$(remove_tuning_files)"
+            [[ "$again" == "Kept {reclaim}: not created by this script." ]] || {{ echo "a second run said: $again" >&2; exit 1; }}
+            [[ "$(sha256sum "$R")" == "$before" ]] || {{ echo "a second run changed the record" >&2; exit 1; }}
+            [[ "$(cat {reclaim})" == "$mine" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,

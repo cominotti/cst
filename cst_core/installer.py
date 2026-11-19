@@ -20,6 +20,10 @@ Usage:
                                           removed: per file that was there
   installer.py remove-text DEST... [--root DIR]
                                           the same for generated files
+  installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
+                                          are (a file a setup script keeps); prints nothing
+  installer.py forget-text DEST... [--root DIR]
+                                          the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
                                           component stays "pending" from a write until then)
   installer.py text-plan DEST MODE [--root DIR]
@@ -113,6 +117,8 @@ class InstallerCommand(StrEnum):
     SRCS = "srcs"
     REMOVE = "remove"
     REMOVE_TEXT = "remove-text"
+    FORGET = "forget"
+    FORGET_TEXT = "forget-text"
     MARK = "mark"
     HELP = "help"
 
@@ -247,13 +253,26 @@ def _stream(lines: Iterable[str]) -> int:
     return 0
 
 
+def _forget(service: InstallService, places: Sequence[Placement]) -> int:
+    """forget or forget-text: the record lines of these files dropped, the files left alone."""
+    for record in sorted({p.record for p in places if p.record}):
+        service.forget(record, [p.dest for p in places if p.record == record])
+    return 0
+
+
 def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[InstallEntry]) -> int:
-    """install, remove, plan or check of manifest entries."""
+    """install, remove, forget, plan or check of manifest entries."""
     req = InstallRequest(home=a.home, values=_values(a.values), root=a.root, as_root=_own()[2])
-    if a.command == InstallerCommand.REMOVE:
+    if a.command in (InstallerCommand.REMOVE, InstallerCommand.FORGET):
         if any(e.owner == Owner.USER for e in entries) and req.as_root and not req.root:
-            raise InstallRefused("files of the user are removed as the user (cst_remove_as USER), not as root")
-        return _stream(service.remove([service.placement(e, req) for e in entries]))
+            how = (
+                "removed as the user (cst_remove_as USER)"
+                if a.command == InstallerCommand.REMOVE
+                else "forgotten as the user"
+            )
+            raise InstallRefused(f"files of the user are {how}, not as root")
+        places = [service.placement(e, req) for e in entries]
+        return _forget(service, places) if a.command == InstallerCommand.FORGET else _stream(service.remove(places))
     if a.command == InstallerCommand.INSTALL:
         return _stream(service.install(entries, req))
     lines, todo = service.plan(entries, req)
@@ -270,10 +289,12 @@ def _command(service: InstallService, a: argparse.Namespace) -> int:
         return 0
     if a.command == InstallerCommand.MARK:
         return _mark(service, a)
-    if a.command == InstallerCommand.REMOVE_TEXT:
+    if a.command in (InstallerCommand.REMOVE_TEXT, InstallerCommand.FORGET_TEXT):
         if not a.args:
-            raise _UsageError("remove-text DEST...")
-        return _stream(service.remove([_text_place(d, 0, None, a, recorded=True) for d in a.args]))
+            raise _UsageError(f"{a.command} DEST...")
+        places = [_text_place(d, 0, None, a, recorded=True) for d in a.args]
+        forget = a.command == InstallerCommand.FORGET_TEXT
+        return _forget(service, places) if forget else _stream(service.remove(places))
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
     if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)

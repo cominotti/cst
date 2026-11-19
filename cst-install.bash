@@ -57,6 +57,13 @@ cst_remove_text() {
     cst_installer remove-text "$@"
 }
 
+# cst_forget (--component C | SRC...): root-owned manifest files dropped
+# from the install record, the files left as they are (one a setup script
+# keeps because it did not write it); prints nothing.
+cst_forget() {
+    cst_installer forget "$@"
+}
+
 # cst_install_as USER [--set KEY=VALUE]... SRC...: files of USER's
 # home (dest `~/...`), written by a process running as
 # USER: no root-owned folders in the home, no link followed with root rights.

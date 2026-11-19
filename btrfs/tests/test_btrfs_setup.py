@@ -16,6 +16,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import socket
@@ -712,6 +713,27 @@ class ComponentInstallTest(unittest.TestCase):
             f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
         )
         self.assertEqual(self.staged(), [])
+        self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
+
+    def test_uninstall_keeps_a_reclaim_file_it_did_not_create_and_drops_its_line(self) -> None:
+        # The reclaim file, installed (staged) and recorded, then rewritten by hand without CST's
+        # marker: remove_tuning_files keeps it as it is and drops its record line, so cst doctor
+        # stops calling it changed. The sysctl file and its line go as before.
+        sysctl = "/etc/sysctl.d/90-btrfs-writeback.conf"
+        reclaim = "/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
+        self.run_bash(
+            "cst_install --set UUID=00000000-0000-0000-0000-000000000000 "
+            "btrfs/sysctl/90-btrfs-writeback.conf btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in >/dev/null"
+        )
+        mine = b"w /sys/fs/btrfs/x/allocation/data/dynamic_reclaim - - - - 0\n"
+        Path(self.stage + reclaim).write_bytes(mine)
+        r = self.run_bash(
+            f'SYSCTL_FILE="$T/stage{sysctl}"; RECLAIM_FILE="$T/stage{reclaim}"\n'
+            f"{assignment('SYSCTL_SRC')}\n{assignment('RECLAIM_SRC')}\nremove_tuning_files"
+        )
+        self.assertIn(f"Kept {self.stage}{reclaim}: not created by this script.", r.stdout)
+        self.assertEqual(self.staged(), [reclaim])
+        self.assertEqual(Path(self.stage + reclaim).read_bytes(), mine)
         self.assertEqual((self.record()["files"], self.record()["components"]), ({}, {}))
 
     def test_a_program_that_does_not_parse_installs_nothing(self) -> None:
