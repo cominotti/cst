@@ -96,6 +96,11 @@ class GamePaths:
         """What the watchdog last said about the settings file's problem lines (once per boot)."""
         return _in(self.run, "settings-warned")
 
+    @property
+    def drift_warned(self) -> str:
+        """What the watchdog last said about drift it does not repair (once per boot)."""
+        return _in(self.run, "drift-warned")
+
 
 @dataclass(frozen=True, slots=True)
 class GameSettings:

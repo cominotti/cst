@@ -449,6 +449,8 @@ class GameProfile:
         except OSError as e:
             self.log(3, f"not switched on: could not write {p.state}: {e.strerror or e}")
             return 1
+        with contextlib.suppress(OSError):  # a new session: its drift is said again
+            os.unlink(p.drift_warned)
         try:
             with open(p.intended, "w", encoding="utf-8") as fh:
                 fh.write(intended_header())
@@ -513,7 +515,7 @@ class GameProfile:
             self.ctl("sys", "daemon-reload")
         if reload["usr"]:
             self.ctl("usr", "daemon-reload")
-        for f in (p.state, p.intended, p.manual):
+        for f in (p.state, p.intended, p.manual, p.drift_warned):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(f)
         self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
@@ -570,11 +572,15 @@ class GameProfile:
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
         a second record to game.state and make 'off' restore the profile's own value. A game.intended
-        of a newer CST is not read (its records may mean something else): said in the journal."""
+        of a newer CST is not read (its records may mean something else): said in the journal once per
+        boot (again when the text changes)."""
         text, newer = self._intended()
         if newer is not None:
-            self.log(4, f"drift not repaired: {newer}")
+            said = f"drift not repaired: {newer}"
+            self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
+        with contextlib.suppress(OSError):  # readable again: a newer one later is said again
+            os.unlink(self.paths.drift_warned)
         for d in self.drift(text):
             r = d.record
             if d.is_cgroup_file:

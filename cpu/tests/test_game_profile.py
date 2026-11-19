@@ -584,6 +584,11 @@ class GameProfileDriftTest(GameProfileCase):
 class IntendedFormatTest(GameProfileCase):
     """game.intended names its format on its first line; a newer one is left alone."""
 
+    def test_on_starts_a_session_without_the_drift_mark(self) -> None:
+        self.write(self.paths.drift_warned, "drift not repaired: x")  # left by an earlier session
+        self.run_profile("on")
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
+
     def test_on_writes_the_format_line_first(self) -> None:
         self.run_profile("on")
         first, _, rest = self.read(self.intended).partition("\n")
@@ -606,6 +611,7 @@ class IntendedFormatTest(GameProfileCase):
         why = f"{self.intended} is format 2 of the game-intended (this CST reads format 1 and older): written by a newer CST"
         self.assertEqual(out, f"<4>game-profile: drift not repaired: {why}\n")
         self.assertEqual([a for a in actions if " show -p " in a or "set-property" in a], [])
+        self.assertEqual(self.run_profile("tick")[0], "")  # said once per boot
         report, _ = self.drift_report()
         self.assertEqual(report, f"  drift: not checked ({why})\n")
         self.write(self.intended, "cst-game-intended x\nprop sys machine.slice CPUWeight 10 10\n")
@@ -615,6 +621,31 @@ class IntendedFormatTest(GameProfileCase):
         _, actions = self.run_profile("off")
         self.assertIn(f"{SYS} daemon-reload", actions)
         self.assertFalse(os.path.exists(self.intended))
+
+    def test_the_newer_format_is_said_once_per_boot_and_again_when_it_changes(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        intended = self.read(self.intended).replace("cst-game-intended 1\n", "cst-game-intended 2\n")
+        self.write(self.intended, intended)
+        said = "<4>game-profile: drift not repaired: "
+        self.assertEqual(self.run_profile("tick")[0].count(said), 1)
+        self.assertEqual(self.run_profile("tick")[0], "")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(f"{said}{self.intended} is format 3 ", self.run_profile("tick")[0])
+        self.assertEqual(self.run_profile("tick")[0], "")
+        # Readable again: a newer format later is said again.
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 1\n"))
+        self.run_profile("tick")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(said, self.run_profile("tick")[0])
+        # A new session says it again.
+        self.run_profile("off")
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.write(self.intended, intended.replace("cst-game-intended 2\n", "cst-game-intended 3\n"))
+        self.assertIn(said, self.run_profile("tick")[0])
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
 
 
 class UnreadableRecordTest(GameProfileCase):

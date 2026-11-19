@@ -4527,6 +4527,48 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_128_cpu_game_profile_drift_it_does_not_repair(self) -> None:
+        """The real game profile, on for tester: with game.intended's first line changed to a newer
+        format ("cst-game-intended 2"), the tick says "drift not repaired" once, and a second tick
+        says nothing."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-128-conf.bak ]]; then mv /tmp/e2e-128-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            touch /run/cpu-setup/manual
+            gp on
+            # A game.intended of a newer format: said once per boot.
+            sed -i '1s/.*/cst-game-intended 2/' /run/cpu-setup/game.intended
+            first=$(gp tick)
+            grep -q 'drift not repaired: /run/cpu-setup/game.intended is format 2' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            gp off
+            test ! -e /run/cpu-setup/drift-warned
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
         """The real game profile, on for tester: game.state's first record is user@UID.service's MemoryLow
         (it names the user). With a last line of game.state cut short (no newline,

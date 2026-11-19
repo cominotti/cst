@@ -842,8 +842,10 @@ Key on existence only. The contents of `game.state` (and of
 version. `game.intended` (what `on` set, for the drift repair) names its
 format on its first line (`cst-game-intended 1`; a file without it, from an
 older version, is format 0 and is read as before). A copy that finds a newer
-format there leaves the drift alone: `tick` says so in the journal,
-`state` and `cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
+format there leaves the drift alone: `tick` says so in the journal once
+per boot (again when the text changes; its mark is
+`/run/cpu-setup/drift-warned`, removed by `on` and `off`), `state` and
+`cst doctor` show "drift: not checked". To be covered all the time, not only during games, run such work in
 a slice under the toolboxes' box: `systemd-run --user --slice=user-NAME.slice`
 (7.1).
 
