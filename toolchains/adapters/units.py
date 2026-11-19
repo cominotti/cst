@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from cst_core.adapters import SystemctlAdapter
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
+from cst_core.ports import SystemctlHost
 from toolchains.domain.auto import (
     TIMER_RUNNING_STATES,
     UNIT_STOPPED_STATES,
@@ -44,7 +45,13 @@ def user_systemctl(program: str | None) -> SystemctlAdapter:
     host; None for the real systemctl. No default: every caller says which, so that no test
     reaches the real user manager by leaving it out."""
     return SystemctlAdapter(
-        RUNNER, timeout=MINUTE, user=True, program=program, on_host=True, base_env=systemctl_env(), stdin="inherit"
+        RUNNER,
+        timeout=MINUTE,
+        user=True,
+        program=program,
+        on_host=SystemctlHost.EVERY,
+        base_env=systemctl_env(),
+        stdin="inherit",
     )
 
 
