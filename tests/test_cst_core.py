@@ -1666,6 +1666,7 @@ class StateContractsTest(unittest.TestCase):
         StateFormatKey.DOCKER_GC_STATE,
         StateFormatKey.DOCKER_GC_LAST_RUN,
         StateFormatKey.VM_INDEX,
+        StateFormatKey.VM_NAS_TORN,
         StateFormatKey.INSTALL_RECORD,
         StateFormatKey.GAME_STATE,
         StateFormatKey.GAME_INTENDED,
@@ -1721,7 +1722,7 @@ class StateContractsTest(unittest.TestCase):
         from btrfs.stall_report.adapters import LOG_DIR
         from cpu.domain import GAME_STATE
         from cst_core.domain.record import ROOT_RECORD
-        from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX
+        from doctor.domain import ALERT_PENDING, GAME_INTENDED, VM_INDEX, VM_TORN
 
         self.assertEqual(GcPaths().last_used, state_format(StateFormatKey.DOCKER_GC_STATE).path)
         self.assertEqual(GcPaths().last_run, state_format(StateFormatKey.DOCKER_GC_LAST_RUN).path)
@@ -1736,6 +1737,7 @@ class StateContractsTest(unittest.TestCase):
         self.assertEqual(GAME_INTENDED, state_format(StateFormatKey.GAME_INTENDED).path)
         self.assertEqual(ALERT_PENDING, state_format(StateFormatKey.ALERT_SPOOL).folder)
         self.assertEqual(VM_INDEX, state_format(StateFormatKey.VM_INDEX).path)
+        self.assertEqual(VM_TORN, state_format(StateFormatKey.VM_NAS_TORN).path)
         self.assertEqual(ROOT_RECORD, state_format(StateFormatKey.INSTALL_RECORD).path)
 
     def test_paths_of_installed_programs_come_from_the_manifest(self) -> None:

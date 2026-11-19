@@ -5,11 +5,11 @@ the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). 
 import datetime
 import json
 from enum import StrEnum
-from typing import NotRequired, Required, TypedDict, TypeIs
+from typing import Final, NotRequired, Required, TypedDict, TypeIs
 
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
-from cst_core.domain.values import Json
+from cst_core.domain.values import MINUTE, Json
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
 DOMAIN_XML = "domain.xml"
@@ -111,6 +111,58 @@ def stored_list(data: object) -> list[object] | None:
     return items_of(backups) if isinstance(backups, list) else None
 
 
+class TornEntry(TypedDict):
+    """A restic snapshot a NAS backup made and failed to forget (vm-nas-torn.json): torn, so no backup
+    (restic could not read every file, or the VM changed while restic read it). snapshot: restic's id;
+    vm, repository and host: whose and where; timestamp: the UTC stamp of that run; why: what tore it.
+    The next NAS backup of vm forgets it before its retention would count it as a backup."""
+
+    snapshot: str
+    vm: str
+    repository: str
+    host: str
+    timestamp: str
+    why: str
+
+
+_TORN_KEYS: KeyTypes = {
+    "snapshot": (str,),
+    "vm": (str,),
+    "repository": (str,),
+    "host": (str,),
+    "timestamp": (str,),
+    "why": (str,),
+}
+
+
+def is_torn_entry(e: object) -> TypeIs[TornEntry]:
+    """An entry of the torn record this cst vm understands: every key a string, and snapshot, vm,
+    repository and host not empty. An entry that is not one is never retried or dropped: it is
+    written back as it is."""
+    return (
+        json_object(e) and has_shape(e, _TORN_KEYS, {}) and all(e[k] for k in ("snapshot", "vm", "repository", "host"))
+    )
+
+
+# Why a torn record that parses is no record (stored_torn found no "torn" list): cst vm and cst doctor.
+NO_TORN_LIST = 'no "torn" list'
+
+# How long a change of the torn record waits for another one (a NAS backup of another VM) to end.
+TORN_LOCK_TIMEOUT: Final = MINUTE
+
+
+def stored_torn(data: object) -> list[object] | None:
+    """The "torn" list of a parsed torn record, each entry as stored; None when data is not an object
+    with one (NO_TORN_LIST). cst vm and cst doctor read the record with it."""
+    torn = data.get("torn") if json_object(data) else None
+    return items_of(torn) if isinstance(torn, list) else None
+
+
+class TornRefused(Refused):
+    """The torn record cannot be used: it cannot be read as one, a newer cst vm wrote it, or its lock
+    stayed taken. A NAS backup refuses to start with it (its retention could count a torn snapshot)."""
+
+
 class CopiedFile(TypedDict):
     """A file or folder in a manifest: where it came from, what it is and its sizes; stored: where
     a local copy keeps it, relative to the backup folder (a NAS backup has none)."""
@@ -160,9 +212,11 @@ class ResticMessage(StrEnum):
 
 
 class ResticSnapshot(TypedDict):
-    """One snapshot of `restic snapshots --json` (the field the NAS prune reads)."""
+    """One snapshot of `restic snapshots --json` (the fields the NAS prune and the torn retry read;
+    tags as restic gives them, checked where they are read)."""
 
     id: str
+    tags: NotRequired[object]
 
 
 def is_restic_snapshot(value: object) -> TypeIs[ResticSnapshot]:

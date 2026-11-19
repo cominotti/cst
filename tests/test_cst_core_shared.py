@@ -37,12 +37,14 @@ from cst_core.adapters import files as core_files, nocow
 from cst_core.adapters.files import (
     CounterFile,
     FileOwner,
+    create_private,
     ensure_dir,
     is_masked_unit,
     owned_file_state_at,
     read_bytes,
     read_int,
     read_text,
+    temp_text_file,
     unit_file_state_at,
 )
 from cst_core.adapters.journal import log
@@ -469,6 +471,84 @@ class AdaptersTest(unittest.TestCase):
         os.symlink(p, self.path("link"))
         with self.assertRaises(OSError):
             nocow.inode_flags(self.path("link"))
+
+
+def _scratch_tempdir(test: unittest.TestCase) -> str:
+    """A scratch folder that tempfile uses as its temporary folder until the test ends."""
+    tmp = tempfile.mkdtemp()
+    test.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    old_tempdir = tempfile.tempdir
+    tempfile.tempdir = tmp
+    test.addCleanup(setattr, tempfile, "tempdir", old_tempdir)
+    return tmp
+
+
+class PrivateFilesTest(unittest.TestCase):
+    """create_private (a new file, 0600 from the start) and temp_text_file (a temporary file removed
+    whatever happens)."""
+
+    def test_create_private_is_0600_whatever_the_umask_and_holds_the_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "secret.xml")
+            old_umask = os.umask(0)  # 0600 comes from the open, not from the umask
+            try:
+                create_private(path, "<domain>s</domain>\n")
+            finally:
+                os.umask(old_umask)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            with open(path) as f:
+                self.assertEqual(f.read(), "<domain>s</domain>\n")
+
+    def test_create_private_refuses_an_existing_file_and_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "secret.xml")
+            with open(path, "w") as f:
+                f.write("first\n")
+            with self.assertRaises(FileExistsError):
+                create_private(path, "second\n")
+            with open(path) as f:
+                self.assertEqual(f.read(), "first\n")
+
+    def test_create_private_refuses_a_link_even_a_dangling_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "elsewhere")
+            path = os.path.join(tmp, "secret.xml")
+            os.symlink(target, path)
+            with self.assertRaises(FileExistsError):
+                create_private(path, "text\n")
+            self.assertFalse(os.path.lexists(target), "nothing is created through the link")
+
+    def test_create_private_with_no_text_makes_an_empty_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "empty")
+            create_private(path, "")
+            self.assertEqual(os.stat(path).st_size, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
+
+    def test_temp_text_file_holds_the_text_while_the_block_runs_and_is_removed_after(self) -> None:
+        tmp = _scratch_tempdir(self)
+        with temp_text_file("<domain/>\n", prefix="cst-test.", suffix=".xml") as path:
+            self.assertEqual(os.path.dirname(path), tmp)
+            name = os.path.basename(path)
+            self.assertTrue(name.startswith("cst-test.") and name.endswith(".xml"), name)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            with open(path) as f:
+                self.assertEqual(f.read(), "<domain/>\n")
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_temp_text_file_is_removed_when_the_block_raises(self) -> None:
+        tmp = _scratch_tempdir(self)
+        with self.assertRaisesRegex(RuntimeError, "boom"), temp_text_file("x", prefix="p", suffix=".s"):
+            raise RuntimeError("boom")
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_temp_text_file_is_removed_when_writing_it_fails(self) -> None:
+        tmp = _scratch_tempdir(self)
+        entered: list[str] = []
+        with self.assertRaises(UnicodeEncodeError), temp_text_file("\udc80", prefix="p", suffix=".s") as path:
+            entered.append(path)
+        self.assertEqual(entered, [], "the block does not run with a file that was not written")
+        self.assertEqual(os.listdir(tmp), [])
 
 
 class CounterFileTest(unittest.TestCase):
@@ -1255,6 +1335,50 @@ class VirshAdapterTest(unittest.TestCase):
             rec.calls[0][0],
             ["flatpak-spawn", "--host", "--env=LC_ALL=C", "virsh", "-c", "qemu:///system", "domstate", "vm1"],
         )
+
+
+class DefineFromTextTest(unittest.TestCase):
+    """core_virsh.define_from_text: the definition in a temporary .xml file while define reads it."""
+
+    def test_define_reads_the_text_from_a_temporary_xml_file_removed_after(self) -> None:
+        tmp = _scratch_tempdir(self)
+        seen: list[tuple[str, str]] = []
+
+        def define(path: str) -> int:
+            with open(path) as f:
+                seen.append((path, f.read()))
+            return 7
+
+        self.assertEqual(core_virsh.define_from_text(define, "<domain/>\n", prefix="cst-vm-tune."), 7)
+        [(path, text)] = seen
+        self.assertEqual(text, "<domain/>\n")
+        self.assertEqual(os.path.dirname(path), tmp)
+        self.assertTrue(os.path.basename(path).startswith("cst-vm-tune."), path)
+        self.assertTrue(path.endswith(".xml"), path)
+        self.assertEqual(os.listdir(tmp), [], "the temporary file is removed")
+
+    def test_the_default_prefix_is_tempfiles_own(self) -> None:
+        _scratch_tempdir(self)
+        names = core_virsh.define_from_text(os.path.basename, "<domain/>")
+        self.assertTrue(names.startswith("tmp") and names.endswith(".xml"), names)
+
+    def test_an_error_from_define_is_passed_on_and_the_file_removed(self) -> None:
+        tmp = _scratch_tempdir(self)
+
+        def define(path: str) -> None:
+            raise Refused(f"virsh define {os.path.basename(path)}: failed")
+
+        with self.assertRaisesRegex(Refused, r"virsh define tmp\w+\.xml: failed"):
+            core_virsh.define_from_text(define, "<domain/>")
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_define_is_not_called_when_writing_the_file_fails(self) -> None:
+        tmp = _scratch_tempdir(self)
+        calls: list[str] = []
+        with self.assertRaises(UnicodeEncodeError):
+            core_virsh.define_from_text(calls.append, "\udc80")
+        self.assertEqual(calls, [])
+        self.assertEqual(os.listdir(tmp), [])
 
 
 class PrintfQTest(unittest.TestCase):

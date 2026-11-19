@@ -12,11 +12,10 @@ from contextlib import contextmanager
 import os
 import socket
 import sys
-import tempfile
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.adapters.virsh import SubprocessVirshAdapter
+from cst_core.adapters.virsh import SubprocessVirshAdapter, define_from_text
 from cst_core.adapters.files import (
     read_text,
 )
@@ -54,6 +53,7 @@ from vm.domain.backup import BootedDeployment
 NAME = "cst-vm"
 
 INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
+TORN_FORMAT = state_format(StateFormatKey.VM_NAS_TORN)
 
 # The component of the files backup-timer on installs (the install record lists them under it).
 TIMER_COMPONENT = manifest_by_src()["vm/cst-vm"].component
@@ -134,13 +134,7 @@ class VmCommands:
 
     def define(self, text: str) -> tuple[int, str, str]:
         """virsh define of text, through a temporary file (removed after)."""
-        fd, tmp = tempfile.mkstemp(prefix="cst-vm-tune.", suffix=".xml")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
-            return self.virsh(("define", tmp), 60, detach=None)
-        finally:
-            os.unlink(tmp)
+        return define_from_text(lambda path: self.virsh(("define", path), 60, detach=None), text, prefix="cst-vm-tune.")
 
     def package_versions(self) -> dict[str, str]:
         return package_versions()

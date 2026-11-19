@@ -858,6 +858,48 @@ echo E2E-OK
 )
 
 
+# test_151: helpers for its bash steps, and cst vm's torn-snapshot steps (vm/application/nas.py) over the
+# real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record" and "entries"
+# write and read the torn record; "retry" (the torn snapshots of earlier runs, then the retention) and
+# "forget" (forget_torn of a snapshot, as a torn run does) run cst vm's code, with the settings, the record
+# and its lock the CST_VM_* variables name.
+VM_TORN_DRIVER = r"""
+import json, os, sys
+step = sys.argv[1]
+if step == "summary":  # restic backup --json: the snapshot's full ID
+    print([m for m in map(json.loads, sys.stdin) if m.get("message_type") == "summary"][0]["snapshot_id"])
+elif step == "ids":  # restic snapshots --json: the full IDs, sorted
+    print(" ".join(sorted(s["id"] for s in json.load(sys.stdin))))
+elif step == "record":  # argv: the record, the repository, then VM=ID per torn snapshot
+    path, repo = sys.argv[2], sys.argv[3]
+    torn = [
+        {"snapshot": snap, "vm": vm, "repository": repo, "host": "e2ehost", "timestamp": "20261101T000000Z",
+         "why": "incomplete"}
+        for vm, snap in (a.split("=", 1) for a in sys.argv[4:])
+    ]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"version": 1, "torn": torn}, f)
+elif step == "entries":  # the record at argv[2]: its version, then VM=ID per entry
+    with open(sys.argv[2]) as f:
+        doc = json.load(f)
+    print(doc["version"], *(f"{e['vm']}={e['snapshot']}" for e in doc["torn"]))
+else:
+    sys.path.insert(0, "/opt/cst-rw")
+    from vm import wiring
+    from vm.application import nas
+    vm = sys.argv[2]
+    cfg = wiring.vm_settings(os.environ)
+    p = wiring.nas_backup(cfg)
+    repo = p.settings.nas_repo()
+    if step == "retry":
+        nas.retention_after_torn(cfg, p, vm, repo)
+    else:
+        left = nas.forget_torn(cfg, p, repo, nas.torn_entry(repo, sys.argv[3], vm, "20261119T000000Z", "incomplete"))
+        print(f"forget_torn: {left}")
+"""
+
+
 # test_83, test_133, for a test that has set $w and $st: scc_setup writes the fake sccache
 # ($w/bin/sccache, its records in $SCCACHE_E2E_STATE) and a crate with six path dependencies
 # ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts;
@@ -4376,6 +4418,90 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             done
             echo E2E-OK
             """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
+        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
+        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
+        the retention would keep in place of the good backup) and one of another VM; the retry lists
+        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
+        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
+        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
+        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
+        w = "/var/tmp/e2e-vm-torn"
+        nas_dir = "/srv/backup/e2e-vm-torn"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        self.addCleanup(exec_bash, self.NAS_CONTAINER, f"rm -rf {nas_dir}", check=False)
+        pub = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+            [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519
+            cat /root/.ssh/id_ed25519.pub
+            """,
+        ).stdout.strip()
+        exec_bash(
+            self.NAS_CONTAINER,
+            f"""
+            mkdir -p /root/.ssh {nas_dir} && chmod 0700 /root/.ssh
+            grep -qxF {shlex.quote(pub)} /root/.ssh/authorized_keys 2>/dev/null ||
+                printf '%s\\n' {shlex.quote(pub)} >>/root/.ssh/authorized_keys
+            chmod 0600 /root/.ssh/authorized_keys
+            """,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_151 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/payload"
+            if ! grep -qx 'Host btrfs-setup-nas' /root/.ssh/config 2>/dev/null; then
+                printf '%s\\n' 'Host btrfs-setup-nas' '    HostName {self.NAS_CONTAINER}' '    User root' \\
+                    '    IdentityFile /root/.ssh/id_ed25519' '    StrictHostKeyChecking no' \\
+                    '    UserKnownHostsFile /dev/null' '    BatchMode yes' >>/root/.ssh/config
+                chmod 0600 /root/.ssh/config
+            fi
+            printf 'NAS_ENABLED=1\\nNAS_PATH={nas_dir}\\nNAS_RESTIC_HOST=e2ehost\\n' >"$w/nas.conf"
+            printf 'e2e-vm-torn-pass' >"$w/pw" && chmod 0600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \\
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_TORN="$w/lib/vm-nas-torn.json" CST_VM_RUN_DIR="$w/run" \\
+                CST_VM_INDEX="$w/lib/vm-backups.json" CST_VM_CONF="$w/vm.conf"
+            export RESTIC_REPOSITORY="sftp:btrfs-setup-nas:{nas_dir}" RESTIC_PASSWORD_FILE="$w/pw" \\
+                RESTIC_CACHE_DIR="$w/cache"
+            restic init -q
+            d() {{ python3 -I -B -c "$DRIVER" "$@"; }}
+            snap() {{  # a snapshot of the payload with the tags $1: its full ID (the summary's snapshot_id)
+                date +%s%N >"$w/payload/stamp"
+                restic backup --json --host e2ehost --tag "$1" "$w/payload" | d summary
+            }}
+            listed() {{ restic snapshots --json --no-lock | d ids; }}
+            good="$(snap cst-vm,vm:e2evm)"
+            torn_short="$(snap cst-vm,vm:e2evm)"
+            other="$(snap cst-vm,vm:e2eother)"
+            torn="$(snap cst-vm,vm:e2evm)"  # the newest: the retention alone would keep it, not $good
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${{torn_short:0:8}}" "e2eother=$other"
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            grep -qF "torn restic snapshot ${{torn:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${{torn_short:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            [[ "$(stat -c %a "$CST_VM_TORN")" == 644 && "$(stat -c %a "$w/run/torn-record.lock")" == 644 ]]
+            fresh="$(snap cst-vm,vm:e2evm)"
+            d forget e2evm "$fresh" >"$w/forget.out"
+            cat "$w/forget.out" >&2
+            grep -qx "forget_torn: None" "$w/forget.out"
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
         ).stdout
         self.assertIn("E2E-OK", out)
 

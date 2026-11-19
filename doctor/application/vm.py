@@ -38,9 +38,12 @@ from doctor.domain import (
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
     VM_TIMER_WANTS,
+    VM_TORN,
+    VM_TORN_FORMAT,
     WARN,
     HostPath,
     Result,
+    name_list,
     parse_offered_features_xml,
     virt_changes,
     virt_versions,
@@ -48,7 +51,7 @@ from doctor.domain import (
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from vm.domain import VmOverlayKind
-from vm.domain.backup import NO_BACKUPS_LIST, is_index_entry, stored_list
+from vm.domain.backup import NO_BACKUPS_LIST, NO_TORN_LIST, is_index_entry, is_torn_entry, stored_list, stored_torn
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -178,13 +181,16 @@ def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
     so they all judge the same contents."""
     known = facts(host)
     if known.vm_index is None:
-        known.vm_index = (_read_vm_index(host),)
+        known.vm_index = (_read_json_state(host, VM_INDEX),)
     return known.vm_index[0]
 
 
-def _read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
+def _read_json_state(host: DoctorHostPort, path: HostPath) -> tuple[object, str | None] | None:
+    """A JSON state file of cst vm read as cst vm reads it (vm.adapters.backup's load_json_file): None when
+    it is missing; (data, None) when it is JSON; (None, why) when it is there but cannot be read, or is
+    not JSON."""
     try:
-        with host.open_bytes(host.path(VM_INDEX)) as f:
+        with host.open_bytes(host.path(path)) as f:
             raw = f.read()
     except FileNotFoundError:
         return None
@@ -252,6 +258,46 @@ def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"{VM_INDEX_FORMAT.newer_text(VM_INDEX, found)}: {host.cst} vm refuses to back up or list "
             "with it; use the cst vm of that CST (its checkout: cst vm backup-timer on)",
+        )
+
+
+@check(CHECKS, "vm")
+def check_vm_nas_torn(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN while cst vm's record of torn NAS snapshots (restic snapshots a failed NAS backup recorded
+    as no backup, not forgotten as far as the record knows) names one: the next NAS backup of that VM
+    to that repository forgets it first (or drops it, when restic no longer lists it), and skips its
+    retention until then; the fix line points to the ways out by hand. WARN when the record is of a newer format or cannot be read as one: cst vm backup --nas
+    refuses to run with it. Reads the file only (no restic)."""
+    read = _read_json_state(host, VM_TORN)
+    if read is None:
+        return
+    data, why = read
+    if why is None and (found := VM_TORN_FORMAT.newer(data, "version")) is not None:
+        yield Result(
+            WARN,
+            f"{VM_TORN_FORMAT.newer_text(VM_TORN, found)}: {host.cst} vm backup --nas refuses to run with it; "
+            "use the cst vm of that CST",
+        )
+        return
+    torn = stored_torn(data) if why is None else None
+    if torn is None:
+        yield Result(
+            WARN,
+            f"{VM_TORN} cannot be read as cst vm's record of torn NAS snapshots ({why or NO_TORN_LIST}): "
+            f"{host.cst} vm backup --nas refuses to run with it; forget the snapshots it names by hand, then "
+            "move it aside",
+        )
+        return
+    named = [f"{e['vm']} {e['snapshot'][:8]} ({e['timestamp'] or '?'})" for e in torn if is_torn_entry(e)]
+    if named:
+        yield Result(
+            WARN,
+            f"{len(named)} restic snapshot(s) recorded as torn (no backup) by a failed NAS backup, in {VM_TORN}: "
+            f"{name_list(named)}; the next `{host.cst} vm backup VM --nas` to the same repository forgets them "
+            "(or drops those already forgotten) before its retention, and skips the retention until then",
+            "or by hand: restic forget ID, with the repository's variables of vm/README.md, section 10.9; for a "
+            f"VM or repository with no more NAS backups, and for an older cst-vm the weekly timer runs "
+            f"(`{host.cst} vm backup-timer on VM`), see section 10.6",
         )
 
 

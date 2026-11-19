@@ -161,6 +161,8 @@ CPU_CONF = HostPath(CPU_SETTINGS)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)
+VM_TORN_FORMAT = state_format(StateFormatKey.VM_NAS_TORN)
+VM_TORN = HostPath(VM_TORN_FORMAT.path)
 
 
 VM_CONF = HostPath("/etc/cst/vm.conf")

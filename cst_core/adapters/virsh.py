@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The libvirt adapter (VirshPort): virsh in the C locale through a CommandRunnerPort."""
 
+from collections.abc import Callable
+
+from cst_core.adapters.files import temp_text_file
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.ports import CommandResult, CommandRunnerPort, ContainerProbePort, VmName
 
@@ -62,3 +65,12 @@ class SubprocessVirshAdapter:
         args = ["dumpxml", "--inactive", domain] if inactive else ["dumpxml", domain]
         res = self.call(*args, check=False)
         return res.stdout if res.returncode == 0 else None
+
+
+def define_from_text[T](define: Callable[[str], T], xml_text: str, *, prefix: str = "tmp") -> T:
+    """define(path) with xml_text in a temporary .xml file (temp_text_file) at path, for `virsh define`,
+    which reads a definition only from a file. The file exists while define runs and is removed
+    after, whatever happens. The caller keeps its own virsh call and its own words for a failure:
+    what define returns or raises is passed on. prefix starts the file's name ("tmp", tempfile's own)."""
+    with temp_text_file(xml_text, prefix=prefix, suffix=".xml") as path:
+        return define(path)

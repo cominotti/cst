@@ -55,6 +55,7 @@ def vm_paths(env: Mapping[str, str]) -> VmPaths:
     rows = (  # (VmPaths field, its variable, the machine's path)
         ("backup_dir", "CST_VM_BACKUP_DIR", "/var/lib/libvirt/cst-backups"),
         ("index", "CST_VM_INDEX", state_format(StateFormatKey.VM_INDEX).path),
+        ("torn", "CST_VM_TORN", state_format(StateFormatKey.VM_NAS_TORN).path),
         ("swtpm_dir", "CST_VM_SWTPM_DIR", "/var/lib/libvirt/swtpm"),
         ("vm_conf", "CST_VM_CONF", "/etc/cst/vm.conf"),
         ("cpu_conf", "CST_VM_CPU_CONF", CPU_SETTINGS),
