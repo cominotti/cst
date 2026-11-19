@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import HELP_WORDS, enum_member, parse_shell_assignments
+from cst_core.domain.text import HELP_WORDS, NO_WORDS, YES_WORDS, enum_member, parse_shell_assignments
 from cst_core.domain.values import (
     DAY,
     HOUR,
@@ -117,8 +117,6 @@ def parse_size(text: str) -> int:
 
 
 # The words a yes/no setting takes (any case, blanks around ignored).
-YES_WORDS: Final = frozenset({"yes", "true", "on", "1"})
-NO_WORDS: Final = frozenset({"no", "false", "off", "0"})
 # The words that turn a rule with a duration off (parse_off_or_duration).
 OFF_WORDS: Final = frozenset({"0", "off", "no", "none"})
 

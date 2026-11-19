@@ -27,6 +27,7 @@ from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode, VirshPort
 from cst_core.domain.text import (
+    NO_WORDS,
     ShellAssignments,
     describe_problems,
     first_line,
@@ -42,7 +43,6 @@ from vm.domain import (
     VmPaths,
     DEFAULT_VM,
     KNOBS,
-    KNOB_OFF_WORDS,
     NAS_DEFAULTS,
     NOT_INSTALLED,
     URI,
@@ -345,4 +345,4 @@ class VmConfFiles:
 def knobs(paths: VmPaths) -> dict[str, bool]:
     """{knob: bool} from /etc/cst/vm.conf; a missing file or knob is yes."""
     conf = read_conf(paths.vm_conf, nas_conf=paths.nas_conf)
-    return {k: conf.get(k, "yes").strip().lower() not in KNOB_OFF_WORDS for k in KNOBS}
+    return {k: conf.get(k, "yes").strip().lower() not in NO_WORDS for k in KNOBS}

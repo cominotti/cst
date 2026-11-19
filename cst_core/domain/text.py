@@ -47,6 +47,11 @@ def is_yes(answer: str) -> bool:
     return answer.strip().lower().startswith(("y", "s"))
 
 
+# A yes/no setting's words (any case, blanks around them dropped): toolchains' settings take one of
+# each; a vm knob is off for a NO_WORDS word and on for anything else.
+YES_WORDS: Final = frozenset({"yes", "true", "on", "1"})
+NO_WORDS: Final = frozenset({"no", "false", "off", "0"})
+
 # The words that ask a command for its help (cst and every module).
 HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
 

@@ -35,7 +35,6 @@ FULL_MARGIN = (GIB, 0.05)  # free space kept on top of a --full copy: 1 GiB or 5
 
 KNOBS = ("VM_NOCOW", "VM_TUNE_DISK_BUS", "VM_TUNE_DISK_DRIVER", "VM_TUNE_NIC")
 
-KNOB_OFF_WORDS = ("no", "0", "false", "off")  # a knob set to one of these (any case) is off; anything else is yes
 
 USER_IMAGES = (
     (".local/share/libvirt/images", "libvirt qemu:///session: virt-manager, virsh as your user"),
