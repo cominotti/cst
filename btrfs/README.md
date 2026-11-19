@@ -552,7 +552,8 @@ through one `cst_core` adapter (the health check runs `btrfs-notify` itself:
 without it, its alert reaches only the journal). When `btrfs-notify` is not installed, does not answer
 within 60 s, or could neither show nor keep the alert, the adapter writes a
 journal line ("alert not delivered (...)"; when `btrfs-notify` ran and failed,
-the reason ends with its last error line) and keeps the alert itself in
+the reason ends with the last error line of a command it ran, such as
+`install` or `mktemp`, not its own remarks) and keeps the alert itself in
 `/var/lib/cst-alerts/pending/`, in the same format and under the same lock as
 `btrfs-notify`. `cst doctor` then lists it as an alert you have not seen yet,
 and also warns that the installed units alert through a missing `btrfs-notify`

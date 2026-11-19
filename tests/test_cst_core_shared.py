@@ -1790,13 +1790,23 @@ class NotifierTest(unittest.TestCase):
 
     def test_the_journal_line_names_btrfs_notify_s_last_error_line(self) -> None:
         # Only "exited 1" reached the journal: why btrfs-notify failed (its stderr) was dropped.
-        error = "btrfs-notify: cannot write /var/lib/cst-alerts/pending: Read-only file system"
+        # Then its own closing remark was quoted instead of the cause: it always comes last.
+        echo = "<4>btrfs-bulk: Disk: problem: the body\nline 2\n"
+        remark = (
+            "<3>btrfs-notify: could not keep the alert for the next login (/var/lib/cst-alerts/pending); "
+            "it is only in this journal\n"
+        )
+        error = "mktemp: failed to create file via template '/var/lib/cst-alerts/pending/.tmp.XXXXXX': Read-only"
+        usage = "usage: btrfs-notify [-u critical|normal] [-a APP] TITLE BODY | --queue DIR | --prune"
         long_line = "e" * 300
         for stderr, why in (
-            (f"warning\n{error}\n\n", f"/x/btrfs-notify exited 1: {error}"),
+            (f"{echo}{error}\n{remark}", f"/x/btrfs-notify exited 1: {error}"),
+            (f"{echo}install: a\ninstall: b\n\n{remark}", "/x/btrfs-notify exited 1: install: b"),
+            (f"{echo}{remark}", "/x/btrfs-notify exited 1"),  # its lock never came: no cause printed
+            (f"{usage}\n", f"/x/btrfs-notify exited 1: {usage}"),
             ("", "/x/btrfs-notify exited 1"),
             (" \n\n", "/x/btrfs-notify exited 1"),
-            (f"{long_line}\n", "/x/btrfs-notify exited 1: " + "e" * 200),
+            (f"{echo}{long_line}\n{remark}", "/x/btrfs-notify exited 1: " + "e" * 200),
         ):
             with self.subTest(stderr=stderr[:40]):
                 self.lines.clear()
@@ -1918,6 +1928,37 @@ class NotifierTest(unittest.TestCase):
         )
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
+
+    def test_the_journal_line_quotes_the_cause_btrfs_notify_printed(self) -> None:
+        """btrfs-notify itself (no desktop session, an alerts folder it cannot create): its stderr ends
+        with its own remark that the alert is only in the journal; the journal line quotes the cause
+        before it instead, and the alert is kept here."""
+        alert = ("Disk: problem", "the body\nline 2")  # the title and body send() passes
+        alerts = os.path.join(self.tmp, "not-a-folder")
+        with open(alerts, "w"):
+            pass
+        run_user = os.path.join(self.tmp, "run-user")
+        os.mkdir(run_user)
+        env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8", "CST_ALERTS_DIR": alerts, "CST_RUN_USER": run_user}
+        done = subprocess.run(
+            ["bash", os.path.join(REPO, "btrfs", "btrfs-notify"), *("-u", "critical", "-a", "btrfs-bulk"), *alert],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("<3>btrfs-notify: could not keep the alert", done.stderr.splitlines()[-1])
+        outcome, _ = self.send(core_ports.CommandResult(1, "", done.stderr))
+        self.assertEqual(outcome, "kept")
+        [(prio, line)] = self.lines
+        self.assertEqual(prio, 3)
+        self.assertRegex(
+            line,
+            r"^alert not delivered \(/x/btrfs-notify exited 1: install: cannot create directory .*not-a-folder.*: "
+            r"Not a directory\): Disk: problem; kept in ",
+        )
 
 
 class _FailingSocket:
