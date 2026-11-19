@@ -54,6 +54,7 @@ from swap.domain import (
     zswap_summary,
 )
 from swap.presenter import (
+    RunCommand,
     render_apply,
     render_debug,
     render_plan,
@@ -1603,7 +1604,7 @@ class MemoryLowOverrideTest(_SwapScratch):
         with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
             f.write(f"{value}\n")
 
-    def _run(self, cmd: D.SwapCommand, shown: Mapping[str, str]) -> tuple[int, str, str]:
+    def _run(self, cmd: RunCommand, shown: Mapping[str, str]) -> tuple[int, str, str]:
         fs = self._fs(mapper_present=True)
         service = SwapApplicationService(
             self.env,

@@ -4,7 +4,7 @@
 from collections.abc import Mapping, Sequence
 import posixpath
 import sys
-from typing import TextIO
+from typing import Literal, TextIO, assert_never
 
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.values import format_bytes_human as human
@@ -264,16 +264,24 @@ def render_apply(
     return result.returncode
 
 
-def run_command(cmd: SwapCommand, service: SwapApplicationService, *, hint: str, out: TextIO, err: TextIO) -> int:
+# The commands run_command runs (help is answered by the command line, before any of them).
+type RunCommand = Literal[SwapCommand.PLAN, SwapCommand.STATUS, SwapCommand.APPLY]
+
+
+def run_command(cmd: RunCommand, service: SwapApplicationService, *, hint: str, out: TextIO, err: TextIO) -> int:
     """plan, status or apply. apply prints each step as it runs; a failing command stops it with
     that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
     try:
-        if cmd == SwapCommand.PLAN:
-            return render_plan(service.plan_report(), out=out)
-        if cmd == SwapCommand.STATUS:
-            return render_status(service.status_report(hint=hint, include_config=True), out=out)
-        result = service.apply_changes(emit=lambda ev: print_event(ev, out, err))
-        return shell_exit_status(render_apply(result, out=out, err=err, events_shown=True))
+        match cmd:
+            case SwapCommand.PLAN:
+                return render_plan(service.plan_report(), out=out)
+            case SwapCommand.STATUS:
+                return render_status(service.status_report(hint=hint, include_config=True), out=out)
+            case SwapCommand.APPLY:
+                result = service.apply_changes(emit=lambda ev: print_event(ev, out, err))
+                return shell_exit_status(render_apply(result, out=out, err=err, events_shown=True))
+            case _:
+                assert_never(cmd)
     except CommandFailed as exc:
         for text, stream in ((exc.stdout, out), (exc.stderr, err)):
             if text:
