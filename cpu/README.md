@@ -1305,7 +1305,9 @@ cst cpu experiment off wsf-300
 ```
 
 - `on` saves the old value to `/run/cpu-setup/exp-<name>` (only the first
-  time), then writes the new one.
+  time), then writes the new one. When the old value cannot be read, `on`
+  stops with `sed: can't read FILE: REASON` (exit 2) and saves nothing, so
+  `off` then says `not on` instead of writing an empty value.
 - `off` writes the saved value back. A **reboot** also reverts everything.
 - `uninstall` does **not** switch experiments off. Use `off` or reboot.
 

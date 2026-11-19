@@ -831,6 +831,18 @@ class ExperimentTest(CpuSetupCase):
         self.assertEqual(self.read(f"{t}/sys/defrag"), "madvise\n")
         self.assertEqual(self.command("experiment", "off", "thp-defer"), (0, "thp-defer: not on\n", ""))
 
+    def test_a_value_that_cannot_be_read_saves_nothing(self) -> None:
+        # The knob's file cannot be read (a folder: open fails for any user, root too): on stops before
+        # it saves anything, so off has nothing to put back and writes nothing into the knob.
+        knob = f"{self.tmp}/sys/defrag"
+        os.remove(knob)
+        os.makedirs(knob)
+        rc, out, err = self.command("experiment", "on", "thp-defer")
+        self.assertEqual((rc, out, err), (2, "", f"sed: can't read {knob}: Is a directory\n"))
+        self.assertFalse(os.path.exists(self.paths.saved("thp-defer")))
+        self.assertEqual(self.command("experiment", "off", "thp-defer"), (0, "thp-defer: not on\n", ""))
+        self.assertEqual(os.listdir(knob), [])
+
     def test_usage_and_unknown_names(self) -> None:
         self.assertEqual(self.command("experiment", "bogus"), (2, "", "experiment: list|on NAME|off NAME\n"))
         self.assertEqual(

@@ -543,13 +543,14 @@ class CpuSetup:
         return 0
 
     def _save_choice(self, file: str, saved: str) -> None:
-        """The value an experiment replaces, for 'off' (sysfs THP shows "[current]" among the choices)."""
-        with open(saved, "w", encoding="utf-8") as out:
-            try:
-                with open(file, encoding="utf-8", errors="replace") as fh:
-                    out.write(current_choice(fh.read()))
-            except OSError as e:
-                raise Halt(2, f"sed: can't read {file}: {e.strerror}") from None
+        """The value an experiment replaces, for 'off' (sysfs THP shows "[current]" among the choices).
+        Read first: a value that cannot be read saves nothing (off then has nothing to put back)."""
+        try:
+            with open(file, encoding="utf-8", errors="replace") as fh:
+                value = current_choice(fh.read())
+        except OSError as e:
+            raise Halt(2, f"sed: can't read {file}: {e.strerror}") from None
+        write_atomic(saved, value, mode="umask", durable=False, relabel=False)
 
     # ---- game, vm-pin -----------------------------------------------------------------------------
     def game(self, args: Sequence[str]) -> int:
