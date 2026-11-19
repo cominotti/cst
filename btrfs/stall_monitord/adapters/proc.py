@@ -220,6 +220,11 @@ class TimedReader:
 
 
 def short_cgroup(pid: str | int) -> str:
+    """The name of the task's cgroup as an event line shows it (the last part of its cgroup v2
+    path, a docker or podman scope cut to its id's first 12 characters); "?" when unreadable. A
+    character that is not printable (a carriage return, an escape) is written as its Python
+    escape (\\r, \\x1b): a cgroup's name may hold any character but "/" and a newline, and the
+    name goes into the event text, the alert and the report's lines."""
     text = read_text(f"/proc/{pid}/cgroup")
     if text is None or text == "":
         return "?"
@@ -227,8 +232,13 @@ def short_cgroup(pid: str | int) -> str:
     leaf = path.rstrip("/").rsplit("/", 1)[-1] or "/"
     if leaf.startswith(("docker-", "libpod-")) and leaf.endswith(".scope"):
         kind, _, rest = leaf.partition("-")
-        return f"{kind}-{rest[:12]}"
-    return leaf[:60]
+        return _printable_name(f"{kind}-{rest[:12]}")
+    return _printable_name(leaf[:60])
+
+
+def _printable_name(name: str) -> str:
+    """NAME with each character that is not printable written as its Python escape."""
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in name)
 
 
 def run_slices(pid: str | int, tid: str | int) -> int | None:

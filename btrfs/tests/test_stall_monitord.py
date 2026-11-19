@@ -449,7 +449,15 @@ class ShortCgroupTest(unittest.TestCase):
             with open(path, "wb") as f:
                 f.write(b"0::/user.slice/a\rb.scope\n")
             with mock.patch.object(md_proc, "read_text", lambda _path: real(path)):
-                self.assertEqual(md_proc.short_cgroup(4242), "a\rb.scope")
+                self.assertEqual(md_proc.short_cgroup(4242), "a\\rb.scope")  # kept, and shown escaped
+
+    def test_a_character_that_is_not_printable_is_shown_escaped(self) -> None:
+        # A cgroup's name may hold a carriage return or an escape; written as it is into the event
+        # text, it would move the cursor of the terminal that shows the report.
+        self.assertEqual(self.short("0::/user.slice/a\rFAKE TEXT\n"), "a\\rFAKE TEXT")
+        self.assertEqual(self.short("0::/user.slice/\x1b[2Jx.scope\n"), "\\x1b[2Jx.scope")
+        self.assertEqual(self.short("0::/system.slice/docker-\x07bcdef0123456789.scope\n"), "docker-\\x07bcdef012345")
+        self.assertEqual(self.short("0::/user.slice/caf\u00e9 x.scope\n"), "caf\u00e9 x.scope")  # printable: kept
 
     def test_unreadable_empty_or_without_a_0_line(self) -> None:
         self.assertEqual(self.short(None), "?")
