@@ -634,6 +634,17 @@ class LiveBackupTest(Nas):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
 
+    def test_a_nas_entry_without_its_snapshot_is_kept_and_does_not_stop_the_prune(self) -> None:
+        # It passed the reader (it has a path) and the prune read its snapshot: a KeyError after the backup.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        odd = {"vm": "win", "mode": "nas", "path": "/p", "repository": "sftp:btrfs-setup-nas:/volume1/restic"}
+        with open(self.index, "w") as f:
+            json.dump({"backups": [odd]}, f)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.index_entries()[-1], odd)
+        self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID)
+
     def test_an_index_of_a_newer_cst_vm_stops_the_nas_backup_before_restic(self) -> None:
         os.makedirs(os.path.dirname(self.index), exist_ok=True)
         with open(self.index, "w") as f:

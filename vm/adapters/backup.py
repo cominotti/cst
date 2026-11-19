@@ -19,12 +19,13 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import items_of, json_object, parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
-from vm.domain.backup import DOMAIN_XML, MANIFEST_JSON, Fingerprint, IndexEntry, Stop
+from vm.domain.backup import DOMAIN_XML, MANIFEST_JSON, Fingerprint, IndexEntry, Stop, is_index_entry
 
 
 def qcow2_backing_file(path: str) -> bool:
@@ -77,36 +78,58 @@ def tree_sizes(path: str) -> tuple[int, int]:
     return st.st_blocks * 512, st.st_size
 
 
-def read_index(cfg: VmSettings) -> list[IndexEntry]:
-    """The backups in the index ([] when there is none or it cannot be read). Refused for an index of a
-    newer cst vm ("version" above INDEX_FORMAT's): listing it could mislead, and writing it back would
-    lose what this one does not know. The index is cfg.paths.index."""
+def stored_backups(cfg: VmSettings) -> list[object]:
+    """The "backups" list of the index as stored ([] when there is no index). Refused, naming the file,
+    when the index is there but cannot be read as one (an error other than a missing file, not JSON,
+    not an object with a "backups" list): reading it as empty would let the next backup write an index
+    without every older entry. Refused for an index of a newer cst vm ("version" above INDEX_FORMAT's):
+    listing it could mislead, and writing it back would lose what this one does not know. The index is
+    cfg.paths.index."""
     path = cfg.paths.index
     try:
         with open(path) as f:
-            data = json.load(f)
-    except OSError, ValueError:
+            text = f.read()
+    except FileNotFoundError:
         return []
+    except OSError as e:
+        raise _unreadable(path, e.strerror or str(e)) from None
+    try:
+        data = parse_json(text)
+    except ValueError, RecursionError:
+        raise _unreadable(path, "not JSON") from None
     if (found := INDEX_FORMAT.newer(data, "version")) is not None:
         raise Refused(
             f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
             f"with it; use the cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)"
         )
-    entries = data.get("backups") if isinstance(data, dict) else None
-    return [
-        e
-        for e in entries or []
-        if isinstance(e, dict) and e.get("vm") and (e.get("path") or (e.get("mode") == "nas" and e.get("snapshot")))
-    ]
+    backups = data.get("backups") if json_object(data) else None
+    if not isinstance(backups, list):
+        raise _unreadable(path, 'no "backups" list')
+    return items_of(backups)
 
 
-def write_index(entries: Sequence[IndexEntry], path: str) -> None:
-    """Atomically (temporary file + rename), mode 0644, folder 0755; durable
-    (the file and the folder fsynced): a lost index hides a finished backup."""
+def _unreadable(path: str, why: str) -> Refused:
+    return Refused(
+        f"{path} cannot be read as cst vm's backup index ({why}): left as it is, and nothing is backed up "
+        f"or listed with it; move it aside (mv {path} {path}.bad) to start a new index"
+    )
+
+
+def read_index(cfg: VmSettings) -> list[IndexEntry]:
+    """The backups in the index that this cst vm understands (is_index_entry); [] when there is no
+    index. Refused as stored_backups is."""
+    return [e for e in stored_backups(cfg) if is_index_entry(e)]
+
+
+def write_index(entries: Sequence[IndexEntry], path: str, carried: Sequence[object] = ()) -> None:
+    """ENTRIES, then CARRIED (the stored entries this cst vm does not understand, kept as they are),
+    atomically (temporary file + rename), mode 0644, folder 0755; durable (the file and the folder
+    fsynced): a lost index hides a finished backup."""
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     os.chmod(d, 0o755)
-    text = json.dumps({"version": INDEX_FORMAT.version, "backups": list(entries)}, indent=2, sort_keys=True) + "\n"
+    doc = {"version": INDEX_FORMAT.version, "backups": [*entries, *carried]}
+    text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     write_atomic(path, text, mode=0o644, relabel=False)
 
 
@@ -236,7 +259,10 @@ class BackupFiles(LocalFileSystemAdapter):
         return read_index(self.cfg)
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
-        write_index(entries, self.cfg.paths.index)
+        # Read again (the caller holds the VM's lock, as when it read): the entries this cst vm does
+        # not understand were never shown to the caller, so none of them is dropped.
+        carried = [e for e in stored_backups(self.cfg) if not is_index_entry(e)]
+        write_index(entries, self.cfg.paths.index, carried)
 
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
@@ -387,7 +413,7 @@ def describe_entry(e: IndexEntry) -> str:
     if e.get("mode") == "nas":
         keep = f", kept: {e['keep']}" if e.get("keep") else ""
         return (
-            f"{e['vm']:<16} {e['timestamp']}  nas      deployment {dep.get('version') or '?'}"
+            f"{e['vm']:<16} {e.get('timestamp') or '?'}  nas      deployment {dep.get('version') or '?'}"
             f"  {qemu}  restic {str(e.get('snapshot'))[:8]} ({e.get('consistency') or '?'}{keep})"
         )
     gone = ""
@@ -398,7 +424,7 @@ def describe_entry(e: IndexEntry) -> str:
     except OSError:
         pass  # not visible to this user (the folders are root's, 0700)
     return (
-        f"{e['vm']:<16} {e['timestamp']}  {e.get('mode', '?'):<7}  deployment {dep.get('version') or '?'}"
+        f"{e['vm']:<16} {e.get('timestamp') or '?'}  {e.get('mode', '?'):<7}  deployment {dep.get('version') or '?'}"
         f"  {qemu}  {e['path']}{gone}"
     )
 

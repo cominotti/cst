@@ -537,6 +537,57 @@ class BackupTest(Scratch):
         with open(self.index) as f:
             self.assertEqual(f.read(), text)
 
+    def test_a_damaged_index_stops_backup_and_list_and_is_left_as_it_is(self) -> None:
+        # Read as empty, the next backup wrote an index with only itself: every older entry lost.
+        os.makedirs(os.path.dirname(self.index))
+        for text, why in (
+            ("{", "not JSON"),
+            ("[]", 'no "backups" list'),
+            ('{"backups": {}}', 'no "backups" list'),
+            ("{}", 'no "backups" list'),
+        ):
+            with open(self.index, "w") as f:
+                f.write(text)
+            for args in (("backup", "win"), ("list",), ("status", "win")):
+                with self.subTest(text=text, args=args):
+                    r = self.run_tool(*args)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(
+                        f"cst vm: {self.index} cannot be read as cst vm's backup index ({why}): left as it is, "
+                        f"and nothing is backed up or listed with it; move it aside (mv {self.index} {self.index}.bad)",
+                        r.stderr,
+                    )
+            with open(self.index) as f:
+                self.assertEqual(f.read(), text)
+        self.assertEqual([c for c in self.calls() if c.startswith("cp ")], [])
+        self.assertFalse(os.path.exists(self.backups) and os.listdir(self.backups))
+
+    def test_entries_this_cst_vm_does_not_understand_are_kept_as_they_are(self) -> None:
+        # A hand edit or another tool: never listed, pruned or dropped; written back after the others.
+        os.makedirs(os.path.dirname(self.index))
+        kept = os.path.join(self.tmp, "kept")
+        os.makedirs(kept)
+        foreign: list[object] = [
+            {"vm": "win", "mode": "nas", "path": "/p", "timestamp": "x"},  # a NAS entry without its snapshot
+            {"vm": 3, "path": kept},
+            {"vm": "win", "path": kept, "epoch": "1"},
+            {"other": 1},
+            "junk",
+        ]
+        mine = {"vm": "win", "path": kept, "epoch": 1}  # no timestamp: listed with "?"
+        with open(self.index, "w") as f:
+            json.dump({"backups": [mine, *foreign]}, f)
+        r = self.run_tool("list")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([line.split()[:2] for line in r.stdout.splitlines() if line.startswith("win")], [["win", "?"]])
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(self.index) as f:
+            stored = json.load(f)["backups"]
+        self.assertEqual(stored[0], mine)
+        self.assertEqual(stored[1]["path"], self.dest())
+        self.assertEqual(stored[2:], foreign)
+
     def test_the_index_writer_produces_the_checked_in_file_exactly(self) -> None:
         # The bytes main's cst vm and doctor read (the format did not change; REPORT has the proof):
         # a local and a NAS entry with every field. The real entries' fields are checked against them

@@ -1896,6 +1896,24 @@ class VmTest(Scratch):
         self.assertNotIn("ostree admin pin", r.stdout)
         self.assertIn("No VM backup since the booted deployment was built", r.stdout)
 
+    def test_a_damaged_index_warns(self) -> None:
+        # cst vm refuses to back up or list with it: doctor says so, and changes nothing.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        for text, why in (("{", "not JSON"), ("[]", 'no "backups" list')):
+            with self.subTest(text=text):
+                with open(path, "w") as f:
+                    f.write(text)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(
+                    f"WARN   /var/lib/cst/vm-backups.json cannot be read as cst vm's backup index ({why}): "
+                    "cst vm refuses to back up or list with it; move it aside to start a new index",
+                    r.stdout,
+                )
+                self.assert_read_only()
+
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
         # After going back to an older CST: a newer index is neither taken for "never backed up"
         # nor read as if this checkout knew its format.

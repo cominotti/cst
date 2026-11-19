@@ -5,9 +5,10 @@ the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). 
 import datetime
 import json
 from enum import StrEnum
-from typing import NotRequired, TypedDict
+from typing import NotRequired, Required, TypedDict, TypeIs
 
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object
 from cst_core.domain.values import Json
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
@@ -32,9 +33,9 @@ class IndexEntry(TypedDict, total=False):
     """One backup in the index (vm-backups.json). A local copy has path, a NAS backup snapshot,
     repository and host. Keys this cst vm does not know are kept as they are."""
 
-    vm: str
+    vm: Required[str]
     timestamp: str
-    epoch: int
+    epoch: float
     path: str
     mode: str
     snapshot: str
@@ -44,6 +45,38 @@ class IndexEntry(TypedDict, total=False):
     keep: str | None
     versions: dict[str, str]
     deployment: BootedDeployment | None
+
+
+# The optional keys of an index entry, of their types (is_index_entry).
+_ENTRY_KEYS: KeyTypes = {
+    "timestamp": (str,),
+    "epoch": (int, float),
+    "path": (str,),
+    "mode": (str,),
+    "snapshot": (str,),
+    "repository": (str,),
+    "host": (str,),
+    "consistency": (str,),
+    "keep": (str, type(None)),
+    "versions": (dict,),
+    "deployment": (dict, type(None)),
+}
+_DEPLOYMENT_KEYS = ("version", "checksum", "timestamp")
+
+
+def is_index_entry(e: object) -> TypeIs[IndexEntry]:
+    """An entry of the index this cst vm understands: vm a non-empty string; a NAS backup (mode "nas")
+    with its restic snapshot, any other with its folder (path); its other known keys of their types.
+    An entry that is not one is never listed, pruned or dropped: write_index keeps it as it is."""
+    if not json_object(e) or not has_shape(e, {"vm": (str,)}, _ENTRY_KEYS) or not e["vm"]:
+        return False
+    versions, deployment = e.get("versions", {}), e.get("deployment")
+    if not json_object(versions) or not all(isinstance(v, str) for v in versions.values()):
+        return False
+    if deployment is not None and not (json_object(deployment) and all(k in deployment for k in _DEPLOYMENT_KEYS)):
+        return False
+    where = e.get("snapshot") if e.get("mode") == "nas" else e.get("path")
+    return isinstance(where, str) and where != ""
 
 
 class CopiedFile(TypedDict):

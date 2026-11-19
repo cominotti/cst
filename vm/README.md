@@ -136,7 +136,14 @@ readers which format they read: an index of a newer `cst vm` (after you went
 back to an older CST) is left as it is, and `backup`, `backup --nas`, `list` and
 `status` stop with exit 1 and a message that names the format, before anything
 is copied, instead of dropping what they do not know when they write it back.
-`cst doctor` warns about it too.
+`cst doctor` warns about it too. The same holds for an index that is there but
+cannot be read as one (not JSON, or no `"backups"` list, or a read error other
+than a missing file): read as empty, the next backup would have written an index
+with only itself. The message names the file; move it aside (`mv
+/var/lib/cst/vm-backups.json /var/lib/cst/vm-backups.json.bad`) to start a new
+index. An entry this `cst vm` does not understand (no `vm`, a NAS entry
+without its snapshot, a local one without its folder, a known key of another
+type) is not listed or pruned, and is written back as it is after the others.
 
 The VM must be **shut off** (`virsh domstate` says `shut off`). Only then
 are the disk, the UEFI variables and the TPM state consistent with each

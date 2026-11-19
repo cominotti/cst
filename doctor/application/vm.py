@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.shapes import parse_json
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from doctor.application.shared import (
@@ -179,6 +179,27 @@ def vm_index_data(host: DoctorHostPort) -> object:
         return None
 
 
+def vm_index_problem(host: DoctorHostPort) -> str | None:
+    """Why cst vm's backup index cannot be read as one, as cst vm reads it (vm.adapters.backup's
+    stored_backups); None when it is missing, readable, or of a newer cst vm."""
+    try:
+        with host.open_text(host.path(VM_INDEX)) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
+    try:
+        data = parse_json(text)
+    except ValueError, RecursionError:
+        return "not JSON"
+    if VM_INDEX_FORMAT.newer(data, "version") is not None:
+        return None
+    if not json_object(data) or not isinstance(data.get("backups"), list):
+        return 'no "backups" list'
+    return None
+
+
 def newest_vm_backup(host: DoctorHostPort) -> float | None:
     """Epoch of the newest backup in cst vm's index, 0 when none or unreadable, None when the index is of
     a newer cst vm (not read: check_vm_index says so)."""
@@ -203,8 +224,15 @@ def nas_configured(host: DoctorHostPort) -> bool:
 
 @check(CHECKS, "vm")
 def check_vm_index(host: DoctorHostPort) -> Iterator[Result]:
-    """WARN when cst vm's backup index is of a newer format: this checkout's cst vm refuses to back up
-    or list with it (after going back to an older CST)."""
+    """WARN when cst vm's backup index is of a newer format (after going back to an older CST), or is
+    there but cannot be read as an index: cst vm refuses to back up or list with it."""
+    if (why := vm_index_problem(host)) is not None:
+        yield Result(
+            WARN,
+            f"{VM_INDEX} cannot be read as cst vm's backup index ({why}): {host.cst} vm refuses to back up "
+            "or list with it; move it aside to start a new index",
+        )
+        return
     found = VM_INDEX_FORMAT.newer(vm_index_data(host), "version")
     if found is not None:
         yield Result(

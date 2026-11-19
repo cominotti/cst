@@ -3640,6 +3640,38 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_113_cst_vm_refuses_a_damaged_index_and_leaves_it(self) -> None:
+        """cst vm (the checkout's program; the index a scratch file, CST_VM_INDEX) with an index that is
+        not JSON, then one without a "backups" list: list exits 1 naming the file and the way out, twice,
+        and the file keeps its bytes. A backup and status need libvirt: their refusal is a unit test."""
+        w = "/var/tmp/e2e-vm-index"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_113 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            export CST_PROG="cst vm" CST_VM_INDEX="$w/vm-backups.json"
+            for text in '{{"backups": [' '{{"version": 1}}'; do
+                printf '%s' "$text" >"$CST_VM_INDEX"
+                before="$(sha256sum <"$CST_VM_INDEX")"
+                for args in list list; do
+                    rc=0; err="$(/usr/bin/python3 -I /opt/cst-rw/vm/cst-vm $args 2>&1 >/dev/null)" || rc=$?
+                    echo "test_113 $args: rc=$rc $err" >&2
+                    [[ "$rc" == 1 ]]
+                    grep -qF "$CST_VM_INDEX cannot be read as cst vm's backup index" <<<"$err"
+                    grep -qF "move it aside (mv $CST_VM_INDEX $CST_VM_INDEX.bad) to start a new index" <<<"$err"
+                done
+                [[ "$(sha256sum <"$CST_VM_INDEX")" == "$before" ]]
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own
