@@ -642,8 +642,8 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
         unrecorded = None
     except (OSError, Refused) as e:
         unrecorded = str(e)
-    rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
-    if rc == 0:
+    failed = forget_snapshot(p, nas, snap)
+    if failed is None:
         if unrecorded is None:
             try:
                 p.store.drop_torn([entry])
@@ -654,7 +654,7 @@ def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -
                 )
         return None
     left = (
-        f"restic snapshot {snap[:8]} could NOT be forgotten ({first_line(err) or f'exit {rc}'}): it is no "
+        f"restic snapshot {snap[:8]} could NOT be forgotten ({failed}): it is no "
         f"backup; forget it by hand, restic forget {snap}, with the repository's variables of vm/README.md, "
         'section "Restore from the NAS"'
     )
@@ -710,11 +710,17 @@ def forget_listed(p: NasBackup, vm: str, nas: NasRepo, e: TornEntry, listed: Seq
         p.out.say(f"  torn restic snapshot {short}: left alone: no longer a {TAG} snapshot of {vm} in this repository")
         return None
     snap = found[0]["id"]
-    rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
-    if rc != 0:
-        return f"restic forget {snap[:8]} (torn, of an earlier run): {first_line(err) or f'exit {rc}'}"
+    if (failed := forget_snapshot(p, nas, snap)) is not None:
+        return f"restic forget {snap[:8]} (torn, of an earlier run): {failed}"
     p.out.say(f"  torn restic snapshot {snap[:8]} of an earlier run forgotten")
     return None
+
+
+def forget_snapshot(p: NasBackup, nas: NasRepo, snap: str) -> str | None:
+    """restic forget of the one snapshot snap (waiting up to RETRY_LOCK for the repository's lock):
+    None when restic forgot it, else why not (restic's first error line, or its exit status)."""
+    rc, _, err = p.restic.run(nas["env"], ["forget", "--retry-lock", RETRY_LOCK, snap], RESTIC_FORGET_TIMEOUT)
+    return None if rc == 0 else first_line(err) or f"exit {rc}"
 
 
 def retention_after_torn(cfg: VmSettings, p: NasBackup, vm: str, nas: NasRepo) -> None:
