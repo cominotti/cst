@@ -136,8 +136,10 @@ cst_install_text() {
     _cst_installer_text text "$@"
 }
 
-# cst_install_text_plan DEST MODE [OWNER] < content: what cst_install_text
-# would do, changing nothing: `unchanged: DEST` or `would write: DEST`.
+# cst_install_text_plan DEST MODE [OWNER [COMPONENT]] < content: what
+# cst_install_text would do, changing nothing: `unchanged: DEST` or
+# `would write: DEST`; with COMPONENT also `would record: DEST` for a
+# current file its record line does not list so (cst_install_text records it).
 cst_install_text_plan() {
     _cst_installer_text text-plan "$@"
 }

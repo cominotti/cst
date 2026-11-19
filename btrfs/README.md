@@ -1267,7 +1267,9 @@ own checks:
 
 `plan` runs the refusals above and the same checks of the files
 (`udevadm verify`, `bash -n`, `systemd-analyze verify`), and prints
-`would write:` or `unchanged:` for each file and `would run: ...` for each
+`would write:` or `unchanged:` for each file (`would record:` for one that
+is right but whose install record line is missing or stale: install records
+it again) and `would run: ...` for each
 change install would make (`rpm-ostree initramfs-etc`, `systemctl enable`
 when the record unit is not enabled, the removal of files an older version
 left). It writes no file, reloads nothing and creates no deployment. The

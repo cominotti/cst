@@ -30,8 +30,10 @@ Usage:
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
                                           component stays "pending" from a write until then)
-  installer.py text-plan DEST MODE [--root DIR]
-                                          unchanged:/would write: for that content; changes nothing
+  installer.py text-plan DEST MODE [--root DIR] [--component C]
+                                          unchanged:/would write: for that content (with --component,
+                                          would record: for a current file the record does not
+                                          list so, as text would); changes nothing
   installer.py payload SRC                the bytes install writes for SRC, to stdout
   installer.py dests [--home DIR] [--module M] [--kind K] [--component C]
                                           the destination of each matching entry, one per line
@@ -230,8 +232,7 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     if a.command == InstallerCommand.TEXT:
         written = service.put(place, data, as_root=as_root)
         return f"{'written:  ' if written else 'unchanged:'} {place.path}"
-    current = service.is_current(place.path, data, mode, place.owner, as_root=as_root)
-    return f"unchanged: {place.path}" if current else f"would write: {place.path}"
+    return service.plan_put(place, data, as_root=as_root)
 
 
 def _component_owner(component: str) -> Owner:

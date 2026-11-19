@@ -382,6 +382,18 @@ class InstallService:
         except RecordFormatError as e:
             raise InstallRefused(f"{path}: {e}: not changed") from None
 
+    def _plan_line(self, records: Mapping[str, InstallRecord], p: Placement, data: bytes, *, as_root: bool) -> str:
+        """What a write of p would print, changing nothing: `would write:`, `would record:` (current, but its
+        record line is missing or not what the write records: _record_changes) or `unchanged:`."""
+        if not self.is_current(p.path, data, p.mode, p.owner, as_root=as_root):
+            return f"would write: {p.path}"
+        return f"{'would record:' if self._record_changes(records, p, data) else 'unchanged:'} {p.path}"
+
+    def plan_put(self, place: Placement, data: bytes, *, as_root: bool) -> str:
+        """What put would do, changing nothing: its _plan_line. A place with a record reads it (a record of a
+        newer CST refuses, as put does); one without (no component) is never `would record:`."""
+        return self._plan_line(self._read_records({place.record}), place, data, as_root=as_root)
+
     def put(self, place: Placement, data: bytes, *, as_root: bool) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
         True when it was written."""
@@ -432,13 +444,9 @@ class InstallService:
         replaced: list[Placement] = []
         todo, records = self._prepare(entries, req)
         for p, data in todo:
-            if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
-                lines.append(f"would write: {p.path}")
+            lines.append(self._plan_line(records, p, data, as_root=req.as_root))
+            if lines[-1].startswith("would write:"):
                 replaced.append(p)
-            elif self._record_changes(records, p, data):
-                lines.append(f"would record: {p.path}")
-            else:
-                lines.append(f"unchanged: {p.path}")
         # A settings file install would write first, from the program it replaces (SettingsStep).
         settings = [
             f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)

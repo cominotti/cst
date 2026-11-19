@@ -138,13 +138,14 @@ warn() { echo "WARNING: $*" >&2; }
 # shellcheck source=cst-install.bash
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../cst-install.bash"
 # With --plan, the text is kept under etc_base and the installer only says
-# `unchanged: DEST` or `would write: DEST`.
+# `unchanged: DEST`, `would write: DEST` or `would record: DEST` (right, but
+# its record line under btrfs:degraded-boot missing or not what install writes).
 write_if_changed() {
     local dest="$1" mode="$2"
     if (( plan )); then
         mkdir -p "$(dirname "${etc_base}${dest}")"
         cat >"${etc_base}${dest}"
-        cst_install_text_plan "${dest}" "${mode}" <"${etc_base}${dest}"
+        cst_install_text_plan "${dest}" "${mode}" root btrfs:degraded-boot <"${etc_base}${dest}"
     else
         cst_install_text "${dest}" "${mode}" root btrfs:degraded-boot
     fi

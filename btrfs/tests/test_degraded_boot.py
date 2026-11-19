@@ -1193,6 +1193,37 @@ status() {{ echo STATUS; }}
         self.assertIn("unchanged: btrfs-degraded-boot-record.service enabled\n", out)
         self.assertIn("unchanged: initramfs-etc (tracked, next-boot overlay in sync)\n", out)
 
+    def test_plan_names_an_installed_file_whose_record_line_is_missing(self) -> None:
+        # The rule is right, but the record lost its line (an install whose record step failed): plan says
+        # install would record it, the other files stay unchanged, and plan changes nothing (the record
+        # included). install then adds the line, and plan says unchanged again.
+        self.installed()
+        path = os.path.join(self.tmp, "home", USER_RECORD_REL)
+        with open(path, encoding="utf-8") as f:
+            doc = object_of(parse_json(f.read()))
+        del object_of(doc["files"])[self.at(RULE)]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc))
+        with open(path, "rb") as f:
+            before = f.read()
+        overlay = self.overlay(self.tracked_bytes())
+        out = self.plan(overlay=overlay)
+        self.assertEqual(
+            [line for line in out.splitlines() if line.startswith("would")], [f"would record: {self.at(RULE)}"], out
+        )
+        for dest in (HELPER, TIMER, SERVICE, RECORD, SYNCED):
+            self.assertIn(f"unchanged: {self.at(dest)}\n", out)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before, "plan changed the record")
+        self.assertIn(
+            f"installer text-plan {self.at(RULE)} 0644 --component btrfs:degraded-boot", self.installer_calls()
+        )
+        r = self.install_path(plan=False, overlay=overlay)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(self.at(RULE), self.record()[0])
+        out = self.plan(overlay=overlay)
+        self.assertEqual([line for line in out.splitlines() if line.startswith("would")], [], out)
+
     def test_plan_stops_where_install_stops(self) -> None:
         """A check plan shares with install stops it the same way: a rule that fails udevadm verify,
         units that fail systemd-analyze verify. (The self-test needs the files written: install runs it, plan does not.)"""

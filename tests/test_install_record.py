@@ -748,6 +748,37 @@ class InstallerRecordCliTest(unittest.TestCase):
         again = self.cli("plan", *sel)
         self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
 
+    def test_text_plan_with_a_component_names_a_current_file_its_record_does_not_list_so(self) -> None:
+        # text-plan --component says what text --component would do to the record too: "would record:" for
+        # a current file with no line or a stale one, "unchanged:" once text recorded it; without
+        # --component it reads no record. A record of a newer CST refuses, as text does.
+        dest, data = "/etc/x.conf", b"x\n"
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        sel = (dest, "0644", "--component", "btrfs:degraded-boot")
+        self.assertEqual(self.cli("text-plan", *sel, stdin=data).stdout, f"would write: {self.stage}{dest}\n".encode())
+        Path(self.stage + "/etc").mkdir()
+        Path(self.stage + dest).write_bytes(data)
+        os.chmod(self.stage + dest, 0o644)
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"would record: {self.stage}{dest}\n".encode(), b""))
+        self.assertFalse(user_record.exists(), "text-plan wrote a record")
+        plain = self.cli("text-plan", dest, "0644", stdin=data)
+        self.assertEqual(plain.stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        self.assertEqual(self.cli("text", *sel, stdin=data).stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        self.assertEqual(self.cli("text-plan", *sel, stdin=data).stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        rec = parse_record(user_record.read_text())
+        files = {dest: dataclasses.replace(rec.files[dest], sha256="0" * 64)}
+        user_record.write_text(render_record(InstallRecord(files, rec.components)))
+        before = user_record.read_bytes()
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual(r.stdout, f"would record: {self.stage}{dest}\n".encode())
+        self.assertEqual(user_record.read_bytes(), before)
+        user_record.write_text('{"format": 7}')
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (1, b""))
+        self.assertIn(b"newer CST", r.stderr)
+        self.assertEqual(self.cli("text-plan", dest, "0644", stdin=data).returncode, 0)
+
     def test_forget_without_a_record_writes_none(self) -> None:
         r = self.cli("forget", "btrfs/docker-gc")
         self.assertEqual((r.returncode, r.stderr), (0, b""))
