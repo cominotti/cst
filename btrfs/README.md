@@ -214,9 +214,11 @@ reads this from `sudo`). If you run `install` directly as root (not through
 `sudo`), neither is created. The launcher is listed in that user's install
 record (`~/.local/state/cst/installed.json`, component
 `btrfs:report-launcher`), so `cst doctor` run as that user reports it
-missing or changed. When the installer cannot write that record (a record of
-a newer CST, a folder the user cannot write), `install` prints a warning,
-leaves the launcher as it is and goes on: the services are still enabled.
+missing or changed. When the installer fails, `install` prints a warning and
+goes on (the services are still enabled), and the launcher is not marked
+done. The launcher may then have been written (only its record failed: a
+record folder the user cannot write, a full disk) or not (a record of a newer
+CST, a `~/.local/bin` the user cannot write).
 
 At the end, `install` runs the health check once and prints its result, checks
 that the stall monitor is running (it stops with `ERROR:` if not), and prints

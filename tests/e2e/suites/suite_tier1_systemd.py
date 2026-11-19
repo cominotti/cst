@@ -6448,3 +6448,68 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_150_stall_report_launcher_written_while_its_record_cannot_be_written(self) -> None:
+        """btrfs-setup.sh's install_report_launcher as root on the container's /, the launcher written for
+        tester through the real runuser. Installed and marked once, then replaced by an older text that
+        tester's record lists (done). With tester's record folder not writable by tester (0555: tester is
+        not root, so the real permission check applies), install_report_launcher writes the new launcher,
+        prints the warning that it may not have been installed and its record was not updated, does not
+        mark it, and the record keeps its bytes. With the folder writable again, install records the
+        launcher. The cleanup makes the folder writable first, then removes the launcher and its line."""
+        c = self.SYSTEMD_CONTAINER
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        state = "/home/tester/.local/state/cst"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"[[ ! -e {shim} ]] || echo there").stdout.strip():
+            self.fail(f"{shim} is there already (another test's): this test needs it absent")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {shim}; runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        self.addCleanup(exec_bash, c, f"[[ ! -d {state} ]] || chmod 0755 {state}", check=False)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_150 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U={state}/installed.json
+            . /opt/cst-rw/cst-install.bash
+            for f in shim_content install_report_launcher mark_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content install_report_launcher mark_report_launcher >/dev/null
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            # The launcher as an older version wrote it, recorded and marked.
+            printf '#!/bin/sh\n# Installed by btrfs-setup.sh (CST), an older version.\nexec /usr/local/bin/btrfs-stall-report "$@"\n' |
+                cst_install_text "$shim" 0755 tester btrfs:report-launcher >/dev/null
+            cst_mark_as tester btrfs:report-launcher
+            before="$(sha256sum "$U")"
+            chmod 0555 {state}
+            err="$(mktemp)"
+            install_report_launcher >/dev/null 2>"$err"
+            (( ! report_launcher_written )) || {{ echo "the launcher counts as written" >&2; exit 1; }}
+            mark_report_launcher
+            grep -qxF "WARNING: {shim} may not have been installed or updated, and the install record of tester was not updated for it (see above)" "$err" ||
+                {{ echo "install said: $(cat "$err")" >&2; exit 1; }}
+            cmp -s "$shim" <(shim_content) || {{ echo "the launcher was not written" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "the record changed" >&2; exit 1; }}
+            chmod 0755 {state}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            grep -qF "\"$(sha256sum <"$shim" | cut -d' ' -f1)\"" "$U" || {{ echo "the record lacks the new launcher" >&2; exit 1; }}
+            rm -f "$err"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
