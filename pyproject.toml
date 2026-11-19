@@ -97,6 +97,11 @@ exclude = ["*.md"]
 # join of constants instead of an f-string), RSE (raise X, not X()), ASYNC,
 # INT (gettext), INP (a Python file outside a package), COM818 and COM819
 # (a stray trailing comma that makes a tuple, a comma where none belongs).
+# Lint group 2, once their last hits were fixed (2026-11): DTZ (naive
+# datetimes), PLW (pylint warnings), RUF (ruff's own rules), SIM
+# (simplifications), PERF (performance), FURB (refurb), PIE, RET (returns),
+# PYI (typing), EXE (a shebang on a file that is not executable, or the
+# reverse) and ERA (commented-out code).
 select = [
     "F",
     "B",
@@ -128,6 +133,17 @@ select = [
     "INP",
     "COM818",
     "COM819",
+    "DTZ",
+    "PLW",
+    "RUF",
+    "SIM",
+    "PERF",
+    "FURB",
+    "PIE",
+    "RET",
+    "PYI",
+    "EXE",
+    "ERA",
 ]
 # Rules of the selected families left out, each with its reason. No entry
 # may name ANN or ALL (tests/test_python_files.py).
@@ -172,6 +188,11 @@ ignore = [
     # An import inside a function: cst_core/wiring.py imports a module's
     # code only when its command runs, on purpose.
     "PLC0415",
+    # A `# noqa` that suppresses nothing: the noqa comments name budgeted
+    # rules (BLE001), which a plain `ruff check` does not select, so it
+    # would report every one. tests/ruff_budget.py's second run checks it
+    # with the budgeted rules turned on.
+    "RUF100",
 ]
 # CST uses the standard library only: no rule may suggest or write an import
 # from the third-party typing_extensions (tests/test_python_files.py checks
@@ -192,6 +213,36 @@ typing-extensions = false
 # word of the health check, the NAS_PASSWORD settings key.
 "btrfs/health_check/domain.py" = ["S105"]
 "btrfs/snapshot_runtime/domain.py" = ["S105"]
+# Naive datetimes on purpose. docker-gc's day(), recorded_line and
+# last_run_line: fromtimestamp(t, UTC).astimezone() differs from
+# fromtimestamp(t) within a day of years 1 and 9999 (it raises there). cpu:
+# the run folder name is the local wall clock written on disk (a round trip
+# through an aware time risks a DST fold), and an aware isoformat would add
+# +HH:MM to the printed result. A snapshot name is local wall clock by its
+# format (strptime without %z), and the snapshot core's tests build such
+# names the same way.
+"btrfs/docker_gc/domain.py" = ["DTZ006", "SIM905"]
+"cpu/domain.py" = ["DTZ006"]
+"btrfs/snapshot/domain.py" = ["DTZ007"]
+"btrfs/tests/test_btrfs_snapshot_core.py" = ["DTZ001", "DTZ007"]
+# SIM905 (above): docker-gc's Docker name lists are a triple-quoted word list
+# split at run time on purpose (about 200 words; a list literal would be
+# about 200 lines).
+# PERF401: events is the _EventLog list whose overridden append also passes
+# each event to the CLI as it happens; list.extend would bypass it and the
+# lines would stop printing live.
+"swap/application/apply.py" = ["PERF401"]
+# SIM115 (open without a with): the NAS run's tee file is held open for the
+# whole run on purpose; the unit runner's sys.stdin is open(0, closefd=False)
+# for the rest of the run.
+"btrfs/snapshot_runtime/adapters/nas.py" = ["SIM115"]
+"tests/run_unit.py" = ["SIM115"]
+# PLW1509 (preexec_fn in a program with threads): the runner only passes a
+# caller's preexec_fn through (no production caller passes one today); the
+# NAS test's controlling_tty does setsid + TIOCSCTTY so the backup sees
+# SIGHUP when the terminal closes, which no Popen option does.
+"cst_core/adapters/runner.py" = ["PLW1509"]
+"vm/tests/test_vm_nas.py" = ["PLW1509"]
 
 [tool.ruff.lint.mccabe]
 # For C901, which is not selected above: tests/ruff_budget.py counts the

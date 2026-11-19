@@ -114,8 +114,12 @@ repository:
   parentheses, so a comma forgotten between two lines of a unit file or a
   plan is an error), `ARG` (unused arguments, production code only: fakes
   in tests ignore arguments on purpose), `SLOT`, `YTT`, `FLY`, `RSE`,
-  `ASYNC`, `INT`, `INP`, `COM818` and `COM819`. The rules of these
-  families that are left out are in `[tool.ruff.lint] ignore` and
+  `ASYNC`, `INT`, `INP`, `COM818` and `COM819`, and the families of
+  lint group 2 once their last hits were fixed: `DTZ` (naive datetimes),
+  `PLW`, `RUF`, `SIM`, `PERF`, `FURB`, `PIE`, `RET`, `PYI`, `EXE` (a
+  shebang on a file that is not executable) and `ERA` (commented-out
+  code). The rules of these families that are left out, and the files
+  that keep a hit on purpose, are in `[tool.ruff.lint] ignore` and
   `per-file-ignores` of `pyproject.toml`, each with its reason in a
   comment (the size rules `PLR09xx` and `PLR2004` are there because the
   budgets below count them). `ANN`
@@ -152,11 +156,11 @@ repository:
   arguments, 50 statements or 5 positional arguments, ruff's defaults), with `FBT003` (a bare `True`/`False`
   passed by position) and the `N` family (pep8-naming), counted under `N`:
   an entry of RULES made of letters only counts every code of its family.
-  The families of lint group 2 that still have hits no safe fix removes
-  are budgeted the same way: `DTZ`, `PLW`, `RUF`, `SIM`, `PERF`, `FURB`,
-  `PIE`, `RET`, `PYI`, `EXE` and `ERA`. A family that reaches 0 moves to
-  `select`. A second ruff run fails on any `# noqa` that suppresses nothing
-  (`RUF100`). When a budget fails, the script prints the measured table;
+  A rule or family that reaches 0 moves to `select` (the lint group 2
+  families did in 2026-11). A second ruff run fails on any `# noqa` that
+  suppresses nothing (`RUF100`, which `select` leaves to it: the noqa
+  comments name budgeted rules that a plain `ruff check` does not turn
+  on). When a budget fails, the script prints the measured table;
   see [tests/budgets.py](../tests/budgets.py) for how budgets work.
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
   `Any` (inside generics: `ANN401` already refuses it as a whole

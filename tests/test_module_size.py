@@ -36,7 +36,7 @@ MODULE_LINE_CAP: Final = 800
 # Modules over the cap, with their lines (tests/budgets.py: never above; lowered by `invowk cmd fix budgets`).
 OVER_CAP: Final[dict[str, int]] = {
     "btrfs/bulk/adapters/user.py": 860,
-    "btrfs/snapshot/application.py": 1117,
+    "btrfs/snapshot/application.py": 1115,
 }
 
 
