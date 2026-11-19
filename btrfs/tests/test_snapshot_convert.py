@@ -638,6 +638,17 @@ class ConvertOneTest(Base):
                 self.assertFalse(self.is_subvol(p))
                 self.assertEqual(self.calls("btrfs"), [])
 
+    def test_a_name_with_a_line_break_is_in_use(self) -> None:
+        # A path with a line break is split across two lines of the open paths (a /proc link, a
+        # bind mount's source), so its use cannot be seen there: it counts as in use, even with
+        # nothing using it, as here. Before, it was converted, also while a container's bind mount
+        # of it was in use (BusyTest.test_a_bind_mount_of_a_name_with_a_line_break_is_busy).
+        p = self.tree("a\nb")
+        r = self.run_prog("convert-one", p)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, log(5, f"convert: {p}: in use, left for later") + "\n")
+        self.assertFalse(self.is_subvol(p))
+
     def test_without_a_path(self) -> None:
         # A usage error (exit 2), told before the lock is taken: it does not wait for another run.
         # Before, bash's own "${2:?}" message and exit 1, after the lock.
@@ -735,6 +746,15 @@ class BusyTest(Base):
         literal, blank = os.path.join(self.home, "a\\040b"), os.path.join(self.home, "a b")
         r = self.run_prog("busy", literal, blank)
         self.assertEqual((r.returncode, self.lines(r.stdout), r.stderr), (0, [literal], ""))
+
+    def test_a_bind_mount_of_a_name_with_a_line_break_is_busy(self) -> None:
+        # The source /home/u/a\012b decodes to two lines of the open paths, neither of which is the
+        # path: a path with a line break counts as busy. Before, it was not listed.
+        self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
+        self.mounted_elsewhere("/home/u/a\\012b")
+        p = os.path.join(self.home, "a\nb")
+        r = self.run_prog("busy", p, os.path.join(self.home, "c"))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"{p}\n", ""))
 
     def test_a_home_mount_point_with_a_blank_is_found(self) -> None:
         # The mount point field is escaped too: HOME_MOUNT ".../home mnt" is ".../home\040mnt" there.

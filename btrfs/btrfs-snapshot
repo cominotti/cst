@@ -314,7 +314,8 @@ collect_open_paths() {
 # escaped name a\134040b is a\040b, never "a b" (as bulk's unescape_mountinfo
 # does). POSIX awk; every value is below 128, so the locale does not change
 # what %c prints. A decoded line break splits the path into two lines of
-# OPEN_PATHS, as it already does for the /proc links find prints.
+# OPEN_PATHS, as it does for the /proc links find prints: in_use counts a path
+# with a line break as in use.
 MOUNTINFO_UNESCAPE_AWK='
 function unesc(s,    out) {
     out = ""
@@ -348,7 +349,11 @@ mount_sources() {
             $3 == d {r = unesc($4); if (index(r, s "/") == 1) print m substr(r, length(s) + 1)}' |
         sort -u
 }
+# A path whose name holds a line break counts as in use: OPEN_PATHS holds one
+# path per line, so a link or a mount source with that name is split across
+# two lines there, and neither is the path or below it.
 in_use() {   # path: true if anything is open at or below it (batch snapshot)
+    [[ "$1" != *$'\n'* ]] || return 0
     P="$1" awk 'BEGIN {p = ENVIRON["P"]}
         index($0, p) == 1 && (length($0) == length(p) || substr($0, length(p) + 1, 1) == "/") {found = 1; exit}
         END {exit !found}' <<<"${OPEN_PATHS}"

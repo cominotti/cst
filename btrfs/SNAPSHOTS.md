@@ -2136,7 +2136,9 @@ The **old tree** is the original folder after the swap, renamed to
 2. **In use?** The script looks at every process: its open files, its working
    folder, and the bind mounts of containers (for example `docker run -v
    ~/Workspace/x:/src`; also of a folder whose name holds a blank, a tab or
-   a backslash). If anything uses the folder, it is left for later.
+   a backslash). If anything uses the folder, it is left for later. A folder
+   whose name holds a line break always counts as in use: the list of open
+   paths has one path per line, so its name cannot be found there.
 3. **New subvolume** `FOLDER.subvol-new`, with the same owner, permissions and
    SELinux label as the folder (an SELinux label is a security tag that Fedora
    puts on every file).
