@@ -1579,7 +1579,8 @@ Because of this:
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
   nothing is removed by a record they do not understand. systemd does not
   restart the recorder for exit 65 (`RestartPreventExitStatus=`; nor for exit
-  76, below; any other failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  76, below; any other failure is restarted after 10 s, also `docker events`
+  ending with 65 or 76 itself, which `record` turns into 1): `docker-gc-recorder.service` stays
   failed, which `cst doctor` lists, and images are held back meanwhile, as
   with any recorder that is not running. Install the docker-gc of that CST
   again (`cst btrfs docker-gc enable` in that checkout), which starts the

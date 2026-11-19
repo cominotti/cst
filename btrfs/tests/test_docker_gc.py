@@ -592,6 +592,9 @@ class RecordTest(unittest.TestCase):
             (EventsEnd(stopped=False, returncode=-9), 0),
             (EventsEnd(stopped=False, returncode=0), 1),
             (EventsEnd(stopped=False, returncode=3), 3),
+            # docker's own 65 or 76 is not docker-gc's refusal, which the unit would leave failed.
+            (EventsEnd(stopped=False, returncode=65), 1),
+            (EventsEnd(stopped=False, returncode=76), 1),
         ):
             with self.subTest(end=end):
                 self.f.docker.end = end

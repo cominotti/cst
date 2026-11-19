@@ -4701,7 +4701,8 @@ echo E2E-OK
         after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
         names the format once, and the file is byte for byte as it was. The same unit ending with exit
         76 (an inspect record without a key docker-gc relies on) is not restarted either. Control: the
-        same unit ending with exit 1 is restarted."""
+        same unit ending with exit 1 is restarted. And docker-gc record whose docker events (a fake docker)
+        ends with 65 itself exits 1 and is restarted: only docker-gc's own refusals stop the restarts."""
         shipped = docker_exec(
             self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
         ).stdout
@@ -4726,7 +4727,7 @@ echo E2E-OK
             if [ -e "$s/made-docker" ]; then systemctl stop docker.service 2>/dev/null || true; rm -f /run/systemd/system/docker.service; fi
             if [ -e "$s/made-state" ]; then rm -rf /var/lib/docker-gc; fi
             if [ -e "$s/state-aside" ]; then mv "$s/state-aside" /var/lib/docker-gc; fi
-            rm -rf "$s"
+            rm -rf "$s" /run/e2e-gc-fake
             systemctl daemon-reload
             """,
             check=False,
@@ -4799,6 +4800,58 @@ echo E2E-OK
             systemctl stop {unit} || true
             [ "$state" = failed ] && [ "$n" = 0 ] && [ "$rc" = 76 ] ||
                 {{ echo "exit 76: state $state, NRestarts $n, status $rc" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # docker events itself ending with 65 is not docker-gc's refusal: record exits 1 for it, and the
+        # recorder is restarted. This checkout's docker-gc record with a fake docker first on PATH, under
+        # /run (PrivateTmp= hides /var/tmp from the unit): ps lists nothing, events exits 65.
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            [
+                "bash",
+                "-c",
+                "mkdir -p /run/e2e-gc-fake && cat >/run/e2e-gc-fake/docker && chmod 0755 /run/e2e-gc-fake/docker",
+            ],
+            input_text=(
+                "#!/usr/bin/python3 -I\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:1] == ['ps']:\n"
+                "    sys.exit(0)\n"
+                "if args[:1] == ['events']:\n"
+                "    sys.exit(65)\n"
+                "sys.stderr.write('e2e fake docker: unexpected ' + ' '.join(args) + '\\n')\n"
+                "sys.exit(1)\n"
+            ),
+        )
+        docker_exec(
+            self.SYSTEMD_CONTAINER,
+            ["bash", "-c", f"cat >{path}"],
+            input_text=derived(
+                "/usr/bin/env PATH=/run/e2e-gc-fake:/usr/bin:/bin /usr/bin/python3 -I /opt/cst-rw/btrfs/docker-gc record"
+            ),
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            rm -f /var/lib/docker-gc/last-used.json   # the newer state of the first part would give 65 itself
+            systemctl daemon-reload
+            start="$(date +%s)"
+            systemctl start {unit} || true
+            sleep 16   # past RestartSec=10, with the program's own start
+            n="$(show NRestarts)"
+            systemctl stop {unit} || true
+            journalctl --sync 2>/dev/null || true
+            log="$(journalctl -q --no-pager -o cat -u {unit} --since "@$start")"
+            grep -qF 'recording image use from docker events' <<<"$log" ||
+                {{ echo "docker events was not reached:" >&2; echo "$log" >&2; exit 1; }}
+            if grep -qF 'e2e fake docker: unexpected' <<<"$log"; then echo "$log" >&2; exit 1; fi
+            [ "$n" -ge 1 ] || {{ echo "docker events ending with 65 was not restarted (NRestarts=$n)" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout
