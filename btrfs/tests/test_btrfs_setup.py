@@ -1423,7 +1423,12 @@ class ReportLauncherTest(unittest.TestCase):
                 HOME_INSTALLER,
                 *(
                     shell_function(SETUP, f)
-                    for f in ("shim_content", "install_report_launcher", "remove_report_launcher")
+                    for f in (
+                        "shim_content",
+                        "install_report_launcher",
+                        "mark_report_launcher",
+                        "remove_report_launcher",
+                    )
                 ),
                 f'target_user="$(id -un)"; shim="{self.shim}"',
                 *lines,
@@ -1442,7 +1447,7 @@ class ReportLauncherTest(unittest.TestCase):
         return r
 
     def test_install_records_the_launcher_and_marks_it(self) -> None:
-        self.bash("install_report_launcher", 'cst_mark_as "$target_user" btrfs:report-launcher')
+        self.bash("install_report_launcher", "mark_report_launcher")
         self.assertEqual(os.stat(self.shim).st_mode & 0o777, 0o755)
         rec = home_record(self.tmp)
         f = object_of(rec["files"][self.shim])
@@ -1487,6 +1492,21 @@ class ReportLauncherTest(unittest.TestCase):
             os.unlink(record)
             if mine:
                 os.unlink(self.shim)
+
+    def test_an_installer_that_fails_does_not_stop_the_install(self) -> None:
+        # The user's install record was written by a newer CST: the installer refuses it. Install goes
+        # on (the services after the launcher still get enabled): the launcher is left as it is, the
+        # record is left as it is, and the launcher is not marked done.
+        newer = '{"format": 999, "files": {}, "components": {}}\n'
+        record = os.path.join(self.tmp, "home", USER_RECORD_REL)
+        os.makedirs(os.path.dirname(record), exist_ok=True)
+        Path(record).write_text(newer)
+        r = self.bash("install_report_launcher", "mark_report_launcher", "echo went-on")
+        self.assertEqual(r.stdout, "went-on\n")
+        self.assertIn("written by a newer CST", r.stderr)
+        self.assertIn(f"was not changed (see above); {self.shim} was not installed or updated\n", r.stderr)
+        self.assertFalse(os.path.lexists(self.shim))
+        self.assertEqual(Path(record).read_text(), newer)
 
     def test_a_user_without_a_home_folder_does_not_stop_the_removal(self) -> None:
         # The installer cannot run as the user (no home folder to keep the record in): our launcher

@@ -542,11 +542,24 @@ EOF
 
 # install_report_launcher: btrfs-stall-report in the target user's ~/.local/bin,
 # for the host and toolboxes alike (no target user: none); listed in that
-# user's install record under btrfs:report-launcher.
+# user's install record under btrfs:report-launcher. When the installer fails
+# (no home, a record of a newer CST, a folder the user cannot write), it says so
+# and install goes on: the launcher is left as it is, and mark_report_launcher
+# does not mark it done.
 install_report_launcher() {
-    if [[ -n "${shim}" ]]; then
-        shim_content | cst_install_text "${shim}" 0755 "${target_user}" btrfs:report-launcher
+    report_launcher_written=0
+    [[ -n "${shim}" ]] || return 0
+    if shim_content | cst_install_text "${shim}" 0755 "${target_user}" btrfs:report-launcher; then
+        report_launcher_written=1
+    else
+        echo "WARNING: the install record of ${target_user} was not changed (see above); ${shim} was not installed or updated" >&2
     fi
+}
+
+# mark_report_launcher: btrfs:report-launcher done in the target user's install
+# record, only when install_report_launcher wrote the launcher.
+mark_report_launcher() {
+    if (( ${report_launcher_written:-0} )); then cst_mark_as "${target_user}" btrfs:report-launcher; fi
 }
 
 # remove_report_launcher: that launcher, with its record line, only when this
@@ -1050,7 +1063,7 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
     # Every component of install is complete (the record says done; see cst doctor).
     cst_mark btrfs:core
     if (( with_below )); then cst_mark btrfs:below; fi
-    if [[ -n "${shim}" ]]; then cst_mark_as "${target_user}" btrfs:report-launcher; fi
+    mark_report_launcher
     echo
     echo "Overview:            ${PROG} status"
     echo "Stalls (as ${target_user:-your user}, also in toolbox): btrfs-stall-report --since '5 min ago'"
