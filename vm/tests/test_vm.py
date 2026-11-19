@@ -2055,8 +2055,8 @@ class FakeSystemd:
         self.timers.done.append(f"clean {unit}")
         return CommandResult(0, "", "")
 
-    def show(self, unit: str, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
-        if on_host:
+    def show(self, unit: str, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
+        if on_host or user:
             raise AssertionError(f"the timer's status reads the local systemd: {unit}")
         return {p: {"NextElapseUSecRealtime": "Sat", "Result": "success"}[p] for p in props}
 

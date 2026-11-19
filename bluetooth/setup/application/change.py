@@ -30,6 +30,7 @@ from bluetooth.setup.domain import (
     BearerState,
     BluetoothCommand,
     LeState,
+    RunningState,
     WpState,
     bearer_matches,
     changes_machine,
@@ -138,7 +139,9 @@ class Change(Checks):
     # ---- restarts --------------------------------------------------------------------------
     def restart_bluetooth(self) -> bool:
         self.out("restart:   bluetooth.service (Bluetooth connections drop for a few seconds)\n")
-        if self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode != 0:
+        restarted = self.run(["sudo", "systemctl", "restart", "bluetooth"], output=OutputMode.INHERIT).returncode == 0
+        self.forget_unit("bluetooth.service")  # a new invocation, also after most failures
+        if not restarted:
             self.err(f"{self.c.prog}: ERROR: bluetooth.service was not restarted. To finish: {self.restart_hint()}\n")
             return False
         path, found = self.adapter()
@@ -150,13 +153,20 @@ class Change(Checks):
 
     def restart_wireplumber(self) -> bool:
         self.out("restart:   wireplumber (your session; audio stops for a moment)\n")
-        if self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode != 0:
+        restarted = (
+            self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode == 0
+        )
+        self.forget_unit("wireplumber.service")
+        if not restarted:
             self.err(
                 f"{self.c.prog}: ERROR: wireplumber was not restarted. To finish: systemctl --user restart wireplumber\n"
             )
             return False
         self.m.clock.sleep(1)  # let the old WirePlumber unregister before checking
-        if not self.le_off_active() and not self.wait_for(15, lambda: self.bap_endpoint_state() == BapState.REGISTERED):
+        # Each look reads bluetoothd's invocation again: it may restart by itself during the wait.
+        if not self.le_off_active() and not self.wait_for(
+            15, lambda: self.bap_endpoint_state(fresh=True) == BapState.REGISTERED
+        ):
             self.err("WARNING: WirePlumber did not register the BAP endpoint within 15 s\n")
         self.restore_a2dp()
         return True
@@ -222,6 +232,8 @@ class Change(Checks):
         if not (bt or wp):
             return 0
         owed = ["wireplumber.service", *(["bluetooth.service"] if bt else [])]
+        # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
+        self.forget_unit("bluetooth.service", "wireplumber.service")
         if self.restart_state("save", *owed) is None:
             self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
         if self.o.no_restart:
@@ -408,26 +420,33 @@ class Change(Checks):
             self.lw_remove()
 
     def lw_install(self) -> None:
-        """The watcher's program and unit (through the installer, as the user), enabled and started."""
-        p, unit, changed = self.p, LDAC_UNIT, False
+        """The watcher's program and unit (through the installer, as the user), enabled and started.
+        The installer runs also for a current copy: it writes nothing then (`unchanged:`), but adds
+        a copy its record does not list yet (installed before the record existed). What it wrote
+        (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
+        that changed after plan (a git pull meanwhile) is still taken up."""
+        p, unit = self.p, LDAC_UNIT
         if self.lw_prog_st != OwnedState.OK:
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
-            r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch")
-            if r.returncode != 0:
-                raise StepFailed(shell_exit_status(r.returncode))
-            changed = True
-        if self.lw_unit_st != OwnedState.OK:
-            said = self.checked(
-                ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
-                input_text=render_unit(self.c.device, self.c.ldac_rate),
-            )
-            self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
-            changed = True
+        r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
+        self.out(r.stdout)  # its lines, then its error, as it printed them
+        if r.stderr:
+            self.err(r.stderr)
+        if r.returncode != 0:
+            raise StepFailed(shell_exit_status(r.returncode))
+        said = self.checked(
+            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
+            input_text=render_unit(self.c.device, self.c.ldac_rate),
+        )
+        self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
+        unit_changed = said.startswith("written:")
+        if unit_changed:
             self.must(["systemctl", "--user", "daemon-reload"])
+        changed = unit_changed or any(line.startswith("written:") for line in r.stdout.splitlines())
         if self.lw_enabled != "enabled":
             self.must(["systemctl", "--user", "enable", unit])
             self.out(f"enabled:   {unit} (starts with your session)\n")
-        if self.lw_active != "active":
+        if self.lw_active != RunningState.ACTIVE:
             self.must(["systemctl", "--user", "start", unit])
             self.out(f"started:   {unit} (logs: journalctl --user -u {unit})\n")
         elif changed:

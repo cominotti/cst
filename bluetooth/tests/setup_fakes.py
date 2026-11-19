@@ -46,18 +46,21 @@ STUBS = (
 FAKE = r"""#!/bin/bash
 # The fake machine of bluetooth/tests/test_setup.py: one script for every
 # command it stands in for (named by $0). Its state is files in $FAKE_STATE;
-# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the CST_, LC_
-# and PYTHON variables it got, to catch a leak).
+# every call but sleep's (Python's own sleep logs none) is logged there (log: the command line; env-log: the command and its
+# first four arguments, a tab, then the CST_, LC_ and PYTHON variables it got, to catch a leak).
 S="${FAKE_STATE:?}"
 me="${0##*/}"
 log() { printf '%s\n' "$*" >>"$S/log"; }
 if [[ "$me" != sleep && ( "$me" != python3 || "$*" == *wp-roles* ) ]]; then
     log "$me $*"
-    { printf '%s:' "$me"; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
+    { printf '%s\t' "$me ${1:-} ${2:-} ${3:-} ${4:-}" | tr '\n' ' '; env | grep -E '^(CST_|LC_|LANG|PYTHON)' | LC_ALL=C sort | tr '\n' ' '; echo; } >>"$S/env-log"
 fi
 unit() { # unit SCOPE NAME: the file prefix of a unit's state
     local n="${2%.service}"
     echo "$S/units/$1-$n"
+}
+active_state() { # active_state PREFIX: the unit's ActiveState (PREFIX.state, else active or inactive)
+    if [[ -e "$1.state" ]]; then cat "$1.state"; elif [[ -e "$1.active" ]]; then echo active; else echo inactive; fi
 }
 new_id() { # new_id PREFIX: a new invocation ID for the unit
     local n
@@ -68,6 +71,7 @@ new_id() { # new_id PREFIX: a new invocation ID for the unit
 case "$me" in
     flatpak-spawn)
         [[ "$1" == --host ]] && shift
+        while [[ "$1" == --env=* ]]; do export "${1#--env=}"; shift; done  # flatpak-spawn --env=K=V
         if [[ "$1" == /usr/bin/python3 && "$*" == *socket* ]]; then
             [[ -e "$S/iso-socket" ]]
             exit
@@ -100,7 +104,11 @@ case "$me" in
         mkdir -p "$S/units"
         case "$1" in
             is-active)
-                if [[ "$2" == --quiet ]]; then [[ -e "$(unit "$scope" "$3").active" ]]; exit; fi
+                if [[ "$2" == --quiet ]]; then
+                    st="$(active_state "$(unit "$scope" "$3")")"
+                    [[ "$st" == active || "$st" == reloading || "$st" == refreshing ]]
+                    exit
+                fi
                 if [[ -e "$(unit "$scope" "$2").active" ]]; then echo active; exit 0; fi
                 echo inactive
                 exit 3
@@ -111,8 +119,14 @@ case "$me" in
                 exit 1
                 ;;
             show)
+                [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
+                    *ActiveState*)   # systemd prints ActiveState= before InvocationID=
+                        echo "ActiveState=$(active_state "$u")"
+                        echo "InvocationID=$(cat "$u.inv" 2>/dev/null)"
+                        exit 0
+                        ;;
                     *InvocationID*) cat "$u.inv" 2>/dev/null; exit 0 ;;
                     *MainPID*) cat "$u.pid" 2>/dev/null || echo 0; exit 0 ;;
                 esac
@@ -280,6 +294,10 @@ class Machine:
             self.put(base + ".inv", inv + "\n")
         if pid is not None:
             self.put(base + ".pid", f"{pid}\n")
+
+    def unit_active_state(self, scope: str, name: str, state: str) -> None:
+        """The ActiveState word the fake systemctl gives for a unit (without it: active or inactive)."""
+        self.put(os.path.join("units", f"{scope}-{name}.state"), state + "\n")
 
     def unit_inv(self, scope: str, name: str) -> str:
         """The invocation ID the fake systemd has for a unit now."""

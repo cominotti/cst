@@ -835,8 +835,8 @@ class _FakeSystemd:
     def restart(self, unit: str) -> CommandResult:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
-        del on_host
+    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
+        del on_host, user
         return {k: v for k, v in self.shown.items() if k in props} if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:

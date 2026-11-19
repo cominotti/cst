@@ -43,9 +43,11 @@ from bluetooth.setup.domain import (
     Options,
     Paths,
     OLD_WP_MARKER,
+    RunningState,
     WpState,
     bap_state,
     bearer_matches,
+    is_running,
     item,
     no_headset_note,
     read_settings_output,
@@ -59,7 +61,7 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode
+from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
 
 
 def read_bluetooth_settings(
@@ -124,6 +126,7 @@ class SetupMachine:
     """The ports of one run."""
 
     runner: CommandRunnerPort
+    systemd: SystemdPort  # its show only: ActiveState and InvocationID (unit_show)
     clock: ClockPort
     console: SetupConsolePort
     files: SetupFilesPort
@@ -184,6 +187,9 @@ class Survey:
         self.wp_owed = False
         self.bt_restart = False
         self.wp_restart = False
+        # (user, unit) -> (ActiveState, InvocationID), see unit_show: a system unit and a user unit
+        # of the same name are two units.
+        self.unit_states: dict[tuple[bool, str], tuple[str, str]] = {}
 
     # ---- running commands ------------------------------------------------------------------
     def out(self, text: str) -> None:
@@ -281,12 +287,26 @@ class Survey:
         return self.wp_conf or "no LDAC rule (no headset)"
 
     # ---- the restarts still owed -----------------------------------------------------------
+    def unit_show(self, unit: str, *, user: bool, fresh: bool = False) -> tuple[str, str]:
+        """(ActiveState, InvocationID) of the unit from one `systemctl show` (cst_core's: C locale, 20 s
+        at most, on the host from a toolbox; '' for what it cannot tell), read once per run and kept
+        until CST restarts the unit (forget_unit); fresh: read it again (and keep that)."""
+        key = (user, unit)
+        if fresh or key not in self.unit_states:
+            shown = self.m.systemd.show(UnitName(unit), ("ActiveState", "InvocationID"), user=user)
+            self.unit_states[key] = (shown.get("ActiveState", ""), shown.get("InvocationID", ""))
+        return self.unit_states[key]
+
+    def forget_unit(self, *units: str) -> None:
+        """The units were restarted: the next unit_show of each reads it again (in either scope)."""
+        for unit in units:
+            for user in (False, True):
+                self.unit_states.pop((user, unit), None)
+
     def unit_invocation(self, unit: str, *, user: bool) -> str:
-        """The unit's InvocationID while it is active, else ''."""
-        scope = ["--user"] if user else []
-        if not self.ok(["systemctl", *scope, "is-active", "--quiet", unit], host=True):
-            return ""
-        return self.quiet(["systemctl", *scope, "show", "-P", "InvocationID", unit], host=True)
+        """The unit's InvocationID while it runs (as `systemctl is-active` sees it), else ''."""
+        active, inv = self.unit_show(unit, user=user)
+        return inv if is_running(active) else ""
 
     def restart_state(self, mode: str, *units: str) -> str | None:
         """The units whose restart is still owed, one per line (save also records them); None on failure."""
@@ -335,9 +355,11 @@ class Survey:
             path = None
         return path or "", r.returncode == 0 and path is not None
 
-    def bap_endpoint_state(self) -> BapState:
-        """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state)."""
-        inv = self.quiet(["systemctl", "show", "-p", "InvocationID", "--value", "bluetooth"], host=True)
+    def bap_endpoint_state(self, *, fresh: bool = False) -> BapState:
+        """registered | unregistered | no-record | unknown (bluetooth-setup.sh's bap_endpoint_state).
+        bluetoothd's invocation, running or not (a stopped unit keeps its last one), as unit_show
+        has it; fresh: read again (the wait after a restart)."""
+        inv = self.unit_show("bluetooth.service", user=False, fresh=fresh)[1]
         wp_pid = self.quiet(["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"], host=True)
         if not inv or not re.fullmatch(r"[1-9][0-9]*", wp_pid):
             return BapState.UNKNOWN
@@ -482,7 +504,7 @@ class Survey:
                 OwnedState.OK,
                 OwnedState.OK,
                 "enabled",
-                "active",
+                RunningState.ACTIVE,
             )
             self.lw_change = not done
         else:
@@ -654,7 +676,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        if self.lw_enabled == "enabled" and self.lw_active == "active":
+        if self.lw_enabled == "enabled" and self.lw_active == RunningState.ACTIVE:
             if self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
                 self.item("ok", svc, "enabled, active")
             else:

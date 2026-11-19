@@ -447,6 +447,18 @@ class AdaptersTest(unittest.TestCase):
         local = SystemctlAdapter(Recording(CommandResult(0, "Result=success\n", "")), timeout=120)
         self.assertEqual(local.show(UnitName("a.service"), ("Result",), on_host=False), {"Result": "success"})
         self.assertEqual(seen[0][1], {"check": False, "timeout": 120, "locale_c": True, "on_host": False})
+        # A unit of the user's own manager (bluetooth's wireplumber.service): --user before show.
+        seen.clear()
+        mine = SystemctlAdapter(Recording(CommandResult(0, "ActiveState=active\nInvocationID=\n", "")))
+        self.assertEqual(
+            mine.show(UnitName("wireplumber.service"), ("ActiveState", "InvocationID"), user=True),
+            {"ActiveState": "active", "InvocationID": ""},
+        )
+        argv, options = seen[0]
+        self.assertEqual(
+            argv, ["systemctl", "--user", "show", "-p", "ActiveState", "-p", "InvocationID", "wireplumber.service"]
+        )
+        self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
 
     def test_systemctl_adapter_user_scope(self) -> None:
         unit = UnitName("cst-toolchains-prune.timer")
