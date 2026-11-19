@@ -283,6 +283,13 @@ async function guarded(label, phase_, prompt, props, required) {
   return r
 }
 const stopped = (stage, extra) => ({ ready: false, stopped: stage, branch: BRANCH, worktree: WT, trail, ...extra })
+// A reviewer's report (null when the agent stopped), or null when the review does not count (reviewProblem): then
+// logged under logLabel and kept in the trail under label.
+const counted = (r, lens, head, label, logLabel = label) => {
+  const why = r ? reviewProblem(lens, r, head) : ''
+  if (why) { log(logLabel + ': ' + why); trail.push({ label, problem: why }); return null }
+  return r
+}
 
 let design = null
 if (MODE === 'new' && A.kind !== 'docs') {
@@ -350,9 +357,7 @@ if (LANE === 'full') {
   const runReview = async (l) => {
     const props = { ...FIND, reviewed_head: { type: 'string' }, ...(l === 'code-review' ? { skill_findings_read: { type: 'boolean' }, fork_agent_id: { type: 'string' } } : {}) }
     const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read', 'fork_agent_id'] : ['findings', 'reviewed_head'])
-    const why = r ? reviewProblem(l, r, HEAD) : ''
-    if (why) { log('review ' + l + ': ' + why); trail.push({ label: 'review: ' + l, problem: why }); return null }
-    return r
+    return counted(r, l, HEAD, 'review: ' + l, 'review ' + l)
   }
   let reviews = await parallel(labels.map((l) => () => runReview(l)))
   for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
@@ -371,8 +376,7 @@ if (LANE === 'full') {
   fix = await guarded('review+fix', 'Fast lane', shared('review+fix', true) + '\n\nStage: review and fix, the fast lane (a change of at most ' + FAST_LINES + ' lines of docs, tests and repository tooling: one agent reviews it and fixes it). You wrote none of this code. Do not invoke the code-review or simplify skills. First review "git -C ' + QWT + ' diff ' + QBASE + '...HEAD" by hand, FINDINGS ONLY until your list is done: correctness, the repository rules, the proof the kind "' + A.kind + '" asks for, tests that would catch a regression, docs that follow the change. Report each finding in findings with file, line, summary and a concrete failure scenario.' + REVIEWED + ' Then take your findings as the fixer does. ' + FIX_RULES,
     { ...FIND, reviewed_head: { type: 'string' }, ...FIX_PROPS }, ['findings', 'reviewed_head', ...FIX_REQ])
   if (!fix) return stopped('review+fix', { impl, simp })
-  const why = reviewProblem('review+fix', fix, HEAD)
-  if (why) { log('review+fix: ' + why); trail.push({ label: 'review+fix', problem: why }); return stopped('review+fix', { impl, simp, fix }) }
+  if (!counted(fix, 'review+fix', HEAD, 'review+fix')) return stopped('review+fix', { impl, simp, fix })
   all = fix.findings
   log(all.length + ' finding(s) from the fast-lane review')
 }
@@ -395,9 +399,7 @@ const RANGE = 'git -C ' + QWT + ' diff ' + shq(HEAD) + ' ' + shq(FIXED)
 const runReReview = async () => {
   const r = await guarded('re-review', 'Re-review', shared('re-review', false) + '\n\nStage: re-review of the fixer\'s commits, by hand, FINDINGS ONLY (edit nothing; do not invoke the code-review skill: it reviews only against main). The range is "' + RANGE + '" ("git -C ' + QWT + ' log ' + shq(HEAD) + '..' + shq(FIXED) + '" lists its commits); the change before it was already reviewed. Check that each commit does what its message says and breaks nothing around it (read the code around it on the branch with "git -C ' + QWT + ' show ' + shq(FIXED) + ':<file>"), keeps the repository rules and the proof the kind "' + A.kind + '" asks for, and has a test where it needs one. Give each finding file, line, summary, a concrete failure scenario and severity: "high" when the branch must not be integrated as it is (a bug, a broken rule or gate, a missing proof), "low" for anything else.' + REVIEWED,
     { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string', enum: ['high', 'low'] } }, required: ['file', 'summary', 'scenario', 'severity'] } }, reviewed_head: { type: 'string' } }, ['findings', 'reviewed_head'])
-  const why = r ? reviewProblem('re-review', r, FIXED) : ''
-  if (why) { log('re-review: ' + why); trail.push({ label: 're-review', problem: why }); return null }
-  return r
+  return counted(r, 're-review', FIXED, 're-review')
 }
 let rr = await runReReview()
 if (!rr && !mainMoved()) { log('re-review: retrying once'); rr = await runReReview() }
