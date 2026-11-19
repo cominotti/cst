@@ -3848,6 +3848,99 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_116_btrfs_snapshot_reads_the_real_kernels_and_findmnts_escapes(self) -> None:
+        """btrfs/btrfs-snapshot against the real kernel's mountinfo and the real findmnt, as root.
+        A tmpfs stands in for the home subvolume (its folder "home" bind-mounted at a HOME_MOUNT
+        with a blank, set in snapshots.conf); another mount namespace (unshare -m) bind-mounts
+        folders whose names hold a tab, a blank, a backslash and an accented letter, as a
+        container's -v does: `busy` lists each, no sibling, and nothing once that namespace is
+        gone. A tmpfs mounted below a folder whose path findmnt -r writes escaped (\\x20,
+        \\xc3\\xba): `convert-one` skips it (is or contains a mountpoint). The escapes are
+        checked first, else the test proves nothing. What the fakes of the unit tests cannot
+        show: how the kernel and findmnt write these names."""
+        cleanup = r"""
+        d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+        if [ -s "$d/holder" ]; then kill "$(cat "$d/holder")" 2>/dev/null || true; fi
+        if mountpoint -q "$d/top" 2>/dev/null; then
+            umount -R "$d/home mnt" "$d/top" 2>/dev/null || umount -lR "$d/top" || true
+        fi
+        rm -rf "$d" "$state"
+        if [ -e "$d.state" ]; then mv "$d.state" "$state"; fi
+        if [ -e "$d.conf" ]; then mv -f "$d.conf" "$conf"; else rm -f "$conf"; fi
+        """
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, cleanup, check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_116 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            d=/var/tmp/e2e-116 conf=/etc/btrfs-setup/snapshots.conf state=/var/lib/btrfs-snapshot
+            snap=/opt/cst-rw/btrfs/btrfs-snapshot
+            install -d -m 0755 "$d" /etc/btrfs-setup
+            if [ -e "$conf" ]; then cp -a "$conf" "$d.conf"; fi
+            if [ -e "$state" ]; then mv "$state" "$d.state"; fi
+            # The home subvolume without btrfs: a tmpfs whose folder "home" is bind-mounted at
+            # HOME_MOUNT (root field /home in mountinfo), a mount point with a blank.
+            install -d "$d/top"
+            mount -t tmpfs tmpfs "$d/top"
+            h="$d/home mnt"
+            mkdir -p "$d/top/home/u" "$h"
+            mount --bind "$d/top/home" "$h"
+            printf '%s\n' "HOME_MOUNT='$h'" "HOME_SUBVOL='home'" >"$conf"
+            names=($'Work\tspace' 'a b' 'back\slash' $'M\xc3\xbasica')
+            paths=()
+            i=0
+            for n in "${names[@]}"; do
+                mkdir -p "$h/u/$n" "$d/src$i"
+                paths+=("$h/u/$n")
+                i=$((i + 1))
+            done
+            mkdir -p "$h/u/Work" "$h/u/a"
+            # Another mount namespace bind-mounts each folder, as a container's -v does: the real
+            # kernel writes the root field of each (/home/u/a\040b, ...) in its mountinfo.
+            (
+                i=0
+                for p in "${paths[@]}"; do printf '%s\0%s\0' "$p" "$d/src$i"; i=$((i + 1)); done
+            ) >"$d/binds"
+            D="$d" unshare -m bash -c '
+                while IFS= read -r -d "" src && IFS= read -r -d "" dst; do mount --bind "$src" "$dst"; done <"$D/binds"
+                echo "$" >"$D/holder"
+                : >"$D/ready"
+                exec sleep 300' >"$d/holder.log" 2>&1 &
+            holder=$!
+            for _ in $(seq 100); do [ -e "$d/ready" ] && break; sleep 0.1; done
+            [ -e "$d/ready" ] || { cat "$d/holder.log" >&2; exit 1; }
+            # The kernel escapes them in mountinfo: else the test proves nothing.
+            grep -qF 'home/u/a\040b' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/Work\011space' "/proc/$holder/mountinfo"
+            grep -qF 'home/u/back\134slash' "/proc/$holder/mountinfo"
+            grep -qF 'home\040mnt' /proc/self/mountinfo
+            want="$(printf '%s\n' "${paths[@]}")"
+            got="$("$snap" busy "$h/u/Work" "$h/u/a" "${paths[@]}")"
+            [ "$got" = "$want" ] || { printf 'busy listed:\n%s\nwanted:\n%s\n' "$got" "$want" >&2; exit 1; }
+            kill "$holder"; wait "$holder" 2>/dev/null || true
+            [ -z "$("$snap" busy "${paths[@]}")" ]
+            # A mount below a folder whose path findmnt -r writes escaped (\x20, \xc3\xba).
+            conv=("$h/u/conv a b" "$h/u/conv "$'M\xc3\xbasica')
+            for p in "${conv[@]}"; do
+                mkdir -p "$p/m"
+                [ "$(stat -c %i "$p")" != 256 ]   # a tmpfs inode 256 would read as a subvolume
+                mount -t tmpfs tmpfs "$p/m"
+            done
+            findmnt -rn -o TARGET | grep -qF 'conv\x20a\x20b/m'   # escaped: else the test proves nothing
+            findmnt -rn -o TARGET | grep -qF 'conv\x20M\xc3\xbasica/m'
+            for p in "${conv[@]}"; do
+                rc=0; out="$("$snap" convert-one "$p")" || rc=$?
+                [ "$rc" = 1 ]
+                [ "$out" = "<4>btrfs-snapshot: convert: $p: is or contains a mountpoint, skipped" ] ||
+                    { echo "convert-one $p: $out" >&2; exit 1; }
+                mountpoint -q "$p/m"
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_82_toolchains_auto_on_reaches_the_users_manager_with_roots_variables(self) -> None:
         """`cst toolchains auto on` run as tester directly (not through snapshots setup), with
         the XDG_RUNTIME_DIR and bus of root that sudo and runuser can pass on: the program's
