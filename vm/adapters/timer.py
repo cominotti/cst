@@ -82,16 +82,19 @@ def install_timer_files(
     as_root = os.geteuid() == 0
     program_entry = manifest_by_src()["vm/cst-vm"]
     for p, (text, mode) in files.items():
-        program = p == paths.sbin_copy
-        place = Placement(
-            path=p,
-            dest=p,
-            record=paths.install_record,
-            component=TIMER_COMPONENT,
-            src=program_entry.src if program else None,
-            kind=program_entry.kind if program else GeneratedKind.TEXT,
-            owner=Owner.ROOT,
-            mode=mode,
+        place = (
+            Placement.of(program_entry, path=p, dest=p, record=paths.install_record)
+            if p == paths.sbin_copy
+            else Placement(
+                path=p,
+                dest=p,
+                record=paths.install_record,
+                component=TIMER_COMPONENT,
+                src=None,
+                kind=GeneratedKind.TEXT,
+                owner=Owner.ROOT,
+                mode=mode,
+            )
         )
         if svc.put(place, text, as_root=as_root):
             kind = TimerStepKind.INSTALLED if states[p] == OwnedState.MISSING else TimerStepKind.UPDATED

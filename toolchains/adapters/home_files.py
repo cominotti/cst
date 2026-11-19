@@ -26,7 +26,7 @@ from cst_core.application.install import InstallService, Placement, record_file
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import json_object, parse_json, parse_toml
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner, expand_dest, manifest_by_src
+from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner, expand_dest, manifest_by_src
 from toolchains.adapters.program import program_folder
 from toolchains.domain.auto import AUTO_UNITS, OFF_TEXT, render_timer
 from toolchains.domain.common import (
@@ -73,62 +73,33 @@ def home_installer(entry_file: str) -> InstallService:
     return program_installer(entry_file)
 
 
-def put_home_file(
-    home: str,
-    path: str,
-    data: bytes,
-    mode: int,
-    *,
-    component: str,
-    src: str | None,
-    kind: ArtifactKind | GeneratedKind,
-    entry_file: str,
-    values: Mapping[str, str] | None = None,
-) -> bool:
-    """Write path in home unless it is current (the caller checked conflicts and masks first) and list it
-    in home's install record; True when it was written."""
-    place = Placement(
-        path=path,
-        dest=path,
-        record=record_file(Owner.USER, home),
-        component=component,
-        src=src,
-        kind=kind,
-        owner=Owner.USER,
-        mode=mode,
-        values=values,
-    )
+def put_home_file(place: Placement, data: bytes, entry_file: str) -> bool:
+    """Write place's file in the home unless it is current (the caller checked conflicts and masks first)
+    and list it in home's install record; True when it was written."""
     return home_installer(entry_file).put(place, data, as_root=False)
 
 
 def put_auto_copy(home: str, rel: str, data: bytes, entry_file: str) -> bool:
     """One of auto on's copies, ~/rel (its manifest entry gives mode, source and component); True when written."""
     e = next(e for e in INSTALL_MANIFEST if e.dest == "~/" + rel)
-    return put_home_file(
-        home,
-        expand_dest(e.dest, home),
-        data,
-        e.mode.bits,
-        component=e.component,
-        src=e.src,
-        kind=e.kind,
-        entry_file=entry_file,
-    )
+    path = expand_dest(e.dest, home)
+    return put_home_file(Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home)), data, entry_file)
 
 
 def put_auto_unit(home: str, name: str, text: str, entry_file: str) -> bool:
     """One of auto on's user units (generated text); True when written."""
     path = os.path.join(home, UNIT_DIR_REL, name)
-    return put_home_file(
-        home,
-        path,
-        text.encode(),
-        0o644,
+    place = Placement(
+        path=path,
+        dest=path,
+        record=record_file(Owner.USER, home),
         component=AUTO_COMPONENT,
         src=None,
         kind=GeneratedKind.TEXT,
-        entry_file=entry_file,
+        owner=Owner.USER,
+        mode=0o644,
     )
+    return put_home_file(place, text.encode(), entry_file)
 
 
 def forget_auto_files(home: str, entry_file: str) -> None:
@@ -140,19 +111,9 @@ def forget_auto_files(home: str, entry_file: str) -> None:
 def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], entry_file: str) -> bool:
     """The sccache wrapper (rustc-wrapper with the settings written in) through the installer, listed with
     those values, its component marked done; True when written."""
-    src = "toolchains/rustc-wrapper"
-    e = manifest_by_src()[src]
-    written = put_home_file(
-        home,
-        path,
-        text.encode(),
-        e.mode.bits,
-        component=SCCACHE_COMPONENT,
-        src=src,
-        kind=e.kind,
-        entry_file=entry_file,
-        values=values,
-    )
+    e = manifest_by_src()["toolchains/rustc-wrapper"]
+    place = Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home), values=values)
+    written = put_home_file(place, text.encode(), entry_file)
     record_done(home, SCCACHE_COMPONENT, entry_file)
     return written
 
