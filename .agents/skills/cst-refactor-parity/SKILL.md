@@ -52,8 +52,10 @@ test, so say in the message why it cannot
 ## 2c. A typing refactor whose tests must pass members: two commits, A and B
 
 When production code starts to take a StrEnum member where it took a plain
-string, ty can then ask the tests to pass the member too. Split the change
-in two commits, each with its own proof:
+string, ty then asks the tests to pass the member too: every test file is
+ty-checked, and a raw string where a parameter takes the StrEnum is an
+`invalid-argument-type`. Split the change in two commits, each with its own
+proof:
 
 - **A**, production only: the tests are unchanged and pass on the old code
   and on the new (step 2). A `StrEnum` member equals its plain string, so
@@ -62,12 +64,20 @@ in two commits, each with its own proof:
   becomes the member of the same value, plus the imports those members need;
   assertions keep the raw strings, which pin the values
   ([magic-values](../../rules/magic-values.md)). Its proof is that the diff
-  is nothing else: compare each changed test file's syntax tree at A and at
-  B with every member reference put back as its string value and the
-  imports dropped; they must be equal. No such checker is in the repository
-  today: a throwaway script in a temporary folder does it (`ast.parse` both
-  versions, `git show A:FILE` and `git show B:FILE`), and the commit message
-  says it ran.
+  is nothing else: compare each changed test file's syntax tree before
+  B and after it, with every member reference put back as its string value
+  and the imports dropped; they must be equal. No such checker is in the
+  repository today: a throwaway script in a temporary folder does it
+  (`ast.parse` both versions, `git show B~1:FILE` and `git show B:FILE`),
+  and the commit message says it ran.
+
+Which comes first: when the StrEnum already exists, B does, and every
+commit stays green: a member is a `str`, so ty accepts it where the parameter still
+takes a plain string, and the tests pass; then A narrows the parameter with
+the tests unchanged, and `invowk cmd check` passes on both. When A creates
+the StrEnum, B cannot come first (it has nothing to import): A then fails
+`invowk cmd test types` at the test calls until B, so B follows A
+directly, A's message says so, and the pair lands together.
 
 ## 3. Review the test diff
 

@@ -27,10 +27,11 @@ after, for example `tests/uv-dev ty check --output-format concise FILE... |
 grep -c '\[RULE\]'` or `tests/uv-dev ruff check --select RULE FILE...` on
 each. Put the counts in the message. A typing refactor whose tests must
 then pass members (a StrEnum member where a plain string was) is two
-commits: production only,
-proved by the unchanged tests; then tests only, where each raw string
-becomes the member of the same value and nothing else changes (the skill's
-"A and B").
+commits: production only, proved by the unchanged tests; and tests only,
+where each raw string becomes the member of the same value and nothing else
+changes. The tests' commit comes first when the StrEnum already exists, so
+both commits pass `invowk cmd check`; the skill's "A and B" gives the
+order and the proofs.
 
 The skill [cst-refactor-parity](../skills/cst-refactor-parity/SKILL.md) shows
 both. A refactor that finds a bug does not fix it on the way: write the bug
