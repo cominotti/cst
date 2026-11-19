@@ -4708,7 +4708,7 @@ echo test_109-ok
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
-            f"{inst} remove {files} >/dev/null 2>&1; rm -f {core}; "
+            f"{inst} remove {files} >/dev/null 2>&1; if [ -e {d}/core.ours ]; then rm -f {core}; fi; "
             f"if [ -e {d}/notify.bak ]; then mv -f {d}/notify.bak {notify}; fi; "
             f"rm -rf {pending}; if [ -e {d}/pending.bak ]; then mv {d}/pending.bak {pending}; fi; "
             f"rm -rf /var/lib/btrfs-snapshot /run/btrfs-snapshot.lock; "
@@ -4729,7 +4729,8 @@ if [ -e "$conf" ]; then cp -a "$conf" "$d/conf.bak"; fi
 if [ -e "$notify" ]; then mv "$notify" "$d/notify.bak"; fi
 if [ -e "$pending" ]; then mv "$pending" "$d/pending.bak"; fi
 {inst} install {files} >/dev/null
-# The fake core: its own SigIgn, then success.
+# The fake core: its own SigIgn, then success. core.ours: the cleanup removes only a core this test wrote.
+: >"$d/core.ours"
 printf '%s\n' '#!/bin/bash' "grep '^SigIgn:' /proc/\$\$/status >>$d/core-sigign" 'exit 0' >"$core"
 chmod 0755 "$core"
 # The fake btrfs: 10 GiB free (at or below EMERGENCY_AT_OR_BELOW_GIB), and subvolume sync.
