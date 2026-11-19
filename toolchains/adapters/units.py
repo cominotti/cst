@@ -97,28 +97,30 @@ class UserUnits:
         return systemctl(*args, check=check, ok=ok, program=self.program)
 
     def active_state(self, name: str) -> str:
-        return self.systemctl("is-active", name)
+        return self.systemctl(UserManagerVerb.IS_ACTIVE, name)
 
     def timer_facts(self, name: str) -> TimerFacts:
-        enabled = self.systemctl("is-enabled", name)
-        active = self.systemctl("is-active", name)
+        enabled = self.systemctl(UserManagerVerb.IS_ENABLED, name)
+        active = self.systemctl(UserManagerVerb.IS_ACTIVE, name)
         if active != UnitActiveState.ACTIVE:
             return TimerFacts(enabled, active)
-        return TimerFacts(enabled, active, self.systemctl("show", "-p", "NextElapseUSecRealtime", "--value", name))
+        next_elapse = self.systemctl(UserManagerVerb.SHOW, "-p", "NextElapseUSecRealtime", "--value", name)
+        return TimerFacts(enabled, active, next_elapse)
 
     def stop_if_running(self, name: str) -> bool:
         # is-active prints the state; it exits 3 when the unit is not active,
         # and 4 when the manager does not know it (nothing loaded it).
-        if self.before_removal(name, "is-active", ok=(0, 3, 4)) in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
+        state = self.before_removal(name, UserManagerVerb.IS_ACTIVE, ok=(0, 3, 4))
+        if state in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
             return False
-        self.before_removal(name, "stop")
+        self.before_removal(name, UserManagerVerb.STOP)
         return True
 
     def reload(self) -> None:
-        self.systemctl("daemon-reload", check=True)
+        self.systemctl(UserManagerVerb.DAEMON_RELOAD, check=True)
 
     def enable_now(self, name: str) -> None:
-        self.systemctl("enable", "--now", name, check=True)
+        self.systemctl(UserManagerVerb.ENABLE, "--now", name, check=True)
 
     def before_removal(self, name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
         """systemctl --user ARGS NAME for a timer, checked, before auto on/off
@@ -157,13 +159,13 @@ class UserUnits:
         `clean` needs the timer loaded and stopped, so this runs before its file
         is removed; a failed clean leaves that file, which auto on and auto off
         then remove themselves (AutoTimer.forget_stamp)."""
-        self.before_removal(name, "disable", "--now")
-        self.systemctl("clean", "--what=state", name)
+        self.before_removal(name, UserManagerVerb.DISABLE, "--now")
+        self.systemctl(UserManagerVerb.CLEAN, "--what=state", name)
 
     def manager_path(self) -> str | None:
         """PATH of the user manager (what the service runs with), or None when
         it cannot be read."""
-        for line in self.systemctl("show-environment").splitlines():
+        for line in self.systemctl(UserManagerVerb.SHOW_ENVIRONMENT).splitlines():
             if line.startswith("PATH="):
                 val = line[len("PATH=") :]
                 # systemd quotes a value with special characters ($'...'): not parsed here.
