@@ -127,6 +127,31 @@ class ValueObjectsTest(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             Duration(-5)
 
+    def test_sizes_too_large_to_hold_are_the_domain_error(self) -> None:
+        # float('9' * 400) is inf and '9' * 308 is finite until multiplied by T: int() of either
+        # raised OverflowError; int() of more than 4300 digits raised a plain ValueError.
+        for spec in ("9" * 400 + "G", "9" * 308 + "T", "9" * 5000 + "K"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "too large for a size"):
+                ByteSize.parse_iec(spec)
+        self.assertIsNone(ByteSize.parse("9" * 5000))
+        self.assertIsNone(ByteSize.parse("9" * 5000 + "G"))
+        # Huge but finite values keep their value.
+        self.assertEqual(ByteSize.parse_iec("8" + "0" * 290 + "T"), ByteSize(int(8e290 * 2**40)))
+        self.assertEqual(ByteSize.parse("9" * 400), ByteSize(int("9" * 400)))
+        self.assertEqual(ByteSize.parse("9" * 400 + "K"), ByteSize(int("9" * 400) * 1024))
+
+    def test_durations_too_large_to_hold_are_the_domain_error(self) -> None:
+        with self.assertRaisesRegex(DomainValidationError, "invalid duration"):
+            Duration.parse("9" * 5000 + "s")
+        for spec in ("9" * 400 + "s", "9" * 5000 + "w", "9" * 307 + "w"):
+            with self.subTest(spec=spec[-4:]), self.assertRaisesRegex(DomainValidationError, "duration too large"):
+                Duration.parse_float(spec)
+        with self.assertRaisesRegex(DomainValidationError, "duration too large"):
+            Duration.parse_float("9" * 400, allow_unitless=True, positive_only=True)
+        # Huge but finite values keep their value.
+        self.assertEqual(Duration.parse("9" * 400 + "s"), Duration(int("9" * 400)))
+        self.assertEqual(Duration.parse_float("1" + "0" * 300 + "s"), 1e300)
+
     def test_cpu_set_parse(self) -> None:
         cs = CpuSet.parse("0-3,6,12-13")
         self.assertEqual(cs.cpus, frozenset({0, 1, 2, 3, 6, 12, 13}))

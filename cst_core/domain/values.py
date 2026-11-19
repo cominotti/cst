@@ -2,6 +2,7 @@
 """Pure domain value objects with invariant enforcement on construction."""
 
 from dataclasses import dataclass
+import math
 import re
 from typing import Final, Self
 
@@ -101,8 +102,11 @@ class ByteSize:
         m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
         if not m:
             return None
-        count = int(m.group(1)) * 1024 ** " KMGT".index(m.group(2) or " ")
-        return cls(count)
+        try:
+            number = int(m.group(1))
+        except ValueError:  # more digits than int() reads (sys.get_int_max_str_digits)
+            return None
+        return cls(number * 1024 ** " KMGT".index(m.group(2) or " "))
 
     @classmethod
     def parse_iec(cls, spec: str) -> Self:
@@ -115,7 +119,10 @@ class ByteSize:
             raise DomainValidationError(
                 f"'{spec}' is not a size (a number with K, M, G or T, e.g. 150G; 0 or off for no cap)"
             )
-        return cls(int(float(m.group(1)) * _SIZE_UNITS[m.group(2)]))
+        count = float(m.group(1)) * _SIZE_UNITS[m.group(2)]
+        if not math.isfinite(count):  # int() of an infinite float raises OverflowError
+            raise DomainValidationError(f"'{spec}' is too large for a size")
+        return cls(int(count))
 
     def human(self) -> str:
         """Format this byte quantity in human-readable binary units."""
@@ -138,7 +145,11 @@ class Duration:
         m = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", spec)
         if not m:
             raise DomainValidationError(f"invalid duration {spec!r} (expected integer with s, m, h, d or w)")
-        return cls(int(m.group(1)) * _DURATION_UNITS[m.group(2)])
+        try:
+            number = int(m.group(1))
+        except ValueError:  # more digits than int() reads (sys.get_int_max_str_digits)
+            raise DomainValidationError(f"invalid duration {spec!r} (expected integer with s, m, h, d or w)") from None
+        return cls(number * _DURATION_UNITS[m.group(2)])
 
     @classmethod
     def parse_float(cls, spec: str, *, allow_unitless: bool = False, positive_only: bool = False) -> float:
@@ -149,6 +160,8 @@ class Duration:
             raise DomainValidationError(f"invalid duration {spec!r}")
         unit = m.group(2).lower() or "s"
         total = float(m.group(1)) * _DURATION_UNITS[unit]
+        if not math.isfinite(total):
+            raise DomainValidationError(f"duration too large: {spec!r}")
         if positive_only and total <= 0:
             raise DomainValidationError(f"duration must be positive: {spec!r}")
         return total

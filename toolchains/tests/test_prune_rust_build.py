@@ -219,7 +219,7 @@ class SettingsTest(Base):
         self.assertEqual(p("90m"), 5400)
         self.assertEqual(p(" 1.5h "), 5400)
         self.assertEqual(p("1w"), 7 * 24 * H)
-        for bad in ("48", "h", "-1h", "1y", "", "1 hours"):
+        for bad in ("48", "h", "-1h", "1y", "", "1 hours", "9" * 400 + "h"):
             with self.assertRaises(tcd_common.ConfigError, msg=bad):
                 p(bad)
 

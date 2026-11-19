@@ -1431,7 +1431,7 @@ class ParseSizeTest(unittest.TestCase):
             self.assertEqual(tcd_common.parse_size(text), 0, text)
 
     def test_a_bare_number_is_refused(self) -> None:
-        for text in ("150", "1x", "", "G"):
+        for text in ("150", "1x", "", "G", "9" * 400 + "G"):
             with self.subTest(text=text), self.assertRaises(tcd_common.ConfigError):
                 tcd_common.parse_size(text)
 
