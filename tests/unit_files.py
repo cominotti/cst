@@ -38,12 +38,12 @@ if REPO not in sys.path:
 
 from bluetooth.domain import LDAC_UNIT, render_unit as bt_render_unit
 from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, EXPECTED_SERVICE, EXPECTED_TIMER
-from btrfs.tests.test_snapshot_runtime import shell_function
 from cpu.game import domain as game_domain
 from cpu.setup import domain as cpu_domain
 from cst_core.domain.install import INSTALL_MANIFEST, manifest_by_src, render_template
 from cst_core.domain.text import group
 from toolchains.domain import auto as tcd_auto
+from tests.shell_source import shell_function
 from toolchains.domain import common as tcd_common
 from vm import domain as vm_domain
 

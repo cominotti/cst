@@ -23,8 +23,8 @@ import unittest
 
 from btrfs.snapshot_runtime.domain import GuardError, guard_number
 from btrfs.tests.snapshot_fakes import SCRIPT
-from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.domain.text import file_lines, parse_snapshots_conf
+from tests.shell_source import shell_function
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "fixtures", "snapshots-conf-corpus.conf")
