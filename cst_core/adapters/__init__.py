@@ -71,11 +71,12 @@ class SystemctlAdapter:
         program, user = scope.get("program"), scope.get("user", False)
         self._head = [program or "systemctl", *(["--user"] if user else [])]
         self._stub = program is not None
-        policy = scope.get("on_host", SystemctlHost.SHOW_ONLY)
-        # show always names on_host to the runner; the other calls only when it is True.
-        self._show_on_host = policy != SystemctlHost.LOCAL and not self._stub
+        # A stub never runs on the host. show always names on_host to the runner; the other calls name
+        # it only when every call goes to the host.
+        policy = SystemctlHost.LOCAL if self._stub else scope.get("on_host", SystemctlHost.SHOW_ONLY)
+        self._show_on_host = policy != SystemctlHost.LOCAL
         self._scope = _ScopeOptions()
-        if policy == SystemctlHost.EVERY and not self._stub:
+        if policy == SystemctlHost.EVERY:
             self._scope["on_host"] = True
         if (base_env := scope.get("base_env")) is not None:
             self._scope["base_env"] = base_env
