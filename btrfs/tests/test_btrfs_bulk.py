@@ -26,7 +26,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, cast, override
+from typing import Any, TypeIs, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_btrfs_bulk.py): the checkout root holds the tests package.
@@ -35,7 +35,7 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from btrfs.bulk import cli as bulk_cli, domain as bulk_domain
-from btrfs.bulk.adapters import machine as bulk_machine, user as bulk_user
+from btrfs.bulk.adapters import child as bulk_child, machine as bulk_machine, user as bulk_user
 from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
@@ -45,6 +45,7 @@ from btrfs.bulk.domain.steam import SteamJournal, SteamPart
 from btrfs.bulk.adapters.host import Host, snapshot_env
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
+from cst_core.domain.shapes import json_object
 from cst_core.domain.values import Json
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 
@@ -1826,6 +1827,45 @@ def _u_refuse(path: str) -> bool:
     raise bulk_domain.Unexpected(f"{path} appeared meanwhile")
 
 
+def _is_echo(v: object) -> TypeIs[dict[str, Json]]:
+    return json_object(v)
+
+
+class ChildResultTest(unittest.TestCase):
+    """as_user's parent side: the child's JSON answer, and a result of another shape refused."""
+
+    def test_the_answers(self) -> None:
+        ok = bulk_child.child_result(b'{"ok": true}', bulk_child.is_bool)
+        self.assertTrue(ok)
+        self.assertIsInstance(ok, bool)
+        self.assertEqual(bulk_child.child_result(b'{"ok": [1, "a"]}', bulk_child.is_list), [1, "a"])
+        self.assertIsNone(bulk_child.child_result(b'{"ok": null}', bulk_child.is_none))
+        with self.assertRaisesRegex(bulk_domain.Unexpected, "^gone$"):
+            bulk_child.child_result(b'{"unexpected": "gone"}', bulk_child.is_bool)
+        with self.assertRaisesRegex(RuntimeError, "^OSError: boom$"):
+            bulk_child.child_result(b'{"error": "OSError: boom"}', bulk_child.is_bool)
+        for data in (b"", b"not json", b"[1]", b'"ok"'):
+            with self.subTest(data=data), self.assertRaisesRegex(RuntimeError, "^child process died$"):
+                bulk_child.child_result(data, bulk_child.is_bool)
+
+    def test_a_result_of_another_shape_is_refused(self) -> None:
+        # Returned as it was before: a step's caller took "x" for its bool.
+        def refused(call: Callable[[], object]) -> None:
+            with self.assertRaisesRegex(RuntimeError, "result of another shape"):
+                call()
+
+        refused(lambda: bulk_child.child_result(b'{"ok": "x"}', bulk_child.is_bool))
+        refused(lambda: bulk_child.child_result(b'{"ok": true}', bulk_child.is_int))
+        refused(lambda: bulk_child.child_result(b'{"ok": 3}', bulk_child.is_str))
+        refused(lambda: bulk_child.child_result(b'{"ok": "nope"}', bulk_child.is_flatpak_access))
+        refused(
+            lambda: bulk_child.child_result(
+                b'{"ok": {"b64": "", "mtime": "1", "mode": 1, "uid": 0}}', bulk_child.is_user_read
+            )
+        )
+        self.assertEqual(bulk_child.child_result(b'{"ok": "ok"}', bulk_child.is_flatpak_access), "ok")
+
+
 class AsUserTest(unittest.TestCase):
     """as_user runs fn in a child process as the user (the uid and group calls faked: the run is not root)."""
 
@@ -1840,15 +1880,15 @@ class AsUserTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_positional_and_keyword_arguments_reach_the_child_and_the_result_comes_back(self) -> None:
-        got = as_user(self.pw, self.tmp, _u_echo, 7, b="x")
+        got = as_user(self.pw, self.tmp, _is_echo, _u_echo, 7, b="x")
         self.assertEqual(got, {"a": 7, "b": "x", "uid": os.getuid()})
 
     def test_without_a_user_it_runs_here_with_the_same_arguments(self) -> None:
-        self.assertEqual(as_user(None, self.tmp, _u_echo, 1, b="y")["b"], "y")
+        self.assertEqual(as_user(None, self.tmp, _is_echo, _u_echo, 1, b="y")["b"], "y")
 
     def test_unexpected_in_the_child_is_raised_again(self) -> None:
         with self.assertRaisesRegex(bulk_domain.Unexpected, "/x appeared meanwhile"):
-            as_user(self.pw, self.tmp, _u_refuse, "/x")
+            as_user(self.pw, self.tmp, bulk_child.is_bool, _u_refuse, "/x")
 
     def test_user_files_steps_run_in_the_child_and_their_results_come_back(self) -> None:
         files = UserFiles(HomeTree(Primitives()), self.pw, self.tmp)

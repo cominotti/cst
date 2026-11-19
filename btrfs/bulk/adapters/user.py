@@ -13,16 +13,25 @@ from collections.abc import Sequence
 import base64
 import contextlib
 import errno
-import json
 import os
 import pwd
 import shutil
 import stat
 import subprocess
-import sys
 import time
 from typing import TypedDict
 
+from btrfs.bulk.adapters.child import (
+    Account,
+    as_user,
+    is_bool,
+    is_flatpak_access,
+    is_int,
+    is_list,
+    is_none,
+    is_str,
+    is_user_read,
+)
 from btrfs.bulk.adapters.machine import HomeTree, Progress, kind
 from btrfs.bulk.domain import NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
 from btrfs.bulk.domain.steam import (
@@ -37,64 +46,6 @@ from btrfs.bulk.domain.steam import (
     vdf_dump,
 )
 from cst_core.domain.values import Json
-
-
-type Account = pwd.struct_passwd  # whose uid, gids and HOME the child takes
-
-
-def as_user[**P, R: Json](pw: Account | None, home: str, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
-    """fn(*args, **kwargs) in a child process with the user's uid, gids and HOME
-    (pw None: already the user, run here). Returns its result, which crosses
-    back as JSON (R: a Json value, so it comes back as it was); an exception
-    there is raised here again."""
-    if pw is None:
-        return fn(*args, **kwargs)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    r, w = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        code = 0
-        try:
-            os.close(r)
-            os.setgroups(os.getgrouplist(pw.pw_name, pw.pw_gid))
-            os.setresgid(pw.pw_gid, pw.pw_gid, pw.pw_gid)
-            os.setresuid(pw.pw_uid, pw.pw_uid, pw.pw_uid)
-            os.umask(0o022)
-            os.chdir(home)
-            for k in [k for k in os.environ if k.startswith("XDG_")]:
-                del os.environ[k]
-            os.environ.update(HOME=pw.pw_dir, USER=pw.pw_name, LOGNAME=pw.pw_name)
-            out = {"ok": fn(*args, **kwargs)}
-        except Unexpected as e:
-            out = {"unexpected": str(e)}
-        except BaseException as e:  # noqa: BLE001 - reported to the parent
-            out = {"error": f"{type(e).__name__}: {e}"}
-            code = 1
-        try:
-            os.write(w, json.dumps(out).encode())
-        finally:
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os._exit(code)
-    os.close(w)
-    data = b""
-    while True:
-        chunk = os.read(r, 65536)
-        if not chunk:
-            break
-        data += chunk
-    os.close(r)
-    os.waitpid(pid, 0)
-    try:
-        out = json.loads(data or b"{}")
-    except ValueError:
-        out = {}
-    if "unexpected" in out:
-        raise Unexpected(out["unexpected"])
-    if "ok" not in out:
-        raise RuntimeError(out.get("error", "child process died"))
-    return out["ok"]  # json.loads's value: R by the bound above
 
 
 def idle_priority() -> None:
@@ -278,7 +229,7 @@ class UserFiles:
         self.tree, self.machine, self.pw, self.home = tree, tree.machine, pw, home
 
     def read(self, path: str) -> FileRead | None:
-        r = as_user(self.pw, self.home, u_read, path)
+        r = as_user(self.pw, self.home, is_user_read, u_read, path)
         return None if r is None else file_read(r)
 
     def u_mkdirs(self, bulk: str, rel: str, nocow: bool) -> str:
@@ -298,7 +249,7 @@ class UserFiles:
         return path
 
     def mkdirs(self, bulk: str, rel: str, *, nocow: bool) -> str:
-        return as_user(self.pw, self.home, self.u_mkdirs, bulk, rel, nocow)
+        return as_user(self.pw, self.home, is_str, self.u_mkdirs, bulk, rel, nocow)
 
     def u_rmtree(self, path: str) -> None:
         """Delete a tree we own; read-only folders (Go's module cache) are made
@@ -322,17 +273,17 @@ class UserFiles:
             os.unlink(path)
 
     def rmtree(self, path: str) -> None:
-        as_user(self.pw, self.home, self.u_rmtree, path)
+        as_user(self.pw, self.home, is_none, self.u_rmtree, path)
 
     def rmdir(self, path: str) -> None:
-        as_user(self.pw, self.home, os.rmdir, path)
+        as_user(self.pw, self.home, is_none, os.rmdir, path)
 
     def u_create_bulk(self, bulk: str) -> bool:
         self.machine.subvol_create(bulk)
         return True
 
     def create_bulk(self, bulk: str) -> bool:
-        return as_user(self.pw, self.home, self.u_create_bulk, bulk)
+        return as_user(self.pw, self.home, is_bool, self.u_create_bulk, bulk)
 
     def u_relabel(self, path: str) -> bool:
         """A new subvolume root has no SELinux label (unlabeled_t), and files
@@ -343,7 +294,7 @@ class UserFiles:
         return True
 
     def relabel(self, path: str) -> bool:
-        return as_user(self.pw, self.home, self.u_relabel, path)
+        return as_user(self.pw, self.home, is_bool, self.u_relabel, path)
 
     def u_write_tag(self, bulk: str) -> bool:
         p = os.path.join(bulk, "CACHEDIR.TAG")
@@ -353,7 +304,7 @@ class UserFiles:
         return True
 
     def write_tag(self, bulk: str) -> bool:
-        return as_user(self.pw, self.home, self.u_write_tag, bulk)
+        return as_user(self.pw, self.home, is_bool, self.u_write_tag, bulk)
 
     def u_symlink(self, link: str, target: str) -> bool:
         if kind(link) != LstatKind.ABSENT:
@@ -362,7 +313,7 @@ class UserFiles:
         return True
 
     def symlink(self, link: str, target: str) -> bool:
-        return as_user(self.pw, self.home, self.u_symlink, link, target)
+        return as_user(self.pw, self.home, is_bool, self.u_symlink, link, target)
 
     def u_prepare(self, src: str, new: str, nocow: bool) -> int:
         """Copy src into new (a fresh folder next to the target) and check it.
@@ -405,7 +356,7 @@ class UserFiles:
         return stamp
 
     def prepare(self, src: str, new: str, *, nocow: bool) -> int:
-        return as_user(self.pw, self.home, self.u_prepare, src, new, nocow)
+        return as_user(self.pw, self.home, is_int, self.u_prepare, src, new, nocow)
 
     def u_clock(self, near: str) -> int:
         """A ctime stamp (ns) of the filesystem's clock, taken one clock tick
@@ -422,7 +373,7 @@ class UserFiles:
             os.unlink(probe)
 
     def clock(self, near: str) -> int:
-        return as_user(self.pw, self.home, self.u_clock, near)
+        return as_user(self.pw, self.home, is_int, self.u_clock, near)
 
     def u_commit(self, j: ItemJournal) -> bool:
         """The switch: src -> old, new -> target, link. j["stamp2"] (taken just
@@ -448,7 +399,7 @@ class UserFiles:
         return True
 
     def commit(self, j: ItemJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_commit, j)
+        return as_user(self.pw, self.home, is_bool, self.u_commit, j)
 
     def u_late_write(self, j: ItemJournal) -> bool:
         """After the switch: was the old tree written to meanwhile? Entries below
@@ -460,7 +411,7 @@ class UserFiles:
         return os.lstat(old).st_mtime_ns >= j["stamp"] or self.tree.changed_since(old, j["stamp"], mindepth=1)
 
     def late_write(self, j: ItemJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_late_write, j)
+        return as_user(self.pw, self.home, is_bool, self.u_late_write, j)
 
     def u_new_written(self, j: ItemJournal) -> bool:
         """After the switch: was the target (the copy, now in use through the
@@ -472,7 +423,7 @@ class UserFiles:
         return os.lstat(target).st_mtime_ns >= stamp2 or self.tree.changed_since(target, stamp2, mindepth=1)
 
     def new_written(self, j: ItemJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_new_written, j)
+        return as_user(self.pw, self.home, is_bool, self.u_new_written, j)
 
     def u_rollback(self, j: ItemJournal) -> bool:
         """Undo a switch, or the part of one an interruption left. Also the
@@ -520,7 +471,7 @@ class UserFiles:
         self.u_rmtree(new)
 
     def rollback(self, j: ItemJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_rollback, j)
+        return as_user(self.pw, self.home, is_bool, self.u_rollback, j)
 
     def u_finish(self, j: ItemJournal) -> bool:
         """Delete the old tree of a completed switch."""
@@ -531,7 +482,7 @@ class UserFiles:
         return True
 
     def finish(self, j: ItemJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_finish, j)
+        return as_user(self.pw, self.home, is_bool, self.u_finish, j)
 
     def u_move_subvol(self, link: str, target: str) -> bool:
         """An old subvolume (from an earlier snapshots setup) is renamed into
@@ -543,7 +494,7 @@ class UserFiles:
         return True
 
     def move_subvol(self, link: str, target: str) -> bool:
-        return as_user(self.pw, self.home, self.u_move_subvol, link, target)
+        return as_user(self.pw, self.home, is_bool, self.u_move_subvol, link, target)
 
     def u_flatpak(self, app: str, path: str) -> FlatpakAccess:
         if not self.machine.flatpak_installed(app):
@@ -554,7 +505,7 @@ class UserFiles:
         return FlatpakAccess.ADDED
 
     def flatpak(self, app: str, path: str) -> str:
-        return as_user(self.pw, self.home, self.u_flatpak, app, path)
+        return as_user(self.pw, self.home, is_flatpak_access, self.u_flatpak, app, path)
 
     def u_flatpak_state(self, app: str, path: str) -> FlatpakAccess:
         if not self.machine.flatpak_installed(app):
@@ -562,7 +513,7 @@ class UserFiles:
         return FlatpakAccess.OK if self.machine.flatpak_has_fs(app, path) else FlatpakAccess.MISSING
 
     def flatpak_state(self, app: str, path: str) -> str:
-        return as_user(self.pw, self.home, self.u_flatpak_state, app, path)
+        return as_user(self.pw, self.home, is_flatpak_access, self.u_flatpak_state, app, path)
 
     def u_set_nocow_dirs(self, top: str) -> bool:
         self.machine.set_nocow(top)
@@ -579,7 +530,7 @@ class UserFiles:
         return True
 
     def set_nocow_dirs(self, top: str) -> bool:
-        return as_user(self.pw, self.home, self.u_set_nocow_dirs, top)
+        return as_user(self.pw, self.home, is_bool, self.u_set_nocow_dirs, top)
 
     def u_reflink_probe(self, src_file: str, library: str) -> bool:
         """Clone SRC_FILE (a copy-on-write file of a part that moves by reflink)
@@ -599,7 +550,7 @@ class UserFiles:
         return True
 
     def reflink_probe(self, src_file: str, library: str) -> bool:
-        return as_user(self.pw, self.home, self.u_reflink_probe, src_file, library)
+        return as_user(self.pw, self.home, is_bool, self.u_reflink_probe, src_file, library)
 
     def u_verify_content(self, src: str, new: str, label: str, total: int) -> str:
         """Every regular file of NEW has the same bytes as in SRC (the tree
@@ -698,7 +649,7 @@ class UserFiles:
 
     def steam_prepare(self, parts: Sequence[SteamPart]) -> int:
         # idle: only a child of its own (pw set) may lower its own priority.
-        return as_user(self.pw, self.home, self.u_steam_prepare, parts, self.pw is not None)
+        return as_user(self.pw, self.home, is_int, self.u_steam_prepare, parts, self.pw is not None)
 
     def u_steam_drop_news(self, j: SteamJournal | PartsOnly) -> bool:
         for p in j["parts"]:
@@ -707,14 +658,14 @@ class UserFiles:
         return True
 
     def steam_drop_news(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_drop_news, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_drop_news, j)
 
     def u_steam_changed(self, j: SteamJournal) -> bool:
         """Was a source written to since the copy started?"""
         return any(self.tree.changed_since(p["src"], j["stamp"]) for p in j["parts"])
 
     def steam_changed(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_changed, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_changed, j)
 
     def u_steam_switch(self, j: SteamJournal) -> bool:
         """Per part, in order (the manifest last): src -> old, new -> dst."""
@@ -726,7 +677,7 @@ class UserFiles:
         return True
 
     def steam_switch(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_switch, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_switch, j)
 
     def written_since(self, path: str, stamp: int) -> bool:
         if kind(path) == LstatKind.ABSENT:
@@ -740,14 +691,14 @@ class UserFiles:
         return any(self.written_since(p["old"], j["stamp"]) for p in j["parts"])
 
     def steam_late(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_late, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_late, j)
 
     def u_steam_new_written(self, j: SteamJournal) -> bool:
         """After the switch: was a moved part written to in the new library?"""
         return any(self.written_since(p["dst"], j["stamp2"]) for p in j["parts"])
 
     def steam_new_written(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_new_written, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_new_written, j)
 
     def u_steam_rollback(self, j: SteamJournal) -> bool:
         """Undo a switch, or what an interruption left of one: the manifest
@@ -783,7 +734,7 @@ class UserFiles:
                 self.u_rmtree(p["new"])
 
     def steam_rollback(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_rollback, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_rollback, j)
 
     def u_steam_finish(self, j: SteamJournal) -> bool:
         for p in j["parts"]:
@@ -793,7 +744,7 @@ class UserFiles:
         return True
 
     def steam_finish(self, j: SteamJournal) -> bool:
-        return as_user(self.pw, self.home, self.u_steam_finish, j)
+        return as_user(self.pw, self.home, is_bool, self.u_steam_finish, j)
 
     def u_write_marker(self, path: str, contentid: str) -> bool:
         u_write_new(path, vdf_dump({"libraryfolder": {"contentid": contentid, "label": ""}}), 0o644)
@@ -801,7 +752,7 @@ class UserFiles:
         return True
 
     def write_marker(self, path: str, contentid: str) -> bool:
-        return as_user(self.pw, self.home, self.u_write_marker, path, contentid)
+        return as_user(self.pw, self.home, is_bool, self.u_write_marker, path, contentid)
 
     def u_write_vdf_pair(
         self,
@@ -849,6 +800,7 @@ class UserFiles:
         mtimes = as_user(
             self.pw,
             self.home,
+            is_list,
             self.u_write_vdf_pair,
             files,
             [base64.b64encode(r).decode() for r in expect],
