@@ -41,7 +41,9 @@ never be linted. This test derives the Python files from the repository
 - ruff's preview is on only for the rules select names by their full code
   ([tool.ruff.lint] explicit-preview-rules is true whenever preview is),
   never for PLC1901, and never for the formatter ([tool.ruff.format]
-  preview, or the top-level [tool.ruff] preview that would switch it on).
+  preview, or the top-level [tool.ruff] preview that would switch it on);
+- no Python file keeps ruff format away from its code with a comment
+  (# fmt: skip, # fmt: off/on, or the yapf: disable/enable ruff also reads).
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
@@ -62,6 +64,9 @@ from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 PYTHON_SHEBANG = re.compile(rb"^#!.*\bpython[0-9.]*\b")
 IGNORE_COMMENT = re.compile(r"#\s*(?:ty|type)\s*:\s*ignore\b")
+# A comment that keeps ruff format away from code: fmt with skip, off or on, and yapf with disable
+# or enable, which ruff also reads (the pattern below spells them out).
+FORMAT_SUPPRESSION = re.compile(r"#\s*(?:fmt\s*:\s*(?:skip|off|on)|yapf\s*:\s*(?:disable|enable))\b")
 # The [tool.ty] settings the gate allows, as "table.key". Any other one could
 # take files or diagnostics out of ty's check (src.exclude, overrides, a rule
 # set to "ignore", analysis.allowed-unresolved-imports, ...).
@@ -341,6 +346,19 @@ def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
                 f"{rel}:{tok.start[0]}: an ignore comment in a ty-gated file; fix what ty reports instead"
                 for tok in tokenize.tokenize(fh.readline)
                 if tok.type == tokenize.COMMENT and IGNORE_COMMENT.search(tok.string)
+            )
+    return out
+
+
+def format_suppressions(repo: str, paths: Iterable[str]) -> list[str]:
+    """The comments that keep ruff format away from code in the given files, as text lines (empty: none)."""
+    out: list[str] = []
+    for rel in sorted(paths):
+        with open(os.path.join(repo, rel), "rb") as fh:
+            out.extend(
+                f"{rel}:{tok.start[0]}: {tok.string.strip()!r} keeps ruff format away; let it lay the code out"
+                for tok in tokenize.tokenize(fh.readline)
+                if tok.type == tokenize.COMMENT and FORMAT_SUPPRESSION.search(tok.string)
             )
     return out
 
@@ -664,6 +682,31 @@ class PythonFilesTest(unittest.TestCase):
                     ],
                 )
 
+    def test_format_suppressions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-pyfiles-") as tmp:
+            # Built from pieces so that this file holds no such comment of its own.
+            fmt, yapf = "# fmt" + ": ", "# yapf" + ": "
+            files = {
+                "clean.py": f's = "{fmt}skip"\nx = [1, 2]  # format: compact\n',
+                "a.py": f"x = [1,2]  {fmt}skip\n",
+                "b.py": f"{fmt}off\nx = [1,2]\n{fmt}on\n",
+                "c.py": "y = 1  #fmt:skip\n",
+                "d.py": f"{yapf}disable\nz = 2\n",
+            }
+            for name, text in files.items():
+                with open(os.path.join(tmp, name), "w") as fh:
+                    fh.write(text)
+            self.assertEqual(
+                format_suppressions(tmp, files),
+                [
+                    f"a.py:1: '{fmt}skip' keeps ruff format away; let it lay the code out",
+                    f"b.py:1: '{fmt}off' keeps ruff format away; let it lay the code out",
+                    f"b.py:3: '{fmt}on' keeps ruff format away; let it lay the code out",
+                    "c.py:1: '#fmt:skip' keeps ruff format away; let it lay the code out",
+                    f"d.py:1: '{yapf}disable' keeps ruff format away; let it lay the code out",
+                ],
+            )
+
     def test_ruff_preview_only_for_the_rules_named(self) -> None:
         def conf(lint: Mapping[str, object], **ruff: object) -> dict[str, object]:
             return {"tool": {"ruff": {"lint": dict(lint), **ruff}}}
@@ -724,6 +767,7 @@ class PythonFilesTest(unittest.TestCase):
             + ruff_preview_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, ty_gated(py_files, ty_gate))
+            + format_suppressions(REPO, py_files)
         )
         self.assertEqual(found, [], "the Python gates miss something (see docs/dev-tools.md):\n" + "\n".join(found))
 

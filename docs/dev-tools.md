@@ -205,7 +205,9 @@ repository:
   whitespace (a space after an opening quote, trailing spaces, tabs, the
   indentation of the lines), so check the diff when a docstring is printed
   as help text (`print(__doc__)`, argparse). Do not use `# fmt: off` or
-  `# fmt: skip` to get a green run. Markdown files are excluded
+  `# fmt: skip` to get a green run: `tests/test_python_files.py` fails on
+  any `# fmt: skip`, `# fmt: off`, `# fmt: on` (and the `# yapf: disable`
+  and `enable` ruff also reads) in a Python file. Markdown files are excluded
   (`[tool.ruff.format] exclude`): ruff would also format the Python code
   blocks in them, which are short examples wrapped to read well next to the
   text around them, not code that runs.
