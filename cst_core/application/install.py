@@ -197,7 +197,10 @@ class InstallService:
                     f"{entry.src}: belongs to the user; install it as the user (cst_install_as USER), not as root"
                 )
 
-    def _prepare(self, entries: Sequence[InstallEntry], req: InstallRequest) -> list[tuple[Placement, bytes]]:
+    def _prepare(
+        self, entries: Sequence[InstallEntry], req: InstallRequest
+    ) -> tuple[list[tuple[Placement, bytes]], dict[str, InstallRecord]]:
+        """Every entry's placement and bytes, checked; and their records as they are now (_read_records)."""
         self._check(entries, req)
         for e in entries:
             self.destination(e, req)  # every destination checked before any payload is built
@@ -205,38 +208,26 @@ class InstallService:
             (self.placement(e, req, values), data)
             for e, (data, values) in zip(entries, self._render(entries, req.values), strict=True)
         ]
-        self._check_records({p.record for p, _ in places})
-        return places
+        return places, self._read_records({p.record for p, _ in places})
 
-    def _check_records(self, records: set[str], outcome: str = "nothing was changed") -> None:
-        """A record of a newer CST stops the call before any write (it is never rewritten by an older one);
-        outcome ends the refusal (what the call left undone)."""
+    def _read_records(self, records: set[str], outcome: str = "nothing was changed") -> dict[str, InstallRecord]:
+        """Each record, read once, as it is now. A record of a newer CST stops the call before any write (it
+        is never rewritten by an older one); outcome ends the refusal (what the call left undone). No record
+        yet, or one that is no record (install starts it again), is empty; a record that cannot be read is
+        left out (plan cannot tell; the update after the files says why)."""
+        found: dict[str, InstallRecord] = {}
         if self._record is None:
-            return
+            return found
         for path in sorted(r for r in records if r):
             try:
-                self._record.read(path)
+                found[path] = self._record.read(path) or EMPTY_RECORD
             except RecordFormatError as e:
                 if e.newer:
                     raise InstallRefused(f"{path}: {e}: {outcome}") from None
-            except OSError:
-                continue  # unreadable here: the update below says why, after the files
-
-    def _listed(self, records: set[str]) -> dict[str, frozenset[str]]:
-        """The destinations each record lists: none for no record yet, or for one that is no record (install
-        starts it again; a newer one was refused before). A record that cannot be read is left out: plan
-        cannot tell."""
-        listed: dict[str, frozenset[str]] = {}
-        if self._record is None:
-            return listed
-        for path in sorted(r for r in records if r):
-            try:
-                listed[path] = frozenset((self._record.read(path) or EMPTY_RECORD).files)
-            except RecordFormatError:
-                listed[path] = frozenset()
+                found[path] = EMPTY_RECORD
             except OSError:
                 continue
-        return listed
+        return found
 
     def is_current(
         self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
@@ -262,7 +253,7 @@ class InstallService:
         is never there before what it runs). The record is updated after
         the last file, and also when a write fails (with the files before it).
         """
-        todo = self._prepare(entries, req)
+        todo, _ = self._prepare(entries, req)
         todo.sort(key=lambda pd: pd[0].kind == ArtifactKind.UNIT)
         # Only a program with a SettingsStep is read here (is_current reads the whole file).
         replaced = [
@@ -386,7 +377,7 @@ class InstallService:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
         True when it was written."""
         # Only this file: the module may have changed other things before it (swap's crypttab).
-        self._check_records({place.record}, f"{place.path} was not written")
+        self._read_records({place.record}, f"{place.path} was not written")
         written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
             "written"
         )
@@ -429,13 +420,12 @@ class InstallService:
         counted: it needs no write, so `check` still takes it as current."""
         lines: list[str] = []
         replaced: list[Placement] = []
-        todo = self._prepare(entries, req)
-        listed = self._listed({p.record for p, _ in todo})
+        todo, records = self._prepare(entries, req)
         for p, data in todo:
             if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
                 lines.append(f"would write: {p.path}")
                 replaced.append(p)
-            elif p.record in listed and p.dest not in listed[p.record]:
+            elif p.record in records and p.dest not in records[p.record].files:
                 lines.append(f"would record: {p.path}")
             else:
                 lines.append(f"unchanged: {p.path}")
