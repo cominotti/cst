@@ -8,6 +8,7 @@ bash: to the journal (passed on), nowhere (2>/dev/null) or into its output (2>&1
 """
 
 from collections.abc import Sequence
+import contextlib
 from dataclasses import dataclass, field
 import os
 import stat
@@ -347,13 +348,11 @@ def next_root(m: Probe) -> tuple[str, str]:
         return "", "rpm-ostree lists no deployment"
     first = status.deployments[0]
     serial = first.get("serial")
-    incomplete = "its first deployment has no osname, checksum or whole serial"
-    if "osname" not in first or "checksum" not in first or not isinstance(serial, (int, float)):
-        return "", incomplete  # the bash's "%d" % ... failed on these: no next root
-    try:
-        return f"/ostree/deploy/{first['osname']}/deploy/{first['checksum']}.{int(serial)}", ""
-    except OverflowError, ValueError:  # inf, nan
-        return "", incomplete
+    # The bash's "%d" % ... failed on the others: no next root.
+    if "osname" in first and "checksum" in first and isinstance(serial, (int, float)):
+        with contextlib.suppress(OverflowError, ValueError):  # inf, nan
+            return f"/ostree/deploy/{first['osname']}/deploy/{first['checksum']}.{int(serial)}", ""
+    return "", "its first deployment has no osname, checksum or whole serial"
 
 
 def marker_problems(m: Probe, marker: str) -> list[str]:
