@@ -674,12 +674,16 @@ OLD_PROTECTED_LINE = (
 class SettingsDomainTest(unittest.TestCase):
     def test_the_settings_file_is_read_strictly(self) -> None:
         read = gc_domain.parse_settings_file
-        self.assertEqual(read("/f", "# mine\nDOCKER_GC_PROTECT=a.example, ghcr.io/team/ ,h:5000\n"), (
-            "a.example", "ghcr.io/team", "h:5000"))  # fmt: skip
+        self.assertEqual(
+            read("/f", "# mine\nDOCKER_GC_PROTECT=a.example, ghcr.io/team/ ,h:5000\n"),
+            ("a.example", "ghcr.io/team", "h:5000"),
+        )
         self.assertEqual(read("/f", "DOCKER_GC_PROTECT=\n"), ())
         # The path separators of the distribution spec's reference grammar: ".", "_", "__", a run of "-".
-        self.assertEqual(read("/f", "DOCKER_GC_PROTECT=ghcr.io/my__team,ghcr.io/my--org,h/a.b_c-d\n"), (
-            "ghcr.io/my__team", "ghcr.io/my--org", "h/a.b_c-d"))  # fmt: skip
+        self.assertEqual(
+            read("/f", "DOCKER_GC_PROTECT=ghcr.io/my__team,ghcr.io/my--org,h/a.b_c-d\n"),
+            ("ghcr.io/my__team", "ghcr.io/my--org", "h/a.b_c-d"),
+        )
         self.assertEqual(read("/f", "# nothing set\n"), ())
         for text, why in (
             ("DOCKER_GC_PROTCT=a.example\n", "/f line 1: DOCKER_GC_PROTCT: unknown setting"),
@@ -762,10 +766,13 @@ class SettingsUseCaseTest(unittest.TestCase):
         self.assertEqual(f.console.lines[-1], "written:   /etc/cst/docker-gc.conf (DOCKER_GC_PROTECT=old.example:5000)")
         self.assertEqual(f.gc.execute(GcCommand.SETTINGS, write=True), 0)
         self.assertEqual(len(f.config.written), 1, "a second --write wrote again")
-        self.assertEqual(f.console.lines[-2:], [
-            "protected registries: old.example:5000 (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf)",
-            "unchanged: /etc/cst/docker-gc.conf",
-        ])  # fmt: skip
+        self.assertEqual(
+            f.console.lines[-2:],
+            [
+                "protected registries: old.example:5000 (DOCKER_GC_PROTECT in /etc/cst/docker-gc.conf)",
+                "unchanged: /etc/cst/docker-gc.conf",
+            ],
+        )
         self.assertEqual(f.gc.execute(GcCommand.SETTINGS), 0)
 
     def test_the_installed_program_is_read_only_while_the_file_is_missing(self) -> None:
@@ -1039,8 +1046,10 @@ class StateFilesTest(unittest.TestCase):
         self.files.save_state(state)
         summary = RunSummary(1794000300.0, 1, 2, 3, 4500000, 0, {"Images": "1 GB"}, {"Images": "0.5 GB"})
         self.files.save_summary(summary)
-        for name, fixture in ((self.files.paths.last_used, "docker-gc-last-used-v1.json"),
-                              (self.files.paths.last_run, "docker-gc-last-run-v1.json")):  # fmt: skip
+        for name, fixture in (
+            (self.files.paths.last_used, "docker-gc-last-used-v1.json"),
+            (self.files.paths.last_run, "docker-gc-last-run-v1.json"),
+        ):
             with self.subTest(fixture), open(name) as f:
                 self.assertEqual(f.read(), self.fixture(fixture))
         # What an older docker-gc wrote (no "v"): read the same.
@@ -1207,8 +1216,10 @@ class DockerCommandTest(unittest.TestCase):
         self.assertTrue(self.info_says(0, ""))
         for down in (
             "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
-            "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct "
-            "and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n",
+            (
+                "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct "
+                "and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory\n"
+            ),
             "... dial unix /var/run/docker.sock: connect: connection refused\n",
         ):
             self.assertFalse(self.info_says(1, down), down)

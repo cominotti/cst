@@ -204,8 +204,10 @@ class ToolConfig:
                 (
                     ConfigMark.UNKNOWN,
                     shown,
-                    f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
-                    f"run {self.prog} config apply from CST",
+                    (
+                        f"sccache wrapper: its source ({WRAPPER_NAME} next to this program) is missing: "
+                        f"run {self.prog} config apply from CST"
+                    ),
                 )
             ]
         st = self.files.wrapper_state(text)
@@ -245,8 +247,10 @@ class ToolConfig:
                         (
                             ConfigMark.REMOVE,
                             shown,
-                            f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
-                            f"~/{WRAPPER_REL} stays (unused, harmless)",
+                            (
+                                f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
+                                f"~/{WRAPPER_REL} stays (unused, harmless)"
+                            ),
                         )
                     ]
                 return [
@@ -268,8 +272,10 @@ class ToolConfig:
                     (
                         ConfigMark.ON,
                         shown,
-                        f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
-                        f"{self.prog} config apply --no-sccache does)",
+                        (
+                            f"sccache is on (CST's rustc-wrapper; {why} does not remove it: "
+                            f"{self.prog} config apply --no-sccache does)"
+                        ),
                     )
                 ]
                 return out + [ln for ln in self.wrapper_lines(verb, text, values) if ln[0] != ConfigMark.OK]
@@ -293,8 +299,10 @@ class ToolConfig:
                 (
                     ConfigMark.BY_HAND,
                     shown,
-                    f"sccache ({why}): CST cannot add the key safely here: put "
-                    f'rustc-wrapper = "{wrapper_path(home)}" into [build] yourself',
+                    (
+                        f"sccache ({why}): CST cannot add the key safely here: put "
+                        f'rustc-wrapper = "{wrapper_path(home)}" into [build] yourself'
+                    ),
                 )
             )
         return out

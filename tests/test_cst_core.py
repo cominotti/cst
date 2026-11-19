@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Final, Literal
+from typing import Final, Literal, override
 import unittest
 from unittest import mock
 
@@ -151,6 +151,7 @@ class ValueObjectsTest(unittest.TestCase):
 
 
 class ManagedFilesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.spec = MarkedLineSpec(
             desired_line="/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)",
@@ -753,9 +754,11 @@ class CstCommandTest(unittest.TestCase):
 
     tmp: str
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-cmd-")
 
+    @override
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
@@ -1278,8 +1281,10 @@ class ModuleRouterTest(unittest.TestCase):
             [
                 (
                     "err",
-                    "'cst x nocow apply' must run on the host, not inside a toolbox/container.\n"
-                    "In a host terminal: cst x nocow apply\n",
+                    (
+                        "'cst x nocow apply' must run on the host, not inside a toolbox/container.\n"
+                        "In a host terminal: cst x nocow apply\n"
+                    ),
                 )
             ],
         )
@@ -1318,15 +1323,29 @@ class ModuleRouterTest(unittest.TestCase):
             [
                 (
                     [
-                        "runuser", "-u", "alice", "--", "env", "-u", "XDG_CONFIG_HOME", "-u", "SUDO_USER",
-                        "HOME=/home/alice", "USER=alice", "LOGNAME=alice", "XDG_RUNTIME_DIR=/run/user/1234",
-                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1234/bus", "CST_PROG=cst x",
-                        "/c/x-setup.sh", "prune", "plan",
+                        "runuser",
+                        "-u",
+                        "alice",
+                        "--",
+                        "env",
+                        "-u",
+                        "XDG_CONFIG_HOME",
+                        "-u",
+                        "SUDO_USER",
+                        "HOME=/home/alice",
+                        "USER=alice",
+                        "LOGNAME=alice",
+                        "XDG_RUNTIME_DIR=/run/user/1234",
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1234/bus",
+                        "CST_PROG=cst x",
+                        "/c/x-setup.sh",
+                        "prune",
+                        "plan",
                     ],
                     None,
                 )
             ],
-        )  # fmt: skip
+        )
         for user in ("", "root"):
             port = _FakeRoutePort(euid=0)
             self.assertEqual(self._router("toolchains", port, sudo_user=user).route(["status"]), 1)
@@ -1335,8 +1354,10 @@ class ModuleRouterTest(unittest.TestCase):
                 [
                     (
                         "err",
-                        "cst x: ERROR: run it from your user account (needs SUDO_USER): "
-                        "toolchain caches and settings belong to your user\n",
+                        (
+                            "cst x: ERROR: run it from your user account (needs SUDO_USER): "
+                            "toolchain caches and settings belong to your user\n"
+                        ),
                     )
                 ],
             )
@@ -1435,8 +1456,18 @@ class CoreWiringTest(unittest.TestCase):
 class StateContractsTest(unittest.TestCase):
     """cst_core/domain/contracts.py: every shared state format, and the programs that use its paths."""
 
-    KEYS: Final = (StateFormatKey.ALERT_SPOOL, StateFormatKey.STALL_RECORDS, StateFormatKey.STALL_QUEUE, StateFormatKey.BULK_JOURNAL, StateFormatKey.DOCKER_GC_STATE, StateFormatKey.DOCKER_GC_LAST_RUN,
-            StateFormatKey.VM_INDEX, StateFormatKey.INSTALL_RECORD, StateFormatKey.GAME_STATE, StateFormatKey.GAME_INTENDED)  # fmt: skip
+    KEYS: Final = (
+        StateFormatKey.ALERT_SPOOL,
+        StateFormatKey.STALL_RECORDS,
+        StateFormatKey.STALL_QUEUE,
+        StateFormatKey.BULK_JOURNAL,
+        StateFormatKey.DOCKER_GC_STATE,
+        StateFormatKey.DOCKER_GC_LAST_RUN,
+        StateFormatKey.VM_INDEX,
+        StateFormatKey.INSTALL_RECORD,
+        StateFormatKey.GAME_STATE,
+        StateFormatKey.GAME_INTENDED,
+    )
 
     def test_every_format_names_real_writers_and_readers(self) -> None:
         for key in self.KEYS:

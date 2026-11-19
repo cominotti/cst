@@ -69,7 +69,7 @@ import argparse
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
 import sys
-from typing import NoReturn
+from typing import NoReturn, override
 
 from cst_core import wiring
 from cst_core.application.install import (
@@ -118,6 +118,7 @@ class InstallerCommand(StrEnum):
 
 
 class _Parser(argparse.ArgumentParser):
+    @override
     def error(self, message: str) -> NoReturn:
         """Raise instead of printing the usage and exiting."""
         raise _UsageError(message)

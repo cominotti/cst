@@ -8,7 +8,7 @@ from typing import Final, Self
 
 # A value JSON can carry as it is: json.loads(json.dumps(v)) == v. A tuple
 # comes back as a list and a set does not go, so neither is one.
-type Json = None | bool | int | float | str | list[Json] | dict[str, Json]
+type Json = bool | int | float | str | list[Json] | dict[str, Json] | None
 
 
 class DomainValidationError(ValueError):

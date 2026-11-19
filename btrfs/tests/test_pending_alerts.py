@@ -208,9 +208,14 @@ class PendingAlertsTest(unittest.TestCase):
         for args in ((), ("--list",), ("--bogus",)):
             with self.subTest(args):
                 r = subprocess.run(
-                    [*RUN, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+                    [*RUN, *args],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
                     timeout=60,
-                )  # fmt: skip
+                )
                 self.assertEqual((r.returncode, r.stdout), (1, ""))
                 self.assertIn("HOME", r.stderr)
         self.assertEqual(self.notifications(), [])
@@ -255,9 +260,13 @@ class PendingAlertsTest(unittest.TestCase):
         self.alert(1)
         env = {**self.env, "LC_ALL": "pt_BR.UTF-8"}
         want = subprocess.run(
-            ["date", "-d", f"@{FIRST}", "+%a %d %b %H:%M"], env=env, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, check=True,
-        ).stdout.strip()  # fmt: skip
+            ["date", "-d", f"@{FIRST}", "+%a %d %b %H:%M"],
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=True,
+        ).stdout.strip()
         r = self.run_prog("--list", LC_ALL="pt_BR.UTF-8")
         self.assertEqual(r.stdout, f"{want}  critical btrfs-test: Disk: problem{NOT_SHOWN}\n")
 
@@ -400,9 +409,14 @@ class PendingAlertsTest(unittest.TestCase):
         os.close(r)
         try:
             p = subprocess.run(
-                [*RUN, "--list"], check=False, stdout=w, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                env=self.env, timeout=60,
-            )  # fmt: skip
+                [*RUN, "--list"],
+                check=False,
+                stdout=w,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                env=self.env,
+                timeout=60,
+            )
         finally:
             os.close(w)
         self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
@@ -441,8 +455,10 @@ class PendingAlertsTest(unittest.TestCase):
             [
                 f"Happened {when(FIRST)}, while no desktop session could show it.\n\nthe body\nline 2",
                 f"Happened again {when(FIRST + 60)}, while no desktop session could show it.\n\nthe body\nline 2",
-                f"Happened 2 more times since you last saw it, while no desktop session could show it: last "
-                f"{when(FIRST + 120)}.\n\nthe body\nline 2",
+                (
+                    f"Happened 2 more times since you last saw it, while no desktop session could show it: last "
+                    f"{when(FIRST + 120)}.\n\nthe body\nline 2"
+                ),
             ],
         )
 

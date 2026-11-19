@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import override
 import unittest
 from unittest import mock
 
@@ -55,6 +56,9 @@ from cst_core.domain.files import owned_file_state
 from cst_core.domain.files import checked_path
 from cst_core.domain.install import Owner
 from cst_core.domain.text import (
+    HELP_WORDS,
+    NO_WORDS,
+    YES_WORDS,
     describe_problems,
     enum_member,
     first_line,
@@ -118,8 +122,11 @@ class DomainTest(unittest.TestCase):
                 values = " ".join(f'"$v{i}"' for i in range(n))
                 r = subprocess.run(
                     ["bash", "-c", f'read -r {names} <<<"$1"; printf "%s\\x1f" {values}', "_", line],
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True,
-                )  # fmt: skip
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=True,
+                )
                 with self.subTest(line=line, n=n):
                     self.assertEqual(read_fields(line, n), r.stdout.split("\x1f")[:-1])
 
@@ -206,6 +213,7 @@ class DomainTest(unittest.TestCase):
 
 
 class AdaptersTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-shared-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -412,6 +420,7 @@ class AdaptersTest(unittest.TestCase):
 class CounterFileTest(unittest.TestCase):
     """CounterFile: the boot counter of btrfs-bulk and docker-volumes-nocow."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-counter-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -451,6 +460,7 @@ class CounterFileTest(unittest.TestCase):
 class WriteBytesAtomicTest(unittest.TestCase):
     """write_bytes_atomic: the mode is exact, a link is replaced (not followed), restorecon as root."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-wba-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -536,6 +546,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
 class WriteAtomicTest(unittest.TestCase):
     """cst_core.adapters.files.write_atomic: unique temp, exact mode, fsync file then folder, temp gone on errors."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-wa-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -682,6 +693,7 @@ class WriteAtomicTest(unittest.TestCase):
 
 
 class ForceSymlinkAndRunnerTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-fsl-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -912,13 +924,15 @@ class CommandRunnerTest(unittest.TestCase):
                 self.py,
                 "-I",
                 "-c",
-                "import subprocess, sys\n"
-                f"sys.path.insert(0, {repo!r})\n"
-                "from cst_core.adapters.runner import SubprocessCommandRunner\n"
-                "r = SubprocessCommandRunner()\n"
-                "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
-                "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
-                "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n",
+                (
+                    "import subprocess, sys\n"
+                    f"sys.path.insert(0, {repo!r})\n"
+                    "from cst_core.adapters.runner import SubprocessCommandRunner\n"
+                    "r = SubprocessCommandRunner()\n"
+                    "a = r.run(sys.argv[1:], output='stdout-show-stderr')\n"
+                    "b = r.run(sys.argv[1:], output='stdout-show-stderr', on_line=lambda ln: None)\n"
+                    "print(repr((a.stdout, a.stderr, b.stdout, b.stderr)))\n"
+                ),
                 *probe,
             ]
             out = subprocess.run(
@@ -1102,7 +1116,10 @@ class CommandRunnerTest(unittest.TestCase):
         env = kw["env"]
         assert isinstance(env, dict)
         self.assertEqual((env["LC_ALL"], env["K"]), ("C", "v"))
-        on_host: Callable[[core_runner.SubprocessCommandRunner], object] = lambda r: r.run(["cmd", "arg"], on_host=True)
+
+        def on_host(r: core_runner.SubprocessCommandRunner) -> object:
+            return r.run(["cmd", "arg"], on_host=True)
+
         self.assertEqual(self.recorded(inside, on_host)[0], ["flatpak-spawn", "--host", "cmd", "arg"])
         self.assertEqual(self.recorded(inside, lambda r: r.run(["cmd", "arg"]))[0], ["cmd", "arg"], "on_host is opt-in")
         self.assertEqual(self.recorded(outside, on_host)[0], ["cmd", "arg"])
@@ -1145,6 +1162,7 @@ class VirshAdapterTest(unittest.TestCase):
 
     def test_domains_and_dumpxml(self) -> None:
         class Answers(_RecordingRunner):
+            @override
             def run(self, argv: Sequence[str], **options: object) -> core_ports.CommandResult:
                 super().run(argv, **options)
                 if "list" in argv:
@@ -1218,6 +1236,7 @@ class PrintfQTest(unittest.TestCase):
 class ShellAssignmentsTest(unittest.TestCase):
     """parse_shell_assignments, the one KEY=VALUE reader (cpu, vm, doctor, toolchains, bluetooth, bulk), against bash."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-kv-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1451,6 +1470,17 @@ class ConfirmTest(unittest.TestCase):
             self.ask("y", tty=False)
 
 
+class SettingWordsTest(unittest.TestCase):
+    """The yes/no words of a setting and the help words, pinned: every module reads them from here, and a word
+    taken out would turn a knob or a help request into something else without any other test noticing."""
+
+    def test_the_words(self) -> None:
+        self.assertEqual(YES_WORDS, frozenset({"yes", "true", "on", "1"}))
+        self.assertEqual(NO_WORDS, frozenset({"no", "false", "off", "0"}))
+        self.assertEqual(HELP_WORDS, frozenset({"help", "-h", "--help"}))
+        self.assertEqual(YES_WORDS & NO_WORDS, frozenset())
+
+
 class _NotifyRunner:
     """CommandRunnerPort for Notifier: one answer for every command, and the calls with their options."""
 
@@ -1466,6 +1496,7 @@ class _NotifyRunner:
 class NotifierTest(unittest.TestCase):
     """cst_core.adapters.notify: btrfs-notify's command line, and an alert it could not take kept for cst doctor."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-notify-test-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -1632,8 +1663,12 @@ class NotifierTest(unittest.TestCase):
         notify = os.path.join(REPO, "btrfs", "btrfs-notify")
         done = subprocess.run(
             ["bash", notify, "-u", "critical", "-a", "btrfs-bulk", "Disk: problem", "from bash"],
-            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
-        )  # fmt: skip
+            env=env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
         self.assertEqual(done.returncode, 0, done.stderr)
         [name] = self.kept()
         path = self.missing(body="from python")
@@ -1651,8 +1686,11 @@ class NotifierTest(unittest.TestCase):
         listed = subprocess.run(
             ["/usr/bin/python3", "-I", "-B", os.path.join(REPO, "btrfs", "cst-pending-alerts"), "--list"],
             env={**env, "HOME": home, "CST_ALERTS_OWNER": str(os.getuid())},
-            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
-        )  # fmt: skip
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertIn("critical btrfs-bulk: Disk: problem (2 times)", listed.stdout)
 
@@ -1671,9 +1709,36 @@ class _FailingSocket:
         self.closed = True
 
 
+class _RecordingSocket:
+    """A socket whose sends work, and which counts its closes."""
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self.closes = 0
+
+    def sendto(self, data: bytes, _address: str) -> int:
+        self.sent.append(data)
+        return len(data)
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+class _RecordingSockets:
+    """An open_socket for ServiceNotifier: each call makes a _RecordingSocket, kept in made."""
+
+    def __init__(self) -> None:
+        self.made: list[_RecordingSocket] = []
+
+    def __call__(self) -> _RecordingSocket:
+        self.made.append(_RecordingSocket())
+        return self.made[-1]
+
+
 class ServiceNotifierTest(unittest.TestCase):
     """cst_core.adapters.sd_notify: sd_notify(3) datagrams to systemd's NOTIFY_SOCKET, and nothing without it."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-sd-notify-test-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -1690,6 +1755,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")
         sock = self.listener(path)
         notifier = ServiceNotifier.from_environ({"NOTIFY_SOCKET": path, "PATH": "/usr/bin"})
+        self.addCleanup(notifier.close)
         self.assertTrue(notifier.ready())
         self.assertTrue(notifier.watchdog())
         self.assertTrue(notifier.watchdog())
@@ -1698,14 +1764,20 @@ class ServiceNotifierTest(unittest.TestCase):
     def test_an_abstract_socket_name_starts_with_at(self) -> None:
         name = f"cst-sd-notify-test-{os.getpid()}-{time.monotonic_ns()}"
         sock = self.listener("\0" + name)
-        self.assertTrue(ServiceNotifier.from_environ({"NOTIFY_SOCKET": "@" + name}).ready())
+        with ServiceNotifier.from_environ({"NOTIFY_SOCKET": "@" + name}) as notifier:
+            self.assertTrue(notifier.ready())
         self.assertEqual(sock.recv(64), b"READY=1")
 
     def test_without_a_usable_notify_socket_nothing_is_opened_or_sent(self) -> None:
         out = io.StringIO()
         opened = mock.patch("socket.socket", side_effect=AssertionError("no socket may be opened"))
-        for environ in ({}, {"NOTIFY_SOCKET": ""}, {"NOTIFY_SOCKET": "@"}, {"NOTIFY_SOCKET": "relative/notify"},
-                        {"NOTIFY_SOCKET": "vsock:2:999"}):  # fmt: skip
+        for environ in (
+            {},
+            {"NOTIFY_SOCKET": ""},
+            {"NOTIFY_SOCKET": "@"},
+            {"NOTIFY_SOCKET": "relative/notify"},
+            {"NOTIFY_SOCKET": "vsock:2:999"},
+        ):
             with self.subTest(environ=environ), contextlib.redirect_stdout(out), opened as made:
                 notifier = ServiceNotifier.from_environ(environ)
                 self.assertFalse(notifier.ready())
@@ -1717,6 +1789,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")  # nothing bound there yet: ENOENT
         out = io.StringIO()
         notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
         with contextlib.redirect_stdout(out):
             self.assertFalse(notifier.ready())
             self.assertFalse(notifier.watchdog())
@@ -1753,6 +1826,7 @@ class ServiceNotifierTest(unittest.TestCase):
         path = os.path.join(self.tmp, "notify")
         sock = self.listener(path)  # bound, never read
         notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
         sent: list[bool] = []
         out = io.StringIO()
 
@@ -1772,6 +1846,54 @@ class ServiceNotifierTest(unittest.TestCase):
         self.assertFalse(sent[-1])
         [warning] = out.getvalue().splitlines()
         self.assertTrue(warning.startswith("<4>cannot notify systemd (WATCHDOG): [Errno 11]"), warning)
+
+    def test_close_closes_the_socket_once(self) -> None:
+        recording = _RecordingSockets()
+        made = recording.made
+        notifier = ServiceNotifier("/run/systemd/notify", open_socket=recording)
+        self.assertTrue(notifier.ready())
+        notifier.close()
+        notifier.close()
+        self.assertEqual([(s.sent, s.closes) for s in made], [([b"READY=1"], 1)])
+        # A send after close opens a new socket.
+        self.assertTrue(notifier.watchdog())
+        self.assertEqual([(s.sent, s.closes) for s in made], [([b"READY=1"], 1), ([b"WATCHDOG=1"], 0)])
+        notifier.close()
+        self.assertEqual(made[1].closes, 1)
+
+    def test_close_without_a_socket_opens_none(self) -> None:
+        def no_socket() -> _RecordingSocket:
+            raise AssertionError("no socket may be opened")
+
+        ServiceNotifier("/run/systemd/notify", open_socket=no_socket).close()
+        ServiceNotifier(None, open_socket=no_socket).close()
+        with ServiceNotifier(None, open_socket=no_socket) as notifier:
+            self.assertFalse(notifier.ready())
+
+    def test_a_with_block_closes_the_socket_at_its_end_and_on_an_exception(self) -> None:
+        recording = _RecordingSockets()
+        made = recording.made
+        with ServiceNotifier("/run/systemd/notify", open_socket=recording) as notifier:
+            self.assertTrue(notifier.ready())
+            self.assertEqual(made[0].closes, 0)
+        self.assertEqual(made[0].closes, 1)
+        with (
+            self.assertRaisesRegex(RuntimeError, "boom"),
+            ServiceNotifier("/run/systemd/notify", open_socket=recording) as notifier,
+        ):
+            notifier.watchdog()
+            raise RuntimeError("boom")
+        self.assertEqual([s.closes for s in made], [1, 1])
+
+    def test_a_send_after_close_reaches_the_socket_again(self) -> None:
+        path = os.path.join(self.tmp, "notify")
+        sock = self.listener(path)
+        notifier = ServiceNotifier(path)
+        self.addCleanup(notifier.close)
+        self.assertTrue(notifier.ready())
+        notifier.close()
+        self.assertTrue(notifier.watchdog())
+        self.assertEqual([sock.recv(64), sock.recv(64)], [b"READY=1", b"WATCHDOG=1"])
 
     def test_a_socket_that_cannot_be_opened_is_a_failed_send(self) -> None:
         def no_socket() -> socket.socket:

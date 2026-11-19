@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst vm list [VM]` and `cst vm status [VM]`: the backups, and the VM's state and hardware."""
 
+import contextlib
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.errors import ExitStatus, Refused
@@ -56,13 +57,11 @@ def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> None:
     nas = [e for e in entries if e.get("mode") == "nas"]
     if nas and nas[-1] is not entries[-1]:
         print(f"  last NAS backup: {store.describe(nas[-1])}")
-    try:
+    with contextlib.suppress(Refused):
         print(
             f"  weekly NAS backup timer: {'on' if instance(vm) in wiring.timer_port(cfg, entry_file).timers_on() else 'off'}"
             f" ({cfg.cst} vm backup-timer status {vm})"
         )
-    except Refused:
-        pass
     if conf.knobs()["VM_NOCOW"]:
         print("VM image folders (NOCOW):")
         for d in wiring.images(cfg).folders():

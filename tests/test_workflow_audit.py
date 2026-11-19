@@ -246,8 +246,31 @@ def command_problems(cue: str, task: str, want: tuple[str, ...], why: str) -> li
 
 
 # What sets a variable for a task: an env block (vars or files) or a uv or zizmor variable named.
-_TASK_ENV = re.compile(r"^\s*env\s*:")
+# The env key may be quoted ("env": {...}) or inside a struct on one line ({name: "native", env:
+# {...}}); a longer word that holds it (environment:, my_env:) is not one, nor an env: in a string
+# or a comment (_code_only).
+_TASK_ENV = re.compile(r'(?<![\w"-])"?env"?\s*:')
 _TOOL_VARIABLE = re.compile(r"\b(?:UV|ZIZMOR)_[A-Z0-9_]*")
+# What is not CUE code in a task's text, left to right: a multi-line string, a quoted key (a string
+# right before its ':'), any other string, a // comment.
+_NOT_CODE = re.compile(r'"""[\s\S]*?"""|("(?:[^"\\\n]|\\.)*")(?=[ \t]*:)|"(?:[^"\\\n]|\\.)*"|//[^\n]*')
+
+
+# Every character but those str.splitlines() breaks a line at.
+_NOT_A_LINE_BREAK = re.compile(r"[^\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def _code_only(block: str) -> str:
+    """block with its strings and comments blanked, newlines kept (its lines stay in step), so an
+    env: in a string value ("echo $env: x") or after a // is not an env key. The quoted key
+    "env" stays."""
+
+    def blank(found: re.Match[str]) -> str:
+        if found.group(1) == '"env"':
+            return found.group(0)
+        return _NOT_A_LINE_BREAK.sub(" ", found.group(0))
+
+    return _NOT_CODE.sub(blank, block)
 
 
 def task_block(cue: str, name: str) -> str | None:
@@ -259,10 +282,10 @@ def task_block(cue: str, name: str) -> str | None:
 def _task_variables(block: str) -> list[str]:
     """The env keys and uv or zizmor variables of a task's text, comment lines left out."""
     out: list[str] = []
-    for line in block.splitlines():
+    for line, code in zip(block.splitlines(), _code_only(block).splitlines(), strict=True):
         if line.lstrip().startswith("//"):
             continue
-        if _TASK_ENV.match(line):
+        if _TASK_ENV.search(code):
             out.append("env")
         out += _TOOL_VARIABLE.findall(line)
     return out
@@ -400,8 +423,10 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(
             config_problems(bad),
             [
-                f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
-                "ignore the findings one by one instead, each with its reason"
+                (
+                    f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
+                    "ignore the findings one by one instead, each with its reason"
+                )
             ],
         )
 
@@ -433,8 +458,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 "  artipacked: &off\n    disable: true\n",
                 [
                     f"{CONFIG}:11: " + flow.format("artipacked"),
-                    f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
-                    "ignore the findings one by one instead, each with its reason",
+                    (
+                        f"{CONFIG}:12: artipacked: `disable` switches the audit off for every file; "
+                        "ignore the findings one by one instead, each with its reason"
+                    ),
                 ],
             ),
             ("  artipacked: *off\n", [f"{CONFIG}:11: " + flow.format("artipacked")]),
@@ -447,8 +474,10 @@ class WorkflowAuditTest(unittest.TestCase):
             (
                 '  artipacked:\n    config:\n      # why\n      "disable": true\n',
                 [
-                    f"{CONFIG}:14: artipacked: `disable` switches the audit off for every file; "
-                    "ignore the findings one by one instead, each with its reason"
+                    (
+                        f"{CONFIG}:14: artipacked: `disable` switches the audit off for every file; "
+                        "ignore the findings one by one instead, each with its reason"
+                    )
                 ],
             ),
             ("  artipacked:\n    config:\n      # why\n      *off: x\n", [f"{CONFIG}:14: {plain}"]),
@@ -470,20 +499,24 @@ class WorkflowAuditTest(unittest.TestCase):
         self.assertEqual(
             entry_problems(GOOD_CONFIG, {**files, ".github/actions/two/action.yml": 201}),
             [
-                f"{CONFIG}:6: github-env: `action.yml:201` matches .github/actions/one/action.yml, "
-                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
-                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
-                "fix the finding"
+                (
+                    f"{CONFIG}:6: github-env: `action.yml:201` matches .github/actions/one/action.yml, "
+                    ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                    "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                    "fix the finding"
+                )
             ],
         )
         whole = GOOD_CONFIG + "  artipacked:\n    ignore:\n      # why\n      - action.yml\n      - ci.yml\n"
         self.assertEqual(
             entry_problems(whole, files),
             [
-                f"{CONFIG}:14: artipacked: `action.yml` matches .github/actions/one/action.yml, "
-                ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
-                "hides the finding in each; rename one of the files (an action may be action.yaml) or "
-                "fix the finding"
+                (
+                    f"{CONFIG}:14: artipacked: `action.yml` matches .github/actions/one/action.yml, "
+                    ".github/actions/two/action.yml: zizmor matches an entry by the file's base name, so it "
+                    "hides the finding in each; rename one of the files (an action may be action.yaml) or "
+                    "fix the finding"
+                )
             ],
         )
         for odd in ('"action.yml:201"', "action.yml:201  # why", "'ci.yml'"):
@@ -491,8 +524,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     entry_problems(GOOD_CONFIG.replace("action.yml:201", odd), files),
                     [
-                        f"{CONFIG}:6: github-env: write the entry as FILE or FILE:LINE, unquoted and with no "
-                        "comment after it, so that this test can check it"
+                        (
+                            f"{CONFIG}:6: github-env: write the entry as FILE or FILE:LINE, unquoted and with no "
+                            "comment after it, so that this test can check it"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -545,8 +580,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     task_problems(GOOD_CUE.replace(good, bad)),
                     [
-                        f"{INVOWKFILE}: the task `test workflows` must run exactly `{good}`, "
-                        f"not `{bad}` (see {AUDIT_WHY})"
+                        (
+                            f"{INVOWKFILE}: the task `test workflows` must run exactly `{good}`, "
+                            f"not `{bad}` (see {AUDIT_WHY})"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -558,6 +595,21 @@ class WorkflowAuditTest(unittest.TestCase):
         for env, words in (
             ('\t\tenv: {vars: {ZIZMOR_OFFLINE: "0"}}\n', ["env", "ZIZMOR_OFFLINE"]),
             ('\t\tenv: {files: [".env"]}\n', ["env"]),
+            ('\t\t"env": {vars: {A: "1"}}\n', ["env"]),
+            ('\t\truntimes: [{name: "native", env: {vars: {A: "1"}}}]\n', ["env"]),
+            ('\t\tenvironment: "x"\n\t\tmy_env: "x"\n', []),
+            # env: in a string value, a multi-line string, a quoted key of another name or after a //.
+            ('\t\tdescription: "echo $env: x"\n', []),
+            ('\t\tdescription: "a \\"quoted\\" env: x"\n', []),
+            ('\t\tdescription: """\n\t\t\tenv: x\n\t\t\t"""\n', []),
+            ('\t\t"my env": "x"\n', []),
+            ('\t\tdescription: "x" // env: none\n', []),
+            # Still an env key: after a string with a // in it, in CUE's short form, after a string.
+            ('\t\tlinks: ["https://x"], env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\truntimes: env: {vars: {A: "1"}}\n', ["env"]),
+            ('\t\tdescription: "x", "env": {vars: {A: "1"}}\n', ["env"]),
+            # A tool variable in a string still counts.
+            ('\t\tdescription: "ZIZMOR_X=1"\n', ["ZIZMOR_X"]),
             ("\t\t// ZIZMOR_X is only a comment\n", []),
         ):
             with self.subTest(env=env):
@@ -602,8 +654,10 @@ class WorkflowAuditTest(unittest.TestCase):
                 self.assertEqual(
                     uv_audit_problems(GOOD_CUE.replace(good, bad), GOOD_NIGHTLY),
                     [
-                        f"{INVOWKFILE}: the task `ci uv-audit` must run exactly `{good}`, "
-                        f"not `{bad}` (see {UV_AUDIT_WHY})"
+                        (
+                            f"{INVOWKFILE}: the task `ci uv-audit` must run exactly `{good}`, "
+                            f"not `{bad}` (see {UV_AUDIT_WHY})"
+                        )
                     ],
                 )
 

@@ -12,7 +12,7 @@ import re
 import shutil
 import tarfile
 import tempfile
-from typing import Protocol, cast
+from typing import Protocol, cast, override
 import unittest
 from unittest import mock
 
@@ -51,6 +51,7 @@ def make_tar(path: Path, members: Mapping[str, bytes]) -> None:
 
 
 class PinInvowkTests(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="pin-invowk-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -85,15 +86,17 @@ class PinInvowkTests(unittest.TestCase):
     def test_rejects_bad_tag_and_missing_cosign(self) -> None:
         with self.assertRaises(pin.PinError):
             pin.run("0.16.0", skip_cosign=True)
-        with mock.patch.object(pin.shutil, "which", return_value=None):
-            with self.assertRaisesRegex(pin.PinError, "cosign"):
-                pin.run("v0.16.0", skip_cosign=False)
+        with (
+            mock.patch.object(pin.shutil, "which", return_value=None),
+            self.assertRaisesRegex(pin.PinError, "cosign"),
+        ):
+            pin.run("v0.16.0", skip_cosign=False)
 
     def test_case_line_matches_the_action_pin_table(self) -> None:
         line = pin.case_line("v0.16.0", "amd64", "1" * 64, "2" * 64)
         self.assertRegex(line, r'^ {10}v0\.16\.0/amd64\) pinned="1{64}"; pinned_bin="2{64}" ;;$')
         # Every pin line in the action has exactly that shape.
-        rows = [l for l in ACTION.read_text(encoding="utf-8").splitlines() if 'pinned_bin="' in l and "/" in l]
+        rows = [row for row in ACTION.read_text(encoding="utf-8").splitlines() if 'pinned_bin="' in row and "/" in row]
         self.assertTrue(rows)
         shape = re.compile(
             r'^ {10}(v[0-9.]+[^/]*)/(amd64|arm64)\) pinned="([0-9a-f]{64})"; pinned_bin="([0-9a-f]{64})" ;;$'

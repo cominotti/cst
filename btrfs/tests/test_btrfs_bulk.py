@@ -636,7 +636,7 @@ class BulkTest(BulkBase):
 
         def wrapped(*a: object, **k: object) -> object:
             if calls["n"] >= after_calls:
-                raise Crash()
+                raise Crash
             calls["n"] += 1
             return real(*a, **k)
 
@@ -699,7 +699,7 @@ class BulkTest(BulkBase):
 
         def copy(src: str, dst: str, nocow: bool) -> None:
             real(src, dst, nocow)
-            raise Crash()
+            raise Crash
 
         self.fake(self.machine, "copy_tree", copy)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
@@ -1086,7 +1086,7 @@ class BulkTest(BulkBase):
                 f.write("late")
             if through_link is not None:
                 self.write(through_link, "new")
-            raise Crash()
+            raise Crash
 
         self.fake(self.user, "u_late_write", late)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
@@ -1413,7 +1413,7 @@ class BulkTest(BulkBase):
         real_rb = self.user.u_rollback
 
         def rb(j: dict[str, Any]) -> None:
-            raise Crash()
+            raise Crash
 
         self.fake(self.user, "u_rollback", rb)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
@@ -1439,7 +1439,7 @@ class BulkTest(BulkBase):
         real = self.user.u_late_write
 
         def boom(j: dict[str, Any]) -> bool:
-            raise Crash()
+            raise Crash
 
         self.fake(self.user, "u_late_write", boom)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
@@ -1464,7 +1464,7 @@ class BulkTest(BulkBase):
             if os.path.isdir(Tp):
                 os.rmdir(Tp)
             os.rename(Lp, Tp)
-            raise Crash()
+            raise Crash
 
         self.fake(self.user, "u_move_subvol", mv)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):
@@ -1488,7 +1488,7 @@ class BulkTest(BulkBase):
             if os.path.isdir(Tp):
                 os.rmdir(Tp)
             os.rename(Lp, Tp)
-            raise Crash()
+            raise Crash
 
         self.fake(self.user, "u_move_subvol", mv)
         with self.assertRaises(Crash), contextlib.redirect_stdout(io.StringIO()):

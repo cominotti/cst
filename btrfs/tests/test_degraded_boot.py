@@ -38,7 +38,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
 
 sys.dont_write_bytecode = True
@@ -294,6 +294,7 @@ class DegradedBootTest(unittest.TestCase):
     tmp: str
     root: str
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="degraded-boot-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -461,13 +462,17 @@ R="{self.root}"
             "unpinned.json": ("no", "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]"),
             "staged-clean.json": (
                 "yes",
-                "  44.20261104.0  staged        555555555555 initramfs-etc=[]\n"
-                "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]",
+                (
+                    "  44.20261104.0  staged        555555555555 initramfs-etc=[]\n"
+                    "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]"
+                ),
             ),
             "pinned.json": (
                 "no",
-                "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]\n"
-                "  44.20261009.0  -             000000000000 initramfs-etc=[]",
+                (
+                    "  44.20261028.0  booted        bbbbbbbbbbbb initramfs-etc=[]\n"
+                    "  44.20261009.0  -             000000000000 initramfs-etc=[]"
+                ),
             ),
         }
         for name, (staged, summary) in cases.items():

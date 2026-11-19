@@ -38,7 +38,7 @@ import signal
 import stat
 import subprocess
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,10 +69,12 @@ SIGNALS_AT_DEFAULT: Final = (
     "/usr/bin/python3",
     "-I",
     "-c",
-    "import os, signal, sys\n"
-    "for s in (signal.SIGINT, signal.SIGHUP):\n"
-    "    signal.signal(s, signal.SIG_DFL)\n"
-    "os.execvp(sys.argv[1], sys.argv[1:])",
+    (
+        "import os, signal, sys\n"
+        "for s in (signal.SIGINT, signal.SIGHUP):\n"
+        "    signal.signal(s, signal.SIG_DFL)\n"
+        "os.execvp(sys.argv[1], sys.argv[1:])"
+    ),
 )
 # The real tools the program may run; everything else is not found.
 REAL_TOOLS: Final = (
@@ -319,6 +321,7 @@ class RuntimeTest(unittest.TestCase):
     calls_file: str
     env: dict[str, str]
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="btrfs-snapshot-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)

@@ -43,40 +43,52 @@ CATEGORIES = [
     ("dirty-throttle", r"^balance_dirty_pages", "writers throttled by the dirty-page limit (vm.dirty_bytes)"),
     (
         "commit",
-        r"commit_transaction|transaction_kthread|wait_current_trans|wait_for_commit|btrfs_sync_fs|join_transaction"
-        r"|start_transaction",
+        (
+            r"commit_transaction|transaction_kthread|wait_current_trans|wait_for_commit|btrfs_sync_fs|join_transaction"
+            r"|start_transaction"
+        ),
         "btrfs transaction commit",
     ),
     ("log-sync", r"tree_log|sync_log|wait_log_commit|wait_for_writer", "fsync log-tree sync (btrfs_sync_log)"),
     (
         "flush",
-        r"barrier_all_devices|write_dev_flush|wait_dev_flush|wait_dev_supers|blkdev_issue_flush"
-        r"|write_all_supers",
+        (
+            r"barrier_all_devices|write_dev_flush|wait_dev_flush|wait_dev_supers|blkdev_issue_flush"
+            r"|write_all_supers"
+        ),
         "disk cache flushes (fsync / commit barriers on every RAID1 member)",
     ),
     (
         "space",
-        r"reserve_metadata|reserve_data|reserve_ticket|flush_space|btrfs_reserve|reserve_space"
-        r"|delalloc_reserve",
+        (
+            r"reserve_metadata|reserve_data|reserve_ticket|flush_space|btrfs_reserve|reserve_space"
+            r"|delalloc_reserve"
+        ),
         "btrfs space reservation / flushing",
     ),
     (
         "writeback",
-        r"ordered_extent|wait_ordered|lock_and_flush|folio_wait_writeback|page_writeback|fdatawait"
-        r"|wait_sb_inodes|writeback_inodes|wb_wait|sync_inodes",
+        (
+            r"ordered_extent|wait_ordered|lock_and_flush|folio_wait_writeback|page_writeback|fdatawait"
+            r"|wait_sb_inodes|writeback_inodes|wb_wait|sync_inodes"
+        ),
         "waiting for data writeback (btrfs ordered extents / fsync)",
     ),
     ("wbt", r"wbt_wait|rq_qos_wait", "block-layer writeback throttling (WBT)"),
     (
         "metadata-read",
-        r"read_extent_buffer_pages|read_tree_block|btrfs_read_extent_buffer|read_block_for_search"
-        r"|btrfs_readahead_tree_block",
+        (
+            r"read_extent_buffer_pages|read_tree_block|btrfs_read_extent_buffer|read_block_for_search"
+            r"|btrfs_readahead_tree_block"
+        ),
         "reading btrfs metadata from disk (cold cache)",
     ),
     (
         "btrfs-locks",
-        r"btrfs_tree_lock|btrfs_tree_read_lock|__btrfs_tree|btrfs_lock_root|btrfs_search_slot"
-        r"|lock_extent|btrfs_inode_lock|btrfs_read_lock",
+        (
+            r"btrfs_tree_lock|btrfs_tree_read_lock|__btrfs_tree|btrfs_lock_root|btrfs_search_slot"
+            r"|lock_extent|btrfs_inode_lock|btrfs_read_lock"
+        ),
         "btrfs b-tree / extent / inode lock contention",
     ),
     # The last alternative: waits for the memory map lock, the daemon's MMAP_LOCK_FRAME.
@@ -95,8 +107,10 @@ CATEGORIES = [
     ),
     (
         "page-read",
-        r"filemap_read|filemap_get_pages|folio_wait_locked|folio_lock|filemap_fault|readahead"
-        r"|read_folio|do_readpage",
+        (
+            r"filemap_read|filemap_get_pages|folio_wait_locked|folio_lock|filemap_fault|readahead"
+            r"|read_folio|do_readpage"
+        ),
         "reading data not in the page cache",
     ),
 ]

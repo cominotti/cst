@@ -721,10 +721,13 @@ class AlertStampTest(Base):
                 self.assertIn("\ntitle=Snapshots paused: low space\n", text)
                 notify = self.path("usr/local/sbin/btrfs-notify")
                 self.assertIn(
-                    log(3, f"alert not delivered ({notify} {why}): Snapshots paused: low space; kept in {path} "
-                        "(cst doctor shows it)"),
+                    log(
+                        3,
+                        f"alert not delivered ({notify} {why}): Snapshots paused: low space; kept in {path} "
+                        "(cst doctor shows it)",
+                    ),
                     out.splitlines(),
-                )  # fmt: skip
+                )
                 self.assertTrue(os.path.exists(self.state_file("alerted-paused")))
                 os.remove(self.state_file("alerted-paused"))
 

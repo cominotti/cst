@@ -144,10 +144,17 @@ def notification_server_up(runner: CommandRunnerPort) -> bool:
     """A notification server answers on the session bus."""
     r = runner.run(
         [
-            "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-            "NameHasOwner", "s", "org.freedesktop.Notifications",
+            "busctl",
+            "--user",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            "s",
+            "org.freedesktop.Notifications",
         ]
-    )  # fmt: skip
+    )
     return r.fault is None and r.returncode == 0 and "true" in r.stdout
 
 

@@ -600,8 +600,10 @@ def commit_alert(label: str, cur_ms: int, long_ms: int) -> tuple[str, str]:
     state = "still running after" if cur_ms >= ALERT_COMMIT_MS else "took"
     return (
         f"btrfs commit stall on {label}",
-        f"A transaction commit {state} {long_ms / 1000:.1f} s. "
-        f"Ask an agent or run: btrfs-stall-report --since '10 min ago'",
+        (
+            f"A transaction commit {state} {long_ms / 1000:.1f} s. "
+            f"Ask an agent or run: btrfs-stall-report --since '10 min ago'"
+        ),
     )
 
 

@@ -37,7 +37,13 @@ never be linted. This test derives the Python files from the repository
   [tool.ruff.lint.per-file-ignores] or extend-per-file-ignores, and no
   [tool.ruff.lint] ignore or extend-ignore, names an ANN rule or ALL; nor
   does the older top-level [tool.ruff] form of these settings, which ruff
-  still reads.
+  still reads;
+- ruff's preview is on only for the rules select names by their full code
+  ([tool.ruff.lint] explicit-preview-rules is true whenever preview is),
+  never for PLC1901, and never for the formatter ([tool.ruff.format]
+  preview, or the top-level [tool.ruff] preview that would switch it on);
+- no Python file keeps ruff format away from its code with a comment
+  (# fmt: skip, # fmt: off/on, or the yapf: disable/enable ruff also reads).
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
@@ -45,7 +51,7 @@ See docs/dev-tools.md.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 import os
 import re
 import tempfile
@@ -58,6 +64,9 @@ from tests.repo_files import REPO, ignored_tracked_files, repo_files
 
 PYTHON_SHEBANG = re.compile(rb"^#!.*\bpython[0-9.]*\b")
 IGNORE_COMMENT = re.compile(r"#\s*(?:ty|type)\s*:\s*ignore\b")
+# A comment that keeps ruff format away from code: fmt with skip, off or on, and yapf with disable
+# or enable, which ruff also reads (the pattern below spells them out).
+FORMAT_SUPPRESSION = re.compile(r"#\s*(?:fmt\s*:\s*(?:skip|off|on)|yapf\s*:\s*(?:disable|enable))\b")
 # The [tool.ty] settings the gate allows, as "table.key". Any other one could
 # take files or diagnostics out of ty's check (src.exclude, overrides, a rule
 # set to "ignore", analysis.allowed-unresolved-imports, ...).
@@ -120,9 +129,11 @@ def ann_ignore_problems(conf: Mapping[str, object]) -> list[str]:
                         f"[{section}.{table}] {key!r} = {rules!r}: ignores ANN; annotate the files instead "
                         "(every Python file is fully annotated)"
                     )
-        for key in ("ignore", "extend-ignore"):
-            if _ignores_ann(settings.get(key)):
-                out.append(f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead")
+        out.extend(
+            f"[{section}] {key} = {settings[key]!r}: ignores ANN for every file; annotate instead"
+            for key in ("ignore", "extend-ignore")
+            if _ignores_ann(settings.get(key))
+        )
     return out
 
 
@@ -173,8 +184,10 @@ def ruff_version_problems(conf: Mapping[str, object]) -> list[str]:
     got = _sub(_sub(dict(conf), "tool"), "ruff").get("required-version")
     if got != want:
         return [
-            f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
-            "(change both together)"
+            (
+                f"[tool.ruff] required-version = {got!r}: must be {want!r}, the ruff pin of the dev group "
+                "(change both together)"
+            )
         ]
     return []
 
@@ -184,10 +197,49 @@ def typing_extensions_problems(conf: Mapping[str, object]) -> list[str]:
     got = _sub(_sub(_sub(dict(conf), "tool"), "ruff"), "lint").get("typing-extensions")
     if got is not False:
         return [
-            f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library only: "
-            "no ruff fix may import typing_extensions)"
+            (
+                f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library only: "
+                "no ruff fix may import typing_extensions)"
+            )
         ]
     return []
+
+
+def ruff_preview_problems(conf: Mapping[str, object]) -> list[str]:
+    """Whether ruff's preview reaches only the rules named one by one, as text lines (empty: it does).
+
+    With [tool.ruff.lint] preview on, a family in select (PLC, RUF, ...) would
+    turn on every preview rule of that family unless explicit-preview-rules is
+    on too. PLC1901 asks for `not x` instead of `x == ""`, the opposite of the
+    house style. The formatter's preview style can change the layout in any
+    release: it stays off, and so does the top-level [tool.ruff] preview, which
+    would switch it on.
+    """
+    ruff = _sub(_sub(dict(conf), "tool"), "ruff")
+    lint = _sub(ruff, "lint")
+    out: list[str] = []
+    if ruff.get("preview") is True:
+        out.append(
+            "[tool.ruff] preview = true: it also turns on the formatter's preview style; "
+            "set preview in [tool.ruff.lint] only"
+        )
+    if _sub(ruff, "format").get("preview") is True:
+        out.append("[tool.ruff.format] preview = true: the preview layout can change in any ruff release; leave it off")
+    explicit = lint.get("explicit-preview-rules", ruff.get("explicit-preview-rules"))
+    if lint.get("preview") is True and explicit is not True:
+        out.append(
+            "[tool.ruff.lint] preview = true needs explicit-preview-rules = true: otherwise a family in "
+            "select turns on every preview rule of that family; name each preview rule instead"
+        )
+    for section, settings in (("tool.ruff", ruff), ("tool.ruff.lint", lint)):
+        for key in ("select", "extend-select"):
+            rules = settings.get(key)
+            if isinstance(rules, list) and "PLC1901" in rules:
+                out.append(
+                    f'[{section}] {key} names PLC1901: it asks for `not x` instead of `x == ""`, '
+                    "the opposite of the house style; never select it"
+                )
+    return out
 
 
 def problems(
@@ -201,13 +253,16 @@ def problems(
 
     ignored: the tracked files a git ignore rule matches (ignored_tracked_files()).
     """
-    out: list[str] = []
     gated = ty_gated(py_files, ty_gate, ignored)
     extensionless = {p for p in py_files if not p.endswith(".py")}
-    for p in sorted(extensionless - set(extend)):
-        out.append(f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include")
-    for p in sorted(set(extend) - extensionless):
-        out.append(f"{p}: in [tool.ruff] extend-include but not an extensionless Python file of the repository")
+    out = [
+        f"{p}: a Python file ruff does not see; add it to [tool.ruff] extend-include"
+        for p in sorted(extensionless - set(extend))
+    ]
+    out.extend(
+        f"{p}: in [tool.ruff] extend-include but not an extensionless Python file of the repository"
+        for p in sorted(set(extend) - extensionless)
+    )
     for name, items in (("extend-include", extend), ("[tool.ty.src] include", ty_gate)):
         dups = sorted({p for p in items if items.count(p) > 1})
         out += [f"{p}: listed twice in {name}" for p in dups]
@@ -247,11 +302,10 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
             "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
             "no longer applies; delete it"
         )
-    for rel in sorted(f for f in files if os.path.basename(f) == ".ignore"):
-        out.append(
-            f"{rel}: ty leaves the files an .ignore file matches out of its check, and git does not see "
-            "the rule; delete it"
-        )
+    out.extend(
+        f"{rel}: ty leaves the files an .ignore file matches out of its check, and git does not see the rule; delete it"
+        for rel in sorted(f for f in files if os.path.basename(f) == ".ignore")
+    )
     ty = conf.get("tool", {}).get("ty", {})
     names: set[str] = set()
     for table, value in ty.items():
@@ -264,12 +318,12 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
                 f'[tool.ty] rules.{name} = {level!r}: a rule may only be raised to "error" here; '
                 "a lower level takes its diagnostics out of the gate"
             )
-    for name in sorted(names - TY_SETTINGS):
-        out.append(
-            f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take files or "
-            "diagnostics out of ty's check; allow it in TY_SETTINGS of tests/test_python_files.py "
-            "only once it is known not to"
-        )
+    out.extend(
+        f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take files or "
+        "diagnostics out of ty's check; allow it in TY_SETTINGS of tests/test_python_files.py "
+        "only once it is known not to"
+        for name in sorted(names - TY_SETTINGS)
+    )
     for name, want in sorted(TY_VALUES.items()):
         table, key = name.split(".", 1)
         section = ty.get(table, {})
@@ -283,17 +337,29 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
     return out
 
 
-def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
-    """The ty/type ignore comments in the given files, as text lines (empty: none)."""
-    out: list[str] = []
+def _comments_matching(repo: str, paths: Iterable[str], pattern: re.Pattern[str]) -> Iterator[tuple[str, int, str]]:
+    """The comments PATTERN finds in the given files, as (path, line number, comment), in path order."""
     for rel in sorted(paths):
         with open(os.path.join(repo, rel), "rb") as fh:
             for tok in tokenize.tokenize(fh.readline):
-                if tok.type == tokenize.COMMENT and IGNORE_COMMENT.search(tok.string):
-                    out.append(
-                        f"{rel}:{tok.start[0]}: an ignore comment in a ty-gated file; fix what ty reports instead"
-                    )
-    return out
+                if tok.type == tokenize.COMMENT and pattern.search(tok.string):
+                    yield rel, tok.start[0], tok.string
+
+
+def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
+    """The ty/type ignore comments in the given files, as text lines (empty: none)."""
+    return [
+        f"{rel}:{line}: an ignore comment in a ty-gated file; fix what ty reports instead"
+        for rel, line, _ in _comments_matching(repo, paths, IGNORE_COMMENT)
+    ]
+
+
+def format_suppressions(repo: str, paths: Iterable[str]) -> list[str]:
+    """The comments that keep ruff format away from code in the given files, as text lines (empty: none)."""
+    return [
+        f"{rel}:{line}: {comment.strip()!r} keeps ruff format away; let it lay the code out"
+        for rel, line, comment in _comments_matching(repo, paths, FORMAT_SUPPRESSION)
+    ]
 
 
 class PythonFilesTest(unittest.TestCase):
@@ -358,8 +424,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["a.py", "tool", "old.py", "new.py"], ["a.py", "tool", "old.py"], ["old.py"]),
             [
-                "old.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
-                "NOT_YET_CLEAN in tests/test_python_files.py",
+                (
+                    "old.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
+                    "NOT_YET_CLEAN in tests/test_python_files.py"
+                ),
                 outside.format("new.py"),
             ],
         )
@@ -367,8 +435,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["a.py", "tool", "new.py"], ["a.py", "tool"], ["old.py"]),
             [
-                "old.py: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
-                "repository; delete it there, or rename it there if the file was renamed",
+                (
+                    "old.py: in NOT_YET_CLEAN (tests/test_python_files.py) but not a Python file of the "
+                    "repository; delete it there, or rename it there if the file was renamed"
+                ),
                 outside.format("new.py"),
             ],
         )
@@ -386,17 +456,21 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(["pkg", "top.py", ".github/scripts", "other"]),
             [
-                "pkg/helper: a Python file outside the ty gate; make ty clean on it and add its path "
-                "(ty finds no extensionless file by itself) to [tool.ty.src] include (a new file never "
-                "goes to NOT_YET_CLEAN)"
+                (
+                    "pkg/helper: a Python file outside the ty gate; make ty clean on it and add its path "
+                    "(ty finds no extensionless file by itself) to [tool.ty.src] include (a new file never "
+                    "goes to NOT_YET_CLEAN)"
+                )
             ],
         )
         # A file below no listed folder is outside, a dot folder included.
         self.assertEqual(
             check(["pkg", "pkg/helper", "top.py", "other"]),
             [
-                ".github/scripts/c.py: a Python file outside the ty gate; make ty clean on it and add its "
-                "folder to [tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
+                (
+                    ".github/scripts/c.py: a Python file outside the ty gate; make ty clean on it and add its "
+                    "folder to [tool.ty.src] include (a new file never goes to NOT_YET_CLEAN)"
+                )
             ],
         )
         # "pkg/s" is no folder of pkg/sub/b.py: a prefix of a name covers nothing.
@@ -405,8 +479,10 @@ class PythonFilesTest(unittest.TestCase):
         self.assertEqual(
             check(gate, ["pkg/sub/b.py"]),
             [
-                "pkg/sub/b.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
-                "NOT_YET_CLEAN in tests/test_python_files.py"
+                (
+                    "pkg/sub/b.py: in both [tool.ty.src] include and NOT_YET_CLEAN; delete it from "
+                    "NOT_YET_CLEAN in tests/test_python_files.py"
+                )
             ],
         )
         # Entries are plain paths to a folder with Python files or to a Python file.
@@ -455,15 +531,19 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(conf(), ["a.py", where]),
                     [
-                        f"{where}: ty leaves the files an .ignore file matches out of its check, and git "
-                        "does not see the rule; delete it"
+                        (
+                            f"{where}: ty leaves the files an .ignore file matches out of its check, and git "
+                            "does not see the rule; delete it"
+                        )
                     ],
                 )
         self.assertEqual(
             ty_setting_problems(conf(), ["a.py", "ty.toml"]),
             [
-                "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
-                "no longer applies; delete it"
+                (
+                    "ty.toml: ty reads it instead of [tool.ty] in pyproject.toml, so the gate there "
+                    "no longer applies; delete it"
+                )
             ],
         )
         for name, bad in (
@@ -475,9 +555,11 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(bad, ["a.py"]),
                     [
-                        f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take "
-                        "files or diagnostics out of ty's check; allow it in TY_SETTINGS of "
-                        "tests/test_python_files.py only once it is known not to"
+                        (
+                            f"[tool.ty] {name}: a ty setting the gate does not allow, since it could take "
+                            "files or diagnostics out of ty's check; allow it in TY_SETTINGS of "
+                            "tests/test_python_files.py only once it is known not to"
+                        )
                     ],
                 )
         # The platform may only be Linux, the one CST runs on.
@@ -487,8 +569,10 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ty_setting_problems(conf(environment={"python-platform": platform}), ["a.py"]),
                     [
-                        f"[tool.ty] environment.python-platform = {platform!r}: only 'linux' is allowed "
-                        "(CST runs on Linux only; another platform changes what ty checks)"
+                        (
+                            f"[tool.ty] environment.python-platform = {platform!r}: only 'linux' is allowed "
+                            "(CST runs on Linux only; another platform changes what ty checks)"
+                        )
                     ],
                 )
         # Another environment setting is still refused.
@@ -504,8 +588,10 @@ class PythonFilesTest(unittest.TestCase):
                         conf(rules={"division-by-zero": "error", "invalid-assignment": level}), ["a.py"]
                     ),
                     [
-                        f"[tool.ty] rules.invalid-assignment = {level!r}: a rule may only be raised to "
-                        '"error" here; a lower level takes its diagnostics out of the gate'
+                        (
+                            f"[tool.ty] rules.invalid-assignment = {level!r}: a rule may only be raised to "
+                            '"error" here; a lower level takes its diagnostics out of the gate'
+                        )
                     ],
                 )
         for terminal in ({"error-on-warning": False}, {}):
@@ -566,8 +652,10 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     ruff_version_problems(conf(bad)),
                     [
-                        f"[tool.ruff] required-version = {bad!r}: must be '==1.2.3', the ruff pin of the "
-                        "dev group (change both together)"
+                        (
+                            f"[tool.ruff] required-version = {bad!r}: must be '==1.2.3', the ruff pin of the "
+                            "dev group (change both together)"
+                        )
                     ],
                 )
         self.assertEqual(
@@ -586,8 +674,81 @@ class PythonFilesTest(unittest.TestCase):
                 self.assertEqual(
                     typing_extensions_problems(conf),
                     [
-                        f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library "
-                        "only: no ruff fix may import typing_extensions)"
+                        (
+                            f"[tool.ruff.lint] typing-extensions = {got!r}: must be false (standard library "
+                            "only: no ruff fix may import typing_extensions)"
+                        )
+                    ],
+                )
+
+    def test_format_suppressions(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-pyfiles-") as tmp:
+            # Built from pieces so that this file holds no such comment of its own.
+            fmt, yapf = "# fmt" + ": ", "# yapf" + ": "
+            files = {
+                "clean.py": f's = "{fmt}skip"\nx = [1, 2]  # format: compact\n',
+                "a.py": f"x = [1,2]  {fmt}skip\n",
+                "b.py": f"{fmt}off\nx = [1,2]\n{fmt}on\n",
+                "c.py": "y = 1  #fmt:skip\n",
+                "d.py": f"{yapf}disable\nz = 2\n",
+            }
+            for name, text in files.items():
+                with open(os.path.join(tmp, name), "w") as fh:
+                    fh.write(text)
+            self.assertEqual(
+                format_suppressions(tmp, files),
+                [
+                    f"a.py:1: '{fmt}skip' keeps ruff format away; let it lay the code out",
+                    f"b.py:1: '{fmt}off' keeps ruff format away; let it lay the code out",
+                    f"b.py:3: '{fmt}on' keeps ruff format away; let it lay the code out",
+                    "c.py:1: '#fmt:skip' keeps ruff format away; let it lay the code out",
+                    f"d.py:1: '{yapf}disable' keeps ruff format away; let it lay the code out",
+                ],
+            )
+
+    def test_ruff_preview_only_for_the_rules_named(self) -> None:
+        def conf(lint: Mapping[str, object], **ruff: object) -> dict[str, object]:
+            return {"tool": {"ruff": {"lint": dict(lint), **ruff}}}
+
+        good = {"preview": True, "explicit-preview-rules": True, "select": ["F", "RUF039"]}
+        self.assertEqual(ruff_preview_problems(conf(good)), [])
+        self.assertEqual(ruff_preview_problems(conf({"select": ["F"]})), [])
+        self.assertEqual(ruff_preview_problems(conf(good, format={"preview": False})), [])
+        needs_explicit = (
+            "[tool.ruff.lint] preview = true needs explicit-preview-rules = true: otherwise a family in "
+            "select turns on every preview rule of that family; name each preview rule instead"
+        )
+        for lint in ({"preview": True}, {"preview": True, "explicit-preview-rules": False}):
+            with self.subTest(lint=lint):
+                self.assertEqual(ruff_preview_problems(conf(lint)), [needs_explicit])
+        # The older top-level form of explicit-preview-rules still counts.
+        self.assertEqual(ruff_preview_problems(conf({"preview": True}, **{"explicit-preview-rules": True})), [])
+        self.assertEqual(
+            ruff_preview_problems(conf(good, format={"preview": True})),
+            ["[tool.ruff.format] preview = true: the preview layout can change in any ruff release; leave it off"],
+        )
+        self.assertEqual(
+            ruff_preview_problems(conf(good, preview=True)),
+            [
+                (
+                    "[tool.ruff] preview = true: it also turns on the formatter's preview style; "
+                    "set preview in [tool.ruff.lint] only"
+                )
+            ],
+        )
+        for where, ruff in (
+            ("tool.ruff.lint] select", conf({**good, "select": ["F", "PLC1901"]})),
+            ("tool.ruff.lint] extend-select", conf({**good, "extend-select": ["PLC1901"]})),
+            ("tool.ruff] select", conf(good, select=["PLC1901"])),
+        ):
+            with self.subTest(where=where):
+                self.assertEqual(
+                    ruff_preview_problems(ruff),
+                    [
+                        (
+                            f'[{where} names PLC1901: it asks for `not x` instead of `x == ""`, '
+                            "the opposite of the house style; never select it"
+                        )
                     ],
                 )
 
@@ -602,8 +763,10 @@ class PythonFilesTest(unittest.TestCase):
             + ann_ignore_problems(conf)
             + ruff_version_problems(conf)
             + typing_extensions_problems(conf)
+            + ruff_preview_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, ty_gated(py_files, ty_gate))
+            + format_suppressions(REPO, py_files)
         )
         self.assertEqual(found, [], "the Python gates miss something (see docs/dev-tools.md):\n" + "\n".join(found))
 

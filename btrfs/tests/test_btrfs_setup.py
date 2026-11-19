@@ -22,7 +22,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from typing import TypedDict
+from typing import TypedDict, override
 import unittest
 import zipfile
 
@@ -75,6 +75,7 @@ def assignment(name: str) -> str:
 
 
 class TimerRemovalTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-setup-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -266,7 +267,7 @@ disable_timers x.service
         self.touch(os.path.join(state, "last-used.json"))
         stage = os.path.join(self.tmp, "stage")
         # Installed first (staged), so the record lists the component.
-        self.run_bash("\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"]))
+        self.run_bash(f"{STAGED_INSTALLER}\ncst_install --component btrfs:docker-gc >/dev/null")
         r = self.run_bash("\n".join([*self.docker_gc_body(), "docker_gc disable --purge"]))
         units = ["docker-gc-recorder.service", "docker-gc.service", "docker-gc.timer"]
         self.assertEqual(
@@ -307,8 +308,10 @@ disable_timers x.service
         # systemctl as systemd 262 answers: is-enabled prints its word and exits 1 (disabled) or 4
         # (not-found); the Python status part is a stub.
         body = [
-            f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
-            "is-active) echo inactive; return 3 ;; esac; }",
+            (
+                f'systemctl() {{ case "$1" in is-enabled) printf "%s\\n" {enabled!r}; return {rc} ;; '
+                "is-active) echo inactive; return 3 ;; esac; }"
+            ),
             'python3() { echo "python3 $*"; }',
             *self.docker_gc_body(),
             # The installed files, in the test's folder (the real ones may exist where the test runs).
@@ -347,14 +350,10 @@ disable_timers x.service
         # Sourced the way the frontend does; the paths it writes point into the test's folder.
         self.touch(*(os.path.join(self.units, t) for t in ("btrfs-snapshot.timer", "btrfs-snapshot-nas.timer")))
         self.run_bash(
-            "\n".join(
-                [
-                    '. "$SRC/setup-snapshots.bash"',
-                    'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"; SNAP_CONF="$T/snapshots.conf"',
-                    "target_user=u",
-                    call,
-                ]
-            )
+            '. "$SRC/setup-snapshots.bash"\n'
+            'SNAP_BOOT_FLAG="$T/convert-at-boot"; BULK_FLAG="$T/bulk-at-boot"; SNAP_CONF="$T/snapshots.conf"\n'
+            "target_user=u\n"
+            f"{call}"
         )
         return [c for c in self.calls() if not c.startswith("rm ")]
 
@@ -507,6 +506,7 @@ class ComponentInstallTest(unittest.TestCase):
     scripts, the real installer staged under the test's folder, systemctl
     and the other host commands as logging shell functions."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-btrfs-component-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -657,7 +657,7 @@ class ComponentInstallTest(unittest.TestCase):
         # systemctl enable fails (set -e stops docker_gc there): the files are written and listed,
         # but the record says pending, which cst doctor reports as a partial install.
         r = subprocess.run(
-            ["bash", "-c", "\n".join([STAGED_INSTALLER, "cst_install --component btrfs:docker-gc >/dev/null"])],
+            ["bash", "-c", f"{STAGED_INSTALLER}\ncst_install --component btrfs:docker-gc >/dev/null"],
             check=False,
             capture_output=True,
             text=True,
@@ -678,9 +678,7 @@ class ComponentInstallTest(unittest.TestCase):
 
     def test_disable_stops_when_the_installer_cannot_list_the_units(self) -> None:
         # A broken installer must not end in "docker-gc disabled" with the timer still enabled.
-        script = "\n".join(
-            [STAGED_INSTALLER, DOCKER_GC_STAGED, "cst_component_units() { return 1; }", "docker_gc disable"]
-        )
+        script = f"{STAGED_INSTALLER}\n{DOCKER_GC_STAGED}\ncst_component_units() {{ return 1; }}\ndocker_gc disable"
         r = subprocess.run(
             [
                 "bash",
@@ -746,6 +744,7 @@ class SnapshotsConfTest(unittest.TestCase):
     """snap_conf_set (btrfs/setup-snapshots.bash) writes snapshots.conf in quotes that bash and
     cst_core's strict reader read alike, and rewrites the printf %q lines an older CST wrote."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-conf-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1136,6 +1135,7 @@ class ScrubLimitTest(unittest.TestCase):
     """SCRUB_LIMIT (the weekly scrub's speed limit) in snapshots.conf: btrfs-setup.sh's
     reader, the drop-in install writes from it, and what status shows."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-scrub-limit-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -1308,6 +1308,7 @@ class UserStepsTest(unittest.TestCase):
     a function that logs and runs the command as the current user; the programs are a fake
     that records what reached it; the user's runtime folder is in the test's folder."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-user-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)

@@ -434,8 +434,10 @@ def overlay_recovery(
                 lines += [
                     f"# {t}: the VM still runs on {overlay}",
                     f"{v} blockjob {q(vm)} {t} --info     # a commit still running? let it finish",
-                    f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
-                    "and nothing waits on it",
+                    (
+                        f"{v} blockjob {q(vm)} {t} --pivot     # only if --info shows the commit ready (100 %) "
+                        "and nothing waits on it"
+                    ),
                     f"{v} blockcommit {q(vm)} {t} --active --pivot --wait --verbose     # only if no block job is listed",
                     f"{v} domblklist {q(vm)} --details     # {t} must show {base}",
                     f"{v} domblklist {q(vm)} --details --inactive     # here too",
@@ -443,16 +445,20 @@ def overlay_recovery(
                 ]
             case VmOverlayKind.DEFINITION:
                 lines += [
-                    f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
-                    "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)",
+                    (
+                        f"# {t}: the VM is back on {base}; only its definition still names {overlay}, which is "
+                        "stale now: do NOT qemu-img commit it (that would overwrite newer data in the image)"
+                    ),
                     f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
                     f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
                     f"sudo rm {q(overlay)}     # only once it shows {base}",
                 ]
             case VmOverlayKind.OFFLINE:
                 lines += [
-                    f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
-                    "offline, then point the definition back",
+                    (
+                        f"# {t}: {vm} is shut off on {overlay}, which holds the guest's last writes: merge it "
+                        "offline, then point the definition back"
+                    ),
                     f"sudo qemu-img commit -p {q(overlay)}     # writes its changes into {base}",
                     f"{v} edit {q(vm)}     # disk {t}: <source file='{base}'/>, and remove its <backingStore> element",
                     f"{v} domblklist {q(vm)} --details --inactive     # {t} must show {base}",
@@ -460,8 +466,10 @@ def overlay_recovery(
                 ]
             case _:
                 lines += [
-                    f"# {t}: the VM's state or the files could not be read: look first, then follow "
-                    'vm/README.md in CST, "If a backup left an overlay"',
+                    (
+                        f"# {t}: the VM's state or the files could not be read: look first, then follow "
+                        'vm/README.md in CST, "If a backup left an overlay"'
+                    ),
                     f"{v} domstate {q(vm)}",
                     f"{v} domblklist {q(vm)} --details",
                     f"{v} domblklist {q(vm)} --details --inactive",
@@ -638,8 +646,10 @@ def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
     head = f"{d.path}  [{d.what}]"
     if d.link is not None:
         return [
-            f"{head}: a symbolic link to {d.link}: not managed by CST (set the mark on the real "
-            f"folder by hand if it is on btrfs: chattr +C <folder>)"
+            (
+                f"{head}: a symbolic link to {d.link}: not managed by CST (set the mark on the real "
+                f"folder by hand if it is on btrfs: chattr +C <folder>)"
+            )
         ]
     if not d.present:
         return [f"{head}: not present"]

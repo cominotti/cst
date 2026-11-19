@@ -93,11 +93,31 @@ FORBIDDEN_DOMAIN_STDLIB: Final[frozenset[str]] = frozenset(
 # are resolved through aliases and `from m import x`.
 PURE_MODULES: Final[frozenset[str]] = frozenset(
     {
-        "__future__", "ast", "collections", "collections.abc", "dataclasses", "difflib", "enum", "fnmatch",
-        "functools", "itertools", "json", "math", "operator", "posixpath", "re", "shlex", "stat",
-        "string", "textwrap", "tomllib", "typing", "unicodedata", "xml.etree.ElementTree",
+        "__future__",
+        "ast",
+        "collections",
+        "collections.abc",
+        "dataclasses",
+        "difflib",
+        "enum",
+        "fnmatch",
+        "functools",
+        "itertools",
+        "json",
+        "math",
+        "operator",
+        "posixpath",
+        "re",
+        "shlex",
+        "stat",
+        "string",
+        "textwrap",
+        "tomllib",
+        "typing",
+        "unicodedata",
+        "xml.etree.ElementTree",
     }
-)  # fmt: skip
+)
 PURE_NAMES: Final[dict[str, frozenset[str]]] = {
     "os": frozenset({"path", "sep", "stat_result"}),
     "os.path": frozenset({"basename", "commonpath", "dirname", "isabs", "join", "normpath", "split", "splitext"}),
@@ -145,7 +165,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "doctor/cli.py": 24,
     "swap/cli.py": 98,
     "toolchains/cli/": 79,
-    "vm/cli/": 282,
+    "vm/cli/": 280,
 }
 
 
@@ -412,9 +432,11 @@ def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozense
     bound = _bindings(tree)  # local name -> fully qualified name
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if not _allowed_module(alias.name) and alias.name not in allowed_modules:
-                    problems.append(f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)")
+            problems.extend(
+                f"{rel}:{node.lineno}: imports {alias.name} (reach the machine through a port)"
+                for alias in node.names
+                if not _allowed_module(alias.name) and alias.name not in allowed_modules
+            )
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
@@ -423,9 +445,14 @@ def direct_io_problems(source: str, rel: str, allowed: frozenset[str] = frozense
                 elif not (_allowed_module(node.module) and (_allowed_use(full) or _allowed_module(full))):
                     problems.append(f"{rel}:{node.lineno}: imports {full} (reach the machine through a port)")
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in IO_BUILTINS:
-            if node.func.id not in bound and node.func.id not in allowed:
-                problems.append(f"{rel}:{node.lineno}: {node.func.id}() does I/O (use a port)")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in IO_BUILTINS
+            and node.func.id not in bound
+            and node.func.id not in allowed
+        ):
+            problems.append(f"{rel}:{node.lineno}: {node.func.id}() does I/O (use a port)")
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
             name = _dotted(node)
             if name is None:
@@ -461,9 +488,11 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
             targets: list[str] = []
             if node.module is not None:
                 targets.append(node.module)
-            for alias in node.names:
-                if alias.name != "*":
-                    targets.append(f"{node.module}.{alias.name}" if node.module is not None else alias.name)
+            targets.extend(
+                f"{node.module}.{alias.name}" if node.module is not None else alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
             seen: set[str] = set()
             for target in targets:
                 reason = _forbidden_import_reason(target, role)
@@ -476,11 +505,14 @@ def architecture_problems(source: str, rel: str, role: LayerRole) -> list[str]:
                     problems.append(
                         f"{rel}:{node.lineno}: @dataclass {node.name} in domain must set frozen=True, slots=True"
                     )
-                elif isinstance(dec, ast.Call) and _is_dataclass_func(dec.func):
-                    if not (_has_true_keyword(dec, "frozen") and _has_true_keyword(dec, "slots")):
-                        problems.append(
-                            f"{rel}:{node.lineno}: @dataclass {node.name} in domain must set frozen=True and slots=True"
-                        )
+                elif (
+                    isinstance(dec, ast.Call)
+                    and _is_dataclass_func(dec.func)
+                    and not (_has_true_keyword(dec, "frozen") and _has_true_keyword(dec, "slots"))
+                ):
+                    problems.append(
+                        f"{rel}:{node.lineno}: @dataclass {node.name} in domain must set frozen=True and slots=True"
+                    )
 
     if role in IO_LAYERS:
         problems.extend(direct_io_problems(source, rel))
@@ -626,12 +658,14 @@ def private_imports(source: str, rel: str) -> list[str]:
     """`from <repository module> import _name`: a private name used outside its module."""
     problems: list[str] = []
     for node in ast.walk(ast.parse(source, filename=rel)):
-        if not isinstance(node, ast.ImportFrom) or node.module in ("__future__",):
+        if not isinstance(node, ast.ImportFrom) or node.module == "__future__":
             continue
         ours = node.level > 0 or (node.module or "").split(".", 1)[0] in {*REPO_PACKAGES, "tests"}
-        for alias in node.names:
-            if ours and alias.name.startswith("_") and not alias.name.startswith("__"):
-                problems.append(f"{rel}:{node.lineno}: imports the private name {alias.name} from {node.module}")
+        problems.extend(
+            f"{rel}:{node.lineno}: imports the private name {alias.name} from {node.module}"
+            for alias in node.names
+            if ours and alias.name.startswith("_") and not alias.name.startswith("__")
+        )
     return problems
 
 
@@ -747,9 +781,11 @@ def core_names_without_user(sources: dict[str, str]) -> list[str]:
     for rel, src in sorted(sources.items()):
         if not rel.startswith(CORE_SHARED_PREFIXES):
             continue
-        for name in top_level_names(src, rel):
-            if not any(name in names for other, names in refs.items() if other != rel):
-                out.append(f"{rel}:{name}")
+        out.extend(
+            f"{rel}:{name}"
+            for name in top_level_names(src, rel)
+            if not any(name in names for other, names in refs.items() if other != rel)
+        )
     return out
 
 

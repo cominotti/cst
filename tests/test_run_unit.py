@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""tests/run_unit.py: what it loads (all, --gates, names)."""
+"""tests/run_unit.py: what it loads (all, --gates, names), and its run-time gates."""
 
 import os
 import shutil
@@ -15,6 +15,8 @@ from tests.run_unit import (
     HOST_COMMANDS,
     HOST_GUARD_ENV,
     HOST_GUARD_EXIT,
+    LEAK_HINT,
+    LOST_EXCEPTION_HINT,
     expected_skip,
     load,
     skip_problems,
@@ -132,6 +134,153 @@ class HostCommandGuardTest(unittest.TestCase):
         for name in HOST_COMMANDS:
             with self.subTest(name=name):
                 self.assertEqual(shutil.which(name), os.path.join(folder, name))
+
+
+# Test modules run by the runner in a child: each leaks a resource in its own way, or does not.
+_LEAKS = """
+import gc, os, unittest, warnings
+class T(unittest.TestCase):
+    def test_leaks_a_file(self):
+        f = open(os.devnull)
+    def test_closes_its_file(self):
+        with open(os.devnull):
+            pass
+    def test_leaks_a_file_in_a_cycle(self):
+        gc.disable()  # only the runner's last collection frees it
+        cycle = [open(os.devnull)]
+        cycle.append(cycle)
+    def test_records_its_own_warning(self):
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            f = open(os.devnull)
+            del f
+        self.assertEqual([w.category for w in seen], [ResourceWarning])
+class S(unittest.TestCase):
+    def test_replaces_showwarning_then_leaks(self):
+        warnings.showwarning = lambda *args, **kwargs: None  # as logging.captureWarnings(True) does
+        f = open(os.devnull)
+        del f
+class U(unittest.TestCase):
+    def test_a_weakref_callback_raises(self):
+        import weakref
+        class Freed:
+            pass
+        thing = Freed()
+        def boom_callback(ref):
+            raise ZeroDivisionError("boom")
+        self.ref = weakref.ref(thing, boom_callback)
+        del thing
+class C(unittest.TestCase):
+    def test_a_leaks_a_file_in_a_cycle(self):
+        gc.disable()  # the next test's collection frees it
+        cycle = [open(os.devnull)]
+        cycle.append(cycle)
+    def test_b_collects(self):
+        gc.collect()
+        gc.enable()
+class F(unittest.TestCase):
+    def test_a_ignores_every_warning(self):
+        warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
+    def test_b_leaks_a_file(self):
+        f = open(os.devnull)
+        del f
+"""
+
+
+class ResourceWarningGateTest(unittest.TestCase):
+    """A test that leaves a file or socket open fails the run, even though unittest says OK."""
+
+    def run_probe(self, name: str, *options: str, cls: str = "T") -> subprocess.CompletedProcess[str]:
+        """The runner in a child (with these interpreter options) on one test of _LEAKS (or the
+        whole class, for an empty name)."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-leak-run-"))
+        with open(os.path.join(tmp, "probe_leaks.py"), "w", encoding="utf-8") as f:
+            f.write(_LEAKS)
+        return subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                *options,
+                os.path.join(REPO, "tests", "run_unit.py"),
+                ".".join(part for part in ("probe_leaks", cls, name) if part),
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env={**os.environ, "PYTHONPATH": tmp},
+        )
+
+    def test_a_leaked_file_fails_the_run_and_names_the_test(self) -> None:
+        done = self.run_probe("test_leaks_a_file")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("OK", done.stderr)  # unittest alone lets it pass
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.T.test_leaks_a_file: unclosed file <_io.TextIOWrapper "
+            "name='/dev/null'",
+            done.stderr,
+        )
+        self.assertIn(LEAK_HINT, done.stderr)
+
+    def test_with_tracemalloc_the_output_says_where_it_was_opened(self) -> None:
+        done = self.run_probe("test_leaks_a_file", "-X", "tracemalloc=8")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("Object allocated at (most recent call last):", done.stderr)
+        self.assertIn("f = open(os.devnull)", done.stderr)
+
+    def test_a_closed_file_passes(self) -> None:
+        done = self.run_probe("test_closes_its_file")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("error:", done.stderr)
+
+    def test_a_leak_only_the_last_collection_finds_fails_the_run(self) -> None:
+        done = self.run_probe("test_leaks_a_file_in_a_cycle")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.T.test_leaks_a_file_in_a_cycle (or one before it: found by the "
+            "last garbage collection): unclosed file",
+            done.stderr,
+        )
+
+    def test_a_leak_a_collection_finds_names_the_running_test_or_one_before_it(self) -> None:
+        done = self.run_probe("", cls="C")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.C.test_b_collects (or one before it: found by a garbage "
+            "collection): unclosed file",
+            done.stderr,
+        )
+
+    def test_a_leak_after_showwarning_was_replaced_fails_the_run(self) -> None:
+        done = self.run_probe("test_replaces_showwarning_then_leaks", cls="S")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.S.test_replaces_showwarning_then_leaks: unclosed file", done.stderr
+        )
+
+    def test_a_leak_after_a_test_that_ignored_every_warning_fails_the_run(self) -> None:
+        done = self.run_probe("", cls="F")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("error: ResourceWarning in probe_leaks.F.test_b_leaks_a_file: unclosed file", done.stderr)
+
+    def test_an_exception_python_could_only_print_fails_the_run_and_names_the_callback(self) -> None:
+        done = self.run_probe("test_a_weakref_callback_raises", cls="U")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 1, done.stderr)
+        self.assertTrue(
+            error[0].startswith("error: exception in probe_leaks.U.test_a_weakref_callback_raises: "), error
+        )
+        self.assertIn("boom_callback", error[0])  # what Python was calling, whatever its words for it
+        self.assertTrue(error[0].endswith(": ZeroDivisionError('boom')"), error)
+        self.assertIn(LOST_EXCEPTION_HINT, done.stderr)
+        self.assertNotIn(LEAK_HINT, done.stderr)
+
+    def test_a_warning_the_test_records_itself_is_its_own(self) -> None:
+        done = self.run_probe("test_records_its_own_warning")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("error:", done.stderr)
 
 
 class LoadTest(unittest.TestCase):

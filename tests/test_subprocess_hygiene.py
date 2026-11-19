@@ -57,12 +57,13 @@ def runs_a_shell(call: ast.Call) -> bool:
 
 
 def offenders(source: str, rel: str) -> list[str]:
-    found: list[str] = []
-    for node in ast.walk(ast.parse(source, rel)):
-        if isinstance(node, ast.Call) and runs_a_shell(node):
-            if not any(kw.arg in ("stdin", "input") for kw in node.keywords):
-                found.append(f"{rel}:{node.lineno}")
-    return found
+    return [
+        f"{rel}:{node.lineno}"
+        for node in ast.walk(ast.parse(source, rel))
+        if isinstance(node, ast.Call)
+        and runs_a_shell(node)
+        and not any(kw.arg in ("stdin", "input") for kw in node.keywords)
+    ]
 
 
 class SubprocessHygieneTest(unittest.TestCase):

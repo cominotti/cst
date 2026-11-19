@@ -354,12 +354,14 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
                 priv,
                 "bash",
                 "-c",
-                "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
-                "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
-                "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
-                "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
-                "if [ -f /run/e2e-loop-devs ]; then "
-                "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi",
+                (
+                    "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
+                    "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
+                    "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
+                    "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
+                    "if [ -f /run/e2e-loop-devs ]; then "
+                    "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi"
+                ),
             ],
             check=False,
             capture=True,
@@ -369,7 +371,7 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         run(["docker", "network", "rm", net], check=False, capture=True)
         leaked: list[str] = []
         for _ in range(5):
-            leaked: list[str] = []
+            leaked = []
             for bf in Path("/sys/block").glob("loop*/loop/backing_file"):
                 try:
                     val = bf.read_text().strip()
@@ -411,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check_only:
         return 0
 
-    run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+    run_id = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     artifact_dir = ARTIFACTS_BASE / run_id
     all_ok = True
     try:

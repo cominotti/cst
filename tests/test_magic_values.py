@@ -46,7 +46,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import os
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
 
 from tests.budgets import budget_problems, format_table, package_of
@@ -122,6 +122,7 @@ class Hit:
         """The MAGIC_EXEMPT key of its scope."""
         return f"{self.rel}:{self.scope}"
 
+    @override
     def __str__(self) -> str:
         return f"{self.rel}:{self.line}: {self.text}"
 

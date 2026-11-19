@@ -35,16 +35,11 @@ def loads_code_by_path(source: str, filename: str = "<source>") -> list[int]:
     uses them may reach into the checkout once installed.
     """
     tree = ast.parse(source, filename=filename)
-    lines: list[int] = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr
-            in {
-                "SourceFileLoader",
-                "spec_from_file_location",
-                "run_path",
-            }
-        ) or (isinstance(node, ast.Name) and node.id in {"SourceFileLoader", "spec_from_file_location", "run_path"}):
-            lines.append(node.lineno)
+    loaders = {"SourceFileLoader", "spec_from_file_location", "run_path"}
+    lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Attribute) and node.attr in loaders)
+        or (isinstance(node, ast.Name) and node.id in loaders)
+    ]
     return sorted(set(lines))

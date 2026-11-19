@@ -362,9 +362,11 @@ class LiveBackupTest(Nas):
         self.assertEqual(
             snaps,
             [
-                f"virsh -c qemu:///system snapshot-create-as win --name cst-nas-{STAMP} --disk-only --atomic "
-                f"--no-metadata --quiesce --diskspec sda,snapshot=external,file={self.overlay} "
-                "--diskspec sdb,snapshot=no"
+                (
+                    f"virsh -c qemu:///system snapshot-create-as win --name cst-nas-{STAMP} --disk-only --atomic "
+                    f"--no-metadata --quiesce --diskspec sda,snapshot=external,file={self.overlay} "
+                    "--diskspec sdb,snapshot=no"
+                )
             ],
         )
         rc = self.restic_calls()

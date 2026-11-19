@@ -32,8 +32,8 @@ def unit_paths(text: str) -> list[tuple[str, str]]:
         key, sep, value = line.strip().partition("=")
         if not sep or not key.startswith(("Exec", "Condition", "Assert")):
             continue
-        for word in value.split():
-            word = word.lstrip("-@:+!|")
+        for raw in value.split():
+            word = raw.lstrip("-@:+!|")
             if word.startswith(ROOTS):
                 out.append((key, word))
     return out

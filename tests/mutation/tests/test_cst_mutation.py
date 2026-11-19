@@ -28,7 +28,7 @@ import sys
 import tempfile
 import tomllib
 from types import ModuleType
-from typing import Any
+from typing import Any, override
 import unittest
 from unittest import mock
 
@@ -45,8 +45,7 @@ TOOL = os.path.join(os.path.dirname(HERE), "cst-mutation")
 
 def load() -> ModuleType:
     # The helper has no .py extension, so it is loaded from its path.
-    mod = load_script(TOOL, "cst_mutation")
-    return mod
+    return load_script(TOOL, "cst_mutation")
 
 
 M = load()
@@ -314,6 +313,7 @@ class RangesTest(unittest.TestCase):
 
 
 class FunctionRangesTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         lines = HELPER_SOURCE.splitlines()
         self.assertTrue(lines[4].startswith("def double"))
@@ -576,7 +576,7 @@ class SessionCountsTest(unittest.TestCase):
                     ("g", "NORMAL", "INCOMPETENT", "Traceback"),
                     ("h", "EXCEPTION", None, "Traceback"),
                 ]
-                for job, *_ in rows + [("pending",)]:
+                for job, *_ in [*rows, ("pending",)]:
                     db.execute("INSERT INTO work_items VALUES (?)", (job,))
                 db.executemany("INSERT INTO work_results VALUES (?, ?, ?, ?)", rows)
                 db.commit()
@@ -599,6 +599,7 @@ class SessionCountsTest(unittest.TestCase):
 class RunTest(unittest.TestCase):
     """The whole run with a fake bwrap and fake cosmic-ray tools."""
 
+    @override
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="cst-mutation-test-")
         self.addCleanup(tmp.cleanup)
@@ -767,7 +768,7 @@ class RunTest(unittest.TestCase):
     def test_without_bwrap_it_refuses_and_runs_nothing(self) -> None:
         tools = M.Tools(bwrap=None, python=sys.executable, venv=self.venv)
         before = snapshot(self.repo)
-        rc, stdout, stderr = self.execute("--all", tools=tools)
+        rc, _stdout, stderr = self.execute("--all", tools=tools)
         self.assertEqual(rc, 2)
         self.assertIn("bubblewrap (bwrap) is not installed", stderr)
         self.assertIn("does not run without it", stderr)

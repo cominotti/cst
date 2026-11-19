@@ -542,7 +542,7 @@ def parse_skip(text: str, names: Collection[str]) -> tuple[str, str]:
     if not sep or name not in names:
         raise Usage(f"--caches-skip {text!r}: expected NAME=REL with NAME one of the --source names")
     norm = os.path.normpath(rel) if rel else ""
-    if not norm or norm.startswith("/") or norm == ".." or norm.startswith("../"):
+    if not norm or norm.startswith(("/", "../")) or norm == "..":
         raise Usage(f"--caches-skip {text!r}: REL must be a path inside the source, relative to its root")
     return name, norm
 

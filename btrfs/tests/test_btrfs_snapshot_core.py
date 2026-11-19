@@ -31,7 +31,7 @@ import types
 import unittest
 import zoneinfo
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, Protocol, TypedDict, cast, override
 from unittest import mock
 
 # Run directly (python3 -I -B btrfs/tests/test_btrfs_snapshot_core.py): the checkout root holds the tests package.
@@ -551,7 +551,7 @@ class RetentionBoundaryTests(unittest.TestCase):
         # A name in the gap (clock set by hand) reads as one hour later, like timelocal().
         gap = snap("2026-03-29 02:30")
         self.assertEqual(core.epoch_to_wall(core.wall_to_epoch(gap.wall, BERLIN), BERLIN), W("2026-03-29 03:30"))
-        d = decide(snaps + [gap], "2026-03-29 05:30", "4h", BERLIN)
+        d = decide([*snaps, gap], "2026-03-29 05:30", "4h", BERLIN)
         self.assertEqual(d[gap.entry], "delete")  # hour 03's first is 03:10
         self.assertEqual(d[E("2026-03-29 03:10")], "keep")
 
@@ -653,7 +653,7 @@ class RetentionBoundaryTests(unittest.TestCase):
         self.assertEqual([r.action for r in rows], ["delete", "delete", "keep"])
         # The reason is the last rule that matched (btrbk): with no hourly rule, "forced".
         rows = core.plan(
-            snaps + [snap("2026-10-14 09:00")], at("2026-10-13 12:00", BERLIN), core.parse_policy("0h"), BERLIN
+            [*snaps, snap("2026-10-14 09:00")], at("2026-10-13 12:00", BERLIN), core.parse_policy("0h"), BERLIN
         )
         self.assertEqual([r.action for r in rows], ["delete", "delete", "keep", "keep"])
         self.assertEqual(rows[2].reason, "preserve forced: 20 hours in the future")
@@ -770,6 +770,7 @@ foreach (sort { $a->{value} <=> $b->{value} } @$results) {
     "set BTRBK_SOURCE=/path/to/btrbk (0.32.7) and have perl to compare with btrbk itself",
 )
 class BtrbkOracleTests(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         with open(os.environ["BTRBK_SOURCE"]) as f:
             text = f.read()
@@ -783,6 +784,7 @@ class BtrbkOracleTests(unittest.TestCase):
         with open(self.harness, "w") as f:
             f.write(PERL_HARNESS)
 
+    @override
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -1034,12 +1036,14 @@ class FakeHost:
 
 
 class CliTestCase(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.state = os.path.join(self.tmp.name, "state")
         self.lock = os.path.join(self.tmp.name, "lock")
         self.pins = os.path.join(self.tmp.name, "pinned")
 
+    @override
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -1296,7 +1300,7 @@ class OwnershipTests(CliTestCase):
         self.assertIn("IGNORED home.20260601T0030", self.out)
 
     def test_unparsable_entry_blocks_deletions(self) -> None:
-        h, old = self.setup_mixed()
+        h, _old = self.setup_mixed()
         h.show_override["/top/snapshots/home.20260601T0300"] = "home.20260601T0300\n\tUUID: \t\tbroken\n"
         before = h.snapshots()
         self.assertEqual(self.cli(h, "prune", source="home=/top/home:24h", clock_ok=True), 4)
@@ -1512,7 +1516,7 @@ class ClockGuardTests(CliTestCase):
 
     def test_clock_behind_newest_snapshot(self) -> None:
         # Unsynchronized: which one is wrong is unknown - neither create nor delete.
-        h, old = self.history("2026-10-13 11:50")  # newest is 12:00: 10 minutes ahead
+        h, _old = self.history("2026-10-13 11:50")  # newest is 12:00: 10 minutes ahead
         h.ntp = "no"
         h.subvols["/top/home"]["gen"] = 10_000
         before = h.snapshots()
@@ -1613,7 +1617,7 @@ class ClockGuardTests(CliTestCase):
         self.assertIn("moved 3 days further than the time elapsed since the last successful run", self.out)
 
     def test_clock_behind_last_run(self) -> None:
-        h, old = self.history("2026-10-13 14:07")
+        h, _old = self.history("2026-10-13 14:07")
         os.makedirs(self.state)
         with open(os.path.join(self.state, core.STATE_FILE), "w") as f:
             f.write(f"{int(h.now) + 3600}\n")  # the old one-number format is read too
@@ -1721,7 +1725,7 @@ class CircuitBreakerTests(CliTestCase):
         self.assertFalse(set(old) & set(h.snapshots()))
 
     def test_six_trip_then_allowed(self) -> None:
-        h, old = self.build(6)
+        h, _old = self.build(6)
         before = h.snapshots()
         self.assertEqual(self.cli(h, "snapshot", source="home=/top/home:1h", clock_ok=True), 4)
         self.assertEqual(h.snapshots(), before)
@@ -1731,7 +1735,7 @@ class CircuitBreakerTests(CliTestCase):
         self.assertEqual(h.snapshots(), ["home.20261013T1000", "home.20261013T1100", "home.20261013T1200"])
 
     def test_message_names_the_callers_commands(self) -> None:
-        h, old = self.build(6)
+        h, _old = self.build(6)
         self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4)
         self.assertIn("btrfs-snapshot-core prune --snapdir DIR", self.out)
         self.assertEqual(
@@ -1754,7 +1758,7 @@ class CircuitBreakerTests(CliTestCase):
         )
 
     def test_per_source(self) -> None:
-        h, old = self.build(6)
+        h, _old = self.build(6)
         h.add_source("/top/ws", 10)
         rc = self.cli(h, "prune", sources=["home=/top/home:1h", "ws=/top/ws:1h"], clock_ok=True)
         self.assertEqual(rc, 4)
@@ -1953,7 +1957,7 @@ class RecheckTests(CliTestCase):
         self.assertIn("pinned meanwhile", self.out)
 
     def test_delete_failure_stops(self) -> None:
-        h, old = self.build()
+        h, _old = self.build()
 
         def vanish(host: FakeHost, path: str) -> None:
             host.subvols.pop(path, None)  # the delete command then fails
@@ -2013,11 +2017,13 @@ def tag(root: str, rel: str, text: str = TAG_TEXT) -> str:
 class CacheWalkTests(unittest.TestCase):
     """walk_caches on real folders in a temporary directory."""
 
+    @override
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = os.path.join(self.tmp.name, "root")
         os.makedirs(self.root)
 
+    @override
     def tearDown(self) -> None:
         for dirpath, dirnames, _ in os.walk(self.tmp.name):
             for d in dirnames:
@@ -2167,7 +2173,7 @@ class CacheWalkTests(unittest.TestCase):
         def fstat(fd: int) -> os.stat_result:
             st = real(fd)
             if os.readlink(f"/proc/self/fd/{fd}").endswith(("/nested", "/t/mnt")):
-                return os.stat_result((st[0], st[1], st[2] + 1) + tuple(st)[3:])
+                return os.stat_result((st[0], st[1], st[2] + 1, *tuple(st)[3:]))
             return st
 
         with mock.patch.object(core.os, "fstat", fstat):
@@ -2543,6 +2549,7 @@ class RealTreeHost(FakeHost):
         super().__init__(now)
         self.dirs = {top, os.path.join(top, "snapshots")}
 
+    @override
     def run(self, argv: Sequence[str]) -> tuple[int, str, str]:
         out = super().run(argv)
         if argv[:3] == ["btrfs", "subvolume", "snapshot"] and out[0] == 0:
@@ -2550,6 +2557,7 @@ class RealTreeHost(FakeHost):
             shutil.copytree(src, dest, symlinks=True)
         return out
 
+    @override
     def walk_caches(self, root: str, skips: Sequence[str], mode: str) -> _CacheWalkProto:
         self.calls.append(["walk", root, list(skips), mode])
         return core.walk_caches(root, skips, mode)
@@ -2558,6 +2566,7 @@ class RealTreeHost(FakeHost):
 class RealKindHost(FakeHost):
     """FakeHost that asks the real Host.kind (lstat, on the real file system) what a path is."""
 
+    @override
     def kind(self, path: str) -> str:
         return snap_adapters.Host().kind(path)
 

@@ -74,9 +74,13 @@ def sys_path_mutations(source: str, rel: str) -> list[int]:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
                 base = t.value if isinstance(t, ast.Subscript) else t
-                if isinstance(base, ast.Attribute) and base.attr == "path" and isinstance(base.value, ast.Name):
-                    if base.value.id in {"sys", "_cst_sys"}:
-                        lines.append(node.lineno)
+                if (
+                    isinstance(base, ast.Attribute)
+                    and base.attr == "path"
+                    and isinstance(base.value, ast.Name)
+                    and base.value.id in {"sys", "_cst_sys"}
+                ):
+                    lines.append(node.lineno)
     return lines
 
 
@@ -164,9 +168,11 @@ def reexport_problems(source: str, rel: str) -> list[str]:
     package = rel.rsplit("/", 1)[0].replace("/", ".") if rel.endswith("/__init__.py") else None
     for node in ast.walk(ast.parse(source, filename=rel)):
         if isinstance(node, ast.Import | ast.ImportFrom):
-            for alias in node.names:
-                if alias.asname is not None and alias.asname == alias.name.rsplit(".", 1)[-1]:
-                    problems.append(f"{rel}:{node.lineno}: re-exports {alias.name} (import it where it is defined)")
+            problems.extend(
+                f"{rel}:{node.lineno}: re-exports {alias.name} (import it where it is defined)"
+                for alias in node.names
+                if alias.asname is not None and alias.asname == alias.name.rsplit(".", 1)[-1]
+            )
         if (
             package is not None
             and isinstance(node, ast.ImportFrom)
@@ -186,14 +192,16 @@ class EntryPointGateTest(unittest.TestCase):
         for rel in entry_points():
             reaches = module_closure([rel]) - {rel}
             if reaches and BOOTSTRAP not in _read(rel):
-                problems.append(f"{rel}: imports {sorted(reaches)[0]} but lacks the canonical bootstrap")
+                problems.append(f"{rel}: imports {min(reaches)} but lacks the canonical bootstrap")
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_only_the_bootstrap_changes_sys_path(self) -> None:
         problems: list[str] = []
         for rel in production_python():
-            for line in sys_path_mutations(without_bootstrap(_read(rel)), rel):
-                problems.append(f"{rel}:{line}: changes sys.path (use the bootstrap in an entry point only)")
+            problems.extend(
+                f"{rel}:{line}: changes sys.path (use the bootstrap in an entry point only)"
+                for line in sys_path_mutations(without_bootstrap(_read(rel)), rel)
+            )
         self.assertEqual(problems, [], "\n".join(problems))
 
     def test_entry_points_only_wire_argv(self) -> None:

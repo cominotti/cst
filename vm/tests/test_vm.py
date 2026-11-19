@@ -305,9 +305,12 @@ class PartsTest(unittest.TestCase):
         p = vm_domain.domain_parts(xml)
         self.assertEqual(
             p.skipped,
-            ["unnamed disk on /iso/win.iso (cdrom, not copied)", "unnamed disk (cdrom, not copied)",
-             "unnamed disk (no source file)"],
-        )  # fmt: skip
+            [
+                "unnamed disk on /iso/win.iso (cdrom, not copied)",
+                "unnamed disk (cdrom, not copied)",
+                "unnamed disk (no source file)",
+            ],
+        )
         self.assertEqual(len(p.problems), 1)
         self.assertTrue(p.problems[0].startswith("unnamed disk: a block disk (/dev/vg/x): "), p.problems)
         self.assertEqual(p.disks, ["/a.qcow2"])
@@ -1703,6 +1706,15 @@ class PackageTest(unittest.TestCase):
             )
             self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
 
+    def test_every_no_word_turns_a_knob_off_and_anything_else_leaves_it_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            for word, on in (("false", False), ("' FALSE '", False), ("Off", False), ("maybe", True), ("TRUE", True)):
+                with self.subTest(word=word):
+                    with open(conf, "w") as f:
+                        f.write(f"VM_NOCOW={word}\n")
+                    self.assertEqual(vm_adapters.knobs(replace(PATHS, vm_conf=conf))["VM_NOCOW"], on)
+
     def test_domain_parts_and_tune_domain(self) -> None:
         parts = vm_domain.domain_parts(old_domain())
         self.assertEqual(parts.uuid, UUID)
@@ -1731,7 +1743,9 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(vm_domain.overlay_kind("running", "/base.qcow2", "/base.qcow2"), "definition")
         # Equal paths, not the same object or ordering: an overlay path sorting before the image is still live.
         self.assertEqual(vm_domain.overlay_kind("running", "/a-overlay.qcow2", "/base.qcow2"), "live")
-        self.assertEqual(vm_domain.overlay_kind("running", "".join(["/base", ".qcow2"]), "/base.qcow2"), "definition")
+        self.assertEqual(
+            vm_domain.overlay_kind("running", os.path.join("/", "base.qcow2"), "/base.qcow2"), "definition"
+        )
         self.assertEqual(vm_domain.overlay_kind("shut off", "/live.qcow2", "/base.qcow2"), "offline")
         self.assertEqual(vm_domain.overlay_kind("weird", "/live.qcow2", "/base.qcow2"), "unknown")
         args = vm_domain.forget_args("win", "workstation", 4, 3)

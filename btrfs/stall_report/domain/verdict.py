@@ -62,8 +62,10 @@ def memory_lines(res: AnalyseResult, storage_d: int) -> list[str]:
     )
     if peak >= storage_d:
         return [
-            f"Memory, not storage, blocked up to {peak} tasks (memory reclaim, swap-in or zswap{notes}). "
-            f"See the memory line; `cst swap status` shows which cgroup swaps."
+            (
+                f"Memory, not storage, blocked up to {peak} tasks (memory reclaim, swap-in or zswap{notes}). "
+                f"See the memory line; `cst swap status` shows which cgroup swaps."
+            )
         ]
     return [f"Memory waits: up to {peak} tasks also waited on memory reclaim, swap-in or zswap{notes}."]
 
@@ -106,12 +108,14 @@ def fuse_lines(res: AnalyseResult) -> list[str]:
     if not n and not ev:
         return []
     return [
-        f"FUSE waits: programs waited on a FUSE filesystem ({n} task-samples"
-        f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}): a gvfs network share "
-        f"(/run/user/*/gvfs; /run/host/run/user/*/gvfs inside toolbox) or the document portal answered "
-        f"slowly. Usually the network or the FUSE daemon, typically a find/search walking into a share "
-        f"(see 'events' for the command); it only involves the local disks if storage waits show up "
-        f"at the same time."
+        (
+            f"FUSE waits: programs waited on a FUSE filesystem ({n} task-samples"
+            f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}): a gvfs network share "
+            f"(/run/user/*/gvfs; /run/host/run/user/*/gvfs inside toolbox) or the document portal answered "
+            f"slowly. Usually the network or the FUSE daemon, typically a find/search walking into a share "
+            f"(see 'events' for the command); it only involves the local disks if storage waits show up "
+            f"at the same time."
+        )
     ]
 
 
@@ -156,10 +160,12 @@ def maint_lines(res: AnalyseResult) -> list[str]:
     if n < 3 and not ev and res.get("maintenance_samples", 0) < 3:
         return []
     return [
-        f"Maintenance: btrfs housekeeping ran (fstrim/discard, scrub or balance; {n} task-samples"
-        f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}"
-        f"{', up to ' + str(peak) + ' task(s) at once' if peak else ''}). Expected background work, "
-        f"not a workload stall; it only slowed the workload if storage waits show up at the same time."
+        (
+            f"Maintenance: btrfs housekeeping ran (fstrim/discard, scrub or balance; {n} task-samples"
+            f"{', ' + str(len(ev)) + ' long wait(s) in events' if ev else ''}"
+            f"{', up to ' + str(peak) + ' task(s) at once' if peak else ''}). Expected background work, "
+            f"not a workload stall; it only slowed the workload if storage waits show up at the same time."
+        )
     ]
 
 
@@ -168,8 +174,10 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     cov = res["coverage"]
     if res["samples"] < 2:
         return [
-            "NO DATA for this window. Is btrfs-stall-monitor.service running? "
-            "(`systemctl status btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"
+            (
+                "NO DATA for this window. Is btrfs-stall-monitor.service running? "
+                "(`systemctl status btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"
+            )
         ]
     if not cov["complete"]:
         out.append(
@@ -194,9 +202,11 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     oe = res.get("open_episode")
     open_lines = (
         [
-            f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
-            f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
-            f"ends; run the report again after that for the details."
+            (
+                f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
+                f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
+                f"ends; run the report again after that for the details."
+            )
         ]
         if oe
         else []
@@ -230,8 +240,10 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
         out += [*mem_lines, f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
     elif d_stall:
         out += [
-            f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
-            f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure).",
+            (
+                f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
+                f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."
+            ),
             *mem_lines,
         ]
     else:

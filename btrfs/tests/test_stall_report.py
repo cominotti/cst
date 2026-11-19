@@ -175,7 +175,7 @@ class ZswapAcrossUpgradeTest(unittest.TestCase):
         res, text = self.analyse(recs)
         self.assertEqual(res["vm"]["zswap_writeback_bytes"], 45 * self.m.PAGE)
         self.assertIsNone(res["vm"]["zswap_counted_from"])
-        line = next(l for l in text.splitlines() if l.startswith("memory"))
+        line = next(row for row in text.splitlines() if row.startswith("memory"))
         self.assertIn("zswap in/out 0 MiB / 0 MiB   disk swap in/out", line)
         self.assertNotIn("from", line)
 
@@ -340,7 +340,7 @@ class SaturationTest(ReportCase):
     def test_quiet_hour_numbers_are_not_saturated(self) -> None:
         res, verdict, text = self.run_report(self.recs(QUIET_NVME, QUIET_DM))
         self.assertAlmostEqual(res["pressure"]["io_some_pct"], 1.3, places=1)
-        line = next(l for l in verdict if l.startswith("btrfs disks"))
+        line = next(row for row in verdict if row.startswith("btrfs disks"))
         self.assertNotIn("SATURATED", line)
         self.assertIn("NOT saturated", line)
         self.assertIn("dm-crypt layer (what btrfs waits for) await 1.1 ms (read 1.1, write 1.1)", line)
@@ -351,7 +351,7 @@ class SaturationTest(ReportCase):
 
     def test_saturated_dm_layer(self) -> None:
         _, verdict, _ = self.run_report(self.recs(QUIET_NVME, BUSY_DM))
-        line = next(l for l in verdict if l.startswith("btrfs disks"))
+        line = next(row for row in verdict if row.startswith("btrfs disks"))
         self.assertIn("look SATURATED", line)
         self.assertIn("await 15.0 ms (read 15.0, write 15.0)", line)
         self.assertIn("encryption queueing adds latency", line)
@@ -361,7 +361,7 @@ class SaturationTest(ReportCase):
         recs[0]["disks"] = {"nvme0n1": "btrfs:fedora"}
         recs.append(episode(T0 + 10, T0 + 30, 3, [("btrfs_sync_log", 30, "storage")], max_d_mem=0))
         _, verdict, _ = self.run_report(recs)
-        line = next(l for l in verdict if l.startswith("btrfs disks"))
+        line = next(row for row in verdict if row.startswith("btrfs disks"))
         self.assertIn("look SATURATED: member disks await 15.0 ms", line)
         self.assertNotIn("NVMe below", line)
 
@@ -398,14 +398,14 @@ class MemoryWaitsTest(ReportCase):
         self.assertIn("at most 2 task(s) waiting on storage", verdict[0])
         self.assertTrue(
             any(
-                l.startswith(
+                row.startswith(
                     "Memory, not storage, blocked up to 74 tasks (memory reclaim, swap-in or zswap; "
                     "estimated from the stacks: recorded by a daemon < v8)"
                 )
-                for l in verdict
+                for row in verdict
             )
         )
-        self.assertFalse(any(l.startswith("Blocked tasks") for l in verdict))
+        self.assertFalse(any(row.startswith("Blocked tasks") for row in verdict))
         self.assertEqual(res["categories"], [])
         self.assertEqual(res["non_storage_waits"], {"reclaim": 1480})
         self.assertIn("[reclaim] zswap_compress", text)
@@ -417,8 +417,10 @@ class MemoryWaitsTest(ReportCase):
         res, verdict, _ = self.run_report(recs)
         self.assertEqual(res["episodes"][0]["max_d"], 6)
         self.assertEqual(res["episodes"][0]["max_d_mem"], 2)
-        self.assertTrue(any(l.startswith("Blocked tasks: up to 6 tasks waiting on storage") for l in verdict), verdict)
-        self.assertFalse(any(l.startswith("Memory") for l in verdict))
+        self.assertTrue(
+            any(row.startswith("Blocked tasks: up to 6 tasks waiting on storage") for row in verdict), verdict
+        )
+        self.assertFalse(any(row.startswith("Memory") for row in verdict))
         self.assertEqual([c["category"] for c in res["categories"]], ["log-sync"])
 
     def test_v7_storage_episode_unchanged(self) -> None:
@@ -428,7 +430,7 @@ class MemoryWaitsTest(ReportCase):
         self.assertEqual(res["episodes"][0]["max_d"], 5)
         self.assertNotIn("estimated", res["episodes"][0])
         self.assertEqual(res["peak"]["d_tasks"], 5)
-        self.assertTrue(any(l.startswith("Blocked tasks: up to 5 tasks") for l in verdict))
+        self.assertTrue(any(row.startswith("Blocked tasks: up to 5 tasks") for row in verdict))
 
     def test_v8_memory_waits_from_samples(self) -> None:
         # Daemon v8: memory waits counted in d_mem; they open no episode.
@@ -629,7 +631,7 @@ class ZswapTrafficTest(ReportCase):
         self.assertEqual(res["vm"]["zswap_out_bytes"], 100 * 2**20)
         self.assertEqual(res["vm"]["swap_out_bytes"], 10 * 2**20)
         self.assertEqual(res["vm"]["swap_out_bypass_bytes"], 0)
-        line = next(l for l in text.splitlines() if l.startswith("memory"))
+        line = next(row for row in text.splitlines() if row.startswith("memory"))
         self.assertIn("zswap in/out 50 MiB / 100 MiB   disk swap in/out 0 MiB / 10 MiB   direct reclaim", line)
         self.assertNotIn("not through zswap", line)
         self.assertNotIn("writeback", line)  # the old duplicate figure is gone

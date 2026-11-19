@@ -126,7 +126,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((plan.new, plan.changes), ({}, ["'a cli': 3 -> deleted (measured 0)"]))
 
     def test_names_table(self) -> None:
-        table = Table("gate.py", "ALLOWED", "names", lambda: set())
+        table = Table("gate.py", "ALLOWED", "names", set)
         plan = plan_table(table, {"keep": "r1", "gone": "r2"}, {"keep", "new"})
         self.assertEqual(plan.new, {"keep": "r1"})
         self.assertEqual(plan.changes, ["'gone': deleted (no longer needed)"])

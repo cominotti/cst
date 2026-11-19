@@ -107,10 +107,41 @@ repository:
   shadowed), `T10` (no debugger call), `TID` (no relative import from a
   parent package), `LOG` and `G` (logging calls), `PLE` (pylint errors),
   `W` (pycodestyle warnings) and `C4` (comprehensions), for every Python
-  file (`test pylint`). `ANN`
+  file (`test pylint`). Since 2026-11 also `E7` (statements), `PLC` and
+  `PLR` (pylint conventions and refactors), `S` (bandit: no `os.system`,
+  `shell=True`, `exec`, `tempfile.mktemp`), `TRY` (exception handling),
+  `ISC` (implicit string joins: inside a list or a tuple a join needs
+  parentheses, so a comma forgotten between two lines of a unit file or a
+  plan is an error), `ARG` (unused arguments, production code only: fakes
+  in tests ignore arguments on purpose), `SLOT`, `YTT`, `FLY`, `RSE`,
+  `ASYNC`, `INT`, `INP`, `COM818` and `COM819`, and the families of
+  lint group 2 once their last hits were fixed: `DTZ` (naive datetimes),
+  `PLW`, `RUF`, `SIM`, `PERF`, `FURB`, `PIE`, `RET`, `PYI`, `EXE` (a
+  shebang on a file that is not executable) and `ERA` (commented-out
+  code). The rules of these families that are left out, and the files
+  that keep a hit on purpose, are in `[tool.ruff.lint] ignore` and
+  `per-file-ignores` of `pyproject.toml`, each with its reason in a
+  comment (the size rules `PLR09xx` and `PLR2004` are there because the
+  budgets below count them). `ANN`
   (annotations) is not in the selected rules: `test types` runs it on its
   own (`ruff check --select ANN`), on every Python file (see "ANN applies
   to every file" below).
+- **ruff preview**: `[tool.ruff.lint] preview = true` with
+  `explicit-preview-rules = true`, so a preview rule is on only where
+  `select` names it by its full code (a family selector such as `RUF` does
+  not pull in the about 145 others): `B901`, `B909`, `PLE1141`, `PLE4703`,
+  `PLW3201`, `PLW0244`, `RUF031`, `RUF039`, `RUF045`, `RUF056`, `RUF066`,
+  `RUF072` and `RUF075`, which find bugs (a list changed while it is
+  iterated, a value returned from a generator and dropped, ...) and had few
+  or no hits. Never `PLC1901`: it asks for `not x` instead of `x == ""`,
+  the opposite of the house style. Preview also changes some stable rules a
+  little (it added one `F811` hit). The formatter stays on its stable style:
+  `[tool.ruff.format]` has no `preview`, and neither has the top-level
+  `[tool.ruff]` (it would turn on both). `tests/test_python_files.py`
+  fails when preview is on without `explicit-preview-rules`, when
+  `PLC1901` is selected and when either formatter preview is on. A preview
+  rule can change or disappear in any ruff release; the exact pin means only
+  an upgrade pull request sees that (see "Upgrading a pin").
 - **`PLW1510`: every `subprocess.run` passes `check=`.** Without it, a
   command that fails (exit status not 0) does not stop the program, and
   nothing in the code says whether that was meant. At a new call site write:
@@ -137,15 +168,15 @@ repository:
   `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
   SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
   measures. Ratchets on the size of a function: `PLR0911`, `PLR0912`,
-  `PLR0913`, `PLR0915` (more than 6 returns, 12 branches, 5 arguments or
-  50 statements, ruff's defaults), with `FBT003` (a bare `True`/`False`
+  `PLR0913`, `PLR0915`, `PLR0917` (more than 6 returns, 12 branches, 5
+  arguments, 50 statements or 5 positional arguments, ruff's defaults), with `FBT003` (a bare `True`/`False`
   passed by position) and the `N` family (pep8-naming), counted under `N`:
   an entry of RULES made of letters only counts every code of its family.
-  The families of lint group 2 that still have hits no safe fix removes
-  are budgeted the same way: `DTZ`, `PLW`, `RUF`, `SIM`, `PERF`, `FURB`,
-  `PIE`, `RET`, `PYI`, `EXE` and `ERA`. A family that reaches 0 moves to
-  `select`. A second ruff run fails on any `# noqa` that suppresses nothing
-  (`RUF100`). When a budget fails, the script prints the measured table;
+  A rule or family that reaches 0 moves to `select` (the lint group 2
+  families did in 2026-11). A second ruff run fails on any `# noqa` that
+  suppresses nothing (`RUF100`, which `select` leaves to it: the noqa
+  comments name budgeted rules that a plain `ruff check` does not turn
+  on). When a budget fails, the script prints the measured table;
   see [tests/budgets.py](../tests/budgets.py) for how budgets work.
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
   `Any` (inside generics: `ANN401` already refuses it as a whole
@@ -174,7 +205,9 @@ repository:
   whitespace (a space after an opening quote, trailing spaces, tabs, the
   indentation of the lines), so check the diff when a docstring is printed
   as help text (`print(__doc__)`, argparse). Do not use `# fmt: off` or
-  `# fmt: skip` to get a green run. Markdown files are excluded
+  `# fmt: skip` to get a green run: `tests/test_python_files.py` fails on
+  any `# fmt: skip`, `# fmt: off`, `# fmt: on` (and the `# yapf: disable`
+  and `enable` ruff also reads) in a Python file. Markdown files are excluded
   (`[tool.ruff.format] exclude`): ruff would also format the Python code
   blocks in them, which are short examples wrapped to read well next to the
   text around them, not code that runs.
@@ -232,8 +265,11 @@ repository:
 - **`[tool.ty.rules]`** raises rules that are warnings or off by default to
   errors: `deprecated`, `division-by-zero`, `possibly-missing-attribute`,
   `possibly-missing-import`, `possibly-unresolved-reference`,
-  `unused-ignore-comment` (an ignore comment that suppresses nothing) and
-  `redundant-cast` (a `cast()` to the type the value already has) and
+  `unused-ignore-comment` (an ignore comment that suppresses nothing),
+  `redundant-cast` (a `cast()` to the type the value already has),
+  `missing-override-decorator` (a method that overrides one of a base class,
+  `setUp` included, says so with `@override` from `typing`: a base method
+  renamed or removed is then an error, not a method nobody calls) and
   `truthiness-test-of-none-union` (below). A rule may be added there only at
   `"error"`.
 - **`truthiness-test-of-none-union`**: a boolean test (`if x:`, `not x`,
@@ -558,7 +594,9 @@ One tool per pull request, so that new findings are clearly the new version's:
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
    version finds, or explain in the pull request why it is noise. A new ruff
-   can also lay out code differently: when the format check fails, run
+   can also change or drop the preview rules named in `select` (read their
+   findings, and the release notes for the ones gone) and lay out code
+   differently: when the format check fails, run
    `tests/uv-dev ruff format` and commit the result in the same pull request.
 4. For cosmic-ray, the gates above do not run it: run it for real, with
    `invowk cmd test mutation swap/domain.py swap.tests.test_swap --all`,

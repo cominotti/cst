@@ -87,9 +87,11 @@ class RepoPathTest(unittest.TestCase):
                     lines = fh.readlines()
             except UnicodeDecodeError, OSError:
                 continue
-            for no, line in enumerate(lines, 1):
-                for path in offending_paths(line, folders, entries):
-                    problems.append(f"{rel}:{no}: {path}")
+            problems.extend(
+                f"{rel}:{no}: {path}"
+                for no, line in enumerate(lines, 1)
+                for path in offending_paths(line, folders, entries)
+            )
         self.assertEqual(
             problems,
             [],

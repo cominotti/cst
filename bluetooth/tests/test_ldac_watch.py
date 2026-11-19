@@ -443,8 +443,10 @@ class BounceTest(unittest.TestCase):
         self.assertIn(
             (
                 6,
-                "act: LDAC at 96000 Hz (want 48000): switching a2dp-sink -> a2dp-sink-sbc -> "
-                "a2dp-sink (about a second of silence)",
+                (
+                    "act: LDAC at 96000 Hz (want 48000): switching a2dp-sink -> a2dp-sink-sbc -> "
+                    "a2dp-sink (about a second of silence)"
+                ),
             ),
             self.lines,
         )

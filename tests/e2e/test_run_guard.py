@@ -14,7 +14,7 @@ import io
 import os
 from pathlib import Path
 import tempfile
-from typing import Protocol, cast
+from typing import Protocol, cast, override
 import unittest
 from unittest import mock
 
@@ -50,6 +50,7 @@ def load_run() -> _E2ERunModule:
 
 
 class PrivilegedGuardTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.mod = load_run()
         self.calls: list[int] = []
@@ -101,6 +102,7 @@ class PrivilegedGuardTest(unittest.TestCase):
 
 
 class CheckoutPreflightTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.mod = load_run()
 

@@ -542,9 +542,11 @@ class QuietTest(unittest.TestCase):
     def test_pressure_is_the_mean_of_each_seconds_avg10(self) -> None:
         # avg10 at 2 % in 5 of 10 seconds: mean 1 %, which fails the memory limit
         # (< 1 %) and passes the IO one.
-        sec = lambda i: (
-            {"memory-pressure": 2.0, "io-pressure": 2.0} if i % 2 else {"memory-pressure": 0.0, "io-pressure": 0.0}
-        )
+        def sec(i: int) -> dict[str, float]:
+            return (
+                {"memory-pressure": 2.0, "io-pressure": 2.0} if i % 2 else {"memory-pressure": 0.0, "io-pressure": 0.0}
+            )
+
         rc, out, _ = self.run_quiet(["--for", "10", "--json"], sec)
         r = json.loads(out)
         self.assertEqual(rc, 1)
@@ -553,7 +555,9 @@ class QuietTest(unittest.TestCase):
         self.assertEqual((t["memory-pressure"]["value"], t["io-pressure"]["value"]), (1.0, 1.0))
 
     def test_wait_slides_the_noisy_seconds_out(self) -> None:
-        noisy = lambda i: {"cpu": 90.0} if i <= 3 else {}
+        def noisy(i: int) -> dict[str, float]:
+            return {"cpu": 90.0} if i <= 3 else {}
+
         rc, out, n = self.run_quiet(["--for", "5"], noisy)
         self.assertEqual((rc, n), (1, 5))  # without --wait: one window
         self.proc = FakeProc(tempfile.mkdtemp(dir=self.tmp.name))
@@ -639,7 +643,9 @@ class QuietTest(unittest.TestCase):
         self.assertRegex(r["start"], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
 
     def test_limits_from_flags_and_the_environment(self) -> None:
-        busy = lambda i: {"cpu": 12.0, "writes": 6.0, "memory-pressure": 1.2, "io-pressure": 5.5, "cpu-pressure": 5.5}
+        def busy(i: int) -> dict[str, float]:
+            return {"cpu": 12.0, "writes": 6.0, "memory-pressure": 1.2, "io-pressure": 5.5, "cpu-pressure": 5.5}
+
         env = {
             "QUIET_CPU_PCT": "20",
             "QUIET_WRITE_MBPS": "7",

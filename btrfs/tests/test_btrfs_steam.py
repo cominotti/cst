@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 from unittest import mock
 import copy
 
@@ -62,6 +62,7 @@ def fixture(name: str) -> bytes:
 
 
 class SteamTest(tb.BulkBase):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.real_steam_running = self.host.steam_running
@@ -732,7 +733,7 @@ class SteamTest(tb.BulkBase):
             def copy(src: str, dst: str, label: str, total: int) -> None:
                 os.makedirs(os.path.join(dst, "game"))  # half done
                 shutil.copy(os.path.join(src, "game/dota/pak01_dir.vpk"), os.path.join(dst, "game/x"))
-                raise Crash()
+                raise Crash
 
             return copy
 
@@ -953,7 +954,7 @@ class SteamTest(tb.BulkBase):
 
         def wrapped_os(*a: object, **k: object) -> object:
             if calls["os"] >= after:
-                raise Crash()
+                raise Crash
             calls["os"] += 1
             return real_os(*a, **k)
 
@@ -1002,7 +1003,7 @@ class SteamTest(tb.BulkBase):
             def clock(near: str) -> object:
                 n["calls"] += 1
                 if n["calls"] == 2:  # the copy is done, stamp2 not taken
-                    raise Crash()
+                    raise Crash
                 return real(near)
 
             return clock
@@ -1039,7 +1040,7 @@ class SteamTest(tb.BulkBase):
     def test_kill_in_the_switching_phase_with_all_renames_done(self) -> None:
         def make(real: Callable[[dict[str, Any]], bool]) -> Callable[[dict[str, Any]], bool]:
             def late(j: dict[str, Any]) -> bool:
-                raise Crash()
+                raise Crash
 
             return late
 
@@ -1271,6 +1272,7 @@ class RealBtrfsSteamTest(SteamTest):
     fakes. BTRFS_BULK_REAL_SCRATCH=~/Workspace/.e2e-x (must exist, on btrfs;
     /tmp is often tmpfs) python3 -I -B btrfs/tests/test_btrfs_steam.py RealBtrfsSteamTest"""
 
+    @override
     def setUp(self) -> None:
         scratch = os.environ["BTRFS_BULK_REAL_SCRATCH"]
         old, tempfile.tempdir = tempfile.tempdir, scratch

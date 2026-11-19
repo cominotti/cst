@@ -51,18 +51,40 @@ kernel's no_new_privs flag (prctl PR_SET_NO_NEW_PRIVS) on itself, which
 every child inherits and no child can clear: a setuid program then runs
 without its privileges, and sudo refuses to start. bwrap (the mutation
 test's sandbox) works under it; it sets the same flag itself.
+
+No test may leave a file, a socket or a child process open. Python finds
+such a leak when the object is freed and only prints a ResourceWarning
+(an exception raised in a __del__, a weakref callback or a generator
+closed when it is freed is only printed too), so the test still passes; a
+daemon that leaks a descriptor per event fails slowly. This runner
+records every ResourceWarning (one that goes to a warnings.showwarning a
+test replaced too, and one after a test that changed the warning filters
+for good: each test starts with them recording again) and every exception
+Python could only print (sys.unraisablehook) with the test that was
+running (LeakRecordingResult; a leak the garbage collector frees, which
+an earlier test may have made, is named with "or one before it"), runs
+the garbage collector once more after the last test, and fails the run
+on each one, with a hint: for a
+ResourceWarning, run the test again with -X tracemalloc=8 to see where the
+resource was opened; for an exception, its traceback is printed above the
+test results. A test that records warnings itself
+(warnings.catch_warnings(record=True)) keeps them. Code that runs in a
+child process (a helper started with python3 -I) is not seen.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import ctypes
+import gc
 import os
 import shlex
 import shutil
 import socket
 import sys
 import tempfile
-from typing import Final
+from typing import Final, override
 import unittest
+from unittest import mock
+import warnings
 
 # The static gates: tests that read the repository (layers, budgets,
 # entry points, the manifest, the Python and shell lists, docs, license
@@ -209,6 +231,134 @@ def guard_host_commands(folder: str) -> None:
     os.environ[HOST_GUARD_ENV] = folder
 
 
+# What the run prints after the leaks it found: how to see where each one was opened.
+LEAK_HINT: Final = (
+    "a file, socket or other resource was left open; "
+    "run the test again with python3 -I -B -X tracemalloc=8 tests/run_unit.py NAME to see where it was opened"
+)
+# What the run prints after the exceptions Python could only print (sys.unraisablehook).
+LOST_EXCEPTION_HINT: Final = (
+    "an exception was raised where Python can only print it (in a __del__, a weakref callback, "
+    "a generator closed when it was freed, ...): its traceback is printed above the test results"
+)
+
+
+# The warnings module's functions that write one warning (WarningMessage) out: _showwarnmsg is the
+# one Python calls; it hands the warning to warnings.showwarning when that was replaced (and its
+# original is _showwarning_orig), and to _showwarnmsg_impl otherwise.
+_SHOW_HOOK: Final = "_showwarnmsg_impl"
+_SHOW_ENTRY: Final = "_showwarnmsg"
+_SHOWWARNING_ORIG: Final = "_showwarning_orig"
+
+
+class LeakRecordingResult(unittest.TextTestResult):
+    """A TextTestResult that also records every ResourceWarning (a file, socket or child process
+    left open, found when it is freed; in leaks) and every exception Python could only print
+    (sys.unraisablehook: raised in a __del__, a weakref callback, ...; in lost_exceptions), with
+    the test that was running. unittest only prints them, and such a test still passes; the
+    runner fails the run on each one. A test that records warnings itself
+    (warnings.catch_warnings with record=True) keeps them: the hook does not see those."""
+
+    leaks: list[str]
+    lost_exceptions: list[str]
+
+    @override
+    def startTestRun(self) -> None:
+        super().startTestRun()
+        self.leaks = []
+        self.lost_exceptions = []
+        self._running = "before the first test"
+        # A leak the garbage collector frees (an object in a reference cycle) may come from any
+        # test before the one running: _where says so (gc.callbacks tell when it collects).
+        self._collecting = False
+        self._found_by = "a garbage collection"
+        gc.callbacks.append(self._gc_phase)
+        # TextTestRunner.run has set its own filter ("default") inside a catch_warnings block,
+        # which also restores showwarning when the run ends.
+        warnings.simplefilter("always", ResourceWarning)
+        self._always = warnings.filters[0]
+        # The hook below warnings.showwarning: it still gets the warning's source, so the
+        # original prints where the object was allocated (with -X tracemalloc), and a test's
+        # warnings.catch_warnings(record=True) replaces it for the test's own warnings.
+        self._show: Callable[[warnings.WarningMessage], None] = getattr(warnings, _SHOW_HOOK)
+        # A replaced warnings.showwarning (mock.patch, logging.captureWarnings) gets the warning
+        # instead, and _showwarnmsg_impl never sees it: the hook on _showwarnmsg records those.
+        self._show_entry: Callable[[warnings.WarningMessage], None] = getattr(warnings, _SHOW_ENTRY)
+        self._showwarning_orig: object = getattr(warnings, _SHOWWARNING_ORIG)
+        self._hooks = (
+            mock.patch.object(warnings, _SHOW_HOOK, self._warned),
+            mock.patch.object(warnings, _SHOW_ENTRY, self._entered),
+        )
+        for hook in self._hooks:
+            hook.start()
+        self._unraisablehook = sys.unraisablehook
+        sys.unraisablehook = self._unraisable
+
+    @override
+    def startTest(self, test: unittest.TestCase) -> None:
+        self._running = test.id()
+        self._keep_recording()
+        super().startTest(test)
+
+    @override
+    def stopTestRun(self) -> None:
+        # An object in a reference cycle is freed only by the collector: run it now, while the
+        # hooks still record, instead of at exit.
+        self._found_by = "the last garbage collection"
+        self._keep_recording()
+        gc.collect()
+        gc.callbacks.remove(self._gc_phase)
+        for hook in reversed(self._hooks):
+            hook.stop()
+        sys.unraisablehook = self._unraisablehook
+        super().stopTestRun()
+
+    def _keep_recording(self) -> None:
+        """Put the "always" filter for ResourceWarning first again. A test that called
+        warnings.simplefilter("ignore") or warnings.resetwarnings() outside a catch_warnings block
+        would otherwise hide the leaks of every test after it."""
+        if warnings.filters[:1] != [self._always]:
+            warnings.simplefilter("always", ResourceWarning)
+
+    def _gc_phase(self, phase: str, _info: dict[str, int]) -> None:
+        self._collecting = phase == "start"
+
+    def _where(self) -> str:
+        """The test that was running, and when the garbage collector freed the object, that it
+        may have been opened by an earlier one."""
+        if self._collecting:
+            return f"{self._running} (or one before it: found by {self._found_by})"
+        return self._running
+
+    def _entered(self, msg: warnings.WarningMessage) -> None:
+        if warnings.showwarning is not self._showwarning_orig:
+            self._record(msg)  # the replacement gets it, not _warned
+        self._show_entry(msg)
+
+    def _warned(self, msg: warnings.WarningMessage) -> None:
+        self._record(msg)
+        self._show(msg)
+
+    def _record(self, msg: warnings.WarningMessage) -> None:
+        if issubclass(msg.category, ResourceWarning):
+            self.leaks.append(f"ResourceWarning in {self._where()}: {msg.message} ({msg.filename}:{msg.lineno})")
+
+    def _unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
+        # err_msg says what Python was doing (since 3.14 the object is often None and only err_msg
+        # names the __del__ or callback); None means the default "Exception ignored in" the object.
+        what = unraisable.err_msg or f"Exception ignored in {unraisable.object!r}"
+        self.lost_exceptions.append(f"exception in {self._where()}: {what}: {unraisable.exc_value!r}")
+        self._unraisablehook(unraisable)
+
+
+class LeakRecordingRunner(unittest.TextTestRunner):
+    """unittest's TextTestRunner with a LeakRecordingResult."""
+
+    @override
+    def _makeResult(self) -> LeakRecordingResult:
+        return LeakRecordingResult(self.stream, self.descriptions, self.verbosity, durations=self.durations)
+
+
 def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
     """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
     names = [a for a in args if a != "-v"]
@@ -255,15 +405,22 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     theirs.close()
     sys.stdin = open(0, closefd=False)
     suite = load(repo, argv)
-    result = unittest.TextTestRunner(verbosity=verbosity).run(suite)
+    result = LeakRecordingRunner(verbosity=verbosity).run(suite)
     ours.close()
+    if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
+        raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
     skipped = [(test.id(), reason) for test, reason in result.skipped]
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    for line in problems:
+    leaks, lost = result.leaks, result.lost_exceptions
+    for line in [*problems, *leaks, *lost]:
         print(f"error: {line}", file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems else 1
+    if leaks:
+        print(LEAK_HINT, file=sys.stderr)
+    if lost:
+        print(LOST_EXCEPTION_HINT, file=sys.stderr)
+    return 0 if result.wasSuccessful() and not problems and not leaks and not lost else 1
 
 
 if __name__ == "__main__":

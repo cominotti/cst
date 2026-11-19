@@ -116,8 +116,8 @@ TEST_SETTINGS = "SWAP_PARTUUID=612551b1-ca02-4514-86ad-7d8902e612dc\nSWAP_SIZE_B
 # Its first line, split: the license gate wants that line on line 1 of this file only.
 MAIN_DROPIN = (
     "# SPDX-"
-    + "License-Identifier: MPL-2.0\n"
-    + """\
+    "License-Identifier: MPL-2.0\n"
+    """\
 # Managed by swap-setup.sh (CST): protect libvirt guests from reclaim.
 # Soft floor: reclaim prefers unprotected cgroups while they have anything
 # reclaimable; ignored when they don't. Propagates to the VM scope via the
@@ -1245,6 +1245,11 @@ class SwapApplicationTest(_SwapScratch):
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(execute_cli(["help"], env={"CST_PROG": "cst swap"}, out=out, err=err), 0)
         self.assertIn("Usage: cst swap <command> [args]", out.getvalue())
+        for word in ("-h", "--help"):
+            with self.subTest(word=word):
+                h_out, h_err = io.StringIO(), io.StringIO()
+                self.assertEqual(execute_cli([word], env={"CST_PROG": "cst swap"}, out=h_out, err=h_err), 0)
+                self.assertEqual((h_out.getvalue(), h_err.getvalue()), (out.getvalue(), err.getvalue()))
         self.assertEqual(format_usage("cst swap").splitlines()[-1], "Usage: cst swap <command> [args]")
         # The layout of the bash usage() it replaces: a blank line first, one before "Usage:".
         text = format_usage("cst swap")

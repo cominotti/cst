@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -67,8 +68,10 @@ class CoverageFloorsTest(unittest.TestCase):
         self.assertEqual(
             floor_problems({}, {"gone domain": 50}),
             [
-                "gone domain: has a floor (50 %) but no such package layer was measured; "
-                "rename the entry with its package, or delete it"
+                (
+                    "gone domain: has a floor (50 %) but no such package layer was measured; "
+                    "rename the entry with its package, or delete it"
+                )
             ],
         )
 
@@ -114,6 +117,7 @@ class CoverageTaskOutTest(unittest.TestCase):
     as it is, in a scratch "checkout" that has no tests/uv-dev.
     """
 
+    @override
     def setUp(self) -> None:
         with open(os.path.join(REPO, INVOWKFILE), encoding="utf-8") as fh:
             script = task_script(fh.read(), "test coverage")

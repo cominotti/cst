@@ -214,11 +214,22 @@ class RouteTest(unittest.TestCase):
             host.execs,
             [
                 [
-                    "flatpak-spawn", "--host", "--env=QUIET_CPU_PCT=20", "--env=QUIET_WRITE_MBPS=8", "--env=QUIET_IO_PSI=",
-                    "python3", "-I", "-B", watch, "quiet", "--wait", "2h", "--json",
+                    "flatpak-spawn",
+                    "--host",
+                    "--env=QUIET_CPU_PCT=20",
+                    "--env=QUIET_WRITE_MBPS=8",
+                    "--env=QUIET_IO_PSI=",
+                    "python3",
+                    "-I",
+                    "-B",
+                    watch,
+                    "quiet",
+                    "--wait",
+                    "2h",
+                    "--json",
                 ]
             ],
-        )  # fmt: skip
+        )
         host.execs.clear()
         setup_cli.main(["report"], handed=handed(), host=host)
         self.assertEqual(host.execs, [["flatpak-spawn", "--host", "python3", "-I", "-B", watch, "report"]])

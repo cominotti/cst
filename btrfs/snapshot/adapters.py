@@ -13,6 +13,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Sequence
 from typing import Literal, TextIO
+import contextlib
 import dataclasses
 import datetime as dt
 import errno
@@ -461,10 +462,8 @@ class StateDir:
         World-readable: cst doctor runs as the user."""
         path = self.path(name)
         if not entries:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
-            except FileNotFoundError:
-                pass
             return
         os.makedirs(self.state_dir, mode=0o755, exist_ok=True)
         # 0644 whatever the umask (sudo keeps a user's 077).

@@ -174,7 +174,7 @@ def nl_end(text: str) -> str:
 
 
 def add_block(text: str) -> str:
-    return nl_end(text) + "\n".join([ON_LINE, FLAG_DIR, FLAG_SIZE]) + "\n"
+    return nl_end(text) + f"{ON_LINE}\n{FLAG_DIR}\n{FLAG_SIZE}\n"
 
 
 def has_line(text: str, line: str) -> bool:

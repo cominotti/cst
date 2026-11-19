@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import re
 import unicodedata
-from typing import Final
+from typing import Final, override
 
 
 def first_line(text: str | None) -> str:
@@ -79,6 +79,7 @@ class SettingsProblem:
     text: str
     reason: str
 
+    @override
     def __str__(self) -> str:
         return f"line {self.line}: {self.text.strip()}: {self.reason}"
 
@@ -230,8 +231,20 @@ _PRINTF_Q_ANSI_C: Final = re.compile(
 )
 _ANSI_C_ESCAPE: Final = re.compile(r"\\(?:([abeEfnrtv\\'\"?])|([0-7]{1,3})|x([0-9A-Fa-f]{1,2}))")
 _ANSI_C_CHARS: Final = {
-    "a": 7, "b": 8, "e": 27, "E": 27, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63,
-}  # fmt: skip
+    "a": 7,
+    "b": 8,
+    "e": 27,
+    "E": 27,
+    "f": 12,
+    "n": 10,
+    "r": 13,
+    "t": 9,
+    "v": 11,
+    "\\": 92,
+    "'": 39,
+    '"': 34,
+    "?": 63,
+}
 
 
 def _ansi_c_value(body: str) -> str:

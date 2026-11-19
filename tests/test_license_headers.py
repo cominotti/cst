@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
@@ -191,6 +192,7 @@ class RulesTest(unittest.TestCase):
 
 
 class FixerTest(unittest.TestCase):
+    @override
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp(prefix="cst-license-fix-")
         self.addCleanup(shutil.rmtree, self.repo)

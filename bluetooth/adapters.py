@@ -267,8 +267,10 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
         if not live.set_profile(ldac):
             return (
                 False,
-                f"pactl could not switch back to {ldac}: the headset stays on {alt} "
-                f"(pactl set-card-profile bluez_card.{live.dev} {ldac})",
+                (
+                    f"pactl could not switch back to {ldac}: the headset stays on {alt} "
+                    f"(pactl set-card-profile bluez_card.{live.dev} {ldac})"
+                ),
                 live.snap(),
             )
 
@@ -294,7 +296,7 @@ class Stop:
     asked: bool = False
 
     @classmethod
-    def handler(cls, signum: int, frame: FrameType | None) -> None:
+    def handler(cls, _signum: int, _frame: FrameType | None) -> None:
         """Handle SIGTERM/SIGINT: defer exit while a profile bounce is active."""
         if cls.busy:
             cls.asked = True  # the sleeps and pactl calls carry on (PEP 475)

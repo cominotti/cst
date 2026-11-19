@@ -382,8 +382,10 @@ class HealthCheckTest(unittest.TestCase):
                 "mixed profiles",
                 {"usage": "Overall:\n    Device missing:\t\t   0\n    Multiple profiles:\t\t  yes\n"},
                 [
-                    "btrfs /var: mixed chunk profiles (degraded writes?) - run balance "
-                    "-dconvert=raid1,soft -mconvert=raid1,soft"
+                    (
+                        "btrfs /var: mixed chunk profiles (degraded writes?) - run balance "
+                        "-dconvert=raid1,soft -mconvert=raid1,soft"
+                    )
                 ],
             ),
             ("critical unallocated", {"device_usage": device_usage(800 * GIB, 4 * GIB)}, [crit]),
@@ -391,9 +393,11 @@ class HealthCheckTest(unittest.TestCase):
                 "low unallocated",
                 {"device_usage": device_usage(20 * GIB + 5, 800 * GIB)},
                 [
-                    "btrfs /var: only 20 GiB unallocated on /dev/mapper/cst-test-1 (warning below 50 GiB; metadata "
-                    "grows only from unallocated space). Free space, or compact half-empty data chunks: "
-                    "'btrfs balance start -dusage=20 /var'"
+                    (
+                        "btrfs /var: only 20 GiB unallocated on /dev/mapper/cst-test-1 (warning below 50 GiB; metadata "
+                        "grows only from unallocated space). Free space, or compact half-empty data chunks: "
+                        "'btrfs balance start -dusage=20 /var'"
+                    )
                 ],
             ),
             (
@@ -695,10 +699,17 @@ class HealthCheckTest(unittest.TestCase):
             [c[1:] for c in self.calls("journalctl")][1:],
             [
                 ["-k", "-q", "--no-pager", "-o", "short-iso", "--since", "-65min"],
-                ["-k", "-q", "-n", "1", "-o", "short-iso", "--cursor-file=" + self.path(
-                    "var/lib/btrfs-health-check/kernel.cursor")],
+                [
+                    "-k",
+                    "-q",
+                    "-n",
+                    "1",
+                    "-o",
+                    "short-iso",
+                    "--cursor-file=" + self.path("var/lib/btrfs-health-check/kernel.cursor"),
+                ],
             ],
-        )  # fmt: skip
+        )
         self.assertEqual(self.read("var/lib/btrfs-health-check/kernel.cursor"), "s=cursor-new\n")
 
     def unwritable(self, rel: str) -> None:
@@ -771,10 +782,20 @@ class HealthCheckTest(unittest.TestCase):
         self.assertEqual(
             self.calls("journalctl")[-1][1:],
             [
-                "-q", "-o", "short-unix", "--no-pager", "-u", "systemd-suspend.service", "-u",
-                "systemd-hibernate.service", "-u", "systemd-suspend-then-hibernate.service", "-n", "1",
+                "-q",
+                "-o",
+                "short-unix",
+                "--no-pager",
+                "-u",
+                "systemd-suspend.service",
+                "-u",
+                "systemd-hibernate.service",
+                "-u",
+                "systemd-suspend-then-hibernate.service",
+                "-n",
+                "1",
             ],
-        )  # fmt: skip
+        )
         self.machine["suspend"] = f"{self.now - 3600}.5 host systemd[1]: Finished System Suspend.\n"
         self.assertEqual(self.run_check().returncode, 1)
 
@@ -1009,8 +1030,10 @@ class MemberDisksTest(unittest.TestCase):
             (rc, err),
             (
                 1,
-                f"<2>{TAG}: NVMe nvme0n1: critical_warning=1\n<2>{TAG}: NVMe nvme0n1: media_errors=1\n"
-                f"<2>{TAG}: NVMe nvme0n1: available_spare 5% below threshold 10%\n",
+                (
+                    f"<2>{TAG}: NVMe nvme0n1: critical_warning=1\n<2>{TAG}: NVMe nvme0n1: media_errors=1\n"
+                    f"<2>{TAG}: NVMe nvme0n1: available_spare 5% below threshold 10%\n"
+                ),
             ),
         )
         h.machine["nvme"] = {"nvme0": HEALTHY_SMART, "nvme2": HEALTHY_SMART}

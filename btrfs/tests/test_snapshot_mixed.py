@@ -14,6 +14,7 @@ Run with: invowk cmd test module btrfs.tests.test_snapshot_mixed
 import os
 import subprocess
 import time
+from typing import override
 import unittest
 
 from btrfs.tests.snapshot_fakes import GIB, SCRIPT, UMASK, RuntimeTest, log
@@ -136,6 +137,7 @@ class LockTest(Base):
 
 
 class NasTest(Base):
+    @override
     def setUp(self) -> None:
         super().setUp()
         self.conf(NAS_ENABLED="1", NAS_PATH="/volume1/restic", NAS_HOST="nas", NAS_USER="u", NAS_PORT="22")

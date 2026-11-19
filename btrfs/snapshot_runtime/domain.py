@@ -56,7 +56,7 @@ def _wrap(n: int) -> int:
     return n - (1 << 64) if n >= 1 << 63 else n
 
 
-# BASE#DIGITS: the bases bash takes, and the digits 0-9 and a-z (A-Z read as a-z up to that base).
+# The bases bash takes in a BASE#DIGITS number, and its digits 0-9 and a-z (A-Z read as a-z up to that base).
 _MIN_BASE: Final = 2
 _MAX_BASE: Final = 64
 _ONE_CASE_DIGITS: Final = 36
