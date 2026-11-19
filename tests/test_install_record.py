@@ -32,7 +32,14 @@ from cst_core import installer
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
-from cst_core.domain.install import GENERATED_COMPONENTS, INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner
+from cst_core.domain.install import (
+    COMPONENTS,
+    GENERATED_COMPONENTS,
+    INSTALL_MANIFEST,
+    ArtifactKind,
+    GeneratedKind,
+    Owner,
+)
 from cst_core.domain.record import (
     EMPTY_RECORD,
     ComponentState,
@@ -832,10 +839,37 @@ class InstallerRecordCliTest(unittest.TestCase):
                     self.assertEqual(user_record.read_bytes(), before)
                     self.assertEqual(Path(self.stage + listed).read_bytes(), b"x\n")
                     self.assertEqual(loose.read_bytes(), b"y\n")
+            # install, plan and check select nothing either (check would say "current"): refused too,
+            # naming the setup command that writes them.
+            for command in ("install", "plan", "check"):
+                with self.subTest(component=component, command=command):
+                    r = self.cli(command, "--component", component)
+                    self.assertEqual((r.returncode, r.stdout), (2, b""), r.stderr)
+                    self.assertEqual(
+                        r.stderr.decode(),
+                        f"cst installer: {command} --component {component}: its files are generated text, not "
+                        f"manifest files; {COMPONENTS[component]} writes them (text or text-plan DEST MODE "
+                        f"--component {component})\n",
+                    )
+                    self.assertEqual(user_record.read_bytes(), before)
+                    self.assertEqual(Path(self.stage + listed).read_bytes(), b"x\n")
             # dests and srcs still answer: such a component has no manifest file.
             for command in ("dests", "srcs"):
                 r = self.cli(command, "--component", component)
                 self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""), command)
+        self.assertFalse(os.path.exists(self.record), "root's record was written")
+
+    def test_another_usage_error_wins_over_the_generated_files_refusal(self) -> None:
+        # Files named and a component selected: that usage error is the one said, not the refusal.
+        for command in ("remove", "forget", "install", "check"):
+            with self.subTest(command=command):
+                r = self.cli(command, "--component", "btrfs:degraded-boot", "btrfs/docker-gc")
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(
+                    r.stderr.decode(),
+                    "cst installer: name the files (SRC...) or select them (--module/--kind/--owner/--component), "
+                    "not both\n",
+                )
         self.assertFalse(os.path.exists(self.record), "root's record was written")
 
     def test_a_new_component_of_generated_files_only_is_refused_too(self) -> None:
@@ -848,14 +882,19 @@ class InstallerRecordCliTest(unittest.TestCase):
             mock.patch("cst_core.wiring.installer_identity", return_value=(False, "/home/u")),
             mock.patch("cst_core.wiring.install_service", return_value=service),
         ):
-            for command in ("remove", "forget"):
+            for command in ("remove", "forget", "install", "plan", "check"):
                 err = io.StringIO()
                 with self.subTest(command=command), contextlib.redirect_stderr(err):
                     self.assertEqual(installer.main([command, "--component", "m:gen", "--root", self.stage]), 2)
+                    how = (
+                        f"name them: {command}-text DEST..."
+                        if command in ("remove", "forget")
+                        else "cst m install writes them (text or text-plan DEST MODE --component m:gen)"
+                    )
                     self.assertEqual(
                         err.getvalue(),
                         f"cst installer: {command} --component m:gen: its files are generated text, not manifest "
-                        f"files; name them: {command}-text DEST...\n",
+                        f"files; {how}\n",
                     )
         self.assertEqual(service.method_calls, [])
 
