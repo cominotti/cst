@@ -865,6 +865,8 @@ cst cpu vm-pin plan     # show the XML diff, change nothing
 cst cpu vm-pin apply    # same diff, asks [y/N], then virsh define
 ```
 
+At the `[y/N]` question, Ctrl-D (end of input) answers no.
+
 An optional VM name can follow (`vm-pin plan OTHER-VM`); the default is
 `VM_NAME`. (`status` shows only part of `vm-pin status`.)
 

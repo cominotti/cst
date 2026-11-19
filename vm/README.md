@@ -268,7 +268,7 @@ VM_TUNE_NIC=yes
 
 How `apply` works (as `cst cpu vm-pin`): it reads the definition with
 `virsh dumpxml --inactive --security-info` (with the graphics passwords, so
-they are kept), shows the diff, asks `[y/N]` (only in a terminal), saves the
+they are kept), shows the diff, asks `[y/N]` (only in a terminal; Ctrl-D is a no), saves the
 previous definition in
 `/var/lib/libvirt/cst-backups/VM/definitions/<UTC time>.before-tune.xml`
 (mode 0600, folders 0700), and runs `virsh define`. The change takes effect

@@ -726,6 +726,14 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
 
+class _CtrlDTerminal(io.StringIO):
+    """stdin of a terminal where the user pressed Ctrl-D: isatty() is true, nothing to read."""
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
+
 class FindGameTest(unittest.TestCase):
     """find_game with a game name: the first pid `pgrep -xo NAME` prints (a fake pgrep on PATH)."""
 
@@ -931,6 +939,31 @@ class VmPinCliTest(unittest.TestCase):
                     f"Previous definition saved in {backup} (restore: virsh -c {cpu_domain.URI} define {backup}).\n"
                 )
             )
+
+    def test_ctrl_d_at_the_question_changes_nothing(self) -> None:
+        # The real confirm and input(): Ctrl-D (an empty terminal) is a no, after a newline.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = cpu_domain.CpuPaths(runs=tmp, conf=os.path.join(tmp, "absent.conf"), etc=os.path.join(tmp, "etc"))
+            calls: list[tuple[str, ...]] = []
+
+            def cli_virsh(*args: str, check: bool = True) -> str:
+                return SAMPLE_DOMAIN_XML
+
+            def adapter_virsh(*args: str, check: bool = True) -> str:
+                calls.append(args)
+                return ""
+
+            out = io.StringIO()
+            with (
+                unittest.mock.patch.object(cpu_cli, "virsh", cli_virsh),
+                unittest.mock.patch.object(cpu_adapters, "virsh", adapter_virsh),
+                unittest.mock.patch("sys.stdin", _CtrlDTerminal()),
+                contextlib.redirect_stdout(out),
+            ):
+                self.assertEqual(cpu_cli.vm_pin(["apply", "box"], doc="DOC", paths=paths), 0)
+            self.assertTrue(out.getvalue().endswith("[y/N] \nNothing changed.\n"), out.getvalue()[-200:])
+            self.assertFalse(os.path.exists(paths.etc), "no definition saved")
+            self.assertEqual(calls, [], "no virsh define")
 
     def test_virsh_adapter(self) -> None:
         ok = subprocess.CompletedProcess(["virsh"], 0, "<domain/>", "")

@@ -1678,6 +1678,21 @@ class ConfirmTest(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "^apply asks for confirmation: run it in a terminal$"):
             self.ask("y", tty=False)
 
+    def test_end_of_input_is_no_after_a_newline(self) -> None:
+        # Ctrl-D at the question: the real input() reads an empty stdin and raises EOFError.
+        out = io.StringIO()
+        with mock.patch("sys.stdin", _EmptyTerminal()), contextlib.redirect_stdout(out):
+            answer = confirm("\nDefine it?")
+        self.assertEqual((answer, out.getvalue()), (False, "\nDefine it? [y/N] \n"))
+
+
+class _EmptyTerminal(io.StringIO):
+    """A terminal on which the user pressed Ctrl-D: isatty() is true and nothing is left to read."""
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
 
 class SettingWordsTest(unittest.TestCase):
     """The yes/no words of a setting and the help words, pinned: every module reads them from here, and a word
