@@ -9,6 +9,7 @@ from btrfs.stall_monitord.domain import (
     MAINT_FRAME as MAINT_RE,
     MMAP_LOCK_FRAME,
     SWAP_FRAME,
+    WaitKind,
 )
 
 # Rules that look at the whole stack first: the reason a task waits is often
@@ -161,7 +162,7 @@ HINTS = {
 def classify(sig: str, examples: Sequence[Sequence[str]], comms: Sequence[str] = (), kind: str | None = None) -> str:
     if kind in NON_STORAGE:  # daemon v3 already classified the wait
         return kind
-    if kind == "memory":  # daemon v8+
+    if kind == WaitKind.MEMORY:  # daemon v8+
         return "reclaim"
     if FUSE_RE.match(sig):
         return "fuse"
@@ -186,7 +187,7 @@ def classify(sig: str, examples: Sequence[Sequence[str]], comms: Sequence[str] =
     for k, rx in CAT_RE:
         if rx.search(sig):
             return k
-    if kind != "storage" and IDLE_SIG.match(sig):
+    if kind != WaitKind.STORAGE and IDLE_SIG.match(sig):
         return "idle"
     for frames in examples:
         for f in frames:

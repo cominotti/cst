@@ -76,12 +76,6 @@ _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 
 # The highest count per "<package> <rule>" (tests/budgets.py; a missing key is 0).
 MAGIC_CEILINGS: Final[dict[str, int]] = {}
-# The reason of the stall monitor's exemptions (its StrEnum, shared by the daemon and stall-report, is
-# a change of its own).
-_STALL_WAIT_KIND: Final = (
-    'the stall monitor\'s wait kind "maintenance" (a format the daemon writes and stall-report reads),'
-    " not systemd's ActiveState; its own StrEnum, shared by both, is owed"
-)
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
     "cst_core/domain/shapes.py:json_object": (
@@ -120,11 +114,6 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
     ),
     "toolchains/domain/common.py:plain": "any TOML document (the user's cargo or uv config) as json.loads would give it",
     "toolchains/domain/common.py:parses_as": "compares a re-parsed TOML document with plain's: any document, no format",
-    # The stall monitor's wait kind "maintenance" (btrfs trim, scrub, balance) is not systemd's ActiveState.
-    "btrfs/stall_monitord/domain.py:wait_counts": _STALL_WAIT_KIND,
-    "btrfs/stall_monitord/domain.py:hung_start": _STALL_WAIT_KIND,
-    "btrfs/stall_monitord/domain.py:hung_key": _STALL_WAIT_KIND,
-    "btrfs/stall_monitord/domain.py:hung_report": _STALL_WAIT_KIND,
 }
 
 
