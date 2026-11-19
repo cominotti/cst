@@ -983,6 +983,21 @@ class AutoTest(Scratch):
         self.assertNotIn("stamp-", out)
         self.assertTrue(os.path.exists(os.path.join(self.home, self.OLD_STAMP)))
 
+    def test_auto_off_keeps_the_stamp_when_the_earlier_timer_cannot_be_stopped(self) -> None:
+        # Both timers are stopped, checked, before anything is removed: the stamp of the
+        # timer whose file was gone stays while the earlier timer's disable is refused.
+        self.orphan()
+        self.write(self.STAMP, "")
+        old = self.write(".config/systemd/user/cst-cargo-build-gc.timer", f"{OLD_MARKER}: x\n[Timer]\n")
+        with self.failing("disable"):
+            rc, out = self.run_main("auto", "off")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("systemctl --user disable --now cst-cargo-build-gc.timer failed", out)
+        self.assertIn("nothing was removed", out)
+        self.assertNotIn("removed:", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, self.STAMP)))
+        self.assertTrue(os.path.exists(old))
+
     def test_auto_off_leaves_everything_when_an_orphan_timer_cannot_be_stopped(self) -> None:
         link = self.orphan()
         with self.failing("stop"), mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):

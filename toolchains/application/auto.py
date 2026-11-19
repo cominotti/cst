@@ -164,13 +164,15 @@ class AutoTimer:
         home = self.home
         st = self.files.auto_states()
         # Both timers are stopped, checked, before anything is removed (see
-        # UserUnitsPort); remove_stale stops the earlier one first.
+        # UserUnitsPort): remove_stale stops the earlier one before it removes
+        # a file, so the timer's stamp goes only after remove_stale.
         if st[TIMER] in (OwnedState.OK, OwnedState.CHANGE):
             self.units.disable_timer(TIMER)
         elif st[TIMER] == OwnedState.MISSING:
             self.stop_orphan_timer()
-            self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
         rc = 0 if self.remove_stale() else 1
+        if st[TIMER] == OwnedState.MISSING:
+            self.forget_stamp(TIMER, "the last run of the timer whose file was gone")
         removed = False
         for name in AUTO_UNITS:
             if st[name] in (OwnedState.OK, OwnedState.CHANGE):
