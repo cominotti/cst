@@ -744,6 +744,34 @@ class BtrfsTest(Scratch):
         self.assertEqual(len(scrub), 1, out)
         self.assertIn("snapshots.conf line 3: SCRUB_LIMIT=$X", scrub[0])
 
+    def scrub_warnings(self, out: str, line: str) -> list[str]:
+        """The WARN lines that name this line of snapshots.conf."""
+        return [ln for ln in out.splitlines() if ln.lstrip().startswith("WARN") and f"snapshots.conf {line}" in ln]
+
+    def test_a_bad_scrub_limit_line_gets_one_warning_the_scrub_rows(self) -> None:
+        # The scrub row and the settings row both warned about the same line.
+        out = self.scrub(conf="\n\nSCRUB_LIMIT=$X\nFOO=$Y\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 3: SCRUB_LIMIT=$X")
+        self.assertEqual(len(named), 1, out)
+        self.assertIn("`cst btrfs install` refuses to run until it is fixed", named[0])
+        # Another bad line beside it is still the settings row's.
+        foo = self.scrub_warnings(out, "line 4: FOO=$Y")
+        self.assertEqual(len(foo), 1, out)
+        self.assertIn("CST's Python programs take nothing from the line (btrfs-snapshot ignores it too", foo[0])
+
+    def test_every_bad_scrub_limit_line_gets_one_warning(self) -> None:
+        # The scrub row named only the first, so with the settings row leaving them to it none may be lost.
+        out = self.scrub(conf="SCRUB_LIMIT=$X\nSCRUB_LIMIT=`y`\n", dropin="1G")
+        for line in ("line 1: SCRUB_LIMIT=$X", "line 2: SCRUB_LIMIT=`y`"):
+            named = self.scrub_warnings(out, line)
+            self.assertEqual(len(named), 1, out)
+            self.assertIn("`cst btrfs install` refuses to run until it is fixed", named[0])
+
+    def test_a_scrub_limit_line_ending_in_cr_gets_one_warning(self) -> None:
+        # The settings row reads the file as text (the CR goes with the line end) and finds no problem there.
+        out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
+        self.assertEqual(len(self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")), 1, out)
+
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
         self.assertIn(

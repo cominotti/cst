@@ -19,7 +19,7 @@ from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_F
 from cst_core.domain.contracts import SNAPSHOTS_CONF, StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import ShellAssignments, group
+from cst_core.domain.text import SettingsProblem, ShellAssignments, group
 from cst_core.domain.values import HOUR, Json
 from swap.domain import SETTINGS_REL
 
@@ -577,15 +577,20 @@ def parse_args(argv: Sequence[str]) -> tuple[DoctorCommand, bool]:
     return DoctorCommand.RUN, brief
 
 
+def scrub_limit_lines(settings: ShellAssignments) -> tuple[SettingsProblem, ...]:
+    """The problem lines of the btrfs settings file that set SCRUB_LIMIT: each one makes
+    `cst btrfs install` refuse to run."""
+    return tuple(p for p in settings.problems if _SCRUB_LIMIT_LINE.match(p.text))
+
+
 def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:
     """SCRUB_LIMIT of the btrfs settings file (read strictly, as bash sources it):
     (size, "") with size "" for no limit (unset, empty or 0), or ("", problem)
-    when a SCRUB_LIMIT line is not a plain assignment or the value is not a
-    size (digits, then K, M, G or T). btrfs-setup.sh's scrub_limit_setting
+    when a SCRUB_LIMIT line is not a plain assignment (the first one) or the value
+    is not a size (digits, then K, M, G or T). btrfs-setup.sh's scrub_limit_setting
     reads it the same way and refuses to install on a problem."""
-    for p in settings.problems:
-        if _SCRUB_LIMIT_LINE.match(p.text):
-            return "", str(p)
+    if lines := scrub_limit_lines(settings):
+        return "", str(lines[0])
     value = settings.values.get("SCRUB_LIMIT", "")
     if value in ("", "0"):
         return "", ""

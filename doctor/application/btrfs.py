@@ -10,7 +10,7 @@ import time
 
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
@@ -41,6 +41,7 @@ from doctor.domain import (
     per_device_allocated,
     pick_mount,
     scrub_dropin_limit,
+    scrub_limit_lines,
     scrub_limit_setting,
     view_join,
     ViewPath,
@@ -372,20 +373,27 @@ def live_scrub_limits(host: DoctorHostPort) -> str:
     return ", ".join(limits) if limits else "no limit on any device"
 
 
-@check(CHECKS, "btrfs")
-def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
-    """The weekly scrub's speed limit: SCRUB_LIMIT, the service's drop-in, sysfs now."""
-    # The whole file with its line ends, as bash reads it ("\r" is part of a value there).
+def scrub_settings(host: DoctorHostPort) -> ShellAssignments:
+    """The btrfs settings file as `cst btrfs install` reads SCRUB_LIMIT from it: the whole file with its
+    line ends, as bash reads it ("\r" is part of a value there)."""
     try:
         with host.open_bytes(host.path(SNAP_CONF)) as f:
             conf = f.read().decode("utf-8", "replace")
     except OSError:
         conf = ""
-    setting, problem = scrub_limit_setting(parse_shell_assignments(conf))
-    if problem:
+    return parse_shell_assignments(conf)
+
+
+@check(CHECKS, "btrfs")
+def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
+    """The weekly scrub's speed limit: SCRUB_LIMIT, the service's drop-in, sysfs now."""
+    settings = scrub_settings(host)
+    setting, problem = scrub_limit_setting(settings)
+    # Every SCRUB_LIMIT problem line (check_snapshot_settings leaves them to this row), else the value's.
+    for why in [str(p) for p in scrub_limit_lines(settings)] or ([problem] if problem else []):
         yield Result(
             WARN,
-            f"{SNAP_CONF} {problem}: `cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
+            f"{SNAP_CONF} {why}: `cst btrfs install` refuses to run until it is fixed (btrfs/README.md, 4.3)",
         )
     if not host.exists(host.path(SCRUB_UNIT)):
         return
@@ -402,9 +410,15 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "btrfs")
 def check_snapshot_settings(host: DoctorHostPort) -> Iterator[Result]:
-    # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line.
+    # btrfs-snapshot reads the file as data too (bash's rules, its own keys): it ignores the line. A
+    # SCRUB_LIMIT problem line that check_scrub_limit reports (the same line, read the same) is warned there.
+    scrub = set(scrub_limit_lines(scrub_settings(host)))
     yield from settings_file_warnings(
-        host, SNAP_CONF, bash_sourced=True, note=" (btrfs-snapshot ignores it too, with a warning in its journal)"
+        host,
+        SNAP_CONF,
+        bash_sourced=True,
+        note=" (btrfs-snapshot ignores it too, with a warning in its journal)",
+        skip=scrub.__contains__,
     )
 
 

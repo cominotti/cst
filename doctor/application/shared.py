@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from cst_core.domain.install import COMPONENTS
 from cst_core.domain.ostree import OstreeStatus, query_status
-from cst_core.domain.text import ShellAssignments, parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.text import SettingsProblem, ShellAssignments, parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import SNAP_CONF, WARN, Deployment, HostPath, OstreeAnswer, Result, ViewPath, is_deployment
 from doctor.ports import CheckFn, DoctorHostPort
 
@@ -119,11 +119,16 @@ def conf_value(host: DoctorHostPort, path: HostPath, key: str) -> str | None:
 
 
 def settings_file_warnings(
-    host: DoctorHostPort, path: HostPath, *, bash_sourced: bool, note: str | None = None
+    host: DoctorHostPort,
+    path: HostPath,
+    *,
+    bash_sourced: bool,
+    note: str | None = None,
+    skip: Callable[[SettingsProblem], bool] | None = None,
 ) -> Iterator[Result]:
-    """WARN for each line of a settings file that is not a plain assignment. note: what the warning
-    adds after "take nothing from the line" (by default, for a file bash sources, that bash reads the
-    line its own way)."""
+    """WARN for each line of a settings file that is not a plain assignment, but the lines skip takes
+    (another check warns about them). note: what the warning adds after "take nothing from the line" (by
+    default, for a file bash sources, that bash reads the line its own way)."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
     bash = (
         (" (bash, which also sources this file, reads it its own way)" if bash_sourced else "")
@@ -131,6 +136,8 @@ def settings_file_warnings(
         else note
     )
     for p in parsed.problems if parsed else ():
+        if skip is not None and skip(p):
+            continue
         yield Result(
             WARN,
             f"{path} {p}. CST's Python programs take nothing from the line{bash}, and the cst commands "
