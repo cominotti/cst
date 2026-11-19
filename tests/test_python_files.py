@@ -183,7 +183,7 @@ def ty_entry_problems(py_files: set[str], ty_gate: Sequence[str]) -> list[str]:
 def ruff_version_problems(conf: Mapping[str, object]) -> list[str]:
     """Whether [tool.ruff] required-version names exactly the ruff pin of the dev group, as text lines."""
     groups = _sub(dict(conf), "dependency-groups")
-    dev = groups.get("dev") if isinstance(groups, dict) else None
+    dev = groups.get("dev")
     pins = [d for d in dev if isinstance(d, str) and d.startswith("ruff==")] if isinstance(dev, list) else []
     if len(pins) != 1:
         return ['[dependency-groups] dev: no exact "ruff==VERSION" pin']

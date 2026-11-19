@@ -487,7 +487,7 @@ def auto_named(name: str) -> bool:
 
 def ts(value: str | None) -> float:
     """RFC 3339 from Docker (nanoseconds, Z) -> epoch seconds; 0 if unset."""
-    if value is None or value == "" or not isinstance(value, str) or value.startswith("0001-"):
+    if value is None or value == "" or value.startswith("0001-"):
         return 0
     m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$", value)
     if not m:

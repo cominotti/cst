@@ -510,14 +510,14 @@ class Nas:
         # mounted, and no new run starts until they are gone.
         leftovers = False
         try:
-            if not self.unmount():
-                leftovers = True
-                self.stale_alert(f"A snapshot of an earlier run is still mounted under {m.nas_mnt}.")
-                return 0
-            self.backups()
+            leftovers = not self.unmount()
+            if not leftovers:
+                self.backups()
         finally:
             if not leftovers:
                 self.unmount()
+        if leftovers:
+            self.stale_alert(f"A snapshot of an earlier run is still mounted under {m.nas_mnt}.")
         return 0
 
     def backups(self) -> None:

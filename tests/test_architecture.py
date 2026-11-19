@@ -708,9 +708,7 @@ def primitive_calls(source: str, rel: str) -> list[tuple[int, str]]:
         full = f"{bound[head]}.{rest}" if rest else bound[head]
         if full not in PRIMITIVE_OWNERS:
             continue
-        if full == "fcntl.ioctl" and not any(
-            "FS_IOC_" in (_dotted(arg) or "") for arg in node.args[1:2] if isinstance(arg, ast.expr)
-        ):
+        if full == "fcntl.ioctl" and not any("FS_IOC_" in (_dotted(arg) or "") for arg in node.args[1:2]):
             continue
         out.append((node.lineno, full))
     return sorted(out)

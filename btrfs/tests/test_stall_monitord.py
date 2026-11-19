@@ -626,12 +626,10 @@ class EpisodeThresholdsTest(unittest.TestCase):
     storage, each at its threshold (ENTER_*); below all three, nothing."""
 
     m: _StallMonitordModule
-    mon: _MonitorProto
 
     @override
     def setUp(self) -> None:
         self.m = load()
-        self.mon = monitor(self.m)
 
     @staticmethod
     def rec(mono: float, io_total_us: int, commit_ms: int = 0, d: int = 0) -> dict[str, Any]:
@@ -645,11 +643,11 @@ class EpisodeThresholdsTest(unittest.TestCase):
         }
 
     def reason(self, io_pct: float, commit_ms: int, d: int) -> str | None:
-        """The episode one sample opens, 1 s after the previous one."""
-        self.mon.prev = self.rec(0.0, 0)
-        self.mon.episode = None
-        self.mon.update_episode(self.rec(1.0, round(io_pct * 1e4), commit_ms, d), [])
-        return None if self.mon.episode is None else self.mon.episode.reason
+        """The episode one sample opens, 1 s after the previous one, on a fresh monitor (no episode)."""
+        mon = monitor(self.m)
+        mon.prev = self.rec(0.0, 0)
+        mon.update_episode(self.rec(1.0, round(io_pct * 1e4), commit_ms, d), [])
+        return None if mon.episode is None else mon.episode.reason
 
     def test_each_threshold_opens_an_episode(self) -> None:
         self.assertEqual(self.reason(10.0, 0, 0), "io_some 10%")
