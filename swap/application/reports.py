@@ -528,8 +528,8 @@ class SwapReports:
     def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
         """machine.slice's floor: "over" (and the drop-in that sets it) when systemd takes MemoryLow from a
         drop-in after CST's; else "-" when systemd says the slice is not active (a cgroup folder left
-        behind is not the slice's) or the cgroup has no memory.low; else the cgroup's memory.low against
-        CST's value (DIFF when it differs)."""
+        behind is not the slice's) or the cgroup has no memory.low (an active slice's row says so: no
+        memory controller for it); else the cgroup's memory.low against CST's value (DIFF when it differs)."""
         shown = self._systemd.show(UnitName("machine.slice"), ("MemoryLow", "DropInPaths", "ActiveState"))
         effective = shown.get("MemoryLow", "")
         dropins = [(p, self._fs.read_text(self._env.host_view(p))) for p in shown.get("DropInPaths", "").split()]
@@ -538,10 +538,19 @@ class SwapReports:
             return SettingCheckRow(
                 SettingState.OVER, "machine.slice MemoryLow", human_size(effective), human(want_low)
             ), source
+        active_state = shown.get("ActiveState", "")
         live_low = self._fs.read_first_line(posixpath.join(self._env.cgroup_dir, "machine.slice", "memory.low"))
-        if live_low is None or slice_not_active(shown.get("ActiveState", "")):
+        if slice_not_active(active_state) or (live_low is None and not active_state):
             return SettingCheckRow(
                 SettingState.INACTIVE, "machine.slice memory.low", "slice not active (no VM running)", human(want_low)
+            ), ""
+        if live_low is None:
+            # systemd says the slice is active, and its cgroup has no memory.low: no memory controller for it.
+            return SettingCheckRow(
+                SettingState.INACTIVE,
+                "machine.slice memory.low",
+                "slice active, no memory.low (memory controller off)",
+                human(want_low),
             ), ""
         ok = live_low.isdigit() and int(live_low) == want_low
         live = human(int(live_low)) if live_low.isdigit() else live_low

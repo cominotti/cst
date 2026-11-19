@@ -1792,6 +1792,25 @@ class MemoryLowOverrideTest(_SwapScratch):
             ["  -       machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
         )
 
+    def test_an_active_slice_without_memory_low_says_so(self) -> None:
+        # The memory controller is not on for the slice: the floor is not applied, and no VM is said to be
+        # missing. The row stays "-": apply does not fail where the controller is absent.
+        os.remove(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"))
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
+        for cmd in (D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+            with self.subTest(cmd=cmd):
+                rc, out, err = self._run(cmd, shown)
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(
+                    [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
+                    [
+                        (
+                            "  -       machine.slice memory.low     slice active, no memory.low"
+                            " (memory controller off)   (desired 48.0 GiB)"
+                        )
+                    ],
+                )
+
     def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
         self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
         self._cgroup_low(2**30)

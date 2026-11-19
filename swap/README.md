@@ -361,7 +361,9 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
 `memory.low`, live and desired. `-` for `machine.slice memory.low` means
 systemd reports the slice not active (no VM running): a cgroup folder left
 behind is not read as the slice's. When systemd cannot be asked, a missing
-`memory.low` means the same.
+`memory.low` means the same. A slice systemd reports active whose cgroup has no
+`memory.low` (the memory controller is not on for it) is `-` too, with
+`slice active, no memory.low`: the floor is then not applied.
 
 **zswap pool**:
 
