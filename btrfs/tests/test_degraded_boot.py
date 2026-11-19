@@ -40,6 +40,7 @@ import tarfile
 import tempfile
 from typing import Final, override
 
+from cst_core.domain.record import USER_RECORD_REL
 from cst_core.domain.shapes import items_of, object_of, parse_json
 from cst_core.domain.text import group
 import unittest
@@ -1397,7 +1398,7 @@ status
     # ------------------------------------------------------ install record --
     def record(self) -> tuple[dict[str, object], dict[str, object]]:
         """The files and the component states of the install record the harness keeps in $FAKE/home."""
-        path = os.path.join(self.tmp, "home", ".local", "state", "cst", "installed.json")
+        path = os.path.join(self.tmp, "home", USER_RECORD_REL)
         if not os.path.exists(path):
             return {}, {}
         with open(path, encoding="utf-8") as f:
@@ -1452,7 +1453,7 @@ status
     def test_an_install_from_before_the_record_is_adopted(self) -> None:
         # What an older CST left: the same files, no line of them in the install record.
         self.installed()
-        os.unlink(os.path.join(self.tmp, "home", ".local", "state", "cst", "installed.json"))
+        os.unlink(os.path.join(self.tmp, "home", USER_RECORD_REL))
         overlay = self.overlay(self.tracked_bytes())
         before = self.tree()
         r = self.install_path(plan=False, overlay=overlay)
@@ -1513,7 +1514,7 @@ status
         self.put("root" + SYNCED, "sums\n")
         self.tracked_json([], nxt=list(TRACKED))
         newer = '{"format": 999, "files": {}, "components": {}}\n'
-        self.put("home/.local/state/cst/installed.json", newer)
+        self.put(f"home/{USER_RECORD_REL}", newer)
         r = self.uninstall()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("written by a newer CST", r.stderr)
@@ -1523,7 +1524,7 @@ status
             sorted(os.path.relpath(p, self.root) for p in self.tree()), ["usr/lib/udev/rules.d/64-btrfs.rules"]
         )
         self.assertTrue(r.stdout.endswith("Uninstalled (initramfs: from the next deployment on).\n"), r.stdout)
-        self.assertEqual(self.read("home/.local/state/cst/installed.json"), newer)
+        self.assertEqual(self.read(f"home/{USER_RECORD_REL}"), newer)
 
     def test_uninstall_keeps_a_foreign_64_btrfs_rule_and_past_markers(self) -> None:
         self.install()

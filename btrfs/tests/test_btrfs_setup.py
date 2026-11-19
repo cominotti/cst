@@ -41,6 +41,7 @@ from btrfs.docker_gc import wiring as gc_wiring
 from btrfs.tests.test_snapshot_runtime import shell_function
 from cst_core.adapters.files import read_text
 from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.record import USER_RECORD_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
 from doctor.domain import scrub_dropin_limit, scrub_limit_setting
@@ -504,7 +505,7 @@ _cst_user_home() {{ printf '%s\\n' "$T/home"; }}
 
 def home_record(tmp: str) -> dict[str, dict[str, object]]:
     """The files and the components of the install record HOME_INSTALLER keeps in tmp/home."""
-    path = os.path.join(tmp, "home", ".local", "state", "cst", "installed.json")
+    path = os.path.join(tmp, "home", USER_RECORD_REL)
     if not os.path.exists(path):
         return {"files": {}, "components": {}}
     with open(path) as f:
@@ -1429,7 +1430,7 @@ class ReportLauncherTest(unittest.TestCase):
         # goes on: our launcher goes as before the record, a file of the user stays, the record is
         # left as it is.
         newer = '{"format": 999, "files": {}, "components": {}}\n'
-        record = os.path.join(self.tmp, "home", ".local", "state", "cst", "installed.json")
+        record = os.path.join(self.tmp, "home", USER_RECORD_REL)
         for mine in (False, True):
             with self.subTest(users_own_file=mine):
                 self.bash("install_report_launcher")
