@@ -380,16 +380,15 @@ if (LANE === 'full') {
   all = fix.findings
   log(all.length + ' finding(s) from the fast-lane review')
 }
-const ready = isReady(fix, TIER1)
 const deferWhy = deferralProblem(fix.deferred)
 if (deferWhy) { log('fix: ' + deferWhy + ': not ready'); trail.push({ label: 'fix', problem: deferWhy }) }
 else if (fix.deferred.length) log('fix: ' + fix.deferred.length + ' finding(s) deferred to a redesign (see deferred)')
 if (fix.gates_ok && String(fix.final_head).trim() !== String(fix.gated_head).trim()) log('fix: HEAD moved after the gates (' + fix.gated_head + ' -> ' + fix.final_head + '): not ready')
-const fixReady = ready && fix.descends_from_reviewed === true && !deferWhy
+const ready = isReady(fix, TIER1) && fix.descends_from_reviewed === true && !deferWhy
 const changedCode = fixerChangedCode(fix)
-const done = (extra) => ({ ready: fixReady, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: changedCode, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail, ...extra })
+const done = (extra) => ({ ready, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: changedCode, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail, ...extra })
 if (!changedCode) return done({ rereview: null })
-if (!fixReady) { log('re-review: skipped, the branch is not ready anyway'); return done({ rereview: null }) }
+if (!ready) { log('re-review: skipped, the branch is not ready anyway'); return done({ rereview: null }) }
 
 // The fixer changed code outside tests: one more findings-only review, of its commits only (reviewed_head..head).
 // By hand: code-review takes a branch and reviews it against main (see the header).
@@ -403,9 +402,8 @@ const runReReview = async () => {
 }
 let rr = await runReReview()
 if (!rr && !mainMoved()) { log('re-review: retrying once'); rr = await runReReview() }
-if (!rr) return { ...done({ rereview: null }), ready: false, stopped: 're-review' }
-const out = reReviewOutcome(rr.findings)
-const rereview = { range: HEAD + '..' + FIXED, high: out.high, low: out.low }
-log('re-review: ' + out.high.length + ' high, ' + out.low.length + ' low finding(s)')
-if (out.high.length) return { ...done({ rereview }), ready: false, stopped: 're-review' }
+if (!rr) return done({ rereview: null, ready: false, stopped: 're-review' })
+const rereview = { range: HEAD + '..' + FIXED, ...reReviewOutcome(rr.findings) }
+log('re-review: ' + rereview.high.length + ' high, ' + rereview.low.length + ' low finding(s)')
+if (rereview.high.length) return done({ rereview, ready: false, stopped: 're-review' })
 return done({ rereview })
