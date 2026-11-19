@@ -273,7 +273,7 @@ each, and when no file has it. Each list starts with a comment that
 says why, and so does a per-audit `config` block (it can weaken an audit
 as much as an ignore list: a cooldown of 0 days, actions pinned by tag).
 The file is plain block YAML, which the test reads line by line: no flow
-lists (`ignore: [a, b]`), anchors, aliases, tags or quoted keys. A line entry moves with its file: when a change above it shifts
+lists (`ignore: [a, b]`), anchors, aliases, tags or quoted keys (below a per-audit `config` block, quoted keys and keys with / * . @ are read, as zizmor's settings take them: `"actions/*": hash-pin`; a quoted `"disable"` still counts as `disable`). A line entry moves with its file: when a change above it shifts
 the line, the audit fails and names the new line; move the entry. Today:
 the `GITHUB_PATH` write of `setup-invowk` (it checks the binary against
 its pinned SHA-256 first), the style finding `self-repository` (`./...`

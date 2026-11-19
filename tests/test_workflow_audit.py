@@ -12,7 +12,10 @@ what zizmor itself cannot:
   pinned by tag), and no audit is disabled (`disable: true` takes an audit
   out for every file, and zizmor then counts none of its findings as
   ignored). The file must be plain block YAML, which this reader follows:
-  no flow style (`ignore: [a, b]`), anchor, alias, tag or quoted key;
+  no flow style (`ignore: [a, b]`), anchor, alias, tag or quoted key,
+  except below a `config` block, where zizmor's settings take quoted keys
+  and keys with / * . @ (unpinned-uses' `"actions/*": hash-pin`); a
+  quoted key is compared without its quotes (`"disable"` is `disable`);
 - every ignore entry names exactly one file of .github: zizmor matches an
   entry by the file's base name only, so `action.yml:201` would also hide
   a finding at line 201 of a second composite action;
@@ -62,6 +65,10 @@ ZIZMOR_COMMAND = ("tests/uv-dev", "zizmor", "--offline", "--strict-collection", 
 UV_AUDIT_COMMAND = ("uv", "audit", "--locked", "--preview-features", "audit-command")
 INLINE_IGNORE = re.compile(r"zizmor\s*:\s*ignore\b")
 _KEY = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
+# Below a per-audit config block, zizmor's settings take other keys too, quoted or with / * . @ in
+# them (unpinned-uses' policies: "actions/*": hash-pin). Never an unquoted key that starts with *, &,
+# ! or @ (an alias, an anchor, a tag, a reserved character).
+_CONFIG_KEY = re.compile(r"""^(\s*)("[^"\\]*"|'[^']*'|[A-Za-z0-9_./-][A-Za-z0-9_./*@-]*)\s*:\s*(.*?)\s*$""")
 
 
 # What the line reader cannot follow: a flow collection, an anchor, an alias or a tag.
@@ -81,25 +88,31 @@ def config_problems(text: str) -> list[str]:
     out: list[str] = []
     lines = text.splitlines()
     rule = "?"
+    config_indent: int | None = None  # the indent of the config: key whose block this line is in
     for number, line in enumerate(lines, 1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         where = f"{CONFIG}:{number}:"
+        if config_indent is not None and len(line) - len(line.lstrip()) <= config_indent:
+            config_indent = None
         if stripped.startswith("- ") or stripped == "-":
             if stripped[1:].strip().startswith(_NOT_BLOCK):
                 out.append(f"{where} {rule}: {_FLOW}")
             continue
-        key = _KEY.match(line)
+        key = (_KEY if config_indent is None else _CONFIG_KEY).match(line)
         if key is None:
             out.append(
                 f"{where} write plain block YAML here (an unquoted `key:`, a `- item` or a comment): "
                 "the gate cannot read this line"
             )
             continue
-        indent, name, value = len(key.group(1)), key.group(2), key.group(3)
+        indent, raw, value = len(key.group(1)), key.group(2), key.group(3)
+        name = raw[1:-1] if raw[0] in "\"'" else raw  # a quoted key compared without its quotes
         if indent == 2:
             rule = name
+        if name == "config" and not value and config_indent is None:
+            config_indent = indent
         if name in _REASONED and value:
             out.append(
                 f"{where} {rule}: nothing after `{name}:` on its line; the reason comment and the "
@@ -337,6 +350,14 @@ class WorkflowAuditTest(unittest.TestCase):
     def test_a_reasoned_config_passes(self) -> None:
         self.assertEqual(config_problems(GOOD_CONFIG), [])
 
+    def test_a_config_block_may_hold_zizmor_s_quoted_policy_keys(self) -> None:
+        policies = (
+            "  unpinned-uses:\n    config:\n      # why\n      policies:\n"
+            '        "actions/*": hash-pin\n        "*": ref-pin\n        github/codeql-action/*: ref-pin\n'
+            "  artipacked:\n    ignore:\n      # why\n      - ci.yml\n"
+        )
+        self.assertEqual(config_problems(GOOD_CONFIG + policies), [])
+
     def test_an_ignore_list_without_a_reason_fails(self) -> None:
         bad = GOOD_CONFIG.replace("      # why\n", "", 1)
         self.assertEqual(
@@ -392,6 +413,16 @@ class WorkflowAuditTest(unittest.TestCase):
                 [f"{CONFIG}:14: " + flow.format("artipacked")],
             ),
             ('  artipacked:\n    "disable": true\n', [f"{CONFIG}:12: {plain}"]),
+            # Below a config block a quoted key is read, and compared without its quotes.
+            (
+                '  artipacked:\n    config:\n      # why\n      "disable": true\n',
+                [
+                    f"{CONFIG}:14: artipacked: `disable` switches the audit off for every file; "
+                    "ignore the findings one by one instead, each with its reason"
+                ],
+            ),
+            ("  artipacked:\n    config:\n      # why\n      *off: x\n", [f"{CONFIG}:14: {plain}"]),
+            ('  artipacked:\n    config:\n      # why\n    "x": y\n', [f"{CONFIG}:14: {plain}"]),
             ("  artipacked:\n    <<: *off\n", [f"{CONFIG}:12: {plain}"]),
             ("---\n", [f"{CONFIG}:11: {plain}"]),
         ):

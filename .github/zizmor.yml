@@ -5,7 +5,8 @@
 # (every finding of that audit in the file) or `FILE:LINE` (one finding);
 # zizmor takes the base name of the file. A line entry moves with the file:
 # when a change above it shifts the line, the audit fails and names the new
-# line. Plain block YAML only (no `[a, b]` lists, anchors or quoted keys):
+# line. Plain block YAML only (no `[a, b]` lists, anchors or quoted keys, but
+# for zizmor's own quoted keys inside a `config` block):
 # tests/test_workflow_audit.py reads it line by line, and fails on an ignore
 # list or a config block without a reason and on `disable` (which would
 # switch an audit off everywhere). See docs/dev-tools.md, "The workflow audit".
