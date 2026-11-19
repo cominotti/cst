@@ -70,5 +70,5 @@ def query_status(run: _QueryFn) -> OstreeStatus | str:
         return f"rpm-ostree status --json failed: {first_line(err) or f'exit {rc}'}"
     try:
         return _parse_status(out)
-    except (ValueError, KeyError, TypeError) as e:
+    except (ValueError, KeyError, TypeError, RecursionError) as e:  # RecursionError: nesting too deep
         return f"rpm-ostree status --json: unreadable output ({e})"

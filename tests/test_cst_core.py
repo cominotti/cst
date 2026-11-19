@@ -1055,6 +1055,17 @@ class OstreeQueryTest(unittest.TestCase):
             with self.subTest(out=out):
                 self.assertEqual(self._answer(0, out)[1], prefix + why)
 
+    def test_deep_nesting_is_unreadable_output_not_a_crash(self) -> None:
+        # json.loads accepts a few hundred levels, which the check of each deployment's values
+        # then walks past the recursion limit; deeper, json.loads itself gives up. Both: RecursionError.
+        prefix = "rpm-ostree status --json: unreadable output ("
+        for depth in (700, 100_000):
+            with self.subTest(depth=depth):
+                out = '{"deployments": [{"booted": true, "x": ' + "[" * depth + "]" * depth + "}]}"
+                got = self._answer(0, out)[1]
+                self.assertIsInstance(got, str)
+                self.assertTrue(str(got).startswith(prefix), got)
+
     def test_booted_and_pending(self) -> None:
         booted = {"booted": True, "osname": "fedora", "checksum": "b"}
         staged = {"osname": "fedora", "checksum": "s", "staged": True}
