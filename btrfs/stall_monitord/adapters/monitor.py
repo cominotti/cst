@@ -438,7 +438,7 @@ class Monitor:
             # threads), so a FUSE wait never hides a disk hang in the same process.
             if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
                 continue
-            self.hung_reported[(pid, key)] = now
+            self.hung_reported[pid, key] = now
             at = wait_at(frames, wchan)
             rep = hung_report(key, self.where(pid, tid, comm), now - first, at)
             self.emit(
@@ -478,7 +478,7 @@ class Monitor:
         key = io_busy_key(busy_s)
         if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
             return
-        self.hung_reported[(pid, key)] = now
+        self.hung_reported[pid, key] = now
         at = wait_at(frames, wchan)
         msg = io_busy_message(self.where(pid, tid, t["comm"]), busy_s, at)
         self.emit(

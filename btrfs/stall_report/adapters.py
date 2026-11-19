@@ -213,6 +213,6 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         comm = str(pick(row, "comm", "name") or "?")
         cg = str(pick(row, "cgroup") or "").rstrip("/").rsplit("/", 1)[-1][:40]
         rate = num(pick(row, "wbytes", "write") if want_write else pick(row, "rbytes", "read"))
-        agg[(comm, cg)] = agg.get((comm, cg), 0.0) + rate * 5.0  # below samples every 5 s
+        agg[comm, cg] = agg.get((comm, cg), 0.0) + rate * 5.0  # below samples every 5 s
     items: list[BelowItem] = [{"comm": c, "cgroup": g, "bytes": int(v)} for (c, g), v in agg.items() if v > 0]
     return sorted(items, key=lambda x: -x["bytes"]), None

@@ -371,7 +371,7 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         run(["docker", "network", "rm", net], check=False, capture=True)
         leaked: list[str] = []
         for _ in range(5):
-            leaked: list[str] = []
+            leaked = []
             for bf in Path("/sys/block").glob("loop*/loop/backing_file"):
                 try:
                     val = bf.read_text().strip()

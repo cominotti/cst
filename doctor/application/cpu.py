@@ -146,7 +146,7 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
             unknown.append(f"{unit} ({why or 'not loaded, or systemd did not answer'})")
             continue
         for p in props:
-            current[(mgr, unit, p)] = vals.get(p, "")
+            current[mgr, unit, p] = vals.get(p, "")
     drifted: list[str] = []
     checked = 0
     for r in records:

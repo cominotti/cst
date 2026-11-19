@@ -536,7 +536,7 @@ class GameProfile:
                 continue
             vals = show_values(res.stdout)
             if vals.get("LoadState") == "loaded":
-                now[(mgr, unit)] = vals
+                now[mgr, unit] = vals
         return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
 
     def repair_drift(self) -> None:

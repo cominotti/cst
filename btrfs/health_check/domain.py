@@ -163,7 +163,7 @@ def unallocated(device_usage: str) -> list[tuple[str, str]]:
     dev = ""
     for line in file_lines(device_usage):
         if ", ID:" in line:
-            dev = re.sub(",$", "", awk_field(line, 1))
+            dev = re.sub(r",$", "", awk_field(line, 1))
         if re.match(_SPACE + "+Unallocated:", line):
             name, value = read_fields(f"{dev} {awk_field(line, 2)}", 2)
             rows.append((name, value))
@@ -243,7 +243,7 @@ class Scrub:
 
 def parse_scrub(text: str) -> Scrub:
     lines = file_lines(text)
-    started = [[*re.split(": +", line), ""][1] for line in lines if "Scrub started" in line]
+    started = [[*re.split(r": +", line), ""][1] for line in lines if "Scrub started" in line]
     status = [awk_field(line, 2) for line in lines if line.startswith("Status:")]
     return Scrub(text, lines_of(started), lines_of(status))
 
@@ -303,7 +303,7 @@ def md_problem(mdstat: str) -> str | None:
             shown.append("--")
         shown.extend(lines[start : i + 1])
         last = i
-    return "md RAID degraded: " + re.sub(" +", " ", "".join(line + "\n" for line in shown).replace("\n", " "))
+    return "md RAID degraded: " + re.sub(r" +", " ", "".join(line + "\n" for line in shown).replace("\n", " "))
 
 
 # ---- the NVMe health log -----------------------------------------------------------------------------------------
@@ -327,7 +327,7 @@ def smart_raw(log: str, key: str) -> str:
 def smart_field(log: str, key: str) -> str:
     """A field of nvme smart-log, its digits only ("100%" -> "100")."""
     v = _smart_value(log, key)
-    return "" if v is None else re.sub("[^0-9]", "", v)
+    return "" if v is None else re.sub(r"[^0-9]", "", v)
 
 
 def controller(disk: str) -> str:

@@ -88,7 +88,7 @@ def first_line_version(text: str, magic: str) -> int | None:
     words = text.split("\n", 1)[0].split()
     if not words or words[0] != magic:
         return 0
-    if len(words) != 2 or not re.fullmatch("[0-9]+", words[1]):
+    if len(words) != 2 or not re.fullmatch(r"[0-9]+", words[1]):
         return None
     try:
         return int(words[1])
