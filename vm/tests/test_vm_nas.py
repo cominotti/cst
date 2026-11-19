@@ -1200,7 +1200,6 @@ class TornRecordTest(Nas):
         *,
         vm: str = "win",
         repository: str = REPO_URL,
-        host: str = "sophia",
         timestamp: str = "20261101T010000Z",
         why: str = "incomplete",
     ) -> vm_domain_backup.TornEntry:
@@ -1208,7 +1207,7 @@ class TornRecordTest(Nas):
             "snapshot": snapshot,
             "vm": vm,
             "repository": repository,
-            "host": host,
+            "host": "sophia",
             "timestamp": timestamp,
             "why": why,
         }
@@ -1366,10 +1365,15 @@ class TornRecordTest(Nas):
                 self.assertIn(f"torn restic snapshot {TORN_ID[:8]} of an earlier run forgotten", r.stdout)
                 self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
 
+    def old_host_entry(self) -> vm_domain_backup.TornEntry:
+        e = self.torn_entry()
+        e["host"] = "oldhost"
+        return e
+
     def test_a_recorded_snapshot_of_another_host_is_listed_and_forgotten_under_that_host(self) -> None:
         # NAS_RESTIC_HOST (or the hostname) changed since the torn run: restic lists that snapshot only
         # under the host it was made on.
-        self.write_torn([self.torn_entry(host="oldhost")])
+        self.write_torn([self.old_host_entry()])
         self.restic_cfg(
             snapshots_by_host={
                 "sophia": self.listed((SNAP_ID, BOTH_TAGS)),
@@ -1384,7 +1388,7 @@ class TornRecordTest(Nas):
         self.assertIn("--keep-weekly", self.forgets()[1], "then the retention")
         self.assertEqual(self.torn_doc(), {"version": 1, "torn": []})
         # Its listing fails: the entry stays and the retention waits.
-        self.write_torn([self.torn_entry(host="oldhost")])
+        self.write_torn([self.old_host_entry()])
         self.restic_cfg(snapshots_rc=1)
         os.unlink(os.path.join(self.fix, "restic.log"))
         r = self.run_tool("backup", "win", "--nas")
@@ -1395,7 +1399,7 @@ class TornRecordTest(Nas):
             "torn ones were not forgotten",
             r.stdout,
         )
-        self.assertEqual(self.torn_list(), [self.torn_entry(host="oldhost")])
+        self.assertEqual(self.torn_list(), [self.old_host_entry()])
 
     def test_a_retry_that_fails_skips_the_retention(self) -> None:
         self.write_torn([self.torn_entry()])
