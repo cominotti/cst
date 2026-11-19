@@ -1222,9 +1222,10 @@ own checks:
   is listed in the install record under the component `btrfs:degraded-boot`,
   so `cst doctor` reports one that is missing or was changed by hand. The
   component is marked done only when every step ran: after a failed
-  self-test, or a `files-only` run that wrote a file, `cst doctor` says its
-  install did not finish. Files of an install from before the record are adopted by the next
-  install, without being written again.
+  self-test, or a `files-only` run that wrote a file or adopted one (the
+  first run after an upgrade from a CST without the record), `cst doctor`
+  says its install did not finish. Files of an install from before the record
+  are adopted by the next install, without being written again.
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
@@ -1250,8 +1251,9 @@ on every run; `plan` does not list that.
 after 45 s and alert` when everything is in place.
 
 **To undo:** `cst btrfs degraded-boot uninstall`, then reboot. It removes
-the files with their install record lines (`removed:   PATH` for each).
-When the installer cannot change the install record (one written by a newer
+the files with their install record lines (`removed:   PATH` for each;
+`removed 'PATH'` for a file an older version left, which the record never
+listed). When the installer cannot change the install record (one written by a newer
 CST), it removes the files without it, with a warning, and goes on. It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
