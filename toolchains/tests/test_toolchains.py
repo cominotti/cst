@@ -35,6 +35,7 @@ from cst_core.domain.errors import Refused, Usage
 from toolchains.domain import auto as tcd_auto
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
+from toolchains.domain import config as tcd_config
 from toolchains.domain import prune as tcd_prune
 from toolchains import cli as tc_cli, wiring as tc_wiring
 from toolchains.adapters import home_files as tc_home_files
@@ -353,6 +354,33 @@ class ConfigTest(Scratch):
         self.assertIsNone(tc_build_tree.resolve_root(self.home, "cst toolchains"))
         rc, out = self.run_main("status")
         self.assertIn("build-dir = CST's line", out)
+
+    def test_plan_and_status_columns_are_these_words(self) -> None:
+        # The first column of config plan (a ConfigMark's value, as the user reads it).
+        def column(out: str) -> list[str]:
+            return [ln[2:11] for ln in out.splitlines() if ln.startswith("  ")]
+
+        rc, plan = self.run_main("config", "plan")
+        self.assertEqual(rc, 0, plan)
+        self.assertEqual(column(plan)[:2], ["write    ", "write    "])
+        self.run_main("config", "apply")
+        rc, again = self.run_main("config", "plan")
+        self.assertEqual(rc, 0, again)
+        self.assertEqual(column(again), ["ok       ", "ok       ", "off      ", "off      "])
+        # Every word the column can hold (the others need a home this test does not build).
+        self.assertEqual(
+            {m.name: m.value for m in tcd_config.ConfigMark},
+            {
+                "OK": "ok",
+                "KEEP": "keep",
+                "WRITE": "write",
+                "REMOVE": "remove",
+                "ON": "on",
+                "OFF": "off",
+                "UNKNOWN": "?",
+                "BY_HAND": "BY HAND",
+            },
+        )
 
     def test_existing_settings_are_never_changed(self) -> None:
         cargo = "[net]\ngit-fetch-with-cli = true\n[build]\njobs = 8\n"
