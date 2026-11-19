@@ -502,7 +502,7 @@ class Survey:
                 OwnedState.OK,
                 OwnedState.OK,
                 "enabled",
-                "active",
+                RunningState.ACTIVE,
             )
             self.lw_change = not done
         else:
