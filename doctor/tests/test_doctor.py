@@ -3057,7 +3057,7 @@ class DoctorFactsTest(unittest.TestCase):
         host = self.host()
         doc_vm.libvirt_domains(host)
         doc_vm.domain_xml(host, "win")
-        doc_shared.deployments(host)
+        doc_shared.ostree_facts(host)
         self.assertEqual([n for n in vars(host) if n in ("_domains", "_dumpxml", "_ostree", "_ostree_list")], [])
 
 
