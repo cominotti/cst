@@ -1981,10 +1981,27 @@ _BAD_FLATPAK = (
 _CP_TEXT = "cp: cannot open 'src/\ufffd' for reading: Permission denied"
 
 
+def _flatpak_shows(path: str) -> str:
+    """A flatpak whose override --show lists PATH among the app's filesystems,
+    next to bytes that are not UTF-8 on stdout and a warning on stderr."""
+    listed = b"[Context]\nfilesystems=/other/\xff;" + path.encode() + b";\n"
+    return (
+        "if sys.argv[1] == 'info':\n"
+        "    sys.exit(0)\n"
+        "if sys.argv[3] == '--show':\n"
+        "    sys.stderr.buffer.write(b'warning: \\xff\\n')\n"
+        f"    sys.stdout.buffer.write({listed!r})\n"
+        "    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    )
+
+
 class ToolMessagesTest(unittest.TestCase):
     """A message of cp, sync or flatpak whose bytes are not UTF-8 is shown
     with U+FFFD in its place, through the real runner and a real child
-    process; it never becomes a UnicodeDecodeError instead of the message."""
+    process; it never becomes a UnicodeDecodeError instead of the message.
+    The same holds for the answers bulk parses (stat -f, du, flatpak
+    override --show): what is UTF-8 in them is still read."""
 
     @override
     def setUp(self) -> None:
@@ -2060,6 +2077,46 @@ class ToolMessagesTest(unittest.TestCase):
     def test_flatpak_info_reads_only_the_return_code(self) -> None:
         self.bad_tools()
         self.assertTrue(self.machine.flatpak_installed("org.example.App"))
+
+    def test_flatpak_step_reaches_the_override(self) -> None:
+        # override --show fails with a non-UTF-8 message: no access yet, so the step adds it.
+        self.bad_tools()
+        app, bulk = "org.example.App", os.path.join(self.tmp, "Bulk")
+        self.assertEqual(self.files.u_flatpak_state(app, bulk), "missing")
+        with self.assertRaises(RuntimeError) as cm:
+            self.files.u_flatpak(app, bulk)
+        self.assertEqual(str(cm.exception), "flatpak override failed: error: cannot write '\ufffd'")
+
+    def test_flatpak_show_still_read(self) -> None:
+        app, bulk = "org.example.App", os.path.join(self.tmp, "Bulk")
+        python_program(self.bin, "flatpak", _flatpak_shows(bulk))
+        self.assertEqual(self.files.u_flatpak_state(app, bulk), "ok")
+        self.assertEqual(self.files.u_flatpak(app, bulk), "ok")
+        self.assertFalse(self.machine.flatpak_has_fs(app, os.path.join(self.tmp, "Other")))
+
+    def test_du_echoes_a_non_utf8_path(self) -> None:
+        # du -sxb prints the path back as it is; only the sum is read.
+        for rc, size in (
+            (0, bulk_domain.TreeSize(4096, complete=True)),
+            (1, bulk_domain.TreeSize(4096, complete=False)),
+        ):
+            with self.subTest(rc=rc):
+                python_program(
+                    self.bin,
+                    "du",
+                    f"sys.stderr.buffer.write(b'du: cannot read \\xff\\n')\n"
+                    f"sys.stdout.buffer.write(b'4096\\t' + sys.argv[3].encode() + b'\\xff\\n')\nsys.exit({rc})\n",
+                )
+                self.assertEqual(self.machine.du_bytes(self.src), size)
+
+    def test_fs_magic_of_a_failed_stat_is_zero(self) -> None:
+        for body, magic in (
+            ("sys.stderr.buffer.write(b'stat: cannot read \\xff\\n')\nsys.exit(1)\n", 0),
+            ("sys.stdout.write('9123683e\\n')\n", bulk_machine.BTRFS_MAGIC),
+        ):
+            with self.subTest(magic=magic):
+                python_program(self.bin, "stat", body)
+                self.assertEqual(self.machine.fs_magic(self.src), magic)
 
     def test_clean_run_unchanged(self) -> None:
         # Control: passes on the old code too; replace changes nothing for a clean run.

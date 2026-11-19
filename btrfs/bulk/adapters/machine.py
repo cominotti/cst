@@ -120,9 +120,9 @@ class Primitives:
     def run(self, argv: Sequence[str], decode_errors: DecodeErrors = "strict") -> CommandResult:
         """argv with its output captured, as subprocess.run(argv, capture_output=True,
         text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start.
-        A caller that only shows the message or reads only the return code passes
-        decode_errors="replace" (cp, sync, flatpak info and override --filesystem, ionice,
-        restorecon); strict stays for output that is parsed (stat -f, du, flatpak override --show)."""
+        Every caller passes decode_errors="replace": a message is shown with U+FFFD, and the
+        parsed answers (stat -f, du, flatpak override --show) fall back on what is not a
+        number or a line they know; du echoes the path, and a warning on stderr is never read."""
         return self.runner.run(argv, stdin="inherit", decode_errors=decode_errors).raise_cause()
 
     def is_nocow(self, path: str) -> bool:
@@ -143,7 +143,7 @@ class Primitives:
 
     def fs_magic(self, path: str) -> int:
         # statfs f_type is not in os.statvfs: ask stat(1).
-        r = self.run(["stat", "-f", "-c", "%t", path])
+        r = self.run(["stat", "-f", "-c", "%t", path], decode_errors="replace")
         try:
             return int(r.stdout.strip(), 16)
         except ValueError:
@@ -182,7 +182,7 @@ class Primitives:
         """du -sxb: the apparent size of the tree at path (this filesystem only).
         A part du cannot read is left out of its sum, and it exits 1: the size
         is then incomplete, a lower bound (also when du printed no sum at all)."""
-        r = self.run(["du", "-sxb", "--", path])
+        r = self.run(["du", "-sxb", "--", path], decode_errors="replace")
         try:
             return TreeSize(int(r.stdout.split()[0]), r.returncode == 0)
         except IndexError, ValueError:
@@ -193,7 +193,7 @@ class Primitives:
         return r.returncode == 0
 
     def flatpak_has_fs(self, app: str, path: str) -> bool:
-        r = self.run(["flatpak", "override", "--user", "--show", app])
+        r = self.run(["flatpak", "override", "--user", "--show", app], decode_errors="replace")
         for line in r.stdout.splitlines():
             if line.startswith("filesystems="):
                 return path in line.split("=", 1)[1].split(";")
