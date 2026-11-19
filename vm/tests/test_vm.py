@@ -347,6 +347,10 @@ class PartsTest(unittest.TestCase):
         self.assertEqual(short(["tune", "plan", "w", "--guest-has-virtio"]), ("tune", "plan", "w", False, True, False))
         self.assertEqual(short(["nocow", "plan", "--root"]), ("nocow", "plan", None, False, False, True))
         self.assertEqual(short(["nocow", "apply"]), ("nocow", "apply", None, False, False, False))
+        # An empty name names no VM, for every command that takes one.
+        for argv in (["list", ""], ["status", ""], ["backup", "", "--nas"], ["backup-timer", "on", ""]):
+            with self.subTest(argv=argv):
+                self.assertIsNone(vm_domain.parse_args(argv).vm)
         for bad in (
             ["status", "--full"],
             ["backup", "a", "b"],
