@@ -27,7 +27,10 @@ from cpu.game.domain import (
     GAME_DROPIN,
     STEAM_SCOPES,
     TAG,
+    CgroupUndo,
     Drift,
+    EppUndo,
+    GameRecordKind,
     GamePaths,
     GameSettings,
     Manager,
@@ -46,7 +49,9 @@ from cpu.game.domain import (
     intended_header,
     intended_props,
     newer_intended,
+    manager_of,
     on_text,
+    PropUndo,
     record_line,
     records,
     repaired_text,
@@ -54,6 +59,7 @@ from cpu.game.domain import (
     game_settings,
     show_values,
     state_uid,
+    state_undo,
     shown,
     transient_unit,
     unheld,
@@ -259,9 +265,9 @@ class GameProfile:
         for kv in settings:
             p = kv.split("=", 1)[0]
             if os.path.exists(self.ctl_file(mgr, unit, p)):
-                rec = ("prop", mgr, unit, p, "existed", self.prop(mgr, unit, p))
+                rec = (GameRecordKind.PROP, mgr, unit, p, "existed", self.prop(mgr, unit, p))
             else:
-                rec = ("prop", mgr, unit, p, "new", "-")
+                rec = (GameRecordKind.PROP, mgr, unit, p, "new", "-")
             if not self._append(self.paths.state, *rec):
                 self._unrecorded(f"{unit}: {' '.join(settings)}")
                 return
@@ -272,7 +278,7 @@ class GameProfile:
             return
         for kv in settings:
             p, _, value = kv.partition("=")
-            self._append(self.paths.intended, "prop", mgr, unit, p, value, self.prop(mgr, unit, p))
+            self._append(self.paths.intended, GameRecordKind.PROP, mgr, unit, p, value, self.prop(mgr, unit, p))
 
     # ---- the boxes ----------------------------------------------------------------------------
     def steam_scopes(self) -> list[str]:
@@ -360,11 +366,11 @@ class GameProfile:
         old = read_stripped(f) or ""
         if old == self.s.build_cpus:
             return
-        if not self._append(self.paths.state, "cgw", f, old):
+        if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
             self._unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
         if _write_line(f, self.s.build_cpus):
-            self._append(self.paths.intended, "cgw", f, self.s.build_cpus, read_stripped(f) or "")
+            self._append(self.paths.intended, GameRecordKind.CGW, f, self.s.build_cpus, read_stripped(f) or "")
         else:
             self.log(4, f"{unit}: could not write {f}")
 
@@ -488,7 +494,7 @@ class GameProfile:
             f = p.epp(cpu)
             if not os.access(f, os.W_OK):
                 continue
-            if not self._append(p.state, "epp", cpu, read_stripped(f) or ""):
+            if not self._append(p.state, GameRecordKind.EPP, cpu, read_stripped(f) or ""):
                 self._unrecorded(f"cpu{cpu}: EPP performance")
                 continue
             _write_line(f, "performance")
@@ -541,24 +547,24 @@ class GameProfile:
             self.s = dataclasses.replace(self.s, target_user=name)
 
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
-        """Undo one record of game.state."""
-        kind = rec[0] if rec else ""
-        if kind == "cgw" and len(rec) >= 3:
-            _write_line(rec[1], rec[2])
-        elif kind == "epp" and len(rec) >= 3:
-            _write_line(self.paths.epp(rec[1]), rec[2])
-        elif len(rec) >= 6:
-            mgr: Manager = "usr" if rec[1] == "usr" else "sys"
-            unit, prop, mode, old = rec[2], rec[3], rec[4], rec[5]
-            if mode == "new":
-                f = self.ctl_file(mgr, unit, prop)
-                with contextlib.suppress(OSError):
-                    os.unlink(f)
-                with contextlib.suppress(OSError):
-                    os.rmdir(os.path.dirname(f))
-                reload[mgr] = True
-            else:
-                self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+        """Undo one record of game.state (as state_undo reads it)."""
+        match state_undo(rec):
+            case CgroupUndo(file=f, old=old):
+                _write_line(f, old)
+            case EppUndo(cpu=cpu, old=old):
+                _write_line(self.paths.epp(cpu), old)
+            case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
+                if mode == "new":
+                    f = self.ctl_file(mgr, unit, prop)
+                    with contextlib.suppress(OSError):
+                        os.unlink(f)
+                    with contextlib.suppress(OSError):
+                        os.rmdir(os.path.dirname(f))
+                    reload[mgr] = True
+                else:
+                    self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+            case None:
+                pass
 
     def drift(self, text: str) -> list[Drift]:
         """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
@@ -595,8 +601,10 @@ class GameProfile:
             if d.is_cgroup_file:
                 ok = _write_line(r[1], r[2])
             else:
-                mgr: Manager = "sys" if r[1] == "sys" else "usr"
-                ok = self.ctl(mgr, "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True) == 0
+                ok = (
+                    self.ctl(manager_of(r[1]) or "usr", "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True)
+                    == 0
+                )
             self.log(*repaired_text(d, ok=ok))
 
     def _unheld(self, drifts: Sequence[Drift]) -> list[Drift]:
