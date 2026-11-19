@@ -415,7 +415,7 @@ class StatusMathTest(unittest.TestCase):
         # The state word as status prints it (a member's value that changes fails here).
         self.assertEqual(
             [ln for ln in text.splitlines() if " zswap " in f"{ln} "],
-            ["  BAD   zswap                        not in this kernel (no /sys/module/zswap)"],
+            ["  BAD     zswap                        not in this kernel (no /sys/module/zswap)"],
         )
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
@@ -1634,7 +1634,7 @@ class MemoryLowOverrideTest(_SwapScratch):
             with self.subTest(cmd=cmd):
                 rc, out, err = self._run(cmd, shown)
                 self.assertEqual(rc, 0, out + err)
-                self.assertIn("  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+                self.assertIn("  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
                 self.assertIn(note + "\n", out)
                 self.assertNotIn("  DIFF", out)
                 self.assertNotIn("machine.slice memory.low", out)
@@ -1651,7 +1651,7 @@ class MemoryLowOverrideTest(_SwapScratch):
             D.SwapCommand.STATUS, {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"}
         )
         self.assertEqual(rc, 0)
-        self.assertIn("  over  machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  over    machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
 
     def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
@@ -1659,7 +1659,7 @@ class MemoryLowOverrideTest(_SwapScratch):
         shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
         rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
         self.assertEqual(rc, 0)
-        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  DIFF    machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertNotIn("over", out.replace("over = ", ""))
         rc, out, err = self._run(D.SwapCommand.APPLY, shown)
         self.assertEqual(rc, 1)
@@ -1672,7 +1672,7 @@ class MemoryLowOverrideTest(_SwapScratch):
         self.assertEqual(rc, 0)
         self.assertEqual(
             [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
-            ["  -     machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
+            ["  -       machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
         )
 
     def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
@@ -1680,7 +1680,7 @@ class MemoryLowOverrideTest(_SwapScratch):
         self._cgroup_low(2**30)
         rc, out, _err = self._run(D.SwapCommand.STATUS, {})
         self.assertEqual(rc, 0)
-        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  DIFF    machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
 
 
 class MemoryLowOverrideRuleTest(unittest.TestCase):
@@ -1778,6 +1778,15 @@ class _SysfsNoCreate(_FakeTempFileSystem):
         super().write_text_direct(path, content)
 
 
+class _SwapNeverActive(_FakeSystemd):
+    """systemctl start succeeds, and the swap device still does not show up in /proc/swaps."""
+
+    @override
+    def start(self, unit: str) -> CommandResult:
+        self.calls.append(("start", unit))
+        return CommandResult(0, "", "")
+
+
 class SwapApplyOutputTest(_SwapScratch):
     """apply prints each step as it runs and stops at a failing command with its message and exit status,
     as swap-setup.sh did under `set -Eeuo pipefail`."""
@@ -1816,6 +1825,39 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertIn("/dev/mapper/swap0: activating", before_start)
         self.assertIn("zram0: swapping off", seen["stop dev-zram0.swap"])
         self.assertEqual(out.getvalue().count("== zswap"), 1, "each line once")
+
+    def test_every_settings_row_and_verification_note_starts_its_text_in_one_column(self) -> None:
+        # The state column fits its longest word (MISSING): no row's label is pushed to the right of
+        # the others, and apply's notes under the rows (BAD, later) line up with them.
+        os.remove(os.path.join(self.env.zswap_params_dir, "shrinker_enabled"))  # a MISSING row
+        with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as f:
+            f.write("MemTotal:       97000000 kB\nMemAvailable:       1000 kB\n")  # zram0 cannot be swapped off
+        fs = self._fs()
+        service, _ = self._service(
+            systemd=_SwapNeverActive(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs), fs=fs
+        )
+        _rc, out, _err = self._apply(service)
+        rows = out.split("== verification\n", 1)[1].split("Done.", 1)[0]
+        lines = [ln for ln in rows.splitlines() if ln.startswith("  ") and not ln.startswith(("  over:", "  exp:"))]
+        words = {ln.split()[0] for ln in lines}
+        self.assertLessEqual({"ok", "MISSING", "BAD", "later"}, words, rows)
+        self.assertEqual({len(ln) - len(ln[2:].lstrip(" ").split(" ", 1)[1].lstrip(" ")) for ln in lines}, {10}, rows)
+        self.assertIn("  BAD     swap0 is not active as swap\n", rows)
+        self.assertIn(
+            "  later   zram0 still active as swap (gone after a reboot, or apply again under lower pressure)\n", rows
+        )
+
+    def test_the_settings_state_column_fits_every_state_word(self) -> None:
+        report = D.SettingsReport(
+            rows=tuple(SettingCheckRow(state, f"label-{state.name}", "live", "want") for state in D.SettingState),
+            exp_name="",
+            exp_key="",
+        )
+        out = io.StringIO()
+        render_settings(report, out=out, header=False)
+        lines = [ln for ln in out.getvalue().splitlines() if "label-" in ln]  # the exp row adds a note
+        self.assertEqual(len(lines), len(D.SettingState))
+        self.assertEqual({ln.index("label-") for ln in lines}, {10}, out.getvalue())
 
     def test_verification_has_no_blank_line_before_it(self) -> None:
         rc, out, err = self._apply(self._service()[0])
@@ -2161,7 +2203,7 @@ class SwapWiringTest(unittest.TestCase):
         env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
         runner = _ScriptedRunner({})  # never the real systemctl (nor flatpak-spawn --host from a toolbox)
         self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), runner=runner, ctx=ctx), 0)
-        self.assertRegex(out.getvalue(), r"DIFF  vm\.swappiness +77 ")
+        self.assertRegex(out.getvalue(), r"DIFF    vm\.swappiness +77 ")
         self.assertEqual(runner.calls, [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"]])
 
     def test_the_desired_files_come_from_this_checkout(self) -> None:

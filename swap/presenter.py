@@ -18,6 +18,7 @@ from swap.domain import (
     CgroupSwapRow,
     ConfigSectionReport,
     DebugSectionReport,
+    SETTING_STATE_WIDTH,
     SettingState,
     SettingsReport,
     SwapApplyResult,
@@ -58,7 +59,7 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
         _section("live settings vs desired (from swap/ in CST)", out)
     for row in report.rows:
         extra = "" if row.state == SettingState.OK or not row.want else f"   (desired {row.want})"
-        print(f"  {row.state:<5} {row.label:<28} {row.live}{extra}", file=out)
+        print(f"  {row.state:<{SETTING_STATE_WIDTH}} {row.label:<28} {row.live}{extra}", file=out)
     if report.override_source:
         print(
             f"  over: {report.override_source} sets machine.slice's MemoryLow; systemd applies it after CST's"

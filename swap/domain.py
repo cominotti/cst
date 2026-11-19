@@ -548,6 +548,11 @@ class SettingState(StrEnum):
     INACTIVE = "-"
 
 
+# The width of the state column of the settings rows and of apply's verification notes under them:
+# the longest word, so every label starts in the same column.
+SETTING_STATE_WIDTH: Final = max(len(state.value) for state in SettingState)
+
+
 @dataclass(frozen=True, slots=True)
 class SettingCheckRow:
     """Single row comparing a live setting against its desired value."""

@@ -296,13 +296,13 @@ check_runtime_over() {
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "no runtime MemoryLow"
     swap_run status
     [[ $rc == 0 ]] || fail "status with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
     grep -qF "  over: $rt sets machine.slice's MemoryLow" <<<"$out" || fail "status over note"
     [[ "$out" != *"  DIFF "* ]] || fail "status DIFF with a runtime MemoryLow"
     s="$(snap)"
     swap_run apply
     [[ $rc == 0 ]] || fail "apply with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
     [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "apply with a runtime MemoryLow wrote"
     [[ "$(snap)" == "$s" ]] || fail "apply with a runtime MemoryLow changed something"
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "apply touched the runtime value"
