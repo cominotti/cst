@@ -408,22 +408,25 @@ class Change(Checks):
             self.lw_remove()
 
     def lw_install(self) -> None:
-        """The watcher's program and unit (through the installer, as the user), enabled and started."""
-        p, unit, changed = self.p, LDAC_UNIT, False
-        if self.lw_prog_st != OwnedState.OK:
+        """The watcher's program and unit (through the installer, as the user), enabled and started.
+        The installer runs also for a current copy: it writes nothing then (`unchanged:`), but adds
+        a copy its record does not list yet (installed before the record existed)."""
+        p, unit = self.p, LDAC_UNIT
+        prog_changed = self.lw_prog_st != OwnedState.OK
+        if prog_changed:
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
-            r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch")
-            if r.returncode != 0:
-                raise StepFailed(shell_exit_status(r.returncode))
-            changed = True
-        if self.lw_unit_st != OwnedState.OK:
-            said = self.checked(
-                ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
-                input_text=render_unit(self.c.device, self.c.ldac_rate),
-            )
-            self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
-            changed = True
+        r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch")
+        if r.returncode != 0:
+            raise StepFailed(shell_exit_status(r.returncode))
+        said = self.checked(
+            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
+            input_text=render_unit(self.c.device, self.c.ldac_rate),
+        )
+        self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
+        unit_changed = self.lw_unit_st != OwnedState.OK
+        if unit_changed:
             self.must(["systemctl", "--user", "daemon-reload"])
+        changed = prog_changed or unit_changed
         if self.lw_enabled != "enabled":
             self.must(["systemctl", "--user", "enable", unit])
             self.out(f"enabled:   {unit} (starts with your session)\n")

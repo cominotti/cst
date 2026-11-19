@@ -1397,6 +1397,30 @@ class WatcherTest(SetupCase):
         self.assertEqual(json.loads(self.text(m.record))["files"], {})
         self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), m.run("plan").stdout)
 
+    def test_apply_adopts_a_current_watcher_the_record_does_not_list(self) -> None:
+        """A current program and unit missing from the install record (installed before it existed)
+        are added to it, with no write, no daemon-reload and no restart."""
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.run("apply", "--no-restart")
+        rec = json.loads(self.text(m.record))
+        before = {path: rec["files"].pop(path) for path in (m.lw_prog, m.lw_unit)}
+        with open(m.record, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        stats = {path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in (m.lw_prog, m.lw_unit)}
+        r = m.run("apply", "--no-restart")
+        self.assertIn(
+            f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\nunchanged: {LW} enabled and active\n",
+            r.stdout,
+        )
+        self.assertEqual({path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in stats}, stats)
+        self.assertEqual(
+            [c for c in r.calls if c.startswith("systemctl --user") and "is-" not in c and "show" not in c], []
+        )
+        files = json.loads(self.text(m.record))["files"]
+        self.assertEqual(files[m.lw_prog]["src"], "bluetooth/bt-ldac-watch")
+        self.assertEqual(files[m.lw_unit]["component"], "bluetooth:ldac")
+        self.assertEqual({path: files[path]["sha256"] for path in before}, {p: f["sha256"] for p, f in before.items()})
+
     def test_plan_and_status_name_the_last_failure(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")
         m.put("lw-journal", JOURNAL)

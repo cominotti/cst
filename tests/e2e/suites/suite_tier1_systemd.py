@@ -534,6 +534,28 @@ grep -qxF "none needed" <<<"$out"
 same "second apply" "$s1"
 [[ "$(wp_pid)" == "$pid" ]]
 
+# 3b. a current watcher the install record does not list (installed before the record existed)
+# is added to it by the next apply: no file written, no restart of the watcher or WirePlumber.
+record="$H/.local/state/cst/installed.json"
+python3 -I -c 'import json, sys
+rec = json.load(open(sys.argv[1]))
+for dest in sys.argv[2:]:
+    del rec["files"][dest]
+json.dump(rec, open(sys.argv[1], "w"))' "$record" "$watch" "$unit"
+lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
+step "apply over an unrecorded watcher" apply --yes
+no_writes "apply over an unrecorded watcher" "$out"
+grep -qxF "unchanged: $watch" <<<"$out"
+grep -qxF "unchanged: $unit (LDAC to 48000 Hz)" <<<"$out"
+grep -qxF "unchanged: cst-bt-ldac48.service enabled and active" <<<"$out"
+same "apply over an unrecorded watcher" "$s1"
+[[ "$(wp_pid)" == "$pid" ]]
+[[ "$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)" == "$lw_pid" ]]
+python3 -I -c 'import json, sys
+files = json.load(open(sys.argv[1]))["files"]
+assert files[sys.argv[2]]["src"] == "bluetooth/bt-ldac-watch", files.get(sys.argv[2])
+assert files[sys.argv[3]]["component"] == "bluetooth:ldac", files.get(sys.argv[3])' "$record" "$watch" "$unit"
+
 # 4. le-audio without on/off only shows the setting.
 out="$(bt le-audio)"
 grep -qxF "LE Audio in PipeWire: off (~/.config/cst/bluetooth.conf)" <<<"$out"
@@ -3373,7 +3395,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         does not run here, so it owes none). `apply` makes that restart and
         writes nothing; `plan` then has nothing to do (exit 0). A second
         `apply` changes nothing: the same inode, mtime and content of each
-        file, no new main.conf backup, no restart of WirePlumber. `le-audio` alone only shows the setting.
+        file, no new main.conf backup, no restart of WirePlumber. With the watcher's program and unit
+        taken out of the install record, the next `apply` adds them back, writes nothing and restarts
+        neither the watcher nor WirePlumber. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
         defaults; nothing else changes and `plan` exits 0. A second
