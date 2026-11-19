@@ -13,6 +13,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -214,6 +215,48 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.target.files["/etc/t"] = (b"edited\n", 0o644)
         self.assertEqual(
             self.svc.plan([self.a, self.t], req), (["would write: /usr/local/sbin/a", "would write: /etc/t"], 2)
+        )
+
+    def test_plan_names_a_current_file_whose_record_line_install_would_change(self) -> None:
+        # The file is right, but its line in the record is not what install writes (a write whose record
+        # could not be saved): plan says install would record it again, and counts no write for it.
+        req = InstallRequest(values={"UUID": "u-1"})
+        list(self.svc.install([self.a, self.t], req))
+        self.svc.mark(self.ROOT, "m:t")
+        good = self.record.texts[self.ROOT]
+        stale: dict[str, Callable[[RecordedFile], RecordedFile]] = {
+            "sha256": lambda f: dataclasses.replace(f, sha256="0" * 64),
+            "mode": lambda f: dataclasses.replace(f, mode=0o600),
+            "component": lambda f: dataclasses.replace(f, component="m:other"),
+            "src": lambda f: dataclasses.replace(f, src="m/old"),
+            "values": lambda f: dataclasses.replace(f, values={"UUID": "u-0"}),
+        }
+        for what, change in stale.items():
+            with self.subTest(stale=what):
+                rec = parse_record(good)
+                files = {**rec.files, "/etc/t": change(rec.files["/etc/t"])}
+                self.record.texts[self.ROOT] = text = render_record(InstallRecord(files, rec.components))
+                self.assertEqual(
+                    self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "would record: /etc/t"], 0)
+                )
+                self.assertEqual(self.record.texts[self.ROOT], text, "plan changed the record")
+                # install does rewrite that line (its component pending again); plan then says unchanged.
+                self.assertEqual(
+                    list(self.svc.install([self.a, self.t], req)), ["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"]
+                )
+                self.assertEqual(self.record.doc().files["/etc/t"], parse_record(good).files["/etc/t"])
+                self.assertEqual(self.record.doc().components["m:t"], "pending")
+                self.assertEqual(
+                    self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
+                )
+                self.svc.mark(self.ROOT, "m:t")
+        # Only the checkout's stamp differs (another commit installed it): install keeps the state, plan
+        # says unchanged.
+        rec = parse_record(good)
+        files = {d: dataclasses.replace(f, commit="older", tree="t0") for d, f in rec.files.items()}
+        self.record.texts[self.ROOT] = render_record(InstallRecord(files, rec.components))
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
         )
 
     def test_plan_takes_a_record_that_is_no_record_as_none_and_says_unchanged_when_it_cannot_read_it(self) -> None:
@@ -676,6 +719,32 @@ class InstallerRecordCliTest(unittest.TestCase):
         r = self.cli("install", *sel)
         self.assertEqual(sorted(r.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
         self.assertEqual(sorted(self.doc().files), want)
+        again = self.cli("plan", *sel)
+        self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+
+    def test_plan_names_a_file_whose_record_line_is_stale_and_check_stays_current(self) -> None:
+        # The file was written, the record kept an older line (its sha256): plan says "would record:" for
+        # that file alone and changes nothing; check exits 0; install puts the line right; plan is then
+        # "unchanged:" for every file.
+        sel = ("--component", "btrfs:docker-gc")
+        want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        rec = self.doc()
+        stale = "/usr/local/sbin/docker-gc"
+        files = {**rec.files, stale: dataclasses.replace(rec.files[stale], sha256="0" * 64)}
+        Path(self.record).write_text(render_record(InstallRecord(files, rec.components)))
+        before = Path(self.record).read_bytes()
+        plan = self.cli("plan", *sel)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(
+            sorted(plan.stdout.decode().splitlines()),
+            sorted(f"{'would record' if d == stale else 'unchanged'}: {self.stage}{d}" for d in want),
+        )
+        self.assertEqual(Path(self.record).read_bytes(), before)
+        check = self.cli("check", *sel)
+        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        self.assertEqual(self.doc().files[stale].sha256, rec.files[stale].sha256)
         again = self.cli("plan", *sel)
         self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
 

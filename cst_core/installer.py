@@ -12,8 +12,8 @@ process running as that user, with --home naming the home folder.
 Usage:
   installer.py install [OPTIONS] SRC...   unchanged:/written: per file, as it goes
   installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file (would record: for a
-                                          current file the install record does not list yet);
-                                          changes nothing
+                                          current file the install record does not list yet,
+                                          or lists otherwise); changes nothing
   installer.py check [OPTIONS] SRC...     exit 0 when every file is current (also one only the
                                           record lacks), else 1; prints nothing
   installer.py text DEST MODE [--root DIR] [--component C]

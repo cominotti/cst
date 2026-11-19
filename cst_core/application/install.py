@@ -4,7 +4,8 @@
 Output lines are the ones the setup scripts always printed:
 `unchanged: DEST` and `written:   DEST`; a plan prints
 `would write: DEST` instead and changes nothing (and `would record: DEST`
-for a file already right that the install record does not list yet); a
+for a file already right that the install record does not list yet, or
+lists otherwise); a
 removal `removed:   DEST`. Every entry's bytes are built and checked (templates)
 before the first write, so a bad call writes nothing; then one line comes
 per file, as it is written.
@@ -229,6 +230,16 @@ class InstallService:
                 continue
         return found
 
+    def _record_changes(self, records: Mapping[str, InstallRecord], p: Placement, data: bytes) -> bool:
+        """True when install would add or change p's line in its record (read in records): no line, or one
+        that is not the same install (RecordedFile.same_install: the checkout's stamp aside). False when the
+        record could not be read: plan cannot tell."""
+        rec = records.get(p.record)
+        if rec is None or self._record is None:
+            return False
+        old = rec.files.get(p.dest)
+        return old is None or not old.same_install(_recorded_file(p, self._record.sha256(data), self._commit, ""))
+
     def is_current(
         self, path: str, data: bytes, mode: int, owner: Owner = Owner.ROOT, *, as_root: bool = False
     ) -> bool:
@@ -358,9 +369,7 @@ class InstallService:
             if not p.record:
                 continue
             sha = self._record.sha256(data)
-            f = RecordedFile(
-                p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, self._commit, trees.get(p.component, sha)
-            )
+            f = _recorded_file(p, sha, self._commit, trees.get(p.component, sha))
             per_record.setdefault(p.record, {})[p.dest] = (f, written)
         for path, files in sorted(per_record.items()):
             self._update(path, _adding(files))
@@ -416,8 +425,9 @@ class InstallService:
     def plan(self, entries: Sequence[InstallEntry], req: InstallRequest) -> tuple[list[str], int]:
         """What install would do, changing nothing: (report lines, number of files to write).
 
-        A current file its record does not list yet is `would record:` (install adopts it). It is not
-        counted: it needs no write, so `check` still takes it as current."""
+        A current file its record does not list yet, or lists otherwise (other bytes, mode, owner, component,
+        source or values: a record not saved after a write), is `would record:` (install records it again).
+        It is not counted: it needs no write, so `check` still takes it as current."""
         lines: list[str] = []
         replaced: list[Placement] = []
         todo, records = self._prepare(entries, req)
@@ -425,7 +435,7 @@ class InstallService:
             if not self.is_current(p.path, data, p.mode, p.owner, as_root=req.as_root):
                 lines.append(f"would write: {p.path}")
                 replaced.append(p)
-            elif p.record in records and p.dest not in records[p.record].files:
+            elif self._record_changes(records, p, data):
                 lines.append(f"would record: {p.path}")
             else:
                 lines.append(f"unchanged: {p.path}")
@@ -434,6 +444,11 @@ class InstallService:
             f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)
         ]
         return settings + lines, len(replaced) + len(settings)
+
+
+def _recorded_file(p: Placement, sha: str, commit: str, tree: str) -> RecordedFile:
+    """The record line install writes for p with these bytes (sha) from this checkout (commit, tree)."""
+    return RecordedFile(p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, commit, tree)
 
 
 def _adding(files: Mapping[str, tuple[RecordedFile, bool]]) -> Callable[[InstallRecord], InstallRecord]:

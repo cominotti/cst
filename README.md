@@ -415,7 +415,8 @@ everything with `plan`, `status` or `doctor` before changing anything:
   `cst_core/installer.py plan SRC...` (or `--module btrfs`, or
   `--component btrfs:core`) shows what an install would write, without
   writing, and names with `would record:` the files already right that the
-  install record does not list yet. Each file belongs to a **component**, the part of a module that
+  install record does not list yet, or lists otherwise (a record not saved
+  after a write). Each file belongs to a **component**, the part of a module that
   one command installs as a whole (`btrfs:core` by `cst btrfs install`,
   `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: `COMPONENTS` in
   the same file). Every file installed is listed, with its sha256 and the
