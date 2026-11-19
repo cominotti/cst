@@ -581,11 +581,14 @@ def env_write_lines(source: str, rel: str) -> list[int]:
         aliases: set[str] = set()
         for node in nodes:
             if isinstance(node, ast.Assign) and is_os_environ(node.value):
-                aliases |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+                aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
             elif (
-                isinstance(node, ast.AnnAssign | ast.NamedExpr) and node.value is not None and is_os_environ(node.value)
+                isinstance(node, ast.AnnAssign | ast.NamedExpr)
+                and isinstance(node.target, ast.Name)
+                and node.value is not None
+                and is_os_environ(node.value)
             ):
-                aliases |= {node.target.id} if isinstance(node.target, ast.Name) else set()
+                aliases.add(node.target.id)
 
         def is_environ(node: ast.expr, aliases: set[str] = aliases) -> bool:
             if isinstance(node, ast.NamedExpr):
