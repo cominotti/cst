@@ -18,6 +18,7 @@ import tempfile
 import types
 from typing import Any, Protocol, cast, override
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 
@@ -947,6 +948,12 @@ class WatcherRunTest(unittest.TestCase):
         self.assertEqual(bt_adapters.run([sys.executable, "-c", "print('hi'); raise SystemExit(4)"]), (4, "hi\n"))
         self.assertEqual(bt_adapters.run(["/nonexistent/cst-pactl"]), (127, ""))
         self.assertEqual(bt_adapters.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.3), (124, ""))
+
+    def test_in_the_c_locale(self) -> None:
+        """LC_ALL=C on top of the session's environment, whatever locale it sets (pactl's English words)."""
+        show = [sys.executable, "-c", "import os; print(os.environ.get('LC_ALL'), os.environ.get('LANG'))"]
+        with mock.patch.dict(os.environ, {"LC_ALL": "pt_BR.UTF-8", "LANG": "pt_BR.UTF-8"}):
+            self.assertEqual(bt_adapters.run(show), (0, "C pt_BR.UTF-8\n"))
 
 
 class UnreadableInputTest(unittest.TestCase):

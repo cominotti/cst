@@ -493,6 +493,21 @@ grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
 s1="$(files)"
 le_text="$(cat "$le")"
 
+# 1b. the watcher runs pactl subscribe with LC_ALL=C, also when the session sets another
+# language (pactl's event lines are read in English).
+systemctl --user set-environment LC_ALL=pt_BR.UTF-8
+systemctl --user restart cst-bt-ldac48.service
+lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
+pactl_env=""
+for _ in $(seq 150); do
+    pactl_pid="$(pgrep -n -P "$lw_pid" -x pactl || true)"
+    if [[ -n "$pactl_pid" ]] && pactl_env="$(tr '\0' '\n' <"/proc/$pactl_pid/environ" 2>/dev/null)"; then break; fi
+    sleep 0.1
+done
+systemctl --user unset-environment LC_ALL
+[[ -n "$pactl_env" ]] || { echo "test_80: no pactl child of the watcher (MainPID $lw_pid)" >&2; false; }
+grep -qxF LC_ALL=C <<<"$pactl_env" || { echo "test_80: the watcher's pactl has $(grep '^LC_ALL=' <<<"$pactl_env" || echo 'no LC_ALL')" >&2; false; }
+
 # 2. apply: no file written, no backup; the owed WirePlumber restart is made, then forgotten.
 step "apply after --no-restart" apply --yes
 wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
@@ -3364,11 +3379,14 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         defaults; nothing else changes and `plan` exits 0. A second
         `le-audio on` writes nothing and restarts nothing. `le-audio off`
         puts the same drop-in back, restarts WirePlumber and the roles are the
-        classic ones again. `revert` afterwards."""
+        classic ones again. The watcher's `pactl subscribe` runs with LC_ALL=C
+        also when the user manager sets LC_ALL to another language. `revert`
+        afterwards."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
             "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "systemctl --user unset-environment LC_ALL || true; "
             "rm -f /home/tester/.config/cst/bluetooth.conf",
             check=False,
         )

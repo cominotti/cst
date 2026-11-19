@@ -36,7 +36,7 @@ from bluetooth.domain.watch import (
     snapshot,
 )
 from bluetooth.ports import LiveAudioPort
-from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.adapters.runner import SubprocessCommandRunner, c_locale
 from cst_core.adapters.files import ensure_dir, write_atomic
 from cst_core.adapters.journal import log
 from cst_core.adapters.terminal import stdin
@@ -175,9 +175,10 @@ RUNNER: CommandRunnerPort = SubprocessCommandRunner()
 
 def run(cmd: Sequence[str], timeout: float = 15) -> tuple[int, str]:
     """(exit status, stdout) of CMD; 127 when it does not exist, 124 on timeout.
-    stdin is ours; bytes that are not UTF-8 become U+FFFD; a command that
-    cannot start raises (as subprocess.run did)."""
-    r = RUNNER.run(cmd, timeout=timeout, stdin="inherit")
+    stdin is ours; LC_ALL=C whatever the session's locale (the watcher reads
+    pactl's English profile descriptions); bytes that are not UTF-8 become
+    U+FFFD; a command that cannot start raises (as subprocess.run did)."""
+    r = RUNNER.run(cmd, timeout=timeout, stdin="inherit", locale_c=True)
     if r.fault in (CommandFault.MISSING, CommandFault.TIMEOUT):
         return r.returncode, ""
     if r.cause is not None:
@@ -404,13 +405,18 @@ class Watcher:
         return None
 
     def run(self) -> None:
-        """Subscribe to `pactl` events forever with exponential backoff on restarts."""
+        """Subscribe to `pactl` events forever with exponential backoff on restarts. pactl runs with
+        LC_ALL=C whatever the session's locale: relevant() reads its English event lines."""
         log(6, f"watching bluez_card.{self.dev}: LDAC wanted at {self.rate} Hz{' (dry run)' if self.dry else ''}")
         backoff = 1.0
         while True:
             try:
                 proc = subprocess.Popen(
-                    ["pactl", "subscribe"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+                    ["pactl", "subscribe"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                    env=c_locale(os.environ),
                 )
             except OSError as e:
                 log(4, f"cannot start pactl subscribe ({e}); again in {backoff:.0f} s")
@@ -476,7 +482,6 @@ def run_watcher(dev: str, rate: int, *, dry_run: bool) -> int:
     as well, so no KeyboardInterrupt comes here."""
     signal.signal(signal.SIGTERM, Stop.handler)
     signal.signal(signal.SIGINT, Stop.handler)
-    os.environ.setdefault("LC_ALL", "C")  # pactl's event lines in English
     try:
         Watcher(dev, rate, dry_run).run()
     except SystemExit:  # Stop's exit, status 0
