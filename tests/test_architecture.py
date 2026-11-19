@@ -543,26 +543,130 @@ def cli_code_lines(source: str) -> int:
     )
 
 
-def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
-    """The nodes of one scope (a module or a function body); a nested function or lambda is a node
-    of it, but its body is a scope of its own."""
+type _Scope = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+
+
+def _outer_parts(fn: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> list[ast.expr]:
+    """The parts of a def or lambda that run in the scope around it: decorators and defaults."""
+    decorators = [] if isinstance(fn, ast.Lambda) else fn.decorator_list
+    return [*decorators, *fn.args.defaults, *(d for d in fn.args.kw_defaults if d is not None)]
+
+
+def _scope_nodes(scope: _Scope) -> list[ast.AST]:
+    """The nodes of one scope (a module, or a function's body); a nested function or lambda is a
+    node of it, with its decorators and defaults, but its body is a scope of its own."""
     found: list[ast.AST] = []
-    todo = list(ast.iter_child_nodes(scope))
+    todo: list[ast.AST] = [scope.body] if isinstance(scope, ast.Lambda) else list(scope.body)
     while todo:
         node = todo.pop()
         found.append(node)
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            todo.extend(_outer_parts(node))
+        else:
             todo.extend(ast.iter_child_nodes(node))
     return found
+
+
+def _parameters(fn: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> list[tuple[str, ast.expr | None]]:
+    """(name, default or None) for every parameter of a def or lambda."""
+    a = fn.args
+    positional = [*a.posonlyargs, *a.args]
+    defaults: list[ast.expr | None] = [None] * (len(positional) - len(a.defaults)) + list(a.defaults)
+    out = [(p.arg, d) for p, d in zip(positional, defaults, strict=True)]
+    out += [(p.arg, d) for p, d in zip(a.kwonlyargs, a.kw_defaults, strict=True)]
+    out += [(p.arg, None) for p in (a.vararg, a.kwarg) if p is not None]
+    return out
+
+
+def _local_names(scope: _Scope, nodes: list[ast.AST]) -> set[str]:
+    """The names a function binds itself (its parameters, assignment targets, imports, defs,
+    except names), less those it declares global or nonlocal; a comprehension's own variables
+    are left out. For the module: none (nothing encloses it)."""
+    if isinstance(scope, ast.Module):
+        return set()
+    comprehension = {id(n) for node in nodes if isinstance(node, ast.comprehension) for n in ast.walk(node.target)}
+    names = {name for name, _ in _parameters(scope)}
+    declared: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del) and id(node) not in comprehension:
+            names.add(node.id)
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            names.update((alias.asname or alias.name).partition(".")[0] for alias in node.names)
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.ExceptHandler)
+            and node.name is not None
+        ):
+            names.add(node.name)  # an except without "as" has no name
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            declared.update(node.names)
+    return names - declared
+
+
+def _assigned_pairs(target: ast.expr, value: ast.expr) -> list[tuple[ast.expr, ast.expr]]:
+    """(target, value) pairs of one assignment, a tuple or list unpacked item by item."""
+    if (
+        isinstance(target, ast.Tuple | ast.List)
+        and isinstance(value, ast.Tuple | ast.List)
+        and len(target.elts) == len(value.elts)
+        and not any(isinstance(e, ast.Starred) for e in target.elts)
+    ):
+        return [p for t, v in zip(target.elts, value.elts, strict=True) for p in _assigned_pairs(t, v)]
+    return [(target, value)]
+
+
+def _scope_aliases(
+    scope: _Scope, nodes: list[ast.AST], inherited: frozenset[str], is_os_environ: Callable[[ast.expr], bool]
+) -> frozenset[str]:
+    """The names bound to os.environ in one scope: those of the scopes around it it does not bind
+    itself, its parameters whose default is os.environ, and its own assignments of os.environ."""
+    aliases = set(inherited - _local_names(scope, nodes))
+    if not isinstance(scope, ast.Module):
+        aliases.update(name for name, default in _parameters(scope) if default is not None and is_os_environ(default))
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                aliases.update(
+                    t.id for t, v in _assigned_pairs(target, node.value) if isinstance(t, ast.Name) and is_os_environ(v)
+                )
+        elif (
+            isinstance(node, ast.AnnAssign | ast.NamedExpr)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and is_os_environ(node.value)
+        ):
+            aliases.add(node.target.id)
+    return frozenset(aliases)
+
+
+def _environ_write_line(
+    node: ast.AST, is_environ: Callable[[ast.expr], bool], is_os_environ: Callable[[ast.expr], bool]
+) -> int | None:
+    """The line of one node when it changes os.environ (an item set or deleted, a method of
+    ENV_WRITERS called, through os.environ or an alias: is_environ; or os.environ itself rebound),
+    else None."""
+    if isinstance(node, ast.Subscript):
+        writes = isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value)
+    elif isinstance(node, ast.AugAssign):
+        writes = is_environ(node.target)
+    elif isinstance(node, ast.Attribute):
+        writes = isinstance(node.ctx, ast.Store | ast.Del) and is_os_environ(node)  # os.environ = ..., del os.environ
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        writes = node.func.attr in ENV_WRITERS and is_environ(node.func.value)
+    else:
+        return None
+    return node.lineno if writes else None
 
 
 def env_write_lines(source: str, rel: str) -> list[int]:
     """Lines that change os.environ: an item set or deleted, a method of ENV_WRITERS called, or os.environ rebound.
 
-    A write through another name bound to os.environ in the same scope (the module, or one function
-    body) counts too: `env = os.environ; env["A"] = "1"`, `e: Mapping = os.environ`,
-    `(w := os.environ).pop("B")`. Such a name counts in its whole scope, even where it was bound
-    to something else (conservative). os.environ handed to a function that writes it is not seen.
+    A write through another name bound to os.environ counts too: `env = os.environ; env["A"] = "1"`,
+    `e: Mapping = os.environ`, `(w := os.environ).pop("B")`, `env, x = os.environ, 1`, a parameter
+    `env=os.environ`. Such a name counts in its whole scope (the module, or one function body),
+    even where it was bound to something else (conservative), and in every function nested in that
+    scope that does not bind the same name itself (a module-level `ENV = os.environ` written in
+    main(), a closure); the decorators and defaults of a def belong to the scope around it.
+    os.environ handed to a function that writes it is not seen.
     """
     tree = ast.parse(source, filename=rel)
     bound = _bindings(tree)
@@ -575,40 +679,23 @@ def env_write_lines(source: str, rel: str) -> list[int]:
         return head in bound and (f"{bound[head]}.{rest}" if rest else bound[head]) == "os.environ"
 
     lines: set[int] = set()
-    scopes = [tree, *(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda))]
-    for scope in scopes:
+    todo: list[tuple[_Scope, frozenset[str]]] = [(tree, frozenset())]
+    while todo:
+        scope, inherited = todo.pop()
         nodes = _scope_nodes(scope)
-        aliases: set[str] = set()
-        for node in nodes:
-            if isinstance(node, ast.Assign) and is_os_environ(node.value):
-                aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
-            elif (
-                isinstance(node, ast.AnnAssign | ast.NamedExpr)
-                and isinstance(node.target, ast.Name)
-                and node.value is not None
-                and is_os_environ(node.value)
-            ):
-                aliases.add(node.target.id)
+        aliases = _scope_aliases(scope, nodes, inherited, is_os_environ)
 
-        def is_environ(node: ast.expr, aliases: set[str] = aliases) -> bool:
+        def is_environ(node: ast.expr, aliases: frozenset[str] = aliases) -> bool:
             if isinstance(node, ast.NamedExpr):
                 node = node.value
             return is_os_environ(node) or (isinstance(node, ast.Name) and node.id in aliases)
 
         for node in nodes:
-            if (
-                isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store | ast.Del) and is_environ(node.value)
-            ) or (isinstance(node, ast.AugAssign) and is_environ(node.target)):
-                lines.add(node.lineno)
-            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store | ast.Del) and is_os_environ(node):
-                lines.add(node.lineno)  # os.environ = ..., del os.environ
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ENV_WRITERS
-                and is_environ(node.func.value)
-            ):
-                lines.add(node.lineno)
+            line = _environ_write_line(node, is_environ, is_os_environ)
+            if line is not None:
+                lines.add(line)
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+                todo.append((node, aliases))
     return sorted(lines)
 
 
@@ -1193,6 +1280,24 @@ class ArchitectureGateTest(unittest.TestCase):
             "top = os.environ\ntop.setdefault('D', '')\n"
         )
         self.assertEqual(env_write_lines(aliased, "vm/cli.py"), [5, 6, 7, 9, 10, 16])
+        # A name bound to os.environ in an enclosing scope (the module, an outer function) counts
+        # in a function that does not bind it itself; a parameter whose default is os.environ, a
+        # name of a tuple unpacking, and the decorators and defaults of a nested def (run in the
+        # scope around it) count too.
+        enclosing = (
+            "import os\nENV = os.environ\n"
+            "def main():\n    ENV['A'] = '1'\n"  # 4
+            "def shadow():\n    ENV = {}\n    ENV['A'] = '1'\n"
+            "def glob():\n    global ENV\n    ENV = 1\n    ENV.clear()\n"  # 11
+            "def outer():\n    env = os.environ\n    def inner():\n        env.pop('B')\n"  # 15
+            "    @wrap(env.pop('C'))\n    def deco(x=env.setdefault('D', '')):\n        return x\n"  # 16, 17
+            "def unpack():\n    env, x = os.environ, 1\n    env['C'] = '1'\n    x['C'] = '1'\n"  # 21
+            "def default(env=os.environ, *, kw=os.environ, other={}):\n"
+            "    env['D'] = '1'\n    kw.update({})\n    other['E'] = '1'\n"  # 24, 25
+            "def comp():\n    [ENV for ENV in ()]\n    ENV['F'] = '1'\n"  # 29
+            "lam = lambda e=os.environ: e.pop('G')\n"  # 30
+        )
+        self.assertEqual(env_write_lines(enclosing, "vm/cli.py"), [4, 11, 15, 16, 17, 21, 24, 25, 29, 30])
         rebound = "import os\ndef main():\n    os.environ = {}\n    del os.environ\n    environ = {}\n"
         self.assertEqual(
             hard_io_lines(rebound, "vm/cli.py", light_cli=True), [3, 4], "a local named environ is no write"
