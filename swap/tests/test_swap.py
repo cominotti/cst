@@ -415,7 +415,7 @@ class StatusMathTest(unittest.TestCase):
         # The state word as status prints it (a member's value that changes fails here).
         self.assertEqual(
             [ln for ln in text.splitlines() if " zswap " in f"{ln} "],
-            ["  BAD   zswap                        not in this kernel (no /sys/module/zswap)"],
+            ["  BAD     zswap                        not in this kernel (no /sys/module/zswap)"],
         )
 
     def test_wsf_experiment_is_not_a_diff(self) -> None:
@@ -650,6 +650,10 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         self._block_links = dict(block_links)
         self._unreadable = set() if unreadable_paths is None else set(unreadable_paths)
 
+    @property
+    def block_links(self) -> dict[str, str]:
+        return dict(self._block_links)
+
     def add_block_link(self, link: str, target: str) -> None:
         self._block_links[link] = target
 
@@ -668,6 +672,89 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         if path in self._unreadable:
             return False
         return super().is_readable(path)
+
+
+class _ClosedFolder(_FakeTempFileSystem):
+    """A folder this user may not search (mode 0700 of another owner): nothing in it can be seen."""
+
+    def __init__(self, block_links: Mapping[str, str], *, closed: str) -> None:
+        super().__init__(block_links)
+        self._closed = closed
+
+    def _inside(self, path: str) -> bool:
+        return path.startswith(self._closed + os.sep)
+
+    @override
+    def lexists(self, path: str) -> bool:
+        return not self._inside(path) and super().lexists(path)
+
+    @override
+    def exists(self, path: str) -> bool:
+        return not self._inside(path) and super().exists(path)
+
+    @override
+    def is_file(self, path: str) -> bool:
+        return not self._inside(path) and super().is_file(path)
+
+    @override
+    def is_dir(self, path: str) -> bool:
+        return not self._inside(path) and super().is_dir(path)
+
+    @override
+    def is_readable(self, path: str) -> bool:
+        return path != self._closed and not self._inside(path) and super().is_readable(path)
+
+    @override
+    def is_searchable(self, path: str) -> bool:
+        return path != self._closed and not self._inside(path) and super().is_searchable(path)
+
+    @override
+    def read_text(self, path: str, default: str | None = None) -> str | None:
+        return default if self._inside(path) else super().read_text(path, default)
+
+
+class _BufferedToPipe(io.StringIO):
+    """A stdout on a pipe: what is written reaches the pipe only when flushed."""
+
+    def __init__(self, pipe: list[str]) -> None:
+        super().__init__()
+        self._pipe = pipe
+        self._sent = 0
+
+    @override
+    def flush(self) -> None:
+        text = self.getvalue()
+        if text[self._sent :]:
+            self._pipe.append(text[self._sent :])
+        self._sent = len(text)
+
+
+class _UnbufferedToPipe(io.StringIO):
+    """A stderr on the same pipe: each write reaches it at once."""
+
+    def __init__(self, pipe: list[str]) -> None:
+        super().__init__()
+        self._pipe = pipe
+
+    @override
+    def write(self, s: str, /) -> int:
+        if s:
+            self._pipe.append(s)
+        return super().write(s)
+
+
+class _TextUnreadable(_FakeTempFileSystem):
+    """read_text gives its default for the paths in unread, as for a file the process may not open."""
+
+    def __init__(
+        self, block_links: Mapping[str, str], unreadable_paths: set[str] | None = None, *, unread: set[str]
+    ) -> None:
+        super().__init__(block_links, unreadable_paths)
+        self._unread = set(unread)
+
+    @override
+    def read_text(self, path: str, default: str | None = None) -> str | None:
+        return default if path in self._unread else super().read_text(path, default)
 
 
 class _FakeSystemd:
@@ -749,8 +836,8 @@ class _FakeSystemd:
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
     def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True) -> dict[str, str]:
-        del props, on_host
-        return dict(self.shown) if unit == "machine.slice" else {}
+        del on_host
+        return {k: v for k, v in self.shown.items() if k in props} if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         cleaned = path.lstrip("/").replace("/", "-")
@@ -1571,6 +1658,120 @@ class SwapSettingsTest(_SwapScratch):
         self.assertEqual(render_apply(service.apply_changes(), out=io.StringIO(), err=err), 1)
         self.assertFalse(os.path.exists(env.settings_path))
 
+    def _on(self, fs: _FakeTempFileSystem) -> tuple[SwapApplicationService, _FakeSystemd]:
+        systemd = _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        return SwapApplicationService(self.env, fs, systemd, system, installer=_installer()), systemd
+
+    def _run_on(self, cmd: RunCommand, fs: _FakeTempFileSystem) -> tuple[int, str, str, _FakeSystemd]:
+        service, systemd = self._on(fs)
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(cmd, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def _older_install(self) -> None:
+        """What an older CST set up: the migration would write /etc/cst/swap.conf from it."""
+        self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
+        self._write(self.env.fstab, OLD_FSTAB + "\n")
+
+    def test_a_settings_file_this_user_cannot_read_asks_for_root_and_is_not_taken_as_missing(self) -> None:
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                fs = _TextUnreadable(self._fs(unreadable={path}).block_links, unreadable_paths={path}, unread={path})
+                rc, out, err, _ = self._run_on(cmd, fs)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(
+                    "  ?         cst/swap.conf                          cannot be read as this user: on the host,"
+                    f" cst swap {cmd} --root\n",
+                    out,
+                )
+                self.assertNotIn("  write     cst/swap.conf", out)
+                self.assertNotIn("REFUSE    cst/swap.conf", out)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_path_that_is_not_a_regular_file_refuses_and_apply_writes_nothing(self) -> None:
+        self._older_install()  # with the partition there: the migration's write case
+        os.makedirs(self.env.settings_path)
+        before = _tree(self.tmp)
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, self._fs())
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  REFUSE    cst/swap.conf                          not a regular file: apply stops\n", out)
+        rc, out, err, systemd = self._run_on(D.SwapCommand.APPLY, self._fs())
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.settings_path}: not a regular file: apply stops.\n")
+        self.assertNotIn("written:", out)
+        self.assertEqual((systemd.daemon_reloads, systemd.calls), (0, []))
+        self.assertEqual(_tree(self.tmp), before)
+        self.assertTrue(os.path.isdir(self.env.settings_path))
+
+    def test_a_settings_file_that_cannot_be_read_although_access_allows_it_refuses(self) -> None:
+        # Root, and the read still fails (EIO, a security policy): apply stops, nothing is migrated.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        before = _tree(self.tmp)
+        fs = _TextUnreadable(self._fs().block_links, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  REFUSE    cst/swap.conf                          cannot be read: apply stops\n", out)
+        fs = _TextUnreadable(self._fs().block_links, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_in_a_folder_this_user_may_not_search_is_not_taken_as_missing(self) -> None:
+        # /etc/cst at 0700 of root: lexists cannot see swap.conf there, and the migration must not run.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        closed = os.path.dirname(self.env.settings_path)
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                rc, out, err, _ = self._run_on(cmd, _ClosedFolder(self._fs().block_links, closed=closed))
+                self.assertEqual(rc, 0, err)
+                self.assertIn(
+                    "  ?         cst/swap.conf                          cannot be read as this user: on the host,"
+                    f" cst swap {cmd} --root\n",
+                    out,
+                )
+                self.assertNotIn("  write     cst/swap.conf", out)
+        self.assertEqual(_tree(self.tmp), before)
+
+    def test_a_settings_file_missing_from_a_folder_this_user_may_search_is_migrated(self) -> None:
+        # The folder is searchable (not readable: 0711): lexists is right, and the migration runs.
+        self._older_install()
+        folder = os.path.dirname(self.env.settings_path)
+        os.makedirs(folder, exist_ok=True)
+        fs = _FakeTempFileSystem(self._fs().block_links, unreadable_paths={folder})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  write     cst/swap.conf", out)
+
+    def test_a_settings_file_root_may_not_read_refuses_and_does_not_ask_for_root(self) -> None:
+        # Root, and access refuses (a security policy, a root-squashed mount): --root cannot help.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        self.env = dataclasses.replace(self.env, as_root=True)
+        before = _tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+                rc, out, err, _ = self._run_on(cmd, fs)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("  REFUSE    cst/swap.conf                          cannot be read: apply stops\n", out)
+                self.assertNotIn("--root", out)
+        fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.APPLY, fs)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {path}: cannot be read: apply stops.\n")
+        self.assertEqual(_tree(self.tmp), before)
+
     def test_as_a_user_the_fstab_line_says_an_older_cst_set_it_up(self) -> None:
         self._write(self.env.crypttab, OLD_CRYPTTAB + "\n")
         self._write(self.env.fstab, OLD_FSTAB + "\n")
@@ -1634,7 +1835,7 @@ class MemoryLowOverrideTest(_SwapScratch):
             with self.subTest(cmd=cmd):
                 rc, out, err = self._run(cmd, shown)
                 self.assertEqual(rc, 0, out + err)
-                self.assertIn("  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+                self.assertIn("  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
                 self.assertIn(note + "\n", out)
                 self.assertNotIn("  DIFF", out)
                 self.assertNotIn("machine.slice memory.low", out)
@@ -1651,19 +1852,52 @@ class MemoryLowOverrideTest(_SwapScratch):
             D.SwapCommand.STATUS, {"MemoryLow": str(8 * 2**30), "DropInPaths": f"{self.CST} {self.FOREIGN}"}
         )
         self.assertEqual(rc, 0)
-        self.assertIn("  over  machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  over    machine.slice MemoryLow      8.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertIn(f"  over: {self.FOREIGN} sets machine.slice's MemoryLow;", out)
 
     def test_diff_when_systemd_reports_cst_s_value_but_the_cgroup_disagrees(self) -> None:
         self._cgroup_low(2**30)
-        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST}
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
         rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
         self.assertEqual(rc, 0)
-        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  DIFF    machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
         self.assertNotIn("over", out.replace("over = ", ""))
         rc, out, err = self._run(D.SwapCommand.APPLY, shown)
         self.assertEqual(rc, 1)
         self.assertIn("one or more settings did not apply as expected", err)
+
+    def test_a_slice_systemd_reports_not_active_is_not_checked_whatever_its_cgroup_folder_holds(self) -> None:
+        # A cgroup folder an inactive machine.slice left behind reads memory.low 0: not the slice's floor.
+        self._cgroup_low(0)
+        for active in ("inactive", "failed", "deactivating", "a-word-systemd-adds-later"):
+            with self.subTest(active=active):
+                shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": active}
+                for cmd in (D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+                    rc, out, err = self._run(cmd, shown)
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertEqual(
+                        [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
+                        [
+                            "  -       machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"
+                        ],
+                    )
+                    self.assertNotIn("  DIFF", out)
+
+    def test_an_active_slice_s_cgroup_is_compared(self) -> None:
+        self._cgroup_low(0)
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
+        rc, out, _err = self._run(D.SwapCommand.STATUS, shown)
+        self.assertEqual(rc, 0)
+        self.assertIn("  DIFF    machine.slice memory.low     0 B   (desired 48.0 GiB)\n", out)
+
+    def test_a_runtime_value_is_an_over_row_also_on_a_slice_not_active(self) -> None:
+        # The over row comes first: a stopped slice does not hide a drop-in that wins over CST's.
+        self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
+        shown = {"MemoryLow": str(2**30), "DropInPaths": f"{self.CST} {self.RUNTIME}", "ActiveState": "inactive"}
+        rc, out, err = self._run(D.SwapCommand.STATUS, shown)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertNotIn("machine.slice memory.low", out)
 
     def test_without_a_running_vm_the_floor_is_not_checked(self) -> None:
         # No memory.low in machine.slice's cgroup (no VM running): the row's state is "-".
@@ -1672,15 +1906,34 @@ class MemoryLowOverrideTest(_SwapScratch):
         self.assertEqual(rc, 0)
         self.assertEqual(
             [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
-            ["  -     machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
+            ["  -       machine.slice memory.low     slice not active (no VM running)   (desired 48.0 GiB)"],
         )
+
+    def test_an_active_slice_without_memory_low_says_so(self) -> None:
+        # The memory controller is not on for the slice: the floor is not applied, and no VM is said to be
+        # missing. The row stays "-": apply does not fail where the controller is absent.
+        os.remove(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"))
+        shown = {"MemoryLow": str(48 * 2**30), "DropInPaths": self.CST, "ActiveState": "active"}
+        for cmd in (D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+            with self.subTest(cmd=cmd):
+                rc, out, err = self._run(cmd, shown)
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(
+                    [ln for ln in out.splitlines() if "machine.slice memory.low" in ln],
+                    [
+                        (
+                            "  -       machine.slice memory.low     slice active, no memory.low"
+                            " (memory controller off)   (desired 48.0 GiB)"
+                        )
+                    ],
+                )
 
     def test_without_an_answer_from_systemd_the_cgroup_is_compared(self) -> None:
         self._host_file(self.RUNTIME, "[Slice]\nMemoryLow=1G\n")
         self._cgroup_low(2**30)
         rc, out, _err = self._run(D.SwapCommand.STATUS, {})
         self.assertEqual(rc, 0)
-        self.assertIn("  DIFF  machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
+        self.assertIn("  DIFF    machine.slice memory.low     1.0 GiB   (desired 48.0 GiB)\n", out)
 
 
 class MemoryLowOverrideRuleTest(unittest.TestCase):
@@ -1778,6 +2031,15 @@ class _SysfsNoCreate(_FakeTempFileSystem):
         super().write_text_direct(path, content)
 
 
+class _SwapNeverActive(_FakeSystemd):
+    """systemctl start succeeds, and the swap device still does not show up in /proc/swaps."""
+
+    @override
+    def start(self, unit: str) -> CommandResult:
+        self.calls.append(("start", unit))
+        return CommandResult(0, "", "")
+
+
 class SwapApplyOutputTest(_SwapScratch):
     """apply prints each step as it runs and stops at a failing command with its message and exit status,
     as swap-setup.sh did under `set -Eeuo pipefail`."""
@@ -1816,6 +2078,39 @@ class SwapApplyOutputTest(_SwapScratch):
         self.assertIn("/dev/mapper/swap0: activating", before_start)
         self.assertIn("zram0: swapping off", seen["stop dev-zram0.swap"])
         self.assertEqual(out.getvalue().count("== zswap"), 1, "each line once")
+
+    def test_every_settings_row_and_verification_note_starts_its_text_in_one_column(self) -> None:
+        # The state column fits its longest word (MISSING): no row's label is pushed to the right of
+        # the others, and apply's notes under the rows (BAD, later) line up with them.
+        os.remove(os.path.join(self.env.zswap_params_dir, "shrinker_enabled"))  # a MISSING row
+        with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as f:
+            f.write("MemTotal:       97000000 kB\nMemAvailable:       1000 kB\n")  # zram0 cannot be swapped off
+        fs = self._fs()
+        service, _ = self._service(
+            systemd=_SwapNeverActive(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs), fs=fs
+        )
+        _rc, out, _err = self._apply(service)
+        rows = out.split("== verification\n", 1)[1].split("Done.", 1)[0]
+        lines = [ln for ln in rows.splitlines() if ln.startswith("  ") and not ln.startswith(("  over:", "  exp:"))]
+        words = {ln.split()[0] for ln in lines}
+        self.assertLessEqual({"ok", "MISSING", "BAD", "later"}, words, rows)
+        self.assertEqual({len(ln) - len(ln[2:].lstrip(" ").split(" ", 1)[1].lstrip(" ")) for ln in lines}, {10}, rows)
+        self.assertIn("  BAD     swap0 is not active as swap\n", rows)
+        self.assertIn(
+            "  later   zram0 still active as swap (gone after a reboot, or apply again under lower pressure)\n", rows
+        )
+
+    def test_the_settings_state_column_fits_every_state_word(self) -> None:
+        report = D.SettingsReport(
+            rows=tuple(SettingCheckRow(state, f"label-{state.name}", "live", "want") for state in D.SettingState),
+            exp_name="",
+            exp_key="",
+        )
+        out = io.StringIO()
+        render_settings(report, out=out, header=False)
+        lines = [ln for ln in out.getvalue().splitlines() if "label-" in ln]  # the exp row adds a note
+        self.assertEqual(len(lines), len(D.SettingState))
+        self.assertEqual({ln.index("label-") for ln in lines}, {10}, out.getvalue())
 
     def test_verification_has_no_blank_line_before_it(self) -> None:
         rc, out, err = self._apply(self._service()[0])
@@ -2161,8 +2456,65 @@ class SwapWiringTest(unittest.TestCase):
         env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
         runner = _ScriptedRunner({})  # never the real systemctl (nor flatpak-spawn --host from a toolbox)
         self.assertEqual(execute_cli(["plan"], env=env, out=out, err=io.StringIO(), runner=runner, ctx=ctx), 0)
-        self.assertRegex(out.getvalue(), r"DIFF  vm\.swappiness +77 ")
-        self.assertEqual(runner.calls, [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "machine.slice"]])
+        self.assertRegex(out.getvalue(), r"DIFF    vm\.swappiness +77 ")
+        self.assertEqual(
+            runner.calls,
+            [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "-p", "ActiveState", "machine.slice"]],
+        )
+
+    def _seam_output(self, cmd: RunCommand, env: Mapping[str, str]) -> str:
+        # cst swap's own wiring, as root on a scratch /etc that is not there: apply stops before any write.
+        tmp = tempfile.mkdtemp(prefix="swap-seam-")
+        self.addCleanup(shutil.rmtree, tmp)
+        ctx = _FakeContext(
+            container=False, root=True, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        env = {k: v.replace("TMP", tmp) for k, v in env.items()}
+        runner = _ScriptedRunner({})  # never the real systemctl
+        service = swap_wiring.build_service("cst swap", ctx, runner, None, fallback_root="/nowhere", env=env)
+        out = io.StringIO()
+        run_command(cmd, service, hint="", out=out, err=io.StringIO())
+        return out.getvalue().replace(tmp, "TMP")
+
+    def test_a_test_seam_in_the_environment_is_the_first_line_of_plan_status_and_apply(self) -> None:
+        both = {"CST_SWAP_PROC": "TMP/proc", "CST_SWAP_SYS": "TMP/sys"}
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS, D.SwapCommand.APPLY):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    self._seam_output(cmd, both).splitlines()[0],
+                    "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in TMP/proc, /sys in TMP/sys, not the kernel's;"
+                    " /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them",
+                )
+        self.assertEqual(
+            self._seam_output(D.SwapCommand.PLAN, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": "TMP/sys"}).splitlines()[0],
+            "test seam (CST_SWAP_SYS): /sys in TMP/sys, not the kernel's; /etc is the real one, and sysctl,"
+            " modprobe and zramctl run as PATH finds them",
+        )
+
+    def test_the_test_seam_line_comes_before_apply_s_first_error_on_one_pipe(self) -> None:
+        # stdout and stderr on one pipe: stdout's text reaches it only when flushed, stderr's at once.
+        tmp = tempfile.mkdtemp(prefix="swap-seam-")
+        self.addCleanup(shutil.rmtree, tmp)
+        ctx = _FakeContext(
+            container=False, root=True, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
+        service = swap_wiring.build_service(
+            "cst swap", ctx, _ScriptedRunner({}), None, fallback_root="/nowhere", env=env
+        )
+        pipe: list[str] = []
+        out, err = _BufferedToPipe(pipe), _UnbufferedToPipe(pipe)
+        self.assertEqual(run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err), 1)
+        self.assertGreaterEqual(len(pipe), 2, pipe)
+        self.assertTrue(pipe[0].startswith("test seam (CST_SWAP_PROC, CST_SWAP_SYS): "), pipe)
+        self.assertIn("ERROR: ", pipe[1])
+
+    def test_without_a_test_seam_there_is_no_such_line(self) -> None:
+        for env in ({}, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": ""}):
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.APPLY):
+                with self.subTest(env=env, cmd=cmd):
+                    out = self._seam_output(cmd, env)
+                    self.assertNotIn("test seam", out)
 
     def test_the_desired_files_come_from_this_checkout(self) -> None:
         ctx = _FakeContext(container=True, root=False, etc_dir="/x/etc", run_dir="/x/run")

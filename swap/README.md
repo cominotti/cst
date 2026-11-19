@@ -115,6 +115,11 @@ compressor later creates a second pool that lives until the old one drains).
   0644). Nothing is configured by default: without it `plan` and `status`
   show `REFUSE` for `cst/swap.conf` (and no crypttab, fstab or partition
   rows), `cst doctor` warns, and `apply` stops before it changes anything.
+  A `/etc/cst/swap.conf` that is there but cannot be read is never treated
+  as missing: as a user who may not read it (its mode or owner, or a folder
+  above it the user may not enter) `plan` and `status` show `?` and ask for
+  `--root`; one that is not a regular file, or that root cannot read, is
+  `REFUSE`, and `apply` stops before it changes anything.
   On sophia it reads:
 
   ```
@@ -157,6 +162,8 @@ left, the floor is ignored, so it cannot starve the host. The cgroup
 filesystem is mounted with `memory_recursiveprot`, so the protection reaches
 the VM's own scope without any libvirt setting. Raise the value in
 `units/machine.slice.d-10-swap-memory-low.conf` if the VM grows.
+`apply`'s `daemon-reload` puts the new value into the running slice's
+`memory.low` (no VM restart), and its verification checks it.
 
 The drop-in is `machine.slice.d/10-swap-memory-low.conf`. The `cpu` module
 has its own drop-in in the same folder, `10-cpu-setup.conf`, with
@@ -351,7 +358,12 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
 **files** and **runtime**: the `plan` view (section 4).
 
 **live settings vs desired**: each zswap parameter, sysctl and the VM's
-`memory.low`, live and desired.
+`memory.low`, live and desired. `-` for `machine.slice memory.low` means
+systemd reports the slice not active (no VM running): a cgroup folder left
+behind is not read as the slice's. When systemd cannot be asked, a missing
+`memory.low` means the same. A slice systemd reports active whose cgroup has no
+`memory.low` (the memory controller is not on for it) is `-` too, with
+`slice active, no memory.low`: the floor is then not applied.
 
 **zswap pool**:
 
@@ -496,7 +508,7 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | `domain.py` | pure swap domain model, the partition (`SwapHardwareSpec`, read from `/etc/cst/swap.conf`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
 | `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens); the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
-| `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters. `CST_SWAP_PROC` and `CST_SWAP_SYS` move where `/proc` and `/sys` are read and written (the cgroup tree stays `/sys/fs/cgroup`): for the tier 1 E2E test only, whose container has a read-only `/proc/sys` and `/sys` of the host's kernel |
+| `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters. `CST_SWAP_PROC` and `CST_SWAP_SYS` move where `/proc` and `/sys` are read and written (the cgroup tree stays `/sys/fs/cgroup`): for the tier 1 E2E test only, whose container has a read-only `/proc/sys` and `/sys` of the host's kernel. When either is set, `plan`, `status` and `apply` say so on their first line (`test seam (...)`), so a stale export in a root shell cannot pass for the kernel's state; the line also says that `/etc` is the real one and that `apply`'s `sysctl`, `modprobe` and `zramctl` are the ones on `PATH` (the tier 1 test puts stand-ins there) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 
 The swap partition's PARTUUID, device name and expected size are in

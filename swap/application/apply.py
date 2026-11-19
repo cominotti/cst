@@ -17,9 +17,11 @@ from swap.application.reports import (
     SwapReports,
 )
 from swap.domain import (
+    SETTING_STATE_WIDTH,
     WSF_EXPERIMENT,
     ApplyEvent,
     ApplyEventKind,
+    SettingState,
     SwapApplyResult,
     SwapHardwareSpec,
     SwapSpecState,
@@ -437,10 +439,11 @@ class SwapApplicationService(SwapReports):
         swapon = self._system.swapon_show()
         verify_notes: list[str] = []
         if not active_swap0:
-            verify_notes.append(f"  BAD   {spec.name} is not active as swap")
+            verify_notes.append(f"  {SettingState.BAD:<{SETTING_STATE_WIDTH}} {spec.name} is not active as swap")
         if active_zram0:
             verify_notes.append(
-                "  later zram0 still active as swap (gone after a reboot, or apply again under lower pressure)"
+                f"  {SettingState.LATER:<{SETTING_STATE_WIDTH}} zram0 still active as swap"
+                " (gone after a reboot, or apply again under lower pressure)"
             )
         verify_error = f"{env.prog}: ERROR: one or more settings did not apply as expected (see above)." if fail else ""
         return SwapApplyResult(

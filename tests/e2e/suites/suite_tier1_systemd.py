@@ -175,10 +175,28 @@ DROPIN_DIR=/etc/systemd/system/machine.slice.d
 REC=/var/lib/cst/installed.json
 export PATH="$W/bin:$PATH" CST_SWAP_PROC="$W/proc" CST_SWAP_SYS="$W/sys"
 
+# swap_setup works in three parts, and swap_cleanup (the caller's EXIT trap, set before it) undoes
+# only what the parts that ran changed: (1) the checks that can fail, before anything outside $W
+# changes; (2) the originals saved into $W/orig, $W/orig/.saved last; (3) the changes. Without
+# .saved, swap_cleanup removes $W and nothing else.
 swap_setup() {
+    cpu_dropin_added=""
     rm -rf "$W"
     mkdir -p "$W/bin" "$W/orig" "$W/proc/sys/vm" "$W/proc/pressure" "$W/sys/module/zswap/parameters" \
         "$W/sys/class/block/e2e-swap0" "$W/sys/class/block/e2e-dm0/dm"
+    # 1. The checks.
+    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
+    [[ ! -e /etc/cst/swap.conf ]]
+    # 2. What swap_cleanup puts back.
+    for f in /etc/crypttab /etc/fstab "$REC"; do
+        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
+    done
+    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
+        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
+    fi
+    systemctl is-active machine.slice >"$W/orig/slice-state" || true
+    : >"$W/orig/.saved"
+    # 3. The changes.
     printf 'name         : zstd\ndriver       : zstd-generic\n' >"$W/proc/crypto"
     printf 'MemTotal:        8000000 kB\nMemAvailable:    6000000 kB\nZswap:                 0 kB\nZswapped:              0 kB\n' >"$W/proc/meminfo"
     printf 'zswpout 0\nzswpin 0\nzswpwb 0\npswpout 0\npswpin 0\n' >"$W/proc/vmstat"
@@ -192,7 +210,6 @@ swap_setup() {
     echo $((SIZE / 512)) >"$W/sys/class/block/e2e-swap0/size"
     echo swap0 >"$W/sys/class/block/e2e-dm0/dm/name"
     mkdir -p /dev/disk/by-partuuid /dev/mapper
-    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
     mknod /dev/e2e-swap0 b 7 1040
     mknod /dev/e2e-dm0 b 7 1041
     ln -s ../../e2e-swap0 "/dev/disk/by-partuuid/$PU"
@@ -221,23 +238,14 @@ EOF
     cp "$W/bin/modprobe" "$W/bin/zramctl"
     printf '#!/bin/bash\necho "NAME TYPE SIZE USED PRIO"\necho "/dev/e2e-dm0 partition 1024M 2M -2"\n' >"$W/bin/swapon"
     chmod 0755 "$W"/bin/*
-    for f in /etc/crypttab /etc/fstab "$REC"; do
-        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
-    done
-    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
-        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
-    fi
-    [[ ! -e /etc/cst/swap.conf ]]
-    systemctl is-active machine.slice >"$W/orig/slice-state" || true
-    # Stopped while apply writes the drop-in: a daemon-reload does not put a new MemoryLow into the
-    # memory.low of a slice that is already running (a start does), and apply checks memory.low.
+    # Stopped, so that every swap test starts from the same machine.slice (apply's daemon-reload puts
+    # a new MemoryLow into a running slice's memory.low too: test_88 step 7).
     if [[ "$(cat "$W/orig/slice-state")" == active ]]; then systemctl stop machine.slice; fi
-    # A cgroup folder an inactive machine.slice left in the container (memory.low 0 there would be
-    # read as the slice's): removed when it is empty, as systemd removes it at a stop.
+    # A cgroup folder an inactive machine.slice left in the container: removed when it is empty, as
+    # systemd removes it at a stop, so every swap test starts from the same tree (test_88 plants one).
     if [[ -d /sys/fs/cgroup/machine.slice ]] && ! systemctl -q is-active machine.slice; then
         rmdir /sys/fs/cgroup/machine.slice || { slice_facts; exit 1; }
     fi
-    cpu_dropin_added=""
     if [[ ! -e "$DROPIN_DIR/10-cpu-setup.conf" ]]; then
         mkdir -p "$DROPIN_DIR"
         cp /opt/cst-rw/cpu/units/machine.slice.d-10-cpu-setup.conf "$DROPIN_DIR/10-cpu-setup.conf"
@@ -247,6 +255,10 @@ EOF
 
 swap_cleanup() {
     local f
+    if [[ ! -e "$W/orig/.saved" ]]; then
+        rm -rf "$W"
+        return 0
+    fi
     for f in crypttab fstab; do
         rm -f "/etc/$f.pre-swap-config.bak"
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
@@ -263,6 +275,8 @@ swap_cleanup() {
     if [[ -n "${cpu_dropin_added:-}" ]]; then rm -f "$DROPIN_DIR/10-cpu-setup.conf"; fi
     rmdir "$DROPIN_DIR" 2>/dev/null || true
     rm -f /dev/mapper/swap0 "/dev/disk/by-partuuid/$PU" /dev/e2e-swap0 /dev/e2e-dm0
+    systemctl stop e2e-swap-vm.service 2>/dev/null || true
+    rm -rf /var/tmp/e2e-swap-cst40g
     if [[ "$(cat "$W/orig/slice-state" 2>/dev/null)" == active ]]; then
         systemctl start machine.slice || true
     else
@@ -298,13 +312,13 @@ check_runtime_over() {
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "no runtime MemoryLow"
     swap_run status
     [[ $rc == 0 ]] || fail "status with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "status over row"
     grep -qF "  over: $rt sets machine.slice's MemoryLow" <<<"$out" || fail "status over note"
     [[ "$out" != *"  DIFF "* ]] || fail "status DIFF with a runtime MemoryLow"
     s="$(snap)"
     swap_run apply
     [[ $rc == 0 ]] || fail "apply with a runtime MemoryLow"
-    grep -qF "  over  machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
+    grep -qF "  over    machine.slice MemoryLow      1.0 GiB   (desired 48.0 GiB)" <<<"$out" || fail "apply over row"
     [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "apply with a runtime MemoryLow wrote"
     [[ "$(snap)" == "$s" ]] || fail "apply with a runtime MemoryLow changed something"
     [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 && -f "$rt" ]] || fail "apply touched the runtime value"
@@ -1271,13 +1285,15 @@ EOF
         scratch partition; apply writes crypttab, fstab, the three files, the zram mask and
         the install record; the real systemd merges swap's 10-swap-memory-low.conf with
         cpu's 10-cpu-setup.conf on machine.slice; status has nothing to do; a second apply
-        changes nothing; a MemoryLow set at run time wins over CST's after a daemon-reload."""
+        changes nothing; with a VM stand-in running, a changed MemoryLow reaches the running
+        slice through apply's daemon-reload; a MemoryLow set at run time wins over CST's after
+        a daemon-reload."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1298,13 +1314,24 @@ printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.con
 s1="$(snap)"
 swap_run plan
 [[ $rc == 0 ]] || fail "plan"
+[[ "$(head -n 1 <<<"$out")" == "test seam (CST_SWAP_PROC, CST_SWAP_SYS): /proc in $W/proc, /sys in $W/sys, not the kernel's; /etc is the real one, and sysctl, modprobe and zramctl run as PATH finds them" ]] || fail "plan's test seam line"
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "settings row"
 grep -qF "  write     crypttab: swap0 line" <<<"$out" || fail "crypttab row"
 grep -qF "  ok        partition 0e2e5a5a...                  /dev/e2e-swap0, $SIZE bytes as expected" <<<"$out" || fail "partition row"
 grep -qF "  later     swap0" <<<"$out" || fail "swap0 row"
 [[ "$(snap)" == "$s1" ]] || fail "plan changed something"
+# A cgroup folder of machine.slice while systemd reports the slice inactive (as one left behind; its
+# memory.low reads 0): plan and apply do not read it as the slice's floor.
+! systemctl -q is-active machine.slice || fail "machine.slice active before apply"
+mkdir /sys/fs/cgroup/machine.slice || fail "cannot plant a cgroup folder for the inactive machine.slice"
+# Without a memory.low there (no memory controller) the step could not tell this folder from none.
+[[ "$(cat /sys/fs/cgroup/machine.slice/memory.low 2>&1)" == 0 ]] || fail "the planted cgroup folder's memory.low is not 0"
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a stale cgroup folder"
+grep -qF "  -       machine.slice memory.low     slice not active (no VM running)" <<<"$out" || fail "plan, stale cgroup folder"
+[[ "$out" != *"  DIFF    machine.slice"* ]] || fail "plan DIFF with a stale cgroup folder"
 
-# 3. apply.
+# 3. apply (the stale cgroup folder still there).
 swap_run apply
 [[ $rc == 0 ]] || fail "apply"
 grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
@@ -1328,6 +1355,7 @@ assert want <= set(rec["files"]), sorted(rec["files"])
 assert d + "50-memory-low.conf" not in rec["files"]
 assert rec["components"]["swap:core"] == "done", rec["components"]
 PY
+rmdir /sys/fs/cgroup/machine.slice || fail "the stale cgroup folder"
 
 # 4. The real systemd merges both 10- drop-ins of machine.slice, and a start puts the floor
 # into the cgroup (where the memory controller is there).
@@ -1356,7 +1384,31 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && "$out" != *"masked:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s2" ]] || fail "second apply changed something"
 
-# 7. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
+# 7. A changed MemoryLow reaches a running slice through apply's daemon-reload alone: a stand-in VM
+# in machine.slice, and a copy of the checkout whose drop-in says 40G (outside $W, which snap hashes).
+systemd-run --quiet --unit=e2e-swap-vm --slice=machine.slice sleep 600
+systemctl -q is-active e2e-swap-vm || fail "the stand-in VM"
+c40=/var/tmp/e2e-swap-cst40g
+rm -rf "$c40"
+cp -a /opt/cst-rw "$c40"
+sed -i 's/^MemoryLow=48G$/MemoryLow=40G/' "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+grep -qx MemoryLow=40G "$c40/swap/units/machine.slice.d-10-swap-memory-low.conf"
+for want in 42949672960 51539607552; do
+    cst_real="$CST"
+    if [[ $want == 42949672960 ]]; then CST="$c40/cst"; fi
+    swap_run apply
+    CST="$cst_real"
+    [[ $rc == 0 && -z "$err" ]] || fail "apply of MemoryLow $want with a VM running"
+    grep -qF "written:   $DROPIN_DIR/10-swap-memory-low.conf" <<<"$out" || fail "apply of $want: drop-in not written"
+    [[ "$out" != *"  DIFF "* ]] || fail "apply of $want: DIFF"
+    systemctl -q is-active e2e-swap-vm || fail "apply of $want stopped the stand-in VM"
+    [[ "$(systemctl show -P MemoryLow machine.slice)" == "$want" ]] || fail "apply of $want: MemoryLow"
+    [[ -e "$low" && "$(cat "$low")" == "$want" ]] || fail "apply of $want: the running slice's memory.low"
+done
+systemctl stop e2e-swap-vm
+rm -rf "$c40"
+
+# 8. A MemoryLow set at run time wins over CST's 48G after a daemon-reload.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 1073741824 ]]
@@ -1379,13 +1431,14 @@ echo E2E-OK
         changes nothing; as the user it says crypttab needs root; doctor warns. apply writes
         /etc/cst/swap.conf from the crypttab line and the partition, removes the old
         drop-in and its record line; a runtime MemoryLow then wins; a second apply changes
-        nothing; doctor is ok."""
+        nothing; doctor is ok; a swap.conf the user cannot read, or a folder in its place, is
+        never taken as missing."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1426,7 +1479,8 @@ systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]] || fail "old name: runtime value won"
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
-# set-property wrote 1G into the cgroup itself; a restart of the slice puts the 48G back there.
+# A stop and a start give the steps below a slice started with the 48G (the reload already put it
+# back into memory.low).
 systemctl stop machine.slice
 systemctl start machine.slice
 
@@ -1486,6 +1540,82 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s1" ]] || fail "second apply changed something"
 
+# A record line of 50-memory-low.conf whose file is gone, then one whose file is not CST's: apply
+# drops the line and leaves the file as it is; doctor then asks for nothing.
+record_old_name() {
+    python3 -I - "$REC" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    rec = json.load(f)
+d = "/etc/systemd/system/machine.slice.d/"
+entry = dict(rec["files"][d + "10-swap-memory-low.conf"])
+entry["src"] = "swap/units/machine.slice.d-50-memory-low.conf"
+rec["files"][d + "50-memory-low.conf"] = entry
+with open(path, "w") as f:
+    json.dump(rec, f, indent=2)
+PY
+}
+old_name_recorded() {
+    python3 -I -c 'import json, sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["files"] else 1)' "$REC" "$old"
+}
+record_old_name
+old_name_recorded || fail "the record line was not planted"
+[[ ! -e "$old" ]]
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line without its file"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line without its file"
+! old_name_recorded || fail "apply kept the record line of a file that is gone"
+[[ ! -e "$old" && "$out" != *"written:"* ]] || fail "apply wrote with a record line without its file"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line without its file"; }
+printf '[Slice]\nMemoryLow=48G\n' >"$old"
+systemctl daemon-reload
+record_old_name
+foreign="$(sha256sum "$old")"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line of a file not CST's"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line of a file not CST's"
+! old_name_recorded || fail "apply kept the record line of a file not CST's"
+[[ "$(sha256sum "$old")" == "$foreign" && "$out" != *"removed:"* ]] || fail "apply touched a file not CST's"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line of a file not CST's"; }
+rm "$old"
+systemctl daemon-reload
+
+# An /etc/cst/swap.conf that is there but cannot be read is never taken as missing: as the user (mode
+# 0600) plan asks for --root and changes nothing; with a folder there, apply stops before any change.
+chmod 0600 /etc/cst/swap.conf
+s_unread="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, swap.conf 0600"; }
+[[ "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan would write swap.conf"; }
+swap_run plan
+grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
+[[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
+chmod 0644 /etc/cst/swap.conf
+# A folder above it the user may not enter (lexists cannot see the file there): the same "?" row, and
+# swap.conf is not taken as missing (no migration from crypttab).
+cst_mode="$(stat -c %a /etc/cst)"
+chmod 0700 /etc/cst
+s_closed="$(snap)"
+user_plan="$(as_user "$CST" swap plan)"
+grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, /etc/cst 0700"; }
+[[ "$user_plan" != *"not written yet"* && "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan took swap.conf as missing"; }
+[[ "$(snap)" == "$s_closed" ]] || fail "plan with /etc/cst 0700 changed something"
+chmod "$cst_mode" /etc/cst
+mv /etc/cst/swap.conf "$W/swap.conf.aside"
+mkdir /etc/cst/swap.conf
+s_dir="$(snap)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder at /etc/cst/swap.conf"
+grep -qF "ERROR: /etc/cst/swap.conf: not a regular file: apply stops." <<<"$err" || fail "apply message, a folder at swap.conf"
+[[ "$out" != *"written:"* && "$(snap)" == "$s_dir" ]] || fail "apply with a folder at swap.conf changed something"
+rmdir /etc/cst/swap.conf
+mv "$W/swap.conf.aside" /etc/cst/swap.conf
+
 # Now a MemoryLow set at run time wins the reload, and status and apply leave it.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
@@ -1539,6 +1669,54 @@ echo E2E-OK
             [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 51539607552 ]]
             """,
         )
+
+    def test_125_swap_e2e_setup_that_fails_before_saving_leaves_etc_alone(self) -> None:
+        """The swap E2E harness itself (SWAP_E2E_LIB, as test_88 and test_90 use it: the cleanup
+        trap set before swap_setup). A swap_setup whose own check fails, here on an
+        /etc/cst/swap.conf already there, stops before it saves or changes anything, and the
+        trap then removes only its scratch folder: swap.conf, crypttab, fstab, the install
+        record and machine.slice's state stay as they were."""
+        state = r"""
+            for f in /etc/cst/swap.conf /etc/crypttab /etc/fstab /var/lib/cst/installed.json; do
+                if [[ -e "$f" ]]; then sha256sum "$f"; else echo "absent $f"; fi
+            done
+            echo "machine.slice $(systemctl is-active machine.slice || true)"
+            if [[ -e /var/tmp/e2e-swap ]]; then echo "scratch folder there"; fi
+            """
+        planted = "/var/tmp/e2e-swap125-planted"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            if [[ -f "$p/files" ]]; then xargs -r rm -f <"$p/files"; fi
+            if [[ -f "$p/dirs" ]]; then xargs -r rmdir <"$p/dirs" || true; fi
+            rm -rf "$p"
+            """,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            [[ ! -e /etc/cst/swap.conf && ! -e /var/tmp/e2e-swap ]]
+            rm -rf "$p"
+            mkdir -p "$p"
+            for f in /etc/crypttab /etc/fstab; do
+                if [[ ! -e "$f" ]]; then echo "$f" >>"$p/files"; printf '# e2e test_125\n' >"$f"; fi
+            done
+            if [[ ! -d /etc/cst ]]; then echo /etc/cst >>"$p/dirs"; mkdir /etc/cst; fi
+            echo /etc/cst/swap.conf >>"$p/files"
+            printf 'SWAP_PARTUUID=0e2e5a5a-1111-4222-8333-944455556666\nSWAP_SIZE_BYTES=1073741824\n' >/etc/cst/swap.conf
+            """,
+        )
+        before = exec_bash(self.SYSTEMD_CONTAINER, state).stdout
+        self.assertNotIn("scratch folder there", before)
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER, SWAP_E2E_LIB + "trap swap_cleanup EXIT\nswap_setup\necho SETUP-RAN\n", check=False
+        )
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("SETUP-RAN", r.stdout)
+        self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
 
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real

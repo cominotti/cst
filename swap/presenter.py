@@ -18,6 +18,7 @@ from swap.domain import (
     CgroupSwapRow,
     ConfigSectionReport,
     DebugSectionReport,
+    SETTING_STATE_WIDTH,
     SettingState,
     SettingsReport,
     SwapApplyResult,
@@ -58,7 +59,7 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
         _section("live settings vs desired (from swap/ in CST)", out)
     for row in report.rows:
         extra = "" if row.state == SettingState.OK or not row.want else f"   (desired {row.want})"
-        print(f"  {row.state:<5} {row.label:<28} {row.live}{extra}", file=out)
+        print(f"  {row.state:<{SETTING_STATE_WIDTH}} {row.label:<28} {row.live}{extra}", file=out)
     if report.override_source:
         print(
             f"  over: {report.override_source} sets machine.slice's MemoryLow; systemd applies it after CST's"
@@ -272,6 +273,8 @@ def run_command(cmd: RunCommand, service: SwapApplicationService, *, hint: str, 
     """plan, status or apply. apply prints each step as it runs; a failing command stops it with
     that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
     try:
+        if note := service.test_seam_note:
+            print(note, file=out, flush=True)  # first on a pipe too, as apply's events (print_event)
         match cmd:
             case SwapCommand.PLAN:
                 return render_plan(service.plan_report(), out=out)
