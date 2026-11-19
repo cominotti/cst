@@ -963,7 +963,9 @@ class AutoTest(Scratch):
         os.makedirs(os.path.join(self.home, self.STAMP))
         rc, out = self.run_main("auto", "off")
         self.assertEqual(rc, 1, out)
-        self.assertIn("cst-toolchains: cannot remove ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer", out)
+        self.assertIn(
+            "cst-toolchains: cannot remove ~/.local/share/systemd/timers/stamp-cst-toolchains-prune.timer", out
+        )
         self.assertFalse(os.path.lexists(link))
         self.assertTrue(self.exists(".config/cst/toolchains-auto.off"))
         self.assertTrue(os.path.isdir(os.path.join(self.home, self.STAMP)))

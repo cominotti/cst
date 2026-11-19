@@ -68,13 +68,17 @@ class AutoTimer:
         stamp_ok = True
         if (timer, True) in found:
             self.units.disable_timer(OLD_TIMER)
-            stamp_ok = self.forget_stamp(OLD_TIMER, f"the last run of the earlier `cst btrfs cargo-gc` timer, {CLEAN_LEFT}")
+            stamp_ok = self.forget_stamp(
+                OLD_TIMER, f"the last run of the earlier `cst btrfs cargo-gc` timer, {CLEAN_LEFT}"
+            )
         elif timer not in (path for path, _ in found) and self.files.present(
             os.path.join(home, timer_stamp_rel(OLD_TIMER))
         ):
             # Its stamp says it ran: it may still run although its file is gone.
             self.stop_orphan_timer(OLD_TIMER)
-            stamp_ok = self.forget_stamp(OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone")
+            stamp_ok = self.forget_stamp(
+                OLD_TIMER, "the last run of the earlier `cst btrfs cargo-gc` timer, whose file was gone"
+            )
         if not found:
             return stamp_ok
         reload = False
