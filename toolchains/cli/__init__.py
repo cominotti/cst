@@ -8,6 +8,7 @@ The program toolchains/cst-toolchains only hands its arguments to main().
 from __future__ import annotations
 
 import sys
+from typing import assert_never
 
 from collections.abc import Sequence
 
@@ -44,15 +45,21 @@ def main(argv: Sequence[str], doc: str, entry_file: str, *, parts: wiring.Parts 
             status.cmd_status(s, a["brief"])
             return 0
         assert action is not None
-        if cmd == ToolchainsCommand.CONFIG:
-            return config.cmd_config(s, action, lean=a["lean"], sccache=a["sccache"])
-        if cmd == ToolchainsCommand.PRUNE and action == ToolchainsAction.PLAN:
-            return prune.cmd_prune(s, ToolchainsAction.PLAN, a["targets"])
-        if cmd == ToolchainsCommand.PRUNE:
-            return s.lock.run(lambda: prune.cmd_prune(s, ToolchainsAction.APPLY, a["targets"]))
-        if action == ToolchainsAction.ON:
-            return s.lock.run(lambda: auto.cmd_auto_on(s, unless_off=a["unless_off"]), busy_refused=True)
-        return s.lock.run(lambda: auto.cmd_auto_off(s), busy_refused=True)
+        match cmd:
+            case ToolchainsCommand.CONFIG:
+                return config.cmd_config(s, action, lean=a["lean"], sccache=a["sccache"])
+            case ToolchainsCommand.PRUNE if action == ToolchainsAction.PLAN:
+                return prune.cmd_prune(s, ToolchainsAction.PLAN, a["targets"])
+            case ToolchainsCommand.PRUNE:
+                return s.lock.run(lambda: prune.cmd_prune(s, ToolchainsAction.APPLY, a["targets"]))
+            case ToolchainsCommand.AUTO if action == ToolchainsAction.ON:
+                return s.lock.run(lambda: auto.cmd_auto_on(s, unless_off=a["unless_off"]), busy_refused=True)
+            case ToolchainsCommand.AUTO:
+                return s.lock.run(lambda: auto.cmd_auto_off(s), busy_refused=True)
+            case ToolchainsCommand.HELP:  # answered before the session
+                return 0
+            case _:
+                assert_never(cmd)
     except Usage as e:
         print(f"{NAME}: {e}\n{USAGE}", file=sys.stderr)
         return 2

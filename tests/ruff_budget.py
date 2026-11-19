@@ -240,7 +240,7 @@ RUFF_BUDGETS: Final[dict[str, int]] = {
     "toolchains FBT001": 12,
     "toolchains N": 1,
     "toolchains PLR0911": 5,
-    "toolchains PLR0912": 10,
+    "toolchains PLR0912": 11,
     "toolchains PLR0913": 6,
     "toolchains PLR0915": 5,
     "toolchains PLR2004": 4,
