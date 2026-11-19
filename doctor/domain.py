@@ -426,7 +426,7 @@ def parse_alert_text(data: str) -> tuple[str, str, int] | None:
             break
         k, _, v = line.partition("=")
         head[k] = v
-    if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or not head.get("title", ""):
+    if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or head.get("title", "") == "":
         return None
     last = int(head["last"]) if head.get("last", "").isdigit() else 0
     return head["urgency"], head["title"][:200], last

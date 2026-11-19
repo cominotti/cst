@@ -55,8 +55,8 @@ class PythonUv(BaseTarget[UvPolicy]):
         """'' when an automatic run is due, else why not."""
         last = self.machine.state.read(self.SPEC.id)
         iv = self.required_policy().interval
-        t = last.get("time") if last else None
-        if self.named or not iv or not last or not isinstance(t, (int, float)):
+        t = last.get("time") if last is not None else None
+        if self.named or not iv or last is None or not isinstance(t, (int, float)):
             return ""
         if self.now - t < iv:
             return f"last run {ago(self.now - t)} ago (INTERVAL {span(iv)})"

@@ -294,6 +294,10 @@ repository:
     value as before;
   - or, better where it is cheap, the producer returns one absent form.
 
+  ruff's RUF056 refuses a `.get()` with a falsy default as the test itself
+  where it sees a dict (`if not d.get(k, ""):`): compare instead
+  (`d.get(k, "") == ""`, `len(d.get(k, [])) > 0`), which satisfies both.
+
   The rule does not see value forms: `x or DEFAULT` and `x and y` as a
   value, `bool(x)`, or a value typed `Any`. Never use them to get past
   it, and no ignore comment, no `cast`, no `TypeIs[str]` "has text" helper

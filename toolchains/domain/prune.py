@@ -235,7 +235,7 @@ def last_run_text(tid: str, s: SavedRun) -> str:
 def saved_run_text(tid: str, saved: SavedRun | None) -> str:
     """status's last-prune text of target TID's saved summary: "none recorded" for no summary, or one
     this version cannot read (keys missing, a value that is no number)."""
-    if not saved:
+    if saved is None or len(saved) == 0:
         return "none recorded"
     try:
         return last_run_text(tid, saved)
