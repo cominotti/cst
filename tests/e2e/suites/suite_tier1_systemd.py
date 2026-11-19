@@ -4527,6 +4527,63 @@ EOF
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
+        """The real game profile, on for tester with a last line of game.state cut short (no newline,
+        "existed 1"), then a box next to the game (a slice of the user manager's own, made by
+        systemd-run --user): the tick's record of the box removes the cut line first and names it, the
+        box's record is a whole last line, and 'off' undoes the box (its override gone) and leaves
+        machine.slice's IOWeight at its own value, not 1."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e129-box.service 2>/dev/null || true
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-129-conf.bak ]]; then mv /tmp/e2e-129-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-129-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            printf 'prop sys machine.slice IOWeight existed 1' >>"$st"   # cut short
+            n=$(( $(wc -l <"$st") + 1 ))
+            systemd-run --user -M tester@ --quiet --slice=e2e129.slice --unit=e2e129-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e129.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            got=$(gp tick)
+            grep -qF "$st line $n: a record cut short (its change was never made), removed before the next record: prop sys machine.slice IOWeight existed 1" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            last=$(tail -n 1 "$st")
+            [[ "$last" =~ ^prop\ usr\ e2e129\.slice\ [A-Za-z]+\ new\ -$ ]] || { echo "last record: $last" >&2; exit 1; }
+            if grep -qF 'IOWeight existed 1' "$st"; then echo "the cut line is still there" >&2; exit 1; fi
+            override=/run/user/$uid/systemd/user.control/e2e129.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            gp off
+            test ! -e "$override" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]] || { echo "IOWeight: not $io" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e129-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;

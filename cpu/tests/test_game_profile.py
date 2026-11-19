@@ -31,7 +31,16 @@ sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
 from cpu.game.adapters import GameProfile, load_profile, read_settings, user_name
-from cpu.game.domain import GamePaths, GameSettings, ctl_file, escapes_in_state, expand_cpus, records, game_settings
+from cpu.game.domain import (
+    GamePaths,
+    GameSettings,
+    ctl_file,
+    cut_tail,
+    escapes_in_state,
+    expand_cpus,
+    records,
+    game_settings,
+)
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 
@@ -243,6 +252,12 @@ class PureRulesTest(unittest.TestCase):
                 "/run/user/1000/systemd/user.control/flatpak-session-helper.service.d/50-AllowedCPUs.conf",
             ],
         )
+
+    def test_a_last_line_cut_short(self) -> None:
+        self.assertIsNone(cut_tail(b""))
+        self.assertIsNone(cut_tail(b"a\n"))
+        self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
+        self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
@@ -650,6 +665,57 @@ class UnreadableRecordTest(GameProfileCase):
         # The same line with its newline is a record, undone as before.
         self.assertEqual(records("epp 0 performance\nepp 1 balance"), [("epp", "0", "performance")])
         self.assertEqual(records("epp 0 performance\nepp 1 balance\n")[1], ("epp", "1", "balance"))
+
+    CUT = "prop sys machine.slice IOWeight existed 1"
+
+    def cut_and_box(self, *paths: str) -> None:
+        """After 'on': a record cut short at the end of each path, and a new box next to the game."""
+        self.run_profile("on")
+        self.write(self.manual, "")
+        for path in paths:
+            with open(path, "a") as f:
+                f.write(self.CUT)
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+
+    def test_a_record_after_a_line_cut_short_removes_that_line_first(self) -> None:
+        # Glued onto the cut line, the box's record would make it a whole record: 'off' would set
+        # IOWeight=1 (or worse), and the box's override would stay.
+        self.cut_and_box(self.state, self.intended)
+        n_state, n_intended = (len(self.read(p).split("\n")) for p in (self.state, self.intended))
+        out, _ = self.run_profile("tick")
+        self.assertIn(
+            f"<4>game-profile: {self.state} line {n_state}: a record cut short (its change was never made),"
+            f" removed before the next record: {self.CUT}\n",
+            out,
+        )
+        self.assertIn(
+            f"<4>game-profile: {self.intended} line {n_intended}: a record cut short (never read by the drift"
+            f" repair), removed before the next record: {self.CUT}\n",
+            out,
+        )
+        state, intended = self.read(self.state), self.read(self.intended)
+        self.assertNotIn(self.CUT, state + intended)
+        self.assertTrue(state.endswith("\nprop usr e2e.slice CPUWeight new -\n"), state)
+        self.assertTrue(intended.endswith("\nprop usr e2e.slice CPUWeight idle idle\n"), intended)
+        self.assertTrue(os.path.exists(self.ctrl("usr", "e2e.slice", "CPUWeight")))
+        out, actions = self.run_profile("off")
+        self.assertEqual([a for a in actions if "IOWeight=1" in a], [])
+        self.assertFalse(os.path.exists(self.ctrl("usr", "e2e.slice", "CPUWeight")))
+
+    def test_a_line_cut_short_that_cannot_be_removed_stops_the_change(self) -> None:
+        self.cut_and_box(self.state)
+        err = io.StringIO()
+        with (
+            unittest.mock.patch(
+                "cpu.game.adapters.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            out, actions = self.run_profile("tick")
+        self.assertIn(f"{self.state}: Read-only file system\n", err.getvalue())
+        self.assertIn(f"e2e.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n", out)
+        self.assertEqual([a for a in self.sets(actions) if "e2e.slice" in a], [])
+        self.assertTrue(self.read(self.state).endswith(f"\n{self.CUT}"))
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")

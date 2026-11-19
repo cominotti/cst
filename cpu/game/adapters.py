@@ -34,6 +34,7 @@ from cpu.game.domain import (
     Record,
     cpuset_in,
     ctl_file,
+    cut_tail,
     drift_lines,
     drifted,
     dropin_text,
@@ -210,13 +211,37 @@ class GameProfile:
     # ---- the state files --------------------------------------------------------------------
     def _append(self, path: str, *fields: str) -> bool:
         """One record at the end of path, on disk before the change it describes is made. False when it
-        cannot be written (a full /run): said on stderr, as bash's failed redirection said it."""
+        cannot be written (a full /run): said on stderr, as bash's failed redirection said it. A last
+        line cut short is removed first (_drop_cut_tail)."""
+        if not self._drop_cut_tail(path):
+            return False
         try:
             with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:
                 fh.write(record_line(*fields))
         except OSError as e:
             print(f"{path}: {e.strerror or e}", file=sys.stderr, flush=True)
             return False
+        return True
+
+    def _drop_cut_tail(self, path: str) -> bool:
+        """Remove a last line with no newline at its end (a record cut short when 'on' died while it
+        wrote it) and name it in the journal: a record glued onto it would become one line with the
+        cut fields, which 'off' would read as a whole record (an old IOWeight "1" of "100"). False when
+        the file cannot be cut (said on stderr, as a failed write)."""
+        data = read_bytes(path)
+        cut = None if data is None else cut_tail(data)
+        if data is None or cut is None:
+            return True
+        keep, line = cut
+        try:
+            os.truncate(path, keep)
+        except OSError as e:
+            print(f"{path}: {e.strerror or e}", file=sys.stderr, flush=True)
+            return False
+        why = "never read by the drift repair" if path == self.paths.intended else "its change was never made"
+        number = data.count(b"\n") + 1
+        text = line.decode("utf-8", "replace")
+        self.log(4, f"{path} line {number}: a record cut short ({why}), removed before the next record: {text}")
         return True
 
     def _unrecorded(self, what: str) -> None:

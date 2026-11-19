@@ -207,6 +207,16 @@ def _cut_short(text: str, lines: Sequence[str], number: int) -> bool:
     return number == len(lines) and not text.endswith("\n")
 
 
+def cut_tail(data: bytes) -> tuple[int, bytes] | None:
+    """A file's last line with no newline at its end (a record cut short): the length the file keeps
+    without it (just after its last newline; 0 for a file of that line only) and the line's bytes. None
+    for an empty file, or one that ends in a newline."""
+    if not data or data.endswith(b"\n"):
+        return None
+    keep = data.rfind(b"\n") + 1
+    return keep, data[keep:]
+
+
 def records(text: str) -> list[Record]:
     """The records of game.state or game.intended in file order; a line bash could not read as
     plain words, and a last line cut short (no newline at its end), are left out."""

@@ -725,7 +725,11 @@ line, with exit 1 and `game.state` left in place.) The last line of the file
 with no newline at its end is such a line, also when its fields look whole:
 `on` writes each record before the change it describes, so that change was
 never made, and its value may be cut short (`1` of `100`), which `off` must
-not set.
+not set. A record written after such a line (a box the watchdog handles
+later) first removes it, so the two never glue into one line `off` would
+read as whole; the journal names it (`<4>... line N: a record cut short
+(its change was never made), removed before the next record: TEXT`). The
+same holds for `game.intended`, whose cut line the drift repair never read.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
