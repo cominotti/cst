@@ -26,7 +26,7 @@ from bluetooth.domain import (
     render_pending,
     still_pending,
 )
-from bluetooth.domain.watch import Snapshot, Tracker, WatchVerdict, profiles, relevant, snapshot
+from bluetooth.domain.watch import Snapshot, Tracker, WatchNote, WatchVerdict, profiles, relevant, snapshot
 from bluetooth.ports import LiveAudioPort
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.files import ensure_dir, write_atomic
@@ -319,12 +319,12 @@ class Watcher:
         self.live: LiveAudioPort = Live(dev)
         self.tracker = Tracker(rate)
         self.known: set[int] = set()
-        self.said: tuple[str, str | float | None] | None = None
+        self.said: tuple[WatchVerdict | WatchNote, str | float | None] | None = None
 
-    def say(self, what: str, why: str | float, level: int = 6) -> None:
+    def say(self, what: WatchVerdict | WatchNote, why: str | float, level: int = 6) -> None:
         """Logs a verdict only when it differs from the last one (no line
         every fallback look)."""
-        key: tuple[str, str | float | None] = (
+        key: tuple[WatchVerdict | WatchNote, str | float | None] = (
             what,
             why if what not in (WatchVerdict.WAIT, WatchVerdict.COOLDOWN) else None,
         )
@@ -364,11 +364,13 @@ class Watcher:
         if alt is None:
             self.tracker.attempted(time.monotonic())
             self.tracker.result(False)
-            self.say("give up", f"{why}, but the card offers no SBC (or other A2DP) profile to switch through", 4)
+            self.say(
+                WatchNote.GIVE_UP, f"{why}, but the card offers no SBC (or other A2DP) profile to switch through", 4
+            )
             return None
         if self.dry:
             self.tracker.attempted(time.monotonic())
-            self.say("dry run", f"{why}: would switch {ldac} -> {alt} -> {ldac}")
+            self.say(WatchNote.DRY_RUN, f"{why}: would switch {ldac} -> {alt} -> {ldac}")
             return None
         log(6, f"act: {why}: switching {ldac} -> {alt} -> {ldac} (about a second of silence)")
         self.tracker.attempted(time.monotonic())

@@ -31,6 +31,13 @@ class WatchVerdict(StrEnum):
     COOLDOWN = "cooldown"
 
 
+class WatchNote(StrEnum):
+    """The watcher's own verdicts in its log lines, besides decide()'s (WatchVerdict)."""
+
+    GIVE_UP = "give up"  # no other A2DP profile to switch through
+    DRY_RUN = "dry run"  # --dry-run: what it would switch
+
+
 class Snapshot(TypedDict):
     """What the watcher sees of the headset in pw-dump (see snapshot)."""
 
@@ -226,7 +233,7 @@ class PactlFacility(StrEnum):
 
 
 EVENT: Final[re.Pattern[str]] = re.compile(
-    rf"^Event '({'|'.join(PactlEvent)})' on ({'|'.join(PactlFacility)}) #(\d+)\s*$"
+    rf"^Event '({'|'.join(map(re.escape, PactlEvent))})' on ({'|'.join(map(re.escape, PactlFacility))}) #(\d+)\s*$"
 )
 
 
@@ -237,7 +244,7 @@ def relevant(line: str, known: set[int]) -> bool:
     m = EVENT.match(line.strip())
     if not m:
         return False
-    event, kind, idx = PactlEvent(m.group(1)), PactlFacility(m.group(2)), int(m.group(3))
+    event, kind, idx = m.group(1), m.group(2), int(m.group(3))  # EVENT matches only their members' words
     if event in (PactlEvent.NEW, PactlEvent.REMOVE) and kind in (PactlFacility.CARD, PactlFacility.SINK):
         return True
     return idx in known
