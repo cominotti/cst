@@ -171,8 +171,10 @@ class DockerVolumesNocow:
         if not self.tree.is_dir(vols):
             self.state.clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
             return
-        busy = self.daemon.service_busy() or self.daemon.dockerd_busy()
-        if busy:
+        busy = self.daemon.service_busy()
+        if busy is None:
+            busy = self.daemon.dockerd_busy()
+        if busy is not None:
             self.postpone(busy)
             return
         self.state.clear_postponed()

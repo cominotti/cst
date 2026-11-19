@@ -605,8 +605,8 @@ class Monitor:
         self.emit(self.meta_record())
         log(
             f"started: kernel {self.kernel}, fs {[v['label'] or k[:8] for k, v in self.topo.fs.items()]}, "
-            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd else 'no'}, "
-            f"kmsg={'yes' if self.kmsg_fd else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
+            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd is not None else 'no'}, "
+            f"kmsg={'yes' if self.kmsg_fd is not None else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
             f"dir={self.log_dir}"
         )
         # The PSI trigger and /dev/kmsg are open and SIGTERM is handled: the unit becomes active now.
@@ -618,7 +618,7 @@ class Monitor:
         while self.running:
             self.signs_of_life()
             now = time.monotonic()
-            if self.duration and now - t0 >= self.duration:
+            if self.duration is not None and now - t0 >= self.duration:
                 break
             try:
                 events = self.poller.poll(max(0.0, (min(next_sample, next_probe) - now) * 1000))
