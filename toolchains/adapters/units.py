@@ -19,7 +19,13 @@ if TYPE_CHECKING:
 from cst_core.adapters import SystemctlAdapter
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
-from toolchains.domain.auto import TimerFacts, UnitActiveState, UserManagerVerb, own_session_env
+from toolchains.domain.auto import (
+    TIMER_RUNNING_STATES,
+    UNIT_STOPPED_STATES,
+    TimerFacts,
+    UserManagerVerb,
+    own_session_env,
+)
 from toolchains.domain.common import NAME
 from toolchains.adapters.program import RUNNER
 
@@ -102,7 +108,7 @@ class UserUnits:
     def timer_facts(self, name: str) -> TimerFacts:
         enabled = self.systemctl(UserManagerVerb.IS_ENABLED, name)
         active = self.systemctl(UserManagerVerb.IS_ACTIVE, name)
-        if active != UnitActiveState.ACTIVE:
+        if active not in TIMER_RUNNING_STATES:
             return TimerFacts(enabled, active)
         next_elapse = self.systemctl(UserManagerVerb.SHOW, "-p", "NextElapseUSecRealtime", "--value", name)
         return TimerFacts(enabled, active, next_elapse)
@@ -111,7 +117,7 @@ class UserUnits:
         # is-active prints the state; it exits 3 when the unit is not active,
         # and 4 when the manager does not know it (nothing loaded it).
         state = self.before_removal(name, UserManagerVerb.IS_ACTIVE, ok=(0, 3, 4))
-        if state in (UnitActiveState.INACTIVE, UnitActiveState.FAILED):
+        if state in UNIT_STOPPED_STATES:
             return False
         self.before_removal(name, UserManagerVerb.STOP)
         return True
