@@ -799,7 +799,9 @@ scc_setup() {
     # client does. The socket is a bare socket node; with a file
     # $st/listen, the daemon itself (same PID) listens on it, as the real
     # server does, so that status can ask it who it is (SO_PEERCRED),
-    # and a start returns once it listens.
+    # and a start returns once it listens: it clears the socket path first
+    # (a socket file a stopped server left would make its bind fail), and
+    # a listener that is not up within 5 s adds no-listener to $st/starts.
     cat >"$w/bin/sccache" <<'EOF'
 #!/bin/sh
 st=$SCCACHE_E2E_STATE
@@ -818,6 +820,7 @@ while (left := end - time.monotonic()) > 0:
         break
 '
 serve() {
+    if [ -e "$st/listen" ]; then rm -f "$SCCACHE_SERVER_UDS"; fi
     setsid sh -c 'cat /proc/self/cgroup >"$1/server-$$.cgroup"; echo $$ >"$1/server-$$.pid"; echo $$ >"$1/live"
         [ -e "$1/listen" ] && exec python3 -I -c "$2" "$SCCACHE_SERVER_UDS"; exec sleep 300' \
         sh "$st" "$listener" </dev/null >/dev/null 2>&1 &
@@ -826,7 +829,8 @@ serve() {
 sock() {
     if [ -e "$st/listen" ]; then
         for _ in $(seq 50); do [ -S "$SCCACHE_SERVER_UDS" ] && return 0; sleep 0.1; done
-        return 0
+        echo no-listener >>"$st/starts"
+        return 1
     fi
     python3 -I -c 'import os, stat, sys; os.mknod(sys.argv[1], stat.S_IFSOCK | 0o600)' "$SCCACHE_SERVER_UDS"
 }
