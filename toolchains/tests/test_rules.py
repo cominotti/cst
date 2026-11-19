@@ -44,6 +44,7 @@ from unittest import mock
 sys.dont_write_bytecode = True
 
 from cst_core.domain.errors import Usage
+from cst_core.domain.text import cgroup_v2_path
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
 from toolchains.domain import config as tcd_config
@@ -1994,6 +1995,29 @@ class RustcWrapperTest(unittest.TestCase):
         for _ in range(2):
             calls = self.run_wrapper(self.rustc(), "x")
             self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"])
+
+    def test_the_wrapper_and_cgroup_v2_path_read_the_same_line(self) -> None:
+        # status (server_place, through cst_core's cgroup_v2_path) reads back where the wrapper put
+        # the server, so both take the same line of /proc/PID/cgroup: the first "0::/" one.
+        sock = os.path.join(self.run_dir, "cst-sccache-hypatia-f45.sock")
+        cases = [
+            (f"0::{self.CAPPED}\n", self.CAPPED),
+            (f"0::\n0::{self.CAPPED}\n", self.CAPPED),  # an empty 0:: line first: skipped
+            (f"0::x{self.CAPPED}\n", None),  # no "/" after "0::": no path, no scope
+        ]
+        self.user_manager()
+        for text, path in cases:
+            with self.subTest(text=text):
+                with open(self.proc_cgroup, "w") as f:
+                    f.write(text)
+                for leftover in (sock, sock + ".lock"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(leftover)
+                shutil.rmtree(self.scope_dir(), ignore_errors=True)
+                calls = self.run_wrapper(self.rustc(), "x")
+                in_scope = [c["who"] for c in calls][:1] == ["systemd-run"]
+                self.assertEqual(in_scope, path is not None, calls)
+                self.assertEqual(cgroup_v2_path(text), path)
 
     def test_host_server_goes_to_app_slice(self) -> None:
         self.user_manager(self.MANAGER + "/app.slice/app-gnome-terminal-1.scope")

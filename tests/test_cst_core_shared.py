@@ -160,7 +160,11 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(cgroup_v2_path(hybrid), scope)  # cgroup v1 lines first, the 0:: line last
         self.assertEqual(cgroup_v2_path("0::/a.scope\n1:name=systemd:/b::c\n0::/d.scope"), "/a.scope")
         self.assertEqual(cgroup_v2_path("0::/a.scope  \n"), "/a.scope  ")  # the rest of the line, as it is
-        self.assertEqual(cgroup_v2_path("0::\n"), "")  # a 0:: line with no path: not None
+        # A 0:: line with no path is no path (the rustc wrapper's 0::/* case skips it too).
+        self.assertEqual(cgroup_v2_path("0::\n0::/a.scope\n"), "/a.scope")
+        for text in ("0::\n", "0::a.scope\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(cgroup_v2_path(text))
         # Only a newline ends a line: a cgroup name may hold any other separator (not "/" or "\n").
         for sep in ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
             with self.subTest(sep=sep):
