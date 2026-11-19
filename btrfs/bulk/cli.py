@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import sys
+from typing import assert_never
 
 from btrfs.bulk.application.commands import boot, keep_ids, keep_report, steam_apply, steam_print, steam_survey
 from btrfs.bulk.application.items import apply, exit_status, report
@@ -76,13 +77,14 @@ def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) 
 def run(w: Wiring, argv: Sequence[str]) -> int:
     """One command of btrfs-bulk (argv[0] the program)."""
     cmd = bulk_command(argv[1] if len(argv) > 1 else BulkCommand.STATUS)
-    if cmd in (BulkCommand.KEEP, BulkCommand.UNKEEP):
-        return keep_cmd(w, cmd, argv[2:])
-    if cmd == BulkCommand.STEAM:
-        return steam_cmd(w, argv[2:])
-    if cmd is None:
-        print(USAGE, file=sys.stderr)
-        return 2
+    match cmd:
+        case BulkCommand.KEEP | BulkCommand.UNKEEP:
+            return keep_cmd(w, cmd, argv[2:])
+        case BulkCommand.STEAM:
+            return steam_cmd(w, argv[2:])
+        case None:
+            print(USAGE, file=sys.stderr)
+            return 2
     try:
         b = w.bulk(argv[2:])
     except BadSettings as e:
@@ -92,11 +94,16 @@ def run(w: Wiring, argv: Sequence[str]) -> int:
                 f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
             )
         raise
-    if cmd in (BulkCommand.PLAN, BulkCommand.STATUS):
-        report(b, cmd)
-        return 0
-    if cmd == BulkCommand.BOOT:
-        return boot(b)
+    match cmd:
+        case BulkCommand.PLAN | BulkCommand.STATUS:
+            report(b, cmd)
+            return 0
+        case BulkCommand.BOOT:
+            return boot(b)
+        case BulkCommand.APPLY:
+            pass  # below
+        case _:
+            assert_never(cmd)
     b.boots.forget()  # a new request gets its two boots again
     deferred, problems = apply(b)
     if deferred:

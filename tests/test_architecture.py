@@ -128,7 +128,7 @@ OUTER_LAYERS: Final[frozenset[str]] = frozenset({"adapters", "cli"})
 CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/cli.py": 149,
     "bluetooth/setup/cli.py": 32,
-    "btrfs/bulk/cli.py": 89,
+    "btrfs/bulk/cli.py": 95,
     "btrfs/chrome_cache/cli.py": 84,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
