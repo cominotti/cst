@@ -26,6 +26,7 @@ under temporary folders.
 """
 
 import ast
+from collections.abc import Mapping, Sequence
 import io
 import os
 from pathlib import Path
@@ -127,6 +128,27 @@ def mode_problems(e: InstallEntry) -> list[str]:
     return []
 
 
+def component_problems(manifest: Sequence[InstallEntry], components: Mapping[str, str]) -> list[str]:
+    """What is wrong with the components: every entry's is known, every one has a file, all of one
+    module with that module's refresh command, and one owner each."""
+    used = {e.component for e in manifest}
+    problems = [f"{c}: a manifest component COMPONENTS does not know" for c in sorted(used - set(components))]
+    problems += [f"{c}: a component no manifest entry belongs to" for c in sorted(set(components) - used)]
+    for name, refresh in components.items():
+        module = name.split(":", 1)[0]
+        entries = [e for e in manifest if e.component == name]
+        # The component is a part of one module, and the command that refreshes it is that module's.
+        if {e.module for e in entries} != {module}:
+            problems.append(f"{name}: files of {sorted({e.module for e in entries})}, not of {module}")
+        if not refresh.startswith(f"cst {module} "):
+            problems.append(f"{name}: refreshed by {refresh!r}, not a command of {module}")
+        # One installer call per component: root and user files never share one (the user's are
+        # written by a process running as the user).
+        if len({e.owner for e in entries}) != 1:
+            problems.append(f"{name}: {len({e.owner for e in entries})} owners: {[e.src for e in entries]}")
+    return problems
+
+
 def manifest_completeness_problems(files: list[str]) -> list[str]:
     """Sources missing from the repository, and installable-looking files missing from the manifest."""
     srcs = {e.src for e in INSTALL_MANIFEST}
@@ -224,19 +246,8 @@ class DistributionGateTest(unittest.TestCase):
         self.assertTrue(mode_problems(bad))
 
     def test_every_entry_has_a_known_component_and_every_component_a_refresh_command(self) -> None:
-        used = {e.component for e in INSTALL_MANIFEST}
-        self.assertEqual(sorted(used - set(COMPONENTS)), [], "manifest components COMPONENTS does not know")
-        self.assertEqual(sorted(set(COMPONENTS) - used), [], "components no manifest entry belongs to")
-        for name, refresh in COMPONENTS.items():
-            with self.subTest(component=name):
-                module = name.split(":", 1)[0]
-                entries = [e for e in INSTALL_MANIFEST if e.component == name]
-                # The component is a part of one module, and the command that refreshes it is that module's.
-                self.assertEqual({e.module for e in entries}, {module})
-                self.assertTrue(refresh.startswith(f"cst {module} "), refresh)
-                # One installer call per component: root and user files never share one (the user's are
-                # written by a process running as the user).
-                self.assertEqual(len({e.owner for e in entries}), 1, [e.src for e in entries])
+        problems = component_problems(INSTALL_MANIFEST, COMPONENTS)
+        self.assertEqual(problems, [], "\n".join(problems))
 
     def test_help_modes_name_python_entries(self) -> None:
         self.assertLessEqual(set(HELP_MODES), {e.src for e in python_entry_srcs()})
