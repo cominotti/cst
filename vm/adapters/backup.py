@@ -19,13 +19,22 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
 from cst_core.domain.errors import Refused
-from cst_core.domain.shapes import items_of, json_object, parse_json
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR
 from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
-from vm.domain.backup import DOMAIN_XML, MANIFEST_JSON, Fingerprint, IndexEntry, Stop, is_index_entry
+from vm.domain.backup import (
+    DOMAIN_XML,
+    MANIFEST_JSON,
+    NO_BACKUPS_LIST,
+    Fingerprint,
+    IndexEntry,
+    Stop,
+    is_index_entry,
+    stored_list,
+)
 
 
 def qcow2_backing_file(path: str) -> bool:
@@ -104,10 +113,10 @@ def stored_backups(cfg: VmSettings) -> list[object]:
             f"{INDEX_FORMAT.newer_text(path, found)}: left as it is, and nothing is backed up or listed "
             f"with it; use the cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)"
         )
-    backups = data.get("backups") if json_object(data) else None
-    if not isinstance(backups, list):
-        raise _unreadable(path, 'no "backups" list')
-    return items_of(backups)
+    backups = stored_list(data)
+    if backups is None:
+        raise _unreadable(path, NO_BACKUPS_LIST)
+    return backups
 
 
 def _unreadable(path: str, why: str) -> Refused:

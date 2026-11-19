@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import NotRequired, Required, TypedDict, TypeIs
 
 from cst_core.domain.errors import Refused
-from cst_core.domain.shapes import KeyTypes, has_shape, json_object
+from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import Json
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
@@ -77,6 +77,17 @@ def is_index_entry(e: object) -> TypeIs[IndexEntry]:
         return False
     where = e.get("snapshot") if e.get("mode") == "nas" else e.get("path")
     return isinstance(where, str) and where != ""
+
+
+# Why an index that parses is no index (stored_list found no "backups" list): cst vm and cst doctor.
+NO_BACKUPS_LIST = 'no "backups" list'
+
+
+def stored_list(data: object) -> list[object] | None:
+    """The "backups" list of a parsed index, each entry as stored; None when data is not an object
+    with one (NO_BACKUPS_LIST). cst vm's stored_backups and cst doctor read the index with it."""
+    backups = data.get("backups") if json_object(data) else None
+    return items_of(backups) if isinstance(backups, list) else None
 
 
 class CopiedFile(TypedDict):

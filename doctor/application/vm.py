@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from doctor.application.shared import (
@@ -48,6 +48,7 @@ from doctor.domain import (
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
 from vm.domain import VmOverlayKind
+from vm.domain.backup import NO_BACKUPS_LIST, stored_list
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -195,9 +196,7 @@ def vm_index_problem(host: DoctorHostPort) -> str | None:
         return "not JSON"
     if VM_INDEX_FORMAT.newer(data, "version") is not None:
         return None
-    if not json_object(data) or not isinstance(data.get("backups"), list):
-        return 'no "backups" list'
-    return None
+    return NO_BACKUPS_LIST if stored_list(data) is None else None
 
 
 def newest_vm_backup(host: DoctorHostPort) -> float | None:
