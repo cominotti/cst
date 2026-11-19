@@ -925,9 +925,7 @@ class InvocationReadTest(SetupCase):
                 "sudo systemctl restart bluetooth",
                 "systemctl --user restart wireplumber",
                 self.BT,  # the BAP wait's look (registered at once); the checks reuse it
-                self.WP,  # the record after the restarts
-                "systemctl is-active --quiet bluetooth",  # the checks' services rows
-                "systemctl --user is-active --quiet wireplumber",
+                self.WP,  # the record after the restarts; the checks' services rows reuse both
             ],
         )
         self.assertFalse(os.path.exists(m.pending))
@@ -1614,7 +1612,7 @@ class ApplyTest(SetupCase):
             "systemctl --user restart wireplumber",
             f"systemctl --user start {LW}",
             f"bluetoothctl bearer {MAC} bredr",
-            "systemctl is-active --quiet bluetooth",
+            f"journalctl --user -u {LW}",  # the checks (their services rows reuse the states read)
         )
         bearer = r.calls.index(f"bluetoothctl bearer {MAC} bredr")
         self.assertTrue(r.calls[bearer + 1].startswith("  stdin=/dev/null via=timeout 5 bluetoothctl bearer"), r.calls)

@@ -234,9 +234,11 @@ reads, also works in a toolbox).
 not make (`--no-restart`, the question answered no, a restart that failed)
 is remembered in `~/.local/state/cst/bluetooth-restart-pending.json`, with
 the invocation ID the service had then (`systemctl show -p ActiveState -p
-InvocationID`, in the C locale and given up after 20 s: one call per service, read again only where it may have
-changed: before the record is written and after CST restarts the service;
-the wait for the BAP endpoint after a restart reads bluetoothd's at each look).
+InvocationID`, in the C locale and given up after 20 s: one call per
+service, read again only where it may have changed: before the record is
+written and after CST restarts the service; the wait for the BAP endpoint
+after a restart reads bluetoothd's at each look; the `services` rows of
+the checks use the same reading).
 While the service keeps running with that ID, `plan` lists the restart
 ("still owed", exit 10), `status` says so, and the next `apply` makes it
 (asking first for Bluetooth). Any restart of the service (by `apply`, by

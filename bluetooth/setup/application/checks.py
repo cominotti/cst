@@ -4,7 +4,7 @@ the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
 from bluetooth.domain import ISO_UUID, LDAC_UNIT, RolesState, parse_roles_state, pw_state
 from bluetooth.setup.application.survey import Survey
-from bluetooth.setup.domain import BapState, LeState, RunningState, WpState, preferred_bearer
+from bluetooth.setup.domain import BapState, LeState, RunningState, WpState, is_running, preferred_bearer
 from cst_core.domain.shapes import parse_json
 from cst_core.ports import OutputMode
 
@@ -75,11 +75,13 @@ class Checks(Survey):
     def services_check(self) -> None:
         prog, unit, rate = self.c.prog, LDAC_UNIT, self.c.ldac_rate
         self.section("services")
-        if self.ok(["systemctl", "is-active", "--quiet", "bluetooth"], host=True):
+        # The state this run already read (unit_show: again after each restart CST made), so these
+        # rows and the restarts still owed see the same state.
+        if is_running(self.unit_show("bluetooth.service", user=False)[0]):
             self.check_ok("bluetooth.service", "active")
         else:
             self.check_bad("bluetooth.service", "not active")
-        if self.ok(["systemctl", "--user", "is-active", "--quiet", "wireplumber"], host=True):
+        if is_running(self.unit_show("wireplumber.service", user=True)[0]):
             self.check_ok("wireplumber (your session)", "active")
         else:
             self.check_bad("wireplumber (your session)", "not active")
