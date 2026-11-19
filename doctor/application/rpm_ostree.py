@@ -15,6 +15,7 @@ from doctor.domain import (
     WARN,
     Deployment,
     OstreeAnswer,
+    PinHow,
     Request,
     Result,
     classify_requests,
@@ -45,7 +46,7 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
             continue
         reqs = d.get("requested-packages") or []
         cls = classify_requests(reqs, installed_packages(host, d), host.arch)
-        found[id(d)] = (d, reqs, cls, [c for c in cls if c[2] != "name"])
+        found[id(d)] = (d, reqs, cls, [c for c in cls if c[2] != PinHow.NAME])
     if not found:
         yield Result(WARN, "layered packages: no deployment in rpm-ostree status")
         return
@@ -57,12 +58,12 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
     for d, reqs, cls, pinned in found.values():
         if not pinned:
             continue
-        listed = ", ".join(r for r, _, how in pinned if how != "inactive")
-        inactive = [r for r, _, how in pinned if how == "inactive"]
+        listed = ", ".join(r for r, _, how in pinned if how != PinHow.INACTIVE)
+        inactive = [r for r, _, how in pinned if how == PinHow.INACTIVE]
         msg = f"{describe(d)}: {len(pinned)} of {len(reqs)} layered packages are pinned to a version"
         if listed:
             msg += " (they never update, and an upgrade fails once that version leaves the repositories): " + listed
-        if any(how == "pinned-form" for _, _, how in pinned):
+        if any(how == PinHow.PINNED_FORM for _, _, how in pinned):
             msg += " (recognised by their form only: the package list was not readable)"
         if inactive:
             msg += (
