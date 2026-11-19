@@ -1024,6 +1024,22 @@ class StateFilesTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(runtime, "run.lock")))
         self.assertFalse(os.path.exists(state))
 
+    def test_a_missing_state_folder_is_made_0755_whatever_the_umask(self) -> None:
+        # os.makedirs(mode=0o755) before write_atomic made the folder with the umask taken off
+        # (0700 under umask 077); write_atomic's own ensure_dir makes it exactly 0755.
+        self.addCleanup(os.umask, os.umask(0o077))
+        for name, save in (
+            ("state", lambda f: f.save_state(GcState(since=5, images={}, heartbeat=9))),
+            ("summary", lambda f: f.save_summary(RunSummary(1, 0, 0, 0, 0, 0))),
+        ):
+            with self.subTest(name=name):
+                folder = os.path.join(self.tmp, name, "docker-gc")
+                files = gc_adapters.GcStateFiles(GcPaths(folder, os.path.join(self.tmp, "run")))
+                save(files)
+                self.assertEqual(stat.S_IMODE(os.stat(folder).st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(folder)).st_mode), 0o755)
+                self.assertEqual(len(os.listdir(folder)), 1)
+
     def test_the_run_summary_replaces_a_link_and_leaves_its_target(self) -> None:
         # It was rewritten in place: through a link, into the file it pointed to.
         target = os.path.join(self.tmp, "elsewhere")
