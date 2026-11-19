@@ -45,6 +45,7 @@ from btrfs.bulk.domain.steam import SteamJournal, SteamPart
 from btrfs.bulk.adapters.host import Host, snapshot_env
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import json_object
 from cst_core.domain.values import Json
 from tests.probes import assert_replaced_durably, recorded_fsyncs
@@ -1966,6 +1967,122 @@ class GibTest(unittest.TestCase):
         self.assertEqual(bulk_domain.gib(bulk_domain.BIG // 10), "102 MiB")  # just under a tenth
         self.assertEqual(bulk_domain.gib(3 * bulk_domain.BIG), "3.0 GiB")
         self.assertEqual(bulk_domain.gib((5 << 20) + (1 << 19)), "5 MiB")  # floored
+
+
+def _fake_tool(folder: str, name: str, body: str) -> None:
+    """An executable FOLDER/NAME: a Python program (not sh: Primitives.run
+    hands on stdin, and bash with a socket as stdin reads ~/.bashrc)."""
+    path = os.path.join(folder, name)
+    with open(path, "w") as f:
+        f.write(f"#!/usr/bin/python3 -I\nimport sys\n{body}")
+    os.chmod(path, 0o755)
+
+
+_BAD_CP = "sys.stderr.buffer.write(b\"cp: cannot open 'src/\\xff' for reading: Permission denied\\n\")\nsys.exit(1)\n"
+_BAD_SYNC = "sys.stderr.buffer.write(b\"sync: error syncing '\\xff': Input/output error\\n\")\nsys.exit(1)\n"
+_BAD_FLATPAK = (
+    "if sys.argv[1] == 'info':\n"
+    "    sys.stdout.buffer.write(b'Ref: app/org.example.App\\xff\\n')\n"
+    "    sys.exit(0)\n"
+    "sys.stderr.buffer.write(b\"error: cannot write '\\xff'\\n\")\n"
+    "sys.exit(1)\n"
+)
+_CP_TEXT = "cp: cannot open 'src/\ufffd' for reading: Permission denied"
+
+
+class ToolMessagesTest(unittest.TestCase):
+    """A message of cp, sync or flatpak whose bytes are not UTF-8 is shown
+    with U+FFFD in its place, through the real runner and a real child
+    process; it never becomes a UnicodeDecodeError instead of the message."""
+
+    @override
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="cst-bulk-test-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = os.path.realpath(tmp.name)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.mkdir(self.bin)
+        self.machine = Primitives(SubprocessCommandRunner(base_env={"PATH": self.bin}))
+        self.files = UserFiles(HomeTree(self.machine), None, self.tmp)
+        self.src = os.path.join(self.tmp, "src")
+        os.mkdir(self.src)
+        with open(os.path.join(self.src, "a"), "w") as f:
+            f.write("data\n")
+
+    def bad_tools(self) -> None:
+        _fake_tool(self.bin, "cp", _BAD_CP)
+        _fake_tool(self.bin, "sync", _BAD_SYNC)
+        _fake_tool(self.bin, "flatpak", _BAD_FLATPAK)
+
+    def test_copy_tree_shows_cp_message(self) -> None:
+        self.bad_tools()
+        dst = os.path.join(self.tmp, "dst")
+        os.mkdir(dst)
+        with self.assertRaises(RuntimeError) as cm:
+            self.machine.copy_tree(self.src, dst, nocow=False)
+        self.assertEqual(str(cm.exception), f"copy failed: {_CP_TEXT}")
+
+    def test_copy_reflink_shows_cp_message(self) -> None:
+        self.bad_tools()
+        with self.assertRaises(RuntimeError) as cm:
+            self.machine.copy_reflink(os.path.join(self.src, "a"), os.path.join(self.tmp, "b"))
+        self.assertEqual(str(cm.exception), f"reflink copy failed: {_CP_TEXT}")
+
+    def test_reflink_probe_keeps_its_hint(self) -> None:
+        # The probe turns only a RuntimeError into its Unexpected with the hint.
+        self.bad_tools()
+        library = os.path.join(self.tmp, "library")
+        os.mkdir(library)
+        with self.assertRaises(bulk_domain.Unexpected) as cm:
+            self.files.u_reflink_probe(os.path.join(self.src, "a"), library)
+        self.assertEqual(
+            str(cm.exception),
+            "reflink of a copy-on-write file into ~/Bulk/steam failed (is ~/Bulk on another filesystem?): "
+            f"reflink copy failed: {_CP_TEXT}",
+        )
+        self.assertFalse(os.path.lexists(os.path.join(library, ".bulk-probe")))
+
+    def test_prepare_shows_cp_message_and_drops_the_copy(self) -> None:
+        # tree_stats asks is_subvol, which runs stat -f only for an inode 256: none here.
+        self.bad_tools()
+        new = os.path.join(self.tmp, "new")
+        with self.assertRaises(RuntimeError) as cm:
+            self.files.u_prepare(self.src, new, nocow=False)
+        self.assertEqual(str(cm.exception), f"copy failed: {_CP_TEXT}")
+        self.assertFalse(os.path.lexists(new))
+
+    def test_verify_content_shows_sync_message(self) -> None:
+        self.bad_tools()
+        with self.assertRaises(RuntimeError) as cm:
+            self.files.u_verify_content(self.src, self.src, "src", 5)
+        self.assertEqual(
+            str(cm.exception),
+            "the copy could not be written to the disk (sync: sync: error syncing '\ufffd': Input/output error)",
+        )
+
+    def test_flatpak_override_shows_its_message(self) -> None:
+        self.bad_tools()
+        with self.assertRaises(RuntimeError) as cm:
+            self.machine.flatpak_add_fs("org.example.App", os.path.join(self.tmp, "Bulk"))
+        self.assertEqual(str(cm.exception), "flatpak override failed: error: cannot write '\ufffd'")
+
+    def test_flatpak_info_reads_only_the_return_code(self) -> None:
+        self.bad_tools()
+        self.assertTrue(self.machine.flatpak_installed("org.example.App"))
+
+    def test_clean_run_unchanged(self) -> None:
+        # Control: passes on the old code too; replace changes nothing for a clean run.
+        _fake_tool(self.bin, "cp", "sys.exit(0)\n")
+        _fake_tool(self.bin, "sync", "sys.exit(0)\n")
+        dst = os.path.join(self.tmp, "dst")
+        os.mkdir(dst)
+        self.assertIsNone(self.machine.copy_tree(self.src, dst, nocow=False))
+        self.assertIsNone(self.machine.copy_reflink(os.path.join(self.src, "a"), os.path.join(self.tmp, "b")))
+        other = os.path.join(self.tmp, "other")
+        os.mkdir(other)
+        with open(os.path.join(other, "a"), "w") as f:
+            f.write("data\n")
+        self.assertEqual(self.files.u_verify_content(self.src, other, "src", 5), "")
 
 
 def _u_echo(a: int, *, b: str) -> dict[str, Json]:

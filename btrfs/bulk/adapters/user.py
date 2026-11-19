@@ -558,7 +558,7 @@ class UserFiles:
         the disk first and read back from there; if that write fails (sync or
         fsync reports an error), RuntimeError: the caller drops the copy and the
         original stays."""
-        r = self.machine.run(["sync", "-f", new])
+        r = self.machine.run(["sync", "-f", new], decode_errors="replace")
         if r.returncode != 0:
             raise RuntimeError(
                 f"the copy could not be written to the disk (sync: {(r.stderr.strip() or f'exit {r.returncode}')[:300]})"

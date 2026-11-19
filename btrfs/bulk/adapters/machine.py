@@ -119,7 +119,10 @@ class Primitives:
 
     def run(self, argv: Sequence[str], decode_errors: DecodeErrors = "strict") -> CommandResult:
         """argv with its output captured, as subprocess.run(argv, capture_output=True,
-        text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start."""
+        text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start.
+        A caller that only shows the message or reads only the return code passes
+        decode_errors="replace" (cp, sync, flatpak info and override --filesystem, ionice,
+        restorecon); strict stays for output that is parsed (stat -f, du, flatpak override --show)."""
         return self.runner.run(argv, stdin="inherit", decode_errors=decode_errors).raise_cause()
 
     def is_nocow(self, path: str) -> bool:
@@ -186,7 +189,7 @@ class Primitives:
             return TreeSize(0, False)
 
     def flatpak_installed(self, app: str) -> bool:
-        r = self.run(["flatpak", "info", app])
+        r = self.run(["flatpak", "info", app], decode_errors="replace")
         return r.returncode == 0
 
     def flatpak_has_fs(self, app: str, path: str) -> bool:
@@ -197,7 +200,7 @@ class Primitives:
         return False
 
     def flatpak_add_fs(self, app: str, path: str) -> None:
-        r = self.run(["flatpak", "override", "--user", f"--filesystem={path}", app])
+        r = self.run(["flatpak", "override", "--user", f"--filesystem={path}", app], decode_errors="replace")
         if r.returncode != 0:
             raise RuntimeError(f"flatpak override failed: {r.stderr.strip()[:200]}")
 
@@ -207,14 +210,14 @@ class Primitives:
         inherits it before data is written). Otherwise reflink clones where
         possible (same filesystem: no data written)."""
         reflink = "--reflink=never" if nocow else "--reflink=auto"
-        r = self.run(["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"])
+        r = self.run(["cp", "-a", reflink, "--sparse=auto", "--", src + "/.", dst + "/"], decode_errors="replace")
         if r.returncode != 0:
             raise RuntimeError(f"copy failed: {r.stderr.strip()[:300]}")
 
     def copy_reflink(self, src: str, dst: str) -> None:
         """cp -a with --reflink=always: the data blocks are shared, none is
         written; fails (instead of copying bytes) where a clone is impossible."""
-        r = self.run(["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst])
+        r = self.run(["cp", "-a", "--reflink=always", "--no-target-directory", "--", src, dst], decode_errors="replace")
         if r.returncode != 0:
             raise RuntimeError(f"reflink copy failed: {r.stderr.strip()[:300]}")
 
