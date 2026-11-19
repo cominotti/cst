@@ -499,9 +499,14 @@ systemctl --user set-environment LC_ALL=pt_BR.UTF-8
 systemctl --user restart cst-bt-ldac48.service
 lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
 pactl_env=""
+# A pactl that is exiting (or a zombie the watcher has not reaped yet) reads as an empty
+# environ: keep looking until one that runs shows its variables.
 for _ in $(seq 150); do
     pactl_pid="$(pgrep -n -P "$lw_pid" -x pactl || true)"
-    if [[ -n "$pactl_pid" ]] && pactl_env="$(tr '\0' '\n' <"/proc/$pactl_pid/environ" 2>/dev/null)"; then break; fi
+    if [[ -n "$pactl_pid" ]]; then
+        pactl_env="$(tr '\0' '\n' <"/proc/$pactl_pid/environ" 2>/dev/null || true)"
+        [[ -n "$pactl_env" ]] && break
+    fi
     sleep 0.1
 done
 systemctl --user unset-environment LC_ALL
