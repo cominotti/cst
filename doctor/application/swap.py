@@ -72,63 +72,70 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
 
 class _HostSettingsFacts:
     """swap.ports' SwapSettingsFacts over doctor's view of the host, so that doctor reads
-    /etc/cst/swap.conf as cst swap reads it (each file read once)."""
+    /etc/cst/swap.conf as cst swap reads it. Each file is read, and swap.conf's lstat asked, once,
+    when an answer first needs it: no answer depends on which were asked before it."""
 
     def __init__(self, host: DoctorHostPort) -> None:
         self._host = host
         self._view = host.path(SWAP_CONF)
-        # swap.conf's text once read (None: it could not be read), and why lstat failed (None: it did not).
-        self.text: str | None = None
-        self._lstat_error: OSError | None = None
-        self._crypttab: str | None = None
+        # What reading each file gave: its text, or why it could not be read (no key: not read yet).
+        self._reads: dict[HostPath, str | OSError] = {}
+        # Why swap.conf's lstat failed, boxed (None: not asked yet; (None,): it did not fail).
+        self._lstat: tuple[OSError | None] | None = None
 
-    def _read(self, path: HostPath) -> str:
-        """The whole file (undecodable bytes replaced); OSError when it cannot be read."""
-        with self._host.open_text(self._host.path(path)) as f:
-            return f.read()
+    def _read(self, path: HostPath) -> str | OSError:
+        """The whole file (undecodable bytes replaced), or the OSError of its read; read once."""
+        known = self._reads.get(path)
+        if known is None:
+            try:
+                with self._host.open_text(self._host.path(path)) as f:
+                    known = f.read()
+            except OSError as e:
+                known = e
+            self._reads[path] = known
+        return known
 
-    def _whole(self, path: HostPath) -> str | None:
-        """The whole file; None when it cannot be read."""
-        try:
-            return self._read(path)
-        except OSError:
-            return None
+    def _text(self, path: HostPath) -> str:
+        """The whole file; "" when it cannot be read."""
+        text = self._read(path)
+        return text if isinstance(text, str) else ""
+
+    def _lstat_error(self) -> OSError | None:
+        """Why swap.conf's lstat failed; None when it did not."""
+        if self._lstat is None:
+            try:
+                self._host.lstat(self._view)
+                self._lstat = (None,)
+            except OSError as e:
+                self._lstat = (e,)
+        return self._lstat[0]
 
     def settings_text(self) -> str | None:
-        self.text = self._whole(SWAP_CONF)
-        return self.text
+        text = self._read(SWAP_CONF)
+        return text if isinstance(text, str) else None
 
     def settings_seen(self) -> bool:
-        try:
-            self._host.lstat(self._view)
-        except OSError as e:
-            self._lstat_error = e
-            return False
-        return True
+        return self._lstat_error() is None
 
     def settings_is_file(self) -> bool:
         return self._host.isfile(self._view)
 
     def settings_readable(self) -> bool:
-        # Asked only after the read failed: doctor has no access(2), and the read is the answer.
-        return self.text is not None
+        # doctor has no access(2): the read is the answer.
+        return isinstance(self._read(SWAP_CONF), str)
 
     def settings_folder_closed(self) -> bool:
         # lstat cannot see into a folder this user may not search: EACCES, where a missing file is ENOENT.
-        return isinstance(self._lstat_error, PermissionError)
+        return isinstance(self._lstat_error(), PermissionError)
 
     def crypttab_closed(self) -> bool:
-        try:
-            self._crypttab = self._read(CRYPTTAB)
-        except OSError as e:
-            return isinstance(e, PermissionError)
-        return False
+        return isinstance(self._read(CRYPTTAB), PermissionError)
 
     def crypttab_text(self) -> str:
-        return self._crypttab or ""
+        return self._text(CRYPTTAB)
 
     def fstab_text(self) -> str:
-        return self._whole(FSTAB) or ""
+        return self._text(FSTAB)
 
     def partition_size(self, device_path: str) -> int | None:
         part = sysfs_partition(
@@ -187,7 +194,7 @@ def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
             # Not configured: say so where the file was read, or where swap is set up (installed, or an
             # older CST's marked fstab line whose partition apply cannot find).
             set_up = host.exists(host.path(ZSWAP_CONF)) or marked_fstab_name(facts.fstab_text()) is not None
-            if facts.text is not None or set_up:
+            if facts.settings_text() is not None or set_up:
                 why = f"; {res.note}" if res.note else ""
                 yield Result(
                     WARN,
