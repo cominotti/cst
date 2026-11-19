@@ -34,6 +34,11 @@ export const meta = {
 // - A workflow agent has the Skill tool (and the advisor) but not Agent or Workflow; it loads AGENTS.md and the
 //   rules, not the conversation. Its shell starts in the MAIN checkout on every call (cd does not persist), so
 //   every command below names the worktree (git -C <worktree>, cd <worktree> && ... in the same call).
+//   Rechecked 2026-11-19 by an implement agent: the same tools (tools.list(): Skill, no Agent or Workflow; the
+//   advisor answered), and pwd in the main checkout on each call. Also seen then: the AGENTS.md and rules in
+//   the agent's context can be older than main's (it had AGENTS.md without the magic-values rule and the
+//   ResourceWarning gotcha, and a reuse-primitives.md without the cst_core.domain.shapes rows, all on main),
+//   so an agent reads the files in its worktree; the prompts' "AGENTS.md ... apply" does not ensure it.
 // - The code-review skill runs as a fork in the session's main directory: it reviews the right tree only with an
 //   explicit target (code-review "high <branch>"), reads surrounding files from main, and must never get --fix.
 //   With an output schema on the caller (as here), the caller's Skill result carries only the fork's agentId
