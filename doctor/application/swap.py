@@ -2,7 +2,6 @@
 """The swap area of `cst doctor`: the zswap parameters swap's zswap.conf sets, and the partition settings."""
 
 from collections.abc import Iterator
-import os
 import stat
 
 from cst_core.domain.values import format_bytes_human as human
@@ -20,6 +19,7 @@ from doctor.domain import (
     ZSWAP_CONF,
     ZSWAP_PARAMS,
     Result,
+    ViewPath,
 )
 from doctor.ports import CheckFn, DoctorHostPort
 from swap.domain import (
@@ -31,6 +31,7 @@ from swap.domain import (
     parse_size,
     parse_tmpfiles_params,
     resolve_settings,
+    sysfs_partition,
 )
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -130,15 +131,27 @@ class _HostSettingsFacts:
         return self._whole(FSTAB) or ""
 
     def partition_size(self, device_path: str) -> int | None:
-        host = self._host
+        part = sysfs_partition(
+            device_path, resolve=self._resolve, is_block=self._is_block, first_line=self._first_line, sys_dir="/sys"
+        )
+        return None if part is None else part[1]
+
+    def _resolve(self, path: str) -> str | None:
+        """A host path with every link followed, in this process's view; None when it cannot be."""
         try:
-            dev = host.realpath(host.path(HostPath(device_path)))
-            if not stat.S_ISBLK(host.stat(dev).st_mode):
-                return None
-            sectors = read_text(host, host.path(HostPath(f"/sys/class/block/{os.path.basename(dev)}/size")))
+            return self._host.realpath(self._host.path(HostPath(path)))
         except OSError:
             return None
-        return int(sectors) * 512 if sectors.isdigit() else None
+
+    def _is_block(self, view: str) -> bool:
+        try:
+            return stat.S_ISBLK(self._host.stat(ViewPath(view)).st_mode)
+        except OSError:
+            return False
+
+    def _first_line(self, path: str) -> str:
+        """A host file's first line, stripped ("" when it cannot be read)."""
+        return read_text(self._host, self._host.path(HostPath(path)))
 
 
 @check(CHECKS, "swap")

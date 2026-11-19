@@ -40,6 +40,7 @@ from swap.domain import (
     is_cst_dropin,
     memory_low_override,
     resolve_settings,
+    sysfs_partition,
     parse_kv,
     parse_meminfo,
     parse_memory_low,
@@ -281,15 +282,13 @@ class SwapReports:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
     def _partition_size_sysfs(self, device_path: str) -> tuple[str, int] | None:
-        dev = self._fs.readlink(device_path, canonicalize=True)
-        if dev is None or not self._fs.is_block_device(dev):
-            return None
-        sectors = self._fs.read_first_line(
-            posixpath.join(self._env.sys_dir, "class", "block", posixpath.basename(dev), "size")
+        return sysfs_partition(
+            device_path,
+            resolve=lambda path: self._fs.readlink(path, canonicalize=True),
+            is_block=self._fs.is_block_device,
+            first_line=self._fs.read_first_line,
+            sys_dir=self._env.sys_dir,
         )
-        if sectors is None or not sectors.isdigit():
-            return None
-        return dev, int(sectors) * 512
 
     def resolve_spec(self) -> SpecResolution:
         """The partition from /etc/cst/swap.conf, or the one an older CST set up (swap.domain's

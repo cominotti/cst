@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Pure domain model, parsing, and calculations for the swap module."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import contextlib
@@ -246,6 +246,32 @@ class SpecResolution:
     note: str = ""
     # "bad" from the settings file's own lines: each problem (note is their "; " join).
     problems: tuple[str, ...] = ()
+
+
+# sysfs gives a block device's size in sectors of this many bytes, whatever the device's own sector size.
+SYSFS_SECTOR_BYTES: Final = 512
+
+
+def sysfs_partition(
+    device_path: str,
+    *,
+    resolve: Callable[[str], str | None],
+    is_block: Callable[[str], bool],
+    first_line: Callable[[str], str | None],
+    sys_dir: str,
+) -> tuple[str, int] | None:
+    """The block device a path leads to and its size in bytes, from sysfs's size of it
+    (sys_dir/class/block/NAME/size); None when the path leads to no block device or sysfs gives no
+    number. resolve: the path with every link followed (None: it leads nowhere); is_block: a block
+    device is there; first_line: a file's first line, stripped (None: it cannot be read). cst swap
+    and cst doctor both size the partition with it."""
+    dev = resolve(device_path)
+    if dev is None or not is_block(dev):
+        return None
+    sectors = first_line(posixpath.join(sys_dir, "class", "block", posixpath.basename(dev), "size"))
+    if sectors is None or not sectors.isdigit():
+        return None
+    return dev, int(sectors) * SYSFS_SECTOR_BYTES
 
 
 def resolve_settings(facts: SwapSettingsFacts, *, as_root: bool) -> SpecResolution:
