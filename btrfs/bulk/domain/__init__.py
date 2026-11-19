@@ -380,6 +380,15 @@ class ItemJournal(TypedDict):
     finishing: NotRequired[bool]
 
 
+# How a damaged journal is reported (recovery and report, of items and Steam games alike).
+DAMAGED = "unreadable, or not as btrfs-bulk writes it: left in place, nothing it names was touched"
+
+
+def damaged_text(path: str) -> str:
+    """What NEEDS A LOOK says of the journal at path, which is not as btrfs-bulk writes it."""
+    return f"damaged journal {path} ({DAMAGED})"
+
+
 # ---- texts ----
 def row_text(name: str, text: str) -> str:
     """One line of plan/status; a long name gets its own line."""
