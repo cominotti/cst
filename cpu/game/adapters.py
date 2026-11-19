@@ -179,7 +179,12 @@ class GameProfile:
     # ---- systemd -------------------------------------------------------------------------
     def uid(self) -> str:
         """The target user's uid."""
-        return self._uid_of(self.s.target_user)
+        return self._lookup_uid(self.s.target_user, say=True)
+
+    def _lookup_uid(self, user: str, *, say: bool) -> str:
+        """The uid of user ("" for none); id's "no such user" line on stderr only when say."""
+        with contextlib.nullcontext() if say else contextlib.redirect_stderr(io.StringIO()):
+            return self._uid_of(user)
 
     def _argv(self, mgr: Manager, args: Sequence[str]) -> list[str]:
         if mgr == "usr":
@@ -541,11 +546,8 @@ class GameProfile:
         if uid is None:
             return
         target = self.s.target_user
-        if target:
-            with contextlib.nullcontext() if say else contextlib.redirect_stderr(io.StringIO()):
-                same = self._uid_of(target) == uid
-            if same:
-                return
+        if target and self._lookup_uid(target, say=say) == uid:
+            return
         name = self._name_of(uid)
         if name:
             if say:
