@@ -103,6 +103,15 @@ class BapState(StrEnum):
     UNKNOWN = "unknown"  # no bluetoothd or WirePlumber found
 
 
+class RunningState(StrEnum):
+    """The ActiveState words of a unit that runs: those for which `systemctl is-active` exits 0
+    (systemd 262, verb_is_active). Any other word (inactive, failed, activating, ...) is not running."""
+
+    ACTIVE = "active"
+    RELOADING = "reloading"
+    REFRESHING = "refreshing"
+
+
 @dataclass(frozen=True, slots=True)
 class Options:
     """The command line of one run."""

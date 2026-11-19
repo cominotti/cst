@@ -43,6 +43,7 @@ from bluetooth.setup.domain import (
     Options,
     Paths,
     OLD_WP_MARKER,
+    RunningState,
     WpState,
     bap_state,
     bearer_matches,
@@ -654,7 +655,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        if self.lw_enabled == "enabled" and self.lw_active == "active":
+        if self.lw_enabled == "enabled" and self.lw_active == RunningState.ACTIVE:
             if self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
                 self.item("ok", svc, "enabled, active")
             else:

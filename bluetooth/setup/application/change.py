@@ -30,6 +30,7 @@ from bluetooth.setup.domain import (
     BearerState,
     BluetoothCommand,
     LeState,
+    RunningState,
     WpState,
     bearer_matches,
     changes_machine,
@@ -430,7 +431,7 @@ class Change(Checks):
         if self.lw_enabled != "enabled":
             self.must(["systemctl", "--user", "enable", unit])
             self.out(f"enabled:   {unit} (starts with your session)\n")
-        if self.lw_active != "active":
+        if self.lw_active != RunningState.ACTIVE:
             self.must(["systemctl", "--user", "start", unit])
             self.out(f"started:   {unit} (logs: journalctl --user -u {unit})\n")
         elif changed:
