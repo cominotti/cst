@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import json
 import os
 import stat
@@ -66,27 +67,20 @@ AUTO_COMPONENT = manifest_by_src()["toolchains/cst-toolchains"].component
 SCCACHE_COMPONENT = manifest_by_src()["toolchains/rustc-wrapper"].component
 
 
-def home_installer(entry_file: str) -> InstallService:
-    """The installer's use case for the files toolchains writes in the home (its copies, its units,
-    the sccache wrapper): written only when they changed, listed in the user's install record
-    (ENTRY_FILE: the running program, see program_folder)."""
-    return program_installer(entry_file)
-
-
-def put_home_file(place: Placement, data: bytes, entry_file: str) -> bool:
+def put_home_file(place: Placement, data: bytes, installer: InstallService) -> bool:
     """Write place's file in the home unless it is current (the caller checked conflicts and masks first)
     and list it in home's install record; True when it was written."""
-    return home_installer(entry_file).put(place, data, as_root=False)
+    return installer.put(place, data, as_root=False)
 
 
-def put_auto_copy(home: str, rel: str, data: bytes, entry_file: str) -> bool:
+def put_auto_copy(home: str, rel: str, data: bytes, installer: InstallService) -> bool:
     """One of auto on's copies, ~/rel (its manifest entry gives mode, source and component); True when written."""
     e = next(e for e in INSTALL_MANIFEST if e.dest == "~/" + rel)
     path = expand_dest(e.dest, home)
-    return put_home_file(Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home)), data, entry_file)
+    return put_home_file(Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home)), data, installer)
 
 
-def put_auto_unit(home: str, name: str, text: str, entry_file: str) -> bool:
+def put_auto_unit(home: str, name: str, text: str, installer: InstallService) -> bool:
     """One of auto on's user units (generated text); True when written."""
     path = os.path.join(home, UNIT_DIR_REL, name)
     place = Placement(
@@ -99,33 +93,33 @@ def put_auto_unit(home: str, name: str, text: str, entry_file: str) -> bool:
         owner=Owner.USER,
         mode=0o644,
     )
-    return put_home_file(place, text.encode(), entry_file)
+    return put_home_file(place, text.encode(), installer)
 
 
-def forget_auto_files(home: str, entry_file: str) -> None:
+def forget_auto_files(home: str, installer: InstallService) -> None:
     """auto off removed its files: the copies and the two units leave home's install record."""
     copies = [expand_dest(e.dest, home) for e in INSTALL_MANIFEST if e.component == AUTO_COMPONENT]
-    forget_home_files(home, [*copies, *(os.path.join(home, UNIT_DIR_REL, n) for n in (SERVICE, TIMER))], entry_file)
+    forget_home_files(home, [*copies, *(os.path.join(home, UNIT_DIR_REL, n) for n in (SERVICE, TIMER))], installer)
 
 
-def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], entry_file: str) -> bool:
+def put_wrapper(home: str, path: str, text: str, values: Mapping[str, str], installer: InstallService) -> bool:
     """The sccache wrapper (rustc-wrapper with the settings written in) through the installer, listed with
     those values, its component marked done; True when written."""
     e = manifest_by_src()["toolchains/rustc-wrapper"]
     place = Placement.of(e, path=path, dest=path, record=record_file(Owner.USER, home), values=values)
-    written = put_home_file(place, text.encode(), entry_file)
-    record_done(home, SCCACHE_COMPONENT, entry_file)
+    written = put_home_file(place, text.encode(), installer)
+    record_done(home, SCCACHE_COMPONENT, installer)
     return written
 
 
-def record_done(home: str, component: str, entry_file: str) -> None:
+def record_done(home: str, component: str, installer: InstallService) -> None:
     """component's command finished: home's install record says it is complete."""
-    home_installer(entry_file).mark(record_file(Owner.USER, home), component)
+    installer.mark(record_file(Owner.USER, home), component)
 
 
-def forget_home_files(home: str, paths: Sequence[str], entry_file: str) -> None:
+def forget_home_files(home: str, paths: Sequence[str], installer: InstallService) -> None:
     """These files of home were removed: its install record no longer lists them."""
-    home_installer(entry_file).forget(record_file(Owner.USER, home), paths)
+    installer.forget(record_file(Owner.USER, home), paths)
 
 
 def defaults_path(entry_file: str) -> str:
@@ -366,6 +360,13 @@ class HomeFiles:
         self.home = home
         self.entry_file = entry_file
 
+    @functools.cached_property
+    def installer(self) -> InstallService:
+        """The installer's use case for the files toolchains writes in the home (its copies, its units,
+        the sccache wrapper): written only when they changed, listed in the user's install record. One
+        per command, made at its first write (status and the plans write nothing and read no .git)."""
+        return program_installer(self.entry_file)
+
     def auto_copies(self) -> dict[str, bytes]:
         return copies(self.entry_file)
 
@@ -379,16 +380,16 @@ class HomeFiles:
         return stale_files(self.home)
 
     def put_auto_copy(self, rel: str, data: bytes) -> bool:
-        return put_auto_copy(self.home, rel, data, self.entry_file)
+        return put_auto_copy(self.home, rel, data, self.installer)
 
     def put_auto_unit(self, name: str, text: str) -> bool:
-        return put_auto_unit(self.home, name, text, self.entry_file)
+        return put_auto_unit(self.home, name, text, self.installer)
 
     def auto_done(self) -> None:
-        record_done(self.home, AUTO_COMPONENT, self.entry_file)
+        record_done(self.home, AUTO_COMPONENT, self.installer)
 
     def forget_auto_files(self) -> None:
-        forget_auto_files(self.home, self.entry_file)
+        forget_auto_files(self.home, self.installer)
 
     def turned_off(self) -> bool:
         return turned_off(self.home)
@@ -428,4 +429,4 @@ class HomeFiles:
         return wrapper_state(self.home, text)
 
     def put_wrapper(self, text: str, values: Mapping[str, str]) -> bool:
-        return put_wrapper(self.home, wrapper_path(self.home), text, values, self.entry_file)
+        return put_wrapper(self.home, wrapper_path(self.home), text, values, self.installer)
