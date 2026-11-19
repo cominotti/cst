@@ -27,6 +27,11 @@ from btrfs.bulk.domain import (
     TAG_SIGNATURE,
     Ctx,
     Item,
+    BulkDirState,
+    BulkTargetState,
+    CacheTagState,
+    LstatKind,
+    PathChain,
     TreeSize,
     Unexpected,
     gib,
@@ -89,15 +94,15 @@ def tree_bytes(top: str) -> int:
     return n
 
 
-def kind(path: str) -> str:
+def kind(path: str) -> LstatKind:
     """absent | link | dir | other (lstat)."""
     try:
         st = os.lstat(path)
     except FileNotFoundError, NotADirectoryError:
-        return "absent"
+        return LstatKind.ABSENT
     if stat.S_ISLNK(st.st_mode):
-        return "link"
-    return "dir" if stat.S_ISDIR(st.st_mode) else "other"
+        return LstatKind.LINK
+    return LstatKind.DIR if stat.S_ISDIR(st.st_mode) else LstatKind.OTHER
 
 
 class Primitives:
@@ -257,7 +262,7 @@ class HomeTree:
     def __init__(self, machine: Primitives) -> None:
         self.machine = machine
 
-    def kind(self, path: str) -> str:
+    def kind(self, path: str) -> LstatKind:
         return kind(path)
 
     def entries_nofollow(self, path: str) -> list[str]:
@@ -271,7 +276,7 @@ class HomeTree:
         except OSError as e:
             if e.errno not in (errno.ENOTDIR, errno.ELOOP):
                 raise
-            if kind(path) == "link":
+            if kind(path) == LstatKind.LINK:
                 raise Unexpected(f"{path} is a symbolic link (not followed)") from None
             return []
         try:
@@ -286,13 +291,13 @@ class HomeTree:
         for part in [p for p in rel.split("/") if p]:
             path = os.path.join(path, part)
             k = kind(path)
-            if k == "absent":
-                return "absent"
-            if k == "link":
+            if k == LstatKind.ABSENT:
+                return PathChain.ABSENT
+            if k == LstatKind.LINK:
                 return "symlink:" + path
-            if k == "other":
+            if k == LstatKind.OTHER:
                 return "file:" + path
-        return "ok"
+        return PathChain.OK
 
     def empty_dir(self, path: str) -> bool:
         with os.scandir(path) as it:
@@ -417,31 +422,31 @@ class HomeTree:
         if c.startswith(("symlink:", "file:")):
             what, p = c.split(":", 1)
             return f"bad:{ctx.short(p)} is a {'symlink' if what == 'symlink' else 'file'}"
-        if c == "absent":
-            return "absent"
-        return "empty" if self.empty_dir(ctx.target(item)) else "data"
+        if c == PathChain.ABSENT:
+            return BulkTargetState.ABSENT
+        return BulkTargetState.EMPTY if self.empty_dir(ctx.target(item)) else BulkTargetState.DATA
 
     def bulk_state(self, ctx: Ctx) -> str:
         k = kind(ctx.bulk)
-        if k == "absent":
-            return "create"
-        if k != "dir":
-            return "bad"
-        return "ok" if self.machine.is_subvol(ctx.bulk) else "plain"
+        if k == LstatKind.ABSENT:
+            return BulkDirState.CREATE
+        if k != LstatKind.DIR:
+            return BulkDirState.BAD
+        return BulkDirState.OK if self.machine.is_subvol(ctx.bulk) else BulkDirState.PLAIN
 
     def tag_state(self, ctx: Ctx) -> str:
         p = os.path.join(ctx.bulk, "CACHEDIR.TAG")
         k = kind(p)
-        if k == "absent":
-            return "create"
-        if k != "other" or not stat.S_ISREG(os.lstat(p).st_mode):
-            return "bad"
+        if k == LstatKind.ABSENT:
+            return CacheTagState.CREATE
+        if k != LstatKind.OTHER or not stat.S_ISREG(os.lstat(p).st_mode):
+            return CacheTagState.BAD
         fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             head = os.read(fd, len(TAG_SIGNATURE))
         finally:
             os.close(fd)
-        return "ok" if head == TAG_SIGNATURE.encode() else "bad"
+        return CacheTagState.OK if head == TAG_SIGNATURE.encode() else CacheTagState.BAD
 
     def free_bytes(self, path: str) -> int:
         return self.machine.free_bytes(path)
@@ -453,7 +458,7 @@ class HomeTree:
         path = ctx.bulk
         for part in os.path.dirname(item.target).split("/"):
             path = os.path.join(path, part)
-            if kind(path) != "dir":
+            if kind(path) != LstatKind.DIR:
                 break  # absent, or a symlink/file: nothing real below it
             if not self.machine.is_nocow(path):
                 out.append(path)
