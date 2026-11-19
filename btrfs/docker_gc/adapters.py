@@ -19,7 +19,7 @@ import zlib
 
 from btrfs.docker_gc.domain import (
     DOCKER_TIMEOUT,
-    IncompleteRecord,
+    IncompleteRecordError,
     InspectError,
     UnknownProtection,
     Container,
@@ -220,7 +220,7 @@ class DockerCli:
             for o in found if isinstance(found, list) else []:
                 if (why := record_problem(kind, o)) is not None:
                     name = (o.get("Id") or o.get("Name")) if json_object(o) else o
-                    raise IncompleteRecord(f"{kind} inspect: {str(name)[:100]}: {why}")
+                    raise IncompleteRecordError(f"{kind} inspect: {str(name)[:100]}: {why}")
                 out.append(_inspected(o))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got

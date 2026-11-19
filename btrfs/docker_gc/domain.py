@@ -42,7 +42,7 @@ class NewerState(RuntimeError):
 # passes on the status `docker events` ends with (the docker CLI uses 1 for its errors).
 # 65: EX_DATAERR of sysexits.h.
 NEWER_STATE_EXIT = 65
-# The exit status of a command stopped by an IncompleteRecord. The recorder unit names it in
+# The exit status of a command stopped by an IncompleteRecordError. The recorder unit names it in
 # RestartPreventExitStatus= too: Docker gives the same answer at every start, so restarting the
 # recorder every 10 s would only inspect every container again, forever, and the unit would never
 # show as failed. 76: EX_PROTOCOL of sysexits.h (docker's answer lacks what its API promises).
@@ -223,7 +223,7 @@ class InspectError(RuntimeError):
     stops ("nothing done"); during the removals the image being re-checked is kept."""
 
 
-class IncompleteRecord(InspectError):
+class IncompleteRecordError(InspectError):
     """An InspectError for a record that lacks a key the plan relies on, holds another type there,
     or is not an object: unlike a gap or a cut answer, the next try gets the same (INCOMPLETE_RECORD_EXIT)."""
 

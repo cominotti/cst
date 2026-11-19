@@ -4729,7 +4729,7 @@ echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
-        # Exit 76 (IncompleteRecord: docker answers the same at every start) is exempt as well.
+        # Exit 76 (IncompleteRecordError: docker answers the same at every start) is exempt as well.
         docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=derived("/bin/sh -c 'exit 76'"))
         out = exec_bash(
             self.SYSTEMD_CONTAINER,

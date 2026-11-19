@@ -511,7 +511,7 @@ class ApplicationTest(unittest.TestCase):
         for command in (GcCommand.RUN, GcCommand.STATUS, GcCommand.RECORD):
             with self.subTest(command=command):
                 self.f.console.lines.clear()
-                self.f.docker.container_errors = [gc_domain.IncompleteRecord("container inspect: c1: no Image")]
+                self.f.docker.container_errors = [gc_domain.IncompleteRecordError("container inspect: c1: no Image")]
                 self.assertEqual(self.f.gc.execute(command), gc_domain.INCOMPLETE_RECORD_EXIT)
                 self.assertEqual(self.f.console.lines[-1], "<3>container inspect: c1: no Image; nothing done")
                 self.assertEqual(self.f.docker.calls, [])
@@ -1239,7 +1239,7 @@ class DockerInspectTest(unittest.TestCase):
         for key in ("Image", "State", "Config", "HostConfig", "Mounts"):
             with self.subTest(key=key):
                 rec = {k: v for k, v in self.container.items() if k != key}
-                with self.answer([rec]), self.assertRaises(gc_domain.IncompleteRecord) as stop:
+                with self.answer([rec]), self.assertRaises(gc_domain.IncompleteRecordError) as stop:
                     self.docker.containers()
                 self.assertEqual(str(stop.exception), f"container inspect: c1: no {key}")
         for key, value, kind in (("Image", None, "NoneType"), ("Mounts", "x", "str"), ("State", [], "list")):

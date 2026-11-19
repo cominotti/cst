@@ -18,7 +18,7 @@ from btrfs.docker_gc.domain import (
     UnknownProtection,
     DockerEvent,
     GcCommand,
-    IncompleteRecord,
+    IncompleteRecordError,
     InspectError,
     GcPaths,
     GcPlan,
@@ -193,12 +193,10 @@ class DockerGc:
             for line in str(e).splitlines():
                 self.console.log(3, line)
             return BAD_SETTINGS_EXIT
-        except IncompleteRecord as e:  # the same at every try: the recorder unit is not restarted for it
-            self.console.log(3, f"{e}; nothing done")
-            return INCOMPLETE_RECORD_EXIT
         except InspectError as e:
             self.console.log(3, f"{e}; nothing done")
-            return 1
+            # An incomplete record comes back at every try: the recorder unit is not restarted for it.
+            return INCOMPLETE_RECORD_EXIT if isinstance(e, IncompleteRecordError) else 1
         except RuntimeError as e:
             self.console.log(3, str(e))
             return 1
