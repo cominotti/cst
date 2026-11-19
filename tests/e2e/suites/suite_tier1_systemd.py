@@ -2536,12 +2536,16 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         `systemd-analyze security --offline` of every service stays at or under
         its SECURITY_CEILINGS entry (lower the entry when a unit gets better; a
         score under it does not fail, so a systemd update in the image that
-        rates a unit better does not turn tier 1 red). Drop-ins (below, machine.slice, user@.service) are not
-        units of their own and are not verified here."""
+        rates a unit better does not turn tier 1 red). Drop-ins (the manifest's, and the generated ones of
+        tests/unit_files.py) are verified through the unit they extend: a unit the distribution ships
+        (machine.slice, user@.service, below.service, ...) gets a stand-in in the stage, a template its
+        @e2e instance, and a user drop-in is checked under the user-check- prefix as user units are. The
+        stand-ins are not services of SECURITY_CEILINGS. A planted drop-in with an unknown key must make
+        verify speak, so a drop-in check cannot pass by reading nothing."""
         c = self.SYSTEMD_CONTAINER
         stage = "/var/tmp/e2e-units"
         # Commands of packages the tier 1 image does not install: staged even so.
-        not_in_image = "/usr/sbin/btrfs"
+        not_in_image = "/usr/sbin/btrfs /usr/bin/below"
         self.addCleanup(exec_bash, c, f"rm -rf {stage}", check=False)
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         sets = (
@@ -2562,7 +2566,9 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                     install -d "{stage}$(dirname "$p")" && install -m 0755 /dev/null "{stage}$p"
                 fi
             done
-            for f in user/*; do cp "$f" "system/user-check-$(basename "$f")"; done
+            for f in user/*; do
+                if [[ -d $f ]]; then cp -r "$f" "system/user-check-$(basename "$f")"; else cp "$f" "system/user-check-$(basename "$f")"; fi
+            done
             """,
         )
         names = exec_bash(
@@ -2576,6 +2582,60 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         verify = f"systemd-analyze verify --man=no --recursive-errors=no --root={stage} "
         v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in names), check=False)
         self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))
+        # Drop-ins: the unit each *.d folder extends (an instance for a template), with a stand-in
+        # when no unit of that name is staged; made after `names`, so the services stay the same.
+        extended = exec_bash(
+            c,
+            f"""
+            cd {stage}/etc/systemd/system
+            [[ -e {stage}/usr/bin/true ]] || {{ install -d {stage}/usr/bin && install -m 0755 /dev/null {stage}/usr/bin/true; }}
+            for d in *.d; do
+                [[ -d $d ]] || continue
+                b="${{d%.d}}"
+                t="$(sed -E 's/@[^.]*\\./@./' <<<"$b")"
+                if [[ ! -e $t ]]; then
+                    if [[ $t == *.service ]]; then
+                        printf '[Unit]\\nDescription=e2e stand-in\\n[Service]\\nExecStart=/usr/bin/true\\n' >"$t"
+                    else
+                        printf '[Unit]\\nDescription=e2e stand-in\\n' >"$t"
+                    fi
+                fi
+                if [[ $b == *@.* ]]; then b="${{b/@./@e2e.}}"; fi
+                echo "$b"
+            done
+            """,
+        ).stdout.split()
+        for name in (
+            "btrfs-scrub-weekly.service",
+            "below.service",
+            "machine.slice",
+            "user@e2e.service",
+            "user@1000.service",
+            "user-1000.slice",
+            "user-check-user.slice",
+            "user-check-flatpak-session-helper.service",
+        ):
+            self.assertIn(name, extended)
+        v = exec_bash(c, verify + " ".join(shlex.quote(n) for n in extended), check=False)
+        self.assertEqual((v.returncode, v.stdout + v.stderr), (0, ""))
+        # Negative control: verify --root reads a drop-in (an unknown key in one is reported).
+        planted = f"{stage}-planted"
+        self.addCleanup(exec_bash, c, f"rm -rf {planted}", check=False)
+        exec_bash(
+            c,
+            f"""
+            rm -rf {planted} && d={planted}/etc/systemd/system && install -d "$d/e2e-planted.service.d" {planted}/usr/bin
+            install -m 0755 /dev/null {planted}/usr/bin/true
+            printf '[Unit]\\nDescription=e2e stand-in\\n[Service]\\nExecStart=/usr/bin/true\\n' >"$d/e2e-planted.service"
+            printf '[Service]\\nNoSuchKey=1\\n' >"$d/e2e-planted.service.d/10-typo.conf"
+            """,
+        )
+        v = exec_bash(
+            c,
+            f"systemd-analyze verify --man=no --recursive-errors=no --root={planted} e2e-planted.service",
+            check=False,
+        )
+        self.assertIn("NoSuchKey", v.stdout + v.stderr)
         services = sorted(n for n in names if n.endswith(".service") and not n.startswith("user-check-"))
         self.assertEqual(services, sorted(self.SECURITY_CEILINGS), "every service has a SECURITY_CEILINGS entry")
         for name in services:

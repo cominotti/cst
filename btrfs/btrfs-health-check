@@ -24,9 +24,12 @@ import sys as _cst_sys
 
 # CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
 # it): from a checkout, cst_core and the module packages are in the folder above
-# this file; inside an installed zipapp, sys.path already holds the archive.
+# this file, and Python writes no bytecode there (no __pycache__ in the checkout,
+# even for a program run by its shebang as root); inside an installed zipapp,
+# sys.path already holds the archive.
 _cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
 if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.dont_write_bytecode = True
     _cst_sys.path.insert(0, _cst_root)
 
 import sys

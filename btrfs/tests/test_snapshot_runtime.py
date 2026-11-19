@@ -4,9 +4,6 @@ status`) shows for SNAPSHOT_EXCLUDE_CACHES, and for the units that run
 btrfs/btrfs-snapshot. (btrfs-snapshot's own options from SNAPSHOT_EXCLUDE_CACHES
 and SNAPSHOT_CACHES_SKIP: test_snapshot_hourly.py, on the whole program.)
 
-shell_function cuts one function out of a script's text, for the
-setup-snapshots.bash and btrfs-setup.sh tests that still need it.
-
 Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_snapshot_runtime -v
 """
@@ -24,16 +21,6 @@ sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BTRFS = os.path.dirname(HERE)
-
-
-def shell_function(path: str, name: str) -> str:
-    """The definition of the shell function NAME in PATH ('name() {' to '}')."""
-    with open(path) as f:
-        text = f.read()
-    m = re.search(rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL)
-    if m is None:
-        raise AssertionError(f"{name}() not found in {path}")
-    return m.group(0)
 
 
 class SnapStatusCachesTest(unittest.TestCase):

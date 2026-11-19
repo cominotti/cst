@@ -82,6 +82,8 @@ def run(
 SELINUX_ENFORCE = Path("/sys/fs/selinux/enforce")
 # Inside a toolbox the host's selinuxfs is not mounted at /sys/fs/selinux; it is under /run/host.
 SELINUX_ENFORCE_FROM_TOOLBOX = Path("/run/host/sys/fs/selinux/enforce")
+# "Y" when the kernel has AppArmor on: host_lsm_security_opts then adds apparmor=unconfined.
+APPARMOR_ENABLED = Path("/sys/module/apparmor/parameters/enabled")
 # podman and toolbox create this file in every container they start.
 CONTAINER_MARKER = Path("/run/.containerenv")
 CONTAINER_FILE_TYPE = "container_file_t"
@@ -144,11 +146,10 @@ def host_selinux(
     return enforce.exists() or (marker.exists() and host_enforce.exists())
 
 
-def host_lsm_security_opts() -> list[str]:
+def host_lsm_security_opts(apparmor: Path = APPARMOR_ENABLED) -> list[str]:
     opts: list[str] = []
     if host_selinux():
         opts.extend(["--security-opt", "label=disable"])
-    apparmor = Path("/sys/module/apparmor/parameters/enabled")
     try:
         if apparmor.exists() and apparmor.read_text().strip() == "Y":
             opts.extend(["--security-opt", "apparmor=unconfined"])

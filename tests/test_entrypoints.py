@@ -5,8 +5,11 @@
   only its own folder and the standard library, so before it can import
   cst_core or its package it adds the checkout root to sys.path. Every entry
   that imports repository code does that with BOOTSTRAP below, byte for byte,
-  and nothing else in production code changes sys.path. Inside an installed
-  zipapp the stanza does nothing (the archive is already on sys.path).
+  and nothing else in production code changes sys.path. From a checkout it
+  also sets sys.dont_write_bytecode before any CST import, so an entry run by
+  its shebang (`python3 -I`, no -B) writes no __pycache__ there
+  (tests/test_bytecode.py). Inside an installed zipapp the stanza does
+  nothing (the archive is already on sys.path).
   Everything else about paths (the program's own path, siblings, data
   files, the installed bytes) goes through cst_core.adapters.runtime.
 - **Entry points only wire argv.** An extension-less program holds a
@@ -36,9 +39,12 @@ import sys as _cst_sys
 
 # CST bootstrap (the same in every entry point; tests/test_entrypoints.py checks
 # it): from a checkout, cst_core and the module packages are in the folder above
-# this file; inside an installed zipapp, sys.path already holds the archive.
+# this file, and Python writes no bytecode there (no __pycache__ in the checkout,
+# even for a program run by its shebang as root); inside an installed zipapp,
+# sys.path already holds the archive.
 _cst_root = _cst_path.dirname(_cst_path.dirname(_cst_path.realpath(__file__)))
 if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_sys.path:
+    _cst_sys.dont_write_bytecode = True
     _cst_sys.path.insert(0, _cst_root)
 """
 
@@ -234,7 +240,7 @@ class EntryPointGateTest(unittest.TestCase):
     def test_checkers(self) -> None:
         self.assertEqual(sys_path_mutations("import sys\nsys.path.insert(0, 'x')\n", "a"), [2])
         self.assertEqual(sys_path_mutations("import sys\nsys.path[0:0] = ['x']\n", "a"), [2])
-        self.assertEqual(sys_path_mutations(BOOTSTRAP, "a"), [9])
+        self.assertEqual(sys_path_mutations(BOOTSTRAP, "a"), [BOOTSTRAP.count("\n")])
         self.assertEqual(sys_path_mutations(without_bootstrap(BOOTSTRAP), "a"), [])
         self.assertEqual(
             reexport_problems("from m import a as a\nimport b as c\n", "x"),
