@@ -32,7 +32,10 @@ declared once and used by name.
   key) for a JSON or dict format read by key; not `dict[str, Any | object |
   Json]` in a signature. The reader still returns what `json.loads` gave: a
   reader that validates returns it through a `TypeIs[TheDict]` guard, never a
-  `cast`, never a rebuilt dict.
+  `cast`, never a rebuilt dict. The guard is built on `cst_core.domain.shapes`
+  (`json_object`, `has_shape`, `list_of`) over the `object` that `parse_json`
+  or `parse_toml` gave, and checks every key whose type is narrower than
+  `object` or `Json` and every Required key.
 
 ## Rules that keep the behaviour
 

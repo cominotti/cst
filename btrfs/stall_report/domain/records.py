@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: MPL-2.0
 """btrfs-stall-report's record formats, no I/O: the window limits, the diskstats fields, the JSON units, what the daemon's records hold and what the analysis of one window returns."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 from typing import NotRequired
 from typing import Required
 from typing import TypedDict
+from typing import TypeIs
+
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object, number_or_none
 
 GAP_MAX = 30.0  # s; a larger gap between samples means the daemon was not running
 FRESH_MAX = 25.0  # s; newer data may still be buffered in the daemon
@@ -87,7 +90,7 @@ class MetaRecord(TypedDict, total=False):
     kernel: str
     base_interval: float  # s between full samples
     vm_keys: list[str]  # the /proc/vmstat names of each sample's "vm" list
-    dirty_bytes: int  # vm.dirty_bytes
+    dirty_bytes: int | None  # vm.dirty_bytes; None when the daemon could not read it
     disks: dict[str, str]  # block device name -> role ("btrfs ...", "swap", ...)
     fs: dict[str, FsInfo]
     stacks: bool  # the daemon could read kernel stacks
@@ -194,6 +197,7 @@ class Coverage(TypedDict):
     first_sample: float | None
     last_sample: float | None
     complete: bool
+    skipped: int  # damaged records and lines in the window, left out (load)
     gaps: NotRequired[int]  # set when the window has 2+ samples
 
 
@@ -317,10 +321,82 @@ class AnalyseResult(TypedDict):
 
 @dataclass(frozen=True, slots=True)
 class Recorded:
-    """The records of the log files by their kind ("t"), each list in file order."""
+    """The records of the log files by their kind ("t"), each list in file order; damaged: the
+    time each damaged record or line belongs to (load: its own "ts", else its neighbour's)."""
 
     metas: list[MetaRecord]
     samples: list[SampleRecord]
     episodes: list[EpisodeRecord]
     events: list[Notice]
     alerts: list[Notice]
+    damaged: list[float] = field(default_factory=list)
+
+
+# What summarise() reads of each record, of its type (a bool is no number). The keys a later daemon
+# added are optional: mono, vm, d, d_all (v3+), d_maint (v5+), d_mem (v8+), cg; max_d_all (v3+),
+# max_d_mem (v8+). Records of every daemon version pass; a record that fails is damaged.
+_NUM = (int, float)
+_META_KEYS: KeyTypes = {
+    "ts": _NUM,
+    "v": (int,),
+    "kernel": (str,),
+    "base_interval": _NUM,
+    "vm_keys": (list,),
+    "dirty_bytes": (int, type(None)),  # null: the daemon could not read vm.dirty_bytes
+    "disks": (dict,),
+    "fs": (dict,),
+    "stacks": (bool,),
+}
+_SAMPLE_REQUIRED: KeyTypes = {"ts": _NUM, "psi": (dict,), "procs": (list,), "fs": (dict,), "disk": (dict,)}
+_SAMPLE_OPTIONAL: KeyTypes = {
+    "mono": _NUM,
+    "vm": (list,),
+    "d": (int,),
+    "d_all": (int,),
+    "d_maint": (int,),
+    "d_mem": (int,),
+    "cg": (dict,),
+}
+_EPISODE_REQUIRED: KeyTypes = {
+    "start": _NUM,
+    "end": _NUM,
+    "reason": (str,),
+    "max_d": (int,),
+    "peak": (dict,),
+    "sigs": (list,),
+}
+_EPISODE_OPTIONAL: KeyTypes = {"max_d_all": (int,), "max_d_mem": (int,)}
+_NOTICE_OPTIONAL: KeyTypes = {
+    "kind": (str,),
+    "msg": (str,),
+    "severe": (bool,),
+    "stack": (list,),
+    "comm": (str,),
+    "title": (str,),
+    "body": (str,),
+}
+
+
+def is_meta_record(r: object) -> TypeIs[MetaRecord]:
+    return has_shape(r, {}, _META_KEYS)
+
+
+def is_sample_record(r: object) -> TypeIs[SampleRecord]:
+    return has_shape(r, _SAMPLE_REQUIRED, _SAMPLE_OPTIONAL)
+
+
+def is_episode_record(r: object) -> TypeIs[EpisodeRecord]:
+    """An episode record with its keys, each of its sigs an object."""
+    if not has_shape(r, _EPISODE_REQUIRED, _EPISODE_OPTIONAL) or not json_object(r):
+        return False
+    sigs = r["sigs"]
+    return isinstance(sigs, list) and all(json_object(s) for s in sigs)
+
+
+def is_notice(r: object) -> TypeIs[Notice]:
+    return has_shape(r, {"ts": _NUM}, _NOTICE_OPTIONAL)
+
+
+def record_ts(r: object) -> float | None:
+    """A record's own time ("ts"), when it is a number."""
+    return number_or_none(r.get("ts")) if json_object(r) else None

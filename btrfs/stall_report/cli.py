@@ -130,9 +130,9 @@ def print_report(res: AnalyseResult, meta: MetaRecord, *, verbose: bool) -> None
         print()
         print(f"events   {len(res['events'])} kernel/daemon event(s) ('!' = severe, on this host's disks):")
         for e in res["events"][-(30 if verbose else 8) :]:
-            print(f"  {'!' if e.get('severe', False) else ' '} {fmt_ts(e['ts'])} {e['msg'][:170]}")
+            print(f"  {'!' if e.get('severe', False) else ' '} {fmt_ts(e['ts'])} {e.get('msg', '')[:170]}")
     for a in res["alerts"]:
-        print(f"alert    {fmt_ts(a['ts'])} {a['title']}: {a['body']}")
+        print(f"alert    {fmt_ts(a['ts'])} {a.get('title', '?')}: {a.get('body', '')}")
 
 
 def main() -> None:

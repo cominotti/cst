@@ -17,6 +17,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -310,7 +311,7 @@ class ReportCase(unittest.TestCase):
     def run_report(
         self, recs: Sequence[Mapping[str, Any]], until: float | None = None
     ) -> tuple[dict[str, Any], list[str], str]:
-        until = until or max(r.get("ts", 0) for r in recs)
+        until = until or float(max(r.get("ts", 0) for r in recs))
         res, meta_ = self.m.analyse(recs, T0, until, with_below=False, verbose=False)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -729,42 +730,171 @@ class ClosedPipeTest(unittest.TestCase):
                     self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""))
 
 
+DAMAGED = "INCOMPLETE DATA: {} damaged record(s) in this window were left out (re-running does not help)"
+
+
 class MalformedLineTest(unittest.TestCase):
-    def test_lines_that_are_json_but_no_record_are_skipped(self) -> None:
-        # A line that parses to a list, number, string or null (a cut or foreign write) is
-        # skipped like a line that is not JSON. Before, analyse() called .get on it: a traceback.
-        tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")
+    """Lines the report cannot use: skipped, counted in the window they belong to, and named in the
+    verdict, never a traceback and never silent."""
+
+    tool = os.path.join(_CHECKOUT, "btrfs", "btrfs-stall-report")
+
+    def report(self, files: Mapping[float, Sequence[str]], since: float, until: float, *args: str) -> str:
+        """The report of the window over log files (the day of each key: its lines, as written)."""
+        with tempfile.TemporaryDirectory() as logs:
+            for day, lines in files.items():
+                path = os.path.join(logs, time.strftime("stall-%Y-%m-%d.jsonl", time.localtime(day)))
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("".join(lines))
+            window = ["--since", f"@{since:.0f}", "--until", f"@{until:.0f}"]
+            p = subprocess.run(
+                ["/usr/bin/python3", "-I", self.tool, "--log-dir", logs, *window, "--no-below", *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin"},
+                timeout=60,
+            )
+        self.assertEqual((p.returncode, p.stderr), (0, ""))
+        return p.stdout
+
+    @staticmethod
+    def lines(records: Sequence[object]) -> list[str]:
+        return [(r if isinstance(r, str) else json.dumps(r)) + "\n" for r in records]
+
+    def test_lines_that_are_json_but_no_record_are_skipped_and_counted(self) -> None:
+        # A line that parses to a list, number, string or null (a cut or foreign write) is skipped
+        # like a line that is not JSON, and counted: before, both were dropped without a word.
         now = time.time()
         good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
-        outputs = []
-        for junk in ([], ["[1, 2]", "5", '"s"', "null", "true"]):
-            with self.subTest(junk=junk), tempfile.TemporaryDirectory() as logs:
-                path = os.path.join(logs, time.strftime("stall-%Y-%m-%d.jsonl", time.localtime(now)))
-                with open(path, "w", encoding="utf-8") as f:
-                    f.writelines(line + "\n" for line in [*junk, *(json.dumps(r) for r in good), *junk])
-                p = subprocess.run(
-                    [
-                        "/usr/bin/python3",
-                        "-I",
-                        tool,
-                        "--log-dir",
-                        logs,
-                        "--since",
-                        f"@{now - 60:.0f}",
-                        "--until",
-                        f"@{now:.0f}",
-                        "--no-below",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    stdin=subprocess.DEVNULL,
-                    env={"PATH": "/usr/bin:/bin"},
-                    timeout=60,
-                )
-                self.assertEqual((p.returncode, p.stderr), (0, ""))
-                outputs.append(p.stdout)
-        self.assertEqual(outputs[1], outputs[0])
+        junk = ["[1, 2]", "5", '"s"', "null", "true", "not json"]
+        clean = self.report({now: self.lines(good)}, now - 60, now)
+        damaged = self.report({now: self.lines([*junk, *good, *junk])}, now - 60, now)
+        self.assertEqual(damaged.replace(f"verdict  {DAMAGED.format(12)}\n", ""), clean)
+        self.assertIn(DAMAGED.format(12), damaged)
+        self.assertNotIn("damaged", clean)
+
+    def test_a_record_without_what_the_report_reads_is_skipped_and_counted(self) -> None:
+        # Before: a TypeError or KeyError in summarise(), the whole report a traceback.
+        now = time.time()
+        good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        bad_sample = {**sample(now - 12, 1000, 0), "ts": "x"}
+        no_psi = {k: v for k, v in sample(now - 11, 1000, 0).items() if k != "psi"}
+        bad_episode = {k: v for k, v in episode(now - 20, now - 15, 3, [("a", 1, "storage")]).items() if k != "end"}
+        bad_event = {"t": "ev", "ts": now - 10, "msg": 5}
+        out = self.report({now: self.lines([*good, bad_sample, no_psi, bad_episode, bad_event])}, now - 60, now)
+        self.assertIn(DAMAGED.format(4), out)
+        report = json.loads(self.report({now: self.lines([*good, bad_sample, no_psi])}, now - 60, now, "--json"))
+        self.assertEqual(report["coverage"]["skipped"], 2)
+        self.assertIn(DAMAGED.format(2), report["verdict"])
+        self.assertEqual(
+            json.loads(self.report({now: self.lines(good)}, now - 60, now, "--json"))["coverage"]["skipped"], 0
+        )
+
+    def test_events_and_alerts_without_their_texts_are_shown(self) -> None:
+        # Notice keeps msg, title and body NotRequired; the text report read them with [] (KeyError).
+        now = time.time()
+        recs = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        out = self.report(
+            {now: self.lines([*recs, {"t": "ev", "ts": now - 20}, {"t": "al", "ts": now - 19}])}, now - 60, now
+        )
+        self.assertIn("events   1 kernel/daemon event(s)", out)
+        self.assertRegex(out, r"alert    \S+ \?: \n")
+        self.assertNotIn("damaged", out)
+
+    def test_what_is_not_counted(self) -> None:
+        now = time.time()
+        good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        # The last line without its newline: the daemon may be writing it.
+        torn = [*self.lines(good), '{"t": "s", "ts": 1']
+        self.assertNotIn("damaged", self.report({now: torn}, now - 60, now))
+        # A damaged line of another day's file, among that day's records: another window.
+        yesterday = now - 86400
+        old = self.lines([meta(yesterday - 30, 7), "not json", sample(yesterday - 20, 1000, 0)])
+        self.assertNotIn("damaged", self.report({now: self.lines(good), yesterday: old}, now - 60, now))
+        # A kind of record the report does not read.
+        self.assertNotIn("damaged", self.report({now: self.lines([*good, {"t": "x", "ts": "y"}])}, now - 60, now))
+
+    def test_a_cut_gz_file_keeps_the_records_before_the_cut(self) -> None:
+        # A .gz whose end is missing (a copy cut short): the lines read before the error count, with a
+        # warning, as they always did.
+        now = time.time()
+        good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        with tempfile.TemporaryDirectory() as logs:
+            path = os.path.join(logs, time.strftime("stall-%Y-%m-%d.jsonl.gz", time.localtime(now)))
+            data = gzip.compress("".join(self.lines(good)).encode())
+            with open(path, "wb") as f:
+                f.write(data[:-8])  # without its trailer (CRC and size): EOFError at the end
+            window = ["--since", f"@{now - 60:.0f}", "--until", f"@{now:.0f}"]
+            p = subprocess.run(
+                ["/usr/bin/python3", "-I", self.tool, "--log-dir", logs, *window, "--no-below"],
+                check=False,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin"},
+                timeout=60,
+            )
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"warning: cannot fully read {path}", p.stderr)
+        self.assertNotIn("NO DATA", p.stdout)
+
+    def test_records_of_every_daemon_version_are_read(self) -> None:
+        # The oldest shapes: a sample with only what every daemon wrote (no mono, vm, d, d_all,
+        # d_maint, d_mem, cg), an episode without max_d_all, max_d_mem, kind or examples, a meta
+        # record with only its version, events and alerts with their texts.
+        now = time.time()
+        oldest = {
+            "t": "s",
+            "ts": 0.0,
+            "psi": {"io": [0, 0, 0, 0], "memory": [0, 0, 0, 0], "cpu": [0, 0, 0, 0]},
+            "procs": [1, 0],
+            "fs": {},
+            "disk": {},
+        }
+        ep = {
+            "t": "ep",
+            "ts": now - 20,
+            "start": now - 20,
+            "end": now - 15,
+            "reason": "hung task",
+            "max_d": 2,
+            "peak": {"io_full_avg10": 1.0},
+            "sigs": [{"sig": "a", "ctx": "", "n": 1, "comms": {}, "cgroups": {}}],
+        }
+        recs = [
+            {"t": "meta", "ts": now - 30, "v": 1},
+            *({**oldest, "ts": now - 25 + 5 * i} for i in range(3)),
+            ep,
+            {"t": "ev", "ts": now - 18, "msg": "x", "severe": False},
+            {"t": "al", "ts": now - 17, "title": "t", "body": "b"},
+            *old_run(3),
+            *new_run(now - 40, 3),
+        ]
+        out = self.report({now: self.lines(recs)}, now - 60, now)
+        self.assertNotIn("damaged", out)
+        self.assertIn("episodes 1", out)
+
+    def test_a_meta_whose_dirty_bytes_is_null_is_read(self) -> None:
+        # The daemon writes read_int's None when it cannot read /proc/sys/vm/dirty_bytes (a
+        # container, a restricted /proc): the meta still counts, with its vm_keys, disks and kernel,
+        # and the limit reads as 0, as for a meta without the key. Before: the meta was damaged.
+        now = time.time()
+        rest = [*(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        null, zero = ({**meta(now - 30, 7), "dirty_bytes": d} for d in (None, 0))
+        out = self.report({now: self.lines([null, *rest])}, now - 60, now)
+        self.assertNotIn("damaged", out)
+        self.assertEqual(out, self.report({now: self.lines([zero, *rest])}, now - 60, now))
+        report = json.loads(self.report({now: self.lines([null, *rest])}, now - 60, now, "--json"))
+        self.assertEqual((report["coverage"]["skipped"], report["vm"]["dirty_limit_bytes"]), (0, 0))
+
+    def test_no_data_says_what_was_damaged(self) -> None:
+        now = time.time()
+        out = self.report({now: self.lines([meta(now - 30, 7), "not json", sample(now - 20, 1000, 0)])}, now - 60, now)
+        verdicts = [line for line in out.splitlines() if line.startswith("verdict")]
+        self.assertTrue(verdicts[0].startswith("verdict  NO DATA"), out)
+        self.assertEqual(verdicts[1], f"verdict  {DAMAGED.format(1)}")
 
 
 # A stand-in for btrfs-stall-report, for btrfs-stall-watch: samples every 5 s around the

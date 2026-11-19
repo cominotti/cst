@@ -622,6 +622,62 @@ sys.exit(r.returncode)
 """
 
 
+# test_112: the program at argv[1] with its settings file at argv[2] against the same fake docker and
+# scenario as test_103's, with one container record that lacks "Image" (its image would look unused):
+# run --dry-run and status (which plan as the weekly run does), twice each, stop with "no Image;
+# nothing done", and nothing is removed.
+GC_HOLE_RUN = r"""
+import json, os, subprocess, sys, tempfile, time
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.tests import test_docker_gc_program as t
+prog, conf = sys.argv[1], sys.argv[2]
+tmp = tempfile.mkdtemp(prefix="e2e-gc-hole-", dir="/var/tmp")  # /tmp is noexec here: the fakes run
+fakes = os.path.join(tmp, "bin")
+os.mkdir(fakes)
+for name, text in (("docker", t.FAKE_DOCKER), ("systemctl", t.FAKE_SYSTEMCTL)):
+    path = os.path.join(fakes, name)
+    with open(path, "w") as f:
+        f.write(text.replace("@PYTHON@", sys.executable))
+    os.chmod(path, 0o755)
+now = time.time()
+docker = t.scenario(now)
+hole = docker["containers"][0]
+del hole["Image"]
+with open(os.path.join(tmp, "docker.json"), "w") as f:
+    json.dump(docker, f)
+state = os.path.join(tmp, "state")
+os.mkdir(state)
+last_used = os.path.join(state, "last-used.json")
+with open(last_used, "w") as f:
+    json.dump({"since": t.OLD + 30 * t.DAY, "images": {t.sha("8"): now - t.DAY}, "heartbeat": now}, f)
+with open(last_used, "rb") as f:
+    before = f.read()
+env = {
+    "PATH": fakes + ":/usr/bin:/bin", "HOME": tmp, "DOCKER_GC_STATE": state, "DOCKER_GC_RUNTIME": os.path.join(tmp, "run"),
+    "DOCKER_GC_CONF": conf, "DOCKER_GC_INSTALLED": prog,
+    "FAKE_DOCKER_STATE": os.path.join(tmp, "docker.json"), "FAKE_DOCKER_LOG": os.path.join(tmp, "calls.log"),
+}
+want = f"<3>docker-gc: container inspect: {hole['Id']}: no Image; nothing done"
+for args in (["run", "--dry-run"], ["status"], ["run", "--dry-run"], ["status"]):  # run: skipped right after boot
+    r = subprocess.run([prog, *args], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False, cwd="/")
+    sys.stderr.write(f"test_112 {' '.join(args)}: rc={r.returncode} {r.stdout}{r.stderr}")
+    if r.returncode != 76 or want not in r.stdout + r.stderr:  # 76: the recorder unit does not restart for it
+        sys.exit(f"test_112: {args}: expected exit 76 and {want!r}")
+with open(os.path.join(tmp, "calls.log")) as f:
+    calls = [json.loads(line) for line in f]
+removing = [c for c in calls if "rm" in c or "prune" in c]
+if removing:
+    sys.exit(f"test_112: docker was asked to remove {removing}")
+with open(os.path.join(tmp, "docker.json")) as f:
+    if json.load(f) != docker:
+        sys.exit("test_112: the fake docker's objects changed")
+with open(last_used, "rb") as f:
+    if f.read() != before:
+        sys.exit("test_112: last-used.json changed")
+print("E2E-OK")
+"""
+
+
 # test_101: run as tester once the test has written main.conf. First the machine as main's CST
 # (535aea1) left it when it set the headset by default: its LDAC rule (the vendored fixture, for an
 # invented headset) and a settings file without DEVICE. Then a machine with no headset at all.
@@ -3580,6 +3636,118 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_112_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
+        """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
+        a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
+        record and the key ("nothing done"), twice; docker is asked to remove nothing, its objects and
+        last-used.json are unchanged. (A plain run plans the same way, but is skipped in the first
+        10 minutes after boot: the unit tests cover it.)"""
+        c = self.SYSTEMD_CONTAINER
+        stage = "/var/tmp/e2e-gc-hole"
+        self.addCleanup(exec_bash, c, f"rm -rf {stage} /var/tmp/e2e-gc-hole-*", check=False)
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        sets = (
+            "--set UUID=00000000-0000-0000-0000-000000000000 --set OPTIONS=subvolid=5 --set USER=tester "
+            "--set ALLOWED=AllowedCPUs=0"
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_112 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            stage={stage}
+            rm -rf "$stage" && install -d -m 0755 "$stage"
+            {installer} install --root "$stage" --owner root {sets} >/dev/null
+            /usr/bin/python3 -I -c {shlex.quote(GC_HOLE_RUN)} "$stage/usr/local/sbin/docker-gc" "$stage/etc/cst/docker-gc.conf"
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_113_cst_vm_refuses_a_damaged_index_and_leaves_it(self) -> None:
+        """cst vm (the checkout's program; the index a scratch file, CST_VM_INDEX) with an index that is
+        not JSON, then one without a "backups" list: list exits 1 naming the file and the way out, twice,
+        and the file keeps its bytes. A backup and status need libvirt: their refusal is a unit test."""
+        w = "/var/tmp/e2e-vm-index"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_113 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w={w}
+            rm -rf "$w" && mkdir -p "$w"
+            export CST_PROG="cst vm" CST_VM_INDEX="$w/vm-backups.json"
+            for text in '{{"backups": [' '{{"version": 1}}'; do
+                printf '%s' "$text" >"$CST_VM_INDEX"
+                before="$(sha256sum <"$CST_VM_INDEX")"
+                for args in list list; do
+                    rc=0; err="$(/usr/bin/python3 -I /opt/cst-rw/vm/cst-vm $args 2>&1 >/dev/null)" || rc=$?
+                    echo "test_113 $args: rc=$rc $err" >&2
+                    [[ "$rc" == 1 ]]
+                    grep -qF "$CST_VM_INDEX cannot be read as cst vm's backup index" <<<"$err"
+                    grep -qF "move it aside (mv $CST_VM_INDEX $CST_VM_INDEX.bad) to start a new index" <<<"$err"
+                done
+                [[ "$(sha256sum <"$CST_VM_INDEX")" == "$before" ]]
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
+        requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
+        the boot as postponed with the file's reason, and status names the file; mark exits 2 and marks
+        nothing. With the file fixed, the reason is gone from the next run. The check comes before
+        any btrfs call, so the container's file system is enough."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            "rm -rf /etc/docker/daemon.json /etc/btrfs-setup/docker-nocow-pending /var/lib/docker-volumes-nocow "
+            "/var/tmp/e2e-nocow; [ -e /var/tmp/e2e-nocow-docker ] && rm -rf /etc/docker || true; rm -f /var/tmp/e2e-nocow-docker",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            """
+            set -E
+            trap 'echo "test_114 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            [ -e /etc/docker ] || { mkdir -p /etc/docker && touch /var/tmp/e2e-nocow-docker; }
+            [ ! -e /etc/docker/daemon.json ] || { echo "a daemon.json is there already" >&2; exit 1; }
+            printf '{' >/etc/docker/daemon.json
+            install -d -m 0755 /etc/btrfs-setup && touch /etc/btrfs-setup/docker-nocow-pending
+            mkdir -p /var/tmp/e2e-nocow && ls -la /var/lib/docker 2>/dev/null >/var/tmp/e2e-nocow/before || true
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_114 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown: migration left for the next boot" <<<"$out"
+            grep -qF '"reason": "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown"' \
+                /var/lib/docker-volumes-nocow/postponed
+            ls -la /var/lib/docker 2>/dev/null >/var/tmp/e2e-nocow/after || true
+            cmp -s /var/tmp/e2e-nocow/before /var/tmp/e2e-nocow/after
+            [[ -e /etc/btrfs-setup/docker-nocow-pending ]]
+            status="$($prog status 2>&1)" || true
+            grep -qF "/etc/docker/daemon.json: not JSON: the boot's migration waits until it is fixed" <<<"$status"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            [[ "$rc" == 2 ]]
+            grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            printf '{}' >/etc/docker/daemon.json
+            out="$($prog migrate 2>&1)" || true
+            echo "test_114 fixed: $out" >&2
+            if grep -qF "daemon.json" <<<"$out"; then echo "the fixed file still holds the migration back" >&2; exit 1; fi
+            if grep -qF "daemon.json" /var/lib/docker-volumes-nocow/postponed 2>/dev/null; then
+                echo "the record still names the fixed file" >&2; exit 1
+            fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own
@@ -4500,8 +4668,9 @@ echo E2E-OK
         none, for its BindsTo=), with a last-used.json of a newer docker-gc ("v": 99): the recorder exits
         65 before any docker call, and RestartPreventExitStatus= keeps systemd from starting it again
         after RestartSec=10: the unit is failed (cst doctor lists it), never restarted, its journal
-        names the format once, and the file is byte for byte as it was. Control: the same unit ending
-        with exit 1 is restarted."""
+        names the format once, and the file is byte for byte as it was. The same unit ending with exit
+        76 (an inspect record without a key docker-gc relies on) is not restarted either. Control: the
+        same unit ending with exit 1 is restarted."""
         shipped = docker_exec(
             self.SYSTEMD_CONTAINER, ["cat", "/opt/cst-rw/btrfs/units/docker-gc-recorder.service"]
         ).stdout
@@ -4580,6 +4749,25 @@ echo E2E-OK
             n="$(systemctl show -p NRestarts --value {unit})"
             systemctl stop {unit} || true
             [ "$n" -ge 1 ] || {{ echo "an exit 1 was not restarted (NRestarts=$n)" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+        # Exit 76 (IncompleteRecordError: docker answers the same at every start) is exempt as well.
+        docker_exec(self.SYSTEMD_CONTAINER, ["bash", "-c", f"cat >{path}"], input_text=derived("/bin/sh -c 'exit 76'"))
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            show() {{ systemctl show -p "$1" --value {unit}; }}
+            systemctl stop {unit} 2>/dev/null || true
+            systemctl reset-failed {unit} 2>/dev/null || true
+            systemctl daemon-reload
+            systemctl start {unit} || true
+            sleep 14   # past RestartSec=10
+            state="$(show ActiveState)" n="$(show NRestarts)" rc="$(show ExecMainStatus)"
+            systemctl stop {unit} || true
+            [ "$state" = failed ] && [ "$n" = 0 ] && [ "$rc" = 76 ] ||
+                {{ echo "exit 76: state $state, NRestarts $n, status $rc" >&2; exit 1; }}
             echo E2E-OK
             """,
         ).stdout

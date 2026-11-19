@@ -415,7 +415,8 @@ def unexplained_deletions(
 
 def err_text(e: BaseException) -> str:
     """An OSError's strerror, else the exception's text (ParseError, an OSError without one)."""
-    return getattr(e, "strerror", None) or str(e)
+    strerror: object = getattr(e, "strerror", None)
+    return strerror if isinstance(strerror, str) and strerror else str(e)
 
 
 # ---- btrfs ---------------------------------------------------------------------------

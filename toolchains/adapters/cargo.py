@@ -5,7 +5,6 @@ which build folders the workspaces under ~/Workspace still claim.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -19,6 +18,7 @@ if TYPE_CHECKING:
 
     from toolchains.domain.prune import Limits
 
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import Json
 from toolchains.domain.build import (
     CACHE_TAG,
@@ -116,9 +116,12 @@ def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
     try:
-        bd = json.loads(r.stdout).get("build_directory")
-    except ValueError, AttributeError:
+        data = parse_json(r.stdout)
+    except ValueError:
         return None, "cargo metadata: unexpected output"
+    if not json_object(data):  # no .get: it raised AttributeError
+        return None, "cargo metadata: unexpected output"
+    bd = data.get("build_directory")
     # No build_directory: a cargo without build-dir support, so not this root.
     return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
 
@@ -322,7 +325,7 @@ def workspace_metadata(
         last = (r.stderr.strip().splitlines() or ["failed"])[-1]
         return None, f"cargo metadata: {last}"
     try:
-        data: object = json.loads(r.stdout)
+        data = parse_json(r.stdout)
         if not is_cargo_metadata(data):
             raise ValueError
     except ValueError:

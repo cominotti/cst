@@ -42,7 +42,8 @@ def is_btrfs(path: str) -> bool | None:
             return None
     except OSError, AttributeError:
         return None
-    return struct.unpack_from("l", buf.raw, 0)[0] == BTRFS_MAGIC
+    magic: object = struct.unpack_from("l", buf.raw, 0)[0]
+    return magic == BTRFS_MAGIC
 
 
 def readable_inode_flags(path: str) -> int | None:

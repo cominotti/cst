@@ -4,12 +4,13 @@ headset in pw-dump, the pactl events and card profiles that matter, and the
 one-attempt-per-connection rule (Tracker). No I/O.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from enum import StrEnum
 import re
-from typing import Final, TypedDict
+from typing import Final, TypedDict, TypeIs
 
-from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, PwObject, PwProps, node_rate
+from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, node_rate
+from cst_core.domain.shapes import KeyTypes, ShapeError, has_shape, json_object, object_or_empty
 
 
 # Seconds. SETTLE: how long the wrong rate must last before acting (the
@@ -50,22 +51,33 @@ class Snapshot(TypedDict):
     mic: bool
 
 
-def serial(props: PwProps) -> int | None:
-    """Parse PipeWire `object.serial` into an int, or None if unavailable."""
-    s = props.get("object.serial")
-    if s is None:
+def serial(props: object) -> int | None:
+    """Parse PipeWire `object.serial` of a node's or device's props (PwProps) into an int, or None
+    if unavailable."""
+    s = props.get("object.serial") if json_object(props) else None
+    if not isinstance(s, str | int | float):  # None, or another JSON value int() refuses
         return None
     try:
         return int(s)
-    except TypeError, ValueError:
+    except ValueError, OverflowError:
         return None
 
 
-def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
+def _rate(info: object) -> int | None:
+    """node_rate, None when its Format or EnumFormat is of another shape (the rate is unknown)."""
+    try:
+        return node_rate(info)
+    except ShapeError:
+        return None
+
+
+def snapshot(dev: str, objs: object) -> Snapshot:
     """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
     dict: card (object serial, None = not in PipeWire), profile (active card
     profile), out (output node serial), codec, rate, mic (the headset's input
-    node is running). Missing parts are None."""
+    node is running). Missing parts are None. An object whose info, props or
+    params is of another shape is skipped (as one that is not an object), so
+    nothing it holds can lead to an action."""
     mac = dev.replace("_", ":")
     inputs: list[int | None] = []
     snap: Snapshot = {
@@ -77,24 +89,28 @@ def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
         "inputs": inputs,
         "mic": False,
     }
-    for o in objs:
-        if not isinstance(o, dict):
+    for o in objs if isinstance(objs, list) else []:
+        if not json_object(o):
             continue
-        info = o.get("info") or {}
-        p = info.get("props") or {}
+        try:
+            info = object_or_empty(o.get("info"))
+            p, params = object_or_empty(info.get("props")), object_or_empty(info.get("params"))
+        except ShapeError:
+            continue
         kind = str(o.get("type", ""))
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             snap["card"] = serial(p)
-            prof = (info.get("params") or {}).get("Profile") or []
-            if prof and isinstance(prof[0], dict):
-                snap["profile"] = prof[0].get("name")
+            prof = params.get("Profile") or []
+            if isinstance(prof, list) and prof and json_object(first := prof[0]):
+                name = first.get("name")
+                snap["profile"] = name if isinstance(name, str) else None
         if not kind.endswith("Node"):
             continue
         name = str(p.get("node.name", ""))
-        if name.startswith("bluez_output." + dev) and p.get(CODEC_KEY, ""):
+        if name.startswith("bluez_output." + dev) and (codec := p.get(CODEC_KEY, "")):
             snap["out"] = serial(p)
-            snap["codec"] = p[CODEC_KEY]
-            snap["rate"] = node_rate(info)
+            snap["codec"] = str(codec)
+            snap["rate"] = _rate(info)
         elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + mac)):
             inputs.append(serial(p))
             if info.get("state") == "running":
@@ -251,6 +267,20 @@ def relevant(line: str, known: set[int]) -> bool:
 
 
 A2DP_DESC: Final[re.Pattern[str]] = re.compile(r"\(A2DP Sink, codec ([^)]+)\)")
+
+
+_CARD_KEYS: KeyTypes = {"index": (int,), "active_profile": (str,), "profiles": (dict,)}
+_PROFILE_KEYS: KeyTypes = {"description": (str,), "available": (bool,)}
+
+
+def is_pactl_card(value: object) -> TypeIs[PactlCard]:
+    """A card of `pactl -f json list cards` as the watcher reads it: its name a string, and the
+    keys it reads, when there, of their types (each profile an object with a text description and
+    a bool available). A card that is not one is skipped: no action without a card that matches."""
+    if not has_shape(value, {"name": (str,)}, _CARD_KEYS) or not json_object(value):
+        return False
+    profs = value.get("profiles", {})
+    return json_object(profs) and all(has_shape(p, {}, _PROFILE_KEYS) for p in profs.values())
 
 
 def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | None, str | None]:

@@ -13,12 +13,14 @@ import subprocess
 import sys
 import threading
 import time
-from typing import TypedDict, TypeIs
+from typing import Final, TypedDict, TypeIs
 import zipfile
 import zlib
 
 from btrfs.docker_gc.domain import (
     DOCKER_TIMEOUT,
+    IncompleteRecordError,
+    InspectError,
     UnknownProtection,
     Container,
     DockerEvent,
@@ -38,6 +40,8 @@ from btrfs.docker_gc.ports import EventSink
 from cst_core.adapters.files import FileOwner, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
+from cst_core.adapters.terminal import stdin
+from cst_core.domain.shapes import KeyTypes, json_object, number_or_none, parse_json, shape_problem
 from cst_core.domain.text import is_yes
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -70,12 +74,46 @@ class InspectedObject(TypedDict, total=False):
 
 def _obj(value: object) -> dict[str, object]:
     """value when it is a JSON object, else an empty one (Docker's null)."""
-    return value if isinstance(value, dict) else {}
+    return value if json_object(value) else {}
 
 
 def _is_inspected(value: object) -> TypeIs[InspectedObject]:
     """A JSON object is an InspectedObject: none of its keys is required, any value is accepted."""
     return isinstance(value, dict)
+
+
+# The keys of an inspected record the plan relies on, of their types (null: Docker's "none"). A
+# record without one would lose a protection: a container without Image leaves its image looking
+# unused, one without Mounts its volumes orphaned, one without Config or HostConfig its labels and
+# restart policy; an image without RepoTags or RepoDigests its registry. Every Docker writes them.
+_NONE = type(None)
+RELIED_ON: Final[dict[str, KeyTypes]] = {
+    "container": {
+        "Id": (str,),
+        "Image": (str,),
+        "State": (dict,),
+        "Config": (dict,),
+        "HostConfig": (dict,),
+        "Mounts": (list, _NONE),
+    },
+    "image": {"Id": (str,), "RepoTags": (list, _NONE), "RepoDigests": (list, _NONE)},
+    "volume": {"Name": (str,), "Labels": (dict, _NONE)},
+}
+
+
+def record_problem(kind: str, record: object) -> str | None:
+    """What a record of `docker KIND inspect` lacks of the keys the plan relies on ("no Image",
+    "Mounts is a str"), or None. A container's Config also holds Labels (an object or null)."""
+    why = shape_problem(record, RELIED_ON.get(kind, {}), {})
+    if why is not None or not json_object(record):
+        return why
+    config = record.get("Config")
+    if kind == "container" and json_object(config):
+        if "Labels" not in config:
+            return "no Config.Labels"
+        if not isinstance(config["Labels"], dict | _NONE):
+            return f"Config.Labels is {type(config['Labels']).__name__}"
+    return None
 
 
 def _inspected(value: object) -> InspectedObject:
@@ -89,10 +127,6 @@ def _str(value: object) -> str:
 
 def _strs(value: object) -> tuple[str, ...]:
     return tuple(v for v in value if isinstance(v, str)) if isinstance(value, list) else ()
-
-
-def _num(value: object) -> float | None:
-    return value if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 def _time(value: object) -> float:
@@ -126,7 +160,7 @@ def volume_of(o: InspectedObject) -> Volume:
 
 
 def image_of(o: InspectedObject) -> Image:
-    size = _num(o.get("Size")) or 0
+    size = number_or_none(o.get("Size")) or 0
     return Image(
         id=_str(o.get("Id")),
         tags=_strs(o.get("RepoTags")),
@@ -139,12 +173,11 @@ def image_of(o: InspectedObject) -> Image:
 def event_of(line: str) -> DockerEvent | None:
     """One line of `docker events --format '{{json .}}'`; None for a line that is not an event."""
     try:
-        ev = json.loads(line)
+        ev = parse_json(line)
     except ValueError:
         return None
-    if not isinstance(ev, dict):
+    if not json_object(ev):
         return None
-    ev = _obj(ev)
     actor = _obj(ev.get("Actor"))
     return DockerEvent(
         kind=_str(ev.get("Type")),
@@ -181,14 +214,18 @@ class DockerCli:
         for i in range(0, len(ids), 100):
             r = self.run(kind, "inspect", *ids[i : i + 100], check=False)
             try:
-                found = json.loads(r.stdout or "[]")
+                found = parse_json(r.stdout or "[]")
             except json.JSONDecodeError as e:
-                raise RuntimeError(f"{kind} inspect: unreadable output ({e})") from e
-            out.extend(_inspected(o) for o in (found if isinstance(found, list) else []))
+                raise InspectError(f"{kind} inspect: unreadable output ({e})") from e
+            for o in found if isinstance(found, list) else []:
+                if (why := record_problem(kind, o)) is not None:
+                    name = (o.get("Id") or o.get("Name")) if json_object(o) else o
+                    raise IncompleteRecordError(f"{kind} inspect: {str(name)[:100]}: {why}")
+                out.append(_inspected(o))
         got = {o.get("Id") or o.get("Name") for o in out}
         missing = set(ids) - got
         if missing and missing & set(self.run(*list_args).stdout.split()):
-            raise RuntimeError(f"{kind} inspect failed for {len(missing)} object(s); nothing done")
+            raise InspectError(f"{kind} inspect failed for {len(missing)} object(s)")
         return out
 
     def is_up(self) -> bool:
@@ -220,13 +257,13 @@ class DockerCli:
         if r.returncode != 0:
             return None
         try:
-            found = json.loads(r.stdout)
+            found = parse_json(r.stdout)
             first = found[0] if isinstance(found, list) else None
         except ValueError, IndexError:
             return ["?"]
-        if not isinstance(first, dict):
-            return ["?"]
-        return list(_strs(_obj(first).get("RepoTags")))
+        if not json_object(first) or not isinstance(tags := first.get("RepoTags", "?"), list | _NONE):
+            return ["?"]  # no RepoTags: tags it may have cannot be ruled out
+        return list(_strs(tags))
 
     def remove_container(self, container_id: str) -> CommandResult:
         return self.run("container", "rm", container_id, check=False)
@@ -245,7 +282,7 @@ class DockerCli:
         out: dict[str, str] = {}
         for line in r.stdout.splitlines():
             try:
-                d = _obj(json.loads(line))
+                d = _obj(parse_json(line))
             except ValueError:
                 continue
             out[str(d.get("Type", "?"))] = str(d.get("Size", "?"))
@@ -299,18 +336,18 @@ class GcStateFiles:
     def load_state(self) -> GcState:
         try:
             with open(self.paths.last_used) as f:
-                st = json.load(f)
+                st = parse_json(f.read())
         except OSError, ValueError:
             st = None
-        if isinstance(st, dict) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
-            images, since = st.get("images"), _num(st.get("since"))
-            heartbeat = _num(st.get("heartbeat", 0))
+        if json_object(st) and stored_version(STATE_FORMAT, self.paths.last_used, st) is not None:
+            images, since = st.get("images"), number_or_none(st.get("since"))
+            heartbeat = number_or_none(st.get("heartbeat", 0))
             # a value that is not a time: not a state docker-gc wrote
             if (
                 isinstance(images, dict)
                 and since is not None
                 and heartbeat is not None
-                and all(_num(v) is not None for v in images.values())
+                and all(number_or_none(v) is not None for v in images.values())
             ):
                 return GcState(since=since, images=images, heartbeat=heartbeat)
         return GcState(since=time.time(), images={}, heartbeat=0)
@@ -325,14 +362,14 @@ class GcStateFiles:
     def load_summary(self) -> RunSummary | None:
         try:
             with open(self.paths.last_run) as f:
-                lr = json.load(f)
+                lr = parse_json(f.read())
         except OSError, ValueError:
             return None
         lr = _obj(lr)
         if stored_version(LAST_RUN_FORMAT, self.paths.last_run, lr) is None:
             return None
-        at = _num(lr.get("at"))
-        counts = [n for k in SUMMARY_COUNTS if (n := _num(lr.get(k))) is not None]
+        at = number_or_none(lr.get("at"))
+        counts = [n for k in SUMMARY_COUNTS if (n := number_or_none(lr.get(k))) is not None]
         if at is None or len(counts) < len(SUMMARY_COUNTS):
             return None
         containers, volumes, images, image_bytes, failed = (int(n) for n in counts)
@@ -442,7 +479,7 @@ class TerminalConsole:
         gc_log(prio, msg)
 
     def interactive(self) -> bool:
-        return sys.stdin.isatty()
+        return stdin().isatty()
 
     def ask(self, question: str) -> bool:
         try:

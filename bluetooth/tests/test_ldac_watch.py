@@ -132,6 +132,43 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(bt_watch.snapshot(DEV, pw_dump(mic_state="running"))["mic"])
         self.assertIsNone(bt_watch.snapshot("00_00", pw_dump())["card"])
 
+    def test_pw_dump_records_of_another_shape_are_skipped(self) -> None:
+        # A list where pw-dump has an object raised AttributeError: the watcher died, and systemd
+        # restarted it on the same output. Such an object is skipped; the others are read.
+        good = pw_dump()
+        node: dict[str, object] = {"type": "PipeWire:Interface:Node", "info": {"props": [1]}}
+        for bad in ({"type": "PipeWire:Interface:Device", "info": [1]}, node, {"info": "x"}, 7, None):
+            with self.subTest(bad=bad):
+                self.assertEqual(bt_watch.snapshot(DEV, [bad, *good]), bt_watch.snapshot(DEV, good))
+        for top in (5, None, "x", {"a": 1}):
+            with self.subTest(top=top):
+                self.assertIsNone(bt_watch.snapshot(DEV, top)["card"])
+        # The headset's own node with a Format of another shape: its rate is unknown (no action).
+        objs = json.loads(json.dumps(pw_dump()))  # a value of any shape, as pw-dump gives it
+        objs[1]["info"]["params"] = {"Format": 5}
+        snap = bt_watch.snapshot(DEV, objs)
+        self.assertEqual((snap["codec"], snap["rate"]), ("ldac", None))
+        self.assertEqual(bt_watch.decide(snap, 48000)[0], bt_watch.WatchVerdict.NONE)
+
+    def test_cards_of_another_shape_are_skipped(self) -> None:
+        # A card whose profiles is a list (or a profile that is not an object) raised AttributeError
+        # in profiles(): the watcher died. Such a card is skipped; every action needs a matching card.
+        data = [
+            *cards(),
+            {"name": "bluez_card.x", "profiles": [1]},
+            {"name": 5},
+            "junk",
+            {"name": f"bluez_card.{DEV}", "profiles": {"a2dp-sink": [1]}},
+        ]
+        with mock.patch.object(bt_adapters, "run", return_value=(0, json.dumps(data))):
+            got = bt_adapters.Live(DEV).cards()
+        self.assertEqual(got, cards())
+        assert got is not None
+        self.assertEqual(bt_watch.profiles(DEV, got), bt_watch.profiles(DEV, cards()))
+        for answer in ("{}", "5", "not json"):
+            with self.subTest(answer=answer), mock.patch.object(bt_adapters, "run", return_value=(0, answer)):
+                self.assertIsNone(bt_adapters.Live(DEV).cards())
+
     def test_suspended_node_rate_from_enumformat(self) -> None:
         self.assertEqual(bt_watch.snapshot(DEV, pw_dump(rate=48000, suspended=True))["rate"], 48000)
         objs = pw_dump()

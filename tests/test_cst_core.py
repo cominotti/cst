@@ -854,7 +854,7 @@ class CstCommandTest(unittest.TestCase):
             pass
         os.killpg(proc.pid, sig)
         out, err = proc.communicate(timeout=30)
-        return out, err, proc.returncode
+        return out, err, int(proc.returncode)  # set by communicate
 
     def test_status_stops_when_a_module_dies_of_ctrl_c(self) -> None:
         out, err, rc = self._status_signalled("echo started\nsleep 10\n", signal.SIGINT)
@@ -1047,13 +1047,27 @@ class OstreeQueryTest(unittest.TestCase):
         for out, why in (
             ("{", "(Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"),
             ("{}", "('deployments')"),
-            ("[]", "(list indices must be integers or slices, not str)"),
-            ('"x"', "(string indices must be integers, not 'str')"),
+            # Another JSON value than an object: one reason, not the text Python gave each type.
+            ("[]", "(not a JSON object)"),
+            ('"x"', "(not a JSON object)"),
+            ("5", "(not a JSON object)"),
+            ("null", "(not a JSON object)"),
             ('{"deployments": null}', "('NoneType' object is not iterable)"),
             ('{"deployments": 5}', "('int' object is not iterable)"),
         ):
             with self.subTest(out=out):
                 self.assertEqual(self._answer(0, out)[1], prefix + why)
+
+    def test_deep_nesting_is_unreadable_output_not_a_crash(self) -> None:
+        # json.loads accepts a few hundred levels, which the check of each deployment's values
+        # then walks past the recursion limit; deeper, json.loads itself gives up. Both: RecursionError.
+        prefix = "rpm-ostree status --json: unreadable output ("
+        for depth in (700, 100_000):
+            with self.subTest(depth=depth):
+                out = '{"deployments": [{"booted": true, "x": ' + "[" * depth + "]" * depth + "}]}"
+                got = self._answer(0, out)[1]
+                self.assertIsInstance(got, str)
+                self.assertTrue(str(got).startswith(prefix), got)
 
     def test_booted_and_pending(self) -> None:
         booted = {"booted": True, "osname": "fedora", "checksum": "b"}

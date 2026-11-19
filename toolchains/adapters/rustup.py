@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from toolchains.domain.prune import Limits
 
+from cst_core.domain.shapes import json_object, parse_toml
+
 from toolchains.domain.build import TOOL_FILE_MAX, WORKSPACE_REL, short_toolchain, toolchain_pattern
 from toolchains.domain.common import gib, tilde
 from toolchains.adapters.build_tree import tree_size
@@ -39,10 +41,11 @@ def pinned_channel(path: str) -> str:
     text = raw.decode("utf-8", "replace")
     if path.endswith(".toml") or "[toolchain]" in text:
         try:
-            tc = tomllib.loads(text).get("toolchain")
+            data = parse_toml(text)
         except tomllib.TOMLDecodeError:
             return ""
-        ch = tc.get("channel") if isinstance(tc, dict) else None
+        tc = data.get("toolchain") if json_object(data) else None  # tomllib gives a table
+        ch = tc.get("channel") if json_object(tc) else None
         return ch.strip() if isinstance(ch, str) else ""
     lines = [x.strip() for x in text.splitlines() if x.strip()]
     return lines[0] if len(lines) == 1 else ""
@@ -53,7 +56,8 @@ def rustup_default(home: str, rh: str) -> str:
     rustup (read only)."""
     try:
         with open(os.path.join(rh, "settings.toml"), "rb") as f:
-            d = tomllib.load(f).get("default_toolchain")
+            data = parse_toml(f.read())
+        d = data.get("default_toolchain") if json_object(data) else None
         if isinstance(d, str) and d:
             return d
     except OSError, tomllib.TOMLDecodeError:
@@ -115,7 +119,8 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
             pins.setdefault(ch, []).append(p)
     try:
         with open(os.path.join(rh, "settings.toml"), "rb") as f:
-            overrides = tomllib.load(f).get("overrides") or {}
+            data = parse_toml(f.read())
+        overrides = (data.get("overrides") if json_object(data) else None) or {}
     except OSError, tomllib.TOMLDecodeError:
         overrides = {}
     for path, ch in overrides.items() if isinstance(overrides, dict) else ():

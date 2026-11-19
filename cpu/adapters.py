@@ -40,6 +40,7 @@ from cst_core.adapters.virsh import SubprocessVirshAdapter
 from cst_core.adapters.files import read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import describe_problems, parse_shell_assignments
 from cst_core.domain.values import CpuSet
 from cst_core.ports import CommandFault, VirshPort
@@ -289,7 +290,8 @@ def record_run(
     end = time.time()
     if proc and proc.poll() is None:
         proc.terminate()
-    rc = proc.returncode if proc else None
+    code = proc.returncode if proc else None
+    rc = code if isinstance(code, int) else None
     meta: RunMeta = {"label": label, "start": start, "end": end, "cmd": list(cmd), "game": game, "rc": rc}
     if mangohud is not None and mangohud != "":
         newest = newest_mangohud_log(os.path.expanduser(mangohud), start, end)
@@ -321,7 +323,7 @@ def frametimes(path: str) -> list[float]:
 def summarize(run_dir: str) -> str:
     # The value is not used; the line stays so that a corrupt meta.json
     # still stops the report here, as before.
-    json.loads(read_text(os.path.join(run_dir, "meta.json"), "{}") or "{}")
+    parse_json(read_text(os.path.join(run_dir, "meta.json"), "{}") or "{}")
     with open(os.path.join(run_dir, "samples.csv"), newline="") as f:
         rows = list(csv.DictReader(f))
 

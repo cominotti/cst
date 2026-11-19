@@ -17,7 +17,7 @@ from typing import TextIO
 
 from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.runtime import restore_default_signals
-from cst_core.adapters.terminal import confirm
+from cst_core.adapters.terminal import confirm, stdout
 from cst_core.domain.errors import Refused
 from cpu.adapters import (
     cpu_paths,
@@ -155,7 +155,7 @@ def quiet(
 ) -> int:
     """Exit 0 if a window of SECONDS was quiet, 1 if not (or --wait ran out),
     2 for a usage error. Reads only; writes nothing but its output."""
-    out_stream: TextIO = sys.stdout if out is None else out
+    out_stream: TextIO = stdout() if out is None else out
     try:
         seconds, wait, as_json, limits = quiet_args(argv, os.environ if environ is None else environ)
     except ValueError as e:

@@ -11,6 +11,7 @@ from typing import TypedDict
 import re
 
 from cst_core.domain.contracts import StateFormatKey, state_format
+from cst_core.domain.text import group_or_none
 from cst_core.domain.values import MINUTE
 
 # v7: reads /proc and /sys files to the end (zswap counters were 0 before).
@@ -744,7 +745,7 @@ def kmsg_line(data: bytes, members: Collection[str]) -> KmsgLine | None:
     if not KMSG_INTEREST.search(msg):
         return None
     m = KMSG_DEVICE.search(msg)
-    dev = (m.group(1) or m.group(2)) if m else None
+    dev = (group_or_none(m, 1) or group_or_none(m, 2)) if m else None
     ours = dev is None or dev in members or re.sub(r"p\d+$", "", dev) in members
     return KmsgLine(msg, severe=bool(KMSG_SEVERE.search(msg)) and ours, ours=ours)
 

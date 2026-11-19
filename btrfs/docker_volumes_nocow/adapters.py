@@ -28,29 +28,52 @@ from cst_core.adapters.files import CounterFile, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
+from cst_core.domain.shapes import json_object, parse_json
 from cst_core.adapters.nocow import FS_NOCOW_FL as NOCOW, inode_flags as flags, set_nocow
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 
+def daemon_config(path: str) -> tuple[str | None, str]:
+    """(data-root, problem) of the dockerd config file at path: (None, "") when there is no such
+    file or it names no data root (dockerd's default then). problem: why the file cannot be read
+    as one (not JSON, not an object, a data-root that is
+    not a folder name); dockerd refuses such a file, so which folder Docker uses is unknown.
+    A read error other than a missing file is raised. A UTF-8 byte order mark at its start is
+    skipped, as dockerd skips it."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            data = parse_json(f.read())
+    except FileNotFoundError:
+        return None, ""
+    except ValueError, RecursionError:  # a byte that is not UTF-8 too (UnicodeDecodeError, at the read)
+        return None, f"{path}: not JSON"
+    if not json_object(data):
+        return None, f"{path}: not a JSON object"
+    if "data-root" not in data:
+        return None, ""
+    root = data["data-root"]
+    if not isinstance(root, str) or not root:
+        return None, f"{path}: data-root is not a folder name"
+    return root, ""
+
+
 def configured_root(path: str) -> str | None:
-    """data-root in the dockerd config file at path; None when there is no
-    such file, it is not a JSON object, or it names no data root (dockerd's
-    default then). Any other error reading it is raised."""
-    try:
-        with open(path) as f:
-            root = json.load(f).get("data-root")
-    except FileNotFoundError, ValueError, AttributeError:
-        return None
-    return root if isinstance(root, str) and root else None
+    """data-root in the dockerd config file at path; None when there is no such file or it names
+    no data root. OSError when the file cannot be read, or (with daemon_config's reason) read as one."""
+    root, problem = daemon_config(path)
+    if problem:
+        raise OSError(problem)
+    return root
 
 
-def docker_root() -> str:
-    """The volumes folder of this machine's docker.service: data-root of /etc/docker/daemon.json."""
+def docker_root() -> tuple[str, str]:
+    """(the volumes folder of this machine's docker.service: data-root of /etc/docker/daemon.json,
+    why that file cannot be read: "" when it can or there is none)."""
     try:
-        root = configured_root(DAEMON_JSON)
-    except OSError:
-        root = None
-    return os.path.join(root or "/var/lib/docker", "volumes")
+        root, problem = daemon_config(DAEMON_JSON)
+    except OSError as e:
+        root, problem = None, f"{DAEMON_JSON}: cannot be read ({e.strerror or e})"
+    return os.path.join(root or "/var/lib/docker", "volumes"), problem
 
 
 def checked(r: CommandResult) -> CommandResult:
@@ -286,7 +309,7 @@ class NocowStateFiles:
     def read_postponed(self) -> StoredPostponed | None:
         try:
             with open(self.paths.postponed) as f:
-                rec = json.load(f)
+                rec = parse_json(f.read())
         except OSError, ValueError:
             return None
         return rec if is_stored_postponed(rec) else None

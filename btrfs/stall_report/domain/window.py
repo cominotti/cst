@@ -89,6 +89,7 @@ def summarise(
         "first_sample": samples[0]["ts"] if samples else None,
         "last_sample": samples[-1]["ts"] if samples else None,
         "complete": False,
+        "skipped": sum(1 for t in recorded.damaged if since <= t <= until),
     }
     if len(samples) < 2:
         return res, meta
@@ -122,10 +123,9 @@ def summarise(
         ),
         0,
     )
-    fs: dict[str, FsTotals]
-    disks: dict[str, DiskTotals]
-    cg: dict[str, CgroupTotals]
-    fs, disks, cg = {}, {}, {}
+    fs: dict[str, FsTotals] = {}
+    disks: dict[str, DiskTotals] = {}
+    cg: dict[str, CgroupTotals] = {}
     gaps = 0
     # (ts, d, v5+) of samples of daemons v3-v7: their "d" also counted memory
     # waits (and, before v5, btrfs maintenance); corrected after the episodes.
@@ -230,8 +230,8 @@ def summarise(
                     "peak_at": None,
                 },
             )
-            for k, v in delta.items():
-                d[k] += v
+            for k in DISK_SUM:  # the keys of delta, in its order
+                d[k] += delta[k]
             util = min(delta["io_ticks"] / (dt * 1000) * 100, 100.0)
             if util > d["peak_util_pct"]:
                 d["peak_util_pct"], d["peak_at"] = util, b["ts"]
@@ -281,7 +281,7 @@ def summarise(
         "zswap_counted_from": counted_from,
         "direct_reclaim_scanned_pages": vmd.get("pgscan_direct", 0),
         "allocstalls": vmd.get("allocstall_normal", 0) + vmd.get("allocstall_movable", 0),
-        "dirty_limit_bytes": meta.get("dirty_bytes", 0),
+        "dirty_limit_bytes": meta.get("dirty_bytes") or 0,
     }
     for f in fs.values():
         f["avg_commit_ms"] = f["commit_ms"] / f["commits"] if f["commits"] else 0

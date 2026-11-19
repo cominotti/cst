@@ -330,6 +330,10 @@ truthiness-test-of-none-union = "error"
 # A method that overrides one of a base class says so with @override
 # (typing.override), unittest's setUp included.
 missing-override-decorator = "error"
+# A value typed Any (json.loads, a regex group, sys.stdout, struct.unpack) returned as, or assigned
+# to, a narrower declared type. Both rules: return alone is bypassed by an annotated local.
+unsound-return = "error"
+unsound-assignment = "error"
 
 [tool.ty.src]
 # The ty gate: every Python file of the repository, by folder. ty finds the

@@ -416,6 +416,11 @@ Python program, `bt-ldac-watch` in this folder, run by a user service:
   `codec SBC`), with PipeWire's usual names (`a2dp-sink`, `a2dp-sink-sbc`)
   as a fallback. Without an SBC profile it switches through another A2DP
   codec (SBC-XQ, AAC); without any, it logs that and does nothing.
+- A card in `pactl list cards` or an object in `pw-dump` of an unexpected
+  shape (a list where an object belongs, a profile that is not an object) is
+  skipped, as if it were not there: every switch needs a card and a node that
+  match, so a skipped one never leads to a switch. Before, it stopped the
+  watcher, and systemd restarted it on the same output.
 
 **Known problem on PipeWire 1.6.11 (2026-11-11): keep it off for now.**
 After the update to PipeWire 1.6.11 the watcher's profile switch failed:

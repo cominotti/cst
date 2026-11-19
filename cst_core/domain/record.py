@@ -31,6 +31,7 @@ from typing import Final
 
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.install import Owner
+from cst_core.domain.shapes import json_object, parse_json
 
 _FORMAT: Final = state_format(StateFormatKey.INSTALL_RECORD).version
 ROOT_RECORD: Final = state_format(StateFormatKey.INSTALL_RECORD).path
@@ -130,10 +131,10 @@ def _file(d: object) -> RecordedFile:
 def parse_record(text: str) -> InstallRecord:
     """The record in text; RecordFormatError when it is not one (newer=True for a newer format)."""
     try:
-        doc = json.loads(text)
+        doc = parse_json(text)
     except ValueError as e:
         raise RecordFormatError(f"not JSON ({e})") from None
-    if not isinstance(doc, dict):
+    if not json_object(doc):
         raise RecordFormatError("not a JSON object")
     fmt = doc.get("format")
     if not isinstance(fmt, int) or isinstance(fmt, bool):

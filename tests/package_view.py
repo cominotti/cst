@@ -22,10 +22,28 @@ This is a test helper only: production code imports the module that
 defines a name.
 """
 
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import ClassVar, Self, override
 
 _MISSING = object()
+
+
+@dataclass(slots=True)
+class _ViewState:
+    """A view's modules, the first value each replaced name had in each module (to restore), and
+    the stack of sets of each name (each entry: the modules it was set in, with their old value)."""
+
+    modules: tuple[ModuleType, ...]
+    saved: dict[tuple[int, str], tuple[ModuleType, object]] = field(default_factory=dict)
+    sets: dict[str, list[list[tuple[ModuleType, object]]]] = field(default_factory=dict)
+
+
+def _state(view: object) -> _ViewState:
+    """The view's state, read past its own __getattr__ and __setattr__."""
+    state = object.__getattribute__(view, "_state")
+    assert isinstance(state, _ViewState), state
+    return state
 
 
 class PackageView:
@@ -36,13 +54,11 @@ class PackageView:
     def __init__(self, *modules: ModuleType) -> None:
         for view in list(PackageView._active):
             view.restore()
-        object.__setattr__(self, "_modules", modules)
-        object.__setattr__(self, "_saved", {})
-        object.__setattr__(self, "_sets", {})
+        object.__setattr__(self, "_state", _ViewState(modules))
         PackageView._active.append(self)
 
     def __getattr__(self, name: str) -> object:
-        for mod in object.__getattribute__(self, "_modules"):
+        for mod in _state(self).modules:
             value = getattr(mod, name, _MISSING)
             if value is not _MISSING:
                 return value
@@ -50,9 +66,10 @@ class PackageView:
 
     @override
     def __setattr__(self, name: str, value: object) -> None:
-        saved: dict[tuple[int, str], tuple[ModuleType, object]] = object.__getattribute__(self, "_saved")
+        state = _state(self)
+        saved = state.saved
         previous: list[tuple[ModuleType, object]] = []
-        for mod in object.__getattribute__(self, "_modules"):
+        for mod in state.modules:
             old = getattr(mod, name, _MISSING)
             if old is _MISSING:
                 continue
@@ -61,13 +78,13 @@ class PackageView:
             setattr(mod, name, value)
         if not previous:
             raise AttributeError(f"no module of this view defines {name}: nothing would see the replacement")
-        sets: dict[str, list[list[tuple[ModuleType, object]]]] = object.__getattribute__(self, "_sets")
-        sets.setdefault(name, []).append(previous)
+        state.sets.setdefault(name, []).append(previous)
 
     @override
     def __delattr__(self, name: str) -> None:
         """Undo the latest set of `name` (the end of a `mock.patch.object` block)."""
-        sets: dict[str, list[list[tuple[ModuleType, object]]]] = object.__getattribute__(self, "_sets")
+        state = _state(self)
+        sets = state.sets
         stack = sets.get(name)
         if stack is None or len(stack) == 0:
             raise AttributeError(f"{name} was not replaced through this view")
@@ -75,17 +92,17 @@ class PackageView:
             setattr(mod, name, old)
         if not stack:
             del sets[name]
-            saved: dict[tuple[int, str], tuple[ModuleType, object]] = object.__getattribute__(self, "_saved")
+            saved = state.saved
             for key in [k for k in saved if k[1] == name]:
                 del saved[key]
 
     def restore(self) -> Self:
         """Put back every name this view replaced (safe to call twice)."""
-        saved: dict[tuple[int, str], tuple[ModuleType, object]] = object.__getattribute__(self, "_saved")
-        for (_, name), (mod, old) in saved.items():
+        state = _state(self)
+        for (_, name), (mod, old) in state.saved.items():
             setattr(mod, name, old)
-        saved.clear()
-        object.__getattribute__(self, "_sets").clear()
+        state.saved.clear()
+        state.sets.clear()
         if self in PackageView._active:
             PackageView._active.remove(self)
         return self

@@ -5,7 +5,6 @@
 """
 
 from collections.abc import Callable, Mapping, Sequence
-import json
 import os
 import signal
 import subprocess
@@ -15,8 +14,9 @@ from typing import Protocol
 
 from cst_core.adapters.runner import c_locale
 from cst_core.domain.errors import ExitStatus
+from cst_core.domain.shapes import json_object, number_or_none, parse_json
 from cst_core.domain.values import MINUTE, format_bytes_gib_mib
-from vm.domain.backup import ResticMessage, ResticSummary
+from vm.domain.backup import ResticMessage, ResticSummary, is_restic_summary
 
 # (argv, timeout, the variables set on top of this process's) -> (exit status, stdout, stderr).
 type RunCommand = Callable[[Sequence[str], int, Mapping[str, str] | None], tuple[int, str, str]]
@@ -34,6 +34,18 @@ def restic_env(extra: Mapping[str, str]) -> dict[str, str]:
     """The environment of a restic run that streams its output (restic backup --json): this
     process's, in the C locale, with extra (the repository's variables) on top."""
     return {**c_locale(os.environ), **extra}
+
+
+def progress_text(status: object) -> str:
+    """One status line of restic backup --json as shown: "50 % (5 MiB of 10 MiB read)"; a field
+    that is missing or null counts as 0, one of another type shows as "?"."""
+    line = status if json_object(status) else {}
+    pct, done, total = (line.get(k) or 0 for k in ("percent_done", "bytes_done", "total_bytes"))
+    shown_pct = f"{100 * p:.0f}" if (p := number_or_none(pct)) is not None else "?"
+    done_text, total_text = (
+        format_bytes_gib_mib(n, mib_decimals=1) if (n := number_or_none(v)) is not None else "?" for v in (done, total)
+    )
+    return f"{shown_pct} % ({done_text} of {total_text} read)"
 
 
 class Restic:
@@ -66,26 +78,24 @@ class Restic:
             assert p.stdout is not None
             for line in p.stdout:
                 try:
-                    msg = json.loads(line)
-                except ValueError:
+                    msg = parse_json(line)
+                except ValueError, RecursionError:
                     out.say(f"  restic: {line.rstrip()}", flush=True)
                     continue
-                if not isinstance(msg, dict):
+                if not json_object(msg):
                     continue
+                # A line's shape never stops the backup: a field of another type shows as "?", a
+                # summary of another shape counts as no summary (no snapshot: the run refuses).
                 match msg.get("message_type"):
                     case ResticMessage.SUMMARY:
-                        summary = msg
+                        summary = msg if is_restic_summary(msg) else {}
                     case ResticMessage.STATUS if time.monotonic() - shown >= MINUTE:
                         shown = time.monotonic()
-                        done, total = msg.get("bytes_done") or 0, msg.get("total_bytes") or 0
-                        out.say(
-                            f"  restic: {100 * float(msg.get('percent_done') or 0):.0f} % ({format_bytes_gib_mib(done, mib_decimals=1)} of "
-                            f"{format_bytes_gib_mib(total, mib_decimals=1)} read)",
-                            flush=True,
-                        )
+                        out.say(f"  restic: {progress_text(msg)}", flush=True)
                     case ResticMessage.ERROR:
                         err = msg.get("error") or {}
-                        out.warn(f"  restic error: {msg.get('item') or ''} {err.get('message') or err}")
+                        text = (err.get("message") or err) if json_object(err) else err
+                        out.warn(f"  restic error: {msg.get('item') or ''} {text}")
                     case _:
                         pass
             rc = p.wait()

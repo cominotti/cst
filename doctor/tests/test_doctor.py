@@ -1335,6 +1335,25 @@ class DockerNocowPostponedTest(Scratch):
         self.assertIn("fix: journalctl -b -u docker-volumes-nocow", r.stdout)
         self.assert_read_only()
 
+    def test_two_boots_held_back_by_daemon_json_say_to_fix_it(self) -> None:
+        # Not "until a boot where nothing uses them": no quiet boot helps, only a fixed file.
+        reason = "/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is unknown"
+        self.record(json.dumps({"reason": reason, "boots": 2, "first": NOW - 86400, "last": NOW, "boot_id": "c"}))
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        got = self.lines(r.stdout)
+        self.assertEqual(len(got), 1, r.stdout)
+        self.assertTrue(
+            got[0].endswith(
+                f": {reason}; fix /etc/docker/daemon.json (the fix line checks it as dockerd reads it), "
+                "and the next boot runs it"
+            ),
+            got[0],
+        )
+        self.assertIn("fix: sudo dockerd --validate --config-file /etc/docker/daemon.json", r.stdout)
+        self.assertNotIn("until a boot where nothing uses them", r.stdout)
+        self.assert_read_only()
+
     def test_odd_fields(self) -> None:
         self.record(json.dumps({"boots": "7", "last": "yesterday"}))
         r = self.run_tool()
@@ -1911,6 +1930,44 @@ class VmTest(Scratch):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertNotIn("ostree admin pin", r.stdout)
         self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+
+    def test_entries_cst_vm_does_not_list_are_no_backup(self) -> None:
+        # cst vm keeps them in the index without listing them (is_index_entry): an empty vm, a NAS
+        # entry without its snapshot, an epoch that is a bool. Their epoch must not pass for a backup.
+        self.deployments(rollback_pinned=True)
+        d = os.path.join(self.root, "var", "lib", "cst")
+        os.makedirs(d, exist_ok=True)
+        foreign = [
+            {"vm": "", "epoch": NOW, "path": "/x"},
+            {"vm": "win", "mode": "nas", "epoch": NOW},
+            {"vm": "win", "epoch": True, "path": "/x"},
+            {"vm": "win", "epoch": NOW, "path": "/x", "versions": {"qemu-kvm": 1}},
+        ]
+        with open(os.path.join(d, "vm-backups.json"), "w") as f:
+            json.dump({"version": 1, "backups": foreign}, f)
+        r = self.run_tool()
+        self.assertIn("No VM backup since the booted deployment was built", r.stdout)
+        self.assertIn("last backup: never", r.stdout)
+        self.assert_read_only()
+
+    def test_a_damaged_index_warns(self) -> None:
+        # cst vm refuses to back up or list with it: doctor says so, and changes nothing.
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 86400)
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-backups.json")
+        # A byte that is not UTF-8, even inside a string, is "not JSON" for cst vm, so for doctor too.
+        for text, why in ((b"{", "not JSON"), (b'{"backups": ["\xff"]}', "not JSON"), (b"[]", 'no "backups" list')):
+            with self.subTest(text=text):
+                with open(path, "wb") as f:
+                    f.write(text)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(
+                    f"WARN   /var/lib/cst/vm-backups.json cannot be read as cst vm's backup index ({why}): "
+                    "cst vm refuses to back up or list with it; move it aside to start a new index",
+                    r.stdout,
+                )
+                self.assert_read_only()
 
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
         # After going back to an older CST: a newer index is neither taken for "never backed up"
@@ -2783,11 +2840,13 @@ class HermeticTest(Scratch):
             seen.extend(found)
             if any(w is None or os.path.dirname(w) != self.bin for _, w in found):
                 return subprocess.CompletedProcess(args, 127, "", "not run: outside the stub folder")
+            if not text:
+                raise AssertionError(f"{args}: the doctor runs its commands in text mode")
             return real_run(
                 args,
                 check=check,
                 capture_output=capture_output,
-                text=text,
+                text=True,
                 timeout=timeout,
                 stdin=stdin,
                 env=env,

@@ -318,7 +318,7 @@ class Machine:
     # ---- running it ----------------------------------------------------------------------
     def env(self, *, container: bool, extra: Mapping[str, str] | None = None) -> dict[str, str]:
         """The environment of a run: the stubs first on PATH, the scratch HOME and host root."""
-        env = {
+        env: dict[str, str] = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": self.home,
             "FAKE_STATE": self.state,

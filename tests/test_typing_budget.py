@@ -44,6 +44,9 @@ ANY_BUDGETS: Final[dict[str, int]] = {
 }
 CAST_BUDGETS: Final[dict[str, int]] = {
     "bluetooth tests": 1,
+    # The one cast of production code: cst_core.adapters.terminal's _std, as typeshed types the
+    # standard streams `TextIO | MaybeNone`; the stream is returned unchanged.
+    "cst_core adapters": 1,
     "btrfs tests": 16,
     "tests tests": 4,
 }

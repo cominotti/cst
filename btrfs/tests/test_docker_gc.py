@@ -120,6 +120,7 @@ class FakeDocker:
         self.prune = ok()
         self.calls: list[tuple[str, ...]] = []
         self.error: RuntimeError | None = None
+        self.container_errors: list[RuntimeError] = []  # raised by the next containers() calls, in order
         self.end = EventsEnd(stopped=False, returncode=0)
         self.events: list[DockerEvent] = []
 
@@ -129,6 +130,8 @@ class FakeDocker:
         return self.up
 
     def containers(self) -> list[Container]:
+        if self.container_errors:
+            raise self.container_errors.pop(0)
         return list(self.listed_containers)
 
     def volumes(self) -> list[Volume]:
@@ -496,6 +499,38 @@ class ApplicationTest(unittest.TestCase):
         self.assertEqual(self.f.gc.execute(GcCommand.RUN), 0)
         self.assertEqual(self.f.state.summary, RunSummary(NOW, 0, 0, 1, 7, 0, {"Images": "1GB"}, {"Images": "1GB"}))
         self.assertEqual(self.f.docker.calls[-2:], [("rm image", "alpine:old"), ("prune", "336")])
+
+    def test_an_unreadable_inspect_stops_the_run_before_anything_is_removed(self) -> None:
+        self.f.docker.container_errors = [gc_domain.InspectError("container inspect failed for 1 object(s)")]
+        self.assertEqual(self.f.gc.execute(GcCommand.RUN), 1)
+        self.assertEqual(self.f.console.lines, ["<3>container inspect failed for 1 object(s); nothing done"])
+        self.assertEqual(self.f.docker.calls, [])
+
+    def test_an_incomplete_record_stops_every_command_with_its_own_status(self) -> None:
+        # Docker answers the same at every try: the recorder unit is not restarted for this status.
+        for command in (GcCommand.RUN, GcCommand.STATUS, GcCommand.RECORD):
+            with self.subTest(command=command):
+                self.f.console.lines.clear()
+                self.f.docker.container_errors = [gc_domain.IncompleteRecordError("container inspect: c1: no Image")]
+                self.assertEqual(self.f.gc.execute(command), gc_domain.INCOMPLETE_RECORD_EXIT)
+                self.assertEqual(self.f.console.lines[-1], "<3>container inspect: c1: no Image; nothing done")
+                self.assertEqual(self.f.docker.calls, [])
+
+    def test_an_unreadable_container_list_during_the_removals_keeps_that_image_and_goes_on(self) -> None:
+        # The re-check of the first image cannot read the containers: that image stays (counted as a
+        # failure), the run goes on with the next one; nothing claims "nothing done" after a removal.
+        a = ImageDrop("sha256:a", protected=False, tags=("a:1",), size=1)
+        b = ImageDrop("sha256:b", protected=False, tags=("b:1",), size=1)
+        self.f.docker.ids = {"a:1": "sha256:a", "b:1": "sha256:b"}
+        self.f.docker.tags = {"sha256:a": [], "sha256:b": []}
+        self.f.docker.container_errors = [gc_domain.InspectError("container inspect failed for 1 object(s)")]
+        self.assertEqual(self.f.gc.apply(GcPlan((), (), (a, b), recorder_ok=True, at=NOW)), 1)
+        self.assertEqual(
+            self.f.console.lines,
+            ["<4>kept image a:1: container list unreadable: container inspect failed for 1 object(s)"],
+        )
+        self.assertNotIn(("rm image", "a:1"), self.f.docker.calls)
+        self.assertIn(("rm image", "b:1"), self.f.docker.calls)
 
     def test_remove_image_rechecks_before_removing(self) -> None:
         img = ImageDrop("sha256:a", protected=False, tags=("a:1", "a:2"), size=1)
@@ -1184,6 +1219,77 @@ class EntryTest(unittest.TestCase):
                 finally:
                     os.close(w)
                 self.assertEqual((p.returncode, p.stderr), (-signal.SIGPIPE, b""), args)
+
+
+class DockerInspectTest(unittest.TestCase):
+    """DockerCli.inspect_all and image_tags over docker's answers (subprocess.run patched)."""
+
+    @override
+    def setUp(self) -> None:
+        self.docker = gc_adapters.DockerCli(SubprocessCommandRunner())
+        self.container: dict[str, object] = {
+            "Id": "c1",
+            "Image": "sha256:a",
+            "State": {"Status": "exited"},
+            "Config": {"Image": "a:1", "Labels": None},
+            "HostConfig": {},
+            "Mounts": [{"Type": "volume", "Name": "v1"}],
+        }
+
+    def answer(self, records: object) -> contextlib.AbstractContextManager[object]:
+        def run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            if argv[1:3] == ["ps", "-aq"]:
+                return subprocess.CompletedProcess(argv, 0, "c1\n", "")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(records), "")
+
+        return mock.patch.object(subprocess, "run", side_effect=run)
+
+    def test_a_record_without_a_key_the_plan_relies_on_is_an_inspect_error(self) -> None:
+        for key in ("Image", "State", "Config", "HostConfig", "Mounts"):
+            with self.subTest(key=key):
+                rec = {k: v for k, v in self.container.items() if k != key}
+                with self.answer([rec]), self.assertRaises(gc_domain.IncompleteRecordError) as stop:
+                    self.docker.containers()
+                self.assertEqual(str(stop.exception), f"container inspect: c1: no {key}")
+        for key, value, kind in (("Image", None, "NoneType"), ("Mounts", "x", "str"), ("State", [], "list")):
+            with (
+                self.subTest(key=key, value=value),
+                self.answer([{**self.container, key: value}]),
+                self.assertRaisesRegex(gc_domain.InspectError, f"^container inspect: c1: {key} is {kind}$"),
+            ):
+                self.docker.containers()
+        with (
+            self.answer([{**self.container, "Config": {"Image": "a:1"}}]),
+            self.assertRaises(gc_domain.InspectError) as stop,
+        ):
+            self.docker.containers()
+        self.assertEqual(str(stop.exception), "container inspect: c1: no Config.Labels")
+
+    def test_a_record_that_is_no_object_is_an_inspect_error(self) -> None:
+        # Not taken for an empty container next to the real one: the run stops, naming it.
+        for junk, shown in (("junk", "junk"), (5, "5"), (None, "None"), ([], "[]")):
+            with (
+                self.subTest(junk=junk),
+                self.answer([self.container, junk]),
+                self.assertRaises(gc_domain.InspectError) as stop,
+            ):
+                self.docker.containers()
+            self.assertEqual(str(stop.exception), f"container inspect: {shown}: not an object")
+
+    def test_docker_s_nulls_are_accepted(self) -> None:
+        with self.answer([{**self.container, "Mounts": None}]):
+            [c] = self.docker.containers()
+        self.assertEqual((c.image_id, c.volumes, c.label_keys), ("sha256:a", frozenset(), frozenset()))
+
+    def test_image_tags_without_repo_tags_cannot_rule_tags_out(self) -> None:
+        for record, tags in (
+            ({"Id": "sha256:a"}, ["?"]),
+            ({"Id": "sha256:a", "RepoTags": "a:1"}, ["?"]),
+            ({"Id": "sha256:a", "RepoTags": None}, []),
+            ({"Id": "sha256:a", "RepoTags": ["a:1", 3]}, ["a:1"]),
+        ):
+            with self.subTest(record=record), self.answer([record]):
+                self.assertEqual(self.docker.image_tags("sha256:a"), tags)
 
 
 class DockerCommandTest(unittest.TestCase):

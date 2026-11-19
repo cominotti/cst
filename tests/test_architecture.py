@@ -234,6 +234,7 @@ _RUNNER: Final = frozenset({"cst_core/adapters/runner.py"})
 _SYSTEMCTL: Final = frozenset({"cst_core/adapters/__init__.py"})
 _VIRSH: Final = frozenset({"cst_core/adapters/virsh.py"})
 _FILES: Final = frozenset({"cst_core/adapters/files.py"})
+_SHAPES: Final = frozenset({"cst_core/domain/shapes.py"})
 PRIMITIVE_OWNERS: Final[dict[str, frozenset[str]]] = {
     "subprocess.run": _RUNNER,
     "subprocess.Popen": _RUNNER | {"cst_core/adapters/dispatch.py"},
@@ -246,6 +247,12 @@ PRIMITIVE_OWNERS: Final[dict[str, frozenset[str]]] = {
     "tempfile.NamedTemporaryFile": _FILES,
     "fcntl.flock": frozenset({"cst_core/adapters/locks.py"}),
     "fcntl.ioctl": frozenset({"cst_core/adapters/nocow.py"}),
+    # JSON and TOML from outside: parsed once, to object (cst_core.domain.shapes), so ty makes every
+    # reader check the shape before a typed value gets it. No budget: 0 elsewhere.
+    "json.loads": _SHAPES,
+    "json.load": _SHAPES,
+    "tomllib.loads": _SHAPES,
+    "tomllib.load": _SHAPES,
 }
 
 # String literals that betray a re-implementation of a primitive -> owners.
@@ -1267,6 +1274,20 @@ class ArchitectureGateTest(unittest.TestCase):
                 "cst_core subprocess.run": 1,
                 "cst_core fcntl.ioctl": 1,
             },
+        )
+
+    def test_json_and_toml_parsers_have_one_owner(self) -> None:
+        src = (
+            "from json import loads as l\nimport tomllib as t\nimport json\n"
+            "l('{}')\nt.loads('a = 1')\njson.load(f)\nt.load(f)\njson.dumps({})\n"
+        )
+        self.assertEqual(
+            primitive_calls(src, "x.py"),
+            [(4, "json.loads"), (5, "tomllib.loads"), (6, "json.load"), (7, "tomllib.load")],
+        )
+        self.assertEqual(
+            primitive_measure({"vm/cli.py": src, "cst_core/domain/shapes.py": src}, primitive_calls, PRIMITIVE_OWNERS),
+            {"vm json.loads": 1, "vm tomllib.loads": 1, "vm json.load": 1, "vm tomllib.load": 1},
         )
 
     def test_primitive_literals_skip_docstrings(self) -> None:

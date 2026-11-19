@@ -33,12 +33,14 @@ if CHECKOUT not in sys.path:
 
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.domain.shapes import json_object, object_of, parse_json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "docker-gc")
 RECORDER_UNIT = os.path.join(os.path.dirname(HERE), "units", "docker-gc-recorder.service")
 DAY = 86400
 NEWER_STATE_EXIT = 65  # a state file of a newer docker-gc: the recorder unit does not restart on it
+INCOMPLETE_RECORD_EXIT = 76  # an inspect record without a key docker-gc relies on: nor on this
 PROTECTED = "registry.example.com"  # an invented registry: what the settings file of these tests protects
 
 FAKE_DOCKER = r"""#!@PYTHON@ -I
@@ -199,19 +201,32 @@ def scenario(now: float) -> dict[str, object]:
             {"Name": "v4", "Labels": anon},
         ],
         "images": [
-            {"Id": sha("a"), "RepoTags": ["alpine:old"], "Size": 7_000_000, "Metadata": {"LastTagTime": iso(OLD)}},
-            {"Id": sha("b"), "RepoTags": ["redis:7"], "Size": 100, "Metadata": {}},
-            {"Id": sha("c"), "RepoTags": ["web:1"], "Size": 100, "Metadata": {}},
+            {
+                "Id": sha("a"),
+                "RepoTags": ["alpine:old"],
+                "RepoDigests": [],
+                "Size": 7_000_000,
+                "Metadata": {"LastTagTime": iso(OLD)},
+            },
+            {"Id": sha("b"), "RepoTags": ["redis:7"], "RepoDigests": [], "Size": 100, "Metadata": {}},
+            {"Id": sha("c"), "RepoTags": ["web:1"], "RepoDigests": [], "Size": 100, "Metadata": {}},
             {
                 "Id": sha("d"),
                 "RepoTags": ["registry.example.com/team/db:1"],
+                "RepoDigests": [],
                 "Size": 3_000_000,
                 "Metadata": {"LastTagTime": iso(OLD)},
             },
             {"Id": sha("e"), "RepoTags": None, "RepoDigests": [], "Size": 999, "Metadata": {}},
-            {"Id": sha("9"), "RepoTags": ["fresh:1"], "Size": 5, "Metadata": {"LastTagTime": iso(now - DAY)}},
-            {"Id": sha("8"), "RepoTags": ["seen:1"], "Size": 6, "Metadata": {}},
-            {"Id": sha("f"), "RepoTags": ["kept:1"], "Size": 6, "Metadata": {}},
+            {
+                "Id": sha("9"),
+                "RepoTags": ["fresh:1"],
+                "RepoDigests": [],
+                "Size": 5,
+                "Metadata": {"LastTagTime": iso(now - DAY)},
+            },
+            {"Id": sha("8"), "RepoTags": ["seen:1"], "RepoDigests": [], "Size": 6, "Metadata": {}},
+            {"Id": sha("f"), "RepoTags": ["kept:1"], "RepoDigests": [], "Size": 6, "Metadata": {}},
         ],
     }
 
@@ -250,7 +265,7 @@ class Program:
 
     def docker(self) -> dict[str, object]:
         with open(self.docker_state) as f:
-            return json.load(f)
+            return object_of(parse_json(f.read()))
 
     def recorded(self, since: float, images: dict[str, float], heartbeat: float) -> None:
         os.makedirs(self.state, exist_ok=True)
@@ -259,7 +274,7 @@ class Program:
 
     def last_used(self) -> dict[str, object]:
         with open(os.path.join(self.state, "last-used.json")) as f:
-            return json.load(f)
+            return object_of(parse_json(f.read()))
 
     def calls(self) -> list[list[str]]:
         try:
@@ -307,6 +322,13 @@ class Program:
             stdin=subprocess.DEVNULL,
             cwd="/",
         )
+
+
+def records(st: Mapping[str, object], kind: str) -> list[dict[str, object]]:
+    """The containers, volumes or images of a fake docker's state, as the state holds them (edits change it)."""
+    rows = st[kind]
+    assert isinstance(rows, list), rows
+    return [r for r in rows if json_object(r)]
 
 
 def days_ago(t: float) -> int:
@@ -429,6 +451,47 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.p.runtime, "run.lock")))
         self.assertFalse(os.path.exists(os.path.join(self.p.state, "last-run.json")))
 
+    def test_a_record_without_a_key_the_plan_needs_stops_the_run(self) -> None:
+        # A container without Image would leave its image looking unused (and planned for removal);
+        # one without Mounts its volumes orphaned. Nothing is removed, the record is named.
+        for key in ("Image", "Mounts", "Config"):
+            with self.subTest(key=key):
+                st = self.p.docker()
+                del records(st, "containers")[0][key]
+                self.p.set_docker(st)
+                before = self.p.last_used()
+                # run --dry-run and status plan as the weekly run does (a run itself is skipped in the
+                # first 10 minutes after boot, before it plans: ApplicationTest covers it).
+                # The recorder's start too, with the exit status its unit does not restart on.
+                for args in (("run", "--dry-run"), ("status",), ("record",)):
+                    rc, out, err = self.p.run(*args)
+                    self.assertEqual((rc, err), (INCOMPLETE_RECORD_EXIT, ""), out)
+                    self.assertTrue(
+                        out.endswith(f"<3>docker-gc: container inspect: {'1' * 64}: no {key}; nothing done\n"), out
+                    )
+                self.assertFalse([c for c in self.p.calls() if "rm" in c or "prune" in c], self.p.calls())
+                self.assertEqual(self.p.docker(), st)
+                self.assertEqual(self.p.last_used(), before)
+                self.p.set_docker(scenario(self.p.now))
+        st = self.p.docker()
+        del records(st, "images")[0]["RepoTags"]  # a protected registry could hide in it: not read as "untagged"
+        self.p.set_docker(st)
+        rc, out, _err = self.p.run("run", "--dry-run")
+        self.assertEqual(
+            (rc, out), (INCOMPLETE_RECORD_EXIT, f"<3>docker-gc: image inspect: {sha('a')}: no RepoTags; nothing done\n")
+        )
+
+    def test_docker_s_nulls_are_read_as_none(self) -> None:
+        # null Mounts, Config.Labels, volume Labels, RepoTags and RepoDigests: Docker's "none".
+        st = self.p.docker()
+        records(st, "containers")[1]["Mounts"] = None
+        records(st, "images")[1]["RepoDigests"] = None
+        self.p.set_docker(st)
+        rc, out, err = self.p.run("run", "--dry-run")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("orphaned anonymous volumes: 3\n", out)  # redis_cache's v4 is no longer in use
+        self.assertTrue(out.endswith("(dry run: nothing removed)\n"), out)
+
     def test_a_failing_docker_command_is_logged_and_exits_1(self) -> None:
         st = self.p.docker()
         st["fail"] = {"volume ls": [1, "Error response from daemon: boom"]}
@@ -472,12 +535,13 @@ class StatusTest(unittest.TestCase):
 
     def test_the_recorder_unit_does_not_restart_on_a_newer_state(self) -> None:
         # Restart=on-failure with RestartSec=10 would start the recorder again every 10 s, forever, to
-        # read the same file (systemd's start limit never trips at that pace), and the unit would never
-        # show as failed. Its exit status for that case stops the restarts (tier 1 test_78: real systemd).
+        # read the same file or get the same inspect answer (systemd's start limit never trips at that
+        # pace), and the unit would never show as failed. Its exit statuses for those cases stop the
+        # restarts (tier 1 test_78: real systemd).
         with open(RECORDER_UNIT) as f:
             service = f.read().split("[Service]\n", 1)[1].split("\n[", 1)[0].splitlines()
         self.assertIn("Restart=on-failure", service)
-        self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT}", service)
+        self.assertIn(f"RestartPreventExitStatus={NEWER_STATE_EXIT} {INCOMPLETE_RECORD_EXIT}", service)
 
     def test_cleanup_now_needs_a_terminal(self) -> None:
         rc, out, err = self.p.run("cleanup-now")

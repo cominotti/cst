@@ -12,7 +12,17 @@ import re
 from typing import Final, Literal, TypedDict
 
 from cst_core.domain.files import OwnedState, effective_lines
-from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem
+from cst_core.domain.shapes import (
+    ShapeError,
+    first_item,
+    has_item,
+    items_of,
+    json_object,
+    object_of,
+    object_or_empty,
+    parse_json,
+)
+from cst_core.domain.text import enum_member, parse_shell_assignments, SettingsProblem, group, split
 from cst_core.domain.values import Json
 
 # The kernel's experimental "ISO socket" feature: needed for LE Audio
@@ -63,7 +73,7 @@ def split_lines(text: str) -> tuple[list[str], str, bool]:
     """(lines, newline, final) of TEXT: the lines without the empty string
     after the last newline, and whether TEXT ended with a newline."""
     nl = "\r\n" if "\r\n" in text else "\n"
-    lines = re.split(r"\r?\n", text)
+    lines = split(r"\r?\n", text)
     final = lines[-1] == ""
     if final:
         lines.pop()
@@ -129,8 +139,9 @@ def current_values(text: str) -> dict[str, str | None]:
     """{key: value of the line that counts, or None} for KEYS in [General]."""
     lines = split_lines(text)[0]
     ranges = general_ranges(lines)
-    out: dict[str, str | None] = dict.fromkeys(KEYS)
+    out: dict[str, str | None] = {}
     for key in KEYS:
+        out[key] = None
         active, _ = key_lines(lines, ranges, key)
         if active:
             m = key_pattern(key).match(lines[active[-1]])
@@ -411,7 +422,7 @@ def line_key(line: str) -> str | None:
     (`KEY=$X`, which sets nothing), so settings_set replaces it; None for a
     comment or any other line."""
     m = _LINE_KEY.match(line)
-    return m.group(1) if m else None
+    return group(m, 1) if m else None
 
 
 def set_keys(text: str) -> list[str]:
@@ -577,51 +588,75 @@ class BusctlObjects(TypedDict, total=False):
     data: list[dict[str, dict[str, Json]]]
 
 
-def adapter_path(objects: BusctlObjects) -> str | None:
-    """The first object path with org.bluez.Adapter1, or None."""
-    data = objects.get("data") or [{}]
-    for path, ifaces in sorted(data[0].items()):
-        if "org.bluez.Adapter1" in ifaces:
+def adapter_path(objects: object) -> str | None:
+    """The first object path with org.bluez.Adapter1 in `busctl -j ... GetManagedObjects`'s
+    JSON (BusctlObjects), or None. ShapeError for JSON of another shape."""
+    data = object_of(objects).get("data") or [{}]
+    for path, ifaces in sorted(object_of(first_item(data)).items()):
+        if has_item(ifaces, "org.bluez.Adapter1"):
             return str(path)
     return None
 
 
-def card_state(
-    dev: str,
-    cards: Sequence[PactlCard],
-    srcs: Sequence[PactlSource],
-    outs: Sequence[PactlSourceOutput],
-) -> tuple[str, bool, bool] | None:
-    """(active profile, a2dp-sink offered, headset mic in use), or None when
-    the headset has no card in PipeWire."""
-    card = next((c for c in cards if c.get("name") == CARD_PREFIX + dev), None)
+# The pactl outputs card_state reads: cards, short sources, source outputs.
+PACTL_OUTPUTS: Final = 3
+
+
+def card_state_of(dev: str, outputs: object) -> tuple[str, bool, bool] | None:
+    """card_state of the three pactl outputs in one JSON value (`[cards, sources, outputs]`)."""
+    parts = items_of(outputs)
+    if len(parts) != PACTL_OUTPUTS:  # card_state(dev, *outputs) raised TypeError
+        raise ShapeError(f"{len(parts)} pactl outputs, not {PACTL_OUTPUTS}")
+    return card_state(dev, parts[0], parts[1], parts[2])
+
+
+def card_state(dev: str, cards: object, srcs: object, outs: object) -> tuple[str, bool, bool] | None:
+    """(active profile, a2dp-sink offered, headset mic in use), or None when the headset has no
+    card in PipeWire. CARDS, SRCS and OUTS: the JSON of `pactl -f json list cards` (PactlCard),
+    `list short sources` (PactlSource) and `list source-outputs` (PactlSourceOutput);
+    ShapeError where a part this reads is of another shape."""
+    card = next((c for c in map(object_of, items_of(cards)) if c.get("name") == CARD_PREFIX + dev), None)
     if card is None:
         return None
-    a2dp = bool(card.get("profiles", {}).get("a2dp-sink", {}).get("available", False))
-    bt_src = {s.get("index") for s in srcs if str(s.get("name", "")).startswith(INPUT_PREFIX + dev)}
-    mic = any(o.get("source") in bt_src for o in outs)
+    a2dp = bool(object_of(object_of(card.get("profiles", {})).get("a2dp-sink", {})).get("available", False))
+    bt_src = {
+        _hashable(s.get("index"))
+        for s in map(object_of, items_of(srcs))
+        if str(s.get("name", "")).startswith(INPUT_PREFIX + dev)
+    }
+    mic = any(_hashable(o.get("source")) in bt_src for o in map(object_of, items_of(outs)))
     return str(card.get("active_profile") or ""), a2dp, mic
 
 
-def pw_state(
-    dev: str, objs: Sequence[PwObject]
-) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
-    """(profiles, rule quality, node codec, node quality, node rate) of the headset, or
-    None when it is not in PipeWire. Missing parts are None."""
+def _hashable(value: object) -> object:
+    """value, a member of a set; ShapeError for a JSON list or object (unhashable)."""
+    if isinstance(value, list | dict):
+        raise ShapeError(f"unhashable: {type(value).__name__}")
+    return value
+
+
+def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
+    """(profiles, rule quality, node codec, node quality, node rate) of the headset in pw-dump's
+    JSON (a list of PwObject), or None when it is not in PipeWire. Missing parts are None;
+    ShapeError where a part this reads is of another shape."""
     prof: str | None = None
     rule: str | None = None
     codec: str | None = None
     quality: str | None = None
     rate: int | None = None
     found = False
-    for o in objs:
-        info = o.get("info") or {}
-        p = info.get("props") or {}
-        params = info.get("params") or {}
+    for o in map(object_of, items_of(objs)):
+        info = object_or_empty(o.get("info"))
         kind = str(o.get("type", ""))
+        # Read only where the object's type needs them: another type's props and params are
+        # never looked into.
+        p = object_of(info.get("props") or {}) if kind.endswith(("Device", "Node")) else {}
+        params: object = info.get("params") or {}
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             found = True
-            prof = " ".join(str(pr.get("name", "?")) for pr in params.get("Profile", []) or [])
+            prof = " ".join(
+                str(object_of(pr).get("name", "?")) for pr in items_of(object_of(params).get("Profile", []) or [])
+            )
             raw_rule = p.get("bluez5.a2dp.ldac.quality")
             rule = None if raw_rule is None else str(raw_rule)
         if (
@@ -631,21 +666,22 @@ def pw_state(
         ):
             codec = str(p[CODEC_KEY])
             rate = node_rate(info)
-            for pr in params.get("Props", []) or []:
-                if "quality" in pr:
-                    q = pr["quality"]
+            for pr in items_of(object_of(params).get("Props", []) or []):
+                if has_item(pr, "quality"):
+                    q = object_of(pr)["quality"]
                     quality = QUALITY_NUM.get(q, str(q)) if isinstance(q, int) else str(q)
     if not found:
         return None
     return prof or None, rule, codec, quality, None if rate is None else str(rate)
 
 
-def node_rate(info: PwInfo) -> int | None:
+def node_rate(info: object) -> int | None:
     """The node's negotiated Format rate, else the rate its EnumFormat offers
-    (a suspended node has an empty Format)."""
-    params = info.get("params") or {}
+    (a suspended node has an empty Format). INFO: a pw-dump object's info (PwInfo);
+    ShapeError where a part this reads is of another shape."""
+    params = object_or_empty(object_of(info).get("params"))
     for key in ("Format", "EnumFormat"):
-        for fmt in params.get(key) or []:
+        for fmt in items_of(params.get(key) or []):
             rate = fmt.get("rate") if isinstance(fmt, dict) else None
             if isinstance(rate, int):
                 return rate
@@ -663,7 +699,7 @@ def lw_failure(text: str) -> tuple[str, str, str] | None:
         m = JOURNAL_LINE.match(line)
         if not m:
             continue
-        when, ident, msg = m.groups()
+        when, ident, msg = group(m, 1), group(m, 2), group(m, 3)
         if msg.startswith("fixed: "):
             last = None
         elif msg.startswith("failed: "):
@@ -684,10 +720,10 @@ def parse_pending(text: str | None) -> dict[str, str]:
     """unit -> invocation ID from the pending-restart file (JSON); {} when absent or unreadable,
     and only the known units with a non-empty ID."""
     try:
-        data = json.loads(text or "{}")
+        data = parse_json(text or "{}")
     except ValueError:
         return {}
-    if not isinstance(data, dict):
+    if not json_object(data):
         return {}
     return {u: i for u, i in data.items() if u in RESTART_UNITS and isinstance(i, str) and i}
 

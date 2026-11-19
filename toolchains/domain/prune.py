@@ -182,7 +182,7 @@ class SavedRun(TypedDict):
     version writes them; an older one may lack keys). The values are as the file holds
     them: status checks each one it shows (json_number)."""
 
-    time: Json
+    time: NotRequired[Json]
     deleted: NotRequired[Json]
     freed: NotRequired[Json]
     total: NotRequired[Json]

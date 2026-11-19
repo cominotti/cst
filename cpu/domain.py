@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
+from cst_core.domain.text import group
 from cst_core.domain.values import HOUR, MINUTE
 
 URI = "qemu:///system"
@@ -250,7 +251,7 @@ def pressure_field(text: str, kind: Literal["some", "full"], key: str) -> str | 
     """The KEY= value (as text) on the KIND line ('some' or 'full') of a
     pressure file's text, or None."""
     m = re.search(rf"^{kind} (?:.* )?{key}=(\d+(?:\.\d+)?)\b", text, re.MULTILINE)
-    return m.group(1) if m else None
+    return group(m, 1) if m else None
 
 
 def lows(ft: Sequence[float]) -> tuple[float, float, float] | None:

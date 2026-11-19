@@ -60,6 +60,7 @@ cst doctor help
 | `vm` | The virtualization packages (QEMU, libvirt, UEFI firmware `edk2-ovmf`, `swtpm`, `libtpms`) differ between the rollback and the booted deployment | `WARN` when a VM exists and the rollback is not pinned (fix: `sudo ostree admin pin N`) or no VM backup, local or on the NAS, was made since the booted deployment was built (fix: `cst vm backup --nas` when the NAS backup is set up, else `cst vm backup`); `info` when both are in place; `ok` when nothing changed |
 | `vm` | A disk of a VM that points to an overlay of a NAS backup (`<image>.cst-overlay-<time>`, in the running VM or in its definition): `cst vm backup --nas` could not merge it back | `WARN`, fix by case: still running on the overlay: `virsh blockcommit`; only the definition names a stale overlay: `virsh edit` (never `qemu-img commit`); shut off on a newer overlay: `qemu-img commit`; unclear: a command that only looks (see [section 7](#7-the-vm-checks)); `info` while that backup is still running |
 | `vm` | `/var/lib/cst/vm-backups.json` of a newer format than this checkout's `cst vm` reads (its `"version"`; written by a newer CST) | `WARN` (no fix line: use the `cst vm` of that CST); the virtualization packages row then says `last backup: unknown` |
+| `vm` | `/var/lib/cst/vm-backups.json` there but not readable as an index (not JSON, no `"backups"` list, a read error) | `WARN` naming the reason: `cst vm` refuses to back up or list with it; move it aside to start a new index |
 | `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
 | `vm` | A VM's weekly NAS backup timer is on, but `/usr/local/sbin/btrfs-notify` (which a failed backup alerts through) is missing, as `cst btrfs uninstall` leaves it when snapshots are not set up: a failed backup then reaches no desktop, only the journal and the pending alerts (the `alerts` rows) | `WARN`, fix: `cst btrfs install` (it installs `btrfs-notify` with the alerts kept for the next login); nothing when no timer is on |
 | `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; changed on disk since CST wrote it (its sha256 differs from the record's); a component installed only in part (its setup command started writing and did not finish: the record says `pending`); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST or that is no record | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
@@ -70,7 +71,7 @@ cst doctor help
 | `vm` | A VM image folder on btrfs (`/var/lib/libvirt/images`, `~/.local/share/libvirt/images`, the two GNOME Boxes folders) without the NOCOW mark (`+C`), or with images still copy-on-write | `info` (`cst vm nocow apply` for the mark; `cst vm nocow plan` for how to convert an image); `info` "not readable as your user" for root's folder, never a finding; `ok` when NOCOW and clean; nothing for folders that are not there (CI, containers). Never `WARN` |
 | `btrfs` | Unallocated space per disk, estimated from sysfs | `WARN` below 50 GiB, `ERROR` below 5 GiB (the same levels as the hourly health check: those of the installed `btrfs-health-check`, the one that alerts (its `btrfs/health_check/domain.py` inside the zipapp, or the text of a bash version), else of this checkout's `btrfs/health_check/domain.py`; no fix line: follow the recovery steps); `ERROR` also when metadata is almost full; `info` "needs root" when the layout gives no per-disk number |
 | `btrfs` | Snapshots left writable (see [section 6.1](#61-snapshots-left-writable)): names in `/var/lib/btrfs-snapshot/core-unfinished` (an hourly run stopped between taking a snapshot and making it read-only), and writable entries named like CST's snapshots in `/var/lib/btrfs-snapshot/core-writable` that no run left | `WARN`; fix: `sudo systemctl start btrfs-snapshot.service` for the first, `sudo btrfs subvolume show <path>` (it only looks) for the second; `ok` when there are none; `info` when the lists cannot be read; nothing when snapshots were never set up |
-| `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks); `info` for one boot, or when the record cannot be read; nothing when there is no record |
+| `btrfs` | The boot-time NOCOW migration of Docker volumes postponed (see [section 6.2](#62-docker-volumes-nocow-migration-postponed)): the record `/var/lib/docker-volumes-nocow/postponed` that `docker-volumes-nocow` keeps of the boots it had to wait at | `WARN` from two boots on, with the reason of the last one; fix: `journalctl -b -u docker-volumes-nocow` (it only looks), or for a `/etc/docker/daemon.json` that cannot be read `sudo dockerd --validate --config-file /etc/docker/daemon.json` (it only checks the file); `info` for one boot, or when the record cannot be read; nothing when there is no record |
 
 "Deployment" is the Silverblue word for one bootable version of the system.
 The **booted** one is running now; a **staged** one was prepared by an
@@ -312,7 +313,9 @@ Docker volumes that still hold copy-on-write data
 ([btrfs/README.md, section 4.10](../btrfs/README.md#410-docker-volumes-without-copy-on-write-nocow)).
 It waits, and tries again at the next boot, when it cannot be sure nothing
 uses the volumes: Docker is running, systemd gives no clear state for
-`docker.service`, or another `dockerd` uses the same data folder. Such a boot
+`docker.service`, or another `dockerd` uses the same data folder. It waits too
+when `/etc/docker/daemon.json` cannot be read (not JSON, for example): then
+which volumes folder Docker uses is unknown. Such a boot
 is not counted as a failed attempt and sends no alert, so a migration could
 wait forever without a word. The helper records it instead, in
 `/var/lib/docker-volumes-nocow/postponed`: the reason of the last boot, its
@@ -322,7 +325,10 @@ volumes folder (Docker removed, or its `data-root` moved).
 
 One boot is `info`: it can happen once (Docker started by hand early, for
 example). From two boots on it is a `WARN`: something holds the migration
-back at every boot. The fix line only shows that boot's journal; the reasons
+back at every boot. The fix line only shows that boot's journal; for a
+`daemon.json` that cannot be read the warning says to fix the file instead, and
+the fix line is `sudo dockerd --validate --config-file /etc/docker/daemon.json`,
+which checks it as dockerd reads it and changes nothing. The reasons
 and what to do are in
 [btrfs/README.md, section 13](../btrfs/README.md#docker-volumes-migration-postponed-at-n-boots-in-a-row).
 
@@ -368,8 +374,10 @@ When they differ and libvirt has at least one VM, it wants two things:
   Unpin it later with `sudo ostree admin pin --unpin N`, once the VMs work on
   the new deployment;
 - a **VM backup** made after the booted deployment was built: an entry in
-  `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp. The
-  fix is `cst vm backup` (with the VM shut off).
+  `/var/lib/cst/vm-backups.json` newer than the deployment's timestamp (only an
+  entry `cst vm list` shows counts: one it keeps without understanding it, such
+  as a NAS entry without its snapshot, does not). The fix is `cst vm backup`
+  (with the VM shut off).
 
 With both in place the line is `info`. A NAS backup (`mode` `nas` in the
 index) counts like a local one. When the NAS backup of `/home` is set up

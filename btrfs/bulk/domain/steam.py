@@ -114,7 +114,8 @@ class VdfText:
 
     def string(self, p: int) -> tuple[str, int]:
         text, n = self.text, self.n
-        start, out = p, []
+        start = p
+        out: list[str] = []
         p += 1
         while True:
             if p >= n or text[p] == "\n":

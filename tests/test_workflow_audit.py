@@ -51,6 +51,7 @@ import re
 import tempfile
 import unittest
 
+from cst_core.domain.text import group_or_none
 from tests.repo_files import REPO, repo_files
 
 CONFIG = ".github/zizmor.yml"
@@ -216,7 +217,8 @@ def task_script(cue: str, name: str) -> str | None:
     )
     if found is None:
         return None
-    return found.group("long") if found.group("long") is not None else found.group("short")
+    long = group_or_none(found, "long")
+    return long if long is not None else group_or_none(found, "short")
 
 
 def task_problems(cue: str) -> list[str]:

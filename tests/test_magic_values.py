@@ -78,6 +78,21 @@ _LOOSE_VALUES: Final = frozenset({"Any", "object", "Json"})
 MAGIC_CEILINGS: Final[dict[str, int]] = {}
 # "path:qualname" -> why the hits in that scope stay.
 MAGIC_EXEMPT: Final[dict[str, str]] = {
+    "cst_core/domain/shapes.py:json_object": (
+        "the one generic JSON-object guard; every record type is a TypedDict narrowed from it"
+    ),
+    "btrfs/bulk/adapters/child.py:is_user_read": (
+        "the guard of u_read's answer as it crosses back from as_user's child: R is bound to Json, which no TypedDict is"
+    ),
+    "cst_core/domain/shapes.py:json_dict": (
+        "the generic guard of a JSON object whose values are JSON (a parsed one always is); no record type"
+    ),
+    "cst_core/domain/shapes.py:object_of": (
+        "the generic reader of a JSON object of any shape (where Python raised on .get); no record type"
+    ),
+    "cst_core/domain/shapes.py:object_or_empty": (
+        "the generic reader of `x or {}` for a JSON object of any shape; no record type"
+    ),
     "cst_core/domain/record.py:_string": (
         "the record's validator: it reads one key of a JSON object nobody has checked yet, and checks it"
     ),
@@ -210,14 +225,17 @@ def _leaks(node: ast.AST, vocabulary: Mapping[str, str]) -> list[tuple[int, str]
 def _arm_subjects(test: ast.expr) -> set[str]:
     """The subjects (as source text) an if test compares with string literals (inside any and/or)."""
     if isinstance(test, ast.BoolOp):
-        return set().union(*(_arm_subjects(v) for v in test.values))
+        subjects: set[str] = set()
+        for v in test.values:
+            subjects |= _arm_subjects(v)
+        return subjects
     if isinstance(test, ast.Compare):
         return {ast.unparse(subject) for subject, _ in _compared_strings(test)}
     return set()
 
 
 def _chain(node: ast.If) -> list[ast.If]:
-    out = [node]
+    out: list[ast.If] = [node]
     while len(out[-1].orelse) == 1 and isinstance(out[-1].orelse[0], ast.If):
         out.append(out[-1].orelse[0])
     return out

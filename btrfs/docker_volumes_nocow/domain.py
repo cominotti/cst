@@ -17,6 +17,20 @@ MARGIN: Final = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration
 GAVE_UP = "Gave up after two boots; see journalctl -u docker-volumes-nocow."
 DAEMON_JSON = "/etc/docker/daemon.json"
+# How the reason a boot records ends when the dockerd config file cannot be read (config_reason).
+CONFIG_UNKNOWN: Final = ", so the volumes folder Docker uses is unknown"
+
+
+def config_reason(problem: str) -> str:
+    """The postponed reason of a boot whose dockerd config file cannot be read (NocowPaths.config_problem)."""
+    return f"{problem}{CONFIG_UNKNOWN}"
+
+
+def is_config_reason(reason: object) -> bool:
+    """reason (a postponed record's) is config_reason's: the dockerd config file could not be read."""
+    return isinstance(reason, str) and reason.endswith(CONFIG_UNKNOWN)
+
+
 # Beside a volume's _data during its migration: the NOCOW copy being made, and the
 # original between the two renames (followed by the time it was moved aside).
 NEW_SUFFIX = ".nocow-new"
@@ -46,6 +60,9 @@ class NocowPaths:
     # Where an alert btrfs-notify could not take is kept (for cst doctor and the next login).
     alerts: str = state_format(StateFormatKey.ALERT_SPOOL).folder
     proc: str = "/proc"  # where running dockerd processes are looked for
+    # Why /etc/docker/daemon.json cannot be read ("" when it can or there is none): then which
+    # volumes folder Docker uses is unknown, and the migration waits (wiring reads it).
+    config_problem: str = ""
 
 
 @dataclass(frozen=True, slots=True)

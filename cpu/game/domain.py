@@ -20,7 +20,7 @@ import re
 from typing import Final, Literal
 
 from cst_core.domain.contracts import StateFormatKey, first_line_version, state_format
-from cst_core.domain.text import file_lines, printf_q, printf_q_words
+from cst_core.domain.text import file_lines, group, printf_q, printf_q_words
 
 type Manager = Literal["sys", "usr"]
 type Record = tuple[str, ...]
@@ -252,7 +252,7 @@ def state_uid(recs: Sequence[Record]) -> str | None:
         if len(r) >= 3 and r[0] == "prop" and r[1] == "sys":
             m = re.fullmatch(r"user@([0-9]+)\.service", r[2])
             if m:
-                return m.group(1)
+                return group(m, 1)
     return None
 
 

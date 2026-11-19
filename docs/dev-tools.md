@@ -269,9 +269,9 @@ repository:
   `redundant-cast` (a `cast()` to the type the value already has),
   `missing-override-decorator` (a method that overrides one of a base class,
   `setUp` included, says so with `@override` from `typing`: a base method
-  renamed or removed is then an error, not a method nobody calls) and
-  `truthiness-test-of-none-union` (below). A rule may be added there only at
-  `"error"`.
+  renamed or removed is then an error, not a method nobody calls),
+  `truthiness-test-of-none-union` (below), and `unsound-return` and
+  `unsound-assignment` (below). A rule may be added there only at `"error"`.
 - **`truthiness-test-of-none-union`**: a boolean test (`if x:`, `not x`,
   `x and y` in a condition) on a value that may be None and may also be
   empty or zero (`str | None`, `int | None`, `list[str] | None`,
@@ -298,6 +298,22 @@ repository:
   value, `bool(x)`, or a value typed `Any`. Never use them to get past
   it, and no ignore comment, no `cast`, no `TypeIs[str]` "has text" helper
   (its else branch would claim the value is not a str).
+- **`unsound-return`, `unsound-assignment`**: a value whose type holds `Any`
+  (what `json.loads` and `tomllib.loads` return, typeshed's `m.group(n)`,
+  `re.split` items and `sys.stdout`, `struct.unpack`, `getattr`, a module
+  loaded by path) returned from a function, or assigned to a local, whose
+  declared type is narrower. ty took such a value as the declared type without
+  a look; now the code checks it first: the parsers are called only in
+  `cst_core.domain.shapes` (`parse_json`, `parse_toml`, which return `object`;
+  the architecture gate's `PRIMITIVE_OWNERS`), and a reader narrows with
+  `json_object`, `has_shape` or a `TypeIs` guard of its own; a regex group is
+  `cst_core.domain.text`'s `group` or `group_or_none`; the streams are
+  `cst_core.adapters.terminal`'s `stdin()`, `stdout()`, `stderr()`. What the
+  rules do not catch: an `Any` passed as a call argument (ty checks no
+  argument against `Any`), `Any` inside a container built elsewhere and
+  returned whole (`list[Any]` from a helper typed so), and a `cast` (counted
+  in `CAST_BUDGETS`). That is why the parsers have one owner: through it every
+  reader must narrow, whatever it passes its value to.
 
 ## The workflow audit (zizmor)
 

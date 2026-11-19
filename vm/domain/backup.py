@@ -5,9 +5,10 @@ the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). 
 import datetime
 import json
 from enum import StrEnum
-from typing import NotRequired, TypedDict
+from typing import NotRequired, Required, TypedDict, TypeIs
 
 from cst_core.domain.errors import Refused
+from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import Json
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
@@ -32,9 +33,9 @@ class IndexEntry(TypedDict, total=False):
     """One backup in the index (vm-backups.json). A local copy has path, a NAS backup snapshot,
     repository and host. Keys this cst vm does not know are kept as they are."""
 
-    vm: str
+    vm: Required[str]
     timestamp: str
-    epoch: int
+    epoch: float
     path: str
     mode: str
     snapshot: str
@@ -44,6 +45,49 @@ class IndexEntry(TypedDict, total=False):
     keep: str | None
     versions: dict[str, str]
     deployment: BootedDeployment | None
+
+
+# The optional keys of an index entry, of their types (is_index_entry).
+_ENTRY_KEYS: KeyTypes = {
+    "timestamp": (str,),
+    "epoch": (int, float),
+    "path": (str,),
+    "mode": (str,),
+    "snapshot": (str,),
+    "repository": (str,),
+    "host": (str,),
+    "consistency": (str,),
+    "keep": (str, type(None)),
+    "versions": (dict,),
+    "deployment": (dict, type(None)),
+}
+_DEPLOYMENT_KEYS = ("version", "checksum", "timestamp")
+
+
+def is_index_entry(e: object) -> TypeIs[IndexEntry]:
+    """An entry of the index this cst vm understands: vm a non-empty string; a NAS backup (mode "nas")
+    with its restic snapshot, any other with its folder (path); its other known keys of their types.
+    An entry that is not one is never listed, pruned or dropped: write_index keeps it as it is."""
+    if not json_object(e) or not has_shape(e, {"vm": (str,)}, _ENTRY_KEYS) or not e["vm"]:
+        return False
+    versions, deployment = e.get("versions", {}), e.get("deployment")
+    if not json_object(versions) or not all(isinstance(v, str) for v in versions.values()):
+        return False
+    if deployment is not None and not (json_object(deployment) and all(k in deployment for k in _DEPLOYMENT_KEYS)):
+        return False
+    where = e.get("snapshot") if e.get("mode") == "nas" else e.get("path")
+    return isinstance(where, str) and where != ""
+
+
+# Why an index that parses is no index (stored_list found no "backups" list): cst vm and cst doctor.
+NO_BACKUPS_LIST = 'no "backups" list'
+
+
+def stored_list(data: object) -> list[object] | None:
+    """The "backups" list of a parsed index, each entry as stored; None when data is not an object
+    with one (NO_BACKUPS_LIST). cst vm's stored_backups and cst doctor read the index with it."""
+    backups = data.get("backups") if json_object(data) else None
+    return items_of(backups) if isinstance(backups, list) else None
 
 
 class CopiedFile(TypedDict):
@@ -94,12 +138,32 @@ class ResticMessage(StrEnum):
     ERROR = "error"
 
 
+class ResticSnapshot(TypedDict):
+    """One snapshot of `restic snapshots --json` (the field the NAS prune reads)."""
+
+    id: str
+
+
+def is_restic_snapshot(value: object) -> TypeIs[ResticSnapshot]:
+    """A snapshot of restic snapshots --json with a non-empty string id."""
+    return json_object(value) and isinstance(snap_id := value.get("id"), str) and snap_id != ""
+
+
 class ResticSummary(TypedDict, total=False):
     """The summary line of `restic backup --json` (the fields a backup reads)."""
 
     snapshot_id: str
     total_bytes_processed: int
     data_added: int
+
+
+_SUMMARY_KEYS: KeyTypes = {"snapshot_id": (str,), "total_bytes_processed": (int,), "data_added": (int,)}
+
+
+def is_restic_summary(value: object) -> TypeIs[ResticSummary]:
+    """The summary line of restic backup --json as a backup reads it: snapshot_id, when there, a
+    non-empty string; total_bytes_processed and data_added, when there, whole numbers."""
+    return has_shape(value, {}, _SUMMARY_KEYS) and json_object(value) and value.get("snapshot_id") != ""
 
 
 def copied_kind(src: str, tpm_dir: str, *, big: bool) -> str:

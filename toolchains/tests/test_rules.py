@@ -743,6 +743,33 @@ class ToolchainReportTest(RulesBase):
         _rc, out = self.run_main("status")
         self.assertIn("== rust toolchains (a report: CST never removes one)", out)
 
+    def test_damaged_rustup_settings_read_as_none(self) -> None:
+        # settings.toml that is not TOML, or holds other types: no default from it (rustup is asked;
+        # here there is none), no overrides.
+        rh = os.path.join(self.tmp, "rustup")
+        os.environ["RUSTUP_HOME"] = rh
+        os.makedirs(os.path.join(rh, "toolchains", "stable-x86_64-unknown-linux-gnu"))
+        for text in ("default_toolchain = [", "default_toolchain = 5\noverrides = 3\n", 'overrides = {"/a" = 1}\n'):
+            with self.subTest(text=text), mock.patch.object(shutil, "which", return_value=None):
+                with open(os.path.join(rh, "settings.toml"), "w") as f:
+                    f.write(text)
+                self.assertEqual(tc_rustup.rustup_default(self.home, rh), "")
+                lines = "\n".join(tc_rustup.toolchain_lines(self.home, self.limits))
+                self.assertIn("default:  unknown", lines)
+                self.assertNotIn("rustup override for", lines)
+
+    def test_a_run_summary_that_is_not_an_object_reads_as_none(self) -> None:
+        path = tc_home_files.state_path(self.home, "python:uv")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        for text in ("not json", "[1]", '"x"', "null", ""):
+            with self.subTest(text=text):
+                with open(path, "w") as f:
+                    f.write(text)
+                self.assertIsNone(tc_home_files.read_state(self.home, "python:uv"))
+        with open(path, "w") as f:
+            f.write('{"deleted": 2}')
+        self.assertEqual(tc_home_files.read_state(self.home, "python:uv"), {"deleted": 2})  # keys not checked
+
     def test_named_in_build_files_is_not_offered(self) -> None:
         rh = os.path.join(self.tmp, "rustup")
         os.environ["RUSTUP_HOME"] = rh
@@ -953,7 +980,9 @@ class SccacheConfigTest(RulesBase):
         return tomllib.loads(self.cfg())
 
     def wrapper_value(self) -> str | None:
-        return (self.data().get("build") or {}).get("rustc-wrapper")
+        value = (self.data().get("build") or {}).get("rustc-wrapper")
+        assert value is None or isinstance(value, str), value
+        return value
 
     def test_off_by_default_and_plain_apply_changes_nothing(self) -> None:
         before = self.cfg()

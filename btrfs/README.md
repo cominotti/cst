@@ -741,6 +741,17 @@ docker volume rm <name>         # or one volume by name
   `sudo systemctl stop docker.socket docker.service`, then
   `sudo systemctl start docker-volumes-nocow.service`, and when it is done
   start Docker again with `sudo systemctl start docker.socket docker.service`.
+- A `/etc/docker/daemon.json` that dockerd cannot read (not JSON, which includes
+  bytes that are not UTF-8, not an object, a `data-root` that is not a folder
+  name, or a read error; a UTF-8 byte order mark at its start is skipped, as
+  dockerd skips it) leaves
+  unknown which volumes folder Docker uses, so the boot's migration waits too:
+  it is recorded as postponed with that reason, even when nothing is scheduled
+  and the default folder is absent or already `+C` (`status` shows it, `cst doctor`
+  from two boots on), and the first boot after the file is fixed runs it. `mark`
+  (what `install` runs) changes nothing then and exits 2, so `install` leaves the
+  request to that boot. Another dockerd whose config file cannot be read that way
+  counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
   written to disk (fsync) before each rewrite starts, so a boot that hangs or
@@ -990,6 +1001,7 @@ episodes 1 (worst first)
 |---|---|---|
 | `NO DATA for this window` | nothing was recorded: the monitor was not running, or your user cannot read the data | see section 13, "`report` says `NO DATA`" |
 | `INCOMPLETE DATA` | part of the window is not recorded yet, or there was a gap | wait a little and run again, or narrow the window. Do not conclude anything yet. |
+| `INCOMPLETE DATA: N damaged record(s) in this window were left out` | lines of the log that are not JSON, or records without what the report reads (a sample without its time, an episode without its end), were skipped: a torn write or a line another program wrote. The last line of a file still being written is not counted. With `NO DATA`, it follows that line | re-running does not help: the window's numbers lack those records. A damaged line belongs to its own time, else to the record before it. |
 | `KERNEL/FS PROBLEMS` | a stuck task, a btrfs maintenance task stuck for 15 min, a btrfs error or a disk error was recorded | read the `events` lines marked `!` |
 | `btrfs device error counters INCREASED in this window.` | a disk reported new read, write or checksum errors | treat it like a health-check alert (section 13, `non-zero device error counters`) |
 | `Storage was NOT a bottleneck` | the disks were not the reason | look at CPU, memory, the network or the program itself. Extra lines may say `CPU contention` or `Memory pressure`. For CPU sharing between games, builds, Docker and the VM, see [../cpu/README.md](../cpu/README.md). |
@@ -1076,7 +1088,8 @@ episode without a record yet), `vm.zswap_in_bytes`, `vm.zswap_out_bytes` and
 `vm.swap_out_bypass_bytes` (`null` when no sample came from a daemon version 7
 or later), and `read_await_ms` / `write_await_ms` per disk. Each episode
 has `max_d_mem` (most tasks waiting on memory at once); episodes of a daemon
-before version 8 whose numbers were corrected carry `"estimated": true`. The `units` block of the JSON output explains them too.
+before version 8 whose numbers were corrected carry `"estimated": true`. `coverage.skipped` counts the
+damaged records and lines of the window (see the verdict table). The `units` block of the JSON output explains them too.
 
 ### 7.5 `watch`: label a run for comparisons
 
@@ -1565,13 +1578,34 @@ Because of this:
   `status` stop with exit 65 and a journal line that names the format, `... is
   format 2 of the docker-gc-state (this CST reads format 1 and older) ...`. So
   nothing is removed by a record they do not understand. systemd does not
-  restart the recorder for exit 65 (`RestartPreventExitStatus=`; any other
-  failure is restarted after 10 s): `docker-gc-recorder.service` stays
+  restart the recorder for exit 65 (`RestartPreventExitStatus=`; nor for exit
+  76, below; any other failure is restarted after 10 s): `docker-gc-recorder.service` stays
   failed, which `cst doctor` lists, and images are held back meanwhile, as
   with any recorder that is not running. Install the docker-gc of that CST
   again (`cst btrfs docker-gc enable` in that checkout), which starts the
   recorder again.
 - Right before removing an image, it checks again that nothing started using it.
+
+**When docker's answer is incomplete.** The plan relies on keys every Docker
+writes in `docker inspect`: a container's `Id`, `Image`, `State`, `Config`
+(with its `Labels`), `HostConfig` and `Mounts`; an image's `Id`, `RepoTags`
+and `RepoDigests`; a volume's `Name` and `Labels` (`null`, Docker's "none",
+counts as empty). Without one, a protection would be lost (a container without
+`Image` would make the image it uses look unused). So a record that lacks one,
+holds another type there, or is not an object at all, stops `run`, `run --dry-run`, `cleanup-now`,
+`status` and the recorder's start before anything is removed, with a journal
+line that names the object and the key: `container inspect: <id>: no Image;
+nothing done` (exit 76). Docker gives the same answer at every try, so
+systemd does not restart the recorder for exit 76, as for exit 65:
+`docker-gc-recorder.service` stays failed, which `cst doctor` lists, and
+images are held back meanwhile. An object missing from the answer or an
+answer that is not JSON stops them the same way, with exit 1 (it may not come
+back: systemd restarts the recorder after 10 s). During the
+removals, the check before an image is removed reads the containers again: if
+that list cannot be read, that image is kept (`kept image ...: container list
+unreadable: ...`, counted in the run's failures) and the run goes on with the
+next one. An image whose `RepoTags` cannot be read there is kept too (it may
+have new tags).
 
 **When the weekly run does not happen.** The run is skipped in the first 10
 minutes after boot, and when Docker is not running (it never starts Docker just
@@ -2098,7 +2132,12 @@ to wait, with the reason of the last boot:
 - `docker.service state unknown (...)` or `cannot ask systemd ...`: systemd
   gave no clear answer; the journal of that boot says more;
 - `dockerd (pid N) uses ... outside docker.service`: a dockerd started by
-  hand or by another unit uses the same data folder.
+  hand or by another unit uses the same data folder;
+- `/etc/docker/daemon.json: not JSON, so the volumes folder Docker uses is
+  unknown` (or `not a JSON object`, `data-root is not a folder name`,
+  `cannot be read (...)`): no quiet boot helps here. Fix the file
+  (`sudo dockerd --validate --config-file /etc/docker/daemon.json` checks it
+  and changes nothing); the next boot runs the migration (section 4.10).
 
 ```
 journalctl -b -u docker-volumes-nocow
@@ -2209,7 +2248,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 |---|---|---|
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), the safeguards, snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`, and the values the ports and the presenter pass (`Scan`, `CacheWalk`, `RunOptions`, `Listing`); no I/O. `ports.py`: the host, btrfs, state directory, pin file, run lock and log boundaries. `application.py`: one `Run` per invocation (clock guards, state lists, creation, sealing, deletions under the circuit breaker and their re-checks), the scan of the snapshot folder and the bodies of the six commands. `adapters.py`: the `Host` (commands, clock, directory entries, the cache-folder walk; tests replace it), the btrfs commands, the state directory, the pin file (it resolves pinned paths on the filesystem), the run lock, the journal lines and the local time zone. `wiring.py`: `$TZ`, the time zone and the adapters. `presenter.py`: what `list`, `caches` and `latest` print. `cli.py`: the argument parser and `main()`. |
 | `btrfs-snapshot-runtime` | `snapshot_runtime/` | The Python side of `btrfs-snapshot` (`hourly`, `nas`, `list`, `caches`, `prune`, `purge`, `configure`), which the bash front `btrfs/btrfs-snapshot` execs for them; the front's conversion engine (`convert`, `convert-boot`, `convert-one`, `convert-planned`, `planned-left`) and `busy` stay bash for good. `domain.py`: the settings and their defaults (`DEFAULTS`; the space-guard numbers also stay as three lines in the front, for btrfs-bulk), bash arithmetic as the guard reads it (`guard_number`), the core's sources and cache options, `CORE_REASON` and the blocked alert, the NAS texts, durations and summary, the vocabularies (`AlertKind`, `CoreExit`, `ResticExit`, ...); no I/O. `adapters/`: `machine.py` (`SnapshotRun`: the paths below `CST_SNAPSHOT_ROOT` for a run that is not root, `snapshots.conf` read as data with cst_core's `parse_snapshots_conf`, the commands with the run's lock fds handed on, the files as the bash's commands treated them, the trapped signals), `hourly.py` (`hourly`, `prune`, `purge`: the lock, the space guard, the waits, the core's runs and alerts), `nas.py` (`Nas`: the NAS backup), `commands.py` (`list`, `caches`, `configure`, the table of commands). `cli.py`: `main()`. |
-| `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `user.py` (the child process that runs as the user, `as_user`, and the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
+| `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |

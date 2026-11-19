@@ -19,7 +19,7 @@ from btrfs.snapshot.domain import DEFAULT_STATE_DIR, UNFINISHED_FILE, WRITABLE_F
 from cst_core.domain.contracts import StateFormatKey, Urgency, state_format
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.text import ShellAssignments
+from cst_core.domain.text import ShellAssignments, group
 from cst_core.domain.values import HOUR, Json
 from swap.domain import SETTINGS_REL
 
@@ -292,9 +292,8 @@ def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, n
       "inactive"      looks like a pin, but no installed package matches
                       (an inactive request, for example one the base image
                       now provides): spec is "", nothing to install back."""
-    names: set[str]
-    versioned: dict[str, list[tuple[str, str, bool]]]
-    names, versioned = set(), {}
+    names: set[str] = set()
+    versioned: dict[str, list[tuple[str, str, bool]]] = {}
     for p in packages or ():
         parsed = parse_nevra(p)
         if not parsed:
@@ -598,7 +597,7 @@ def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:
 def scrub_dropin_limit(text: str) -> str:
     """The limit the scrub service's drop-in sets, or "" (no drop-in, no limit)."""
     m = _SCRUB_DROPIN_LIMIT.search(text)
-    return m.group(1) if m else ""
+    return group(m, 1) if m else ""
 
 
 # The settings whose value is a command line (ExecSearchPath=, ExecPaths= hold folders, not programs).

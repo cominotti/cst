@@ -172,18 +172,26 @@ def maint_lines(res: AnalyseResult) -> list[str]:
 def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     out = []
     cov = res["coverage"]
+    skipped = cov.get("skipped", 0)
+    damaged = (
+        [f"INCOMPLETE DATA: {skipped} damaged record(s) in this window were left out (re-running does not help)"]
+        if skipped
+        else []
+    )
     if res["samples"] < 2:
         return [
             (
                 "NO DATA for this window. Is btrfs-stall-monitor.service running? "
                 "(`systemctl status btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"
-            )
+            ),
+            *damaged,
         ]
     if not cov["complete"]:
         out.append(
             f"INCOMPLETE DATA: {cov['covered_s']} s of the {cov['window_s']} s window recorded, last sample "
             f"{fmt_ts(cov['last_sample'])}. Data is written every ~10 s; re-run shortly, or narrow the window."
         )
+    out += damaged
     sev = [e for e in res["events"] if e.get("severe", False)]
     if sev:
         out.append(f"KERNEL/FS PROBLEMS: {len(sev)} severe event(s) (hung task, btrfs or device error); see 'events'.")

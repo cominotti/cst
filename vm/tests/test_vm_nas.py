@@ -178,6 +178,8 @@ if cmd == "backup":
     if "slow-backup" in vm.get("fail", []):
         open(os.path.join(fix, "backup-started"), "w").close()
         import time; time.sleep(3)
+    for line in cfg.get("backup_lines", []):
+        print(line)
     print(json.dumps({"message_type": "status", "percent_done": 0.5, "total_bytes": 10, "bytes_done": 5}))
     if "term-during-backup" in vm.get("fail", []):
         import signal, time
@@ -193,7 +195,7 @@ if cmd == "forget":
     print("remove 1 snapshots:" if cfg.get("forgot") else "keep 2 snapshots:")
     sys.exit(cfg.get("forget_rc", 0))
 if cmd == "snapshots":
-    print(json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
+    print(cfg["snapshots_json"] if "snapshots_json" in cfg else json.dumps([{"id": i} for i in cfg.get("snapshots", [])]))
     sys.exit(0)
 sys.exit(1)
 """
@@ -606,6 +608,56 @@ class LiveBackupTest(Nas):
         self.assertEqual(self.index_entries()[0]["keep"], "pre-f46")
         self.assertIn("kept until removed by hand", r.stdout)
 
+    def test_restic_lines_of_another_shape_do_not_stop_the_backup(self) -> None:
+        # A string "error" or a status whose numbers are text raised inside the loop: restic was
+        # stopped and the backup failed.
+        self.restic_cfg(
+            backup_lines=[
+                json.dumps({"message_type": "status", "percent_done": "half", "bytes_done": None, "total_bytes": [1]}),
+                json.dumps({"message_type": "error", "error": "disk gone", "item": "/x"}),
+                json.dumps({"message_type": "error", "error": {"message": "unreadable"}, "item": "/y"}),
+                "[1, 2]",
+            ]
+        )
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("  restic: ? % (0.0 MiB of ? read)", r.stdout)
+        self.assertIn("  restic error: /x disk gone", r.stderr)
+        self.assertIn("  restic error: /y unreadable", r.stderr)
+        self.assertEqual(self.index_entries()[-1]["snapshot"], SNAP_ID)
+
+    def test_a_snapshot_id_that_is_not_text_is_no_snapshot(self) -> None:
+        # str(123) became a snapshot to record, or to forget after an incomplete backup.
+        for rc, why in ((0, "restic exit 0"), (3, "some files could not be read")):
+            with self.subTest(rc=rc):
+                self.restic_cfg(id=123, backup_rc=rc)
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"restic backup failed: {why}; no backup recorded", r.stderr)
+                self.assertFalse([c for c in self.restic_calls() if c["args"][0] == "forget" and "123" in c["args"]])
+                self.assertFalse(os.path.exists(self.index) and self.index_entries())
+
+    def test_a_snapshot_list_of_another_shape_drops_no_index_entry(self) -> None:
+        # Read as no snapshots, {} dropped every older NAS entry of the VM; an id that is a number
+        # stopped the run after the backup, with the index not written.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        old = {
+            "vm": "win",
+            "mode": "nas",
+            "snapshot": "old1",
+            "repository": "sftp:btrfs-setup-nas:/volume1/restic",
+            "epoch": 1,
+            "timestamp": "a",
+        }
+        for answer in ("{}", '[{"id": 5}]', '[{"id": "' + SNAP_ID + '"}, {"x": 1}]', '[{"id": ""}]', '"x"'):
+            with self.subTest(answer=answer):
+                with open(self.index, "w") as f:
+                    json.dump({"backups": [old]}, f)
+                self.restic_cfg(snapshots_json=answer)
+                r = self.run_tool("backup", "win", "--nas")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual([e.get("snapshot") for e in self.index_entries()], ["old1", SNAP_ID])
+
     def test_forgotten_snapshots_leave_the_index(self) -> None:
         os.makedirs(os.path.dirname(self.index))
         local = os.path.join(self.tmp, "local-backup")
@@ -635,6 +687,17 @@ class LiveBackupTest(Nas):
         r = self.run_tool("backup", "win", "--nas")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([e.get("snapshot") or e.get("path") for e in self.index_entries()], ["kept", local, SNAP_ID])
+
+    def test_a_nas_entry_without_its_snapshot_is_kept_and_does_not_stop_the_prune(self) -> None:
+        # It passed the reader (it has a path) and the prune read its snapshot: a KeyError after the backup.
+        os.makedirs(os.path.dirname(self.index), exist_ok=True)
+        odd = {"vm": "win", "mode": "nas", "path": "/p", "repository": "sftp:btrfs-setup-nas:/volume1/restic"}
+        with open(self.index, "w") as f:
+            json.dump({"backups": [odd]}, f)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.index_entries()[-1], odd)
+        self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID)
 
     def test_an_index_of_a_newer_cst_vm_stops_the_nas_backup_before_restic(self) -> None:
         os.makedirs(os.path.dirname(self.index), exist_ok=True)

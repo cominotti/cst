@@ -13,6 +13,7 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowPaths,
     PendingVolume,
     copy_check_failed,
+    config_reason,
     copy_matches,
     label_mismatch,
     next_postponed,
@@ -41,6 +42,10 @@ class DockerVolumesNocow:
         btrfs) is one journal line; exit 0 for the boot's migrate and for unmark, else 2."""
         try:
             match command:
+                case NocowCommand.MARK if self.paths.config_problem:
+                    # btrfs-setup then leaves the request to the boot, which waits until it is fixed.
+                    self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
+                    return 2
                 case NocowCommand.MARK:
                     return 1 if self.mark() else 0
                 case NocowCommand.MIGRATE:
@@ -129,13 +134,15 @@ class DockerVolumesNocow:
         record = next_postponed(self.state.read_postponed(), why=why, boot=boot, now=int(self.clock.now()))
         self.state.write_postponed(record)
 
-    def postpone(self, busy: str) -> None:
+    def postpone(self, busy: str, *, always: bool = False) -> None:
         """A Docker daemon may use the volumes: nothing is touched this boot."""
         self.out.log(4, f"{busy}: migration left for the next boot")
         # Not an attempt and no alert, but recorded when there was work to
         # do (a scheduled migration, or the folder still without +C), so status
         # and `cst doctor` can show a migration held back boot after boot.
-        if self.state.flag_exists() or not self.tree.is_nocow(self.paths.volumes):
+        # ALWAYS: recorded whatever the folder shows (it may not be the one Docker uses).
+        vols = self.paths.volumes
+        if always or self.state.flag_exists() or (self.tree.is_dir(vols) and not self.tree.is_nocow(vols)):
             self.note_postponed(busy)
         else:
             self.state.clear_postponed()
@@ -168,6 +175,11 @@ class DockerVolumesNocow:
     def migrate(self) -> None:
         """The boot's run (docker-volumes-nocow.service, before docker.service)."""
         vols = self.paths.volumes
+        if self.paths.config_problem:  # the folder Docker uses is unknown: it may not be vols
+            # Recorded even with no flag and vols absent or +C: the volumes Docker uses may be elsewhere,
+            # and only a fixed file tells; status and cst doctor then say so.
+            self.postpone(config_reason(self.paths.config_problem), always=True)
+            return
         if not self.tree.is_dir(vols):
             self.state.clear_postponed()  # no volumes (Docker removed, data-root moved): nothing waits
             return
@@ -231,6 +243,8 @@ class DockerVolumesNocow:
 
     def status(self) -> None:
         vols = self.paths.volumes
+        if self.paths.config_problem:
+            self.out.say(f"{self.paths.config_problem}: the boot's migration waits until it is fixed")
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent")
             return
