@@ -679,10 +679,24 @@ class AlertStampTest(Base):
         self.assertEqual(len(sent), 1)
         self.assertLess(abs(os.stat(stamp).st_mtime - time.time()), 120)
 
-    def test_an_alert_btrfs_notify_could_not_take_is_tried_again(self) -> None:
+    def test_an_alert_btrfs_notify_could_not_take_is_kept_and_not_sent_again_that_day(self) -> None:
+        # Kept in the pending alerts folder, it reaches cst doctor and the next login: sent for the day.
         self.machine(notify_rc=1)
         _, sent = self.paused_run()
         self.assertEqual(len(sent), 1)
+        self.assertTrue(os.path.exists(self.state_file("alerted-paused")))
+        _, sent = self.paused_run()
+        self.assertEqual(sent, [])
+
+    def test_an_alert_kept_nowhere_is_tried_again(self) -> None:
+        # btrfs-notify fails and the pending alerts folder cannot be made: only the journal has the
+        # alert, so the stamp stays unset and the next run sends it again.
+        self.machine(notify_rc=1)
+        shutil.rmtree(self.path("var/lib/cst-alerts"), ignore_errors=True)
+        self.write(self.path("var/lib/cst-alerts"), "")
+        out, sent = self.paused_run()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("it is only in this journal", out)
         self.assertFalse(os.path.exists(self.state_file("alerted-paused")))
         _, sent = self.paused_run()
         self.assertEqual(len(sent), 1)
@@ -690,7 +704,7 @@ class AlertStampTest(Base):
     def test_an_alert_btrfs_notify_cannot_take_is_kept_for_cst_doctor(self) -> None:
         # btrfs-notify missing (btrfs:alerts half removed) or failing: the alert went only to the
         # journal. cst_core's Notifier keeps it in the pending alerts folder (cst doctor and the next
-        # login show it) and says so; the once-a-day stamp stays unset, so the next run tries again.
+        # login show it) and says so; that sets the once-a-day stamp.
         pending = self.path("var/lib/cst-alerts/pending")
         for name, setup, why in (
             ("failing", lambda: self.machine(notify_rc=1), "exited 1"),
@@ -711,14 +725,15 @@ class AlertStampTest(Base):
                         "(cst doctor shows it)"),
                     out.splitlines(),
                 )  # fmt: skip
-                self.assertFalse(os.path.exists(self.state_file("alerted-paused")))
+                self.assertTrue(os.path.exists(self.state_file("alerted-paused")))
+                os.remove(self.state_file("alerted-paused"))
 
-    def test_without_btrfs_notify_nothing_is_sent_and_no_stamp_is_set(self) -> None:
+    def test_without_btrfs_notify_nothing_is_sent_and_the_kept_alert_sets_the_stamp(self) -> None:
         os.remove(self.path("usr/local/sbin/btrfs-notify"))
         out, sent = self.paused_run()
         self.assertEqual(sent, [])
         self.assertTrue(out.startswith(log(4, "Snapshots paused: low space: ")))
-        self.assertFalse(os.path.exists(self.state_file("alerted-paused")))
+        self.assertTrue(os.path.exists(self.state_file("alerted-paused")))
 
 
 class SpaceGuardTest(Base):

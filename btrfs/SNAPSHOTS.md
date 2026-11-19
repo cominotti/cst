@@ -1433,8 +1433,9 @@ desktop user), with these rules:
 - If `btrfs-notify` itself is missing, fails or does not answer within 60
   seconds, the hourly and NAS runs keep the alert in the same place
   (`/var/lib/cst-alerts/pending`), where `cst doctor` and your next login
-  show it, and say so in the journal; the run tries to send it again the next
-  time.
+  show it, and say so in the journal. That counts as sent for the day. Only
+  when it cannot be kept there either (it is then only in the journal) does
+  the next run try to send it again.
 - This also holds for `Subvolume conversion at boot gave up`: it happens at
   boot, before any login, and you see it when you log in. It is also in the
   journal (`journalctl -u btrfs-subvol-convert`) and on the boot screen. Check

@@ -182,11 +182,12 @@ class SnapshotRun:
 
     def desktop_alert(self, urgency: Urgency, title: str, body: str) -> bool:
         """btrfs-notify -u URGENCY -a btrfs-snapshot TITLE BODY through cst_core's Notifier: True when
-        btrfs-notify showed the alert or kept it for the next login. When it is missing, fails or
-        does not answer within 60 s, the Notifier keeps the alert in the pending alerts folder (cst
-        doctor and the next login show it) and says so in the journal; False then."""
+        btrfs-notify showed the alert or kept it for the next login, or, when it is missing, fails or
+        does not answer within 60 s, the Notifier kept it in the pending alerts folder (cst doctor and
+        the next login show it; it says so in the journal). False when the alert is only in the
+        journal."""
         notifier = Notifier(self.runner, self.notify, self.pending_alerts, log=self.log)
-        return self._call(lambda: notifier.send(urgency, TAG, title, body)) == "sent"
+        return self._call(lambda: notifier.send(urgency, TAG, title, body)) in ("sent", "kept")
 
     def _call[T](self, call: Callable[[], T]) -> T:
         """One command; a signal trap_stop caught while it ran ends the run once it is done (bash

@@ -42,8 +42,10 @@ PRUNE_USAGE = "usage: btrfs-snapshot prune [--dry-run] [--allow-mass-delete]"
 # ---- alerts ------------------------------------------------------------------------------------
 def send_alert(m: SnapshotRun, kind: AlertKind, urgency: Urgency, title: str, body: str) -> None:
     """A desktop alert at most once a day per kind (see the bash's alert): btrfs-notify shows it now
-    or keeps it for the next login; only when it could do neither does the stamp stay as it was (the
-    alert is then kept in the pending alerts folder by cst_core's Notifier, and tried again next run)."""
+    or keeps it for the next login, or, when it cannot, cst_core's Notifier keeps it in the pending
+    alerts folder (cst doctor and the next login show it); either way the day's stamp is set. Only an
+    alert that reached neither (only the journal has it) leaves the stamp as it was: the next run
+    tries again."""
     stamp = f"{m.state}/alerted-{kind}"
     m.log(4, f"{title}: {body}")
     if os.path.exists(stamp):
