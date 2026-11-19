@@ -2,20 +2,35 @@
 """The swap area of `cst doctor`: the zswap parameters swap's zswap.conf sets, and the partition settings."""
 
 from collections.abc import Iterator
+import os
+import stat
 
 from cst_core.domain.values import format_bytes_human as human
 from doctor.application.cpu import unit_props
 from doctor.application.shared import check, read_text
-from doctor.domain import FSTAB, HostPath, INFO, OK, SWAP_CONF, SWAP_DROPIN, WARN, ZSWAP_CONF, ZSWAP_PARAMS, Result
+from doctor.domain import (
+    CRYPTTAB,
+    FSTAB,
+    HostPath,
+    INFO,
+    OK,
+    SWAP_CONF,
+    SWAP_DROPIN,
+    WARN,
+    ZSWAP_CONF,
+    ZSWAP_PARAMS,
+    Result,
+)
 from doctor.ports import CheckFn, DoctorHostPort
 from swap.domain import (
+    SwapSpecState,
     human_size,
     marked_fstab_name,
     memory_low_override,
     parse_memory_low,
     parse_size,
-    parse_swap_settings,
     parse_tmpfiles_params,
+    resolve_settings,
 )
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
@@ -54,43 +69,117 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, f"zswap: every parameter {ZSWAP_CONF} sets is in this kernel")
 
 
-def _settings_text(host: DoctorHostPort, path: HostPath) -> str | None:
-    """The file's text ("" when it cannot be read), or None when it is not there."""
-    view = host.path(path)
-    return read_text(host, view, 65536) if host.exists(view) else None
+class _HostSettingsFacts:
+    """swap.domain's SwapSettingsFacts over doctor's view of the host, so that doctor reads
+    /etc/cst/swap.conf as cst swap reads it (each file read once)."""
+
+    def __init__(self, host: DoctorHostPort) -> None:
+        self._host = host
+        self._view = host.path(SWAP_CONF)
+        # swap.conf's text once read (None: it could not be read), and why lstat failed (None: it did not).
+        self.text: str | None = None
+        self._lstat_error: OSError | None = None
+        self._crypttab: str | None = None
+
+    def _whole(self, path: HostPath) -> str | None:
+        """The whole file (undecodable bytes replaced); None when it cannot be read."""
+        try:
+            with self._host.open_text(self._host.path(path)) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def settings_text(self) -> str | None:
+        self.text = self._whole(SWAP_CONF)
+        return self.text
+
+    def settings_seen(self) -> bool:
+        try:
+            self._host.lstat(self._view)
+        except OSError as e:
+            self._lstat_error = e
+            return False
+        return True
+
+    def settings_is_file(self) -> bool:
+        return self._host.isfile(self._view)
+
+    def settings_readable(self) -> bool:
+        # Asked only after the read failed: doctor has no access(2), and the read is the answer.
+        return self.text is not None
+
+    def settings_folder_closed(self) -> bool:
+        # lstat cannot see into a folder this user may not search: EACCES, where a missing file is ENOENT.
+        return isinstance(self._lstat_error, PermissionError)
+
+    def crypttab_closed(self) -> bool:
+        try:
+            with self._host.open_text(self._host.path(CRYPTTAB)) as f:
+                self._crypttab = f.read()
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    def crypttab_text(self) -> str:
+        return self._crypttab or ""
+
+    def fstab_text(self) -> str:
+        return self._whole(FSTAB) or ""
+
+    def partition_size(self, device_path: str) -> int | None:
+        host = self._host
+        try:
+            dev = host.realpath(host.path(HostPath(device_path)))
+            if not stat.S_ISBLK(host.stat(dev).st_mode):
+                return None
+            sectors = read_text(host, host.path(HostPath(f"/sys/class/block/{os.path.basename(dev)}/size")))
+        except OSError:
+            return None
+        return int(sectors) * 512 if sectors.isdigit() else None
 
 
 @check(CHECKS, "swap")
 def check_swap_settings(host: DoctorHostPort) -> Iterator[Result]:
-    """The swap partition in /etc/cst/swap.conf: WARN for each problem (cst swap apply refuses), WARN
-    when it is missing where swap is set up (an older CST's marked fstab line: apply writes it; else
-    apply refuses), ok when it names a partition. Nothing where swap is not set up."""
-    not_configured = Result(
-        WARN,
-        f"swap partition: not configured (no SWAP_PARTUUID in {SWAP_CONF}): cst swap apply refuses"
-        " (swap/README.md, section 2.3)",
-    )
-    text = _settings_text(host, SWAP_CONF)
-    if text is not None:
-        settings = parse_swap_settings(text)
-        for problem in settings.problems:
-            yield Result(WARN, f"swap partition: {SWAP_CONF} {problem}: cst swap apply refuses until it is fixed")
-        if settings.spec is not None:
-            spec = settings.spec
+    """The swap partition in /etc/cst/swap.conf, resolved as cst swap resolves it (swap.domain's
+    resolve_settings): ok when it names a partition; WARN for each problem, or for a file that is not
+    a regular file (cst swap apply refuses); info when this user may not read it (cst swap status --root
+    can); WARN when it is missing where an older CST set swap up and apply can write it from
+    /etc/crypttab; WARN "not configured" where swap is set up without one. Nothing where swap is not
+    set up."""
+    facts = _HostSettingsFacts(host)
+    res = resolve_settings(facts, as_root=host.uid == 0)
+    match res.state:
+        case SwapSpecState.OK if res.spec is not None:
+            spec = res.spec
             yield Result(OK, f"swap partition: {spec.partuuid} ({spec.expected_size_bytes} bytes, {SWAP_CONF})")
-        elif not settings.problems:
-            yield not_configured
-        return
-    name = marked_fstab_name(_settings_text(host, FSTAB) or "")
-    if name is not None:
-        yield Result(
-            WARN,
-            f"swap partition: {SWAP_CONF} not written yet; an older CST set up {name}, and"
-            " `cst swap apply` writes it from /etc/crypttab",
-            f"{host.cst} swap apply",
-        )
-    elif host.exists(host.path(ZSWAP_CONF)):
-        yield not_configured
+        case SwapSpecState.BAD:
+            for problem in res.problems or (res.note,):
+                yield Result(WARN, f"swap partition: {SWAP_CONF} {problem}: cst swap apply refuses until it is fixed")
+        case SwapSpecState.UNREADABLE:
+            yield Result(
+                INFO,
+                f"swap partition: cannot read {SWAP_CONF} as this user: on the host, cst swap status --root reads it",
+            )
+        case SwapSpecState.UNKNOWN | SwapSpecState.WRITE:
+            yield Result(
+                WARN,
+                f"swap partition: {SWAP_CONF} not written yet; an older CST set up {res.note}, and"
+                " `cst swap apply` writes it from /etc/crypttab",
+                f"{host.cst} swap apply",
+            )
+        case _:
+            # Not configured: say so where the file was read, or where swap is set up (installed, or an
+            # older CST's marked fstab line whose partition apply cannot find).
+            set_up = host.exists(host.path(ZSWAP_CONF)) or marked_fstab_name(facts.fstab_text()) is not None
+            if facts.text is not None or set_up:
+                why = f"; {res.note}" if res.note else ""
+                yield Result(
+                    WARN,
+                    f"swap partition: not configured (no SWAP_PARTUUID in {SWAP_CONF}{why}): cst swap apply refuses"
+                    " (swap/README.md, section 2.3)",
+                )
 
 
 @check(CHECKS, "swap")

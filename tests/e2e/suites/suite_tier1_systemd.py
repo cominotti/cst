@@ -1587,7 +1587,7 @@ echo E2E-OK
         /etc/cst/swap.conf from the crypttab line and the partition, removes the old
         drop-in and its record line; a runtime MemoryLow then wins; a second apply changes
         nothing; doctor is ok; a swap.conf the user cannot read, or a folder in its place, is
-        never taken as missing."""
+        never taken as missing, by plan, apply or cst doctor."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -1749,7 +1749,11 @@ grep -qF "  ?         cst/swap.conf                          cannot be read as t
 [[ "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan would write swap.conf"; }
 swap_run plan
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
-[[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
+# cst doctor as the user reads it as cst swap does: info, not "not configured".
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it" <<<"$doc" || { out="$doc"; fail "doctor, swap.conf 0600"; }
+[[ "$doc" != *"swap partition: not configured"* ]] || { out="$doc"; fail "doctor took swap.conf 0600 as not configured"; }
+[[ "$(snap)" == "$s_unread" ]] || fail "plan or doctor with swap.conf 0600 changed something"
 chmod 0644 /etc/cst/swap.conf
 # A folder above it the user may not enter (lexists cannot see the file there): the same "?" row, and
 # swap.conf is not taken as missing (no migration from crypttab).
@@ -1759,7 +1763,10 @@ s_closed="$(snap)"
 user_plan="$(as_user "$CST" swap plan)"
 grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, /etc/cst 0700"; }
 [[ "$user_plan" != *"not written yet"* && "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan took swap.conf as missing"; }
-[[ "$(snap)" == "$s_closed" ]] || fail "plan with /etc/cst 0700 changed something"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it" <<<"$doc" || { out="$doc"; fail "doctor, /etc/cst 0700"; }
+[[ "$doc" != *"not written yet"* ]] || { out="$doc"; fail "doctor took swap.conf as missing"; }
+[[ "$(snap)" == "$s_closed" ]] || fail "plan or doctor with /etc/cst 0700 changed something"
 chmod "$cst_mode" /etc/cst
 mv /etc/cst/swap.conf "$W/swap.conf.aside"
 mkdir /etc/cst/swap.conf
@@ -1768,6 +1775,8 @@ swap_run apply
 [[ $rc == 1 ]] || fail "apply with a folder at /etc/cst/swap.conf"
 grep -qF "ERROR: /etc/cst/swap.conf: not a regular file: apply stops." <<<"$err" || fail "apply message, a folder at swap.conf"
 [[ "$out" != *"written:"* && "$(snap)" == "$s_dir" ]] || fail "apply with a folder at swap.conf changed something"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed" <<<"$doc" || { out="$doc"; fail "doctor, a folder at swap.conf"; }
 rmdir /etc/cst/swap.conf
 mv "$W/swap.conf.aside" /etc/cst/swap.conf
 

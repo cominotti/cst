@@ -27,6 +27,7 @@ import os
 import pwd
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1240,6 +1241,25 @@ class ZswapParamsTest(Scratch):
         )
 
 
+# What an older CST's apply left in /etc/fstab and /etc/crypttab (swap's marker), and doctor's rows.
+SWAP_PU = "612551b1-ca02-4514-86ad-7d8902e612dc"
+SWAP_FSTAB = (
+    "UUID=x / btrfs defaults 0 0\n"
+    "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n"
+)
+SWAP_CRYPTTAB = (
+    f"swap0 /dev/disk/by-partuuid/{SWAP_PU} /dev/urandom"
+    " swap,cipher=aes-xts-plain64,size=512,sector-size=4096,discard # managed-by: swap-setup.sh (CST)\n"
+)
+NOT_CONFIGURED = (
+    "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+    " refuses (swap/README.md, section 2.3)"
+)
+UNREADABLE = (
+    "  info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it"
+)
+
+
 class SwapSettingsDoctorTest(Scratch):
     """check_swap_settings: the partition /etc/cst/swap.conf names (cst swap apply refuses without
     one), or that an older CST set swap up and apply writes the file."""
@@ -1252,6 +1272,18 @@ class SwapSettingsDoctorTest(Scratch):
 
     def lines(self, out: str) -> list[str]:
         return [ln for ln in out.splitlines() if "swap partition" in ln]
+
+    def close(self, rel: str) -> None:
+        """Mode 000 on a file or folder of the scratch root (put back at the end, so it can be removed)."""
+        p = os.path.join(self.root, rel)
+        mode = stat.S_IMODE(os.lstat(p).st_mode)
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, mode)
+
+    def not_as_root(self) -> None:
+        # Root opens a file of mode 000 and enters a folder of mode 000: the user's view needs a user.
+        if os.geteuid() == 0:
+            self.skipTest("not as root")
 
     def test_nothing_where_swap_is_not_set_up(self) -> None:
         self.assertEqual(self.lines(self.run_tool().stdout), [])
@@ -1279,11 +1311,11 @@ class SwapSettingsDoctorTest(Scratch):
         )
 
     def test_an_older_cst_set_it_up(self) -> None:
-        self.write(
-            "etc/fstab",
-            "UUID=x / btrfs defaults 0 0\n"
-            "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n",
-        )
+        # As the user: /etc/crypttab (root's, 0600) cannot be read, and the marked fstab line tells.
+        self.not_as_root()
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.close("etc/crypttab")
         r = self.run_tool()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertEqual(
@@ -1297,6 +1329,65 @@ class SwapSettingsDoctorTest(Scratch):
         )
         self.assertIn("swap apply", r.stdout.split("swap partition:", 1)[1])
         self.assert_read_only()
+
+    def test_a_marked_fstab_line_without_a_crypttab_is_not_configured(self) -> None:
+        # cst swap apply refuses there (nothing to write the file from): no "apply writes it" row.
+        self.write("etc/fstab", SWAP_FSTAB)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.lines(r.stdout), [NOT_CONFIGURED])
+
+    def test_a_readable_crypttab_without_its_line_is_not_configured(self) -> None:
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", "luks-x UUID=x none luks\n")
+        self.assertEqual(self.lines(self.run_tool().stdout), [NOT_CONFIGURED])
+
+    def test_a_crypttab_line_whose_partition_is_not_here_is_not_configured(self) -> None:
+        # The by-partuuid link leads to a regular file, not a block device.
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.write("dev/nvme0n1p5", "")
+        os.makedirs(os.path.join(self.root, "dev/disk/by-partuuid"))
+        os.symlink("../../nvme0n1p5", os.path.join(self.root, "dev/disk/by-partuuid", SWAP_PU))
+        self.assertEqual(
+            self.lines(self.run_tool().stdout),
+            [
+                NOT_CONFIGURED.replace(
+                    "swap.conf)",
+                    f"swap.conf; the swap0 line in crypttab names /dev/disk/by-partuuid/{SWAP_PU}, which is not here)",
+                )
+            ],
+        )
+
+    def test_a_swap_conf_this_user_cannot_read(self) -> None:
+        # cst swap plan shows "?" and asks for --root: not "not configured".
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.write("etc/tmpfiles.d/zswap.conf", "")
+        self.close("etc/cst/swap.conf")
+        self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
+
+    def test_a_swap_conf_in_a_folder_this_user_may_not_enter(self) -> None:
+        # Not taken as missing: no "an older CST set up swap0" row from the marked fstab line.
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.close("etc/cst")
+        self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
+
+    def test_a_folder_or_a_dangling_link_at_swap_conf_is_not_a_regular_file(self) -> None:
+        folder = os.path.join(self.root, "etc/cst/swap.conf")
+        os.makedirs(folder)
+        not_a_file = (
+            "  WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed"
+        )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.lines(r.stdout), [not_a_file])
+        os.rmdir(folder)
+        os.symlink("nowhere", folder)
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.assertEqual(self.lines(self.run_tool().stdout), [not_a_file])
 
     def test_installed_but_not_configured(self) -> None:
         self.write("etc/tmpfiles.d/zswap.conf", "")

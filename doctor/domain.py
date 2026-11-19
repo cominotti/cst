@@ -133,10 +133,11 @@ _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
-# The partition swap manages (swap/domain.py, SETTINGS_REL), and the file an older CST marked a line in.
+# The partition swap manages (swap/domain.py, SETTINGS_REL), and the files an older CST marked a line in.
 SWAP_CONF = HostPath("/etc/" + SETTINGS_REL)
 SWAP_DROPIN = HostPath(_BY_SRC["swap/units/machine.slice.d-10-swap-memory-low.conf"].dest)
 FSTAB = HostPath("/etc/fstab")
+CRYPTTAB = HostPath("/etc/crypttab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
 GAME_RUN = HostPath(state_format(StateFormatKey.GAME_STATE).folder)

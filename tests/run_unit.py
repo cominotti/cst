@@ -141,6 +141,9 @@ EXPECTED_SKIPS: Final[dict[str, str]] = {
     "bluetooth.tests.test_setup.StepDownTest.test_the_test_overrides_do_not_reach_the_run_as_the_user": _USERNS,
     "btrfs.tests.test_btrfs_bulk.BulkTest.test_root_reads_bulk_user_with_the_one_settings_reader": "not as root",
     "btrfs.tests.test_btrfs_snapshot_core.BtrbkOracleTests": "needs btrbk (perl) to compare with",
+    "doctor.tests.test_doctor.SwapSettingsDoctorTest.test_an_older_cst_set_it_up": "not as root",
+    "doctor.tests.test_doctor.SwapSettingsDoctorTest.test_a_swap_conf_this_user_cannot_read": "not as root",
+    "doctor.tests.test_doctor.SwapSettingsDoctorTest.test_a_swap_conf_in_a_folder_this_user_may_not_enter": "not as root",
     "btrfs.tests.test_snapshot_hourly.CommandLineTest.test_as_root_the_test_seam_is_ignored": (
         "needs an unprivileged user namespace (unshare -r: off in CI's container; tier 1 test_108 runs it as root)"
     ),
