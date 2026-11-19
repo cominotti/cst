@@ -106,15 +106,22 @@ class Wiring:
     def user(self, args: Sequence[str]) -> tuple[Ctx, Account | None]:
         """Whose home, from --user NAME (root) or, not as root, the current
         user and the home override. As root without a name: BULK_USER of
-        bulk.conf (BadSettings on a bad line); NoUser without either."""
+        bulk.conf (BadSettings on a bad line, or a name no account has);
+        NoUser without either, or for a --user NAME no account has."""
         _, user_args = split_user_args(args)
         name = user_args[1] if len(user_args) == 2 else None
         if self.root:
-            if name is None or name == "":
+            from_conf = name is None or name == ""
+            if from_conf:
                 name = bulk_user(self.paths.conf)  # a name or None, never ""
             if name is None or name == ROOT_ACCOUNT:
                 raise NoUser("btrfs-bulk: needs --user NAME (not root)")
-            pw = lookup_user(name)
+            try:
+                pw = lookup_user(name)
+            except KeyError:
+                if from_conf:  # bulk.conf names nobody: fixed there, like a bad line
+                    raise BadSettings(f"{self.paths.conf}: BULK_USER={name}: no such account") from None
+                raise NoUser(f"btrfs-bulk: --user {name}: no such account") from None
             return Ctx(real_path(pw.pw_dir), uid=pw.pw_uid), pw
         return self.home_ctx(self.home or default_home()), None
 
@@ -127,7 +134,7 @@ class Wiring:
             if self.root:
                 return self.user_ctx(user_args) if user_args else None
             return self.user_ctx([])
-        except BadSettings, NoUser, KeyError:
+        except BadSettings, NoUser:
             return None
 
     def build(self, ctx: Ctx, pw: Account | None = None) -> Bulk:

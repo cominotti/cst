@@ -536,6 +536,49 @@ class BulkTest(BulkBase):
                     self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
                 self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
 
+    @unittest.skipIf(os.geteuid() == 0, "as root the current user is root, which user_ctx refuses")
+    def test_root_refuses_a_user_no_account_has(self) -> None:
+        # pwd's KeyError went up uncaught: a traceback by hand, and at boot the catch-all's exit 70
+        # with no alert, every boot (the account was deleted after bulk.conf named it).
+        gone = "cst-test-no-such-account"
+        with self.assertRaises(KeyError):
+            pwd.getpwnam(gone)
+        root = self.root_wiring()
+        with open(self.paths.conf, "w") as f:
+            f.write(f"BULK_USER={gone}\n")
+        with open(self.paths.flag, "w") as f:
+            f.write("apps\n")
+        lines = f"{self.paths.conf}: BULK_USER={gone}: no such account"
+        with self.assertRaises(BadSettings) as cm:
+            root.user_ctx([])
+        self.assertEqual(cm.exception.lines, lines)
+        sent: list[tuple[str, str]] = []
+        self.fake(self.host, "alert", lambda title, body: sent.append((title, body)))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
+        self.assertEqual(
+            err.getvalue(),
+            f"btrfs-bulk: {lines}\nFix the line (cst btrfs install writes the file) or pass --user NAME.\n",
+        )
+        self.assertEqual(sent, [])
+        # At boot: the refusal (78, which fails the unit) and its alert, the items waiting.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 78)
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual([title for title, _ in sent], ["~/Bulk: nothing moved at boot"])
+        self.assertIn(lines, sent[0][1])
+        self.assertTrue(os.path.exists(self.paths.flag))
+        # --user NAME: no file to fix, exit 1; keep and unkeep then name no home, as without --user.
+        with self.assertRaisesRegex(NoUser, f"^btrfs-bulk: --user {gone}: no such account$"):
+            root.user_ctx(["--user", gone])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "plan", "--user", gone], TOOL, wiring=root), 1)
+        self.assertEqual(err.getvalue(), f"btrfs-bulk: --user {gone}: no such account\n")
+        self.assertIsNone(root.keep_ctx(["--user", gone]))
+
     def test_a_bad_bulk_conf_line_at_boot_exits_non_zero_and_alerts(self) -> None:
         # The boot service runs `btrfs-bulk boot` before any login. The refusal to guess whose home
         # it moves only reached the boot console and the journal, every boot, unseen.

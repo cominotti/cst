@@ -4669,25 +4669,40 @@ echo E2E-OK
         ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
 
-    def test_122_bulk_boot_failure_is_a_failed_unit_with_its_traceback(self) -> None:
-        """btrfs-bulk-boot.service (real systemd) with a BULK_USER that names no account and the boot
-        flag: the lookup's KeyError is an error the boot step does not expect. The unit exits 70 and
-        is failed (an uncaught exception exited 1, which its SuccessExitStatus= counts as success),
-        its journal holds the traceback, the flag stays for the next boot, and no alert is kept."""
+    def test_122_bulk_boot_failures_are_failed_units(self) -> None:
+        """btrfs-bulk-boot.service (real systemd) with the boot flag. A BULK_USER that names no
+        account is a bulk.conf the boot step refuses: the unit exits 78 and is failed, its journal
+        names the account and has no traceback (pwd's KeyError went up uncaught before), and the
+        refusal's alert is kept. An error it does not expect (a file where its state folder belongs):
+        the unit exits 70 and is failed (an uncaught exception exited 1, which its SuccessExitStatus=
+        counts as success), its journal holds the traceback, and no alert is kept. The flag stays for
+        the next boot both times."""
         out = self.bulk_boot(
             r"""
-printf 'BULK_USER=cste2ebulkgone
-' >/etc/btrfs-setup/bulk.conf
-printf 'apps
-' >/etc/btrfs-setup/bulk-at-boot
+printf 'BULK_USER=cste2ebulkgone\n' >/etc/btrfs-setup/bulk.conf
+printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
 if id cste2ebulkgone >/dev/null 2>&1; then echo "the account cste2ebulkgone exists" >&2; exit 1; fi
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
+unit_log_has "btrfs-bulk: /etc/btrfs-setup/bulk.conf: BULK_USER=cste2ebulkgone: no such account"
+unit_log_has "~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
+journalctl --sync 2>/dev/null || true
+if journalctl -q --no-pager -o cat -u btrfs-bulk-boot.service --since "@$start" | grep -qF Traceback; then
+    echo "a traceback for an account that does not exist" >&2; exit 1
+fi
+[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
+ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort >"$s/pending-refused"
+systemctl reset-failed btrfs-bulk-boot.service
+printf 'BULK_USER=cste2ebulk\n' >/etc/btrfs-setup/bulk.conf
+rm -rf /var/lib/btrfs-bulk
+printf 'not a folder\n' >/var/lib/btrfs-bulk   # the boot counter cannot be written
 boot_unit "70 exit-code"
 systemctl is-failed --quiet btrfs-bulk-boot.service
 unit_log_has "btrfs-bulk boot: unexpected error, nothing more is done this boot"
 unit_log_has "Traceback (most recent call last):"
-unit_log_has "KeyError"
-[ -e /etc/btrfs-setup/bulk-at-boot ]   # the items wait for the next boot
-[ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-before")" ]   # no alert kept
+unit_log_has "FileExistsError"
+[ -e /etc/btrfs-setup/bulk-at-boot ]
+[ "$(ls -1 /var/lib/cst-alerts/pending 2>/dev/null | sort)" = "$(cat "$s/pending-refused")" ]   # no alert kept
 echo E2E-OK
 """
         )
