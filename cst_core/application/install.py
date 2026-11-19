@@ -37,6 +37,7 @@ from cst_core.domain.install import (
 )
 from cst_core.domain.settings_steps import SETTINGS_STEPS, SettingsStep
 from cst_core.domain.record import (
+    EMPTY_RECORD,
     ROOT_RECORD,
     USER_RECORD_REL,
     ComponentState,
@@ -230,12 +231,11 @@ class InstallService:
             return listed
         for path in sorted(r for r in records if r):
             try:
-                rec = self._record.read(path)
+                listed[path] = frozenset((self._record.read(path) or EMPTY_RECORD).files)
             except RecordFormatError:
-                rec = None
+                listed[path] = frozenset()
             except OSError:
                 continue
-            listed[path] = frozenset(rec.files) if rec is not None else frozenset()
         return listed
 
     def is_current(
