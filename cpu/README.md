@@ -795,7 +795,14 @@ What else the profile does about it:
   `systemctl set-property --runtime` and logged at level notice, for example:
   `drift: user.slice MemoryLow was '0' instead of '17179869184' (daemon-reload or uresourced?): set MemoryLow=16G again`.
   It does not add a line to `game.state`, so `off` still restores the value
-  from before `on`. A unit that systemd has not loaded (or a user manager
+  from before `on`. A setting `game.state` holds no record of (the file was
+  edited, or cut) is not set again, since `off` could not undo it: the tick
+  says so once per boot at level notice
+  (`drift not repaired: UNIT PROP: game.state holds no record of it, ...`,
+  the same mark as below, 7.6), and `game state` marks its `DRIFT:` line
+  `(not set again: ...)`. `cst doctor` still warns about it and proposes
+  switching the profile off and on again, which writes fresh records. A
+  unit that systemd has not loaded (or a user manager
   that is gone after a logout) is skipped, and so is a `cpuset.cpus` file
   whose cgroup is gone.
 - `cst cpu game state` prints a `DRIFT:` line per setting that differs

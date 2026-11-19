@@ -35,11 +35,13 @@ from cpu.game.domain import (
     GamePaths,
     GameSettings,
     ctl_file,
+    Drift,
     cut_tail,
     escapes_in_state,
     expand_cpus,
     records,
     game_settings,
+    unheld,
 )
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
@@ -258,6 +260,19 @@ class PureRulesTest(unittest.TestCase):
         self.assertIsNone(cut_tail(b"a\n"))
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
+
+    def test_drift_game_state_holds_no_record_of(self) -> None:
+        prop, cgw = (
+            Drift(("prop", "sys", "a.slice", "CPUWeight", "10", "10"), "50"),
+            Drift(("cgw", "/f", "1", "1"), "2"),
+        )
+        usr = Drift(("prop", "usr", "a.slice", "CPUWeight", "idle", "idle"), "100")
+        drifts = [prop, cgw, usr]
+        self.assertEqual(unheld(drifts, []), drifts)
+        held = [("prop", "sys", "a.slice", "CPUWeight", "existed", "50"), ("cgw", "/f", "")]
+        self.assertEqual(unheld(drifts, held), [usr])  # another manager's record holds no other
+        self.assertEqual(unheld(drifts, [("prop", "sys", "a.slice", "CPUWeight", "new")]), drifts)  # 5 fields
+        self.assertEqual(unheld([cgw], [("cgw", "/f")]), [cgw])  # 2 fields: off undoes nothing
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
@@ -491,6 +506,42 @@ class GameProfileDriftTest(GameProfileCase):
         self.assertIn(f"{USR} daemon-reload", actions)
         for p in (self.state, self.intended, self.manual):
             self.assertFalse(os.path.exists(p), p)
+
+    def lose_machine_slice_records(self) -> None:
+        """After 'on': machine.slice's records gone from game.state and its overrides removed (game.state
+        rewritten by hand, or written by a version that recorded it elsewhere): its values are back to
+        the unit's own, which game.intended calls drift."""
+        self.run_profile("on")
+        self.write(self.manual, "")
+        kept = [x for x in self.read(self.state).split("\n") if x and " machine.slice " not in x]
+        self.write(self.state, "".join(x + "\n" for x in kept))
+        for prop in ("AllowedCPUs", "CPUWeight", "IOWeight"):
+            os.remove(self.ctrl("sys", "machine.slice", prop))
+        self.set_now("sys", "machine.slice", CPUWeight="50")
+
+    def test_a_setting_game_state_holds_no_record_of_is_not_set_again(self) -> None:
+        self.lose_machine_slice_records()
+        self.set_now("sys", "user.slice", MemoryLow="0")  # held: repaired as before
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime user.slice MemoryLow=16G"])
+        self.assertIn(
+            "<5>game-profile: drift not repaired: machine.slice CPUWeight: game.state holds no record of it, so"
+            " 'off' could not undo it\n",
+            out,
+        )
+        self.assertFalse(os.path.exists(self.ctrl("sys", "machine.slice", "CPUWeight")))
+        out, actions = self.run_profile("tick")
+        self.assertEqual((out, self.sets(actions)), ("", []))  # said once per boot
+        report, _ = self.drift_report()
+        self.assertIn(
+            "  DRIFT: machine.slice CPUWeight is '50', the profile set '10' (not set again: game.state holds no"
+            " record of it)\n",
+            report,
+        )
+        self.assertIn("(the watchdog does not set these again; cst cpu game off && cst cpu game on", report)
+        out, actions = self.run_profile("off")
+        self.assertEqual([a for a in actions if "machine.slice" in a], [])
+        self.assertFalse(os.path.exists(self.paths.drift_warned))
 
     def test_cgroup_file_drift_is_rewritten(self) -> None:
         cg = os.path.join(self.tmp, "cpuset.cpus")

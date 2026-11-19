@@ -56,6 +56,8 @@ from cpu.game.domain import (
     state_uid,
     shown,
     transient_unit,
+    unheld,
+    unheld_text,
     vm_io_weight,
 )
 
@@ -572,16 +574,30 @@ class GameProfile:
     def repair_drift(self) -> None:
         """Set again what drift() lists, straight with set-property: not with setp, which would add
         a second record to game.state and make 'off' restore the profile's own value. A game.intended
-        of a newer CST is not read (its records may mean something else): said in the journal once per
-        boot (again when the text changes)."""
+        of a newer CST is not read (its records may mean something else), and a setting game.state holds
+        no record of is not set again ('off' could not undo it): each said in the journal once per boot
+        (again when the text changes)."""
         text, newer = self._intended()
         if newer is not None:
             said = f"drift not repaired: {newer}"
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
-        with contextlib.suppress(OSError):  # readable again: a newer one later is said again
-            os.unlink(self.paths.drift_warned)
-        for d in self.drift(text):
+        drifts = self.drift(text)
+        skipped = unheld(drifts, records(self._state_text()))
+        if skipped:  # 'off' could not undo them: said once per boot, at notice
+            said = "\n".join(unheld_text(d) for d in skipped)
+
+            def emit() -> None:
+                for line in said.split("\n"):
+                    self.log(5, line)
+
+            self._say_once(self.paths.drift_warned, said, emit)
+        else:
+            with contextlib.suppress(OSError):  # nothing left to say: a later one is said again
+                os.unlink(self.paths.drift_warned)
+        for d in drifts:
+            if d in skipped:
+                continue
             r = d.record
             if d.is_cgroup_file:
                 ok = _write_line(r[1], r[2])
@@ -696,7 +712,8 @@ class GameProfile:
             return drift_lines(None, manual=os.path.exists(p.manual))
         text, newer = self._intended()
         drifts = self.drift(text) if newer is None else None
-        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer)
+        not_held = [] if drifts is None else unheld(drifts, records(self._state_text()))
+        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer, not_held=not_held)
 
     def _intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""

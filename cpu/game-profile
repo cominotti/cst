@@ -26,8 +26,9 @@ hooks, or by `cst cpu game on|off`), and from cpu-game-watchdog.timer.
          new Steam scopes (the game itself) get the memory protection, and
          new boxes of the user manager next to the game get idle-class;
          a setting that something undid meanwhile (a daemon-reload, or
-         uresourced resetting MemoryLow) is set again and logged. With the
-         profile off, it removes MemoryLow drop-ins left behind.
+         uresourced resetting MemoryLow) is set again and logged, unless
+         game.state holds no record of it ('off' could not undo that).
+         With the profile off, it removes MemoryLow drop-ins left behind.
   state  what is applied now, and which settings drifted from what 'on' set.
 
 Everything is runtime-only: a reboot clears it too. A runtime override is

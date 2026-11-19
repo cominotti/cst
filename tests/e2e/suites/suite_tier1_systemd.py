@@ -4528,9 +4528,12 @@ EOF
         self.assertIn("E2E-OK", out)
 
     def test_128_cpu_game_profile_drift_it_does_not_repair(self) -> None:
-        """The real game profile, on for tester: with game.intended's first line changed to a newer
-        format ("cst-game-intended 2"), the tick says "drift not repaired" once, and a second tick
-        says nothing."""
+        """The real game profile, on for tester. With machine.slice's records gone from game.state and
+        its overrides removed (then a daemon-reload), the tick does not set it again (off could not undo
+        that) and says so once, a second tick says nothing, 'state' marks it, and 'off' leaves
+        machine.slice at its own value with no override. With game.intended's first line changed to a
+        newer format ("cst-game-intended 2"), the tick says "drift not repaired" once, and a second
+        tick says nothing."""
         self.addCleanup(
             exec_bash,
             self.SYSTEMD_CONTAINER,
@@ -4553,6 +4556,28 @@ EOF
             install -d /etc/cpu-setup /run/cpu-setup
             printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
             gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            ov=/run/systemd/system.control/machine.slice.d
+            base=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            # machine.slice's records gone from game.state, its overrides too: 'off' could not undo a
+            # repair, so the tick leaves it and says so once.
+            sed -i '/ machine\.slice /d' "$st"
+            rm -f "$ov"/50-*.conf
+            systemctl daemon-reload
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            first=$(gp tick)
+            grep -qF "drift not repaired: machine.slice CPUWeight: game.state holds no record of it, so 'off' could not undo it" <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "the tick set machine.slice again" >&2; exit 1; fi
+            second=$(gp tick)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            grep -q "DRIFT: machine.slice CPUWeight is .*, the profile set '10' (not set again: game.state holds no record of it)" <<<"$(gp state)"
+            gp off
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
+            if compgen -G "$ov/50-*.conf" >/dev/null; then echo "an override of machine.slice is left" >&2; exit 1; fi
             touch /run/cpu-setup/manual
             gp on
             # A game.intended of a newer format: said once per boot.

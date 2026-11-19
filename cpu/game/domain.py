@@ -341,6 +341,43 @@ def drifted(
     return out
 
 
+# The fields of a game.state record 'off' undoes: "prop MGR UNIT PROP MODE OLD" and "cgw FILE OLD".
+STATE_PROP_FIELDS: Final = 6
+STATE_CGW_FIELDS: Final = 3
+
+
+def _state_keys(state_recs: Sequence[Record]) -> set[Record]:
+    """The settings game.state holds a record of, as 'off' reads its records (any kind but cgw and epp
+    with six fields or more is a prop record; a manager other than usr is the system's)."""
+    keys: set[Record] = set()
+    for r in state_recs:
+        kind = r[0] if r else ""
+        if kind == "cgw" and len(r) >= STATE_CGW_FIELDS:
+            keys.add(("cgw", r[1]))
+        elif kind not in ("cgw", "epp") and len(r) >= STATE_PROP_FIELDS:
+            keys.add(("prop", "usr" if r[1] == "usr" else "sys", r[2], r[3]))
+    return keys
+
+
+def _drift_key(d: Drift) -> Record:
+    r = d.record
+    return ("cgw", r[1]) if d.is_cgroup_file else ("prop", r[1], r[2], r[3])
+
+
+def unheld(drifts: Sequence[Drift], state_recs: Sequence[Record]) -> list[Drift]:
+    """The drifts whose setting game.state (its records) holds no record of: 'off' could not undo
+    them, so the drift repair does not set them again."""
+    keys = _state_keys(state_recs)
+    return [d for d in drifts if _drift_key(d) not in keys]
+
+
+def unheld_text(d: Drift) -> str:
+    """The journal line for a drift the tick does not set again (unheld)."""
+    r = d.record
+    what = r[1] if d.is_cgroup_file else f"{r[2]} {r[3]}"
+    return f"drift not repaired: {what}: game.state holds no record of it, so 'off' could not undo it"
+
+
 def repaired_text(d: Drift, *, ok: bool) -> tuple[int, str]:
     """The journal line (priority, text) for a drift the tick set again (ok) or could not."""
     r = d.record
@@ -363,9 +400,11 @@ def again_cmd(*, manual: bool) -> str:
     return "cst cpu game off && cst cpu game on" if manual else "sudo systemctl restart cpu-game.service"
 
 
-def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None) -> list[str]:
+def drift_lines(
+    drifts: Sequence[Drift] | None, *, manual: bool, newer: str | None = None, not_held: Sequence[Drift] = ()
+) -> list[str]:
     """The drift part of 'state' (drifts None: no game.intended, switched on by an older version; newer:
-    why game.intended cannot be compared)."""
+    why game.intended cannot be compared; not_held: the drifts the watchdog does not set again, unheld)."""
     if newer is not None:
         return [f"  drift: not checked ({newer})"]
     if drifts is None:
@@ -376,13 +415,16 @@ def drift_lines(drifts: Sequence[Drift] | None, *, manual: bool, newer: str | No
     lines: list[str] = []
     for d in drifts:
         r = d.record
+        suffix = " (not set again: game.state holds no record of it)" if d in not_held else ""
         if d.is_cgroup_file:
-            lines.append(f"  DRIFT: {r[1]} is '{d.now}', the profile wrote '{r[3]}'")
+            lines.append(f"  DRIFT: {r[1]} is '{d.now}', the profile wrote '{r[3]}'{suffix}")
         else:
-            lines.append(f"  DRIFT: {r[2]} {r[3]} is '{d.now}', the profile set '{r[5]}'")
-    if drifts:
+            lines.append(f"  DRIFT: {r[2]} {r[3]} is '{d.now}', the profile set '{r[5]}'{suffix}")
+    if any(d not in not_held for d in drifts):
         lines.append("  (a daemon-reload or uresourced undid these; the watchdog sets them again within 30 s;")
         lines.append(f"   if they stay: {again_cmd(manual=manual)})")
+    elif drifts:
+        lines.append(f"  (the watchdog does not set these again; {again_cmd(manual=manual)} records them afresh)")
     else:
         lines.append("  drift: none (every setting the profile made still holds)")
     return lines
