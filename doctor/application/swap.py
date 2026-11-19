@@ -121,8 +121,9 @@ class _HostSettingsFacts:
         return self._host.isfile(self._view)
 
     def settings_readable(self) -> bool:
-        # doctor has no access(2): the read is the answer.
-        return isinstance(self._read(SWAP_CONF), str)
+        # doctor has no access(2): the read is the answer, and only a refused one (EACCES, EPERM)
+        # says this user may not read it; any other failure (EIO, ...) is one --root would not help.
+        return not isinstance(self._read(SWAP_CONF), PermissionError)
 
     def settings_folder_closed(self) -> bool:
         # lstat cannot see into a folder this user may not search: EACCES, where a missing file is ENOENT.

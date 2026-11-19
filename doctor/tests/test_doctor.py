@@ -19,6 +19,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+import errno
 import hashlib
 import importlib
 import io
@@ -31,7 +32,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Protocol, Self, override
+from typing import Protocol, Self, TextIO, override
 import types
 import unittest
 from unittest import mock
@@ -1419,6 +1420,31 @@ class SwapSettingsDoctorTest(Scratch):
         self.write("etc/tmpfiles.d/zswap.conf", "")
         self.close("etc/cst/swap.conf")
         self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
+
+    def test_a_swap_conf_whose_read_fails_otherwise_stops_apply(self) -> None:
+        # A file this user may read whose read fails (EIO): cst swap plan says "cannot be read" and
+        # apply refuses; --root would not help, so no "cst swap status --root reads it" row.
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        host = doc_adapters.Host(dict(self.env))
+        conf = os.path.join(self.root, "etc/cst/swap.conf")
+        opened = host.open_text
+
+        def open_text(path: str) -> TextIO:
+            if path == conf:
+                raise OSError(errno.EIO, "Input/output error", path)
+            return opened(doc_domain.ViewPath(path))
+
+        with mock.patch.object(host, "open_text", open_text):
+            rows = list(doc_swap.check_swap_settings(host))
+        self.assertEqual(
+            rows,
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf cannot be read: cst swap apply refuses until it is fixed",
+                )
+            ],
+        )
 
     def test_a_swap_conf_in_a_folder_this_user_may_not_enter(self) -> None:
         # Not taken as missing: no "an older CST set up swap0" row from the marked fstab line.
