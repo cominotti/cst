@@ -3,7 +3,7 @@
 
 import unittest
 
-from tests.ruff_budget import RULES, RUFF_BUDGETS, rule_counts, unused_noqa
+from tests.ruff_budget import RULES, RUFF_BUDGETS, budgeted_rule, rule_counts, unused_noqa
 
 
 def rec(code: str, path: str, row: int = 1) -> dict[str, object]:
@@ -28,6 +28,23 @@ class RuffBudgetTest(unittest.TestCase):
             got,
             {"vm FBT001": 2, "vm tests FBT001": 1, "btrfs/bulk C901": 1, "doctor SLF001": 1},
         )
+
+    def test_a_family_counts_its_codes_under_its_name(self) -> None:
+        got = rule_counts(
+            [
+                rec("N802", "vm/cli.py"),
+                rec("N806", "vm/cli.py"),
+                rec("N818", "vm/tests/test_vm.py"),
+                rec("NPY002", "vm/cli.py"),  # another family that starts with N
+                rec("PLR0913", "vm/cli.py"),
+                rec("PLR0914", "vm/cli.py"),  # a code next to a budgeted one
+            ],
+            repo="/repo",
+        )
+        self.assertEqual(got, {"vm N": 2, "vm tests N": 1, "vm PLR0913": 1})
+        self.assertEqual(budgeted_rule("N801"), "N")
+        self.assertIsNone(budgeted_rule("NPY002"))
+        self.assertEqual(budgeted_rule("FBT003"), "FBT003")
 
     def test_unused_noqa_lines(self) -> None:
         self.assertEqual(

@@ -135,7 +135,11 @@ repository:
   [.agents/rules/magic-values.md](../.agents/rules/magic-values.md)) and `C901` (a function over
   `[tool.ruff.lint.mccabe] max-complexity`, 15). C901 stands in for
   SonarCloud's cognitive complexity rule (S3776), which only a Sonar run
-  measures. A second ruff run fails on any `# noqa` that suppresses nothing
+  measures. Ratchets on the size of a function: `PLR0911`, `PLR0912`,
+  `PLR0913`, `PLR0915` (more than 6 returns, 12 branches, 5 arguments or
+  50 statements, ruff's defaults), with `FBT003` (a bare `True`/`False`
+  passed by position) and the `N` family (pep8-naming), counted under `N`:
+  an entry of RULES made of letters only counts every code of its family. A second ruff run fails on any `# noqa` that suppresses nothing
   (`RUF100`). When a budget fails, the script prints the measured table;
   see [tests/budgets.py](../tests/budgets.py) for how budgets work.
 - **The typing budget** (`tests/test_typing_budget.py`, in the unit suite):
