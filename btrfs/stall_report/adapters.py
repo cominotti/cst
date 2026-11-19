@@ -174,9 +174,10 @@ _CHECKS: Final[dict[str, Callable[[object], bool]]] = {
 def records_of(recs: Sequence[object], damaged: Sequence[float] = ()) -> Recorded:
     """The records by their kind ("t"), after DAMAGED (load's). One of a known kind without what the
     report reads is damaged too, at its own time (none: in no window). Another kind is not read."""
-    by_tag: dict[object, list[object]] = {}  # one pass over the records: each one's tag read once
+    by_tag: dict[str | None, list[object]] = {}  # one pass over the records: each one's tag read once
     for r in recs:
-        by_tag.setdefault(r.get("t") if json_object(r) else None, []).append(r)
+        t = r.get("t") if json_object(r) else None
+        by_tag.setdefault(t if isinstance(t, str) else None, []).append(r)
     tag = StallRecordTag
     return Recorded(
         metas=[r for r in by_tag.get(tag.META, []) if is_meta_record(r)],

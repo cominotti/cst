@@ -816,6 +816,17 @@ class MalformedLineTest(unittest.TestCase):
         # A kind of record the report does not read.
         self.assertNotIn("damaged", self.report({now: self.lines([*good, {"t": "x", "ts": "y"}])}, now - 60, now))
 
+    def test_a_record_whose_kind_is_no_string_is_not_read(self) -> None:
+        # A "t" that is a list or an object names no kind the report reads: the record is not read,
+        # like one of another kind. Before, records_of grouped by it and the report died (unhashable).
+        now = time.time()
+        good = [meta(now - 30, 7), *(sample(now - 25 + 5 * i, 1000, 0) for i in range(3))]
+        clean = self.report({now: self.lines(good)}, now - 60, now)
+        for kind in ([], {}):
+            with self.subTest(t=kind):
+                odd = {"t": kind, "ts": now - 10}
+                self.assertEqual(self.report({now: self.lines([*good, odd])}, now - 60, now), clean)
+
     def test_a_cut_gz_file_keeps_the_records_before_the_cut(self) -> None:
         # A .gz whose end is missing (a copy cut short): the lines read before the error count, with a
         # warning, as they always did.
