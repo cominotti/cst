@@ -869,6 +869,38 @@ class UnreadableRecordTest(GameProfileCase):
         os.makedirs(os.path.join(self.ucg, "e2e.slice"))
         self.tick_after_a_cut_record("prop usr e2e.slice CPUWeight new -", "usr", "e2e.slice", "CPUWeight=idle")
 
+    def second_record_cut(self, *, steam: bool) -> None:
+        """cpuset delegated: a box next to the game gets two settings, which setp records one after the
+        other before it sets either. 'on' (or a tick) died while it wrote the second record (AllowedCPUs):
+        the first (CPUWeight) is a whole line, but neither change was made. The next tick sets the box
+        (steam: a new Steam scope is recorded first in that tick, which removes the cut line before the
+        box is looked at); a second tick sets nothing more, and 'off' removes both overrides."""
+        self.write(os.path.join(self.ucg, "cgroup.subtree_control"), "cpuset cpu memory pids\n")
+        self.run_profile("on")
+        self.write(self.manual, "")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        if steam:
+            self.systemd.units["usr"] = ["app-flatpak-com.valvesoftware.Steam-7.scope"]
+        with open(self.state, "a") as f:
+            f.write("prop usr e2e.slice CPUWeight new -\nprop usr e2e.slice AllowedCPUs new")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime e2e.slice CPUWeight=idle AllowedCPUs=12-23", actions)
+        overrides = [self.ctrl("usr", "e2e.slice", prop) for prop in ("CPUWeight", "AllowedCPUs")]
+        for path in overrides:
+            self.assertTrue(os.path.exists(path), path)
+        self.assertTrue(self.read(self.state).endswith("\nprop usr e2e.slice AllowedCPUs new -\n"))
+        _, actions = self.run_profile("tick")  # handled now: nothing more
+        self.assertEqual([a for a in self.sets(actions) if " e2e.slice " in a], [])
+        self.run_profile("off")
+        for path in overrides:
+            self.assertFalse(os.path.exists(path), path)
+
+    def test_a_box_whose_second_record_was_cut_short_is_set(self) -> None:
+        self.second_record_cut(steam=False)
+
+    def test_a_box_whose_second_record_was_cut_short_is_set_after_a_new_steam_scope(self) -> None:
+        self.second_record_cut(steam=True)
+
     def test_a_steam_scope_whose_record_was_cut_short_is_protected(self) -> None:
         steam = "app-flatpak-com.valvesoftware.Steam-7.scope"
         self.run_profile("on")

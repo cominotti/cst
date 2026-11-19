@@ -387,6 +387,13 @@ class GameProfile:
         else:
             self.log(4, f"{unit}: could not write {f}")
 
+    def _recorded(self, unit: str, settings: Sequence[str]) -> bool:
+        """game.state holds a whole record of each of settings for unit, a box of the user manager: setp
+        records them one after the other before it sets any, so a box whose last record was cut short
+        (or never written) is not handled yet, even when its first record is whole."""
+        text = self._state_text()
+        return all(has_record_part(text, f"prop usr {printf_q(unit)} {kv.split('=', 1)[0]} ") for kv in settings)
+
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of
         escaped_cgroups not handled yet; a box that holds a GameMode client is the game itself."""
@@ -395,7 +402,7 @@ class GameProfile:
             settings.append(f"AllowedCPUs={self.s.build_cpus}")
         for d in self.escaped_cgroups():
             unit = os.path.basename(d).removeprefix("_")
-            if has_record_part(self._state_text(), f"prop usr {printf_q(unit)} CPUWeight "):
+            if self._recorded(unit, settings):
                 continue
             if self.gamemode_in(d):
                 continue

@@ -766,7 +766,12 @@ read as whole; the journal names it (`<4>... line N: a record cut short
 same holds for `game.intended`, whose cut line the drift repair never read.
 A cut line is no record of a box handled either: a box whose own record was
 cut short (a Docker container, a Steam scope, a box next to the game) is set
-by the next tick, whose record of it removes the cut line first.
+by the next tick, whose record of it removes the cut line first. A box next
+to the game counts as handled only when each of its settings has a whole
+record: with cpuset delegated it gets two, `CPUWeight` and `AllowedCPUs`,
+which are recorded one after the other before either is set, so a box whose
+`CPUWeight` record is whole but whose `AllowedCPUs` record was cut short (or
+is missing) is set again, both settings.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
