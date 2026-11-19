@@ -55,7 +55,7 @@ from btrfs.health_check.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.adapters.journal import log
-from cst_core.domain.contracts import NOTIFY_PROGRAM
+from cst_core.domain.contracts import NOTIFY_PROGRAM, Urgency
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
 from cst_core.domain.text import file_lines, parse_snapshots_conf, read_fields
@@ -497,7 +497,11 @@ def snapshot_problems(m: Probe) -> list[str]:
                 nas_last = v
         # Journal only: btrfs-snapshot already notifies once a day about a stale NAS backup.
         if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * DAY:
-            log(4, "no successful NAS backup (restic) for over 8 days (journalctl -u btrfs-snapshot-nas)", tag=TAG)
+            log(
+                4,
+                f"no successful NAS backup (restic) for over {NAS_MAX_AGE_DAYS} days (journalctl -u btrfs-snapshot-nas)",
+                tag=TAG,
+            )
     return problems
 
 
@@ -531,7 +535,7 @@ def swap_disks(m: Probe, members: Sequence[str]) -> list[str]:
 def alert(m: Probe, problems: Sequence[str]) -> None:
     """The alert through btrfs-notify (shown on the desktop, or kept for the next login)."""
     r = m.runner.run(
-        [m.notify, "-u", "critical", "-a", TAG, ALERT_TITLE, alert_body(problems)], output=OutputMode.INHERIT
+        [m.notify, "-u", Urgency.CRITICAL, "-a", TAG, ALERT_TITLE, alert_body(problems)], output=OutputMode.INHERIT
     )
     if r.fault is not None:
         sys.stderr.write(f"{TAG}: {m.notify}: {getattr(r.cause, 'strerror', None) or r.fault}\n")
