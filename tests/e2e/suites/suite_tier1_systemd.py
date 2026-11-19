@@ -161,10 +161,28 @@ DROPIN_DIR=/etc/systemd/system/machine.slice.d
 REC=/var/lib/cst/installed.json
 export PATH="$W/bin:$PATH" CST_SWAP_PROC="$W/proc" CST_SWAP_SYS="$W/sys"
 
+# swap_setup works in three parts, and swap_cleanup (the caller's EXIT trap, set before it) undoes
+# only what the parts that ran changed: (1) the checks that can fail, before anything outside $W
+# changes; (2) the originals saved into $W/orig, $W/orig/.saved last; (3) the changes. Without
+# .saved, swap_cleanup removes $W and nothing else.
 swap_setup() {
+    cpu_dropin_added=""
     rm -rf "$W"
     mkdir -p "$W/bin" "$W/orig" "$W/proc/sys/vm" "$W/proc/pressure" "$W/sys/module/zswap/parameters" \
         "$W/sys/class/block/e2e-swap0" "$W/sys/class/block/e2e-dm0/dm"
+    # 1. The checks.
+    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
+    [[ ! -e /etc/cst/swap.conf ]]
+    # 2. What swap_cleanup puts back.
+    for f in /etc/crypttab /etc/fstab "$REC"; do
+        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
+    done
+    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
+        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
+    fi
+    systemctl is-active machine.slice >"$W/orig/slice-state" || true
+    : >"$W/orig/.saved"
+    # 3. The changes.
     printf 'name         : zstd\ndriver       : zstd-generic\n' >"$W/proc/crypto"
     printf 'MemTotal:        8000000 kB\nMemAvailable:    6000000 kB\nZswap:                 0 kB\nZswapped:              0 kB\n' >"$W/proc/meminfo"
     printf 'zswpout 0\nzswpin 0\nzswpwb 0\npswpout 0\npswpin 0\n' >"$W/proc/vmstat"
@@ -178,7 +196,6 @@ swap_setup() {
     echo $((SIZE / 512)) >"$W/sys/class/block/e2e-swap0/size"
     echo swap0 >"$W/sys/class/block/e2e-dm0/dm/name"
     mkdir -p /dev/disk/by-partuuid /dev/mapper
-    [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
     mknod /dev/e2e-swap0 b 7 1040
     mknod /dev/e2e-dm0 b 7 1041
     ln -s ../../e2e-swap0 "/dev/disk/by-partuuid/$PU"
@@ -207,14 +224,6 @@ EOF
     cp "$W/bin/modprobe" "$W/bin/zramctl"
     printf '#!/bin/bash\necho "NAME TYPE SIZE USED PRIO"\necho "/dev/e2e-dm0 partition 1024M 2M -2"\n' >"$W/bin/swapon"
     chmod 0755 "$W"/bin/*
-    for f in /etc/crypttab /etc/fstab "$REC"; do
-        if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
-    done
-    if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
-        cp -a /etc/systemd/zram-generator.conf "$W/orig/"
-    fi
-    [[ ! -e /etc/cst/swap.conf ]]
-    systemctl is-active machine.slice >"$W/orig/slice-state" || true
     # Stopped while apply writes the drop-in: a daemon-reload does not put a new MemoryLow into the
     # memory.low of a slice that is already running (a start does), and apply checks memory.low.
     if [[ "$(cat "$W/orig/slice-state")" == active ]]; then systemctl stop machine.slice; fi
@@ -223,7 +232,6 @@ EOF
     if [[ -d /sys/fs/cgroup/machine.slice ]] && ! systemctl -q is-active machine.slice; then
         rmdir /sys/fs/cgroup/machine.slice || { slice_facts; exit 1; }
     fi
-    cpu_dropin_added=""
     if [[ ! -e "$DROPIN_DIR/10-cpu-setup.conf" ]]; then
         mkdir -p "$DROPIN_DIR"
         cp /opt/cst-rw/cpu/units/machine.slice.d-10-cpu-setup.conf "$DROPIN_DIR/10-cpu-setup.conf"
@@ -233,6 +241,10 @@ EOF
 
 swap_cleanup() {
     local f
+    if [[ ! -e "$W/orig/.saved" ]]; then
+        rm -rf "$W"
+        return 0
+    fi
     for f in crypttab fstab; do
         rm -f "/etc/$f.pre-swap-config.bak"
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
@@ -1262,8 +1274,8 @@ EOF
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1370,8 +1382,8 @@ echo E2E-OK
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
             + r"""
-swap_setup
 trap swap_cleanup EXIT
+swap_setup
 trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
 fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; slice_facts; exit 1; }
 
@@ -1472,6 +1484,51 @@ swap_run apply
 [[ "$out" != *"written:"* && "$out" != *"removed:"* && -z "$err" ]] || fail "second apply wrote"
 [[ "$(snap)" == "$s1" ]] || fail "second apply changed something"
 
+# A record line of 50-memory-low.conf whose file is gone, then one whose file is not CST's: apply
+# drops the line and leaves the file as it is; doctor then asks for nothing.
+record_old_name() {
+    python3 -I - "$REC" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    rec = json.load(f)
+d = "/etc/systemd/system/machine.slice.d/"
+entry = dict(rec["files"][d + "10-swap-memory-low.conf"])
+entry["src"] = "swap/units/machine.slice.d-50-memory-low.conf"
+rec["files"][d + "50-memory-low.conf"] = entry
+with open(path, "w") as f:
+    json.dump(rec, f, indent=2)
+PY
+}
+old_name_recorded() {
+    python3 -I -c 'import json, sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["files"] else 1)' "$REC" "$old"
+}
+record_old_name
+old_name_recorded || fail "the record line was not planted"
+[[ ! -e "$old" ]]
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line without its file"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line without its file"
+! old_name_recorded || fail "apply kept the record line of a file that is gone"
+[[ ! -e "$old" && "$out" != *"written:"* ]] || fail "apply wrote with a record line without its file"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line without its file"; }
+printf '[Slice]\nMemoryLow=48G\n' >"$old"
+systemctl daemon-reload
+record_old_name
+foreign="$(sha256sum "$old")"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" == *"$old"* ]] || { out="$doc"; fail "doctor did not see the record line of a file not CST's"; }
+swap_run apply
+[[ $rc == 0 && -z "$err" ]] || fail "apply, a record line of a file not CST's"
+! old_name_recorded || fail "apply kept the record line of a file not CST's"
+[[ "$(sha256sum "$old")" == "$foreign" && "$out" != *"removed:"* ]] || fail "apply touched a file not CST's"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+[[ "$doc" != *"$old"* ]] || { out="$doc"; fail "doctor, a record line of a file not CST's"; }
+rm "$old"
+systemctl daemon-reload
+
 # Now a MemoryLow set at run time wins the reload, and status and apply leave it.
 systemctl set-property --runtime machine.slice MemoryLow=1G
 systemctl daemon-reload
@@ -1525,6 +1582,54 @@ echo E2E-OK
             [[ "$(systemctl show -P MemoryLow e2e-swaporder.slice)" == 51539607552 ]]
             """,
         )
+
+    def test_125_swap_e2e_setup_that_fails_before_saving_leaves_etc_alone(self) -> None:
+        """The swap E2E harness itself (SWAP_E2E_LIB, as test_88 and test_90 use it: the cleanup
+        trap set before swap_setup). A swap_setup whose own check fails, here on an
+        /etc/cst/swap.conf already there, stops before it saves or changes anything, and the
+        trap then removes only its scratch folder: swap.conf, crypttab, fstab, the install
+        record and machine.slice's state stay as they were."""
+        state = r"""
+            for f in /etc/cst/swap.conf /etc/crypttab /etc/fstab /var/lib/cst/installed.json; do
+                if [[ -e "$f" ]]; then sha256sum "$f"; else echo "absent $f"; fi
+            done
+            echo "machine.slice $(systemctl is-active machine.slice || true)"
+            if [[ -e /var/tmp/e2e-swap ]]; then echo "scratch folder there"; fi
+            """
+        planted = "/var/tmp/e2e-swap125-planted"
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            if [[ -f "$p/files" ]]; then xargs -r rm -f <"$p/files"; fi
+            if [[ -f "$p/dirs" ]]; then xargs -r rmdir <"$p/dirs" || true; fi
+            rm -rf "$p"
+            """,
+        )
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"p={planted}\n"
+            r"""
+            [[ ! -e /etc/cst/swap.conf && ! -e /var/tmp/e2e-swap ]]
+            rm -rf "$p"
+            mkdir -p "$p"
+            for f in /etc/crypttab /etc/fstab; do
+                if [[ ! -e "$f" ]]; then echo "$f" >>"$p/files"; printf '# e2e test_125\n' >"$f"; fi
+            done
+            if [[ ! -d /etc/cst ]]; then echo /etc/cst >>"$p/dirs"; mkdir /etc/cst; fi
+            echo /etc/cst/swap.conf >>"$p/files"
+            printf 'SWAP_PARTUUID=0e2e5a5a-1111-4222-8333-944455556666\nSWAP_SIZE_BYTES=1073741824\n' >/etc/cst/swap.conf
+            """,
+        )
+        before = exec_bash(self.SYSTEMD_CONTAINER, state).stdout
+        self.assertNotIn("scratch folder there", before)
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER, SWAP_E2E_LIB + "trap swap_cleanup EXIT\nswap_setup\necho SETUP-RAN\n", check=False
+        )
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("SETUP-RAN", r.stdout)
+        self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
 
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
