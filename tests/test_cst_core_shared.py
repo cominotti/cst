@@ -277,6 +277,16 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(read_int(self.path("x", b"7 MiB")))
         self.assertEqual(read_int(self.path("missing"), 0), 0)
 
+    def test_read_text_keeps_line_ends_only_when_asked(self) -> None:
+        # By default a "\r" or "\r\n" becomes a newline (universal newlines); keep_line_ends gives
+        # every character as it is, with the same default, limit and lenient decode.
+        p = self.path("ends", b"0::/a\rb.scope\r\nx\xff\n")
+        self.assertEqual(read_text(p), "0::/a\nb.scope\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, keep_line_ends=True), "0::/a\rb.scope\r\nx" + chr(0xFFFD) + "\n")
+        self.assertEqual(read_text(p, "", limit=6, keep_line_ends=True), "0::/a\r")
+        self.assertIsNone(read_text(self.path("missing"), keep_line_ends=True))
+        self.assertEqual(read_text(self.path("missing"), "d", keep_line_ends=True), "d")
+
     def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
         # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
         superscript_two, arabic_three = chr(0xB2).encode(), chr(0x663).encode()
