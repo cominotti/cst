@@ -20,7 +20,14 @@ if TYPE_CHECKING:
 
     from toolchains.ports import RunOutputPort
 
-from cst_core.adapters.files import owned_file_state_at, read_bytes, read_text, unit_file_state_at, write_atomic
+from cst_core.adapters.files import (
+    LocalFileSystemAdapter,
+    owned_file_state_at,
+    read_bytes,
+    read_text,
+    unit_file_state_at,
+    write_atomic,
+)
 from cst_core.adapters.install import program_installer
 from cst_core.adapters.runtime import install_payload
 from cst_core.application.install import InstallService, Placement, record_file
@@ -403,11 +410,7 @@ class HomeFiles:
         return os.path.lexists(path)
 
     def remove_if_present(self, path: str) -> bool:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            return False
-        return True
+        return LocalFileSystemAdapter().remove_file(path)
 
     def dangling_link(self, path: str) -> bool:
         return os.path.islink(path) and not os.path.exists(path)
