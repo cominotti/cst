@@ -274,7 +274,7 @@ def run_command(cmd: RunCommand, service: SwapApplicationService, *, hint: str, 
     that command's own message and exit status (128+N when signal N killed it), as `set -e` stopped swap-setup.sh."""
     try:
         if note := service.test_seam_note:
-            print(note, file=out)
+            print(note, file=out, flush=True)  # first on a pipe too, as apply's events (print_event)
         match cmd:
             case SwapCommand.PLAN:
                 return render_plan(service.plan_report(), out=out)

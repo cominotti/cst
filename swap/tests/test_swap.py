@@ -674,6 +674,36 @@ class _FakeTempFileSystem(LocalFileSystemAdapter):
         return super().is_readable(path)
 
 
+class _BufferedToPipe(io.StringIO):
+    """A stdout on a pipe: what is written reaches the pipe only when flushed."""
+
+    def __init__(self, pipe: list[str]) -> None:
+        super().__init__()
+        self._pipe = pipe
+        self._sent = 0
+
+    @override
+    def flush(self) -> None:
+        text = self.getvalue()
+        if text[self._sent :]:
+            self._pipe.append(text[self._sent :])
+        self._sent = len(text)
+
+
+class _UnbufferedToPipe(io.StringIO):
+    """A stderr on the same pipe: each write reaches it at once."""
+
+    def __init__(self, pipe: list[str]) -> None:
+        super().__init__()
+        self._pipe = pipe
+
+    @override
+    def write(self, s: str, /) -> int:
+        if s:
+            self._pipe.append(s)
+        return super().write(s)
+
+
 class _TextUnreadable(_FakeTempFileSystem):
     """read_text gives its default for the paths in unread, as for a file the process may not open."""
 
@@ -2373,6 +2403,24 @@ class SwapWiringTest(unittest.TestCase):
             "test seam (CST_SWAP_SYS): /sys in TMP/sys, not the kernel's; /etc is the real one, and sysctl,"
             " modprobe and zramctl run as PATH finds them",
         )
+
+    def test_the_test_seam_line_comes_before_apply_s_first_error_on_one_pipe(self) -> None:
+        # stdout and stderr on one pipe: stdout's text reaches it only when flushed, stderr's at once.
+        tmp = tempfile.mkdtemp(prefix="swap-seam-")
+        self.addCleanup(shutil.rmtree, tmp)
+        ctx = _FakeContext(
+            container=False, root=True, etc_dir=os.path.join(tmp, "etc"), run_dir=os.path.join(tmp, "run")
+        )
+        env = {"CST_SWAP_PROC": os.path.join(tmp, "proc"), "CST_SWAP_SYS": os.path.join(tmp, "sys")}
+        service = swap_wiring.build_service(
+            "cst swap", ctx, _ScriptedRunner({}), None, fallback_root="/nowhere", env=env
+        )
+        pipe: list[str] = []
+        out, err = _BufferedToPipe(pipe), _UnbufferedToPipe(pipe)
+        self.assertEqual(run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err), 1)
+        self.assertGreaterEqual(len(pipe), 2, pipe)
+        self.assertTrue(pipe[0].startswith("test seam (CST_SWAP_PROC, CST_SWAP_SYS): "), pipe)
+        self.assertIn("ERROR: ", pipe[1])
 
     def test_without_a_test_seam_there_is_no_such_line(self) -> None:
         for env in ({}, {"CST_SWAP_PROC": "", "CST_SWAP_SYS": ""}):
