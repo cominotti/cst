@@ -790,7 +790,8 @@ echo E2E-OK
 
 # test_83, test_133, for a test that has set $w and $st: scc_setup writes the fake sccache
 # ($w/bin/sccache, its records in $SCCACHE_E2E_STATE) and a crate with six path dependencies
-# ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts.
+# ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts;
+# live_server_in checks the live server's cgroup, stop_server stops it and waits for its scope to go.
 SCCACHE_FAKE_STEPS = r"""
 scc_setup() {
     # The fake sccache. --start-server: a daemon (setsid, stdio closed)
@@ -882,6 +883,21 @@ build() {
         cargo build --offline -j"$jobs" </dev/null >"$w/cargo-$n.out" 2>&1 || { cat "$w/cargo-$n.out" >&2; exit 1; }
 }
 starts() { tr '\n' ' ' <"$st/starts"; }
+# live_server_in WANT WHAT: sets server to the live server's PID and checks that its cgroup is
+# WANT (else it prints WHAT and the cgroup, and fails). Call it on a line of its own: in a
+# condition, errexit is off inside it.
+live_server_in() {
+    server=$(cat "$st/live")
+    local got
+    got=$(cat "$st/server-$server.cgroup")
+    [ "$got" = "$1" ] || { echo "e2e: $2: '$got'" >&2; return 1; }
+}
+# stop_server PID DIR: stops the server PID and checks that its scope's folder DIR goes within 5 s.
+stop_server() {
+    kill "$1"
+    for _ in $(seq 50); do [ -d "$2" ] || break; sleep 0.1; done
+    test ! -d "$2"
+}
 """
 
 
@@ -4088,8 +4104,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             # The compiles ran in the capped scope; the server is in its own one.
             [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
             if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
-            server=$(cat "$st/live")
-            [ "$(cat "$st/server-$server.cgroup")" = "$want" ]
+            live_server_in "$want" "the server's cgroup"
             test -d "$ucg/user.slice/$scope"
             [ "$(systemctl --user show -P Slice "$scope")" = user.slice ]
             [ "$(systemctl --user show -P MemoryMax "$scope")" = infinity ]
@@ -4102,9 +4117,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [ "$(starts)" = "start " ]
 
             # The server stops: the scope goes away.
-            kill "$server"
-            for _ in $(seq 50); do [ -d "$ucg/user.slice/$scope" ] || break; sleep 0.1; done
-            test ! -d "$ucg/user.slice/$scope"
+            stop_server "$server" "$ucg/user.slice/$scope"
             [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
 
             # Upgrade: a server that an older wrapper left in a capped scope (it
@@ -4118,9 +4131,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -q e2e-scc-old.scope "$st/server-$old.cgroup"
             build 4
             [ "$(starts)" = "auto start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
-            [ "$(cat "$st/server-$(cat "$st/live").cgroup")" = "$want" ]
+            live_server_in "$want" "the new server's cgroup"
             kill -0 "$old"   # the old one runs on until it stops by itself (killed here)
-            kill "$old" "$(cat "$st/live")"
+            kill "$old" "$server"
             for _ in $(seq 50); do [ -d "$ucg/user.slice/$scope" ] || break; sleep 0.1; done
 
             # A start that systemd refuses: a unit of the scope's name is already
@@ -4205,9 +4218,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
             if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
             # The server is in its own scope, in app.slice.
-            server=$(cat "$st/live")
-            got=$(cat "$st/server-$server.cgroup")
-            [ "$got" = "$want" ] || { echo "e2e: the server's cgroup: '$got'" >&2; exit 1; }
+            live_server_in "$want" "the server's cgroup"
             test -d "$ucg/app.slice/$scope"
             test ! -e "$ucg/user.slice/$scope"
             [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
@@ -4224,9 +4235,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
 
             # The server stops: the scope goes away; its socket file stays behind.
-            kill "$server"
-            for _ in $(seq 50); do [ -d "$ucg/app.slice/$scope" ] || break; sleep 0.1; done
-            test ! -d "$ucg/app.slice/$scope"
+            stop_server "$server" "$ucg/app.slice/$scope"
             [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
             test -S "$sock"
 
@@ -4234,13 +4243,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             # again in its own scope in app.slice.
             build 3
             [ "$(starts)" = "start start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
-            server=$(cat "$st/live")
-            got=$(cat "$st/server-$server.cgroup")
-            [ "$got" = "$want" ] || { echo "e2e: the new server's cgroup: '$got'" >&2; exit 1; }
+            live_server_in "$want" "the new server's cgroup"
             [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
-            kill "$server"
-            for _ in $(seq 50); do [ -d "$ucg/app.slice/$scope" ] || break; sleep 0.1; done
-            test ! -d "$ucg/app.slice/$scope"
+            stop_server "$server" "$ucg/app.slice/$scope"
 
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
