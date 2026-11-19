@@ -51,7 +51,7 @@ See docs/dev-tools.md.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 import os
 import re
 import tempfile
@@ -337,30 +337,29 @@ def ty_setting_problems(conf: Mapping[str, Any], files: Iterable[str]) -> list[s
     return out
 
 
-def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
-    """The ty/type ignore comments in the given files, as text lines (empty: none)."""
-    out: list[str] = []
+def _comments_matching(repo: str, paths: Iterable[str], pattern: re.Pattern[str]) -> Iterator[tuple[str, int, str]]:
+    """The comments PATTERN finds in the given files, as (path, line number, comment), in path order."""
     for rel in sorted(paths):
         with open(os.path.join(repo, rel), "rb") as fh:
-            out.extend(
-                f"{rel}:{tok.start[0]}: an ignore comment in a ty-gated file; fix what ty reports instead"
-                for tok in tokenize.tokenize(fh.readline)
-                if tok.type == tokenize.COMMENT and IGNORE_COMMENT.search(tok.string)
-            )
-    return out
+            for tok in tokenize.tokenize(fh.readline):
+                if tok.type == tokenize.COMMENT and pattern.search(tok.string):
+                    yield rel, tok.start[0], tok.string
+
+
+def ignore_comments(repo: str, paths: Iterable[str]) -> list[str]:
+    """The ty/type ignore comments in the given files, as text lines (empty: none)."""
+    return [
+        f"{rel}:{line}: an ignore comment in a ty-gated file; fix what ty reports instead"
+        for rel, line, _ in _comments_matching(repo, paths, IGNORE_COMMENT)
+    ]
 
 
 def format_suppressions(repo: str, paths: Iterable[str]) -> list[str]:
     """The comments that keep ruff format away from code in the given files, as text lines (empty: none)."""
-    out: list[str] = []
-    for rel in sorted(paths):
-        with open(os.path.join(repo, rel), "rb") as fh:
-            out.extend(
-                f"{rel}:{tok.start[0]}: {tok.string.strip()!r} keeps ruff format away; let it lay the code out"
-                for tok in tokenize.tokenize(fh.readline)
-                if tok.type == tokenize.COMMENT and FORMAT_SUPPRESSION.search(tok.string)
-            )
-    return out
+    return [
+        f"{rel}:{line}: {comment.strip()!r} keeps ruff format away; let it lay the code out"
+        for rel, line, comment in _comments_matching(repo, paths, FORMAT_SUPPRESSION)
+    ]
 
 
 class PythonFilesTest(unittest.TestCase):
