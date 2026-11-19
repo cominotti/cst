@@ -53,7 +53,8 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
 )
-from cst_core.ports import ActiveState, CommandFailed, CommandFault, CommandResult, SystemctlHost, UnitName
+from cst_core.domain.units import ActiveState
+from cst_core.ports import CommandFailed, CommandFault, CommandResult, SystemctlHost, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"

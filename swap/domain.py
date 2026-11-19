@@ -14,7 +14,7 @@ from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
-from cst_core.ports import ActiveState
+from cst_core.domain.units import ActiveState
 from swap.ports import SwapSettingsFacts
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"

@@ -12,7 +12,7 @@ from typing import Final, TypedDict, TypeIs
 
 from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
 from cst_core.domain.values import GIB
-from cst_core.ports import ActiveState
+from cst_core.domain.units import ActiveState
 
 MARGIN: Final = 20 * GIB  # free space kept besides the copy itself
 GIVE_UP_AFTER = 2  # boots that tried the migration

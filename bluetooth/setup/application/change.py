@@ -39,7 +39,8 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import ActiveState, OutputMode
+from cst_core.domain.units import ActiveState
+from cst_core.ports import OutputMode
 
 SPACE = r"[ \t\n\r\f\v]"
 

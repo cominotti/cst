@@ -62,7 +62,8 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.ports import ActiveState, ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
+from cst_core.domain.units import ActiveState
+from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
 
 
 def read_bluetooth_settings(

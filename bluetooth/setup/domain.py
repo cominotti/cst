@@ -16,7 +16,7 @@ from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.text import HELP_WORDS, enum_member, group
-from cst_core.ports import ActiveState
+from cst_core.domain.units import ActiveState
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).

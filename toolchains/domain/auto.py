@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-from cst_core.domain.units import render_timer as unit_timer, render_unit_file
-from cst_core.ports import ActiveState
+from cst_core.domain.units import ActiveState, render_timer as unit_timer, render_unit_file
 from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL
 
 

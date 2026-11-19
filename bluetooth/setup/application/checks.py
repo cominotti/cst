@@ -14,7 +14,8 @@ from bluetooth.domain import (
 from bluetooth.setup.application.survey import Survey
 from bluetooth.setup.domain import BapState, LeState, WpState, is_running, preferred_bearer
 from cst_core.domain.shapes import parse_json
-from cst_core.ports import ActiveState, OutputMode
+from cst_core.domain.units import ActiveState
+from cst_core.ports import OutputMode
 
 
 class Checks(Survey):

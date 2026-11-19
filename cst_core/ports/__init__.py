@@ -303,24 +303,6 @@ class ModuleRoutePort(Protocol):
         ...
 
 
-class ActiveState(StrEnum):
-    """A unit's ActiveState as `systemctl show` prints it: systemd's eight words.
-
-    Each module keeps its own subset of what counts as running or stopped for it, a frozenset of
-    these members, since they do not agree (reloading, refreshing, maintenance). The text from
-    systemctl stays a plain str and is compared with members (==, in a frozenset of them); it is
-    never parsed with ActiveState(text), which would raise on a word a newer systemd adds."""
-
-    ACTIVE = "active"
-    RELOADING = "reloading"
-    INACTIVE = "inactive"
-    FAILED = "failed"
-    ACTIVATING = "activating"
-    DEACTIVATING = "deactivating"
-    MAINTENANCE = "maintenance"
-    REFRESHING = "refreshing"
-
-
 class SystemctlHost(StrEnum):
     """Which systemctl calls of a SystemctlAdapter run on the host from a toolbox (flatpak-spawn
     --host), decided when the adapter is built: none (local), show only (show-only: what an adapter
