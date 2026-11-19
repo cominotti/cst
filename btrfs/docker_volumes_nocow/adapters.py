@@ -76,13 +76,6 @@ def docker_root() -> tuple[str, str]:
     return os.path.join(root or "/var/lib/docker", "volumes"), problem
 
 
-def checked(r: CommandResult) -> CommandResult:
-    """A command that could not run raises its error, as subprocess.run did."""
-    if r.cause is not None:
-        raise r.cause
-    return r
-
-
 def real_dirs(root: str, names: Sequence[str], dev: int) -> list[str]:
     """Subdirectories to descend into: real directories on the same filesystem
     (os.walk lists symlinks to directories among them; those are entries,
@@ -146,7 +139,7 @@ class LocalVolumeTree:
         # stdin ours; bytes that are not UTF-8 become U+FFFD: a cp or chcon message that names such a
         # file is still a message (decoded strictly, it raised UnicodeDecodeError before the twin was
         # removed). btrfs filesystem usage is parsed from its ASCII digits either way.
-        return checked(self._runner.run(argv, stdin="inherit", decode_errors="replace"))
+        return self._runner.run(argv, stdin="inherit", decode_errors="replace").raise_cause()
 
     def is_dir(self, path: str) -> bool:
         return os.path.isdir(path)

@@ -16,7 +16,7 @@ import stat
 import time
 import traceback
 
-from btrfs.bulk.adapters.machine import HomeTree, kind, log, ran
+from btrfs.bulk.adapters.machine import HomeTree, kind, log
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.adapters.notify import Notifier, PENDING_ALERTS
 from cst_core.domain.contracts import Urgency
@@ -105,7 +105,7 @@ class Host:
     def convert_bulk_dir(self, bulk: str) -> list[str]:
         """~/Bulk exists as a plain folder: btrfs-snapshot turns it into a
         subvolume (its convert_one: reflink clone + switch, busy -> later)."""
-        r = ran(self._snapshot("convert-one", bulk))
+        r = self._snapshot("convert-one", bulk).raise_cause()
         return (r.stdout + r.stderr).splitlines()
 
     def _snapshot(self, *args: str, timeout: float | None = None) -> CommandResult:

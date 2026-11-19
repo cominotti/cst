@@ -109,14 +109,6 @@ def kind(path: str) -> LstatKind:
     return LstatKind.DIR if stat.S_ISDIR(st.st_mode) else LstatKind.OTHER
 
 
-def ran(r: CommandResult) -> CommandResult:
-    """r, of a command that ran; the OSError of one that could not start is
-    raised, as subprocess.run raised it."""
-    if r.cause is not None:
-        raise r.cause
-    return r
-
-
 class Primitives:
     """The primitives that need btrfs, root or the host (the tests' fakes
     replace these methods; everything built on them stays real). runner:
@@ -128,7 +120,7 @@ class Primitives:
     def run(self, argv: Sequence[str], decode_errors: DecodeErrors = "strict") -> CommandResult:
         """argv with its output captured, as subprocess.run(argv, capture_output=True,
         text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start."""
-        return ran(self.runner.run(argv, stdin="inherit", decode_errors=decode_errors))
+        return self.runner.run(argv, stdin="inherit", decode_errors=decode_errors).raise_cause()
 
     def is_nocow(self, path: str) -> bool:
         return bool(inode_flags(path) & FS_NOCOW_FL)

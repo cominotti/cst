@@ -61,6 +61,13 @@ class CommandResult:
     # that lets the exception propagate as it did before. Not compared.
     cause: Exception | None = field(default=None, compare=False)
 
+    def raise_cause(self) -> CommandResult:
+        """self, of a command that ran and exited (whatever its exit status); the cause of one
+        that did not is raised, as subprocess.run raised it (for a caller that keeps that)."""
+        if self.cause is not None:
+            raise self.cause
+        return self
+
 
 class CommandFailed(RuntimeError):
     """Raised when an external command fails and check=True."""

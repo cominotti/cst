@@ -831,6 +831,17 @@ class CommandRunnerTest(unittest.TestCase):
         self.assertEqual(len(rec.calls), 1)
         return rec.calls[0]
 
+    def test_raise_cause_raises_what_kept_a_command_from_running_to_its_end(self) -> None:
+        runner = core_runner.SubprocessCommandRunner(_container(inside=False))
+        failed = runner.run([self.py, "-I", "-c", "import sys; sys.exit(3)"])
+        self.assertIs(failed.raise_cause(), failed)  # it ran: any exit status is the caller's
+        with self.assertRaises(FileNotFoundError):
+            runner.run(["cst-test-no-such-command"]).raise_cause()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner.run([self.py, "-I", "-c", "import time; time.sleep(5)"], timeout=0.2).raise_cause()
+        plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
+        self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
+
     def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
         # Only the arguments an option sets: a caller's test double that takes
         # a fixed set of arguments keeps working when the caller moves here.
