@@ -5,6 +5,7 @@ of the libraries, its text, the moves), the boot step and keep/unkeep.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections.abc import Sequence
 import os
 
@@ -22,13 +23,16 @@ from btrfs.bulk.application.steam import (
     steam_target,
 )
 from btrfs.bulk.domain import (
+    BOOT_REFUSED_EXIT,
     BY_ID,
     MARGIN,
+    BadSettings,
     BulkCommand,
     BulkItemState,
     Ctx,
     FlatpakAccess,
     LstatKind,
+    NoUser,
     Unexpected,
     du_text,
     gib,
@@ -53,7 +57,7 @@ from btrfs.bulk.domain.steam import (
     steam_move_lines,
     steam_nocow_files,
 )
-from btrfs.bulk.ports import BulkStatePort, HomeTreePort, OutputPort
+from btrfs.bulk.ports import BulkStatePort, HomeTreePort, HostPort, OutputPort
 
 LIBRARY_ROW = "library ~/Bulk/steam"  # the plan's line about ~/Bulk/steam as a Steam library
 
@@ -439,6 +443,25 @@ def boot(b: Bulk) -> int:
     if not deferred:
         b.boots.remove()
     return exit_status(b, deferred, problems)
+
+
+def boot_run(make: Callable[[], Bulk], host: HostPort, err: Callable[[str], None]) -> int:
+    """btrfs-bulk boot (btrfs-bulk-boot.service, before any login) over the Bulk make() puts
+    together. When bulk.conf cannot tell whose home it is: the message to err, for a bad line
+    also an alert (nobody reads the boot console; btrfs-notify keeps it for the login), and
+    BOOT_REFUSED_EXIT, which fails the unit. The flag stays: the items wait for the next boot."""
+    try:
+        return boot(make())
+    except BadSettings as e:
+        host.alert(
+            "~/Bulk: nothing moved at boot",
+            f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
+        )
+        err(str(e))
+        return BOOT_REFUSED_EXIT
+    except NoUser as e:
+        err(str(e))
+        return BOOT_REFUSED_EXIT
 
 
 def keep_ids(state: BulkStatePort, cmd: str, ids: Sequence[str]) -> OSError | None:

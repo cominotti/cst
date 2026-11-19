@@ -4554,12 +4554,16 @@ install -d -o cste2ebulk -m 0755 /var/tmp/cst-e2e-bulk-home
 [ -d /etc/btrfs-setup ] || touch "$s/made-etc"
 mkdir -p /etc/btrfs-setup
 systemctl daemon-reload
-# boot_unit: start it as at boot; exit 1 ("needs a look") counts as success (SuccessExitStatus).
+# boot_unit [WANT]: start it as at boot; WANT is "EXIT_STATUS SERVICE_RESULT", by default "1 success"
+# (exit 1, "needs a look", counts as success through SuccessExitStatus). A failed oneshot makes
+# systemctl start fail: allowed only when WANT is not a success.
 boot_unit() {
+    want="${1:-1 success}"
     rm -f "$s/exit"
-    systemctl start btrfs-bulk-boot.service || { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
+    systemctl start btrfs-bulk-boot.service || [ "${want#* }" != success ] ||
+        { systemctl status --no-pager btrfs-bulk-boot.service >&2; return 1; }
     for _ in $(seq 1 20); do [ -s "$s/exit" ] && break; sleep 0.25; done   # ExecStopPost may lag the job
-    [ "$(cat "$s/exit" 2>/dev/null)" = "1 success" ] ||
+    [ "$(cat "$s/exit" 2>/dev/null)" = "$want" ] ||
         { echo "exit status and result: $(cat "$s/exit" 2>/dev/null)" >&2; return 1; }
 }
 # unit_log_has TEXT: the unit's journal since the test started has TEXT (waits for journald).
@@ -4632,15 +4636,17 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
 
     def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
-        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the refusal's alert
-        is kept in /var/lib/cst-alerts/pending in btrfs-notify's format (the unit's journal says so),
-        and cst doctor, as the user, shows it and warns that the installed unit alerts through a
-        missing btrfs-notify; cst-pending-alerts lists it for the next login."""
+        """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the unit exits 78
+        and is failed; the refusal's alert is kept in /var/lib/cst-alerts/pending in btrfs-notify's
+        format (the unit's journal says so), and cst doctor, as the user, lists the failed unit, shows
+        the alert and warns that the installed unit alerts through a missing btrfs-notify;
+        cst-pending-alerts lists it for the next login."""
         out = self.bulk_boot(
             r"""
 printf 'BULK_USER=$USER\n' >/etc/btrfs-setup/bulk.conf
 printf 'apps\n' >/etc/btrfs-setup/bulk-at-boot
-boot_unit
+boot_unit "78 exit-code"
+systemctl is-failed --quiet btrfs-bulk-boot.service
 unit_log_has "alert not delivered (/usr/local/sbin/btrfs-notify is not installed): ~/Bulk: nothing moved at boot; kept in /var/lib/cst-alerts/pending/"
 f="$(grep -lxF 'title=~/Bulk: nothing moved at boot' /var/lib/cst-alerts/pending/*.alert)"
 [ "$(head -n 1 "$f")" = "cst-alert 1" ]
@@ -4655,7 +4661,8 @@ echo E2E-OK
         self.assertIn("E2E-OK", out)
         doctor = as_tester_bash(self.SYSTEMD_CONTAINER, "/opt/cst-rw/cst doctor", check=False).stdout
         self.assertIn("~/Bulk: nothing moved at boot", doctor)
-        self.assertIn("btrfs-bulk-boot.service", doctor)
+        failed = [line for line in doctor.splitlines() if "system units failed:" in line]
+        self.assertTrue(failed and "btrfs-bulk-boot.service" in failed[0], doctor)
         self.assertIn("alert through /usr/local/sbin/btrfs-notify, which is missing", doctor)
         listed = as_tester_bash(
             self.SYSTEMD_CONTAINER, "python3 -I -B /opt/cst-rw/btrfs/cst-pending-alerts --list"

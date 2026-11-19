@@ -19,6 +19,8 @@ Type=oneshot
 ExecStart=/usr/local/sbin/btrfs-bulk boot
 # 1/4/3 = something needs a look (4: only inside ~/Bulk) / is left for
 # later: logged (and retried at the next boot), not a failed boot unit.
+# 78 (bulk.conf cannot tell whose home it is) is left out on purpose: the
+# unit fails, and cst doctor lists it.
 SuccessExitStatus=1 3 4
 StandardOutput=journal+console
 TimeoutStartSec=45min

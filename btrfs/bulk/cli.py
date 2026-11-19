@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import sys
 from typing import assert_never
 
-from btrfs.bulk.application.commands import boot, keep_ids, keep_report, steam_apply, steam_print, steam_survey
+from btrfs.bulk.application.commands import boot_run, keep_ids, keep_report, steam_apply, steam_print, steam_survey
 from btrfs.bulk.application.items import apply, exit_status, report
 from btrfs.bulk.domain import BY_ID, BadSettings, BulkCommand, NoUser, bulk_command, split_user_args
 from btrfs.bulk.domain.steam import MAKE_DEFAULT, SteamArgs, parse_steam_args
@@ -65,7 +65,7 @@ def main(argv: Sequence[str], entry_file: str, *, wiring: Wiring | None = None) 
     """btrfs-bulk with argv (argv[0] the program); entry_file is the running
     entry point's __file__ (where btrfs-snapshot is found). Whose home it is
     unknown (a bad bulk.conf line, no user as root): the message on stderr,
-    exit 1."""
+    exit 1 (BOOT_REFUSED_EXIT at boot, from boot_run)."""
     w = Wiring.from_environment(entry_file) if wiring is None else wiring
     try:
         return run(w, argv)
@@ -82,24 +82,16 @@ def run(w: Wiring, argv: Sequence[str]) -> int:
             return keep_cmd(w, cmd, argv[2:])
         case BulkCommand.STEAM:
             return steam_cmd(w, argv[2:])
+        case BulkCommand.BOOT:
+            return boot_run(lambda: w.bulk(argv[2:]), w.host, lambda s: print(s, file=sys.stderr))
         case None:
             print(USAGE, file=sys.stderr)
             return 2
-    try:
-        b = w.bulk(argv[2:])
-    except BadSettings as e:
-        if cmd == BulkCommand.BOOT:  # before any login: the alert waits for it (btrfs-notify keeps it)
-            w.host.alert(
-                "~/Bulk: nothing moved at boot",
-                f"{e.lines}. Fix the line (cst btrfs install writes the file); log: journalctl -u btrfs-bulk-boot",
-            )
-        raise
+    b = w.bulk(argv[2:])
     match cmd:
         case BulkCommand.PLAN | BulkCommand.STATUS:
             report(b, cmd)
             return 0
-        case BulkCommand.BOOT:
-            return boot(b)
         case BulkCommand.APPLY:
             pass  # below
         case _:

@@ -550,8 +550,8 @@ class BulkTest(BulkBase):
         self.fake(self.host, "alert", lambda title, body: sent.append((title, body)))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
-        # The text on stderr, exit 1 (what Python did with the SystemExit it was).
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 78)
+        # The text on stderr; exit 78, which fails the unit (exit 1 counts as success there).
         self.assertIn(f"{self.paths.conf} line 2: BULK_USER=$USER: $", err.getvalue())
         self.assertTrue(err.getvalue().endswith("or pass --user NAME.\n"), err.getvalue())
         self.assertEqual(len(sent), 1, sent)
@@ -566,6 +566,32 @@ class BulkTest(BulkBase):
             self.assertEqual(bulk_cli.main(["btrfs-bulk", "plan"], TOOL, wiring=root), 1)
         self.assertEqual(sent, [])
 
+    def test_no_user_at_boot_fails_the_unit_without_an_alert(self) -> None:
+        # No bulk.conf as root: the boot step cannot tell whose home it is. It exited 1, which
+        # btrfs-bulk-boot.service counts as success, so the refusal was seen nowhere.
+        root = self.root_wiring()
+        with open(self.paths.flag, "w") as f:
+            f.write("apps\n")
+        sent: list[str] = []
+        self.fake(self.host, "alert", lambda title, body: sent.append(title))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 78)
+        self.assertEqual(err.getvalue(), "btrfs-bulk: needs --user NAME (not root)\n")
+        self.assertEqual(sent, [])
+        self.assertTrue(os.path.exists(self.paths.flag), "the items wait for the next boot")
+        # Run by hand: exit 1, as before.
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "status"], TOOL, wiring=root), 1)
+
+    def test_the_boot_unit_fails_on_the_boot_refusal_and_succeeds_on_needs_a_look(self) -> None:
+        # The code's exit statuses and the unit's SuccessExitStatus= cannot drift apart.
+        with open(os.path.join(os.path.dirname(HERE), "units", "btrfs-bulk-boot.service")) as f:
+            [line] = [x for x in f.read().splitlines() if x.startswith("SuccessExitStatus=")]
+        success = set(line.removeprefix("SuccessExitStatus=").split())
+        self.assertEqual(success, {"1", "3", "4"})
+        self.assertNotIn(str(bulk_domain.BOOT_REFUSED_EXIT), success)
+
     def test_the_boot_refusal_reaches_cst_doctor_without_btrfs_notify(self) -> None:
         # btrfs-notify missing (cst btrfs uninstall left snapshots in place, say): the alert of the
         # refusal went nowhere. Now it is kept in the pending alerts folder that cst doctor reads.
@@ -574,7 +600,7 @@ class BulkTest(BulkBase):
             f.write("BULK_USER=$USER\n")
         out = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out):
-            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 1)
+            self.assertEqual(bulk_cli.main(["btrfs-bulk", "boot"], TOOL, wiring=root), 78)
         [name] = os.listdir(self.alerts)
         kept = os.path.join(self.alerts, name)
         with open(kept) as f:

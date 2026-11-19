@@ -1580,9 +1580,14 @@ and run `cst btrfs bulk apply`. Log: `journalctl -u btrfs-bulk-boot`.
 **Nothing moved into ~/Bulk at boot** (alert `~/Bulk: nothing moved at boot`).
 A line of `/etc/btrfs-setup/bulk.conf` is not a plain `KEY=VALUE` (the alert
 names the file and the line), so the boot step cannot tell whose home it
-handles and moves nothing; it exits with 1, like a run that needs a look. The
-items keep waiting for the boot. Fix the line (`cst btrfs install` writes the
-file again), then run `cst btrfs bulk apply` or reboot.
+handles and moves nothing. It exits with 78, so `btrfs-bulk-boot.service`
+shows as failed (`systemctl --failed`, `cst doctor`); the same happens,
+without the alert, when `bulk.conf` names no user. Exit 1 ("needs a look"),
+3 and 4 still count as success for the unit. The items keep waiting for the
+boot. Fix the line (`cst btrfs install` writes the file again), then run
+`cst btrfs bulk apply` or reboot. `sudo systemctl reset-failed
+btrfs-bulk-boot.service` clears the failed mark at once; the next boot
+clears it too.
 
 **`bulk status` says `an interrupted move is recorded`.**
 A move was interrupted (power loss, kill). Nothing is lost. Normally the next
