@@ -2129,9 +2129,10 @@ The **old tree** is the original folder after the swap, renamed to
 
 1. **Checks.** The folder is skipped (and the reason is shown by `status` as
    `skipped: ...`) if it is a symlink (a shortcut that points to another path)
-   or a file, if it is or contains a mount point, or if it already contains a
-   nested subvolume. Skipped folders are checked again on every run, because
-   the cause may go away.
+   or a file, if it is or contains a mount point (also one whose path holds a
+   blank, a tab, a backslash or an accented letter), or if it already
+   contains a nested subvolume. Skipped folders are checked again on every
+   run, because the cause may go away.
 2. **In use?** The script looks at every process: its open files, its working
    folder, and the bind mounts of containers (for example `docker run -v
    ~/Workspace/x:/src`; also of a folder whose name holds a blank, a tab or

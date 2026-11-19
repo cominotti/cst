@@ -363,10 +363,28 @@ in_use_now() {
         \( -lname "${pat}" -o -lname "${pat}/*" \) -print -quit 2>/dev/null)" ]] && return 0
     OPEN_PATHS="$(mount_sources)" in_use "$1"
 }
+# findmnt -r writes a blank, a tab, a line break, a backslash and every byte
+# from 0x80 up (an accented letter too, whatever the locale) as \xHH; unhex
+# decodes them. awk runs in the C locale, so %c of a value from 128 up is that
+# one byte, not a character encoded in UTF-8, and index() compares bytes.
+FINDMNT_UNESCAPE_AWK='
+function unhex(s,    out, hex) {
+    out = ""; hex = "0123456789abcdef"
+    while (match(s, /\\x[0-9A-Fa-f][0-9A-Fa-f]/)) {
+        out = out substr(s, 1, RSTART - 1) \
+            sprintf("%c", (index(hex, tolower(substr(s, RSTART + 2, 1))) - 1) * 16 + index(hex, tolower(substr(s, RSTART + 3, 1))) - 1)
+        s = substr(s, RSTART + 4)
+    }
+    return out s
+}'
 # A mount below PATH (e.g. a bind mount of the same subvolume) would be walked
 # by cp/find -xdev and emptied by rm --one-file-system: never touch such a path.
+# Each mount point is decoded (unhex above) before it is compared.
 has_mount_below() {
-    findmnt -rn -o TARGET | P="$1/" awk 'BEGIN {p = ENVIRON["P"]} index($0, p) == 1 {found = 1; exit} END {exit !found}'
+    findmnt -rn -o TARGET | P="$1/" LC_ALL=C awk "${FINDMNT_UNESCAPE_AWK}"'
+        BEGIN {p = ENVIRON["P"]}
+        index(unhex($0), p) == 1 {found = 1; exit}
+        END {exit !found}'
 }
 
 # ---- conversion of one directory into a nested subvolume ----------------------------

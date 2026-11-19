@@ -32,6 +32,14 @@ PLAN = "etc/btrfs-setup/convert-plan"
 BOOT_FLAG = "etc/btrfs-setup/convert-at-boot"
 FIRST = "Converting planned directories (busy ones wait for the next boot)..."
 BOOT_FIRST = "btrfs-snapshot: converting the directories the desktop session kept busy..."
+# Names findmnt -r writes escaped (\xHH): a blank, an accented letter, a backslash, a tab.
+ESCAPED_NAMES = ("Work space", "Música", "back\\slash", "Work\tspace")
+
+
+def findmnt_raw(path: str) -> str:
+    """PATH as `findmnt -rn -o TARGET` prints it: every byte that is not printable ASCII, a
+    blank or a backslash as \\xHH (tier 1 test_116 checks the real findmnt)."""
+    return "".join(chr(b) if 0x21 <= b < 0x7F and b != 0x5C else f"\\x{b:02x}" for b in os.fsencode(path))
 
 
 class Base(RuntimeTest):
@@ -373,6 +381,20 @@ class ConvertTest(Base):
         self.assertEqual(read(named), "a file\n")
         self.assertTrue(os.path.islink(link))
 
+    def test_an_old_tree_with_a_mount_below_an_escaped_name_is_kept(self) -> None:
+        # findmnt -r writes the mount point escaped (\xHH). Before, has_mount_below compared that
+        # text with the path, never matched, and rm --one-file-system emptied the old tree, which
+        # does not stop at a bind mount of the same file system.
+        for name in ESCAPED_NAMES:
+            with self.subTest(name=name):
+                old = self.tree(f"{name}.pre-subvol-20261101T000000")
+                self.machine(mounts=["/", findmnt_raw(f"{old}/sub")])
+                self.write(self.state_file("drop-pending"), f"{old}\n")
+                r = self.run_prog("convert")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(read(os.path.join(old, "sub", "inner")), "inner\n")
+                self.assertEqual(read(self.state_file("drop-pending")), f"{old}\n")
+
 
 class ConvertBootTest(Base):
     def test_without_the_flag_nothing_happens(self) -> None:
@@ -600,6 +622,21 @@ class ConvertOneTest(Base):
         self.assertEqual(
             self.lines(r.stdout), [log(4, f"convert: {link}: not a directory (a symlink or file), skipped")]
         )
+
+    def test_a_mount_below_an_escaped_name_is_found(self) -> None:
+        # findmnt -r writes the mount point escaped (\xHH). Before, has_mount_below compared that
+        # text with the path and never matched: the folder was converted with a mount below it.
+        for name in ESCAPED_NAMES:
+            with self.subTest(name=name):
+                p = self.tree(name)
+                self.machine(mounts=["/", findmnt_raw(f"{p}/sub")])
+                r = self.run_prog("convert-one", p)
+                self.assertEqual(
+                    (r.returncode, self.lines(r.stdout)),
+                    (1, [log(4, f"convert: {p}: is or contains a mountpoint, skipped")]),
+                )
+                self.assertFalse(self.is_subvol(p))
+                self.assertEqual(self.calls("btrfs"), [])
 
     def test_without_a_path(self) -> None:
         # A usage error (exit 2), told before the lock is taken: it does not wait for another run.
