@@ -376,11 +376,13 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     suite = load(repo, argv)
     result = LeakRecordingRunner(verbosity=verbosity).run(suite)
     ours.close()
+    if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
+        raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
     skipped = [(test.id(), reason) for test, reason in result.skipped]
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    leaks = result.leaks if isinstance(result, LeakRecordingResult) else []
+    leaks = result.leaks
     for line in [*problems, *leaks]:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
