@@ -799,8 +799,10 @@ What else the profile does about it:
   from before `on`. A setting `game.state` holds no record of (the file was
   edited, or cut) is not set again, since `off` could not undo it: the tick
   says so once per boot at level notice
-  (`drift not repaired: UNIT PROP: game.state holds no record of it, ...`,
-  the same mark as below, 7.6), and `game state` marks its `DRIFT:` line
+  (`drift not repaired: UNIT PROP: game.state holds no record of it, ...`;
+  said again when the list of such settings changes, and when one comes
+  back after a tick that found none, for example while systemd did not
+  answer about its unit; the same mark as below, 7.6), and `game state` marks its `DRIFT:` line
   `(not set again: ...)`. `cst doctor` still warns about it and proposes
   switching the profile off and on again, which writes fresh records. A
   unit that systemd has not loaded (or a user manager

@@ -604,7 +604,7 @@ class GameProfile:
         a second record to game.state and make 'off' restore the profile's own value. A game.intended
         of a newer CST is not read (its records may mean something else), and a setting game.state holds
         no record of is not set again ('off' could not undo it): each said in the journal once per boot
-        (again when the text changes)."""
+        (again when the text changes, and when it comes back after a tick that had nothing to say: _say_unheld)."""
         text, newer = self._intended()
         if newer is not None:
             said = f"drift not repaired: {newer}"
