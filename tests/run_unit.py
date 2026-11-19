@@ -61,8 +61,10 @@ records every ResourceWarning (one that goes to a warnings.showwarning a
 test replaced too, and one after a test that changed the warning filters
 for good: each test starts with them recording again) and every exception
 Python could only print (sys.unraisablehook) with the test that was
-running (LeakRecordingResult), runs the garbage collector once more after
-the last test, and fails the run on each one, with a hint: for a
+running (LeakRecordingResult; a leak the garbage collector frees, which
+an earlier test may have made, is named with "or one before it"), runs
+the garbage collector once more after the last test, and fails the run
+on each one, with a hint: for a
 ResourceWarning, run the test again with -X tracemalloc=8 to see where the
 resource was opened; for an exception, its traceback is printed above the
 test results. A test that records warnings itself
@@ -266,6 +268,11 @@ class LeakRecordingResult(unittest.TextTestResult):
         self.leaks = []
         self.lost_exceptions = []
         self._running = "before the first test"
+        # A leak the garbage collector frees (an object in a reference cycle) may come from any
+        # test before the one running: _where says so (gc.callbacks tell when it collects).
+        self._collecting = False
+        self._found_by = "a garbage collection"
+        gc.callbacks.append(self._gc_phase)
         # TextTestRunner.run has set its own filter ("default") inside a catch_warnings block,
         # which also restores showwarning when the run ends.
         warnings.simplefilter("always", ResourceWarning)
@@ -297,9 +304,10 @@ class LeakRecordingResult(unittest.TextTestResult):
     def stopTestRun(self) -> None:
         # An object in a reference cycle is freed only by the collector: run it now, while the
         # hooks still record, instead of at exit.
-        self._running = f"{self._running} (or one before it: found by the last garbage collection)"
+        self._found_by = "the last garbage collection"
         self._keep_recording()
         gc.collect()
+        gc.callbacks.remove(self._gc_phase)
         for hook in reversed(self._hooks):
             hook.stop()
         sys.unraisablehook = self._unraisablehook
@@ -312,6 +320,16 @@ class LeakRecordingResult(unittest.TextTestResult):
         if warnings.filters[:1] != [self._always]:
             warnings.simplefilter("always", ResourceWarning)
 
+    def _gc_phase(self, phase: str, _info: dict[str, int]) -> None:
+        self._collecting = phase == "start"
+
+    def _where(self) -> str:
+        """The test that was running, and when the garbage collector freed the object, that it
+        may have been opened by an earlier one."""
+        if self._collecting:
+            return f"{self._running} (or one before it: found by {self._found_by})"
+        return self._running
+
     def _entered(self, msg: warnings.WarningMessage) -> None:
         if warnings.showwarning is not self._showwarning_orig:
             self._record(msg)  # the replacement gets it, not _warned
@@ -323,13 +341,13 @@ class LeakRecordingResult(unittest.TextTestResult):
 
     def _record(self, msg: warnings.WarningMessage) -> None:
         if issubclass(msg.category, ResourceWarning):
-            self.leaks.append(f"ResourceWarning in {self._running}: {msg.message} ({msg.filename}:{msg.lineno})")
+            self.leaks.append(f"ResourceWarning in {self._where()}: {msg.message} ({msg.filename}:{msg.lineno})")
 
     def _unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
         # err_msg says what Python was doing (since 3.14 the object is often None and only err_msg
         # names the __del__ or callback); None means the default "Exception ignored in" the object.
         what = unraisable.err_msg or f"Exception ignored in {unraisable.object!r}"
-        self.lost_exceptions.append(f"exception in {self._running}: {what}: {unraisable.exc_value!r}")
+        self.lost_exceptions.append(f"exception in {self._where()}: {what}: {unraisable.exc_value!r}")
         self._unraisablehook(unraisable)
 
 

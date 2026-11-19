@@ -170,6 +170,14 @@ class U(unittest.TestCase):
             raise ZeroDivisionError("boom")
         self.ref = weakref.ref(thing, boom_callback)
         del thing
+class C(unittest.TestCase):
+    def test_a_leaks_a_file_in_a_cycle(self):
+        gc.disable()  # the next test's collection frees it
+        cycle = [open(os.devnull)]
+        cycle.append(cycle)
+    def test_b_collects(self):
+        gc.collect()
+        gc.enable()
 class F(unittest.TestCase):
     def test_a_ignores_every_warning(self):
         warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
@@ -232,6 +240,15 @@ class ResourceWarningGateTest(unittest.TestCase):
         self.assertIn(
             "error: ResourceWarning in probe_leaks.T.test_leaks_a_file_in_a_cycle (or one before it: found by the "
             "last garbage collection): unclosed file",
+            done.stderr,
+        )
+
+    def test_a_leak_a_collection_finds_names_the_running_test_or_one_before_it(self) -> None:
+        done = self.run_probe("", cls="C")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(
+            "error: ResourceWarning in probe_leaks.C.test_b_collects (or one before it: found by a garbage "
+            "collection): unclosed file",
             done.stderr,
         )
 
