@@ -37,7 +37,11 @@ never be linted. This test derives the Python files from the repository
   [tool.ruff.lint.per-file-ignores] or extend-per-file-ignores, and no
   [tool.ruff.lint] ignore or extend-ignore, names an ANN rule or ALL; nor
   does the older top-level [tool.ruff] form of these settings, which ruff
-  still reads.
+  still reads;
+- ruff's preview is on only for the rules select names by their full code
+  ([tool.ruff.lint] explicit-preview-rules is true whenever preview is),
+  never for PLC1901, and never for the formatter ([tool.ruff.format]
+  preview, or the top-level [tool.ruff] preview that would switch it on).
 
 Standard library only: the unit tests run on /usr/bin/python3 without uv.
 See docs/dev-tools.md.
@@ -194,6 +198,43 @@ def typing_extensions_problems(conf: Mapping[str, object]) -> list[str]:
             )
         ]
     return []
+
+
+def ruff_preview_problems(conf: Mapping[str, object]) -> list[str]:
+    """Whether ruff's preview reaches only the rules named one by one, as text lines (empty: it does).
+
+    With [tool.ruff.lint] preview on, a family in select (PLC, RUF, ...) would
+    turn on every preview rule of that family unless explicit-preview-rules is
+    on too. PLC1901 asks for `not x` instead of `x == ""`, the opposite of the
+    house style. The formatter's preview style can change the layout in any
+    release: it stays off, and so does the top-level [tool.ruff] preview, which
+    would switch it on.
+    """
+    ruff = _sub(_sub(dict(conf), "tool"), "ruff")
+    lint = _sub(ruff, "lint")
+    out: list[str] = []
+    if ruff.get("preview") is True:
+        out.append(
+            "[tool.ruff] preview = true: it also turns on the formatter's preview style; "
+            "set preview in [tool.ruff.lint] only"
+        )
+    if _sub(ruff, "format").get("preview") is True:
+        out.append("[tool.ruff.format] preview = true: the preview layout can change in any ruff release; leave it off")
+    explicit = lint.get("explicit-preview-rules", ruff.get("explicit-preview-rules"))
+    if lint.get("preview") is True and explicit is not True:
+        out.append(
+            "[tool.ruff.lint] preview = true needs explicit-preview-rules = true: otherwise a family in "
+            "select turns on every preview rule of that family; name each preview rule instead"
+        )
+    for section, settings in (("tool.ruff", ruff), ("tool.ruff.lint", lint)):
+        for key in ("select", "extend-select"):
+            rules = settings.get(key)
+            if isinstance(rules, list) and "PLC1901" in rules:
+                out.append(
+                    f'[{section}] {key} names PLC1901: it asks for `not x` instead of `x == ""`, '
+                    "the opposite of the house style; never select it"
+                )
+    return out
 
 
 def problems(
@@ -623,6 +664,52 @@ class PythonFilesTest(unittest.TestCase):
                     ],
                 )
 
+    def test_ruff_preview_only_for_the_rules_named(self) -> None:
+        def conf(lint: Mapping[str, object], **ruff: object) -> dict[str, object]:
+            return {"tool": {"ruff": {"lint": dict(lint), **ruff}}}
+
+        good = {"preview": True, "explicit-preview-rules": True, "select": ["F", "RUF039"]}
+        self.assertEqual(ruff_preview_problems(conf(good)), [])
+        self.assertEqual(ruff_preview_problems(conf({"select": ["F"]})), [])
+        self.assertEqual(ruff_preview_problems(conf(good, format={"preview": False})), [])
+        needs_explicit = (
+            "[tool.ruff.lint] preview = true needs explicit-preview-rules = true: otherwise a family in "
+            "select turns on every preview rule of that family; name each preview rule instead"
+        )
+        for lint in ({"preview": True}, {"preview": True, "explicit-preview-rules": False}):
+            with self.subTest(lint=lint):
+                self.assertEqual(ruff_preview_problems(conf(lint)), [needs_explicit])
+        # The older top-level form of explicit-preview-rules still counts.
+        self.assertEqual(ruff_preview_problems(conf({"preview": True}, **{"explicit-preview-rules": True})), [])
+        self.assertEqual(
+            ruff_preview_problems(conf(good, format={"preview": True})),
+            ["[tool.ruff.format] preview = true: the preview layout can change in any ruff release; leave it off"],
+        )
+        self.assertEqual(
+            ruff_preview_problems(conf(good, preview=True)),
+            [
+                (
+                    "[tool.ruff] preview = true: it also turns on the formatter's preview style; "
+                    "set preview in [tool.ruff.lint] only"
+                )
+            ],
+        )
+        for where, ruff in (
+            ("tool.ruff.lint] select", conf({**good, "select": ["F", "PLC1901"]})),
+            ("tool.ruff.lint] extend-select", conf({**good, "extend-select": ["PLC1901"]})),
+            ("tool.ruff] select", conf(good, select=["PLC1901"])),
+        ):
+            with self.subTest(where=where):
+                self.assertEqual(
+                    ruff_preview_problems(ruff),
+                    [
+                        (
+                            f'[{where} names PLC1901: it asks for `not x` instead of `x == ""`, '
+                            "the opposite of the house style; never select it"
+                        )
+                    ],
+                )
+
     def test_every_python_file_is_under_the_gates(self) -> None:
         files = repo_files()
         with open(os.path.join(REPO, "pyproject.toml"), "rb") as fh:
@@ -634,6 +721,7 @@ class PythonFilesTest(unittest.TestCase):
             + ann_ignore_problems(conf)
             + ruff_version_problems(conf)
             + typing_extensions_problems(conf)
+            + ruff_preview_problems(conf)
             + ty_setting_problems(conf, files)
             + ignore_comments(REPO, ty_gated(py_files, ty_gate))
         )

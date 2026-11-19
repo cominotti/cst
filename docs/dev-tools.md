@@ -126,6 +126,22 @@ repository:
   (annotations) is not in the selected rules: `test types` runs it on its
   own (`ruff check --select ANN`), on every Python file (see "ANN applies
   to every file" below).
+- **ruff preview**: `[tool.ruff.lint] preview = true` with
+  `explicit-preview-rules = true`, so a preview rule is on only where
+  `select` names it by its full code (a family selector such as `RUF` does
+  not pull in the about 145 others): `B901`, `B909`, `PLE1141`, `PLE4703`,
+  `PLW3201`, `PLW0244`, `RUF031`, `RUF039`, `RUF045`, `RUF056`, `RUF066`,
+  `RUF072` and `RUF075`, which find bugs (a list changed while it is
+  iterated, a value returned from a generator and dropped, ...) and had few
+  or no hits. Never `PLC1901`: it asks for `not x` instead of `x == ""`,
+  the opposite of the house style. Preview also changes some stable rules a
+  little (it added one `F811` hit). The formatter stays on its stable style:
+  `[tool.ruff.format]` has no `preview`, and neither has the top-level
+  `[tool.ruff]` (it would turn on both). `tests/test_python_files.py`
+  fails when preview is on without `explicit-preview-rules`, when
+  `PLC1901` is selected and when either formatter preview is on. A preview
+  rule can change or disappear in any ruff release; the exact pin means only
+  an upgrade pull request sees that (see "Upgrading a pin").
 - **`PLW1510`: every `subprocess.run` passes `check=`.** Without it, a
   command that fails (exit status not 0) does not stop the program, and
   nothing in the code says whether that was meant. At a new call site write:
@@ -546,7 +562,9 @@ One tool per pull request, so that new findings are clearly the new version's:
 2. Run `uv lock` (it rewrites `uv.lock` with the new hashes).
 3. Run `invowk cmd test pylint` and `invowk cmd test types`. Fix what the new
    version finds, or explain in the pull request why it is noise. A new ruff
-   can also lay out code differently: when the format check fails, run
+   can also change or drop the preview rules named in `select` (read their
+   findings, and the release notes for the ones gone) and lay out code
+   differently: when the format check fails, run
    `tests/uv-dev ruff format` and commit the result in the same pull request.
 4. For cosmic-ray, the gates above do not run it: run it for real, with
    `invowk cmd test mutation swap/domain.py swap.tests.test_swap --all`,

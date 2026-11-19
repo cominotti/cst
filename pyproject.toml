@@ -144,7 +144,42 @@ select = [
     "PYI",
     "EXE",
     "ERA",
+    # Preview rules, each by its full code (see preview below): a loop that
+    # changes the list it iterates (B909), a return value in a generator,
+    # silently dropped (B901), a dict iterated without .items() (PLE1141), a
+    # set changed while it is iterated (PLE4703), a misspelled dunder method
+    # (PLW3201), __slots__ redefined in a subclass (PLW0244), a tuple in a
+    # subscript with parentheses (RUF031), a regex pattern that is not a raw
+    # string (RUF039), a dataclass field that is a class variable by accident
+    # (RUF045), d.get(k, False) in a boolean test (RUF056), a property that
+    # returns nothing (RUF066), a finally that does nothing (RUF072), a
+    # context manager whose __enter__ can fail after acquiring (RUF075).
+    "B901",
+    "B909",
+    "PLE1141",
+    "PLE4703",
+    "PLW3201",
+    "PLW0244",
+    "RUF031",
+    "RUF039",
+    "RUF045",
+    "RUF056",
+    "RUF066",
+    "RUF072",
+    "RUF075",
 ]
+# Preview rules are on only where select names them by their full code: with
+# explicit-preview-rules, a family selector (PLC, RUF, ...) does not pull in
+# the other preview rules of its family. Never PLC1901 (it asks for `not x`
+# instead of `x == ""`, the opposite of the house style). The formatter
+# stays on its stable style ([tool.ruff.format] has no preview).
+# tests/test_python_files.py checks all three. A ruff upgrade can change or
+# drop a preview rule: read its findings (docs/dev-tools.md, "Upgrading a pin").
+preview = true
+explicit-preview-rules = true
+# RUF001-RUF003 (a character that looks like another): the micro sign of the
+# microsecond unit (µs) in cpu's docstrings is meant.
+allowed-confusables = ["µ"]
 # Rules of the selected families left out, each with its reason. No entry
 # may name ANN or ALL (tests/test_python_files.py).
 ignore = [
