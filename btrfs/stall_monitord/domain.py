@@ -117,7 +117,7 @@ def parse_stack(text: str | None) -> list[str]:
 def stack_signature(frames: Sequence[str], wchan: str | None) -> tuple[str, str]:
     """Innermost non-generic frame plus the syscall/context it came from."""
     if not frames:
-        return (f"wchan:{wchan}" if wchan else "no-stack"), ""
+        return (f"wchan:{wchan}" if wchan is not None and wchan != "" else "no-stack"), ""
     sig = next((f for f in frames if not GENERIC_FRAME.match(f)), frames[0])
     ctx = ""
     for f in frames:
@@ -226,7 +226,7 @@ def wait_kind(frames: Sequence[str], wchan: str | None) -> str:
             if LOCAL_IO_FRAME.match(f):
                 return "storage"
         return "storage"
-    if wchan:
+    if wchan is not None and wchan != "":
         if FUSE_FRAME.match(wchan):
             return "fuse"
         if MAINT_FRAME.match(wchan):
@@ -568,7 +568,7 @@ def io_some_pct(prev: SampleOut | None, rec: SampleOut) -> float:
     if not prev:
         return 0.0
     io, prev_io = rec["psi"]["io"], prev["psi"]["io"]
-    if not io or not prev_io:
+    if io is None or len(io) == 0 or prev_io is None or len(prev_io) == 0:
         return 0.0
     dt = rec["mono"] - prev["mono"]
     if dt <= 0:

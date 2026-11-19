@@ -205,7 +205,7 @@ def manifest_arg(args: Sequence[str], cwd: str) -> str:
             val = args[i + 1]
         elif a.startswith("--manifest-path="):
             val = a.split("=", 1)[1]
-        if val:
+        if val is not None and val != "":
             return os.path.normpath(os.path.join(cwd, val))
     return ""
 

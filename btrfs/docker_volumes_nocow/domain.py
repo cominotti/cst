@@ -172,7 +172,7 @@ def next_postponed(rec: StoredPostponed | None, *, why: str, boot: str, now: int
 
 def postponed_line(rec: StoredPostponed | None) -> str:
     """The status line of a postponed migration, or ""."""
-    if not rec:
+    if rec is None or len(rec) == 0:
         return ""
     last = rec.get("last")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if type(last) is int else "?"

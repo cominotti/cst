@@ -240,7 +240,7 @@ def find_worktrees(home: str, deadline: float, ws: Workspaces, cmd_timeout: floa
     for d in found:
         common = git_common_dir(d)
         roots.add(os.path.realpath(d))
-        if common:
+        if common is not None and common != "":
             groups.setdefault(common, d)
     for _common, d in sorted(groups.items()):
         for wt in git_worktrees(d, deadline, cmd_timeout):
@@ -370,7 +370,7 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
     ws = Workspaces()
     start = time.monotonic()
     deadline = start + ENUM_BUDGET
-    pre = prefixes(root) if root else ()
+    pre = prefixes(root) if root is not None and root != "" else ()
     try:
         ws.worktrees = find_worktrees(home, deadline, ws, limits.cmd_timeout)
         cargo = user_cargo(home) if with_cargo else ""

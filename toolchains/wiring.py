@@ -113,7 +113,7 @@ def reexec_on_host(argv: Sequence[str], entry_file: str) -> int | None:
     the same program runs on the host (same home path), replacing this one.
     None when it runs here (on the host, or CST_TOOLCHAINS_HERE set); 1 when
     the host cannot be reached (said on stderr)."""
-    if not in_container() or os.environ.get("CST_TOOLCHAINS_HERE"):
+    if not in_container() or os.environ.get("CST_TOOLCHAINS_HERE", ""):
         return None
     try:
         spawn = on_host_argv([*program_argv(entry_file), *argv], {"CST_PROG": prog_name()})

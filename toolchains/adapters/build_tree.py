@@ -365,10 +365,10 @@ class CargoBuildTree:
         # after this check must first compile, and that waits for the lock.
         try:
             users = self.open_by(root)[0].get(folder.key)
-            if users:
+            if users is not None and len(users) > 0:
                 return BuildTreeResult.BUSY, "in use: " + users_text(users)
             ties, unknown = self.cargo_runs(root, cache)
-            if ties.get(folder.key):
+            if ties.get(folder.key, []):
                 return BuildTreeResult.BUSY, "cargo runs on it: " + users_text(ties[folder.key])
             if unknown:
                 return BuildTreeResult.STOP, unknown_text(unknown)

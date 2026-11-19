@@ -70,7 +70,7 @@ def _file_findings(
 def _older(files: InstalledFilesPort, f: RecordedFile) -> bool:
     """The record's bytes differ from what this checkout installs (a manifest file only; a template with
     its recorded values; never a file its module renders itself, such as the sccache wrapper)."""
-    entry = manifest_by_src().get(f.src) if f.src else None
+    entry = manifest_by_src().get(f.src) if f.src is not None and f.src != "" else None
     if entry is None or (f.values is not None and not entry.is_template):
         return False
     want = files.desired_sha256(entry.src, f.values)

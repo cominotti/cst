@@ -24,7 +24,7 @@ LOG_DIR = state_format(StateFormatKey.STALL_RECORDS).folder
 
 
 def parse_time(s: str | None, default: float) -> float:
-    if not s:
+    if s is None or s == "":
         return default
     s = s.strip()
     if s.startswith("@"):

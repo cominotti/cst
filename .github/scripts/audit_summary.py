@@ -15,7 +15,7 @@ def main() -> int:
 
     report_path = Path(sys.argv[1])
     exit_code = int(sys.argv[2])
-    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
     if not summary_file:
         return 0
 

@@ -292,7 +292,7 @@ class Run:
                 )
             return
         line = str(int(self.now))
-        if self.boot_id and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
+        if self.boot_id is not None and UUID_RE.fullmatch(self.boot_id) and self.boottime is not None:
             line += f" {self.boot_id} {self.boottime:.3f}"
         # The file is fsynced, its folder is not (a crash at worst keeps the
         # previous record): one btrfs log sync less per run.
@@ -1041,7 +1041,7 @@ def cmd_latest(args: LatestQuery, machine: Machine) -> tuple[int, str | None]:
     check_snapdir(machine.host, args.snapdir)
     log = machine.log
     source_uuid = None
-    if args.source_path:
+    if args.source_path is not None and args.source_path != "":
         try:
             source_uuid = machine.btrfs.show(SubvolPath(os.path.normpath(args.source_path)))["uuid"]
         except ParseError as e:

@@ -149,7 +149,7 @@ def summarise(
             ("cpu", "cpu_some", 1),
         ):
             pa, pb = a["psi"].get(key), b["psi"].get(key)
-            if pa and pb and pb[idx] >= pa[idx]:
+            if pa is not None and len(pa) > 0 and pb is not None and len(pb) > 0 and pb[idx] >= pa[idx]:
                 psi[res_key] += pb[idx] - pa[idx]
         p = b["psi"]
         peak["io_some_avg10"] = max(peak["io_some_avg10"], (p.get("io") or [0])[0])
@@ -208,7 +208,7 @@ def summarise(
                     f["new_device_errors"] += n - fa["err"][devid]
         for name, xb in b["disk"].items():
             xa = a["disk"].get(name)
-            if not xa:
+            if xa is None or len(xa) == 0:
                 continue
             delta = {k: xb[DI[k]] - xa[DI[k]] for k in DISK_SUM}
             if any(v < 0 for v in delta.values()):
@@ -237,7 +237,7 @@ def summarise(
                 d["peak_util_pct"], d["peak_at"] = util, b["ts"]
         for name, vb in b.get("cg", {}).items():
             va = a.get("cg", {}).get(name)
-            if not va:
+            if va is None or len(va) == 0:
                 continue
             dl = [y - x for x, y in zip(va, vb, strict=False)]
             if any(v < 0 for v in dl):

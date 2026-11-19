@@ -241,7 +241,7 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
     names, problem = dom_fn(host)
     rb_ver = rollback.get("version") or (rollback.get("checksum") or "?")[:10]
     what = f"virtualization packages changed from the rollback deployment {rb_ver} to the booted one: {change}"
-    if not names:
+    if names is None or len(names) == 0:
         yield Result(INFO, f"{what}; no libvirt VM {'defined' if names is not None else f'seen ({problem})'}")
         return
     pinned = bool(rollback.get("pinned"))
@@ -369,7 +369,9 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                 )
             elif state in ("shut off", "crashed"):
                 kind = (
-                    VmOverlayKind.OFFLINE if file_newer(host, HostPath(path), HostPath(base)) else VmOverlayKind.UNKNOWN
+                    VmOverlayKind.OFFLINE
+                    if file_newer(host, HostPath(path), HostPath(base)) is True
+                    else VmOverlayKind.UNKNOWN
                 )
             else:
                 kind = VmOverlayKind.UNKNOWN
@@ -431,7 +433,7 @@ def check_vm_backup_timer(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
     """INFO: whether the weekly NAS backup timer of each VM is on."""
     dom_fn = libvirt_domains if domains_fn is None else domains_fn
     names, _ = dom_fn(host)
-    if not names:
+    if names is None or len(names) == 0:
         return
     try:
         links = set(host.listdir(host.path(VM_TIMER_WANTS)))
@@ -456,7 +458,7 @@ def check_vm_hardware(
     """INFO for VMs whose disks or network card differ from `cst vm tune`."""
     dom_fn = libvirt_domains if domains_fn is None else domains_fn
     names, _ = dom_fn(host)
-    if not names:
+    if names is None or len(names) == 0:
         return
     if vm_tools is None:
         yield Result(INFO, "VM hardware: not checked (the vm package is not wired in)")
@@ -520,7 +522,7 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = 
                 f"VM image folder {path}: still copy-on-write: {listed}; "
                 f"{host.cst} vm nocow plan prints how to convert (never done automatically)",
             )
-        if p.nocow and not cow:
+        if p.nocow is True and not cow:
             yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
 
 

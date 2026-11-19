@@ -266,7 +266,7 @@ def with_builds_parent(path: str, current: DaemonJson) -> JsonEdit:
     parent = current.get("cgroup-parent")
     if parent == "builds.slice":
         return JsonEdit(None, f"unchanged: {path}")
-    if parent:
+    if parent is not None and parent:
         return JsonEdit(None, f"{path} already sets cgroup-parent={parent!r}: left alone", error=True)
     return JsonEdit({**current, "cgroup-parent": "builds.slice"}, f"written:   {path} (cgroup-parent: builds.slice)")
 

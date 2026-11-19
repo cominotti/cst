@@ -209,11 +209,12 @@ def json_number(value: Json) -> float:
 
 def rust_last_run(s: SavedRun) -> str:
     """One line of status from rust:build's saved summary (an older one may lack keys)."""
-    extra = f", {s['busy']} busy" if s.get("busy") else ""
-    extra += f", {s['failed']} failed" if s.get("failed") else ""
+    busy, failed, trimmed = s.get("busy"), s.get("failed"), s.get("trimmed")
+    extra = f", {busy} busy" if busy is not None and busy else ""
+    extra += f", {failed} failed" if failed is not None and failed else ""
     trim = (
-        f", incremental of {s['trimmed']} folder(s) ({gib(json_number(s.get('trim_freed', 0)))})"
-        if s.get("trimmed")
+        f", incremental of {trimmed} folder(s) ({gib(json_number(s.get('trim_freed', 0)))})"
+        if trimmed is not None and trimmed
         else ""
     )
     return (

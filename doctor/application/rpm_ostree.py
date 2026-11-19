@@ -139,7 +139,7 @@ def check_staged(host: DoctorHostPort) -> Iterator[Result]:
     if pending is None:
         yield Result(OK, "no pending deployment: the next boot is the booted one")
         return
-    if not pending.get("staged"):
+    if not pending.get("staged", False):
         yield Result(
             INFO,
             f"{describe(pending)} is not the booted one (for example after "

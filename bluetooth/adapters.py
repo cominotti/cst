@@ -274,7 +274,7 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
 
     def ldac_back() -> Snapshot | None:
         s = live.snap()
-        return s if s and s["codec"] == "ldac" and s["rate"] else None
+        return s if s and s["codec"] == "ldac" and s["rate"] is not None and s["rate"] != 0 else None
 
     snap = wait_until(ldac_back, LDAC_WAIT, step=1.0)
     if snap is None:

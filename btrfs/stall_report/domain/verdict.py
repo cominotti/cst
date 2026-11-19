@@ -135,7 +135,7 @@ def busy_lines(res: AnalyseResult) -> list[str]:
         e
         for e in res["events"]
         if e.get("kind") == "hung"
-        and e.get("severe")
+        and e.get("severe", False)
         and (v6 is None or e.get("ts", 0) < v6)
         and any(f in ("btrfs_sync_log", "btrfs_sync_file") for f in e.get("stack") or ())
     ]
@@ -176,7 +176,7 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
             f"INCOMPLETE DATA: {cov['covered_s']} s of the {cov['window_s']} s window recorded, last sample "
             f"{fmt_ts(cov['last_sample'])}. Data is written every ~10 s; re-run shortly, or narrow the window."
         )
-    sev = [e for e in res["events"] if e.get("severe")]
+    sev = [e for e in res["events"] if e.get("severe", False)]
     if sev:
         out.append(f"KERNEL/FS PROBLEMS: {len(sev)} severe event(s) (hung task, btrfs or device error); see 'events'.")
     if any(f["new_device_errors"] for f in res["fs"].values()):

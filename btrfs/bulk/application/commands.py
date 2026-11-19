@@ -90,7 +90,7 @@ def steam_survey(b: Bulk, ids: Sequence[str], allow_copy: bool = False) -> Steam
         def settle(t: Vdf) -> Vdf:
             return lf_with_library(t, T, present(cid, "the marker's contentid"), b.tree.realpath)
 
-        S = steam_read_pair(b, settle if cid else None)
+        S = steam_read_pair(b, settle if cid is not None and cid != "" else None)
     except Unexpected as e:
         sv["fatal"] = str(e)
         return sv
@@ -299,7 +299,7 @@ def start_moves(b: Bulk, sv: SteamSurvey, movers: Sequence[SteamApp], rc: int) -
             p.get("sample", "")
             for a in movers
             for p in a["parts"]
-            if p.get("mode") == SteamPartMode.REFLINK and p.get("sample")
+            if p.get("mode") == SteamPartMode.REFLINK and p.get("sample", "")
         ),
         "",
     )

@@ -34,7 +34,7 @@ def _datagram_socket() -> _Datagrams:
 
 def _address(value: str | None) -> str | None:
     """The socket address of a NOTIFY_SOCKET value: a path, or an abstract name (@name); None for anything else."""
-    if not value:
+    if value is None or value == "":
         return None
     if value.startswith("@") and len(value) > 1:
         return "\0" + value[1:]

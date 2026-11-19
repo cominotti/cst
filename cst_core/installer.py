@@ -158,12 +158,14 @@ def _entries(
     component: str | None = None,
 ) -> tuple[InstallEntry, ...]:
     by_src = {e.src: e for e in INSTALL_MANIFEST}
-    if srcs and (module or kind is not None or owner is not None or component):
+    named = (module is not None and module != "") or (component is not None and component != "")
+    selected = named or kind is not None or owner is not None
+    if srcs and selected:
         raise _UsageError("name the files (SRC...) or select them (--module/--kind/--owner/--component), not both")
     if component is not None and component not in COMPONENTS:
         raise _UsageError(f"--component {component!r}: no such component (known: {', '.join(COMPONENTS)})")
     if not srcs:
-        if not (module or kind is not None or owner is not None or component):
+        if not selected:
             raise _UsageError("no file named")
         return tuple(
             e
@@ -233,7 +235,7 @@ def _listing(command: str, entries: Sequence[InstallEntry], home: str | None) ->
         if command == InstallerCommand.SRCS:
             print(e.src)
         else:
-            print(expand_dest(e.dest, home) if e.dest.startswith("~") and home else e.dest)
+            print(expand_dest(e.dest, home) if e.dest.startswith("~") and home is not None and home != "" else e.dest)
     return 0
 
 

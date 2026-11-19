@@ -161,7 +161,7 @@ def usage_usec(cg: str) -> int:
 def find_game(name: str | None) -> int | None:
     """PID of the game: NAME if given, else a process with GameMode's client
     library loaded."""
-    if name:
+    if name is not None and name != "":
         r = subprocess.run(["pgrep", "-xo", name], check=False, capture_output=True, text=True)
         return int(r.stdout.split()[0]) if r.stdout.split() else None
     # Several processes of the launch chain (reaper, pressure-vessel) map it:
@@ -291,7 +291,7 @@ def record_run(
         proc.terminate()
     rc = proc.returncode if proc else None
     meta: RunMeta = {"label": label, "start": start, "end": end, "cmd": list(cmd), "game": game, "rc": rc}
-    if mangohud:
+    if mangohud is not None and mangohud != "":
         newest = newest_mangohud_log(os.path.expanduser(mangohud), start, end)
         if newest is not None:
             shutil.copy2(newest, os.path.join(run_dir, "mangohud.csv"))

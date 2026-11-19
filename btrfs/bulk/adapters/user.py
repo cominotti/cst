@@ -438,7 +438,7 @@ class UserFiles:
         except OSError:
             os.rename(old, src)
             raise
-        if link:
+        if link is not None and link != "":
             try:
                 os.symlink(target, link)
             except OSError:
@@ -480,7 +480,7 @@ class UserFiles:
         was created again meanwhile (by an app, while the data waited in old),
         nothing is deleted: Unexpected, and the journal stays."""
         src, target, new, old, link = j["src"], j["target"], j["new"], j["old"], j["link"]
-        if link and kind(link) == LstatKind.LINK and self.tree.link_target(link) == target:
+        if link is not None and link != "" and kind(link) == LstatKind.LINK and self.tree.link_target(link) == target:
             os.unlink(link)
         if kind(old) == LstatKind.DIR:
             self.put_old_back(src, target, new, old)

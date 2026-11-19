@@ -624,7 +624,11 @@ def pw_state(
             prof = " ".join(str(pr.get("name", "?")) for pr in params.get("Profile", []) or [])
             raw_rule = p.get("bluez5.a2dp.ldac.quality")
             rule = None if raw_rule is None else str(raw_rule)
-        if kind.endswith("Node") and str(p.get("node.name", "")).startswith("bluez_output." + dev) and p.get(CODEC_KEY):
+        if (
+            kind.endswith("Node")
+            and str(p.get("node.name", "")).startswith("bluez_output." + dev)
+            and p.get(CODEC_KEY, "")
+        ):
             codec = str(p[CODEC_KEY])
             rate = node_rate(info)
             for pr in params.get("Props", []) or []:
@@ -694,7 +698,7 @@ def still_pending(recorded: Mapping[str, str], current: Mapping[str, str], skipp
     and each skipped unit that runs now. A unit that does not run reads the new files when
     it starts: nothing is owed for it."""
     owed = {u: i for u, i in recorded.items() if current.get(u) == i}
-    owed.update({u: current[u] for u in skipped if u in RESTART_UNITS and current.get(u)})
+    owed.update({u: current[u] for u in skipped if u in RESTART_UNITS and current.get(u, "")})
     return owed
 
 

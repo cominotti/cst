@@ -398,5 +398,9 @@ def conflict_text(ctx: Ctx, j: ItemJournal) -> str:
         f"written to on both sides during the move: compare {ctx.short(j['old'])} (the old "
         f"tree) with {ctx.short(j['target'])} (in use now), copy what you need into the "
         f"second, delete the first, then run bulk apply again"
-        + ("; both inside ~/Bulk, no data of it in /home: snapshots do not wait for it" if j.get("bulk_only") else "")
+        + (
+            "; both inside ~/Bulk, no data of it in /home: snapshots do not wait for it"
+            if j.get("bulk_only", False)
+            else ""
+        )
     )

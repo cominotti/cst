@@ -168,7 +168,7 @@ def committed(b: Bulk, j: ItemJournal) -> bool:
     kind = b.tree.kind
     if j["kind"] == BulkJournalKind.SUBVOL:
         return kind(present(j["link"], "the journal's link")) == LstatKind.LINK
-    if j["link"]:
+    if j["link"] is not None and j["link"] != "":
         return kind(j["link"]) == LstatKind.LINK and b.tree.link_target(j["link"]) == j["target"]
     # In-place rewrite of the target (no link): new renamed onto it, old kept.
     return (
@@ -193,7 +193,7 @@ def recover(b: Bulk) -> list[str]:
             state.jdrop(item.id)
         except (OSError, RuntimeError, Unexpected) as e:
             stuck.append(item.id)
-            wait = "" if j.get("bulk_only") else "; snapshots wait until it is gone"
+            wait = "" if j.get("bulk_only", False) else "; snapshots wait until it is gone"
             log(f"NEEDS A LOOK: {item.id}: an interrupted move: {e} (journal kept in {state.jpath(item.id)}{wait})")
     return stuck + steam_recover_all(b)
 
@@ -201,11 +201,11 @@ def recover(b: Bulk) -> list[str]:
 def recover_item(b: Bulk, item: Item, j: ItemJournal) -> None:
     """Finish or undo the move journal j recorded (ItemRecover); an exception: it stays."""
     ctx, user, log = b.ctx, b.user, b.out.log
-    if j.get("conflict"):
+    if j.get("conflict", False):
         if b.tree.kind(j["old"]) != LstatKind.ABSENT:
             raise Unexpected(conflict_text(ctx, j))
         log(f"  {item.id}: the old tree is gone: the move is complete")
-    elif j.get("finishing"):
+    elif j.get("finishing", False):
         # The last check had passed and the old tree was being deleted:
         # what is left of it is a partial copy (each deletion changes
         # ctimes there, so the late-write check cannot be made again).
@@ -213,7 +213,7 @@ def recover_item(b: Bulk, item: Item, j: ItemJournal) -> None:
         log(f"  {item.id}: deleted the old copy left by an interrupted run (its deletion was cut short)")
     elif j["kind"] == BulkJournalKind.SUBVOL:
         recover_subvol(b, item, j)
-    elif not j.get("undo") and committed(b, j):
+    elif not j.get("undo", False) and committed(b, j):
         recover_switched(b, item, j)
     else:
         user.rollback(j)
@@ -692,13 +692,17 @@ def report_journals(b: Bulk) -> int:
             continue
         left += 1
         j = state.jread_item(item.id)
-        if j and j.get("conflict") and b.tree.kind(j["old"]) != LstatKind.ABSENT:
+        if j and j.get("conflict", False) and b.tree.kind(j["old"]) != LstatKind.ABSENT:
             say(f"  {item.id}: NEEDS A LOOK: {conflict_text(ctx, j)}")
         elif j:
             say(f"  {item.id}: an interrupted move is recorded ({ctx.short(j['old'] or j['src'])}): the next")
             say(
                 "      apply (or boot) finishes or undoes it; "
-                + ("inside ~/Bulk only, snapshots do not wait" if j.get("bulk_only") else "snapshots wait until then")
+                + (
+                    "inside ~/Bulk only, snapshots do not wait"
+                    if j.get("bulk_only", False)
+                    else "snapshots wait until then"
+                )
             )
         else:
             say(f"  {item.id}: NEEDS A LOOK: {state.newer_journal(item.id) or damaged(state, item.id)}")
@@ -712,7 +716,7 @@ def report_steam_journals(b: Bulk) -> int:
     for ident in state.steam_journal_ids():
         left += 1
         sj = state.jread_steam(ident)
-        if sj and sj.get("conflict"):
+        if sj and sj.get("conflict", False):
             say(f"  {ident}: NEEDS A LOOK: {steam_conflict_text(b, sj)}")
         elif sj:
             say(f"  {ident}: an interrupted Steam game move is recorded (phase {sj.get('phase')}): the next")

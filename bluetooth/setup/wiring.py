@@ -80,7 +80,7 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
     if found is None:
         return Exit(1, err=f"id: '{user}': no such user\n")
     uid, home = found
-    handed = [f"CST_PROG={env['CST_PROG']}"] if env.get("CST_PROG") else []
+    handed = [f"CST_PROG={env['CST_PROG']}"] if env.get("CST_PROG", "") else []
     self_script = os.path.join(cst_folder(entry), "bluetooth-setup.sh")
     argv = step_down_argv(
         user,

@@ -322,7 +322,7 @@ def resolve_protection(
         base = Protection(parse_settings_file(path, file_text), f"DOCKER_GC_PROTECT in {path}")
     elif installed is None:
         base = Protection((), f"no {path}, and no docker-gc installed", to_write=())
-    elif not (built_in := builtin_protected(installed)):
+    elif (built_in := builtin_protected(installed)) is None or len(built_in) == 0:
         # Fail closed. Only an older docker-gc has a list of its own, never an empty one; this one
         # (an empty default) reads it from the file, so the file being gone is no "none".
         what = "reads them from that file" if built_in == () else "does not show which registries it protects"
@@ -471,7 +471,7 @@ def auto_named(name: str) -> bool:
 
 def ts(value: str | None) -> float:
     """RFC 3339 from Docker (nanoseconds, Z) -> epoch seconds; 0 if unset."""
-    if not value or not isinstance(value, str) or value.startswith("0001-"):
+    if value is None or value == "" or not isinstance(value, str) or value.startswith("0001-"):
         return 0
     m = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$", value)
     if not m:

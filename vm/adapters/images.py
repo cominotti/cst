@@ -24,7 +24,7 @@ def nocow(path: str) -> bool:
 def user_home(sudo_user: str | None) -> str:
     """The home of the user who runs CST: under sudo, SUDO_USER's (sudo may
     set HOME to /root), else HOME."""
-    if os.geteuid() == 0 and sudo_user:
+    if os.geteuid() == 0 and sudo_user is not None and sudo_user != "":
         try:
             return pwd.getpwnam(sudo_user).pw_dir
         except KeyError:
@@ -140,7 +140,7 @@ def mark_system_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
             mark_folder_nocow(path)
         except OSError as e:
             return f"{path}: {e.strerror}"
-        return "" if flag_state(readable_inode_flags(path)) else f"{path}: the mark did not stick"
+        return "" if flag_state(readable_inode_flags(path)) is True else f"{path}: the mark did not stick"
     steps: list[list[str]] = []
     if not d.present:
         steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]
@@ -164,7 +164,7 @@ def mark_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
         mark_folder_nocow(d.path)
     except OSError as e:
         return f"{d.path}: {e.strerror}"
-    return "" if flag_state(readable_inode_flags(d.path)) else f"{d.path}: the mark did not stick"
+    return "" if flag_state(readable_inode_flags(d.path)) is True else f"{d.path}: the mark did not stick"
 
 
 class ImageFolders:

@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.text import first_line
 from vm import wiring
-from vm.domain import instance, nocow_lines, version_changes, VmSettings
+from vm.domain import instance, nocow_lines, of_vm, version_changes, VmSettings
 from vm.domain.tune import cpu_status_line, tune_line
 
 
@@ -14,7 +14,7 @@ def cmd_list(cfg: VmSettings, vm: str | None) -> None:
     store = wiring.backup_store(cfg)
     entries = [e for e in store.read_index() if vm is None or e["vm"] == vm]
     if not entries:
-        print(f"no VM backups{f' of {vm}' if vm else ''} in {cfg.paths.index} (make one: {cfg.cst} vm backup)")
+        print(f"no VM backups{of_vm(vm)} in {cfg.paths.index} (make one: {cfg.cst} vm backup)")
         return
     for e in sorted(entries, key=lambda e: (e["vm"], e.get("epoch") or 0)):
         print(store.describe(e))

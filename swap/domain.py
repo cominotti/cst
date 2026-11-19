@@ -371,7 +371,7 @@ def same_param(live: str, desired: str) -> bool:
 
 def share(num: float, den: float | None) -> float | None:
     """num/den as a fraction, None when den is 0."""
-    return None if not den else num / den
+    return None if den is None or den == 0 else num / den
 
 
 def pct(frac: float | None) -> str:
@@ -495,7 +495,7 @@ def zswap_summary(meminfo: Mapping[str, int], vmstat: Mapping[str, int], params:
         "limit": limit,
         "pool_of_limit": share(pool or 0, limit) if pool is not None else None,
         "accept_below": limit * accept // 100 if limit is not None and accept is not None else None,
-        "ratio": (stored / pool) if pool and stored is not None else None,
+        "ratio": (stored / pool) if pool is not None and pool != 0 and stored is not None else None,
         "zswpout": zout,
         "zswpin": zin,
         "zswpwb": zwb,

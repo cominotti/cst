@@ -385,7 +385,7 @@ def describe_entry(e: IndexEntry) -> str:
         "?",
     )
     if e.get("mode") == "nas":
-        keep = f", kept: {e['keep']}" if e.get("keep") else ""
+        keep = f", kept: {kept}" if (kept := e.get("keep")) is not None and kept != "" else ""
         return (
             f"{e['vm']:<16} {e['timestamp']}  nas      deployment {dep.get('version') or '?'}"
             f"  {qemu}  restic {str(e.get('snapshot'))[:8]} ({e.get('consistency') or '?'}{keep})"

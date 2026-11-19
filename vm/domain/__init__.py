@@ -271,11 +271,16 @@ class ImageProbe:
     leftovers: list[str] = field(default_factory=list)
 
 
+def of_vm(vm: str | None) -> str:
+    """' of VM' for a line about one VM's backups; "" for all of them (no name, or an empty one)."""
+    return f" of {vm}" if vm is not None and vm != "" else ""
+
+
 def disk_label(dev: str | None, source: str = "", *, word: str = "") -> str:
     """A disk as a message names it: word + its target (sda). Without a
     target name (libvirt requires one, but a definition read here may lack
     it): "unnamed disk", with its source path when one is given."""
-    if dev:
+    if dev is not None and dev != "":
         return word + dev
     return f"unnamed disk on {source}" if source else "unnamed disk"
 
@@ -309,7 +314,7 @@ def domain_parts(xml_text: str) -> DomainParts:
             )
             continue
         path = src.get("file") if src is not None else None
-        if not path:
+        if path is None or path == "":
             skipped.append(f"{disk_label(dev)} (no source file)")
             continue
         if path not in disks:
@@ -478,7 +483,7 @@ def quiesce_skipped(agent: str, *, quiesce: bool) -> str:
 
 
 def valid_keep(name: str | None) -> bool:
-    if not name:
+    if name is None or name == "":
         return False
     return (
         bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name))

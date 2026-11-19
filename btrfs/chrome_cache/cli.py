@@ -82,7 +82,7 @@ def main(argv: Sequence[str]) -> int:
     if "--home" in args:
         i = args.index("--home")
         home = args[i + 1] if i + 1 < len(args) else None
-    if cmd is None or (("--home" in args) and not home):
+    if cmd is None or (("--home" in args) and (home is None or home == "")):
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
     if HostExecutionContext().is_root():

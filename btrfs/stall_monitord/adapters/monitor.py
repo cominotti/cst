@@ -407,7 +407,7 @@ class Monitor:
         out: list[DTask] = []
         for pid, tid, comm in d_tasks:
             frames, wchan = self.describe(pid, tid)
-            if not (frames or wchan) or d_comm(pid, tid) is None:
+            if not (frames or (wchan is not None and wchan != "")) or d_comm(pid, tid) is None:
                 continue
             out.append((pid, tid, comm, frames, wchan, wait_kind(frames, wchan)))
         return settle_kinds(out)

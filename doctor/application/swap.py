@@ -102,7 +102,7 @@ def check_machine_slice_memory_low(host: DoctorHostPort) -> Iterator[Result]:
     if want is None:
         return
     vals = unit_props(host, ["systemctl"], "machine.slice", ["MemoryLow", "DropInPaths"])
-    if vals is None or not vals.get("MemoryLow"):
+    if vals is None or not vals.get("MemoryLow", ""):
         return
     effective = vals["MemoryLow"]
     paths = vals.get("DropInPaths", "").split()

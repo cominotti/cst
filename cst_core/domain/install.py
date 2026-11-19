@@ -242,7 +242,7 @@ def python_entry_srcs() -> tuple[InstallEntry, ...]:
 def expand_dest(dest: str, home: str | None) -> str:
     """The destination with a leading `~/` replaced by `home` (a user-owned entry)."""
     if dest == "~" or dest.startswith("~/"):
-        if not home:
+        if home is None or home == "":
             raise ValueError(f"{dest}: a home folder is needed for this destination")
         return home.rstrip("/") + dest[1:]
     return dest

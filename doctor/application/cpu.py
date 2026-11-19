@@ -189,7 +189,7 @@ def user_manager_cgroup(host: DoctorHostPort) -> HostPath | None:
     uid = host.uid
     if uid == 0:
         target = conf_value(host, CPU_CONF, "TARGET_USER")
-        if not target:
+        if target is None or target == "":
             return None
         found = host.user_id(target)
         if found is None:
@@ -222,7 +222,7 @@ def check_user_manager_boxes(host: DoctorHostPort) -> Iterator[Result]:
     every CPU); info for systemd-run jobs straight in app.slice. Reads
     /sys/fs/cgroup only; nothing when there is no user manager to look at."""
     rel = user_manager_cgroup(host)
-    if not rel or not host.isdir(host.path(rel)):
+    if rel is None or rel == "" or not host.isdir(host.path(rel)):
         return
     base = host.path(rel)
     loose = [(u, d) for u, d in cgroup_units(host, base) if u.endswith(".slice") and u not in USER_KNOWN_SLICES]

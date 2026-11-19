@@ -91,7 +91,7 @@ def snapshot(dev: str, objs: Iterable[PwObject]) -> Snapshot:
         if not kind.endswith("Node"):
             continue
         name = str(p.get("node.name", ""))
-        if name.startswith("bluez_output." + dev) and p.get(CODEC_KEY):
+        if name.startswith("bluez_output." + dev) and p.get(CODEC_KEY, ""):
             snap["out"] = serial(p)
             snap["codec"] = p[CODEC_KEY]
             snap["rate"] = node_rate(info)

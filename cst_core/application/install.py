@@ -98,7 +98,7 @@ def record_file(owner: Owner, home: str | None, root: str = "") -> str:
     """The install record of root's files, or of the user's whose home this is (staged under root)."""
     if owner == Owner.ROOT:
         return staged(root, ROOT_RECORD)
-    if not home:
+    if home is None or home == "":
         raise ValueError("a home folder is needed for the user's install record")
     return staged(root, home.rstrip("/") + "/" + USER_RECORD_REL)
 
