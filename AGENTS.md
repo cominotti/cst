@@ -218,8 +218,9 @@ of those either.
 Python reports a file, socket or child process that was never closed only
 when the object is freed, as a ResourceWarning it prints, and the test
 still passes. `tests/run_unit.py` records each one (and each exception
-raised in a `__del__`) with the test that was running, collects garbage
-once more after the last test, and fails the run on any.
+Python can only print: raised in a `__del__`, a weakref callback, ...)
+with the test that was running, collects garbage once more after the last
+test, and fails the run on any.
 
 **Rule:** close what a test opens: a `with` block, or `self.addCleanup(x.close)`.
 To see where a reported object was opened, run that test again with

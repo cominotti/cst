@@ -54,16 +54,18 @@ test's sandbox) works under it; it sets the same flag itself.
 
 No test may leave a file, a socket or a child process open. Python finds
 such a leak when the object is freed and only prints a ResourceWarning
-(an exception raised in a __del__ is only printed too), so the test still
-passes; a daemon that leaks a descriptor per event fails slowly. This
-runner records every ResourceWarning (one that goes to a
-warnings.showwarning a test replaced too, and one after a test that
-changed the warning filters for good: each test starts with them
-recording again) and every exception raised in a
-__del__ with the test that was running (LeakRecordingResult), runs the
-garbage collector once more after the last test, and fails the run on
-each one, with a hint: run the test again with -X tracemalloc=8 to see
-where the resource was opened. A test that records warnings itself
+(an exception raised in a __del__, a weakref callback or a generator
+closed when it is freed is only printed too), so the test still passes; a
+daemon that leaks a descriptor per event fails slowly. This runner
+records every ResourceWarning (one that goes to a warnings.showwarning a
+test replaced too, and one after a test that changed the warning filters
+for good: each test starts with them recording again) and every exception
+Python could only print (sys.unraisablehook) with the test that was
+running (LeakRecordingResult), runs the garbage collector once more after
+the last test, and fails the run on each one, with a hint: for a
+ResourceWarning, run the test again with -X tracemalloc=8 to see where the
+resource was opened; for an exception, its traceback is printed above the
+test results. A test that records warnings itself
 (warnings.catch_warnings(record=True)) keeps them. Code that runs in a
 child process (a helper started with python3 -I) is not seen.
 """
@@ -229,8 +231,13 @@ def guard_host_commands(folder: str) -> None:
 
 # What the run prints after the leaks it found: how to see where each one was opened.
 LEAK_HINT: Final = (
-    "a file, socket or other resource was left open (or an exception was raised in a __del__); "
+    "a file, socket or other resource was left open; "
     "run the test again with python3 -I -B -X tracemalloc=8 tests/run_unit.py NAME to see where it was opened"
+)
+# What the run prints after the exceptions Python could only print (sys.unraisablehook).
+LOST_EXCEPTION_HINT: Final = (
+    "an exception was raised where Python can only print it (in a __del__, a weakref callback, "
+    "a generator closed when it was freed, ...): its traceback is printed above the test results"
 )
 
 
@@ -244,17 +251,20 @@ _SHOWWARNING_ORIG: Final = "_showwarning_orig"
 
 class LeakRecordingResult(unittest.TextTestResult):
     """A TextTestResult that also records every ResourceWarning (a file, socket or child process
-    left open, found when it is freed) and every exception raised in a __del__, with the test
-    that was running. unittest only prints them, and a test that leaks still passes; the runner
-    fails the run on each one. A test that records warnings itself (warnings.catch_warnings with
-    record=True) keeps them: the hook does not see those."""
+    left open, found when it is freed; in leaks) and every exception Python could only print
+    (sys.unraisablehook: raised in a __del__, a weakref callback, ...; in lost_exceptions), with
+    the test that was running. unittest only prints them, and such a test still passes; the
+    runner fails the run on each one. A test that records warnings itself
+    (warnings.catch_warnings with record=True) keeps them: the hook does not see those."""
 
     leaks: list[str]
+    lost_exceptions: list[str]
 
     @override
     def startTestRun(self) -> None:
         super().startTestRun()
         self.leaks = []
+        self.lost_exceptions = []
         self._running = "before the first test"
         # TextTestRunner.run has set its own filter ("default") inside a catch_warnings block,
         # which also restores showwarning when the run ends.
@@ -316,7 +326,10 @@ class LeakRecordingResult(unittest.TextTestResult):
             self.leaks.append(f"ResourceWarning in {self._running}: {msg.message} ({msg.filename}:{msg.lineno})")
 
     def _unraisable(self, unraisable: sys.UnraisableHookArgs) -> None:
-        self.leaks.append(f"exception in {self._running}, ignored in {unraisable.object!r}: {unraisable.exc_value!r}")
+        # err_msg says what Python was doing (since 3.14 the object is often None and only err_msg
+        # names the __del__ or callback); None means the default "Exception ignored in" the object.
+        what = unraisable.err_msg or f"Exception ignored in {unraisable.object!r}"
+        self.lost_exceptions.append(f"exception in {self._running}: {what}: {unraisable.exc_value!r}")
         self._unraisablehook(unraisable)
 
 
@@ -382,12 +395,14 @@ def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
     for test_id, reason in skipped:
         print(f"skipped: {test_id}: {reason}", file=sys.stderr)
     problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    leaks = result.leaks
-    for line in [*problems, *leaks]:
+    leaks, lost = result.leaks, result.lost_exceptions
+    for line in [*problems, *leaks, *lost]:
         print(f"error: {line}", file=sys.stderr)
     if leaks:
         print(LEAK_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not problems and not leaks else 1
+    if lost:
+        print(LOST_EXCEPTION_HINT, file=sys.stderr)
+    return 0 if result.wasSuccessful() and not problems and not leaks and not lost else 1
 
 
 if __name__ == "__main__":

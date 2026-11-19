@@ -16,6 +16,7 @@ from tests.run_unit import (
     HOST_GUARD_ENV,
     HOST_GUARD_EXIT,
     LEAK_HINT,
+    LOST_EXCEPTION_HINT,
     expected_skip,
     load,
     skip_problems,
@@ -159,6 +160,16 @@ class S(unittest.TestCase):
         warnings.showwarning = lambda *args, **kwargs: None  # as logging.captureWarnings(True) does
         f = open(os.devnull)
         del f
+class U(unittest.TestCase):
+    def test_a_weakref_callback_raises(self):
+        import weakref
+        class Freed:
+            pass
+        thing = Freed()
+        def boom_callback(ref):
+            raise ZeroDivisionError("boom")
+        self.ref = weakref.ref(thing, boom_callback)
+        del thing
 class F(unittest.TestCase):
     def test_a_ignores_every_warning(self):
         warnings.simplefilter("ignore")  # outside a catch_warnings block: for the rest of the run
@@ -235,6 +246,19 @@ class ResourceWarningGateTest(unittest.TestCase):
         done = self.run_probe("", cls="F")
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn("error: ResourceWarning in probe_leaks.F.test_b_leaks_a_file: unclosed file", done.stderr)
+
+    def test_an_exception_python_could_only_print_fails_the_run_and_names_the_callback(self) -> None:
+        done = self.run_probe("test_a_weakref_callback_raises", cls="U")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+        self.assertEqual(len(error), 1, done.stderr)
+        self.assertTrue(
+            error[0].startswith("error: exception in probe_leaks.U.test_a_weakref_callback_raises: "), error
+        )
+        self.assertIn("boom_callback", error[0])  # what Python was calling, whatever its words for it
+        self.assertTrue(error[0].endswith(": ZeroDivisionError('boom')"), error)
+        self.assertIn(LOST_EXCEPTION_HINT, done.stderr)
+        self.assertNotIn(LEAK_HINT, done.stderr)
 
     def test_a_warning_the_test_records_itself_is_its_own(self) -> None:
         done = self.run_probe("test_records_its_own_warning")
