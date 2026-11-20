@@ -3,11 +3,12 @@
 snapshots left writable, Docker's postponed NOCOW."""
 
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 import os
 import re
 import shlex
 import time
-from typing import Final
+from typing import Final, NamedTuple
 
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from cst_core.domain.shapes import parse_json
@@ -182,6 +183,223 @@ def btrfs_devices(host: DoctorHostPort, base: ViewPath) -> tuple[list[tuple[str,
     return devs, ""
 
 
+# Where the ENOSPC lines send the reader for the steps.
+ENOSPC_STEPS: Final = "btrfs/README.md, section 13: 'No space left' but df shows free space"
+
+
+class _Levels(NamedTuple):
+    """btrfs-health-check's unallocated levels, in GiB."""
+
+    warn_gib: int
+    crit_gib: int
+
+    @property
+    def limits(self) -> str:
+        return f"warning below {self.warn_gib} GiB, critical below {self.crit_gib} GiB"
+
+
+@dataclass(frozen=True)
+class _Fs:
+    """What the allocation check reads of one mounted btrfs before it judges it."""
+
+    uuid: str
+    alloc: ViewPath
+    mnt: str
+    name: str
+    where: str
+    system: bool
+    devs: list[tuple[str, str, int]]
+    dev_problem: str
+    fill: dict[str, tuple[int, int] | None]
+    profiles: dict[str, dict[str, int]]
+    layout: str
+
+    @property
+    def needs_root(self) -> str:
+        return (
+            f"per-device unallocated needs root: sudo btrfs filesystem usage -T {self.where} "
+            "(the hourly btrfs-health-check watches it)"
+        )
+
+
+def _fs_facts(host: DoctorHostPort, sysfs: ViewPath, uuid: str, mounts: Mapping[str, list[str]]) -> _Fs:
+    """One filesystem's devices, mount point, chunk fill and profiles, read in this order."""
+    base = view_join(sysfs, uuid)
+    alloc = view_join(base, "allocation")
+    devs, dev_problem = btrfs_devices(host, base)
+    targets: list[str] = []
+    try:
+        for n in host.listdir(view_join(base, "devices")):
+            targets += [t for t in mounts.get(n, []) if t not in targets]
+    except OSError:
+        pass
+    mnt = pick_mount(targets)
+    # How full the chunks are (logical bytes: one copy).
+    fill: dict[str, tuple[int, int] | None] = {}
+    for kind in ("data", "metadata"):
+        total = read_int(host, view_join(alloc, kind, "total_bytes"))
+        used = read_int(host, view_join(alloc, kind, "bytes_used"))
+        fill[kind] = (used, total) if total is not None and total != 0 and used is not None else None
+    profiles = btrfs_profiles(host, alloc)
+    return _Fs(
+        uuid=uuid,
+        alloc=alloc,
+        mnt=mnt,
+        name=f"btrfs {mnt}" if mnt else f"btrfs {uuid[:8]}",
+        where=mnt or "MOUNTPOINT",
+        system=bool({"/", "/var", "/sysroot"} & set(targets)),
+        devs=devs,
+        dev_problem=dev_problem,
+        fill=fill,
+        profiles=profiles,
+        layout="/".join(sorted({p.upper() for prof in profiles.values() for p in prof})) or "?",
+    )
+
+
+def _chunk_fill_result(fs: _Fs) -> Result:
+    """How full the data and metadata chunks are."""
+    parts: list[str] = []
+    for kind in ("data", "metadata"):
+        pair = fs.fill[kind]
+        if pair:
+            u, t = pair
+            parts.append(
+                f"{kind} chunks {format_bytes_gib_mib(u)} used of {format_bytes_gib_mib(t)} allocated ({100 * u // t}%)"
+            )
+    data, meta = fs.fill["data"], fs.fill["metadata"]
+    if data and meta and data[0]:
+        parts.append(f"metadata is {100 * meta[0] / data[0]:.1f}% of data")
+    if parts:
+        return Result(OK, f"{fs.name} ({fs.layout}): " + ", ".join(parts))
+    return Result(INFO, f"{fs.name}: chunk usage not readable in sysfs")
+
+
+def _reclaim_result(host: DoctorHostPort, fs: _Fs, conf: str) -> Result:
+    """Automatic reclaim of half-empty data chunks (Linux 6.11+, set by cst btrfs install)."""
+    dyn = read_int(host, view_join(fs.alloc, "data", "dynamic_reclaim"))
+    per = read_int(host, view_join(fs.alloc, "data", "periodic_reclaim"))
+    if dyn is None or per is None:
+        return Result(INFO, f"{fs.name}: this kernel has no automatic reclaim switches (Linux 6.11 or later)")
+    if dyn == 1 and per == 1:
+        return _reclaim_on_result(host, fs)
+    off = ", ".join(k for k, v in (("dynamic_reclaim", dyn), ("periodic_reclaim", per)) if v != 1)
+    configured = f"/sys/fs/btrfs/{fs.uuid}/allocation/data/" in conf
+    if configured or fs.system:
+        why = "configured by CST but switched off" if configured else "not set up"
+        return Result(
+            WARN,
+            f"{fs.name}: automatic data reclaim is {why} ({off} = 0): btrfs then never "
+            "compacts half-empty data chunks by itself as unallocated space runs out",
+            f"{host.cst} btrfs install",
+        )
+    return Result(INFO, f"{fs.name}: automatic data reclaim off ({off}); CST sets it up only for the root filesystem")
+
+
+def _reclaim_on_result(host: DoctorHostPort, fs: _Fs) -> Result:
+    """Both reclaim switches on: how many chunks it reclaimed, and whether some failed."""
+    count = read_int(host, view_join(fs.alloc, "data", "reclaim_count"))
+    errs = read_int(host, view_join(fs.alloc, "data", "reclaim_errors"))
+    extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
+    if errs is not None and errs != 0:
+        return Result(
+            INFO,
+            f"{fs.name}: automatic data reclaim on (dynamic, periodic){extra}, {errs} failed (journalctl -k -g BTRFS)",
+        )
+    return Result(OK, f"{fs.name}: automatic data reclaim on (dynamic, periodic){extra}")
+
+
+def _unallocated_results(host: DoctorHostPort, fs: _Fs, levels: _Levels) -> Iterator[Result]:
+    """Unallocated space, per device: exact when each device holds one copy of every chunk, else the sum."""
+    if not fs.devs:
+        yield Result(INFO, f"{fs.name}: {fs.needs_root}; not estimated: {fs.dev_problem}")
+        return
+    each = per_device_allocated(fs.profiles, len(fs.devs))
+    if each is not None and all(size >= each for _, _, size in fs.devs):
+        yield from _unallocated_exact(host, fs, each, levels)
+    else:
+        yield _unallocated_striped(host, fs, levels)
+
+
+def _size_unknown(fs: _Fs, fs_bytes: int | None, block_bytes: int) -> str:
+    """Why the per-device numbers are only an upper bound (statfs does not match the block devices)."""
+    if fs_bytes is None:
+        return f"the filesystem size could not be read (stat -f {fs.where})"
+    if block_bytes > fs_bytes:
+        return (
+            f"the btrfs devices use {format_bytes_gib_mib(block_bytes - fs_bytes)} less than their block "
+            "devices (shrunk with btrfs filesystem resize?)"
+        )
+    return "the filesystem size from statfs does not match its block devices"
+
+
+def _unallocated_exact(host: DoctorHostPort, fs: _Fs, each: int, levels: _Levels) -> Iterator[Result]:
+    """Each device holds one copy of every chunk: its unallocated space is its size less each."""
+    fs_bytes = btrfs_device_bytes(host, fs.mnt, fs.profiles)
+    block_bytes = sum(size for _, _, size in fs.devs)
+    exact = fs_bytes is not None and abs(block_bytes - fs_bytes) <= RESIZE_SLACK
+    unknown = _size_unknown(fs, fs_bytes, block_bytes)
+    free = [(label, size - each) for _, label, size in fs.devs]
+    low = min(b for _, b in free)
+    listed = ", ".join(f"{label} {format_bytes_gib_mib(b)}" for label, b in free)
+    if not exact:
+        listed = "at most " + listed
+    meta = fs.fill["metadata"]
+    meta_free = (meta[1] - meta[0]) if meta else None
+    rsv = read_int(host, view_join(fs.alloc, "global_rsv_size")) or 0
+    if low < levels.crit_gib * GIB:
+        yield Result(
+            ERROR,
+            f"{fs.name}: CRITICAL: unallocated per device {listed} ({levels.limits}): "
+            f"ENOSPC is close. Free space first, then a filtered data balance; never a "
+            f"metadata or full balance. Steps: {ENOSPC_STEPS}",
+        )
+    elif low < levels.warn_gib * GIB:
+        yield Result(
+            WARN,
+            f"{fs.name}: little unallocated space per device: {listed} ({levels.limits}; "
+            f"metadata grows only from it). Free space; then, if it stays low, "
+            f"see {ENOSPC_STEPS}",
+        )
+    elif exact:
+        yield Result(
+            OK,
+            f"{fs.name}: unallocated per device {listed} ({levels.limits}; from sysfs, "
+            "each btrfs device fills its block device)",
+        )
+    else:
+        yield Result(INFO, f"{fs.name}: {fs.needs_root}; not estimated: {unknown}")
+    if meta_free is not None and meta_free < 2 * rsv and low < 2 * GIB:
+        yield Result(
+            ERROR,
+            f"{fs.name}: metadata almost full ({meta_free // 2**20} MiB free in "
+            f"metadata chunks, global reserve {rsv // 2**20} MiB): writes may fail "
+            f"with ENOSPC soon. Steps: {ENOSPC_STEPS}",
+        )
+
+
+def _unallocated_striped(host: DoctorHostPort, fs: _Fs, levels: _Levels) -> Result:
+    """Mixed or striped layout: only the sum over all devices is exact."""
+    disk_total = 0
+    for kind in ("data", "metadata", "system"):
+        disk_total += read_int(host, view_join(fs.alloc, kind, "disk_total")) or 0
+    total_free = sum(size for _, _, size in fs.devs) - disk_total
+    n = len(fs.devs)
+    if disk_total and total_free < levels.warn_gib * GIB * n:
+        return Result(
+            WARN,
+            f"{fs.name}: {format_bytes_gib_mib(total_free)} unallocated over {n} device(s), so at least "
+            f"one device has less than {levels.warn_gib} GiB ({levels.limits}); {fs.needs_root}. "
+            f"Steps: {ENOSPC_STEPS}",
+        )
+    if disk_total:
+        return Result(
+            INFO,
+            f"{fs.name}: {format_bytes_gib_mib(total_free)} unallocated over {n} device(s) (layout {fs.layout}); "
+            f"{fs.needs_root}",
+        )
+    return Result(INFO, f"{fs.name}: {fs.needs_root}")
+
+
 @check(CHECKS, "btrfs")
 def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | None = None) -> Iterator[Result]:
     sysfs = host.path(BTRFS_SYSFS)
@@ -194,160 +412,14 @@ def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | Non
     if not uuids:
         yield Result(INFO, f"allocation: no mounted btrfs filesystem ({BTRFS_SYSFS} has none)")
         return
-    warn_gib, crit_gib = unalloc_thresholds(host, health_check_repo=health_check_repo)
+    levels = _Levels(*unalloc_thresholds(host, health_check_repo=health_check_repo))
     mounts = btrfs_mounts(host)
     conf = read_text(host, host.path(RECLAIM_CONF), 65536)
-    readme = "btrfs/README.md, section 13: 'No space left' but df shows free space"
     for uuid in uuids:
-        base = view_join(sysfs, uuid)
-        alloc = view_join(base, "allocation")
-        devs, dev_problem = btrfs_devices(host, base)
-        targets: list[str] = []
-        try:
-            for n in host.listdir(view_join(base, "devices")):
-                targets += [t for t in mounts.get(n, []) if t not in targets]
-        except OSError:
-            pass
-        mnt = pick_mount(targets)
-        name = f"btrfs {mnt}" if mnt else f"btrfs {uuid[:8]}"
-        where = mnt or "MOUNTPOINT"
-        system = bool({"/", "/var", "/sysroot"} & set(targets))
-
-        # How full the chunks are (logical bytes: one copy).
-        fill: dict[str, tuple[int, int] | None] = {}
-        for kind in ("data", "metadata"):
-            total = read_int(host, view_join(alloc, kind, "total_bytes"))
-            used = read_int(host, view_join(alloc, kind, "bytes_used"))
-            fill[kind] = (used, total) if total is not None and total != 0 and used is not None else None
-        profiles = btrfs_profiles(host, alloc)
-        layout = "/".join(sorted({p.upper() for prof in profiles.values() for p in prof})) or "?"
-        parts: list[str] = []
-        for kind in ("data", "metadata"):
-            pair = fill[kind]
-            if pair:
-                u, t = pair
-                parts.append(
-                    f"{kind} chunks {format_bytes_gib_mib(u)} used of {format_bytes_gib_mib(t)} allocated ({100 * u // t}%)"
-                )
-        if fill["data"] and fill["metadata"] and fill["data"][0]:
-            parts.append(f"metadata is {100 * fill['metadata'][0] / fill['data'][0]:.1f}% of data")
-        if parts:
-            yield Result(OK, f"{name} ({layout}): " + ", ".join(parts))
-        else:
-            yield Result(INFO, f"{name}: chunk usage not readable in sysfs")
-
-        # Automatic reclaim of half-empty data chunks (Linux 6.11+, set by cst btrfs install).
-        dyn = read_int(host, view_join(alloc, "data", "dynamic_reclaim"))
-        per = read_int(host, view_join(alloc, "data", "periodic_reclaim"))
-        configured = f"/sys/fs/btrfs/{uuid}/allocation/data/" in conf
-        if dyn is None or per is None:
-            yield Result(INFO, f"{name}: this kernel has no automatic reclaim switches (Linux 6.11 or later)")
-        elif dyn == 1 and per == 1:
-            count = read_int(host, view_join(alloc, "data", "reclaim_count"))
-            errs = read_int(host, view_join(alloc, "data", "reclaim_errors"))
-            extra = f": {count} chunk(s) reclaimed since mount" if count is not None else ""
-            if errs is not None and errs != 0:
-                yield Result(
-                    INFO,
-                    f"{name}: automatic data reclaim on (dynamic, periodic){extra}, "
-                    f"{errs} failed (journalctl -k -g BTRFS)",
-                )
-            else:
-                yield Result(OK, f"{name}: automatic data reclaim on (dynamic, periodic){extra}")
-        else:
-            off = ", ".join(k for k, v in (("dynamic_reclaim", dyn), ("periodic_reclaim", per)) if v != 1)
-            if configured or system:
-                why = "configured by CST but switched off" if configured else "not set up"
-                yield Result(
-                    WARN,
-                    f"{name}: automatic data reclaim is {why} ({off} = 0): btrfs then never "
-                    "compacts half-empty data chunks by itself as unallocated space runs out",
-                    f"{host.cst} btrfs install",
-                )
-            else:
-                yield Result(
-                    INFO, f"{name}: automatic data reclaim off ({off}); CST sets it up only for the root filesystem"
-                )
-
-        # Unallocated space, per device.
-        limits = f"warning below {warn_gib} GiB, critical below {crit_gib} GiB"
-        needs_root = (
-            f"per-device unallocated needs root: sudo btrfs filesystem usage -T {where} "
-            "(the hourly btrfs-health-check watches it)"
-        )
-        if not devs:
-            yield Result(INFO, f"{name}: {needs_root}; not estimated: {dev_problem}")
-            continue
-        each = per_device_allocated(profiles, len(devs))
-        if each is not None and all(size >= each for _, _, size in devs):
-            fs_bytes = btrfs_device_bytes(host, mnt, profiles)
-            block_bytes = sum(size for _, _, size in devs)
-            exact = fs_bytes is not None and abs(block_bytes - fs_bytes) <= RESIZE_SLACK
-            if fs_bytes is None:
-                unknown = f"the filesystem size could not be read (stat -f {where})"
-            elif block_bytes > fs_bytes:
-                unknown = (
-                    f"the btrfs devices use {format_bytes_gib_mib(block_bytes - fs_bytes)} less than their block "
-                    "devices (shrunk with btrfs filesystem resize?)"
-                )
-            else:
-                unknown = "the filesystem size from statfs does not match its block devices"
-            free = [(label, size - each) for _, label, size in devs]
-            low = min(b for _, b in free)
-            listed = ", ".join(f"{label} {format_bytes_gib_mib(b)}" for label, b in free)
-            if not exact:
-                listed = "at most " + listed
-            meta_free = (fill["metadata"][1] - fill["metadata"][0]) if fill["metadata"] else None
-            rsv = read_int(host, view_join(alloc, "global_rsv_size")) or 0
-            if low < crit_gib * GIB:
-                yield Result(
-                    ERROR,
-                    f"{name}: CRITICAL: unallocated per device {listed} ({limits}): "
-                    f"ENOSPC is close. Free space first, then a filtered data balance; never a "
-                    f"metadata or full balance. Steps: {readme}",
-                )
-            elif low < warn_gib * GIB:
-                yield Result(
-                    WARN,
-                    f"{name}: little unallocated space per device: {listed} ({limits}; "
-                    f"metadata grows only from it). Free space; then, if it stays low, "
-                    f"see {readme}",
-                )
-            elif exact:
-                yield Result(
-                    OK,
-                    f"{name}: unallocated per device {listed} ({limits}; from sysfs, "
-                    "each btrfs device fills its block device)",
-                )
-            else:
-                yield Result(INFO, f"{name}: {needs_root}; not estimated: {unknown}")
-            if meta_free is not None and meta_free < 2 * rsv and low < 2 * GIB:
-                yield Result(
-                    ERROR,
-                    f"{name}: metadata almost full ({meta_free // 2**20} MiB free in "
-                    f"metadata chunks, global reserve {rsv // 2**20} MiB): writes may fail "
-                    f"with ENOSPC soon. Steps: {readme}",
-                )
-            continue
-        # Mixed or striped layout: only the sum over all devices is exact.
-        disk_total = 0
-        for kind in ("data", "metadata", "system"):
-            disk_total += read_int(host, view_join(alloc, kind, "disk_total")) or 0
-        total_free = sum(size for _, _, size in devs) - disk_total
-        if disk_total and total_free < warn_gib * GIB * len(devs):
-            yield Result(
-                WARN,
-                f"{name}: {format_bytes_gib_mib(total_free)} unallocated over {len(devs)} device(s), so at least "
-                f"one device has less than {warn_gib} GiB ({limits}); {needs_root}. "
-                f"Steps: {readme}",
-            )
-        elif disk_total:
-            yield Result(
-                INFO,
-                f"{name}: {format_bytes_gib_mib(total_free)} unallocated over {len(devs)} device(s) (layout {layout}); {needs_root}",
-            )
-        else:
-            yield Result(INFO, f"{name}: {needs_root}")
+        fs = _fs_facts(host, sysfs, uuid, mounts)
+        yield _chunk_fill_result(fs)
+        yield _reclaim_result(host, fs, conf)
+        yield from _unallocated_results(host, fs, levels)
 
 
 # ---- btrfs: snapshots left writable & docker NOCOW -----------------------------------------------
