@@ -1160,6 +1160,35 @@ class ReportCommandsTest(unittest.TestCase):
             ],
         )
 
+    def test_below_output_in_several_documents(self) -> None:
+        # Not one JSON document: each line that starts a list or an object is read on its own, one
+        # that does not parse is dropped; nested lists are flattened and other values skipped. A
+        # row without a name is "?", the columns are found by part of their name, and a rate that
+        # is no number counts 0.
+        lines = (
+            '{"comm": "a", "cgroup": "/x/y.service", "io.rbytes_per_sec": 2}',
+            '[{"comm": "b", "io.rbytes_per_sec": "4 B/s"}, 7]',
+            "{bad",
+            '[[{"name": "c", "Cgroup": "/z/", "Read": 1}]]',
+            '{"io.rbytes_per_sec": 3}',
+            '{"comm": "d", "io.rbytes_per_sec": "n/a"}',
+        )
+        self.fake("below", "\n".join(lines).encode())
+        self.assertEqual(
+            rp_adapters.below_top(1, 2, "io.rbytes_per_sec"),
+            (
+                [
+                    {"comm": "b", "cgroup": "", "bytes": 20},
+                    {"comm": "?", "cgroup": "", "bytes": 15},
+                    {"comm": "a", "cgroup": "y.service", "bytes": 10},
+                    {"comm": "c", "cgroup": "z", "bytes": 5},
+                ],
+                None,
+            ),
+        )
+        self.fake("below", b"")
+        self.assertEqual(rp_adapters.below_top(1, 2, "io.rbytes_per_sec"), ([], None))
+
     def test_a_failed_below_is_the_error_of_the_section(self) -> None:
         self.fake("below", b"ignored", err="x\n", rc=1)
         self.assertEqual(rp_adapters.below_top(1, 2, "io.rbytes_per_sec"), (None, "below dump failed: x"))
