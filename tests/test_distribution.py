@@ -129,8 +129,8 @@ def mode_problems(e: InstallEntry) -> list[str]:
     return []
 
 
-def component_problems(
-    manifest: Sequence[InstallEntry], components: Mapping[str, str], generated: Mapping[str, Owner]
+def component_problems[K: str](
+    manifest: Sequence[InstallEntry], components: Mapping[K, str], generated: Mapping[K, Owner]
 ) -> list[str]:
     """What is wrong with the components: every entry's is known, every one has a file (or is declared
     in generated, the components of generated text only, and then has none), all of one module with
