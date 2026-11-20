@@ -330,10 +330,11 @@ remove_old_units() {
 
 # check_syntax FILE: bash -n or a Python parse, by shebang; fails on errors.
 check_syntax() {
-    if head -n1 "$1" | grep -q python; then
-        python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$1"
+    local file="$1"
+    if head -n1 "${file}" | grep -q python; then
+        python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${file}"
     else
-        bash -n "$1"
+        bash -n "${file}"
     fi
 }
 
@@ -717,8 +718,10 @@ crypt_active_flags() {
     dmsetup table "$1" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^(allow_discards|same_cpu_crypt|submit_from_crypt_cpus|no_read_workqueue|no_write_workqueue|high_priority)$/) print $i}'
 }
 
+# crypt_header_flags BACKING: the persistent flags in the LUKS2 header of the backing device.
 crypt_header_flags() {
-    cryptsetup luksDump "$1" 2>/dev/null | awk -F: '/^Flags:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}'
+    local backing="$1"
+    cryptsetup luksDump "${backing}" 2>/dev/null | awk -F: '/^Flags:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}'
 }
 
 crypt_perf() {

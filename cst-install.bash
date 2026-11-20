@@ -154,8 +154,9 @@ cst_installed_dests() {
 # of its programs (python-entry and shell), one per line: what a setup script
 # checks for syntax errors before it installs anything.
 cst_component_programs() {
-    cst_installer srcs --component "$1" --kind python-entry &&
-        cst_installer srcs --component "$1" --kind shell
+    local component="$1"
+    cst_installer srcs --component "${component}" --kind python-entry &&
+        cst_installer srcs --component "${component}" --kind shell
 }
 
 # cst_component_units COMPONENT: the names of its unit files (drop-ins left

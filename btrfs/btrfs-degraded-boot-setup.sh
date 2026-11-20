@@ -160,9 +160,10 @@ run_or_plan() {
     fi
 }
 
-# Queries over `rpm-ostree status --json`. Deployment 0 is the one the next
-# boot uses (staged/pending if any, else booted).
+# ostree_query WHAT: queries over `rpm-ostree status --json`. Deployment 0 is
+# the one the next boot uses (staged/pending if any, else booted).
 ostree_query() {
+    local what="$1"
     rpm-ostree status --json | python3 -c '
 import json, sys
 d = json.load(sys.stdin)["deployments"]
@@ -181,7 +182,7 @@ elif what == "summary":
         flags = [k for k in ("booted", "staged", "pinned") if x.get(k)]
         print("  %-14s %-13s %s initramfs-etc=%s" % (x.get("version"), ",".join(flags) or "-",
               x["checksum"][:12], x.get("initramfs-etc") or []))
-' "$1"
+' "${what}"
 }
 
 # The boot entry (${BOOT_DIR}/loader/entries/*.conf) whose ostree= is the
@@ -254,11 +255,12 @@ root_fs_uuid() {
     findmnt -rn -o UUID --target /sysroot 2>/dev/null | head -n1
 }
 
-# The kernel names (dm-0, ...) of the members of btrfs filesystem $1, from lsblk.
+# root_members WANT_UUID: the kernel names (dm-0, ...) of the members of the btrfs
+# filesystem with that UUID, from lsblk.
 root_members() {
-    local name fstype fsuuid
+    local want_uuid="$1" name fstype fsuuid
     while read -r name fstype fsuuid; do
-        if [[ "${fstype}" == "btrfs" && "${fsuuid}" == "$1" ]]; then
+        if [[ "${fstype}" == "btrfs" && "${fsuuid}" == "${want_uuid}" ]]; then
             echo "${name}"
         fi
     done < <(lsblk -rn -o KNAME,FSTYPE,UUID)
@@ -284,9 +286,11 @@ all_tracked() {
     done
 }
 
+# upstream_ok RULES: whether the udev rules file RULES has both lines of 64-btrfs.rules this script relies on.
 upstream_ok() {
-    grep -qF 'IMPORT{builtin}="btrfs ready $devnode"' "$1" &&
-        grep -qF 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"' "$1"
+    local rules="$1"
+    grep -qF 'IMPORT{builtin}="btrfs ready $devnode"' "${rules}" &&
+        grep -qF 'ENV{ID_BTRFS_READY}=="0", ENV{SYSTEMD_READY}="0"' "${rules}"
 }
 
 old_rule_is_ours() {

@@ -114,7 +114,7 @@ snap_subvol() {
     findmnt -rn -o OPTIONS -M /var/home | tr ',' '\n' | sed -n 's|^subvol=/\{0,1\}||p' | head -n1
 }
 
-is_subvol() { [[ -d "$1" && "$(stat -c %i "$1")" == 256 ]]; }
+is_subvol() { local path="$1"; [[ -d "${path}" && "$(stat -c %i "${path}")" == 256 ]]; }
 
 # snapshots.conf as created the first time, before any key is set.
 snap_conf_defaults() {
@@ -402,8 +402,8 @@ snap_setup() {
 
 # Items need a look: start snapshots only if you say so (never with --yes).
 snap_start_anyway() {   # yes
-    local ans
-    if (( $1 )) || [[ ! -t 0 ]]; then
+    local yes="$1" ans
+    if (( yes )) || [[ ! -t 0 ]]; then
         echo
         echo "Snapshots were NOT started (--yes never starts them over ~/Bulk items that need"
         echo "a look). Fix the items (or keep one in /home on purpose: '${PROG} bulk"
@@ -451,19 +451,20 @@ snap_user_configs() {   # home
     snap_chrome apply || echo "NOTE: Chrome's chrome-flags.conf was left as it is (see above)" >&2
 }
 
-# NUL-separated cargo target dirs under ~/Workspace that still hold
-# intermediate artifacts (old layout: .fingerprint inside target/; with
-# build-dir only the final artifacts stay there).
+# snap_cargo_targets HOME: NUL-separated cargo target dirs under HOME/Workspace
+# that still hold intermediate artifacts (old layout: .fingerprint inside
+# target/; with build-dir only the final artifacts stay there).
 snap_cargo_targets() {
-    find "$1/Workspace" -xdev \( -path '*/.flatpak-builder' -prune \) -o \
+    local home="$1"
+    find "${home}/Workspace" -xdev \( -path '*/.flatpak-builder' -prune \) -o \
         \( -type d -name target -exec sh -c 'for m in "$1"/debug/.fingerprint "$1"/release/.fingerprint "$1"/*/debug/.fingerprint "$1"/*/release/.fingerprint; do
               [ -e "$m" ] && exit 0; done; exit 1' _ '{}' \; -print0 -prune \) 2>/dev/null
 }
 
 # Sets SNAP_TARGETS (NUL-safe array) and prints them; one walk of ~/Workspace.
-snap_clean_targets_plan() {
-    local sizes total
-    mapfile -d '' -t SNAP_TARGETS < <(snap_cargo_targets "$1")
+snap_clean_targets_plan() {   # home
+    local home="$1" sizes total
+    mapfile -d '' -t SNAP_TARGETS < <(snap_cargo_targets "${home}")
     (( ${#SNAP_TARGETS[@]} )) || { echo "Old cargo target/ dirs: none."; return 0; }
     # Files vanishing during a running build make du exit non-zero.
     sizes="$(du -sx -- "${SNAP_TARGETS[@]}" 2>/dev/null || true)"
@@ -573,14 +574,14 @@ snap_disable() {
 # by an older version, e.g. the Chrome cache): the hourly run would still
 # convert them. `snapshots setup` rewrites it.
 snap_plan_stale() {   # home
-    local entry strategy rel line known
+    local home="$1" entry strategy rel line known
     [[ -r "${SNAP_PLAN}" ]] || return 0
     while IFS= read -r line; do
         [[ -z "${line}" || "${line}" == \#* ]] && continue
         known=0
         for entry in "${SNAP_EXCLUDE[@]}"; do
             read -r strategy rel <<<"${entry}"
-            [[ "${line}" == "${strategy} $1/${rel}" ]] && known=1
+            [[ "${line}" == "${strategy} ${home}/${rel}" ]] && known=1
         done
         (( known )) && continue
         echo "  ${SNAP_PLAN} is from an older version (it still plans: ${line#* })."
@@ -794,7 +795,7 @@ snap_nas_forget_repo() {
 }
 
 snap_nas() {
-    local action="${1:-status}" host user port path key restic_now=0 repo_exists=0
+    local action="${1:-status}" host user port path key opt restic_now=0 repo_exists=0
     [[ $# -gt 0 ]] && shift
     local NAS_ENABLED=0 NAS_HOST="" NAS_PORT="" NAS_USER="" NAS_PATH="" NAS_RESTIC_HOST="" HOME_DIR=""
     snap_conf_read NAS_ENABLED NAS_HOST NAS_PORT NAS_USER NAS_PATH NAS_RESTIC_HOST HOME_DIR
@@ -804,12 +805,13 @@ snap_nas() {
     case "${action}" in
         setup)
             while [[ $# -gt 0 ]]; do
-                case "$1" in
+                opt="$1"
+                case "${opt}" in
                     --path) path="${2:?}"; shift 2 ;;
                     --host) host="${2:?}"; shift 2 ;;
                     --port) port="${2:?}"; shift 2 ;;
                     --user) user="${2:?}"; shift 2 ;;
-                    *) echo "nas setup: unknown argument $1" >&2; exit 2 ;;
+                    *) echo "nas setup: unknown argument ${opt}" >&2; exit 2 ;;
                 esac
             done
             # These go into the ssh config and sftp batches: no spaces or quotes.
