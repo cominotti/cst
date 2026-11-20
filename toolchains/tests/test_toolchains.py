@@ -1223,7 +1223,7 @@ class AutoTest(Scratch):
     def test_an_empty_masked_refusal_still_refuses_auto_on(self) -> None:
         # A refusal is any text, "" too: auto on must not go on and write the files.
         self.csts_cargo_config()
-        with mock.patch.object(tc_app_auto, "masked_refusal", lambda *_args, **_kwargs: ""):
+        with mock.patch.object(tc_app_auto, "masked_refusal", return_value=""):
             rc, out, err = self.run_split("auto", "on")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("nothing was written", err)
