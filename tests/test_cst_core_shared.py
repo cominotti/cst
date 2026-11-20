@@ -449,6 +449,28 @@ class AdaptersTest(unittest.TestCase):
         os.close(fd)
         self.assertTrue(os.path.exists(self.path("lock-target")))
 
+    def test_a_lock_that_fails_closes_its_fd_and_raises(self) -> None:
+        # fchmod of a new lock file, flock itself, or the wait between tries (Ctrl-C): the error
+        # reaches the caller, and the fd that was opened for the lock is closed.
+        def open_fds() -> int:
+            return len(os.listdir("/proc/self/fd"))
+
+        cases: tuple[tuple[str, str, BaseException, float | None], ...] = (
+            ("fchmod", "cst_core.adapters.locks.os.fchmod", PermissionError(1, "fchmod refused"), None),
+            ("flock", "cst_core.adapters.locks.fcntl.flock", OSError(37, "no locks available"), None),
+            ("sleep", "cst_core.adapters.locks.time.sleep", KeyboardInterrupt(), 5.0),
+        )
+        for name, target, error, timeout in cases:
+            with self.subTest(name=name):
+                lock = self.path(f"{name}.lock")
+                held = take_lock(lock, wait=False) if name == "sleep" else None
+                before = open_fds()
+                with mock.patch(target, side_effect=error), self.assertRaises(type(error)):
+                    take_lock(lock, wait=True, timeout=timeout)
+                self.assertEqual(open_fds(), before, "the lock's fd was left open")
+                if held is not None:
+                    os.close(held)
+
     def test_nocow_sets_and_clears_only_its_bit(self) -> None:
         p = self.path("img", b"")
         flags = {"v": 0x80}  # another attribute that must stay
@@ -1501,6 +1523,23 @@ class ShellAssignmentsTest(unittest.TestCase):
         for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", chr(0x85), chr(0x2028), chr(0x2029)):
             with self.subTest(sep=repr(sep)):
                 self.assertEqual(dict(parse_shell_assignments(f"A=1{sep}B=2\n").values), {"A": f"1{sep}B=2"})
+
+    def test_lines_that_are_no_assignment(self) -> None:
+        # No key at the start, or (in a file only Python reads) a key with no = after it.
+        for line, bash_sourced in (
+            ("1K=v", True),
+            ("=v", True),
+            ("export =v", True),
+            ("1K=v", False),
+            ("=v", False),
+            ("K v", False),
+            ("K", False),
+            ("K v", True),
+        ):
+            with self.subTest(line=line, bash_sourced=bash_sourced):
+                got = parse_shell_assignments(line + "\n", bash_sourced=bash_sourced)
+                self.assertEqual(dict(got.values), {})
+                self.assertEqual([(p.line, p.reason) for p in got.problems], [(1, "not a KEY=VALUE line")])
 
     def test_python_only_files_keep_what_their_readers_accepted(self) -> None:
         # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (VM_NOCOW = 0 has always worked in vm.conf),
