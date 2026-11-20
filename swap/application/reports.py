@@ -289,6 +289,11 @@ class SwapReports:
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
+    def _swap0_device(self, spec: SwapHardwareSpec) -> str:
+        """The device /proc/swaps names for swap0: where its mapper path's link leads, or the path
+        itself when it leads nowhere."""
+        return self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
+
     def _zram_evictable(self, zram_used: int) -> bool:
         """Whether free RAM (MemAvailable in /proc/meminfo) can take the zram0 swap in use now
         (zram_used, in KiB), so that swapping it off is safe."""
@@ -398,7 +403,7 @@ class SwapReports:
                 PlanItem("REFUSE", f"partition {spec.partuuid[:8]}...", f"{spec.device_path} not found: apply stops")
             )
 
-        real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
+        real_swap0 = self._swap0_device(spec)
         swap0_used = find_swap_used_kib(swaps_text, real_swap0)
         if swap0_used is not None:
             if tier_change:

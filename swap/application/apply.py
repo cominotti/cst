@@ -308,8 +308,7 @@ class SwapApplicationService(SwapReports):
         sd = self._systemd
         swap_unit = sd.escape_path(spec.mapper_path, suffix="swap")
         swaps_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "swaps"), "") or ""
-        real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
-        swap0_used = find_swap_used_kib(swaps_text, real_swap0)
+        swap0_used = find_swap_used_kib(swaps_text, self._swap0_device(spec))
         crypt_unit = UnitName(f"systemd-cryptsetup@{spec.name}.service")
         if swap0_used is None:
             events.append(
@@ -457,8 +456,7 @@ class SwapApplicationService(SwapReports):
         settings = self.build_settings_report(self.zswap_params())
         fail = settings.has_diff
         swaps_final = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
-        real_swap0_final = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
-        active_swap0 = find_swap_used_kib(swaps_final, real_swap0_final) is not None
+        active_swap0 = find_swap_used_kib(swaps_final, self._swap0_device(spec)) is not None
         active_zram0 = find_swap_used_kib(swaps_final, "/dev/zram0") is not None
         if not active_swap0:
             fail = True
