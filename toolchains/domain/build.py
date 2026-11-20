@@ -329,44 +329,67 @@ def decide(
     order = sorted(folders, key=lambda f: (f.activity, f.key))
     act: dict[str, tuple[FolderAction, str]] = {}
     total = sum(f.size for f in folders)
-    inc_idle = pol.incremental_idle
     for f in order:
-        idle = now - f.activity
-        if f.problem:
-            act[f.key] = (FolderAction.KEEP, f"left alone: {f.problem}")
-        elif f.key in in_use:
-            act[f.key] = (FolderAction.KEEP, "in use: " + users_text(in_use[f.key]))
-        elif idle < pol.min_keep:
-            act[f.key] = (FolderAction.KEEP, f"active {ago(idle)} ago (within MIN_KEEP)")
-        elif idle > pol.max_idle:
-            act[f.key] = (FolderAction.DELETE, f"idle {ago(idle)} > MAX_IDLE")
-            total -= f.size
-        elif claimed is not None and pol.orphans and f.key not in claimed:
-            act[f.key] = (FolderAction.DELETE, f"orphan: no workspace claims it (idle {ago(idle)})")
-            total -= f.size
-        elif inc_idle and idle > inc_idle and f.inc_size:
-            act[f.key] = (
-                FolderAction.TRIM,
-                f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})",
-            )
-            total -= f.inc_size
+        rule = _folder_rule(f, pol, now - f.activity, in_use, claimed)
+        if rule is not None:
+            a, why, freed = rule
+            act[f.key] = (a, why)
+            total -= freed
     if pol.max_total and total > pol.max_total:
-        for f in order:
-            if total <= pol.max_total:
-                break
-            prev = act.get(f.key)
-            if prev is not None and prev[0] in (FolderAction.KEEP, FolderAction.DELETE):
-                continue
-            act[f.key] = (
-                FolderAction.DELETE,
-                f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active",
-            )
-            total -= f.size - (f.inc_size if prev is not None and prev[0] == FolderAction.TRIM else 0)
+        _cap_deletes(order, act, total, pol)
     out: list[tuple[Folder, FolderAction, str]] = []
     for f in order:
         a, why = act.get(f.key, (FolderAction.KEEP, f"active {ago(now - f.activity)} ago"))
         out.append((f, a, why))
     return out
+
+
+def _folder_rule(
+    f: Folder,
+    pol: RustPolicy,
+    idle: float,
+    in_use: Mapping[str, Sequence[tuple[int | str, str]]],
+    claimed: Mapping[str, Sequence[str]] | None,
+) -> tuple[FolderAction, str, int] | None:
+    """(action, reason, bytes it takes off the total) of the first rule that
+    holds for F, idle IDLE seconds; None when none does (decide keeps it)."""
+    inc_idle = pol.incremental_idle
+    rule: tuple[FolderAction, str, int] | None = None
+    if f.problem:
+        rule = (FolderAction.KEEP, f"left alone: {f.problem}", 0)
+    elif f.key in in_use:
+        rule = (FolderAction.KEEP, "in use: " + users_text(in_use[f.key]), 0)
+    elif idle < pol.min_keep:
+        rule = (FolderAction.KEEP, f"active {ago(idle)} ago (within MIN_KEEP)", 0)
+    elif idle > pol.max_idle:
+        rule = (FolderAction.DELETE, f"idle {ago(idle)} > MAX_IDLE", f.size)
+    elif claimed is not None and pol.orphans and f.key not in claimed:
+        rule = (FolderAction.DELETE, f"orphan: no workspace claims it (idle {ago(idle)})", f.size)
+    elif inc_idle and idle > inc_idle and f.inc_size:
+        rule = (
+            FolderAction.TRIM,
+            f"incremental of an idle folder (idle {ago(idle)}; frees {gib(f.inc_size)})",
+            f.inc_size,
+        )
+    return rule
+
+
+def _cap_deletes(
+    order: Sequence[Folder], act: dict[str, tuple[FolderAction, str]], total: int, pol: RustPolicy
+) -> None:
+    """Over MAX_TOTAL: deletes in ACT the least recently active folders of
+    ORDER that no rule keeps or deletes, until TOTAL is at most MAX_TOTAL."""
+    for f in order:
+        if total <= pol.max_total:
+            break
+        prev = act.get(f.key)
+        if prev is not None and prev[0] in (FolderAction.KEEP, FolderAction.DELETE):
+            continue
+        act[f.key] = (
+            FolderAction.DELETE,
+            f"over MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}), least recently active",
+        )
+        total -= f.size - (f.inc_size if prev is not None and prev[0] == FolderAction.TRIM else 0)
 
 
 def users_text(users: Sequence[tuple[int | str, str]]) -> str:
