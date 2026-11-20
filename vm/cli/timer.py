@@ -4,7 +4,7 @@
 from cst_core.domain.errors import Refused
 from vm import application, wiring
 from vm.domain import ON_CALENDAR, TimerStep, TimerStepKind, VmSettings, VmSub, instance
-from vm.domain.backup import timer_status_lines
+from vm.domain.backup import BackupMode, timer_status_lines
 from vm.ports import TimerFilesPort
 
 
@@ -35,7 +35,7 @@ def cmd_timer(cfg: VmSettings, sub: VmSub, vm: str, entry_file: str, timers: Tim
 def _print_nas_state(cfg: VmSettings, vm: str) -> None:
     """backup-timer status's lines about the NAS: the VM's last NAS backup, and whether it is set up."""
     store = wiring.backup_store(cfg)
-    nas = [e for e in store.read_index() if e["vm"] == vm and e.get("mode") == "nas"]
+    nas = [e for e in store.read_index() if e["vm"] == vm and e.get("mode") == BackupMode.NAS]
     print(f"  last NAS backup: {store.describe(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
     if not wiring.settings_port(cfg).nas_set_up():
         print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")

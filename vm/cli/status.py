@@ -8,7 +8,7 @@ from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.text import first_line
 from vm import wiring
 from vm.domain import instance, nocow_lines, of_vm, version_changes, VmSettings
-from vm.domain.backup import package_change_lines
+from vm.domain.backup import BackupMode, package_change_lines
 from vm.domain.tune import cpu_status_line, tune_line
 from vm.ports import SettingsPort, VmCommandsPort
 
@@ -37,7 +37,7 @@ def cmd_status(cfg: VmSettings, vm: str, entry_file: str) -> None:
         print(f"  last backup: {store.describe(last)}")
         for line in package_change_lines(version_changes(last.get("versions"), commands.package_versions())):
             print(line)
-    nas = [e for e in entries if e.get("mode") == "nas"]
+    nas = [e for e in entries if e.get("mode") == BackupMode.NAS]
     if nas and nas[-1] is not entries[-1]:
         print(f"  last NAS backup: {store.describe(nas[-1])}")
     with contextlib.suppress(Refused):

@@ -26,6 +26,7 @@ from vm.domain import (
 from vm.domain.backup import (
     DOMAIN_XML,
     MANIFEST_JSON,
+    BackupMode,
     Fingerprint,
     IndexRefused,
     Manifest,
@@ -117,7 +118,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     sources = _local_disk_sources(store, vm, parts, notes)
     state, tpm_dir = _local_state_sources(cfg, store, parts, notes)
     sources += state
-    mode = "full" if full else "reflink"
+    mode = BackupMode.FULL if full else BackupMode.REFLINK
     epoch, stamp = backup_time(cfg, p.clock)
     vm_dir = os.path.join(cfg.paths.backup_dir, vm)
     dest_dir = os.path.join(vm_dir, stamp)
@@ -168,7 +169,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         out.warn(f"  incomplete backup removed: {dest_dir}")
         raise
     refused = _index_local_backup(store, manifest, dest_dir)
-    _say_local_done(out, notes, dest_dir, len(copied), reflink=mode == "reflink")
+    _say_local_done(out, notes, dest_dir, len(copied), reflink=mode == BackupMode.REFLINK)
     out.say("\nTo restore (never done automatically; read each line first):")
     for line in restore_lines(vm, dest_dir, copied, tpm_dir):
         out.say(f"  {line}")
@@ -274,7 +275,7 @@ def _index_local_backup(store: BackupStorePort, manifest: Manifest, dest_dir: st
         entries = [
             e
             for e in store.read_index()
-            if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
+            if e.get("mode") == BackupMode.NAS or (store.is_dir(e["path"]) and e["path"] != dest_dir)
         ]
         entries.append(index_entry(manifest, dest_dir))
         entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))

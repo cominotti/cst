@@ -43,6 +43,15 @@ class BootedDeployment(TypedDict):
     timestamp: Json
 
 
+class BackupMode(StrEnum):
+    """How a backup was made, the mode of its manifest and its index entry: a local copy by reflink
+    or in full (--full), or a restic snapshot on the NAS."""
+
+    REFLINK = "reflink"
+    FULL = "full"
+    NAS = "nas"
+
+
 class IndexEntry(TypedDict, total=False):
     """One backup in the index (vm-backups.json). A local copy has path, a NAS backup snapshot,
     repository and host. Keys this cst vm does not know are kept as they are."""
@@ -89,7 +98,7 @@ def is_index_entry(e: object) -> TypeIs[IndexEntry]:
         return False
     if deployment is not None and not (json_object(deployment) and all(k in deployment for k in _DEPLOYMENT_KEYS)):
         return False
-    where = e.get("snapshot") if e.get("mode") == "nas" else e.get("path")
+    where = e.get("snapshot") if e.get("mode") == BackupMode.NAS else e.get("path")
     return isinstance(where, str) and where != ""
 
 
@@ -352,7 +361,7 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractS
     of the VM's snapshots restic lists (None: not readable), without which the VM's NAS entries of
     entry's repository leave it."""
     snap = entry["snapshot"]
-    out = [e for e in entries if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
+    out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
     out.append(entry)
     if alive is not None:
         alive = alive | {snap}
@@ -361,7 +370,7 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractS
             for e in out
             if not (
                 e["vm"] == entry["vm"]
-                and e.get("mode") == "nas"
+                and e.get("mode") == BackupMode.NAS
                 and e.get("repository") == entry["repository"]
                 and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
             )
@@ -429,7 +438,7 @@ def nas_manifest(run: NasRun, files: list[CopiedFile], consistency: str, keep: s
         "uuid": run.parts.uuid,
         "timestamp": run.stamp,
         "epoch": int(run.epoch),
-        "mode": "nas",
+        "mode": BackupMode.NAS,
         "consistency": consistency,
         "keep": keep,
         "tags": nas_tags(run.vm, keep),
@@ -446,7 +455,7 @@ def nas_index_entry(run: NasRun, nas: NasRepo, snap: str, consistency: str, keep
         "vm": run.vm,
         "timestamp": run.stamp,
         "epoch": int(run.epoch),
-        "mode": "nas",
+        "mode": BackupMode.NAS,
         "snapshot": snap,
         "repository": nas["repo"],
         "host": nas["host"],
