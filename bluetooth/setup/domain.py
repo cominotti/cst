@@ -370,10 +370,16 @@ def resolve(
         return bad(
             f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got '{device}'; set DEVICE in {paths.user_settings} or use --device)"
         )
+    if not device:
+        device_from = "no DEVICE set"
+    elif opts.device:
+        device_from = "--device"
+    else:
+        device_from = "settings"
     return Config(
         prog=prog,
         device=device.upper(),
-        device_from=("--device" if opts.device else "settings") if device else "no DEVICE set",
+        device_from=device_from,
         quality=quality,
         bearer=bearer,
         ldac_rate=rate,

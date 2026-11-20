@@ -147,7 +147,8 @@ class Change(Checks):
             self.err(f"{self.c.prog}: ERROR: bluetooth.service was not restarted. To finish: {self.restart_hint()}\n")
             return False
         path, found = self.adapter()
-        target = path if found else (path + "\n" if path else "") + "/org/bluez/hci0"  # $(adapter_path || echo ...)
+        fallback = (path + "\n" if path else "") + "/org/bluez/hci0"  # $(adapter_path || echo ...)
+        target = path if found else fallback
         powered = ["busctl", "get-property", "org.bluez", target, "org.bluez.Adapter1", "Powered"]
         if not self.wait_for(15, lambda: self.ok(powered)):
             self.err("WARNING: the adapter did not answer within 15 s after the restart\n")
