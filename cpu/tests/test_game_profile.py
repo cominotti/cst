@@ -38,6 +38,7 @@ from cpu.game.domain import (
     ctl_file,
     Drift,
     cut_tail,
+    drifted,
     escapes_in_state,
     expand_cpus,
     has_record_part,
@@ -257,6 +258,28 @@ class PureRulesTest(unittest.TestCase):
                 "/run/user/1000/systemd/user.control/flatpak-session-helper.service.d/50-AllowedCPUs.conf",
             ],
         )
+
+    def test_drifted_skips_what_it_cannot_compare(self) -> None:
+        # A record cut short, a cgw record with an empty SHOWN and a record of another kind never drift,
+        # and the cgroup file is read only for a whole cgw record that has a SHOWN.
+        read: list[str] = []
+
+        def read_file(path: str) -> str | None:
+            read.append(path)
+            return "0-23"
+
+        now = {("sys", "machine.slice"): {"CPUWeight": "50"}}
+        skipped = [
+            ("cgw", "/cg/a/cpuset.cpus", "12-23", ""),
+            ("cgw", "/cg/b/cpuset.cpus", "12-23"),
+            ("prop", "sys", "machine.slice", "CPUWeight", "10"),
+            ("epp", "0", "performance"),
+        ]
+        self.assertEqual(drifted(skipped, now, read_file), [])
+        self.assertEqual(read, [])
+        whole = ("cgw", "/cg/c/cpuset.cpus", "12-23", "12-23")
+        self.assertEqual(drifted([*skipped, whole], now, read_file), [Drift(whole, "0-23")])
+        self.assertEqual(read, ["/cg/c/cpuset.cpus"])
 
     def test_a_last_line_cut_short(self) -> None:
         self.assertIsNone(cut_tail(b""))
@@ -1873,15 +1896,19 @@ class FullRunFolderTest(GameProfileCase):
     its 'off' (ExecStop) runs later. A traceback there left the oneshot unit failed: its ExecStop never
     ran, and the watchdog's and 'game off''s stop did nothing, so the profile stayed on until reboot."""
 
-    def full_after(self, records: int, *, mode: str = "a") -> contextlib.AbstractContextManager[object]:
-        """The game profile's own writes of game.state in mode fail with ENOSPC after records of them."""
+    def full_after(
+        self, records: int, *, mode: str = "a", path: str | None = None
+    ) -> contextlib.AbstractContextManager[object]:
+        """The game profile's own writes of path (game.state by default) in mode fail with ENOSPC after
+        records of them."""
         real = open
         written = {"n": 0}
+        full = self.state if path is None else path
 
         def fake_open(
             path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
         ) -> IO[str]:
-            if path == self.state and flags == mode:
+            if path == full and flags == mode:
                 written["n"] += 1
                 if written["n"] > records:
                     raise OSError(errno.ENOSPC, "No space left on device", path)
@@ -1930,6 +1957,46 @@ class FullRunFolderTest(GameProfileCase):
             f"<3>game-profile: not switched on: could not write {self.state}: No space left on device\n", out.getvalue()
         )
         self.assertEqual(self.sets(self.systemd.actions), [])
+
+    def test_on_whose_game_intended_cannot_be_written_still_switches_on(self) -> None:
+        # No drift repair then; the profile itself still works.
+        self.systemd.actions = []
+        p, out = self.profile()
+        err = io.StringIO()
+        with self.full_after(0, mode="w", path=self.intended), contextlib.redirect_stderr(err):
+            self.assertEqual(p.locked("on"), 0)
+        self.assertEqual(err.getvalue(), f"{self.intended}: No space left on device\n")
+        self.assertIn("<5>game-profile: on: ", out.getvalue())
+        self.assertIn(f"prop sys user@{UID}.service MemoryLow new -\n", self.read(self.state))
+        self.assertIn(
+            f"{SYS} set-property --runtime machine.slice AllowedCPUs=12-23 CPUWeight=10 IOWeight=10",
+            self.systemd.actions,
+        )
+        self.assertNotIn("cst-game-intended", self.read(self.intended))
+
+    def test_on_skips_each_p_core_whose_epp_record_cannot_be_written(self) -> None:
+        for cpu in ("0", "1"):
+            self.write(self.paths.epp(cpu), "balance_performance\n")
+        s = GameSettings(target_user=USER, p_cores="0-1")
+        # How many records a whole 'on' writes before the first EPP record.
+        self.run_profile("on", s)
+        before_epp = [line for line in self.read(self.state).splitlines() if not line.startswith("epp ")]
+        self.run_profile("off", s)
+        self.assertFalse(os.path.exists(self.state))
+        p, out = self.profile(s)
+        err = io.StringIO()
+        with self.full_after(len(before_epp)), contextlib.redirect_stderr(err):
+            self.assertEqual(p.locked("on"), 0)
+        log = out.getvalue()
+        for cpu in ("0", "1"):  # the first one does not stop the loop
+            self.assertIn(
+                f"<4>game-profile: cpu{cpu}: EPP performance: not done, its record could not be written to {self.state}\n",
+                log,
+            )
+            self.assertEqual(self.read(self.paths.epp(cpu)), "balance_performance\n")
+        self.assertIn("<5>game-profile: on: ", log)
+        self.assertEqual(err.getvalue(), f"{self.state}: No space left on device\n" * 2)
+        self.assertNotIn("epp ", self.read(self.state))
 
 
 if __name__ == "__main__":
