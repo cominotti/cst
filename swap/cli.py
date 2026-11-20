@@ -83,9 +83,9 @@ def execute_cli(
     prog = env_map.get("CST_PROG") or "cst swap"
     reexec = wiring.sudo_reexec if elevate is None else elevate
 
-    parsed = parse_swap_args(args, format_usage(prog))
+    parsed = parse_swap_args(args)
     if isinstance(parsed, SwapArgsStop):
-        return _stop(parsed, stdout, stderr)
+        return _stop(parsed, prog, stdout, stderr)
 
     exec_ctx = wiring.execution_context() if ctx is None else ctx
     if parsed.want_root:
@@ -102,13 +102,14 @@ def execute_cli(
     )
 
 
-def _stop(stop: SwapArgsStop, stdout: TextIO, stderr: TextIO) -> int:
-    """Print where the command line stopped, on the one stream it names; its exit status."""
-    stream = stderr if stop.to_stderr else stdout
+def _stop(stop: SwapArgsStop, prog: str, stdout: TextIO, stderr: TextIO) -> int:
+    """Print where the command line stopped, as swap-setup.sh did: help on stdout, an error on
+    stderr (its line, then the help text when it asks for it); its exit status."""
+    stream = stdout if stop.code == 0 else stderr
     if stop.line is not None:
         print(stop.line, file=stream)
-    if stop.text:
-        stream.write(stop.text)
+    if stop.usage:
+        stream.write(format_usage(prog))
     return stop.code
 
 

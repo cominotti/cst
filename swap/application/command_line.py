@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """The command line of `cst swap`, read as swap-setup.sh read it: the command word, --root, and
-where it stops (help, an argument a command does not take, an unknown command) with its text and
-exit status. Pure: swap/cli.py writes the text and runs the command."""
+where it stops (help, an argument a command does not take, an unknown command) with its message
+and exit status. Pure: swap/cli.py prints the message and the help text and runs the command."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -22,31 +22,30 @@ class SwapArgs:
 
 @dataclass(frozen=True, slots=True)
 class SwapArgsStop:
-    """The command line ends here with exit status code: line (printed, with its newline) and then
-    text (written as it is) go to one stream, stderr or stdout."""
+    """The command line ends here with exit status code: its message line (None: none), and
+    whether the help text follows it (usage)."""
 
     code: int
-    to_stderr: bool
     line: str | None
-    text: str = ""
+    usage: bool = False
 
 
-def parse_swap_args(args: Sequence[str], usage: str) -> SwapArgs | SwapArgsStop:
-    """What `cst swap ARGS` does (usage: the help text, for help and an unknown command)."""
+def parse_swap_args(args: Sequence[str]) -> SwapArgs | SwapArgsStop:
+    """What `cst swap ARGS` does."""
     cmd = args[0] if args and args[0] else "help"  # bash's ${1:-help}: an empty word is help too
     rest = tuple(args[1:])
     match parse_swap_command(cmd):
         case SwapCommand.HELP:
-            return SwapArgsStop(0, to_stderr=False, line=None, text=usage)
+            return SwapArgsStop(0, line=None, usage=True)
         case (SwapCommand.PLAN | SwapCommand.STATUS) as command:
             first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
             want_root = first == "--root"
             if first and not want_root:
-                return SwapArgsStop(2, to_stderr=True, line=f"{cmd}: unknown argument '{first}' (only --root)")
+                return SwapArgsStop(2, line=f"{cmd}: unknown argument '{first}' (only --root)")
             return SwapArgs(command, (cmd, *rest), want_root=want_root)
         case SwapCommand.APPLY as command:
             if rest:
-                return SwapArgsStop(2, to_stderr=True, line="apply: no arguments")
+                return SwapArgsStop(2, line="apply: no arguments")
             return SwapArgs(command, (cmd,), want_root=True)
         case None:
-            return SwapArgsStop(2, to_stderr=True, line=f"Unknown command: {cmd}", text=usage)
+            return SwapArgsStop(2, line=f"Unknown command: {cmd}", usage=True)
