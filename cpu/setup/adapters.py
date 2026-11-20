@@ -24,6 +24,7 @@ from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
+from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
@@ -344,11 +345,11 @@ class CpuSetup:
         self.run(["systemctl", "daemon-reload"])
         self.usys("daemon-reload")
         self.run(["systemctl", "enable", "--now", WATCHDOG_TIMER])
-        self.installer("mark", "--component", CORE_COMPONENT, "done")
+        self.installer("mark", "--component", CORE_COMPONENT, ComponentState.DONE)
         home = self.required_home(user, "cst-install.bash")
-        self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, "done", as_user=user)
+        self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, ComponentState.DONE, as_user=user)
         if gamemode:
-            self.installer("mark", "--home", home, "--component", GAMEMODE_COMPONENT, "done", as_user=user)
+            self.installer("mark", "--home", home, "--component", GAMEMODE_COMPONENT, ComponentState.DONE, as_user=user)
         for line in install_done_lines(self.prog):
             self.say(line)
         return 0
@@ -446,7 +447,7 @@ class CpuSetup:
                 self.installer("install", "--set", f"ALLOWED={allowed}", "--component", DOCKER_SLICE_COMPONENT)
                 self.run(["systemctl", "daemon-reload"])
                 self.run(["systemctl", "start", BUILDS_SLICE])
-                self.installer("mark", "--component", DOCKER_SLICE_COMPONENT, "done")
+                self.installer("mark", "--component", DOCKER_SLICE_COMPONENT, ComponentState.DONE)
                 self._set_builds_parent()
                 self.say("Restart Docker when convenient (stops running containers): sudo systemctl restart docker")
                 return 0
