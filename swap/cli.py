@@ -21,7 +21,7 @@ from typing import NoReturn, TextIO
 
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
 from swap import wiring
-from swap.domain import SwapCommand, parse_swap_command
+from swap.application.command_line import SwapArgsStop, parse_swap_args
 from swap.presenter import run_command
 
 _HELP_TEXT = """\
@@ -81,42 +81,35 @@ def execute_cli(
     stdout = sys.stdout if out is None else out
     stderr = sys.stderr if err is None else err
     prog = env_map.get("CST_PROG") or "cst swap"
+    reexec = wiring.sudo_reexec if elevate is None else elevate
 
-    cmd = args[0] if args and args[0] else "help"  # bash's ${1:-help}: an empty word is help too
-    rest = args[1:] if args else []
-    orig_args = [cmd, *rest]
-
-    match parse_swap_command(cmd):
-        case SwapCommand.HELP:
-            stdout.write(format_usage(prog))
-            return 0
-        case (SwapCommand.PLAN | SwapCommand.STATUS) as command:
-            first = rest[0] if rest else ""  # only the first word counts, as in swap-setup.sh
-            want_root = first == "--root"
-            if first and not want_root:
-                print(f"{cmd}: unknown argument '{first}' (only --root)", file=stderr)
-                return 2
-        case SwapCommand.APPLY as command:
-            if rest:
-                print("apply: no arguments", file=stderr)
-                return 2
-            want_root = True
-        case None:
-            print(f"Unknown command: {cmd}", file=stderr)
-            stderr.write(format_usage(prog))
-            return 2
+    parsed = parse_swap_args(args, format_usage(prog))
+    if isinstance(parsed, SwapArgsStop):
+        return _stop(parsed, stdout, stderr)
 
     exec_ctx = wiring.execution_context() if ctx is None else ctx
-    if want_root:
+    if parsed.want_root:
         if exec_ctx.is_container():
-            print(f"'{prog} {' '.join(orig_args)}' must run on the host, not inside a toolbox/container.", file=stderr)
+            words = " ".join(parsed.words)
+            print(f"'{prog} {words}' must run on the host, not inside a toolbox/container.", file=stderr)
             return 1
         if not exec_ctx.is_root():
-            reexec = wiring.sudo_reexec if elevate is None else elevate
-            reexec(wiring.sudo_rerun_argv(prog, orig_args))
+            reexec(wiring.sudo_rerun_argv(prog, parsed.words))
 
     service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root, env=env_map)
-    return run_command(command, service, hint=f"{prog} {cmd} --root, on the host", out=stdout, err=stderr)
+    return run_command(
+        parsed.command, service, hint=f"{prog} {parsed.word} --root, on the host", out=stdout, err=stderr
+    )
+
+
+def _stop(stop: SwapArgsStop, stdout: TextIO, stderr: TextIO) -> int:
+    """Print where the command line stopped, on the one stream it names; its exit status."""
+    stream = stderr if stop.to_stderr else stdout
+    if stop.line is not None:
+        print(stop.line, file=stream)
+    if stop.text:
+        stream.write(stop.text)
+    return stop.code
 
 
 def main() -> int:
