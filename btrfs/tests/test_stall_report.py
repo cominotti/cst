@@ -878,6 +878,351 @@ class VerdictLinesTest(unittest.TestCase):
         )
 
 
+def rich_result() -> dict[str, object]:
+    """A result with every section of the text report: two filesystems, disks of each role, slices,
+    containers and more cgroups than shown, below's lists, more episodes and events than shown, alerts."""
+
+    def disk(role: str, aw: float, wb: int) -> dict[str, object]:
+        return {
+            "role": role,
+            "await_ms": aw,
+            "read_await_ms": aw / 2,
+            "write_await_ms": aw * 2,
+            "flush_await_ms": 1.5,
+            "fl_ios": 9,
+            "queue_depth": 2.5,
+            "read_bytes": 100 * 2**20,
+            "write_bytes": wb,
+            "rd_ios": 1,
+            "wr_ios": 2,
+            "rd_ticks": 3,
+            "wr_ticks": 4,
+            "rd_sectors": 5,
+            "wr_sectors": 6,
+            "io_ticks": 7,
+            "time_in_queue": 8,
+            "fl_ticks": 10,
+            "peak_util_pct": 50.0,
+            "peak_at": T0 + 3,
+            "util_pct": 20.0,
+        }
+
+    def cgroup(io: float, wb: int) -> dict[str, object]:
+        return {
+            "io_some": io * 10,
+            "io_full": io,
+            "io_some_pct": io,
+            "io_full_pct": io / 2,
+            "read_bytes": 5 * 2**20,
+            "write_bytes": wb,
+        }
+
+    def sig(i: int, ctx: str) -> dict[str, object]:
+        return {
+            "n": i + 1,
+            "cat": "commit",
+            "sig": f"fn{i}",
+            "ctx": ctx,
+            "comms": {"a": 3, "b": 2, "c": 1, "d": 1, "e": 1},
+            "cgroups": {"x.slice": 1, "y.slice": 1, "z.slice": 1, "w.slice": 1},
+            "examples": [[f"f{j}" for j in range(12)], ["g"]],
+        }
+
+    def episode(i: int, sigs: int) -> dict[str, object]:
+        return {
+            "start": T0 + i,
+            "end": T0 + i + 20,
+            "max_d": 4 + i,
+            "reason": f"psi {i}",
+            "peak": {"io_full_avg10": 12.0 + i, "commit_ms": 100 * i},
+            "sigs": [sig(j, "via x" if j % 2 else "") for j in range(sigs)],
+            "cats": {},
+        }
+
+    names = [
+        "user.slice",
+        "system.slice",
+        "docker-0123456789ab",
+        "libpod-fedcba987654",
+        "app.scope",
+        "a.service",
+        "b.service",
+        "c.service",
+        "d.service",
+        "e.service",
+        "idle.service",
+    ]
+    loads = [
+        (30.0, 0),
+        (2.0, 0),
+        (5.0, 2**30),
+        (0.5, 100 * 2**20),
+        (2.0, 0),
+        (3.0, 0),
+        (4.0, 0),
+        (6.0, 0),
+        (7.0, 0),
+        (8.0, 0),
+        (0.5, 10),
+    ]
+    return {
+        "window": {"since": T0, "until": T0 + 60},
+        "kernel": "7.2.0",
+        "samples": 12,
+        "coverage": {
+            "window_s": 60,
+            "covered_s": 55,
+            "first_sample": T0 + 1,
+            "last_sample": T0 + 56,
+            "complete": True,
+            "skipped": 0,
+            "gaps": 2,
+        },
+        "pressure": {
+            "io_some_pct": 1.25,
+            "io_full_pct": 0.5,
+            "mem_some_pct": 0.75,
+            "mem_full_pct": 0.25,
+            "cpu_some_pct": 2.5,
+        },
+        "peak": {
+            "io_some_avg10": 9.0,
+            "io_full_avg10": 4.0,
+            "mem_some_avg10": 0.0,
+            "cpu_some_avg10": 0.0,
+            "iowait_tasks": 2,
+            "d_tasks": 2,
+            "mem_tasks": 1,
+            "maint_tasks": 0,
+            "dirty_bytes": 3 * 2**20,
+            "writeback_bytes": 2**20,
+        },
+        "maintenance_samples": 0,
+        "vm": {
+            "swap_in_bytes": 2**20,
+            "swap_out_bytes": 2 * 2**20,
+            "zswap_in_bytes": None,
+            "zswap_out_bytes": None,
+            "zswap_writeback_bytes": None,
+            "swap_out_bypass_bytes": None,
+            "zswap_counted_from": None,
+            "direct_reclaim_scanned_pages": 12345,
+            "allocstalls": 1234,
+            "dirty_limit_bytes": 64 * 2**20,
+        },
+        "fs": {
+            "aaaaaaaa-1-2-3-4": {
+                "commits": 4,
+                "avg_commit_ms": 33.3,
+                "max_commit_ms": 1200,
+                "max_at": T0 + 4,
+                "new_device_errors": 0,
+                "space": {"metadata": [5, 20, 0, 0, 0]},
+            },
+            "bbbbbbbbbb-1-2-3-4": {
+                "commits": 0,
+                "avg_commit_ms": 0.0,
+                "max_commit_ms": 0,
+                "max_at": None,
+                "new_device_errors": 1,
+            },
+        },
+        "disks": {
+            "nvme0n1": disk("btrfs:data", 1.0, 3 * 2**30),
+            "dm-0": disk("btrfs:data", 6.0, 3 * 2**30),
+            "dm-1": disk("swap", 2.0, 0),
+            "sda": disk("", 0.0, 0),
+        },
+        "cgroups": {n: cgroup(io, wb) for n, (io, wb) in zip(names, loads, strict=True)},
+        "below": {
+            "error": "below dump failed: partial",
+            "top_writers": [
+                {"comm": f"w{i}", "cgroup": "" if i % 2 else "g.service", "bytes": 2**20 * i} for i in range(8)
+            ],
+            "top_readers": [{"comm": "r", "cgroup": "q", "bytes": 5}],
+        },
+        "categories": [],
+        "non_storage_waits": {},
+        "sample_d_tasks": 0,
+        "open_episode": None,
+        "v6_since": T0,
+        "episodes": [episode(i, s) for i, s in enumerate([9, 2, 0, 1, 0, 0, 0])],
+        "events": [{"t": "ev", "ts": T0 + i, "kind": "x", "severe": i % 3 == 0, "msg": f"event {i}"} for i in range(10)]
+        + [{"t": "ev", "ts": T0 + 40, "kind": "x"}],
+        "alerts": [{"t": "al", "ts": T0 + 2, "title": "Disk", "body": "slow"}, {"t": "al", "ts": T0 + 3}],
+    }
+
+
+class ReportTextTest(unittest.TestCase):
+    """The whole text report of a result with every section, verbose and not: the window, the
+    verdict, pressure and peaks, the filesystems, the disks (dm-crypt rows only when verbose), memory,
+    the cgroups (slices first, at most 6 others, the container names), below's error and lists, the
+    episodes and their signatures (more of both when verbose, with a stack), the events and alerts."""
+
+    def report(self, *, verbose: bool) -> list[str]:
+        meta_ = {"kernel": "7.2.0", "fs": {"aaaaaaaa-1-2-3-4": {"label": "data"}}}
+        out = io.StringIO()
+        with (
+            mock.patch.object(rp_cli, "container_names", return_value={"docker-0123456789ab": "web"}),
+            contextlib.redirect_stdout(out),
+        ):
+            load().print_report(rich_result(), meta_, verbose=verbose)
+        return out.getvalue().split("\n")[:-1]
+
+    def test_every_section(self) -> None:
+        def at(offset: int) -> str:
+            return time.strftime("%H:%M:%S", time.localtime(T0 + offset))
+
+        day = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0))
+        self.assertEqual(
+            self.report(verbose=False),
+            [
+                f"window   {day} -> {at(60)}  kernel 7.2.0",
+                f"recorded {at(1)} -> {at(56)} (55 s of 60 s, 2 gap(s))",
+                "",
+                "verdict  KERNEL/FS PROBLEMS: 4 severe event(s) (hung task, btrfs or device error); see 'events'.",
+                "verdict  btrfs device error counters INCREASED in this window.",
+                "verdict  Blocked tasks: up to 10 tasks waiting on storage in D state (btrfs commit/log/lock waits block tasks without showing up as IO pressure).",
+                f"verdict  Slow btrfs commits: longest 1.2 s at {at(4)}.",
+                f"verdict  Worst episode: {at(0)}-{at(20)} (20 s, 4 D tasks, commit 0 ms).",
+                "verdict  btrfs disks look SATURATED: dm-crypt layer (what btrfs waits for) await 6.0 ms (read 3.0, write 12.0), queue depth 2.5; NVMe below await 1.0 ms (read 0.5, write 2.0), information only (its time can include disk cache flushes); encryption queueing adds latency.",
+                "",
+                "pressure io some/full 1.2% / 0.5%   memory some/full 0.8% / 0.2%   cpu some 2.5%   (% of recorded time)",
+                "peaks    io 10s-avg some/full 9%/4%  tasks waiting on storage 2  on memory 1  iowait tasks 2  dirty 3 MiB (limit 64 MiB)  writeback 1 MiB",
+                f"btrfs    data: 4 commits, avg 33 ms, longest 1200 ms @{at(4)}; metadata 25% of allocated chunks; new device errors 0",
+                "btrfs    bbbbbbbb: 0 commits, avg 0 ms, longest 0 ms; metadata 0% of allocated chunks; new device errors 1",
+                "disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it",
+                "  nvme0n1  btrfs:data    await   1.0 ms (r 0.5 / w 2.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 3,072 MiB",
+                "  sda                    await   0.0 ms (r 0.0 / w 0.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 0 MiB",
+                "  dm-1     swap          await   2.0 ms (r 1.0 / w 4.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 0 MiB",
+                "memory   zswap in/out n/a (daemon < v7)   disk swap in/out 1 MiB / 2 MiB   direct reclaim scanned 12,345 pages  allocstalls 1,234",
+                "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare cgroups with each other, not with disk totals)",
+                "  user.slice                                   io some/full  30.0% /  15.0%  read 5 MiB  write 0 MiB",
+                "  system.slice                                 io some/full   2.0% /   1.0%  read 5 MiB  write 0 MiB",
+                "  docker-0123456789ab (web)                    io some/full   5.0% /   2.5%  read 5 MiB  write 1,024 MiB",
+                "  libpod-fedcba987654                          io some/full   0.5% /   0.2%  read 5 MiB  write 100 MiB",
+                "  e.service                                    io some/full   8.0% /   4.0%  read 5 MiB  write 0 MiB",
+                "  d.service                                    io some/full   7.0% /   3.5%  read 5 MiB  write 0 MiB",
+                "  c.service                                    io some/full   6.0% /   3.0%  read 5 MiB  write 0 MiB",
+                "  b.service                                    io some/full   4.0% /   2.0%  read 5 MiB  write 0 MiB",
+                "below    below dump failed: partial",
+                "below    top writers: w0[g.service] 0 MiB, w1 1 MiB, w2[g.service] 2 MiB, w3 3 MiB, w4[g.service] 4 MiB, w5 5 MiB",
+                "below    top readers: r[q] 0 MiB",
+                "",
+                "episodes 7 (worst first, showing 6)",
+                f"  {at(0)}-{at(20)}   20s  opened by: psi 0; peak io full 12%, commit 0 ms, D tasks max 4",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "        2 task-samples [commit] fn1 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "        3 task-samples [commit] fn2  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                f"  {at(1)}-{at(21)}   20s  opened by: psi 1; peak io full 13%, commit 100 ms, D tasks max 5",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "        2 task-samples [commit] fn1 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                f"  {at(2)}-{at(22)}   20s  opened by: psi 2; peak io full 14%, commit 200 ms, D tasks max 6",
+                f"  {at(3)}-{at(23)}   20s  opened by: psi 3; peak io full 15%, commit 300 ms, D tasks max 7",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                f"  {at(4)}-{at(24)}   20s  opened by: psi 4; peak io full 16%, commit 400 ms, D tasks max 8",
+                f"  {at(5)}-{at(25)}   20s  opened by: psi 5; peak io full 17%, commit 500 ms, D tasks max 9",
+                "         (task-samples: one task seen in D state in one 1 s sample, roughly task-seconds)",
+                "",
+                "events   11 kernel/daemon event(s) ('!' = severe, on this host's disks):",
+                f"  ! {at(3)} event 3",
+                f"    {at(4)} event 4",
+                f"    {at(5)} event 5",
+                f"  ! {at(6)} event 6",
+                f"    {at(7)} event 7",
+                f"    {at(8)} event 8",
+                f"  ! {at(9)} event 9",
+                f"    {at(40)} ",
+                f"alert    {at(2)} Disk: slow",
+                f"alert    {at(3)} ?: ",
+            ],
+        )
+        self.assertEqual(
+            self.report(verbose=True),
+            [
+                f"window   {day} -> {at(60)}  kernel 7.2.0",
+                f"recorded {at(1)} -> {at(56)} (55 s of 60 s, 2 gap(s))",
+                "",
+                "verdict  KERNEL/FS PROBLEMS: 4 severe event(s) (hung task, btrfs or device error); see 'events'.",
+                "verdict  btrfs device error counters INCREASED in this window.",
+                "verdict  Blocked tasks: up to 10 tasks waiting on storage in D state (btrfs commit/log/lock waits block tasks without showing up as IO pressure).",
+                f"verdict  Slow btrfs commits: longest 1.2 s at {at(4)}.",
+                f"verdict  Worst episode: {at(0)}-{at(20)} (20 s, 4 D tasks, commit 0 ms).",
+                "verdict  btrfs disks look SATURATED: dm-crypt layer (what btrfs waits for) await 6.0 ms (read 3.0, write 12.0), queue depth 2.5; NVMe below await 1.0 ms (read 0.5, write 2.0), information only (its time can include disk cache flushes); encryption queueing adds latency.",
+                "",
+                "pressure io some/full 1.2% / 0.5%   memory some/full 0.8% / 0.2%   cpu some 2.5%   (% of recorded time)",
+                "peaks    io 10s-avg some/full 9%/4%  tasks waiting on storage 2  on memory 1  iowait tasks 2  dirty 3 MiB (limit 64 MiB)  writeback 1 MiB",
+                f"btrfs    data: 4 commits, avg 33 ms, longest 1200 ms @{at(4)}; metadata 25% of allocated chunks; new device errors 0",
+                "btrfs    bbbbbbbb: 0 commits, avg 0 ms, longest 0 ms; metadata 0% of allocated chunks; new device errors 1",
+                "disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it",
+                "  nvme0n1  btrfs:data    await   1.0 ms (r 0.5 / w 2.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 3,072 MiB",
+                "  sda                    await   0.0 ms (r 0.0 / w 0.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 0 MiB",
+                "  dm-0     btrfs:data    await   6.0 ms (r 3.0 / w 12.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 3,072 MiB",
+                "  dm-1     swap          await   2.0 ms (r 1.0 / w 4.0)  flush await   1.5 ms (9 flushes)  queue  2.5  read 100 MiB  write 0 MiB",
+                "memory   zswap in/out n/a (daemon < v7)   disk swap in/out 1 MiB / 2 MiB   direct reclaim scanned 12,345 pages  allocstalls 1,234",
+                "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare cgroups with each other, not with disk totals)",
+                "  user.slice                                   io some/full  30.0% /  15.0%  read 5 MiB  write 0 MiB",
+                "  system.slice                                 io some/full   2.0% /   1.0%  read 5 MiB  write 0 MiB",
+                "  docker-0123456789ab (web)                    io some/full   5.0% /   2.5%  read 5 MiB  write 1,024 MiB",
+                "  libpod-fedcba987654                          io some/full   0.5% /   0.2%  read 5 MiB  write 100 MiB",
+                "  e.service                                    io some/full   8.0% /   4.0%  read 5 MiB  write 0 MiB",
+                "  d.service                                    io some/full   7.0% /   3.5%  read 5 MiB  write 0 MiB",
+                "  c.service                                    io some/full   6.0% /   3.0%  read 5 MiB  write 0 MiB",
+                "  b.service                                    io some/full   4.0% /   2.0%  read 5 MiB  write 0 MiB",
+                "below    below dump failed: partial",
+                "below    top writers: w0[g.service] 0 MiB, w1 1 MiB, w2[g.service] 2 MiB, w3 3 MiB, w4[g.service] 4 MiB, w5 5 MiB",
+                "below    top readers: r[q] 0 MiB",
+                "",
+                "episodes 7 (worst first)",
+                f"  {at(0)}-{at(20)}   20s  opened by: psi 0; peak io full 12%, commit 0 ms, D tasks max 4",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        2 task-samples [commit] fn1 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        3 task-samples [commit] fn2  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        4 task-samples [commit] fn3 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        5 task-samples [commit] fn4  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        6 task-samples [commit] fn5 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        7 task-samples [commit] fn6  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        8 task-samples [commit] fn7 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                f"  {at(1)}-{at(21)}   20s  opened by: psi 1; peak io full 13%, commit 100 ms, D tasks max 5",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                "        2 task-samples [commit] fn1 via via x  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                f"  {at(2)}-{at(22)}   20s  opened by: psi 2; peak io full 14%, commit 200 ms, D tasks max 6",
+                f"  {at(3)}-{at(23)}   20s  opened by: psi 3; peak io full 15%, commit 300 ms, D tasks max 7",
+                "        1 task-samples [commit] fn0  comms: a(3), b(2), c(1), d(1)  cgroups: x.slice, y.slice, z.slice",
+                "          stack: f0 <- f1 <- f2 <- f3 <- f4 <- f5 <- f6 <- f7 <- f8 <- f9",
+                f"  {at(4)}-{at(24)}   20s  opened by: psi 4; peak io full 16%, commit 400 ms, D tasks max 8",
+                f"  {at(5)}-{at(25)}   20s  opened by: psi 5; peak io full 17%, commit 500 ms, D tasks max 9",
+                f"  {at(6)}-{at(26)}   20s  opened by: psi 6; peak io full 18%, commit 600 ms, D tasks max 10",
+                "         (task-samples: one task seen in D state in one 1 s sample, roughly task-seconds)",
+                "",
+                "events   11 kernel/daemon event(s) ('!' = severe, on this host's disks):",
+                f"  ! {at(0)} event 0",
+                f"    {at(1)} event 1",
+                f"    {at(2)} event 2",
+                f"  ! {at(3)} event 3",
+                f"    {at(4)} event 4",
+                f"    {at(5)} event 5",
+                f"  ! {at(6)} event 6",
+                f"    {at(7)} event 7",
+                f"    {at(8)} event 8",
+                f"  ! {at(9)} event 9",
+                f"    {at(40)} ",
+                f"alert    {at(2)} Disk: slow",
+                f"alert    {at(3)} ?: ",
+            ],
+        )
+
+
 class ClassifyBranchesTest(unittest.TestCase):
     """Each way classify() decides, one case per branch (the mutation run left them unchecked)."""
 
