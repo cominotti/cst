@@ -7,6 +7,7 @@ one folder at a time, planned again after each, through BuildTreePort.delete/tri
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,34 @@ from toolchains.domain.prune import RM_MARGIN, RUST_BUILD
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from toolchains.ports import RunOutputPort
+
+
+@dataclasses.dataclass(slots=True)
+class _RunTally:
+    """What one apply's delete loop and its steps share: the root and its
+    device, the policy, the claimed folders, cargo's answers, the users of
+    each folder, the folders left, and the counts of the run."""
+
+    root: str
+    pol: RustPolicy
+    claimed: Mapping[str, Sequence[str]] | None
+    cache: CargoCache
+    users: dict[str, list[tuple[int | str, str]]]
+    left: list[Folder]
+    dev: int = 0
+    deleted: dict[str, Folder] = dataclasses.field(default_factory=dict)
+    trimmed: dict[str, int] = dataclasses.field(default_factory=dict)
+    rechecked: dict[str, int] = dataclasses.field(default_factory=dict)
+    nbusy: int = 0
+    failed: int = 0
+    rc: int = 0
+    stopped_by_budget: bool = False
+
+
+def _next_prune_step(plan: Sequence[tuple[Folder, FolderAction, str]]) -> tuple[Folder, FolderAction, str] | None:
+    """The first folder of PLAN to delete, else the first to trim; None when there is none."""
+    pick = next(((f, a, why) for f, a, why in plan if a == FolderAction.DELETE), None)
+    return pick or next(((f, a, why) for f, a, why in plan if a == FolderAction.TRIM), None)
 
 
 class RustBuild(BaseTarget[RustPolicy]):
@@ -162,7 +191,6 @@ class RustBuild(BaseTarget[RustPolicy]):
         claimed, ws = self.workspaces(root)
         for line in self.workspace_lines(ws, claimed, folders):
             self.tsay(line, 5 if claimed is None and ws is not None else 6)
-        rc = 0
         cache: CargoCache = {}
         users_map, unreadable = self.machine.tree.open_by(root)
         users: dict[str, list[tuple[int | str, str]]] = merge_users(
@@ -172,6 +200,15 @@ class RustBuild(BaseTarget[RustPolicy]):
             self.tsay(
                 f"{unreadable} Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", 5
             )
+        self._remove_leftovers(trash, users)
+        tally = _RunTally(root, pol, claimed, cache, users, list(folders))
+        self._report_busy(tally, now)
+        tally.dev = self.machine.tree.device(root)
+        self._prune_loop(tally, now)
+        return self._finish(tally, before, len(folders), now)
+
+    def _remove_leftovers(self, trash: Sequence[Folder], users: Mapping[str, Sequence[tuple[int | str, str]]]) -> None:
+        """Delete what an interrupted run left (TRASH), unless a process uses it."""
         for t in trash:
             if len(users.get(t.key, [])) > 0:
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
@@ -181,119 +218,139 @@ class RustBuild(BaseTarget[RustPolicy]):
                 f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
                 6 if ok else 3,
             )
-        deleted: dict[str, Folder] = {}
-        trimmed: dict[str, int] = {}
-        nbusy = failed = 0
-        left = list(folders)
-        # Said once: what the policy alone would delete but a process uses now.
-        for f, a, _ in decide(left, pol, now, {}, claimed):
-            if a in (FolderAction.DELETE, FolderAction.TRIM) and f.key in users:
-                nbusy += 1
-                self.tsay(f"skipped {f.key}: in use: {users_text(users[f.key])}", 5)
-        dev = self.machine.tree.device(root)
-        rechecked: dict[str, int] = {}
-        stopped_by_budget = False
-        root_dir = root
 
-        def recheck(f: Folder, a: FolderAction) -> Callable[[], str]:
-            """Measure F again (the locks are held) and plan again with it:
-            '' when the rule still gives action A (or a delete when A is a
-            trim), else why not. F takes the fresh measurement either way."""
+    def _report_busy(self, tally: _RunTally, now: float) -> None:
+        """Said once: what the policy alone would delete but a process uses now."""
+        for f, a, _ in decide(tally.left, tally.pol, now, {}, tally.claimed):
+            if a in (FolderAction.DELETE, FolderAction.TRIM) and f.key in tally.users:
+                tally.nbusy += 1
+                self.tsay(f"skipped {f.key}: in use: {users_text(tally.users[f.key])}", 5)
 
-            def check() -> str:
-                cur = self.clock()
-                top, leaf = f.key.split("/")
-                fresh = self.machine.tree.measure(Folder(root_dir, top, leaf), dev, cur)
-                got, gwhy = next(
-                    (x, w)
-                    for g, x, w in decide([fresh if g is f else g for g in left], pol, cur, users, claimed)
-                    if g is fresh
+    def _recheck(self, tally: _RunTally, f: Folder, a: FolderAction) -> Callable[[], str]:
+        """Measure F again (the locks are held) and plan again with it:
+        '' when the rule still gives action A (or a delete when A is a
+        trim), else why not. F takes the fresh measurement either way. The
+        folders left and their users are read from TALLY when it runs."""
+
+        def check() -> str:
+            cur = self.clock()
+            top, leaf = f.key.split("/")
+            fresh = self.machine.tree.measure(Folder(tally.root, top, leaf), tally.dev, cur)
+            got, gwhy = next(
+                (x, w)
+                for g, x, w in decide(
+                    [fresh if g is f else g for g in tally.left], tally.pol, cur, tally.users, tally.claimed
                 )
-                f.__dict__.update(fresh.__dict__)
-                if got == a or (a == FolderAction.TRIM and got == FolderAction.DELETE and f.inc):
-                    return ""
-                return f"measured again: {gwhy}" if got == FolderAction.KEEP else f"measured again: now {got}: {gwhy}"
+                if g is fresh
+            )
+            f.__dict__.update(fresh.__dict__)
+            if got == a or (a == FolderAction.TRIM and got == FolderAction.DELETE and f.inc):
+                return ""
+            return f"measured again: {gwhy}" if got == FolderAction.KEEP else f"measured again: now {got}: {gwhy}"
 
-            return check
+        return check
 
-        # One folder at a time, planned again after each: a folder found busy (or
-        # failing) stays counted and kept, so the cap picks the next one instead.
+    def _prune_loop(self, tally: _RunTally, now: float) -> None:
+        """One folder at a time, planned again after each: a folder found busy (or
+        failing) stays counted and kept, so the cap picks the next one instead."""
         while True:
             cur = self.clock()
-            plan = decide(left, pol, cur, users, claimed)
-            nxt = next(((f, a, why) for f, a, why in plan if a == FolderAction.DELETE), None)
-            nxt = nxt or next(((f, a, why) for f, a, why in plan if a == FolderAction.TRIM), None)
-            if nxt is None:
+            pick = _next_prune_step(decide(tally.left, tally.pol, cur, tally.users, tally.claimed))
+            if pick is None:
                 break
-            f, a, why = nxt
+            f, a, _ = pick
             left_s = self.time_left()
             if left_s is not None and left_s < RM_MARGIN:
-                stopped_by_budget = True
+                tally.stopped_by_budget = True
                 self.tsay(
                     f"stopped before {f.key}: the run's time budget ({span(self.limits.run_budget)}) is nearly used up; "
                     "the next run goes on",
                     5,
                 )
                 break
-            if a == FolderAction.DELETE:
-                result, detail = self.machine.tree.delete(root_dir, f, now, cache, recheck(f, a), self.deadline)
-            else:
-                result, detail = self.machine.tree.trim(root_dir, f, now, cache, recheck(f, a), self.deadline)
-            if result == BuildTreeResult.CHANGED:
-                # Planned again with the fresh measurement; a folder that keeps
-                # changing is left for the next run.
-                rechecked[f.key] = rechecked.get(f.key, 0) + 1
-                self.tsay(f"not {'deleted' if a == FolderAction.DELETE else 'trimmed'}: {f.key}: {detail}", 5)
-                if rechecked[f.key] < 3:
-                    continue
-                result = BuildTreeResult.BUSY
-            if result == BuildTreeResult.DELETED:
-                left.remove(f)
-                deleted[f.key] = f
-                self.tsay(f"deleted {f.key} ({gib(f.size)}, last active {when(f.activity)}): {why}")
-                if detail:
-                    self.tsay(f"note: {f.key}: {detail}", 5)
-                continue
-            if result == BuildTreeResult.TRIMMED:
-                trimmed[f.key] = f.inc_size
-                self.tsay(
-                    f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active "
-                    f"{when(f.activity)}): {why}"
-                )
-                f.size -= f.inc_size  # planned again without them (the cap counts what is left)
-                f.inc = []
-                continue
-            if result == BuildTreeResult.STOP:
-                nbusy += 1
-                self.tsay(f"stopped before {f.key}: {detail}; nothing more is deleted in this run", 5)
+            step = self.machine.tree.delete if a == FolderAction.DELETE else self.machine.tree.trim
+            result, detail = step(tally.root, f, now, tally.cache, self._recheck(tally, f, a), self.deadline)
+            if self._settle(tally, pick, result, detail):
                 break
-            if result == BuildTreeResult.BUSY:
-                nbusy += 1
-                self.tsay(f"skipped {f.key}: {detail}", 5)
-            else:
-                failed += 1
-                rc = 1
-                self.tsay(
-                    f"could not delete {'the incremental folders of ' if a == FolderAction.TRIM else ''}{f.key}: {detail}",
-                    3,
-                )
-            if a == FolderAction.DELETE and not self.machine.tree.exists(f.path):
-                left.remove(f)  # renamed away; the next run deletes the leftover
-            users = dict(users)
-            users[f.key] = [("-", detail)]
-        freed = sum(f.size for f in deleted.values())
-        trim_freed = sum(trimmed.values())
+
+    def _settle(
+        self, tally: _RunTally, pick: tuple[Folder, FolderAction, str], result: BuildTreeResult, detail: str
+    ) -> bool:
+        """Book the RESULT (and DETAIL) of the step on PICK (folder, action,
+        reason) in TALLY; True when nothing more is deleted in this run."""
+        f, a, _ = pick
+        if result == BuildTreeResult.CHANGED:
+            # Planned again with the fresh measurement; a folder that keeps
+            # changing is left for the next run.
+            tally.rechecked[f.key] = tally.rechecked.get(f.key, 0) + 1
+            self.tsay(f"not {'deleted' if a == FolderAction.DELETE else 'trimmed'}: {f.key}: {detail}", 5)
+            if tally.rechecked[f.key] < 3:
+                return False
+            result = BuildTreeResult.BUSY
+        if result in (BuildTreeResult.DELETED, BuildTreeResult.TRIMMED):
+            self._book_freed(tally, pick, result, detail)
+            return False
+        if result == BuildTreeResult.STOP:
+            tally.nbusy += 1
+            self.tsay(f"stopped before {f.key}: {detail}; nothing more is deleted in this run", 5)
+            return True
+        self._book_kept(tally, pick, result, detail)
+        return False
+
+    def _book_freed(
+        self, tally: _RunTally, pick: tuple[Folder, FolderAction, str], result: BuildTreeResult, detail: str
+    ) -> None:
+        """PICK was deleted (RESULT DELETED) or trimmed: off the plan, or planned again without its incremental folders."""
+        f, _, why = pick
+        if result == BuildTreeResult.DELETED:
+            tally.left.remove(f)
+            tally.deleted[f.key] = f
+            self.tsay(f"deleted {f.key} ({gib(f.size)}, last active {when(f.activity)}): {why}")
+            if detail:
+                self.tsay(f"note: {f.key}: {detail}", 5)
+            return
+        tally.trimmed[f.key] = f.inc_size
+        self.tsay(
+            f"deleted the incremental folders of {f.key} ({gib(f.inc_size)}, last active {when(f.activity)}): {why}"
+        )
+        f.size -= f.inc_size  # planned again without them (the cap counts what is left)
+        f.inc = []
+
+    def _book_kept(
+        self, tally: _RunTally, pick: tuple[Folder, FolderAction, str], result: BuildTreeResult, detail: str
+    ) -> None:
+        """PICK was not deleted (RESULT BUSY, or a failure): counted, and kept as in use for the rest of the run."""
+        f, a, _ = pick
+        if result == BuildTreeResult.BUSY:
+            tally.nbusy += 1
+            self.tsay(f"skipped {f.key}: {detail}", 5)
+        else:
+            tally.failed += 1
+            tally.rc = 1
+            self.tsay(
+                f"could not delete {'the incremental folders of ' if a == FolderAction.TRIM else ''}{f.key}: {detail}",
+                3,
+            )
+        if a == FolderAction.DELETE and not self.machine.tree.exists(f.path):
+            tally.left.remove(f)  # renamed away; the next run deletes the leftover
+        tally.users = dict(tally.users)
+        tally.users[f.key] = [("-", detail)]
+
+    def _finish(self, tally: _RunTally, before: int, nfolders: int, now: float) -> int:
+        """The run's summary line and its saved record; the exit status."""
+        freed = sum(f.size for f in tally.deleted.values())
+        trim_freed = sum(tally.trimmed.values())
         total = before - freed - trim_freed
         self.tsay(
-            f"done: deleted {len(deleted)} folder(s), freed {gib(freed)}"
-            + (f"; incremental of {len(trimmed)} folder(s), freed {gib(trim_freed)}" if trimmed else "")
-            + f"; left {gib(total)} in {len(folders) - len(deleted)} folder(s)"
-            + (f"; {nbusy} busy" if nbusy else "")
-            + ("; stopped at the time budget" if stopped_by_budget else "")
+            f"done: deleted {len(tally.deleted)} folder(s), freed {gib(freed)}"
+            + (f"; incremental of {len(tally.trimmed)} folder(s), freed {gib(trim_freed)}" if tally.trimmed else "")
+            + f"; left {gib(total)} in {nfolders - len(tally.deleted)} folder(s)"
+            + (f"; {tally.nbusy} busy" if tally.nbusy else "")
+            + ("; stopped at the time budget" if tally.stopped_by_budget else "")
         )
-        if pol.max_total and total > pol.max_total and not stopped_by_budget:
+        if tally.pol.max_total and total > tally.pol.max_total and not tally.stopped_by_budget:
             self.tsay(
-                f"still above MAX_TOTAL ({gib(total)} > {gib(pol.max_total)}): "
+                f"still above MAX_TOTAL ({gib(total)} > {gib(tally.pol.max_total)}): "
                 "the rest is active within MIN_KEEP, in use or left alone",
                 4,
             )
@@ -301,17 +358,17 @@ class RustBuild(BaseTarget[RustPolicy]):
             self.SPEC.id,
             {
                 "time": now,
-                "deleted": len(deleted),
+                "deleted": len(tally.deleted),
                 "freed": freed,
                 "total": total,
-                "folders": len(folders) - len(deleted),
-                "busy": nbusy,
-                "failed": failed,
-                "trimmed": len(trimmed),
+                "folders": nfolders - len(tally.deleted),
+                "busy": tally.nbusy,
+                "failed": tally.failed,
+                "trimmed": len(tally.trimmed),
                 "trim_freed": trim_freed,
             },
         )
-        return rc
+        return tally.rc
 
     def status_lines(self) -> list[str]:
         """Size and age of the folders, or why they are not looked at."""
