@@ -16,6 +16,7 @@ SNAP_SSH_CONFIG=/root/.ssh/config
 SNAP_NAS_KEY=/etc/btrfs-setup/ssh/id_ed25519
 SNAP_SSH_ALIAS=btrfs-setup-nas          # Host block restic's ssh uses (same name in btrfs-snapshot)
 SNAP_RESTIC_PW=/etc/btrfs-setup/restic-password
+SNAP_RESTIC_CACHE=/var/cache/btrfs-snapshot-restic   # restic's cache (btrfs-snapshot's too)
 SNAP_RUNTIME=/usr/local/sbin/btrfs-snapshot
 # btrfs-snapshot, always run without CST_SNAPSHOT_ROOT: that is its test seam
 # (every file below another folder), never handed on to a run as root.
@@ -726,7 +727,7 @@ snap_nas_test() {   # path
 # restic with the repository at SNAP_REPO_PATH (set by the caller).
 snap_restic() {
     RESTIC_REPOSITORY="sftp:${SNAP_SSH_ALIAS}:${SNAP_REPO_PATH}" RESTIC_PASSWORD_FILE="${SNAP_RESTIC_PW}" \
-        RESTIC_CACHE_DIR=/var/cache/btrfs-snapshot-restic restic "$@"
+        RESTIC_CACHE_DIR="${SNAP_RESTIC_CACHE}" restic "$@"
 }
 
 # Layer restic if absent; true if it can be used now.

@@ -40,6 +40,7 @@ if REPO not in sys.path:
 
 from btrfs.docker_gc import wiring as gc_wiring
 from cst_core.adapters.files import read_text
+from cst_core.domain import contracts
 from cst_core.domain.install import INSTALL_MANIFEST
 from cst_core.domain.record import USER_RECORD_REL
 from cst_core.domain.shapes import json_object, object_of, parse_json
@@ -787,6 +788,27 @@ class ComponentInstallTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("docker-gc", r.stderr)
         self.assertEqual(self.staged(), [])
+
+
+class SnapshotsBashPathsTest(unittest.TestCase):
+    """btrfs/setup-snapshots.bash names the /home NAS backup's files once each, with the values of
+    cst_core.domain.contracts (which btrfs-snapshot's runtime, cst vm and the Python readers use)."""
+
+    def test_the_bash_names_hold_the_contract_values_and_name_them_once(self) -> None:
+        text = Path(BTRFS, "setup-snapshots.bash").read_text(encoding="utf-8")
+        for name, value in (
+            ("SNAP_CONF", contracts.SNAPSHOTS_CONF),
+            ("SNAP_SSH_ALIAS", contracts.NAS_SSH_ALIAS),
+            ("SNAP_RESTIC_PW", contracts.RESTIC_PW_FILE),
+            ("SNAP_RESTIC_CACHE", contracts.RESTIC_CACHE_DIR),
+        ):
+            with self.subTest(name=name):
+                found = re.findall(rf"^{name}=(\S+)", text, flags=re.MULTILINE)
+                self.assertEqual(found, [value])
+                # The value is written once, on that line; everywhere else the script uses the name.
+                self.assertEqual(
+                    [line for line in text.splitlines() if value in line and not line.startswith(f"{name}=")], []
+                )
 
 
 class SnapshotsConfTest(unittest.TestCase):

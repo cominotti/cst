@@ -17,7 +17,7 @@ from typing import NotRequired
 from typing import TypedDict
 import os
 
-from cst_core.domain.contracts import NOTIFY_PROGRAM, StateFormatKey, state_format
+from cst_core.domain.contracts import NOTIFY_PROGRAM, SNAPSHOTS_CONF, StateFormatKey, state_format
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.domain.text import enum_member
@@ -335,7 +335,7 @@ class BulkPaths:
     flag: str = "/etc/btrfs-setup/bulk-at-boot"
     keep: str = "/etc/btrfs-setup/bulk-keep"
     convert_plan: str = "/etc/btrfs-setup/convert-plan"
-    snapshots_conf: str = "/etc/btrfs-setup/snapshots.conf"
+    snapshots_conf: str = SNAPSHOTS_CONF
     notify: str = NOTIFY_PROGRAM
     state: str = state_format(StateFormatKey.BULK_JOURNAL).folder
     attempts: str = "/var/lib/btrfs-bulk/boot-attempts"
