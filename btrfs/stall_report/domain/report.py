@@ -2,7 +2,7 @@
 """btrfs-stall-report's text report, no I/O: the lines of one window's report (verdict, pressure,
 btrfs, disks, memory, cgroups, below, episodes, events and alerts)."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 import time
 
 from btrfs.stall_report.domain.records import AnalyseResult, Episode, MetaRecord
@@ -11,25 +11,24 @@ from btrfs.stall_report.domain.verdict import fmt_bytes, fmt_counts, fmt_ts, ver
 
 def report_lines(
     res: AnalyseResult, meta: MetaRecord, container_names: Callable[[], Mapping[str, str]], *, verbose: bool
-) -> list[str]:
-    """The text report's lines, in order ("" for an empty line). container_names() gives the containers'
-    names by cgroup; it is asked only when a cgroup is a container's."""
-    out = _window_lines(res)
-    out.append("")
-    out.extend(f"verdict  {line}" for line in verdict(res, meta))
+) -> Iterator[str]:
+    """The text report's lines, in order ("" for an empty line), each made when it is asked for: a
+    printer shows the lines before the cgroups' while container_names() runs. container_names() gives
+    the containers' names by cgroup; it is asked only when a cgroup is a container's."""
+    yield from _window_lines(res)
+    yield ""
+    yield from (f"verdict  {line}" for line in verdict(res, meta))
     if res["samples"] < 2:
-        return out
-    out.append("")
-    return (
-        out
-        + _pressure_lines(res)
-        + _fs_lines(res, meta)
-        + _disk_lines(res, verbose=verbose)
-        + _memory_and_cgroup_lines(res, container_names)
-        + _below_lines(res)
-        + _episode_lines(res, verbose=verbose)
-        + _event_lines(res, verbose=verbose)
-    )
+        return
+    yield ""
+    yield from _pressure_lines(res)
+    yield from _fs_lines(res, meta)
+    yield from _disk_lines(res, verbose=verbose)
+    yield _memory_line(res)
+    yield from _cgroup_lines(res, container_names)
+    yield from _below_lines(res)
+    yield from _episode_lines(res, verbose=verbose)
+    yield from _event_lines(res, verbose=verbose)
 
 
 def _window_lines(res: AnalyseResult) -> list[str]:
@@ -100,21 +99,25 @@ def _disk_lines(res: AnalyseResult, *, verbose: bool) -> list[str]:
     return out
 
 
-def _memory_and_cgroup_lines(res: AnalyseResult, container_names: Callable[[], Mapping[str, str]]) -> list[str]:
-    """The memory line, then the cgroups: the slices, and at most 6 others that waited or wrote (with
-    the names of the containers among them)."""
+def _memory_line(res: AnalyseResult) -> str:
+    """The memory line: zswap and swap, direct reclaim and allocation stalls."""
     vm = res["vm"]
+    return (
+        f"memory   {zswap_text(vm)}   direct reclaim scanned "
+        f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}"
+    )
+
+
+def _cgroup_lines(res: AnalyseResult, container_names: Callable[[], Mapping[str, str]]) -> list[str]:
+    """The cgroups: the slices, and at most 6 others that waited or wrote (with the names of the
+    containers among them)."""
     names = container_names() if any(k.startswith(("docker-", "libpod-")) for k in res["cgroups"]) else {}
     out = [
-        (
-            f"memory   {zswap_text(vm)}   direct reclaim scanned "
-            f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}"
-        ),
         (
             "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "
             "dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare "
             "cgroups with each other, not with disk totals)"
-        ),
+        )
     ]
     shown = 0
     for name, c in sorted(

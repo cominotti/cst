@@ -1069,6 +1069,24 @@ class ReportTextTest(unittest.TestCase):
             load().print_report(rich_result(), meta_, verbose=verbose)
         return out.getvalue().split("\n")[:-1]
 
+    def test_the_lines_before_the_cgroups_are_printed_before_the_container_names_are_asked(self) -> None:
+        # docker ps and podman ps can take seconds: the window, the verdict and the lines up to memory
+        # are out by then (on a terminal they show at once), as before the report's lines moved to report.py.
+        meta_ = {"kernel": "7.2.0", "fs": {"aaaaaaaa-1-2-3-4": {"label": "data"}}}
+        out = io.StringIO()
+        printed: list[list[str]] = []
+
+        def names() -> dict[str, str]:
+            printed.append(out.getvalue().split("\n"))
+            return {}
+
+        with mock.patch.object(rp_cli, "container_names", names), contextlib.redirect_stdout(out):
+            load().print_report(rich_result(), meta_, verbose=False)
+        [lines] = printed
+        self.assertTrue(lines[0].startswith("window   "), lines)
+        self.assertTrue(lines[-2].startswith("memory   "), lines)
+        self.assertEqual(lines[-1], "")
+
     def test_every_section(self) -> None:
         def at(offset: int) -> str:
             return time.strftime("%H:%M:%S", time.localtime(T0 + offset))
