@@ -547,7 +547,9 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(self.state(p), "unreadable")
         self.assertEqual(self.file_state(TMPFILES, p), "unreadable")
         events: list[D.ApplyEvent] = []
-        self.assertEqual(self.svc._apply_marked_line(p, self.line_spec(), 0o644, events, name="swap0")[0], False)
+        self.assertEqual(
+            self.svc._apply_marked_line(p, self.line_spec(), 0o644, events, name="swap0"), (False, False, False)
+        )
         self.assertIn("unreadable", events[-1].text)
 
     def test_other_lines_come_back_byte_for_byte(self) -> None:
