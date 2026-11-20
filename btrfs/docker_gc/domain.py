@@ -306,26 +306,42 @@ def builtin_protected(sources: Sequence[str]) -> tuple[str, ...] | None:
         except SyntaxError, ValueError, MemoryError:  # MemoryError: the parser's nesting limit
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and node.name == "GcSettings":
-                for item in node.body:
-                    if (
-                        isinstance(item, ast.AnnAssign)
-                        and isinstance(item.target, ast.Name)
-                        and item.target.id == "protected"
-                        and isinstance(value := _literal(item.value), tuple)
-                        and all(isinstance(v, str) for v in value)
-                    ):
-                        return registries_of(",".join(value))
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get"
-                and len(node.args) == 2
-                and _literal(node.args[0]) == "DOCKER_GC_PROTECT"
-                and isinstance(default := _literal(node.args[1]), str)
-            ):
+            if (protected := _class_default(node)) is not None:
+                return protected
+            if (default := _env_get_default(node)) is not None:
                 env_default = registries_of(default)
     return env_default
+
+
+def _class_default(node: ast.AST) -> tuple[str, ...] | None:
+    """The registries of GcSettings.protected's default, when NODE is that class and the default a
+    tuple of strings; else None."""
+    if not isinstance(node, ast.ClassDef) or node.name != "GcSettings":
+        return None
+    for item in node.body:
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == "protected"
+            and isinstance(value := _literal(item.value), tuple)
+            and all(isinstance(v, str) for v in value)
+        ):
+            return registries_of(",".join(value))
+    return None
+
+
+def _env_get_default(node: ast.AST) -> str | None:
+    """The default text of a `.get("DOCKER_GC_PROTECT", "...")` call; None for any other node."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and len(node.args) == 2
+        and _literal(node.args[0]) == "DOCKER_GC_PROTECT"
+        and isinstance(default := _literal(node.args[1]), str)
+    ):
+        return default
+    return None
 
 
 def resolve_protection(
