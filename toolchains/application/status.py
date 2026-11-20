@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from toolchains.application.auto import AutoTimer
     from toolchains.application.config import ToolConfig
     from toolchains.application.prune import Target
-    from toolchains.domain.prune import Settings
+    from toolchains.domain.prune import Settings, TargetSpec
     from toolchains.ports import HomeFilesPort, InstalledToolsPort, RunOutputPort, RunStatePort
 
 
@@ -43,7 +43,7 @@ class ToolchainsStatus:
 
     def show(self, *, brief: bool) -> None:
         """Every section, or with BRIEF only the timer and each target's last prune."""
-        home, say = self.home, self.out.say
+        say = self.out.say
         say(f"auto: {self.timer.timer_text()}")
         settings: Settings | None
         try:
@@ -55,20 +55,30 @@ class ToolchainsStatus:
             last = saved_run_text(tid, self.state.read(tid))
             if brief:
                 say(f"{tid}: last prune: {last}")
-                continue
-            say(f"== {tid}: {spec.what}")
-            t = self.target(settings, tid)
-            say(f"  where:    {self.out.where(t.location())}")
-            if settings:
-                state = "enabled" if settings.enabled[tid] else "disabled (prune runs it only when named)"
-                say(f"  policy:   {state}; {settings.policy_text(tid)} ({settings.source_of(spec)})")
             else:
-                say("  policy:   BAD SETTINGS (see above)")
-            say(f"  last prune: {last}")
-            for line in t.status_lines():
-                say(f"  {line}")
-        if brief:
-            return
+                self._target_section(tid, spec, settings, last)
+        if not brief:
+            self._other_sections(settings)
+
+    def _target_section(self, tid: str, spec: TargetSpec, settings: Settings | None, last: str) -> None:
+        """The section of target TID (LAST: its last prune; SETTINGS None: bad)."""
+        say = self.out.say
+        say(f"== {tid}: {spec.what}")
+        t = self.target(settings, tid)
+        say(f"  where:    {self.out.where(t.location())}")
+        if settings:
+            state = "enabled" if settings.enabled[tid] else "disabled (prune runs it only when named)"
+            say(f"  policy:   {state}; {settings.policy_text(tid)} ({settings.source_of(spec)})")
+        else:
+            say("  policy:   BAD SETTINGS (see above)")
+        say(f"  last prune: {last}")
+        for line in t.status_lines():
+            say(f"  {line}")
+
+    def _other_sections(self, settings: Settings | None) -> None:
+        """The sections after the targets: the planned targets, the rust toolchains,
+        the toolchain settings, the sccache servers and the files of auto on."""
+        home, say = self.home, self.out.say
         say("== not implemented yet (nothing pruned there by CST):")
         for tid, (where, how) in PLANNED.items():
             shown = ", ".join(self.out.where(os.path.join(home, p.strip()[2:])) for p in where.split(","))
