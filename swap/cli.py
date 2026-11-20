@@ -98,7 +98,7 @@ def execute_cli(
 
     service = wiring.build_service(prog, exec_ctx, runner, fs, fallback_root=_cst_root, env=env_map)
     return run_command(
-        parsed.command, service, hint=f"{prog} {parsed.word} --root, on the host", out=stdout, err=stderr
+        parsed.command, service, hint=f"{prog} {parsed.words[0]} --root, on the host", out=stdout, err=stderr
     )
 
 

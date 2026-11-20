@@ -12,11 +12,10 @@ from swap.domain import SwapCommand, parse_swap_command
 
 @dataclass(frozen=True, slots=True)
 class SwapArgs:
-    """A command to run: the command, its word as given (word), the words to run it again with
-    (words: word and the rest), and whether it needs root (on the host, through sudo)."""
+    """A command to run: the command, the words to run it again with (words: its word as given,
+    then the rest), and whether it needs root (on the host, through sudo)."""
 
     command: Literal[SwapCommand.PLAN, SwapCommand.STATUS, SwapCommand.APPLY]
-    word: str
     words: tuple[str, ...]
     want_root: bool
 
@@ -44,10 +43,10 @@ def parse_swap_args(args: Sequence[str], usage: str) -> SwapArgs | SwapArgsStop:
             want_root = first == "--root"
             if first and not want_root:
                 return SwapArgsStop(2, to_stderr=True, line=f"{cmd}: unknown argument '{first}' (only --root)")
-            return SwapArgs(command, cmd, (cmd, *rest), want_root=want_root)
+            return SwapArgs(command, (cmd, *rest), want_root=want_root)
         case SwapCommand.APPLY as command:
             if rest:
                 return SwapArgsStop(2, to_stderr=True, line="apply: no arguments")
-            return SwapArgs(command, cmd, (cmd,), want_root=True)
+            return SwapArgs(command, (cmd,), want_root=True)
         case None:
             return SwapArgsStop(2, to_stderr=True, line=f"Unknown command: {cmd}", text=usage)
