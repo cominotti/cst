@@ -1737,6 +1737,7 @@ class PendingAlertsStatusTest(unittest.TestCase):
             [
                 "set -Eeuo pipefail",
                 f'. "{REPO}/cst-install.bash"',
+                shell_function(SETUP, "indent"),
                 shell_function(SETUP, "status_pending_alerts"),
                 'SRC="$T"; PROG=cst-btrfs-test; USER_UNIT_DIR="$T"; PENDING_UNIT=unit; OLD_ALERTS_DIR="$T/old"',
                 'touch "$T/unit"',

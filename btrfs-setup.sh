@@ -210,6 +210,11 @@ usage() {
 }
 in_container() { [[ -e /run/.containerenv || -e /.dockerenv ]]; }
 
+# indent: the lines of stdin, two spaces in (a block of status output).
+indent() {
+    sed 's/^/  /'
+}
+
 # ---- command line ------------------------------------------------------------
 orig_args=("$@")
 # No command = help, like cpu-setup.sh: running the bare script to see what it
@@ -528,7 +533,7 @@ status_pending_alerts() {
         cst_as_user "${target_user}" python3 -I -B "${SRC}/cst-pending-alerts" --list
     else
         python3 -I -B "${SRC}/cst-pending-alerts" --list
-    fi 2>&1 | sed 's/^/  /'
+    fi 2>&1 | indent
 }
 
 shim_content() {
@@ -642,22 +647,22 @@ status() (
     uuid="$(root_fs_uuid)"
     echo "kernel $(uname -r), root btrfs ${uuid:-?}"
     section "services and timers"
-    systemctl --no-pager list-timers "${TIMERS[@]}" fstrim.timer 2>/dev/null | sed -n '1,4p' | sed 's/^/  /'
+    systemctl --no-pager list-timers "${TIMERS[@]}" fstrim.timer 2>/dev/null | sed -n '1,4p' | indent
     for u in btrfs-stall-monitor.service below.service; do
         printf '  %-28s %s\n' "${u}" "$(systemctl is-active "${u}" 2>/dev/null || true)"
     done
     section "last health check"
     journalctl -u btrfs-health-check.service -o cat --no-pager 2>/dev/null |
-        grep -E 'btrfs-health-check:' | tail -n 3 | sed 's/^/  /'
+        grep -E 'btrfs-health-check:' | tail -n 3 | indent
     section "last scrub"
-    btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | sed 's/^/  /'
+    btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | indent
     section "weekly scrub speed limit (per device)"
     status_scrub_limit "${uuid}"
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
-        grep -E 'trimmed|Failed|failed' | tail -n 4 | sed 's/^/  /'
+        grep -E 'trimmed|Failed|failed' | tail -n 4 | indent
     section "docker volumes (NOCOW)"
-    python3 -I -B "${SRC}/docker-volumes-nocow" status 2>&1 | sed 's/^/  /'
+    python3 -I -B "${SRC}/docker-volumes-nocow" status 2>&1 | indent
     section "docker-gc"
     if systemctl -q is-enabled docker-gc.timer 2>/dev/null; then
         journalctl -u docker-gc.service -o cat --no-pager 2>/dev/null | grep -E '^<[0-9]>docker-gc: removed|docker-gc: removed' |
@@ -680,21 +685,21 @@ status() (
     (
         # shellcheck source=btrfs/setup-snapshots.bash
         . "${SRC}/setup-snapshots.bash"
-        snap_status 2>&1 | sed 's/^/  /'
+        snap_status 2>&1 | indent
     )
     section "Bulk (re-downloadable data: no snapshots, no NAS backup)"
     if [[ -n "${target_user}" && "${target_user}" != root ]]; then
         (
             # shellcheck source=btrfs/setup-snapshots.bash
             . "${SRC}/setup-snapshots.bash"
-            bulk_status 2>&1 | sed 's/^/  /'
+            bulk_status 2>&1 | indent
         )
     else
         echo "  run through sudo from your user account to see your ~/Bulk"
     fi
     section "stalls, last hour (report --since '1 hour ago' --no-below)"
     python3 -I -B "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
-        sed 's/^/  /'
+        indent
     data="$(du -sh "${DATA_DIR}" 2>/dev/null | cut -f1)"
     echo
     echo "data: stall log ${data:-?}, below store $(du -sh /var/log/below/store 2>/dev/null | cut -f1)"
