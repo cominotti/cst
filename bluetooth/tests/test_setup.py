@@ -1725,7 +1725,7 @@ class StatusTest(SetupCase):
             ),
             r.stdout,
         )
-        m.unit("user", "cst-bt-ldac48")
+        m.unit("user", LW.removesuffix(".service"))
         r = m.run("status", container=True)
         self.assertIn(
             row(
