@@ -16,7 +16,6 @@ from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.domain.install import manifest_by_src, render_template
 from cst_core.domain.record import InstallRecord
-from cst_core.domain.values import DomainValidationError
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, ContainerProbePort, VirshPort
 from doctor.domain import NAME, VIRSH_URI, HostPath, ViewPath
 from vm import adapters as vm_adapters
@@ -88,9 +87,9 @@ class Host:
                 with zf.open(info) as f:
                     return f.read(limit).decode("utf-8", "replace")
         # What zipfile raises on an archive it cannot read: KeyError for a missing member, ValueError for a
-        # name that is not UTF-8, EOFError for one cut short, NotImplementedError and RuntimeError for flags
-        # it does not support or an encrypted member.
-        except (zipfile.BadZipFile, KeyError, ValueError, EOFError, NotImplementedError, RuntimeError) as e:
+        # name that is not UTF-8, EOFError for one cut short, RuntimeError (NotImplementedError among them)
+        # for flags it does not support or an encrypted member.
+        except (zipfile.BadZipFile, KeyError, ValueError, EOFError, RuntimeError) as e:
             raise OSError(f"{path}: {member}: {e}") from e
 
     def listdir(self, path: ViewPath) -> list[str]:
@@ -197,7 +196,7 @@ class InstalledFiles:
             data = entry_payload(self._repo, entry)
             if entry.is_template:
                 data = render_template(data.decode("utf-8"), values or {}).encode("utf-8")
-        except OSError, ValueError, SyntaxError, DomainValidationError:
+        except OSError, ValueError, SyntaxError:  # ValueError covers DomainValidationError and UnicodeDecodeError
             return None
         return hashlib.sha256(data).hexdigest()
 
