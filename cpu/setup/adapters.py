@@ -108,7 +108,9 @@ def _make_run_dir(path: str) -> None:
 
 
 def _touch(path: str) -> None:
+    """touch PATH: created when it is not there (append mode never empties it), its times set to now."""
     with open(path, "a", encoding="utf-8"):
+        # Opening it is the whole point: append mode creates the file and leaves its bytes alone.
         pass
     os.utime(path)
 

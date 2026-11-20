@@ -435,7 +435,7 @@ class GameProfile:
             return 1
         try:
             with open(p.state, "w", encoding="utf-8"):
-                pass
+                pass  # an empty game.state: the profile is on, with nothing to undo yet
         except OSError as e:
             self.log(3, f"not switched on: could not write {p.state}: {e.strerror or e}")
             return 1
