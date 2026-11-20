@@ -41,9 +41,7 @@ def main() -> int:
     )
 
     if findings:
-        lines.append("")
-        lines.append("| Severity | Rule | File | Message |")
-        lines.append("|---|---|---|---|")
+        lines.extend(("", "| Severity | Rule | File | Message |", "|---|---|---|---|"))
         for item in findings[:25]:
             sev = str(item.get("severity", "-")).replace("|", "\\|")
             rule = str(item.get("rule_id") or item.get("id") or "-").replace("|", "\\|")
