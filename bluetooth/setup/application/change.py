@@ -196,10 +196,9 @@ class Change(Checks):
             )
             return
         if a2dp != "1":
-            back = self._reconnect_a2dp()
-            if back is None:
+            prof = self._reconnect_a2dp()
+            if prof is None:
                 return
-            prof = back
         if not prof.startswith("a2dp-sink"):
             r = self.run(
                 ["pactl", "set-card-profile", f"bluez_card.{self.c.device_id}", "a2dp-sink"], output=OutputMode.STDOUT
