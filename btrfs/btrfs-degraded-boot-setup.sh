@@ -908,10 +908,8 @@ else
             # unless space came back). A rule rm -f cannot remove either keeps its line. Neither
             # failure stops the cleanup (both are tested, so set -e does not end the script here):
             # udev is reloaded and the self-test's error is the one the run ends with.
-            if ! cst_remove_text "${RULE}" >/dev/null; then
-                if rm -f "${RULE}"; then
-                    cst_forget_text "${RULE}" >/dev/null || true
-                fi
+            if ! cst_remove_text "${RULE}" >/dev/null && rm -f "${RULE}"; then
+                cst_forget_text "${RULE}" >/dev/null || true
             fi
             udevadm control --reload
         fi
