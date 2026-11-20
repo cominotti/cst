@@ -65,6 +65,7 @@ from vm.domain.backup import (
     not_indexed_text,
     restic_failure_why,
     snapshot_args,
+    torn_entry,
 )
 from vm.ports import (
     BackupStorePort,
@@ -640,11 +641,6 @@ def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = 
     # All or nothing: an answer of another shape is no list of the live snapshots, and reading it
     # as one would drop the index entries of every snapshot it does not name.
     return data if list_of(data, is_restic_snapshot) else None
-
-
-def torn_entry(nas: NasRepo, snap: str, vm: str, stamp: str, why: str) -> TornEntry:
-    """The record of snap, a torn snapshot of vm's run at stamp (why: what tore it)."""
-    return {"snapshot": snap, "vm": vm, "repository": nas["repo"], "host": nas["host"], "timestamp": stamp, "why": why}
 
 
 def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -> str | None:

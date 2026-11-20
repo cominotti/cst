@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """The records of the backups: an index entry, the two manifests, restic's summary of a backup,
 the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and the state of one NAS
-backup run (NasRun); the NAS backup's snapshot arguments, index and last lines, and the lines status
-and backup-timer status print about them. Pure."""
+backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
+lines status and backup-timer status print about them. Pure."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -147,6 +147,11 @@ _TORN_KEYS: KeyTypes = {
     "timestamp": (str,),
     "why": (str,),
 }
+
+
+def torn_entry(nas: NasRepo, snap: str, vm: str, stamp: str, why: str) -> TornEntry:
+    """The record of snap, a torn snapshot of vm's run at stamp (why: what tore it)."""
+    return {"snapshot": snap, "vm": vm, "repository": nas["repo"], "host": nas["host"], "timestamp": stamp, "why": why}
 
 
 def is_torn_entry(e: object) -> TypeIs[TornEntry]:
