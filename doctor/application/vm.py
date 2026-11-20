@@ -5,6 +5,7 @@ the backup timer, the virtual hardware, the image folders, the backup alerts).""
 from collections.abc import Callable, Iterator
 import shlex
 import time
+from typing import Final, NamedTuple
 import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
@@ -34,13 +35,13 @@ from doctor.domain import (
     VM_CONF,
     VM_INDEX,
     VM_INDEX_FORMAT,
-    VM_LIVE_STATES,
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
     VM_TIMER_WANTS,
     VM_TORN,
     VM_TORN_FORMAT,
     WARN,
+    Deployment,
     HostPath,
     Result,
     name_list,
@@ -50,7 +51,7 @@ from doctor.domain import (
     host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
-from vm.domain import VmOverlayKind
+from vm.domain import LIVE_STATES, STOPPED_STATES, ImageProbe, VmOverlayKind
 from vm.domain.backup import NO_BACKUPS_LIST, NO_TORN_LIST, is_index_entry, is_torn_entry, stored_list, stored_torn
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
@@ -113,6 +114,50 @@ def offered_features(host: DoctorHostPort) -> tuple[set[str | None] | None, str]
     return parse_offered_features_xml(out)
 
 
+def _passthrough_cpu(host: DoctorHostPort, vm: str) -> ET.Element | Result:
+    """The <cpu> element of vm's definition when its mode is host-passthrough; else the line that says
+    why there is nothing more to check (the definition cannot be read, or another mode)."""
+    rc, out, err = domain_xml(host, vm)
+    try:
+        cpu = ET.fromstring(out).find("cpu") if rc == 0 else None
+    except ET.ParseError:
+        rc, err = 1, "definition unreadable"
+        cpu = None
+    if rc != 0:
+        return Result(INFO, f"VM {vm}: definition not readable ({virsh_problem(rc, err)})")
+    mode = cpu.get("mode", "custom") if cpu is not None else "not set"
+    if cpu is None or mode != "host-passthrough":
+        return Result(OK, f"VM {vm}: cpu mode {mode} (the CET/MBEC bootloop concerns host-passthrough only)")
+    return cpu
+
+
+def _features_result(
+    host: DoctorHostPort, vm: str, missing: list[str], offered: set[str | None] | None, oproblem: str | None
+) -> Result:
+    """A host-passthrough VM whose definition does not disable the features of missing, against what this
+    QEMU offers (offered_features' answer: offered, None with why in oproblem when it could not be read)."""
+    if offered is None:
+        return Result(
+            INFO,
+            f"VM {vm}: host-passthrough without disabling {', '.join(missing)}; whether "
+            f"this QEMU passes them was not checked ({oproblem}). If Windows loops in "
+            f"Automatic Repair: {host.cst} cpu vm-pin plan ({CET_ISSUE})",
+        )
+    bad = [n for n in missing if n in offered]
+    if not bad:
+        return Result(
+            OK, f"VM {vm}: host-passthrough; this QEMU does not offer {', '.join(missing)} (nothing to disable yet)"
+        )
+    return Result(
+        WARN,
+        f"VM {vm}: host-passthrough passes {', '.join(bad)} to the guest (QEMU 11 and "
+        "later offer them); Windows with Hyper-V/VBS/WSL2 then loops in Automatic Repair. "
+        f"The fix shows the change to the definition; then {host.cst} cpu vm-pin apply. "
+        f"Upstream: {CET_ISSUE}",
+        f"{host.cst} cpu vm-pin plan",
+    )
+
+
 @check(CHECKS, "vm")
 def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None = None) -> Iterator[Result]:
     dom_fn = libvirt_domains if domains_fn is None else domains_fn
@@ -132,46 +177,19 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
     offered: set[str | None] | None = None
     oproblem: str | None = None
     for vm in names:
-        rc, out, err = domain_xml(host, vm)
-        try:
-            cpu = ET.fromstring(out).find("cpu") if rc == 0 else None
-        except ET.ParseError:
-            rc, err = 1, "definition unreadable"
-            cpu = None
-        if rc != 0:
-            yield Result(INFO, f"VM {vm}: definition not readable ({virsh_problem(rc, err)})")
-            continue
-        mode = cpu.get("mode", "custom") if cpu is not None else "not set"
-        if cpu is None or mode != "host-passthrough":
-            yield Result(OK, f"VM {vm}: cpu mode {mode} (the CET/MBEC bootloop concerns host-passthrough only)")
+        cpu = _passthrough_cpu(host, vm)
+        if isinstance(cpu, Result):
+            yield cpu
             continue
         off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
         missing = [n for n in wanted if n not in off]
-        if missing and oproblem is None:
-            offered, oproblem = offered_features(host)
         if not missing:
             yield Result(OK, f"VM {vm}: host-passthrough with {', '.join(wanted)} disabled")
-        elif offered is None:
-            yield Result(
-                INFO,
-                f"VM {vm}: host-passthrough without disabling {', '.join(missing)}; whether "
-                f"this QEMU passes them was not checked ({oproblem}). If Windows loops in "
-                f"Automatic Repair: {host.cst} cpu vm-pin plan ({CET_ISSUE})",
-            )
-        elif not [n for n in missing if n in offered]:
-            yield Result(
-                OK, f"VM {vm}: host-passthrough; this QEMU does not offer {', '.join(missing)} (nothing to disable yet)"
-            )
-        else:
-            bad = [n for n in missing if n in offered]
-            yield Result(
-                WARN,
-                f"VM {vm}: host-passthrough passes {', '.join(bad)} to the guest (QEMU 11 and "
-                "later offer them); Windows with Hyper-V/VBS/WSL2 then loops in Automatic Repair. "
-                f"The fix shows the change to the definition; then {host.cst} cpu vm-pin apply. "
-                f"Upstream: {CET_ISSUE}",
-                f"{host.cst} cpu vm-pin plan",
-            )
+            continue
+        # Asked at most once per check-up, and only for a VM that misses a disable.
+        if oproblem is None:
+            offered, oproblem = offered_features(host)
+        yield _features_result(host, vm, missing, offered, oproblem)
 
 
 def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
@@ -306,27 +324,39 @@ def check_vm_settings(host: DoctorHostPort) -> Iterator[Result]:
     yield from settings_file_warnings(host, VM_CONF, bash_sourced=False)
 
 
-@check(CHECKS, "vm")
-def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | None = None) -> Iterator[Result]:
-    (booted, _, err), deps = ostree_facts(host)
-    if err or booted is None:
-        yield Result(INFO, f"virtualization packages: not compared ({err or 'no booted deployment'})")
-        return
+def _rollback(deps: list[Deployment], booted: Deployment) -> tuple[int, Deployment] | None:
+    """(index, deployment) of the rollback: the first deployment after the booted one of the same OS."""
     i = next(n for n, d in enumerate(deps) if d is booted)
-    rb = next(((n, d) for n, d in enumerate(deps) if n > i and d.get("osname") == booted.get("osname")), None)
-    if rb is None:
-        yield Result(OK, "virtualization packages: no rollback deployment to compare with")
-        return
+    return next(((n, d) for n, d in enumerate(deps) if n > i and d.get("osname") == booted.get("osname")), None)
+
+
+def _backup_warning(host: DoctorHostPort, what: str, built: float, backup: float | None) -> Result:
+    """No VM backup since the booted deployment was built (built: its epoch, 0 unknown; backup: the
+    newest backup's, 0 none, None unknown)."""
+    when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
+    if backup is None:
+        last = "unknown (see the index line)"
+    elif backup:
+        last = time.strftime("%Y-%m-%d", time.localtime(backup))
+    else:
+        last = "never"
+    if nas_configured(host):
+        advice, fix = "The NAS backup works with the VM running", f"{host.cst} vm backup --nas"
+    else:
+        advice, fix = "Shut the VM down first", f"{host.cst} vm backup"
+    return Result(
+        WARN,
+        f"{what}. No VM backup since the booted deployment was built ({when}; last backup: {last}). {advice}",
+        fix,
+    )
+
+
+def _virt_change_results(
+    host: DoctorHostPort, booted: Deployment, rb: tuple[int, Deployment], change: str, dom_fn: DomainsFn
+) -> Iterator[Result]:
+    """The virtualization packages changed from the rollback deployment rb (index, deployment) to the
+    booted one: what keeps the way back for the VMs (the rollback pinned, a VM backup since the build)."""
     index, rollback = rb
-    old, new = installed_packages(host, rollback), installed_packages(host, booted)
-    if old is None or new is None:
-        yield Result(INFO, "virtualization packages: not compared (rpm-ostree db list did not answer)")
-        return
-    change = virt_changes(virt_versions(old), virt_versions(new))
-    if not change:
-        yield Result(OK, "virtualization packages: the same in the booted and the rollback deployment")
-        return
-    dom_fn = libvirt_domains if domains_fn is None else domains_fn
     names, problem = dom_fn(host)
     rb_ver = rollback.get("version") or (rollback.get("checksum") or "?")[:10]
     what = f"virtualization packages changed from the rollback deployment {rb_ver} to the booted one: {change}"
@@ -350,28 +380,30 @@ def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | Non
             f"sudo ostree admin pin {index}",
         )
     if not fresh:
-        when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
-        last = (
-            "unknown (see the index line)"
-            if backup is None
-            else time.strftime("%Y-%m-%d", time.localtime(backup))
-            if backup
-            else "never"
-        )
-        if nas_configured(host):
-            yield Result(
-                WARN,
-                f"{what}. No VM backup since the booted deployment was built ({when}; last "
-                f"backup: {last}). The NAS backup works with the VM running",
-                f"{host.cst} vm backup --nas",
-            )
-        else:
-            yield Result(
-                WARN,
-                f"{what}. No VM backup since the booted deployment was built ({when}; last "
-                f"backup: {last}). Shut the VM down first",
-                f"{host.cst} vm backup",
-            )
+        yield _backup_warning(host, what, built, backup)
+
+
+@check(CHECKS, "vm")
+def check_virt_stack_change(host: DoctorHostPort, *, domains_fn: DomainsFn | None = None) -> Iterator[Result]:
+    (booted, _, err), deps = ostree_facts(host)
+    if err or booted is None:
+        yield Result(INFO, f"virtualization packages: not compared ({err or 'no booted deployment'})")
+        return
+    rb = _rollback(deps, booted)
+    if rb is None:
+        yield Result(OK, "virtualization packages: no rollback deployment to compare with")
+        return
+    _, rollback = rb
+    old, new = installed_packages(host, rollback), installed_packages(host, booted)
+    if old is None or new is None:
+        yield Result(INFO, "virtualization packages: not compared (rpm-ostree db list did not answer)")
+        return
+    change = virt_changes(virt_versions(old), virt_versions(new))
+    if not change:
+        yield Result(OK, "virtualization packages: the same in the booted and the rollback deployment")
+        return
+    dom_fn = libvirt_domains if domains_fn is None else domains_fn
+    yield from _virt_change_results(host, booted, rb, change, dom_fn)
 
 
 def nas_backup_running(host: DoctorHostPort, vm: str) -> int:
@@ -401,46 +433,165 @@ def file_newer(host: DoctorHostPort, a: HostPath, b: HostPath) -> bool | None:
         return None
 
 
+# Where the overlay lines send the reader.
+OVERLAY_GUIDE: Final = '(vm/README.md, "If a backup left an overlay")'
+
+
+class _OverlayDisks(NamedTuple):
+    """A VM's disks on a NAS backup's overlay: {target: overlay} live (domblklist) and in its definition,
+    and {target: source} of every live disk (None when domblklist did not answer)."""
+
+    live: dict[str, str]
+    defined: dict[str, str]
+    sources: dict[str, str] | None
+
+
+class _OverlayDisk(NamedTuple):
+    """One disk on an overlay: its VM, target, overlay, the image under it, and the VM's state (None when
+    virsh did not answer)."""
+
+    vm: str
+    dev: str
+    path: str
+    base: str
+    state: str | None
+
+
+def _live_sources(host: DoctorHostPort, vm: str) -> tuple[dict[str, str], dict[str, str] | None]:
+    """({target: overlay}; {target: source} of the running VM's disks, None when domblklist did not answer)."""
+    rc, out, _ = virsh(host, "domblklist", vm, "--details")
+    if rc != 0:
+        return {}, None
+    sources: dict[str, str] = {}
+    live: dict[str, str] = {}
+    for ln in out.splitlines():
+        parts = ln.split(None, 3)
+        if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
+            sources[parts[2]] = parts[3].strip()
+            if VM_OVERLAY_MARK in parts[3]:
+                live.setdefault(parts[2], parts[3].strip())
+    return live, sources
+
+
+def _defined_overlays(host: DoctorHostPort, vm: str) -> dict[str, str]:
+    """{target: overlay} of the disks vm's definition puts on an overlay ("?" for a disk without a target)."""
+    rc, out, _ = domain_xml(host, vm)
+    try:
+        disks = ET.fromstring(out).findall("devices/disk") if rc == 0 else []
+    except ET.ParseError:
+        disks = []
+    defined: dict[str, str] = {}
+    for disk in disks:
+        src, tgt = disk.find("source"), disk.find("target")
+        path = src.get("file") if src is not None else None
+        if path is not None and VM_OVERLAY_MARK in path:
+            target = (tgt.get("dev") if tgt is not None else None) or "?"
+            defined.setdefault(target, path)
+    return defined
+
+
+def _overlay_disks(host: DoctorHostPort, vm: str) -> _OverlayDisks:
+    """vm's disks on an overlay, from domblklist, then from the definition."""
+    live, sources = _live_sources(host, vm)
+    return _OverlayDisks(live=live, defined=_defined_overlays(host, vm), sources=sources)
+
+
+def _vm_state(host: DoctorHostPort, vm: str) -> str | None:
+    """virsh domstate's answer ("running", "shut off", ...), None when virsh did not answer."""
+    rc, out, _ = virsh(host, "domstate", vm)
+    return first_line(out) if rc == 0 else None
+
+
+def _overlay_kind(host: DoctorHostPort, disk: _OverlayDisk, disks: _OverlayDisks) -> VmOverlayKind:
+    """How the disk can be put back on its image: the VM's state and where it runs; for a VM that is shut
+    off or crashed, whether the overlay is newer than the image."""
+    if disk.state in LIVE_STATES:
+        if disk.dev in disks.live:
+            return VmOverlayKind.LIVE
+        if disks.sources is not None and disks.sources.get(disk.dev) == disk.base:
+            return VmOverlayKind.DEFINITION
+        return VmOverlayKind.UNKNOWN
+    if disk.state in STOPPED_STATES:
+        return (
+            VmOverlayKind.OFFLINE
+            if file_newer(host, HostPath(disk.path), HostPath(disk.base)) is True
+            else VmOverlayKind.UNKNOWN
+        )
+    return VmOverlayKind.UNKNOWN
+
+
+def _overlay_result(host: DoctorHostPort, disk: _OverlayDisk, kind: VmOverlayKind) -> Result:
+    """The warning for a disk left on an overlay, with the way back for its kind."""
+    vm, dev, path, base, state = disk
+    q, v = shlex.quote, f"sudo virsh -c {VIRSH_URI}"
+    left = f"an overlay left by `{host.cst} vm backup --nas` (it could not merge it back)"
+    match kind:
+        case VmOverlayKind.LIVE:
+            return Result(
+                WARN,
+                f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
+                f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
+                f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
+                f"command below. Then check that `virsh domblklist {vm} --details` (also with "
+                f"--inactive) shows {base}, and remove the overlay file {OVERLAY_GUIDE}",
+                f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
+            )
+        case VmOverlayKind.DEFINITION:
+            return Result(
+                WARN,
+                f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
+                f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
+                f"the image). Point the disk back with the command below (<source file='{base}'/>, "
+                f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
+                f"then remove the overlay file {OVERLAY_GUIDE}",
+                f"{v} edit {q(vm)}",
+            )
+        case VmOverlayKind.OFFLINE:
+            return Result(
+                WARN,
+                f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
+                f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
+                f"command below, then point the disk back with `virsh edit {vm}` (<source "
+                f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
+                f"--inactive`, and remove the overlay file {OVERLAY_GUIDE}",
+                f"sudo qemu-img commit -p {q(path)}",
+            )
+        case _ if state in STOPPED_STATES:
+            return Result(
+                WARN,
+                f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
+                f"cannot tell whether that overlay still holds the guest's last writes: the image is "
+                f"newer, or the times are unreadable. The image is newer both after a merge cut short "
+                f"(the overlay is still needed) and after a merge that left the definition behind "
+                f"(stale). Do not remove or commit anything yet: look at the times with the command "
+                f"below and at the backup's own message or alert {OVERLAY_GUIDE}",
+                f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}",
+            )
+        case _:
+            return Result(
+                WARN,
+                f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
+                f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
+                f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
+                f"`virsh domblklist {vm} --details` (and --inactive) {OVERLAY_GUIDE}",
+                f"{v} domblklist {q(vm)} --details",
+            )
+
+
 @check(CHECKS, "vm")
 def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = None) -> Iterator[Result]:
     """WARN for a disk whose definition names an overlay of a NAS backup."""
     dom_fn = libvirt_domains if domains_fn is None else domains_fn
     names, _ = dom_fn(host)
     for vm in names or []:
-        live: dict[str, str] = {}
-        defined: dict[str, str] = {}
-        sources: dict[str, str] | None = None
-        rc, out, _ = virsh(host, "domblklist", vm, "--details")
-        if rc == 0:
-            sources = {}
-            for ln in out.splitlines():
-                parts = ln.split(None, 3)
-                if len(parts) == 4 and parts[0] != "Type" and not parts[0].startswith("-"):
-                    sources[parts[2]] = parts[3].strip()
-                    if VM_OVERLAY_MARK in parts[3]:
-                        live.setdefault(parts[2], parts[3].strip())
-        rc, out, _ = domain_xml(host, vm)
-        try:
-            disks = ET.fromstring(out).findall("devices/disk") if rc == 0 else []
-        except ET.ParseError:
-            disks = []
-        for disk in disks:
-            src, tgt = disk.find("source"), disk.find("target")
-            path = src.get("file") if src is not None else None
-            if path is not None and VM_OVERLAY_MARK in path:
-                target = (tgt.get("dev") if tgt is not None else None) or "?"
-                defined.setdefault(target, path)
-        if not live and not defined:
+        disks = _overlay_disks(host, vm)
+        if not disks.live and not disks.defined:
             continue
-        rc, out, _ = virsh(host, "domstate", vm)
-        state = first_line(out) if rc == 0 else None
+        state = _vm_state(host, vm)
         pid = nas_backup_running(host, vm)
-        q, v = shlex.quote, f"sudo virsh -c {VIRSH_URI}"
-        left = f"an overlay left by `{host.cst} vm backup --nas` (it could not merge it back)"
-        guide = '(vm/README.md, "If a backup left an overlay")'
-        for dev in sorted(set(live) | set(defined)):
-            path = live.get(dev) or defined[dev]
-            base = path.split(VM_OVERLAY_MARK, 1)[0]
+        for dev in sorted(set(disks.live) | set(disks.defined)):
+            path = disks.live.get(dev) or disks.defined[dev]
+            disk = _OverlayDisk(vm, dev, path, path.split(VM_OVERLAY_MARK, 1)[0], state)
             if pid:
                 yield Result(
                     INFO,
@@ -448,73 +599,7 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                     "it merges the overlay back when restic is done",
                 )
                 continue
-            if state in VM_LIVE_STATES:
-                kind = (
-                    VmOverlayKind.LIVE
-                    if dev in live
-                    else VmOverlayKind.DEFINITION
-                    if sources is not None and sources.get(dev) == base
-                    else VmOverlayKind.UNKNOWN
-                )
-            elif state in ("shut off", "crashed"):
-                kind = (
-                    VmOverlayKind.OFFLINE
-                    if file_newer(host, HostPath(path), HostPath(base)) is True
-                    else VmOverlayKind.UNKNOWN
-                )
-            else:
-                kind = VmOverlayKind.UNKNOWN
-            match kind:
-                case VmOverlayKind.LIVE:
-                    yield Result(
-                        WARN,
-                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM writes into it, and it "
-                        f"grows. If `virsh blockjob {vm} {dev} --info` shows a commit ready (100 %), finish "
-                        f"it with `virsh blockjob {vm} {dev} --pivot`; with no block job, merge it with the "
-                        f"command below. Then check that `virsh domblklist {vm} --details` (also with "
-                        f"--inactive) shows {base}, and remove the overlay file {guide}",
-                        f"{v} blockcommit {q(vm)} {dev} --active --pivot --wait --verbose",
-                    )
-                case VmOverlayKind.DEFINITION:
-                    yield Result(
-                        WARN,
-                        f"VM {vm}: disk {dev}: the definition names {path}, {left}, but the VM runs "
-                        f"on {base} again: the overlay is stale. Do NOT qemu-img commit it (that would overwrite newer data in "
-                        f"the image). Point the disk back with the command below (<source file='{base}'/>, "
-                        f"and remove its <backingStore>), check `virsh domblklist {vm} --details --inactive`, "
-                        f"then remove the overlay file {guide}",
-                        f"{v} edit {q(vm)}",
-                    )
-                case VmOverlayKind.OFFLINE:
-                    yield Result(
-                        WARN,
-                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state} on it, and it is "
-                        f"newer than {base}: it holds the guest's last writes. Merge it offline with the "
-                        f"command below, then point the disk back with `virsh edit {vm}` (<source "
-                        f"file='{base}'/>, no <backingStore>), check `virsh domblklist {vm} --details "
-                        f"--inactive`, and remove the overlay file {guide}",
-                        f"sudo qemu-img commit -p {q(path)}",
-                    )
-                case _ if state in ("shut off", "crashed"):
-                    yield Result(
-                        WARN,
-                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
-                        f"cannot tell whether that overlay still holds the guest's last writes: the image is "
-                        f"newer, or the times are unreadable. The image is newer both after a merge cut short "
-                        f"(the overlay is still needed) and after a merge that left the definition behind "
-                        f"(stale). Do not remove or commit anything yet: look at the times with the command "
-                        f"below and at the backup's own message or alert {guide}",
-                        f"sudo ls -l --time-style=full-iso {q(base)} {q(path)}",
-                    )
-                case _:
-                    yield Result(
-                        WARN,
-                        f"VM {vm}: disk {dev} is on {path}, {left}. The VM's state "
-                        f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
-                        f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
-                        f"`virsh domblklist {vm} --details` (and --inactive) {guide}",
-                        f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details",
-                    )
+            yield _overlay_result(host, disk, _overlay_kind(host, disk, disks))
 
 
 @check(CHECKS, "vm")
@@ -587,32 +672,37 @@ def check_vm_image_dirs(host: DoctorHostPort, *, vm_tools: VmToolsPort | None = 
     system = vm_tools.system_images
     for d in vm_tools.image_dirs():
         p = vm_tools.probe_dir(d, (lambda x: host.path(HostPath(x))) if d.path == system else (lambda x: x))
-        if not p.present or p.btrfs is False:
-            continue
-        path = p.path
-        if p.nocow is None and not p.listed:
-            yield Result(
-                INFO,
-                f"VM image folder {path}: NOCOW mark not readable as your user (root's "
-                f"folder); {host.cst} vm nocow plan --root shows it",
-            )
-            continue
-        cow = [i for i in p.images if i.nocow is False]
-        if p.nocow is False:
-            yield Result(
-                INFO,
-                f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
-                f"copy-on-write; {host.cst} vm nocow apply sets it",
-            )
-        if cow:
-            listed = ", ".join(f"{i.name} ({format_bytes_gib_mib(i.alloc, mib_decimals=1)})" for i in cow)
-            yield Result(
-                INFO,
-                f"VM image folder {path}: still copy-on-write: {listed}; "
-                f"{host.cst} vm nocow plan prints how to convert (never done automatically)",
-            )
-        if p.nocow is True and not cow:
-            yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
+        yield from _image_dir_results(host, p)
+
+
+def _image_dir_results(host: DoctorHostPort, p: ImageProbe) -> Iterator[Result]:
+    """The lines of one image folder: none when it is missing or not on btrfs."""
+    if not p.present or p.btrfs is False:
+        return
+    path = p.path
+    if p.nocow is None and not p.listed:
+        yield Result(
+            INFO,
+            f"VM image folder {path}: NOCOW mark not readable as your user (root's "
+            f"folder); {host.cst} vm nocow plan --root shows it",
+        )
+        return
+    cow = [i for i in p.images if i.nocow is False]
+    if p.nocow is False:
+        yield Result(
+            INFO,
+            f"VM image folder {path}: no NOCOW mark (+C), so new images there are "
+            f"copy-on-write; {host.cst} vm nocow apply sets it",
+        )
+    if cow:
+        listed = ", ".join(f"{i.name} ({format_bytes_gib_mib(i.alloc, mib_decimals=1)})" for i in cow)
+        yield Result(
+            INFO,
+            f"VM image folder {path}: still copy-on-write: {listed}; "
+            f"{host.cst} vm nocow plan prints how to convert (never done automatically)",
+        )
+    if p.nocow is True and not cow:
+        yield Result(OK, f"VM image folder {path}: NOCOW, no copy-on-write image")
 
 
 @check(CHECKS, "vm")

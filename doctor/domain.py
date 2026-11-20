@@ -5,7 +5,7 @@ Standard library only (no filesystem I/O, no subprocess calls, no outer
 layers).
 """
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import os.path
@@ -75,7 +75,9 @@ ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s
 # name-[epoch:]version-release with a distribution tag in the release
 # (.fc44, .el9, .eln140), and an optional .arch: only the form gives it away
 # when the deployment's package list cannot be read.
-NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d[^-]*\.(?:fc|el|eln)\d+[^-]*)$")
+# The release is checked for the tag with a lookahead, then taken whole: [^-]* followed by the tag made
+# the match backtrack over every ".fcN" of a long release.
+NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d(?=[^-]*\.(?:fc|el|eln)\d)[^-]*)$")
 
 TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
@@ -167,7 +169,6 @@ VM_TORN = HostPath(VM_TORN_FORMAT.path)
 
 VM_CONF = HostPath("/etc/cst/vm.conf")
 VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
-VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works
 VM_RUN_DIR = HostPath("/run/cst-vm")  # nas-<vm>.lock: the pid of a NAS backup in progress
 VM_TIMER_WANTS = HostPath("/etc/systemd/system/timers.target.wants")
 # Packages that make up the guest's virtual hardware: name prefixes.
@@ -321,24 +322,34 @@ def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, n
         if r in names:
             out.append((r, r, PinHow.NAME))
         elif r in versioned:
-            hits = versioned[r]
-            name, _, named = hits[0]
-            arches = [a for _, a, _ in hits]
-            # Without an arch in the request and several installed (multilib),
-            # the bare name is what installed the native one.
-            arch = "" if (not named and (native in arches or "noarch" in arches)) else arches[0]
-            out.append((r, install_spec(name, arch, named, native), PinHow.PINNED))
+            out.append(_pinned_request(r, versioned[r], native))
         else:
-            m = NVR_FORM.match(r)
-            if not m:
-                out.append((r, r, PinHow.NAME))  # a name, a provide (vim), a path...
-            elif packages is None:
-                last = m.group("rel").rsplit(".", 1)[-1]
-                arch = last if last in ARCHES else ""
-                out.append((r, install_spec(m.group("name"), arch, bool(arch), native), PinHow.PINNED_FORM))
-            else:
-                out.append((r, "", PinHow.INACTIVE))
+            out.append(_unmatched_request(r, packages, native))
     return out
+
+
+def _pinned_request(r: str, hits: list[tuple[str, str, bool]], native: str) -> Request:
+    """A request that is the name-version of installed packages (hits: their (name, arch, whether the
+    spelling names the arch))."""
+    name, _, named = hits[0]
+    arches = [a for _, a, _ in hits]
+    # Without an arch in the request and several installed (multilib),
+    # the bare name is what installed the native one.
+    arch = "" if (not named and (native in arches or "noarch" in arches)) else arches[0]
+    return (r, install_spec(name, arch, named, native), PinHow.PINNED)
+
+
+def _unmatched_request(r: str, packages: Iterable[str] | None, native: str) -> Request:
+    """A request that names no installed package: by name, unless it has the form of a pin (read off the
+    string when the package list is unknown, else an inactive request)."""
+    m = NVR_FORM.match(r)
+    if not m:
+        return (r, r, PinHow.NAME)  # a name, a provide (vim), a path...
+    if packages is None:
+        last = m.group("rel").rsplit(".", 1)[-1]
+        arch = last if last in ARCHES else ""
+        return (r, install_spec(m.group("name"), arch, bool(arch), native), PinHow.PINNED_FORM)
+    return (r, "", PinHow.INACTIVE)
 
 
 def unpin_command(classified: Iterable[Request]) -> str:
@@ -368,27 +379,41 @@ def pkg_names(obj: object) -> list[str]:
         if n and n not in out:
             out.append(n)
 
-    def walk(o: object) -> None:
-        if isinstance(o, str):
-            parsed = parse_nevra(o)
-            add(parsed[0] if parsed else o)
-        elif isinstance(o, dict):
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, (list, tuple)):
-            if (
-                len(o) >= 2
-                and isinstance(o[0], str)
-                and isinstance(o[1], str)
-                and (o[0] == o[1] or o[0].startswith(o[1] + "-"))
-            ):
-                add(o[1])
-            else:
-                for v in o:
-                    walk(v)
-
-    walk(obj)
+    _walk_packages(obj, add)
     return out
+
+
+def _walk_packages(o: object, add: Callable[[str], None]) -> None:
+    """add each package name in o (pkg_names): a NEVRA string, a [nevra, name, ...] row, or the values
+    of a list, tuple or dict, walked in order."""
+    if isinstance(o, str):
+        parsed = parse_nevra(o)
+        add(parsed[0] if parsed else o)
+        return
+    if isinstance(o, dict):
+        values: Iterable[object] = o.values()
+    elif isinstance(o, (list, tuple)):
+        name = _package_row_name(o)
+        if name is not None:
+            add(name)
+            return
+        values = o
+    else:
+        return
+    for v in values:
+        _walk_packages(v, add)
+
+
+def _package_row_name(o: Sequence[object]) -> str | None:
+    """The name of a [nevra, name, epoch, version, release, arch] row, None when o is no such row."""
+    if (
+        len(o) >= 2
+        and isinstance(o[0], str)
+        and isinstance(o[1], str)
+        and (o[0] == o[1] or o[0].startswith(o[1] + "-"))
+    ):
+        return o[1]
+    return None
 
 
 def describe(d: Deployment) -> str:
