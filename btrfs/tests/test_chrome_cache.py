@@ -85,6 +85,31 @@ class SizeTextTest(unittest.TestCase):
         self.assertEqual(chrome_domain.size_text(-(2**30)), "-1.0 GiB")
 
 
+class ParseChromeArgsTest(unittest.TestCase):
+    """chrome-cache's command line: a command, then nothing or `--home DIR`."""
+
+    def test_the_command_and_its_home(self) -> None:
+        self.assertEqual(chrome_domain.parse_chrome_args([]), ("status", None))
+        self.assertEqual(chrome_domain.parse_chrome_args(["apply"]), ("apply", None))
+        self.assertEqual(chrome_domain.parse_chrome_args(["off", "--home", "/h"]), ("off", "/h"))
+
+    def test_any_other_argument_is_a_usage_error(self) -> None:
+        # Before, an argument it did not know was ignored: `apply --home=/h` changed the caller's home.
+        for args in (
+            ["bogus"],
+            ["apply", "--home"],
+            ["apply", "--home", ""],
+            ["apply", "--home=/h"],
+            ["apply", "--hmoe", "/h"],
+            ["off", "extra"],
+            ["apply", "--home", "/h", "extra"],
+            ["status", "extra", "--home", "/h"],
+            ["--home", "/h", "apply"],
+        ):
+            with self.subTest(args=args):
+                self.assertIsNone(chrome_domain.parse_chrome_args(args))
+
+
 class ChromeCacheTest(unittest.TestCase):
     m: _ChromeCacheModule
     tmp: str
@@ -494,7 +519,13 @@ class ChromeCacheTest(unittest.TestCase):
 
     def test_main_refusals_say_why_on_stderr(self) -> None:
         usage = "usage: chrome-cache status|plan|apply|off [--home DIR]\n"
-        for args in (("bogus",), ("apply", "--home"), ("apply", "--home", "")):
+        for args in (
+            ("bogus",),
+            ("apply", "--home"),
+            ("apply", "--home", ""),
+            ("status", f"--home={self.home}"),
+            ("plan", "--hmoe", self.home),
+        ):
             with self.subTest(args=args):
                 self.assertEqual(self.main_out(*args), (2, "", usage))
         with mock.patch.object(chrome_cli.HostExecutionContext, "is_root", return_value=True):

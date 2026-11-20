@@ -77,16 +77,19 @@ class _InspectResult(TypedDict):
 # ---- reading the flags file ---------------------------------------------------------------
 def parse_chrome_args(args: Sequence[str]) -> tuple[ChromeCacheCommand, str | None] | None:
     """The command (status when ARGS is empty) and the --home folder (None without --home) of
-    chrome-cache's arguments; None for a usage error: an unknown command, or --home without a
-    folder."""
+    chrome-cache's arguments; None for a usage error: an unknown command, --home without a folder,
+    or any other argument after the command (--home=DIR too: a word not understood must not turn
+    into the caller's own home)."""
     cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
     if cmd is None:
         return None
-    if "--home" not in args:
-        return cmd, None
-    i = args.index("--home")
-    home = args[i + 1] if i + 1 < len(args) else ""
-    return (cmd, home) if home else None
+    match args[1:]:
+        case []:
+            return cmd, None
+        case ["--home", home] if home:
+            return cmd, home
+        case _:
+            return None
 
 
 def marked(s: str, rest: str) -> bool:
