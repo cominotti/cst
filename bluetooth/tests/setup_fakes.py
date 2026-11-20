@@ -153,7 +153,11 @@ case "$me" in
         ;;
     busctl)
         case "$*" in
-            *GetManagedObjects*) cat "$S/objects.json" 2>/dev/null; exit ;;
+            *GetManagedObjects*)  # fail-objects: its answer, then a failure
+                cat "$S/objects.json" 2>/dev/null || exit
+                [[ ! -e "$S/fail-objects" ]]
+                exit
+                ;;
             "--system list --no-legend --unique") cat "$S/bus-names" 2>/dev/null; exit 0 ;;
             get-property*) cat "$S/prop-$4-$5" 2>/dev/null; exit ;;
         esac
@@ -185,7 +189,15 @@ case "$me" in
         ;;
     pactl)
         case "$*" in
-            "-f json list cards") cat "$S/pactl-cards" 2>/dev/null; exit ;;
+            "-f json list cards")
+                # After bluetoothctl connect: pactl-cards-connected, from the look after a2dp-delay looks.
+                if [[ -e "$S/a2dp-connected" && -e "$S/pactl-cards-connected" ]]; then
+                    n="$(cat "$S/a2dp-delay" 2>/dev/null || echo 0)"
+                    if (( n > 0 )); then echo "$(( n - 1 ))" >"$S/a2dp-delay"; else cat "$S/pactl-cards-connected"; exit; fi
+                fi
+                cat "$S/pactl-cards" 2>/dev/null
+                exit
+                ;;
             "-f json list short sources") cat "$S/pactl-sources" 2>/dev/null || echo "[]"; exit 0 ;;
             "-f json list source-outputs") cat "$S/pactl-outputs" 2>/dev/null || echo "[]"; exit 0 ;;
             set-card-profile*) [[ ! -e "$S/no-profile-switch" ]]; exit ;;

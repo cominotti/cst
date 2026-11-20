@@ -274,6 +274,13 @@ class MainConfTest(unittest.TestCase):
         reverted, _ = self.m.revert_general("[General]\nName = y\n", "[General]\nExperimental = true\n")
         self.assertEqual(self.m.current_values(reverted)["Experimental"], "true")
 
+    def test_revert_comments_out_the_earlier_active_lines(self) -> None:
+        # The backup's line replaces the one that counts (the last); the earlier active ones go.
+        current = "[General]\nExperimental = true\nName = x\nExperimental = true\n"
+        reverted, changed = self.m.revert_general(current, "[General]\n#Experimental = false\n")
+        self.assertTrue(changed)
+        self.assertEqual(reverted, "[General]\n#Experimental = true\nName = x\n#Experimental = false\n")
+
     def test_repeated_general_group_counts_as_one(self) -> None:
         # GLib merges a second [General] into the first: its later line wins.
         text = (
@@ -530,6 +537,29 @@ class LiveParsingTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(r.returncode, 3)
+
+    def test_pw_state_second_output_node(self) -> None:
+        # A later output node of the headset gives the codec and the rate; with no quality in its
+        # Props, the quality an earlier node gave is kept.
+        dev = "0A_1B_2C_3D_4E_5F"
+        objs = [
+            {"type": "PipeWire:Interface:Device", "info": {"props": {"device.name": f"bluez_card.{dev}"}}},
+            {
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {"node.name": f"bluez_output.{dev}.1", "api.bluez5.codec": "ldac"},
+                    "params": {"Format": [{"rate": 96000}], "Props": [{"quality": 0}]},
+                },
+            },
+            {
+                "type": "PipeWire:Interface:Node",
+                "info": {
+                    "props": {"node.name": f"bluez_output.{dev}.2", "api.bluez5.codec": "sbc"},
+                    "params": {"Props": [{"volume": 1.0}]},
+                },
+            },
+        ]
+        self.assertEqual(self.m.pw_state(dev, objs), (None, None, "sbc", "hq", None))
 
 
 class LeAudioRenderTest(unittest.TestCase):

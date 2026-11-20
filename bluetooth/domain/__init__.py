@@ -153,6 +153,20 @@ def current_values(text: str) -> dict[str, str | None]:
     return out
 
 
+def _already_set(lines: Sequence[str], active: Sequence[int], key: str) -> bool:
+    """Whether the line of KEY that counts (the last of ACTIVE) already has a value we accept."""
+    if not active:
+        return False
+    m = key_pattern(key).match(lines[active[-1]])
+    return m is not None and satisfied(key, m.group(2))
+
+
+def _comment_out(lines: list[str], idxs: Iterable[int]) -> None:
+    """Comment out the lines at IDXS, in place."""
+    for j in idxs:
+        lines[j] = "#" + lines[j].lstrip()
+
+
 def edit_general(text: str) -> tuple[str, bool]:
     """(new text, changed). The line of a key that counts (the last active
     one, in any [General] block) gets our value (an old
@@ -169,20 +183,29 @@ def edit_general(text: str) -> tuple[str, bool]:
     for key, val in WANTED.items():
         ranges = general_ranges(lines)  # again: an insert moves the lines
         active, commented = key_lines(lines, ranges, key)
-        if active:
-            m = key_pattern(key).match(lines[active[-1]])
-            if m is not None and satisfied(key, m.group(2)):
-                continue
+        if _already_set(lines, active, key):
+            continue
         changed = True
         if active:
             lines[active[-1]] = f"{key} = {val}"
-            for j in active[:-1]:
-                lines[j] = "#" + lines[j].lstrip()
+            _comment_out(lines, active[:-1])
         elif commented:
             lines[commented[-1]] = f"{key} = {val}"
         else:
             lines.insert(ranges[0][0] + 1, f"{key} = {val}")
     return join_lines(lines, nl, final), changed
+
+
+def _backup_line(blines: Sequence[str], branges: Sequence[tuple[int, int]], key: str) -> str | None:
+    """The backup's line for KEY: its active line, else its commented example; None without either."""
+    bact, bcom = key_lines(blines, branges, key)
+    return blines[(bact or bcom)[-1]] if bact or bcom else None
+
+
+def _is_active_line(key: str, line: str) -> bool:
+    """LINE sets KEY and is not commented out."""
+    m = key_pattern(key).match(line)
+    return m is not None and not m.group(1)
 
 
 def revert_general(text: str, backup: str) -> tuple[str, bool]:
@@ -199,24 +222,17 @@ def revert_general(text: str, backup: str) -> tuple[str, bool]:
         return text, False
     branges = general_ranges(blines)
     for key in KEYS:
-        want: str | None = None
-        bact, bcom = key_lines(blines, branges, key)
-        if bact or bcom:
-            want = blines[(bact or bcom)[-1]]
+        want = _backup_line(blines, branges, key)
         ranges = general_ranges(lines)
         active, _ = key_lines(lines, ranges, key)
         if want is None:
-            for j in active:
-                lines[j] = "#" + lines[j].lstrip()
+            _comment_out(lines, active)
         elif active:
             lines[active[-1]] = want
-            for j in active[:-1]:
-                lines[j] = "#" + lines[j].lstrip()
-        else:
-            m = key_pattern(key).match(want)
-            if m is not None and not m.group(1):
-                # The backup had it on, the file has no active line now.
-                lines.insert(ranges[0][0] + 1, want)
+            _comment_out(lines, active[:-1])
+        elif _is_active_line(key, want):
+            # The backup had it on, the file has no active line now.
+            lines.insert(ranges[0][0] + 1, want)
     if lines == before:
         return text, False
     return join_lines(lines, nl, final), True
@@ -638,6 +654,24 @@ def _hashable(value: object) -> object:
     return value
 
 
+def _device_parts(params: object, raw_rule: object) -> tuple[str, str | None]:
+    """(profiles, rule quality) of the headset's Device object (pw_state): the names of the card's
+    Profile params, and its bluez5.a2dp.ldac.quality rule (RAW_RULE) as text, None when unset."""
+    prof = " ".join(str(object_of(pr).get("name", "?")) for pr in items_of(object_of(params).get("Profile", []) or []))
+    return prof, None if raw_rule is None else str(raw_rule)
+
+
+def _node_parts(info: object, params: object, quality: str | None) -> tuple[str | None, str | None]:
+    """(rate, quality) of the headset's output Node (pw_state); QUALITY, an earlier node's,
+    stays when its Props name none."""
+    rate = node_rate(info)
+    for pr in items_of(object_of(params).get("Props", []) or []):
+        if has_item(pr, "quality"):
+            q = object_of(pr)["quality"]
+            quality = QUALITY_NUM.get(q, str(q)) if isinstance(q, int) else str(q)
+    return None if rate is None else str(rate), quality
+
+
 def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
     """(profiles, rule quality, node codec, node quality, node rate) of the headset in pw-dump's
     JSON (a list of PwObject), or None when it is not in PipeWire. Missing parts are None;
@@ -646,7 +680,7 @@ def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None
     rule: str | None = None
     codec: str | None = None
     quality: str | None = None
-    rate: int | None = None
+    rate: str | None = None
     found = False
     for o in map(object_of, items_of(objs)):
         info = object_or_empty(o.get("info"))
@@ -657,25 +691,17 @@ def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None
         params: object = info.get("params") or {}
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             found = True
-            prof = " ".join(
-                str(object_of(pr).get("name", "?")) for pr in items_of(object_of(params).get("Profile", []) or [])
-            )
-            raw_rule = p.get("bluez5.a2dp.ldac.quality")
-            rule = None if raw_rule is None else str(raw_rule)
+            prof, rule = _device_parts(params, p.get("bluez5.a2dp.ldac.quality"))
         if (
             kind.endswith("Node")
             and str(p.get("node.name", "")).startswith("bluez_output." + dev)
             and p.get(CODEC_KEY, "")
         ):
             codec = str(p[CODEC_KEY])
-            rate = node_rate(info)
-            for pr in items_of(object_of(params).get("Props", []) or []):
-                if has_item(pr, "quality"):
-                    q = object_of(pr)["quality"]
-                    quality = QUALITY_NUM.get(q, str(q)) if isinstance(q, int) else str(q)
+            rate, quality = _node_parts(info, params, quality)
     if not found:
         return None
-    return prof or None, rule, codec, quality, None if rate is None else str(rate)
+    return prof or None, rule, codec, quality, rate
 
 
 def node_rate(info: object) -> int | None:
