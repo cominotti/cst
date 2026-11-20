@@ -16,6 +16,7 @@ from btrfs.pending_alerts.adapters import (
     read_pending,
     save_record,
     show_notification,
+    unseen_alerts,
     use_callers_time_locale,
     wait_for_notification_server,
 )
@@ -25,7 +26,6 @@ from btrfs.pending_alerts.domain import (
     SUMMARY_TITLE,
     TAG,
     USAGE,
-    Alert,
     PendingPaths,
     Seen,
     SeenHow,
@@ -47,6 +47,10 @@ from cst_core.ports import CommandRunnerPort
 
 def log(prio: int, msg: str) -> None:
     journal_log(prio, msg, tag=TAG, stream=sys.stderr)
+
+
+def _skipped(name: str) -> None:
+    log(4, f"{name}: not a valid pending alert; skipped")
 
 
 def list_alerts(s: PendingPaths) -> int:
@@ -75,15 +79,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
     rec = load_record(s)
     at = partial(happened_at, btime=boot_time())
 
-    todo: list[tuple[str, str, Alert]] = []  # oldest first: (mtime, name, alert as first read)
-    for mtime, name in pending_files(s):
-        if seen_as(rec, name, mtime) is not None:
-            continue
-        alert = read_pending(s, name)
-        if alert is None:
-            log(4, f"{name}: not a valid pending alert; skipped")
-            continue
-        todo.append((mtime, name, alert))
+    todo = unseen_alerts(s, rec, _skipped)  # oldest first: (mtime, name, alert as first read)
     if not todo:
         return 0
     if not wait_for_notification_server(runner, s.wait):
@@ -99,7 +95,7 @@ def show_alerts(s: PendingPaths, runner: CommandRunnerPort) -> int:
         mtime, name, first_read = todo[i]
         alert = read_pending(s, name)
         if alert is None:
-            log(4, f"{name}: not a valid pending alert; skipped")
+            _skipped(name)
             continue
         if show_notification(runner, alert.urgency, alert.app, alert.title, login_text(alert, rec.get(name), at)):
             done[name] = Seen(mtime, SeenHow.SHOWN, first_read.count, first_read.first)
