@@ -45,6 +45,7 @@ from cpu.game.domain import (
     expand_cpus,
     has_prop_record,
     intended_records,
+    newer_intended,
     record_line,
     records,
     game_settings,
@@ -218,8 +219,12 @@ class GameProfileCase(unittest.TestCase):
         """'state''s drift part over a snapshot of the two files, as 'state' reads them."""
         self.systemd.actions = []
         p, _ = self.profile()
-        snapshot = records(read_text(self.state) or ""), read_text(self.intended)
-        return "".join(line + "\n" for line in p.drift_report(*snapshot)), self.systemd.actions
+        intended = read_text(self.intended)
+        newer = None if intended is None else newer_intended(self.intended, intended)
+        report = p.drift_report(
+            records(read_text(self.state) or ""), intended, newer, manual=os.path.exists(self.manual)
+        )
+        return "".join(line + "\n" for line in report), self.systemd.actions
 
     def read(self, path: str) -> str:
         with open(path) as f:
@@ -796,6 +801,7 @@ class StateSnapshotTest(GameProfileCase):
         seen: list[str] = []
 
         def then_off(path: str, *args: object, **kwargs: object) -> str | None:
+            self.assertEqual((args, kwargs), ((), {}), "a read_text call this fake does not forward")
             text = real(path)
             if path in (self.state, self.intended):
                 seen.append(path)
@@ -803,12 +809,50 @@ class StateSnapshotTest(GameProfileCase):
                     os.unlink(path)  # 'off' ended meanwhile: the next read would find nothing
             return text
 
-        with unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=then_off):
+        with (
+            unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_off),
+            unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=then_off),
+        ):
             out, _ = self.run_profile("state")
         self.assertEqual(sorted(seen), sorted([self.state, self.intended]))
         self.assertIn("game profile: ON (by hand)\n", out)
         self.assertIn("  other boxes     idle: e2e.slice\n", out)
         self.assertIn("  drift: none (every setting the profile made still holds)\n", out)
+
+    def test_the_by_hand_mark_is_read_once(self) -> None:
+        # The header ("ON (by hand)") and the drift line's fix command judge one reading of the mark.
+        self.run_profile("on")
+        self.write(self.manual, "")
+        real = os.path.exists
+        asked: list[str] = []
+
+        def exists(path: str) -> bool:
+            if path == self.manual:
+                asked.append(path)
+            return real(path)
+
+        with unittest.mock.patch("cpu.game.adapters.profile.os.path.exists", side_effect=exists):
+            out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON (by hand)\n", out)
+        self.assertEqual(asked, [self.manual])
+
+    def test_a_game_state_there_but_unreadable_is_still_on(self) -> None:
+        # read_text gives None for a file it cannot open, as for one that is not there; os.path.exists said
+        # ON before the snapshot, and still does: an unreadable game.state is on, with no records.
+        self.run_profile("on")
+        real = cst_files.read_text
+
+        def unreadable(path: str, *args: object, **kwargs: object) -> str | None:
+            self.assertEqual((args, kwargs), ((), {}), "a read_text call this fake does not forward")
+            return None if path in (self.state, self.intended) else real(path)
+
+        with (
+            unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=unreadable),
+            unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=unreadable),
+        ):
+            out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON\n", out)  # before the fix: "game profile: off"
+        self.assertIn("  drift: none", out)  # an unreadable game.intended holds no record, as before the snapshot
 
 
 class UnreadableRecordTest(GameProfileCase):

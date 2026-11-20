@@ -22,7 +22,7 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
-from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
+from cpu.game.adapters.host import holds, read_settings, read_snapshot, read_stripped, user_id, user_name
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -727,15 +727,14 @@ class GameProfile:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
         # One snapshot of both files (None: not there; an empty game.state is on), with no lock: never waits.
-        state_text, intended_text = read_text(self.paths.state), read_text(self.paths.intended)
-        on = state_text is not None
+        state_text, intended_text = read_snapshot(self.paths.state), read_snapshot(self.paths.intended)
+        on, manual = state_text is not None, os.path.exists(self.paths.manual)
         state_recs = records(state_text or "")
         why = None if self.problems else self._target_refusal()  # as 'on' reads TARGET_USER
         if on:
             self._user_from_state(state_recs, say=False)
         p, s = self.paths, self.s
-        by_hand = " (by hand)" if os.path.exists(p.manual) else ""
-        self.say(f"game profile: ON{by_hand}" if on else "game profile: off")
+        self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
         self.say_lines(
             f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
             for line in self._problem_lines()
@@ -759,16 +758,16 @@ class GameProfile:
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
-            self.say_lines(self.drift_report(state_recs, intended_text))
+            self.say_lines(self.drift_report(state_recs, intended_text, newer, manual=manual))
         return 0
 
-    def drift_report(self, state_recs: Sequence[Record], intended_text: str | None) -> list[str]:
-        """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None):
-        each setting that no longer holds, or that none drifted."""
-        manual = os.path.exists(self.paths.manual)
+    def drift_report(
+        self, state_recs: Sequence[Record], intended_text: str | None, newer: str | None, *, manual: bool
+    ) -> list[str]:
+        """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None, why
+        it cannot be compared, the by-hand mark): each setting that no longer holds, or that none drifted."""
         if intended_text is None:
             return drift_lines(None, manual=manual)
-        newer = newer_intended(self.paths.intended, intended_text)
         drifts = self.drift(intended_text) if newer is None else None
         not_held = [] if drifts is None else unheld(drifts, state_recs)
         return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)

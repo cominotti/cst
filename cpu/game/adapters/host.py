@@ -6,6 +6,8 @@ import contextlib
 import locale
 import pwd
 
+import os
+
 from cst_core.adapters.files import read_bytes, read_text
 from cst_core.domain.text import SettingsProblem, parse_shell_assignments
 from cpu.game.domain import GameSettings, game_settings
@@ -27,6 +29,13 @@ def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]
         return game_settings({}), ()
     parsed = parse_shell_assignments(text)
     return game_settings(parsed.values), parsed.problems
+
+
+def read_snapshot(path: str) -> str | None:
+    """The file's text for a snapshot 'state' judges: None when it is not there; "" when it is there but
+    cannot be read (it still counts as there, as os.path.exists said before the snapshot)."""
+    text = read_text(path)
+    return "" if text is None and os.path.exists(path) else text
 
 
 def user_id(user: str) -> str:
