@@ -261,13 +261,13 @@ def _ldac_back(live: LiveAudioPort) -> Snapshot | None:
     return s if s and s["codec"] == "ldac" and s["rate"] is not None and s["rate"] != 0 else None
 
 
-def _interrupted(
-    snap: Snapshot | None, *, gone: bool, now: str | None, switch: tuple[str, str], hint: str
-) -> str | None:
-    """Why the bounce stops after the hold (the headset left, its microphone opened, another profile
-    was chosen), or None to switch back to LDAC."""
-    ldac, alt = switch
-    if gone:
+def _interrupted(dev: str, snap: Snapshot | None, cards: list[PactlCard] | None, ldac: str, alt: str) -> str | None:
+    """Why the bounce of headset DEV stops after the hold, in this order: its card left pactl,
+    its microphone opened, another profile was chosen; or None to switch back to LDAC.
+    SNAP and CARDS: what PipeWire and pactl show after the hold."""
+    now = profiles(dev, cards)[0] if cards is not None else None
+    hint = f"back to LDAC by hand: pactl set-card-profile bluez_card.{dev} {ldac}"
+    if cards is not None and now is None:
         return "the headset went away during the switch"
     if snap is not None and snap["mic"]:
         return f"the headset's microphone came into use during the switch: left on {now or alt} ({hint})"
@@ -288,10 +288,7 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
     # switch to HFP when an app opens the headset's microphone) or the user
     # may have chosen another profile. That choice wins.
     snap = live.snap()
-    c = live.cards()
-    now = profiles(live.dev, c)[0] if c is not None else None
-    hint = f"back to LDAC by hand: pactl set-card-profile bluez_card.{live.dev} {ldac}"
-    why = _interrupted(snap, gone=c is not None and now is None, now=now, switch=(ldac, alt), hint=hint)
+    why = _interrupted(live.dev, snap, live.cards(), ldac, alt)
     if why is not None:
         return False, why, snap
     if not live.set_profile(ldac):
