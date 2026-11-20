@@ -177,6 +177,22 @@ class ParseTest(unittest.TestCase):
         objs[1]["info"]["params"] = {}
         self.assertIsNone(bt_watch.snapshot(DEV, objs)["rate"])
 
+    def test_card_without_a_usable_profile(self) -> None:
+        # A card with no Profile param, or one that is not a list, has no active profile.
+        for profile in (None, {"name": "a2dp-sink"}, [], ["a2dp-sink"]):
+            with self.subTest(profile=profile):
+                objs = json.loads(json.dumps(pw_dump()))  # a value of any shape, as pw-dump gives it
+                objs[0]["info"]["params"] = {} if profile is None else {"Profile": profile}
+                snap = bt_watch.snapshot(DEV, objs)
+                self.assertEqual((snap["card"], snap["profile"]), (500, None))
+        # A second Device object of the headset without one: its serial, the first one's profile.
+        objs = json.loads(json.dumps(pw_dump()))
+        second = json.loads(json.dumps(objs[0]))
+        second["info"]["props"]["object.serial"] = "501"
+        second["info"]["params"] = {}
+        snap = bt_watch.snapshot(DEV, [*objs, second])
+        self.assertEqual((snap["card"], snap["profile"]), (501, "a2dp-sink"))
+
     def test_helper_reads_the_same_rate(self) -> None:
         for objs in (pw_dump(), pw_dump(rate=48000, suspended=True)):
             pw = self.h.pw_state(DEV, objs)
@@ -553,6 +569,19 @@ class BounceTest(unittest.TestCase):
         w.look()
         self.assertEqual(live.calls, ["a2dp-sink-sbc"])
         self.assertTrue(any(lv == 3 and "microphone came into use" in m and "by hand" in m for lv, m in self.lines))
+
+    def test_headset_gone_during_the_bounce(self) -> None:
+        # pactl still answers, but the headset's card is no longer in it after the hold.
+        class GoneLive(FakeLive):
+            @override
+            def cards(self) -> list[PactlCard]:
+                return super().cards() if self.active == "a2dp-sink" else super().cards()[:1]
+
+        live = GoneLive()
+        w = self.watcher(live)
+        w.look()
+        self.assertEqual(live.calls, ["a2dp-sink-sbc"])
+        self.assertTrue(any(lv == 3 and "the headset went away during the switch" in m for lv, m in self.lines))
 
     def test_alt_never_active_still_switches_back(self) -> None:
         live = FakeLive()
