@@ -1901,13 +1901,13 @@ class FullRunFolderTest(GameProfileCase):
     ran, and the watchdog's and 'game off''s stop did nothing, so the profile stayed on until reboot."""
 
     def full_after(
-        self, records: int, *, mode: str = "a", path: str | None = None
+        self, records: int, *, mode: str = "a", target: str | None = None
     ) -> contextlib.AbstractContextManager[object]:
-        """The game profile's own writes of path (game.state by default) in mode fail with ENOSPC after
+        """The game profile's own writes of target (game.state by default) in mode fail with ENOSPC after
         records of them."""
         real = open
         written = {"n": 0}
-        full = self.state if path is None else path
+        full = self.state if target is None else target
 
         def fake_open(
             path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
@@ -1967,7 +1967,7 @@ class FullRunFolderTest(GameProfileCase):
         self.systemd.actions = []
         p, out = self.profile()
         err = io.StringIO()
-        with self.full_after(0, mode="w", path=self.intended), contextlib.redirect_stderr(err):
+        with self.full_after(0, mode="w", target=self.intended), contextlib.redirect_stderr(err):
             self.assertEqual(p.locked("on"), 0)
         self.assertEqual(err.getvalue(), f"{self.intended}: No space left on device\n")
         self.assertIn("<5>game-profile: on: ", out.getvalue())
