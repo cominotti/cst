@@ -388,7 +388,10 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   `SCCACHE_SERVER_PORT`, or when the start fails; the build never fails
   because of it. A server that an older wrapper started stays where it is
   until it stops: the first compile after `config apply` starts the new
-  server in the scope, compiles already running on the old one finish
+  server in the scope (except a host server an earlier wrapper already
+  started in `app.slice/cst-sccache-host.scope`, which compiles reuse
+  until it stops before starting the next one in `sccache.slice`),
+  compiles already running on an old one finish
   there, and the old one stops after 10 minutes without work (measured with
   sccache 0.17.0). A memory cap on your own scope does not bound the
   compiles that go through sccache: sccache runs rustc as a child of the
@@ -526,9 +529,12 @@ Things to know:
   of the stop command: the wrapper tries again 10 minutes after the failure.
   When that process cannot be read (from inside another toolbox: another
   user namespace), nothing is claimed and the line stays a `WARN`. The first compile after
-  `config apply` replaces a misplaced server (the wrapper removes its socket
+  `config apply` replaces a pre-scope misplaced server (the wrapper removes its socket
   and starts one in the scope); the old one runs on, out of sight of
-  `status`, until it stops by itself. It finds the server's process through the socket
+  `status`, until it stops by itself. A host server started by an older
+  wrapper in `app.slice/cst-sccache-host.scope` stays reported without a
+  `WARN` and is reused until it stops, then the next compile starts in
+  `sccache.slice`. It finds the server's process through the socket
   (the peer's PID, `SO_PEERCRED`) and reads `/proc/<pid>/cgroup`;
   `cgroup unknown` when that cannot be read.
 - **`RUST_SCCACHE=no` does not remove it**; `config` shows it as `on`. To
