@@ -350,10 +350,13 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   compile:
   - inside a toolbox the scope goes into the inner `user.slice` of the user
     manager, next to the toolboxes, so it gets their CPUs and weight (and
-    the game profile's idle class); on the host it goes into `app.slice`,
-    where host compiles from a terminal or a desktop IDE run (normal weight,
-    all CPUs; the game profile leaves it alone, as it leaves a host terminal,
-    see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    the game profile's idle class); on the host it goes into `sccache.slice`,
+    a sibling slice of `app.slice` and `user.slice` that runs at normal
+    weight outside games and is demoted by the game profile during games
+    (see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    If a server started by an older wrapper is still running in
+    `app.slice/cst-sccache-host.scope`, compiles keep reusing it until it
+    stops, then start the next one in `sccache.slice`.
     A host build that you start in a box of its own (`flatpak-spawn --host`
     from a toolbox, `systemd-run --user --slice=user-NAME.slice`, a
     `run-*` job) no longer keeps its compiles through sccache in that box:
@@ -385,7 +388,10 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   `SCCACHE_SERVER_PORT`, or when the start fails; the build never fails
   because of it. A server that an older wrapper started stays where it is
   until it stops: the first compile after `config apply` starts the new
-  server in the scope, compiles already running on the old one finish
+  server in the scope (except a host server an earlier wrapper already
+  started in `app.slice/cst-sccache-host.scope`, which compiles reuse
+  until it stops before starting the next one in `sccache.slice`),
+  compiles already running on an old one finish
   there, and the old one stops after 10 minutes without work (measured with
   sccache 0.17.0). A memory cap on your own scope does not bound the
   compiles that go through sccache: sccache runs rustc as a child of the
@@ -506,7 +512,7 @@ Things to know:
   requests, hits, misses, cache size. For each running server (with or
   without sccache on the host's PATH) it also shows where the server runs:
   `sccache server <env>: in its own scope (user.slice/cst-sccache-<env>.scope)`
-  (`app.slice/cst-sccache-host.scope` for the host's server), or a `WARN` line
+  (`sccache.slice/cst-sccache-host.scope` for the host's server), or a `WARN` line
   with its cgroup when it runs anywhere else (started by an older wrapper, or
   by the client inside a compile's capped scope), with the command that stops
   it (run it where sccache is installed: in the toolbox for a toolbox's
@@ -523,9 +529,12 @@ Things to know:
   of the stop command: the wrapper tries again 10 minutes after the failure.
   When that process cannot be read (from inside another toolbox: another
   user namespace), nothing is claimed and the line stays a `WARN`. The first compile after
-  `config apply` replaces a misplaced server (the wrapper removes its socket
+  `config apply` replaces a pre-scope misplaced server (the wrapper removes its socket
   and starts one in the scope); the old one runs on, out of sight of
-  `status`, until it stops by itself. It finds the server's process through the socket
+  `status`, until it stops by itself. A host server started by an older
+  wrapper in `app.slice/cst-sccache-host.scope` stays reported without a
+  `WARN` and is reused until it stops, then the next compile starts in
+  `sccache.slice`. It finds the server's process through the socket
   (the peer's PID, `SO_PEERCRED`) and reads `/proc/<pid>/cgroup`;
   `cgroup unknown` when that cannot be read.
 - **`RUST_SCCACHE=no` does not remove it**; `config` shows it as `on`. To

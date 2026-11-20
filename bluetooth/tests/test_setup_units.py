@@ -35,6 +35,7 @@ from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from cst_core.domain.files import OwnedState
 from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+from cst_core.ports import SystemctlHost
 
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
 SELF = os.path.join(REPO, "bluetooth-setup.sh")
@@ -101,6 +102,8 @@ def change(
     machine = SetupMachine(
         runner=runner,
         systemd=SystemctlAdapter(runner, timeout=show_timeout),
+        user_systemd_host=SystemctlAdapter(runner, user=True, on_host=SystemctlHost.EVERY),
+        user_systemd=SystemctlAdapter(runner, user=True, on_host=SystemctlHost.LOCAL),
         clock=clock,
         console=console,
         files=LocalSetupFiles(),

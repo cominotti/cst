@@ -4923,7 +4923,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         starts in, and the socket comes 0.3 s after the start; unlike the real
         one it runs rustc in the client's cgroup). The toolbox is a stand-in
         (CST_SCCACHE_CONTAINERENV names "e2ebox"), so this is the toolbox
-        branch; test_133 covers the host one (app.slice). The first build
+        branch; test_133 covers the host one (sccache.slice). The first build
         runs in a transient scope with MemoryMax, like a test harness's capped
         lane: the wrapper must start the one server in
         cst-sccache-e2ebox.scope in the inner user.slice (MemoryMax infinity),
@@ -5039,18 +5039,21 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
-    def test_133_sccache_host_server_starts_in_app_slice_scope(self) -> None:
+    def test_133_sccache_host_server_starts_in_sccache_slice_scope(self) -> None:
         """The host branch of the real rustc wrapper (test_83 covers a toolbox's): with no
         container file (CST_SCCACHE_CONTAINERENV names a file that is not there) the wrapper's
         environment is "host", its socket cst-sccache-host.sock, and a first build inside a
         transient scope with MemoryMax starts the one server in cst-sccache-host.scope in the user
-        manager's app.slice (MemoryMax infinity), not in the capped scope and not in user.slice
-        (the toolboxes' slice). The fake sccache is test_83's, with its server listening on its
-        socket (SCCACHE_FAKE_STEPS, $st/listen), so that `cst toolchains status` asks the real
-        socket who listens (SO_PEERCRED), reads that process's real /proc/PID/cgroup and says the
-        server is in its own scope. A second build starts nothing; the scope goes away when the
+        manager's sccache.slice (MemoryMax infinity), not in app.slice or user.slice (the toolboxes'
+        slice). The fake sccache is test_83's, with its server listening on its socket
+        (SCCACHE_FAKE_STEPS, $st/listen), so that `cst toolchains status` asks the real socket who
+        listens (SO_PEERCRED), reads that process's real /proc/PID/cgroup and says the server is in
+        its own scope; while active, `cst doctor` emits no WARN for `sccache.slice` and `cpu.game`
+        sees it as an escaped slice. A second build starts nothing; the scope goes away when the
         server stops, and a build after that, with the stopped server's socket file still there,
-        starts a new server in the same scope."""
+        starts a new server in `sccache.slice`. Live upgrade: when an older server already runs in
+        `app.slice/cst-sccache-host.scope` listening on the socket, a build reuses it (no start,
+        no `.failed` marker), then starts in `sccache.slice` once the old server stops."""
         self.addCleanup(
             as_tester_bash,
             self.SYSTEMD_CONTAINER,
@@ -5076,7 +5079,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             st=$w/state
             ucg=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service
             scope=cst-sccache-host.scope
-            want="0::/user.slice/user-1000.slice/user@1000.service/app.slice/$scope"
+            want="0::/user.slice/user-1000.slice/user@1000.service/sccache.slice/$scope"
             sock=/run/user/1000/cst-sccache-host.sock
             rm -rf "$w" "$sock" "$sock.lock" "$sock.failed"
             mkdir -p "$w/bin" "$w/crate/src" "$st"
@@ -5092,35 +5095,88 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
             [ "$(grep -c 'e2e-scc-cap-1.scope' "$st/compiles")" -ge 7 ]
             if grep -v 'e2e-scc-cap-1.scope' "$st/compiles"; then exit 1; fi
-            # The server is in its own scope, in app.slice.
+            # The server is in its own scope, in sccache.slice.
             live_server_in "$want" "the server's cgroup"
-            test -d "$ucg/app.slice/$scope"
+            test -d "$ucg/sccache.slice/$scope"
+            test ! -e "$ucg/app.slice/$scope"
             test ! -e "$ucg/user.slice/$scope"
-            [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
+            [ "$(systemctl --user show -P Slice "$scope")" = sccache.slice ]
             [ "$(systemctl --user show -P MemoryMax "$scope")" = infinity ]
             test -S "$sock"
 
             # status asks the socket who listens and reads that process's cgroup.
             status_out=$("$cst" toolchains status)
-            grep -qF "sccache server host: in its own scope (app.slice/$scope)" <<<"$status_out" ||
+            grep -qF "sccache server host: in its own scope (sccache.slice/$scope)" <<<"$status_out" ||
                 { printf 'e2e: status said:\n%s\n' "$status_out" >&2; exit 1; }
+
+            # While active: cst doctor emits no WARN for sccache.slice, and cpu.game treats it as escaped.
+            doc_out=$(CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true)
+            grep -qE '^  (ok|info|WARN)[[:space:]]+user manager:' <<<"$doc_out" ||
+                { printf 'e2e: doctor missing user manager line:\n%s\n' "$doc_out" >&2; exit 1; }
+            if grep -qF 'sccache.slice' <<<"$doc_out"; then
+                printf 'e2e: doctor unexpectedly named sccache.slice:\n%s\n' "$doc_out" >&2
+                exit 1
+            fi
+            /usr/bin/python3 -I -B - <<'PY'
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from cpu.game.adapters.profile import GameProfile
+from cpu.game.domain import GamePaths, GameSettings, escaped_unit
+from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
+assert escaped_unit("sccache.slice") == "sccache.slice"
+prof = GameProfile(GamePaths(), GameSettings(target_user="tester"), SubprocessCommandRunner(HostExecutionContext()))
+escaped = prof.escaped_cgroups()
+assert any(d.endswith("/sccache.slice") for d in escaped), escaped
+PY
 
             # A second build: the server is there, nothing starts.
             build 2
             [ "$(starts)" = "start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
 
             # The server stops: the scope goes away; its socket file stays behind.
-            stop_server "$server" "$ucg/app.slice/$scope"
+            stop_server "$server" "$ucg/sccache.slice/$scope"
             [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
             test -S "$sock"
 
             # A build after that: the stale socket is no server, so the wrapper starts a new one,
-            # again in its own scope in app.slice.
+            # again in its own scope in sccache.slice.
             build 3
             [ "$(starts)" = "start start " ] || { echo "e2e: starts: '$(starts)'" >&2; exit 1; }
             live_server_in "$want" "the new server's cgroup"
+            [ "$(systemctl --user show -P Slice "$scope")" = sccache.slice ]
+            stop_server "$server" "$ucg/sccache.slice/$scope"
+
+            # Live upgrade: a server started by an older wrapper is still running in
+            # app.slice/cst-sccache-host.scope; the next build reuses it until it stops,
+            # then starts the next one in sccache.slice.
+            rm -f "$sock" "$sock.failed"
+            : >"$st/starts"
+            systemd-run --user --wait --quiet --collect --unit=e2e-scc-launch-old \
+                -E SCCACHE_E2E_STATE="$st" -E SCCACHE_SERVER_UDS="$sock" \
+                systemd-run --user --scope --quiet --collect --unit="$scope" --slice=app.slice \
+                "$w/bin/sccache" --start-server
+            test -d "$ucg/app.slice/$scope"
             [ "$(systemctl --user show -P Slice "$scope")" = app.slice ]
-            stop_server "$server" "$ucg/app.slice/$scope"
+            test -S "$sock"
+            old_pid=$(cat "$st/live")
+            : >"$st/starts"
+
+            build 4
+            [ -z "$(starts)" ] || { echo "e2e: expected reuse of app.slice server, starts: '$(starts)'" >&2; exit 1; }
+            [ "$(cat "$st/live")" = "$old_pid" ] ||
+                { echo "e2e: expected old pid $old_pid, got $(cat "$st/live")" >&2; exit 1; }
+            test ! -e "$sock.failed"
+            test ! -e "$ucg/sccache.slice/$scope"
+
+            stop_server "$old_pid" "$ucg/app.slice/$scope"
+            [ "$(systemctl --user show -P LoadState "$scope")" = not-found ]
+            test -S "$sock"
+
+            build 5
+            [ "$(starts)" = "start " ] || { echo "e2e: expected sccache.slice start, starts: '$(starts)'" >&2; exit 1; }
+            live_server_in "$want" "the upgraded server's cgroup"
+            [ "$(systemctl --user show -P Slice "$scope")" = sccache.slice ]
+            stop_server "$server" "$ucg/sccache.slice/$scope"
 
             "$cst" toolchains config apply --no-sccache >/dev/null
             if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi

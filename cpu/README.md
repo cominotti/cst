@@ -1090,7 +1090,7 @@ does not read that file, so they work together with `docker-slice`.
 | `systemd-run --user` jobs without `--slice` | `app.slice/run-*.scope`, `app.slice/run-*.service` | not covered | idle, 12-23* |
 | `systemd-run --user --slice=X.slice` (X without a dash), and GNOME's `background.slice` | top-level `X.slice` of the user manager | not covered (`background.slice`: GNOME's weight 30) | idle, 12-23* |
 | `systemd-run --user --slice=user-NAME.slice` | under the inner `user.slice` | as the toolboxes | as the toolboxes |
-| Rust compiles through CST's sccache wrapper ([toolchains/README.md](../toolchains/README.md)) | the shared server's scope: `user.slice/cst-sccache-<toolbox>.scope` from a toolbox, `app.slice/cst-sccache-host.scope` on the host, wherever the build was started | toolbox: as the toolboxes; host: not covered | toolbox: as the toolboxes; host: not covered (not a `run-*` job) |
+| Rust compiles through CST's sccache wrapper ([toolchains/README.md](../toolchains/README.md)) | the shared server's scope: `user.slice/cst-sccache-<toolbox>.scope` from a toolbox, `sccache.slice/cst-sccache-host.scope` on the host, wherever the build was started | toolbox: as the toolboxes; host: not covered | toolbox: as the toolboxes; host: `idle, 12-23*` (top-level slice demoted by the game profile) |
 
 \* the CPU limits need the cpuset delegation (6.3), so they work only after
 the user manager restart.

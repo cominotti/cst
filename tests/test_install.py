@@ -6,7 +6,7 @@ Everything is written under temporary folders (a staging root): nothing on
 the machine is touched, no sudo, no runuser (a stub stands in for it).
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import contextlib
 import io
 import os
@@ -953,7 +953,26 @@ _SHELL_END = ("|", ";", "&", "<", ">", ")")
 
 
 _REDIRECTION = re.compile(r"[0-9]*[<>]|&>")
-_COMMENT = re.compile(r"(?:^|\s)#")
+
+
+def _has_unquoted_comment(text: str) -> bool:
+    """Whether text holds a # that bash reads as starting a comment (unquoted, at start or after delimiter)."""
+    quote, escaped, word_start = "", False, True
+    for ch in text:
+        if escaped:
+            escaped, word_start = False, False
+        elif ch == "\\" and quote != "'":
+            escaped, word_start = True, False
+        elif quote:
+            quote = "" if ch == quote else quote
+            word_start = False
+        elif ch in ("'", '"'):
+            quote, word_start = ch, False
+        elif ch == "#" and word_start:
+            return True
+        else:
+            word_start = ch.isspace() or ch in ";|&()<>"
+    return False
 
 
 def _before_redirection(word: str) -> tuple[str, bool]:
@@ -966,14 +985,14 @@ def _before_redirection(word: str) -> tuple[str, bool]:
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
-    """(number of its first line, text) of each command line, a line ending in a backslash joined with
-    the next one, unless that backslash is in a comment (bash continues no comment)."""
+    """(number of its first line, text) of each command line, a line ending in an odd number of
+    backslashes joined with the next one, unless those backslashes are in an unquoted comment."""
     out: list[tuple[int, str]] = []
     first, parts = 0, []
     for number, line in enumerate(text.splitlines(), 1):
         if not parts:
             first = number
-        if line.endswith("\\") and not _COMMENT.search("".join([*parts, line])):
+        if (len(line) - len(line.rstrip("\\"))) % 2 == 1 and not _has_unquoted_comment("".join([*parts, line])):
             parts.append(line[:-1])
             continue
         out.append((first, " ".join([*parts, line])))
@@ -981,6 +1000,27 @@ def _logical_lines(text: str) -> list[tuple[int, str]]:
     if parts:
         out.append((first, " ".join(parts)))
     return out
+
+
+def _command_component_args(words: Sequence[str], skip: int | None) -> list[str]:
+    """The component argument words of one `_COMPONENT_CALLS` invocation."""
+    rest: list[str] = []
+    for w in words:
+        if w.startswith(_SHELL_END) or w == "||" or _REDIRECTION.match(w):
+            break
+        head, redirected = _before_redirection(w)
+        if redirected:  # `cst_mark C>/dev/null` or `cst_mark C;>/dev/null`: C, then end of args
+            cleaned = head.split(";", 1)[0]
+            if cleaned:
+                rest.append(cleaned)
+            break
+        if ";" in w:  # `cst_mark C; fi`: the command ends there
+            cleaned = w.split(";", 1)[0]
+            if cleaned:
+                rest.append(cleaned)
+            break
+        rest.append(w)
+    return rest if skip is None else rest[skip : skip + 1]
 
 
 def shell_component_words(text: str) -> list[tuple[int, str]]:
@@ -994,24 +1034,12 @@ def shell_component_words(text: str) -> list[tuple[int, str]]:
         for i, word in enumerate(words):
             args: list[str] = []
             if word.startswith("--component="):
-                args = [_before_redirection(word.removeprefix("--component="))[0].removesuffix(";")]
+                args = [_before_redirection(word.removeprefix("--component="))[0].split(";", 1)[0]]
             elif word == "--component" and i + 1 < len(words):
-                args = [_before_redirection(words[i + 1])[0].removesuffix(";")]
+                args = [_before_redirection(words[i + 1])[0].split(";", 1)[0]]
             elif word in _COMPONENT_CALLS:
-                rest: list[str] = []
-                for w in words[i + 1 :]:
-                    if w.startswith(_SHELL_END) or w == "||" or _REDIRECTION.match(w):
-                        break
-                    head, redirected = _before_redirection(w)
-                    if redirected:  # `cst_mark C>/dev/null`: C, then the redirection ends the arguments
-                        rest.append(head)
-                        break
-                    rest.append(w.removesuffix(";"))
-                    if w.endswith(";"):  # `cst_mark C; fi`: the command ends there
-                        break
-                skip = _COMPONENT_CALLS[word]
-                args = rest if skip is None else rest[skip : skip + 1]
-            found += [(number, a.strip("\"'")) for a in args if "$" not in a]
+                args = _command_component_args(words[i + 1 :], _COMPONENT_CALLS[word])
+            found += [(number, a.strip("\"'")) for a in args if a and "$" not in a]
     return found
 
 
@@ -1098,6 +1126,52 @@ class ShellComponentWordsTest(unittest.TestCase):
                 (7, "btrfs:x2"),
                 (8, "btrfs:y"),
                 (9, "btrfs:z"),
+            ],
+        )
+
+    def test_quoted_hash_continues_line_and_semicolon_before_redirection_ends_word(self) -> None:
+        self.assertEqual(
+            _logical_lines(
+                "echo \" # \" \\\nmore\necho ' # ' \\\nmore\n# comment \\\nnext\necho a;# comment \\\nnext\necho foo \\\\\ncst_mark btrfs:alerts\n"
+            ),
+            [
+                (1, 'echo " # "  more'),
+                (3, "echo ' # '  more"),
+                (5, "# comment \\"),
+                (6, "next"),
+                (7, "echo a;# comment \\"),
+                (8, "next"),
+                (9, "echo foo \\\\"),
+                (10, "cst_mark btrfs:alerts"),
+            ],
+        )
+        text = (
+            'echo " # "; cst_install_text a 0644 \\\n'
+            "    root btrfs:core\n"
+            "echo ' # '; cst_install_text b 0644 \\\n"
+            "    root btrfs:alerts\n"
+            "cst_install_text e 0644 \\#notacomment \\\n"
+            "    btrfs:snapshot\n"
+            "echo a;# note \\\n"
+            "echo foo \\\\\n"
+            "# cst_mark btrfs:bogus\n"
+            "cst_mark btrfs:core;>/dev/null extra\n"
+            "cst_mark btrfs:alerts;2>/dev/null extra\n"
+            "cst_installer dests --component=btrfs:z;>/dev/null\n"
+            "cst_installer dests --component btrfs:q;>/dev/null\n"
+            "cst_mark btrfs:core;fi\n"
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [
+                (1, "btrfs:core"),
+                (3, "btrfs:alerts"),
+                (5, "btrfs:snapshot"),
+                (10, "btrfs:core"),
+                (11, "btrfs:alerts"),
+                (12, "btrfs:z"),
+                (13, "btrfs:q"),
+                (14, "btrfs:core"),
             ],
         )
 

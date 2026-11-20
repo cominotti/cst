@@ -29,7 +29,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
-from cst_core.ports import CommandFailed, CommandResult, UnitName
+from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
@@ -789,13 +789,16 @@ class _FakeSystemd(NoUnitQueries):
     def daemon_reload(self) -> None:
         self.daemon_reloads += 1
 
-    def enable(self, unit: str, *, now: bool = False) -> CommandResult:
+    def enable(self, unit: str, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del now, output
         raise AssertionError(f"swap never enables a unit: {unit}")
 
-    def disable(self, unit: str, *, now: bool = False) -> CommandResult:
+    def disable(self, unit: str, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del now, output
         raise AssertionError(f"swap never disables a unit: {unit}")
 
-    def clean(self, unit: str, *, what: str) -> CommandResult:
+    def clean(self, unit: str, *, what: str, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del what, output
         raise AssertionError(f"swap never cleans a unit: {unit}")
 
     def _set_active(self, device: str, active: bool) -> None:
@@ -817,7 +820,8 @@ class _FakeSystemd(NoUnitQueries):
             self._on_call(verb, unit)
         return unit != self._fail_unit
 
-    def start(self, unit: str) -> CommandResult:
+    def start(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         if not self._call("start", unit):
             return self._fail_result
         if unit == "systemd-cryptsetup@swap0.service" and self._fs is not None:
@@ -826,7 +830,8 @@ class _FakeSystemd(NoUnitQueries):
             self._set_active(self._mapper_real, True)
         return CommandResult(0, "", "")
 
-    def stop(self, unit: str) -> CommandResult:
+    def stop(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         if not self._call("stop", unit):
             return self._fail_result
         if unit == "dev-mapper-swap0.swap":
@@ -835,7 +840,8 @@ class _FakeSystemd(NoUnitQueries):
             self._set_active("/dev/zram0", False)
         return CommandResult(0, "", "")
 
-    def restart(self, unit: str) -> CommandResult:
+    def restart(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         return CommandResult(0, "", "") if self._call("restart", unit) else self._fail_result
 
     def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
@@ -2038,7 +2044,8 @@ class _SwapNeverActive(_FakeSystemd):
     """systemctl start succeeds, and the swap device still does not show up in /proc/swaps."""
 
     @override
-    def start(self, unit: str) -> CommandResult:
+    def start(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         self.calls.append(("start", unit))
         return CommandResult(0, "", "")
 

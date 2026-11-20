@@ -208,5 +208,6 @@ jobs:
         with:
           name: nightly-e2e-artifacts
           path: tests/e2e/.artifacts/
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 14

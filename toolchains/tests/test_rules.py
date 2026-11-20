@@ -1552,6 +1552,11 @@ class SccacheConfigTest(RulesBase):
             place("host", host, sock, facts(run_dir_fallback=True, manager_socket="/x", start_failed=True)),
             "sccache server host: in its own scope (app.slice/cst-sccache-host.scope)",
         )
+        host_new = "0::/user.slice/user-1000.slice/user@1000.service/sccache.slice/cst-sccache-host.scope"
+        self.assertEqual(
+            place("host", host_new, sock),
+            "sccache server host: in its own scope (sccache.slice/cst-sccache-host.scope)",
+        )
         # The scope of another environment is not its own.
         self.assertIn(
             "WARN: runs in app.slice/cst-sccache-host.scope, not in cst-sccache-h.scope", place("h", host, sock)
@@ -2020,13 +2025,70 @@ class RustcWrapperTest(unittest.TestCase):
                 self.assertEqual(in_scope, path is not None, calls)
                 self.assertEqual(cgroup_v2_path(text), path)
 
-    def test_host_server_goes_to_app_slice(self) -> None:
+    def test_host_server_goes_to_sccache_slice(self) -> None:
         self.user_manager(self.MANAGER + "/app.slice/app-gnome-terminal-1.scope")
         os.unlink(self.containerenv)
         calls = self.run_wrapper(self.rustc(), "x")
         self.assertEqual([c["who"] for c in calls], ["systemd-run", "start", "sccache", "rustc"])
-        self.assertIn("--unit=cst-sccache-host.scope --slice=app.slice ", calls[0]["args"])
-        self.assertTrue(os.path.isdir(self.scope_dir("app.slice", "host")))
+        self.assertIn("--unit=cst-sccache-host.scope --slice=sccache.slice ", calls[0]["args"])
+        self.assertTrue(os.path.isdir(self.scope_dir("sccache.slice", "host")))
+        self.assertFalse(os.path.exists(self.scope_dir("app.slice", "host")))
+
+    def test_host_upgrade_reuses_live_app_slice_server_until_it_stops(self) -> None:
+        # Upgrade from an earlier wrapper that started cst-sccache-host.scope in app.slice:
+        # compiles reuse that live server (builtins only) until it stops, then move to sccache.slice.
+        self.user_manager(self.MANAGER + "/app.slice/app-gnome-terminal-1.scope", flock_log=True)
+        os.unlink(self.containerenv)
+        old_scope = self.scope_dir("app.slice", "host")
+        os.makedirs(old_scope)
+        host_sock = os.path.join(self.run_dir, "cst-sccache-host.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        self.addCleanup(srv.close)
+        srv.bind(host_sock)
+        srv.listen(1)
+
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["sccache", "rustc"], calls)
+        self.assertFalse(os.path.exists(host_sock + ".failed"))
+        self.assertTrue(stat.S_ISSOCK(os.stat(host_sock).st_mode))
+        self.assertFalse(os.path.exists(self.scope_dir("sccache.slice", "host")))
+
+        prlimit = shutil.which("prlimit")
+        assert prlimit is not None
+        assert self.sh is not None
+        open(self.log, "w").close()
+        r = subprocess.run(
+            [prlimit, "--nproc=0", self.sh, self.script, self.rustc(), "x"],
+            check=False,
+            env=self.wrapper_env(),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual([c["who"] for c in self.calls()], ["sccache", "rustc"])
+
+        shutil.rmtree(old_scope)
+        srv.close()
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["flock", "systemd-run", "start", "sccache", "rustc"])
+        self.assertIn("--unit=cst-sccache-host.scope --slice=sccache.slice ", calls[1]["args"])
+        self.assertTrue(os.path.isdir(self.scope_dir("sccache.slice", "host")))
+
+    def test_host_blocked_app_slice_without_socket_falls_back_and_backs_off(self) -> None:
+        # An old app.slice scope without the server's socket is not a live server: systemd refuses
+        # the duplicate unit name, the wrapper writes the backoff marker and falls back cleanly.
+        self.user_manager(self.MANAGER + "/app.slice/app-gnome-terminal-1.scope", start_fails=True, flock_log=True)
+        os.unlink(self.containerenv)
+        os.makedirs(self.scope_dir("app.slice", "host"))
+        host_sock = os.path.join(self.run_dir, "cst-sccache-host.sock")
+
+        calls = self.run_wrapper(self.rustc(), "x")
+        self.assertEqual([c["who"] for c in calls], ["flock", "systemd-run", "sccache", "rustc"], calls)
+        self.assertIn("--unit=cst-sccache-host.scope --slice=sccache.slice ", calls[1]["args"])
+        with open(host_sock + ".failed") as f:
+            self.assertEqual(f.read(), "1000\n")
 
     def test_a_scope_or_a_socket_alone_starts_a_server(self) -> None:
         # A socket left by a server that stopped (or by a server an older

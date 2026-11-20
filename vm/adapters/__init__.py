@@ -192,9 +192,10 @@ def read_conf(path: str, *, nas_conf: str, bash_sourced: bool = False) -> dict[s
 
 def settings_file(path: str, *, bash_sourced: bool, nas_conf: str) -> ShellAssignments:
     """A settings file through cst_core's one reader ("" when it cannot be read).
-    snapshots.conf (the file at nas_conf) also takes the lines an older CST wrote there with
-    printf %q, read as bash reads them (parse_snapshots_conf)."""
-    text = read_text(path, "")
+    snapshots.conf (the file at nas_conf) keeps its line ends so a carriage return stays
+    part of its line as in bash (matching btrfs-snapshot, btrfs-health-check, and cst doctor),
+    and also takes the lines an older CST wrote there with printf %q (parse_snapshots_conf)."""
+    text = read_text(path, "", keep_line_ends=path == nas_conf)
     if path == nas_conf:
         return parse_snapshots_conf(text)
     return parse_shell_assignments(text, bash_sourced=bash_sourced)

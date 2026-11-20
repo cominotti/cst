@@ -56,10 +56,14 @@
 # wrapper picked the socket itself (above) and the server's scope is missing,
 # it starts the server first, under the user manager, in
 # cst-sccache-<toolbox name or host>.scope: in the inner user.slice inside a
-# toolbox (next to the toolboxes, with their CPUs and weight), in app.slice on
-# the host. A lock file next to the socket makes parallel compiles start one
-# server; the socket is removed first, so "the scope's folder and the socket
-# exist" means a server has started there. Each compile checks that with shell
+# toolbox (next to the toolboxes, with their CPUs and weight), in sccache.slice
+# on the host (a sibling slice of app.slice and user.slice, left alone outside
+# games and demoted by the game profile during games). A server an earlier
+# version started in app.slice is reused while its scope folder and socket
+# stay, so an upgrade never breaks an active server; once it stops, the next
+# compile starts in sccache.slice. A lock file next to the socket makes
+# parallel compiles start one server; the socket is removed first, so "the
+# scope's folder and the socket exist" means a server has started there. Each compile checks that with shell
 # builtins only (the folder comes from /proc/self/cgroup); only a missing
 # server costs flock and systemd-run. Without a user manager above the compile
 # (an ssh session, docker exec), without the user manager's socket
@@ -171,13 +175,18 @@ if [ "$own_address" = yes ]; then
     case "$uid" in '' | *[!0-9]*) manager= ;; esac
     if [ -n "$manager" ]; then
         slice=user.slice
-        [ "$env_id" = host ] && slice=app.slice
+        [ "$env_id" = host ] && slice=sccache.slice
         scope="cst-sccache-${env_id}.scope"
         manager_dir="${CST_SCCACHE_CGROUP_FS:-/sys/fs/cgroup}${above}/${manager}"
         scope_dir="${manager_dir}/${slice}/${scope}"
         # The socket is removed before each start: with the scope's folder, it
         # means a server has started there.
         server_missing() { [ ! -d "$scope_dir" ] || [ ! -S "$SCCACHE_SERVER_UDS" ]; }
+        # Upgrade from an earlier CST that started the host server in app.slice:
+        # keep using that live server until it stops, so an upgrade never drops
+        # its socket or collides on the same unit name; the next start uses
+        # sccache.slice.
+        old_host_server() { [ "$env_id" = host ] && [ -d "${manager_dir}/app.slice/${scope}" ] && [ -S "$SCCACHE_SERVER_UDS" ]; }
         # A start failed less than 10 minutes ago (the marker holds the seconds
         # since boot of that failure): try no start, leave the server that the
         # client started then alone. Sets now, which a failed start writes.
@@ -193,13 +202,13 @@ if [ "$own_address" = yes ]; then
             case "$stamp" in '' | *[!0-9]* | 0?*) return 1 ;; esac
             [ "$stamp" -le "$now" ] && [ "$((now - stamp))" -lt 600 ]
         }
-        if [ -d "$manager_dir" ] && server_missing && ! backing_off &&
+        if [ -d "$manager_dir" ] && server_missing && ! old_host_server && ! backing_off &&
             [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/systemd/private" ] &&
             command -v systemd-run >/dev/null 2>&1 && command -v flock >/dev/null 2>&1; then
             # The lock is held until --start-server returns (the server
             # listens); the server never gets its descriptor (9>&-).
             {
-                if flock -w 15 9 && server_missing && ! backing_off; then
+                if flock -w 15 9 && server_missing && ! old_host_server && ! backing_off; then
                     rm -f "$SCCACHE_SERVER_UDS"
                     systemd-run --user --scope --quiet --collect --unit="$scope" --slice="$slice" \
                         --description="CST: the shared sccache server ($env_id)" \

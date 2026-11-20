@@ -45,7 +45,7 @@ See docs/dev-tools.md, "The workflow audit".
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 import os
 import re
 import tempfile
@@ -361,6 +361,122 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
                 "the steps after it do not run (give the audit a job of its own)"
             )
     return out + command_problems(cue, "ci uv-audit", UV_AUDIT_COMMAND, UV_AUDIT_WHY)
+
+
+_STEPS_HDR = re.compile(r"^(\s*)steps\s*:\s*(?:#.*)?$")
+_DASH_ITEM = re.compile(r"^(\s*-\s+)(.*)$")
+_UPLOAD_USES = re.compile(r"^uses\s*:\s*actions/upload-artifact(?:[@\s]|$)")
+_WITH_HDR = re.compile(r"^with\s*:\s*(?:#.*)?$")
+_WITH_KV = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$")
+
+
+def _strip_yaml_comment(value: str) -> str:
+    """Trailing `# comment` outside quotes removed from a YAML scalar."""
+    quote = ""
+    for i, ch in enumerate(value):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "#" and (i == 0 or value[i - 1].isspace()):
+            return value[:i].rstrip()
+    return value.rstrip()
+
+
+def _has_hidden_segment(entry: str) -> bool:
+    """True when entry names a file or folder whose name starts with `.` (negation lines left out)."""
+    raw = _strip_yaml_comment(entry).strip().strip("\"'")
+    if not raw or raw.startswith("!"):
+        return False
+    return any(part.startswith(".") and part not in (".", "..") for part in raw.replace("\\", "/").split("/"))
+
+
+def _step_blocks(text: str) -> list[list[tuple[int, str]]]:
+    """The step line blocks under every `steps:` section in a workflow file."""
+    blocks: list[list[tuple[int, str]]] = []
+    steps_indent: int | None = None
+    step_indent: int | None = None
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if _STEPS_HDR.match(line):
+            steps_indent, step_indent = indent, None
+            continue
+        if steps_indent is None:
+            continue
+        item = _DASH_ITEM.match(line)
+        if indent < steps_indent or (indent == steps_indent and item is None):
+            steps_indent, step_indent = None, None
+        elif item is not None and (step_indent is None or indent == step_indent):
+            step_indent = indent
+            blocks.append([(lineno, line)])
+        elif blocks and step_indent is not None:
+            blocks[-1].append((lineno, line))
+    return blocks
+
+
+def _upload_step_with(step: Sequence[tuple[int, str]]) -> tuple[int | None, list[str], str]:
+    """(uses line number or None, path entries, include-hidden-files value) of one step."""
+    first = _DASH_ITEM.match(step[0][1])
+    if first is None:
+        return None, [], ""
+    body_indent = len(first.group(1))
+    use_line: int | None = None
+    with_lines: list[str] = []
+    in_with = False
+    for idx, (lineno, line) in enumerate(step):
+        content = first.group(2) if idx == 0 else line.lstrip()
+        indent = body_indent if idx == 0 else len(line) - len(content)
+        if indent <= body_indent:
+            in_with = indent == body_indent and _WITH_HDR.match(content) is not None
+            if indent == body_indent and _UPLOAD_USES.match(content):
+                use_line = lineno
+        elif in_with:
+            with_lines.append(line)
+    paths, include_hidden = _parse_with_paths(with_lines)
+    return use_line, paths, include_hidden
+
+
+def _parse_with_paths(lines: Sequence[str]) -> tuple[list[str], str]:
+    """(`path` entries, lower-cased `include-hidden-files` value) inside a step's `with:` lines."""
+    if not lines:
+        return [], ""
+    key_indent = len(lines[0]) - len(lines[0].lstrip())
+    paths: list[str] = []
+    include_hidden = ""
+    in_path = False
+    for line in lines:
+        content = line.lstrip()
+        indent = len(line) - len(content)
+        if indent == key_indent and (kv := _WITH_KV.match(content)) is not None:
+            key, val = kv.group(1), _strip_yaml_comment(kv.group(2))
+            in_path = key == "path" and val in ("|", "|-", ">", ">-")
+            if key == "include-hidden-files":
+                include_hidden = val.strip("\"'").lower()
+            elif key == "path" and not in_path and val:
+                paths.append(val)
+        elif in_path and indent > key_indent:
+            paths.append(content)
+    return paths, include_hidden
+
+
+def artifact_upload_problems(rel: str, text: str) -> list[str]:
+    """Every actions/upload-artifact step in `rel` that names a hidden path without `include-hidden-files: true`."""
+    out: list[str] = []
+    for step in _step_blocks(text):
+        use_line, paths, include_hidden = _upload_step_with(step)
+        if use_line is None or include_hidden == "true":
+            continue
+        hidden = [p for p in paths if _has_hidden_segment(p)]
+        if hidden:
+            out.append(
+                f"{rel}:{use_line}: actions/upload-artifact uploads a hidden path ({hidden[0]}) "
+                "without `include-hidden-files: true` (v4+ skips hidden files by default)"
+            )
+    return out
 
 
 GOOD_CONFIG = """# header
@@ -748,7 +864,44 @@ class WorkflowAuditTest(unittest.TestCase):
             + task_problems(cue)
             + uv_audit_problems(cue, nightly)
         )
+        for rel in sorted(github):
+            if rel.startswith(".github/workflows/") and rel.endswith((".yml", ".yaml")):
+                with open(os.path.join(REPO, rel), encoding="utf-8") as fh:
+                    found += artifact_upload_problems(rel, fh.read())
         self.assertEqual(found, [], "the workflow audit misses something (see docs/dev-tools.md):\n" + "\n".join(found))
+
+    def test_upload_artifact_hidden_paths_require_include_hidden_files(self) -> None:
+        base = (
+            "jobs:\n  e2e:\n    steps:\n      - name: Upload\n        if: always()\n"
+            "        uses: actions/upload-artifact@abc # v7\n        with:\n          name: logs\n"
+        )
+        msg = (
+            "ci.yml:6: actions/upload-artifact uploads a hidden path (tests/e2e/.artifacts/) "
+            "without `include-hidden-files: true` (v4+ skips hidden files by default)"
+        )
+        want = [msg]
+        self.assertEqual(artifact_upload_problems("ci.yml", base + "          path: tests/e2e/.artifacts/\n"), want)
+        self.assertEqual(
+            artifact_upload_problems(
+                "ci.yml", base + "          path: tests/e2e/.artifacts/\n          include-hidden-files: false\n"
+            ),
+            want,
+        )
+        self.assertEqual(
+            artifact_upload_problems(
+                "ci.yml",
+                base + "          path: |\n            /tmp/out/\n            tests/e2e/.artifacts/\n",
+            ),
+            want,
+        )
+        for ok in (
+            base + "          path: tests/e2e/.artifacts/\n          include-hidden-files: true\n",
+            base + "          path: tests/e2e/.artifacts/\n          include-hidden-files: 'true'\n",
+            base + "          path: audit-report.json\n",
+            base + "          path: |\n            /tmp/cst-coverage/\n            !/tmp/cst-coverage/coverage.data\n",
+        ):
+            with self.subTest(ok=ok):
+                self.assertEqual(artifact_upload_problems("ci.yml", ok), [])
 
 
 if __name__ == "__main__":

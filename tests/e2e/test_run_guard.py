@@ -205,5 +205,37 @@ class CheckoutPreflightTest(unittest.TestCase):
         self.assertIn("chcon -R -t container_file_t", err.getvalue())
 
 
+class DumpLogsTest(unittest.TestCase):
+    @override
+    def setUp(self) -> None:
+        self.mod = load_run()
+
+    def test_dump_logs_collects_full_boot_journal_and_all_four_logs(self) -> None:
+        cmds: list[list[str]] = []
+
+        def fake_run(cmd: Sequence[str], **_k: object) -> object:
+            cmds.append(list(cmd))
+
+            class _Done:
+                returncode = 0
+                stdout = f"out for {' '.join(cmd)}"
+                stderr = ""
+
+            return _Done()
+
+        self.mod.run = fake_run
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-e2e-logs-")))
+        self.mod.dump_logs(["c1"], tmp)
+        files = sorted(p.name for p in tmp.iterdir())
+        self.assertEqual(
+            files,
+            ["c1_docker_logs.log", "c1_journal_boot.log", "c1_system_failed.log", "c1_user_failed.log"],
+        )
+        journal_cmd = next(c for c in cmds if "journalctl" in c)
+        self.assertEqual(journal_cmd, ["docker", "exec", "c1", "journalctl", "-b", "--no-pager"])
+        self.assertNotIn("-n", journal_cmd)
+        self.assertIn("journalctl -b --no-pager", (tmp / "c1_journal_boot.log").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
