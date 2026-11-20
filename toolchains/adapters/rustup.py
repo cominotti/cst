@@ -149,11 +149,9 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
 def _toolchain_row(path: str, short: str, pin: str) -> tuple[str, int]:
     """(row, size) of the toolchain installed at PATH (SHORT: its name without
     the host, PIN: why it is kept); a linked toolchain counts 0 bytes."""
-    size = 0 if os.path.islink(path) else tree_size(path)
-    row = f"  {gib(size):>10}  {short:<22} {pin}" + (
-        "  (a link: rustup toolchain link)" if os.path.islink(path) else ""
-    )
-    return row, size
+    link = os.path.islink(path)
+    size = 0 if link else tree_size(path)
+    return f"  {gib(size):>10}  {short:<22} {pin}" + ("  (a link: rustup toolchain link)" if link else ""), size
 
 
 def _toolchain_pins(pin_files: Sequence[str], rh: str) -> dict[str, list[str]]:
