@@ -39,6 +39,7 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
+from cst_core.domain.install import Component
 from cst_core.domain.units import ActiveState
 from cst_core.ports import OutputMode
 
@@ -443,7 +444,7 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
         said = self.checked(
-            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
+            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
@@ -463,7 +464,7 @@ class Change(Checks):
         else:
             self.out(f"unchanged: {unit} enabled and active\n")
         self.lw_active = self.quiet(["systemctl", "--user", "is-active", unit])
-        r = self.installer("mark", "--home", p.home, "--component", "bluetooth:ldac", "done")
+        r = self.installer("mark", "--home", p.home, "--component", Component.BLUETOOTH_LDAC, "done")
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
 

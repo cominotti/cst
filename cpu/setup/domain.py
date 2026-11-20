@@ -14,6 +14,7 @@ import re
 from typing import Final, TypedDict, TypeIs
 
 from cst_core.domain.contracts import CPU_SETTINGS
+from cst_core.domain.install import Component
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
@@ -62,12 +63,12 @@ QUIET_ENV: Final = ("QUIET_CPU_PCT", "QUIET_CPU_PSI", "QUIET_IO_PSI", "QUIET_MEM
 DROPIN_NAME: Final = "10-cpu-setup.conf"
 OLD_DROPIN_NAME: Final = "50-cpu-setup.conf"  # until 2026-11; install and uninstall remove it
 MANAGED_MARK: Final = "Managed by cpu-setup.sh"
-# The install record's component of the toolbox drop-ins (a key of COMPONENTS in cst_core/domain/install.py).
-TOOLBOX_COMPONENT: Final = "cpu:toolbox"
-# The other components of the install record cst cpu installs, marks and removes (keys of the same COMPONENTS).
-CORE_COMPONENT: Final = "cpu:core"
-GAMEMODE_COMPONENT: Final = "cpu:gamemode"
-DOCKER_SLICE_COMPONENT: Final = "cpu:docker-slice"
+# The install record's component of the toolbox drop-ins (a Component of cst_core/domain/install.py).
+TOOLBOX_COMPONENT: Final = Component.CPU_TOOLBOX
+# The other components of the install record cst cpu installs, marks and removes (Components too).
+CORE_COMPONENT: Final = Component.CPU_CORE
+GAMEMODE_COMPONENT: Final = Component.CPU_GAMEMODE
+DOCKER_SLICE_COMPONENT: Final = Component.CPU_DOCKER_SLICE
 # The timer that runs the game profile's watchdog (cpu-game-profile tick).
 WATCHDOG_TIMER: Final = "cpu-game-watchdog.timer"
 # GameMode's group: its members may ask gamemoded for the game profile.

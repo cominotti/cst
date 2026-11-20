@@ -33,6 +33,29 @@ class GeneratedKind(StrEnum):
     TEXT = "text"
 
 
+class Component(StrEnum):
+    """The parts of the modules that one command installs as a whole (COMPONENTS: that command), as the
+    manifest's component column, the install record and the setup scripts name them (MODULE:PART)."""
+
+    BTRFS_CORE = "btrfs:core"
+    BTRFS_ALERTS = "btrfs:alerts"
+    BTRFS_BELOW = "btrfs:below"
+    BTRFS_SNAPSHOTS = "btrfs:snapshots"
+    BTRFS_TOP_MOUNT = "btrfs:top-mount"
+    BTRFS_DOCKER_GC = "btrfs:docker-gc"
+    BTRFS_DEGRADED_BOOT = "btrfs:degraded-boot"
+    BTRFS_REPORT_LAUNCHER = "btrfs:report-launcher"
+    CPU_CORE = "cpu:core"
+    CPU_GAMEMODE = "cpu:gamemode"
+    CPU_DOCKER_SLICE = "cpu:docker-slice"
+    CPU_TOOLBOX = "cpu:toolbox"
+    BLUETOOTH_LDAC = "bluetooth:ldac"
+    SWAP_CORE = "swap:core"
+    TOOLCHAINS_AUTO = "toolchains:auto"
+    TOOLCHAINS_SCCACHE = "toolchains:sccache"
+    VM_BACKUP_TIMER = "vm:backup-timer"
+
+
 @dataclass(frozen=True, slots=True)
 class InstallEntry:
     """One repository artifact installed onto a host or user account."""
@@ -156,10 +179,10 @@ vm/cst-vm                                           /usr/local/sbin/cst-vm      
 )
 
 
-# The components of the manifest: each is a part of one module whose files one
-# command installs (and refreshes) together, in one installer call; the value
-# is that command, as a user types it.
-COMPONENTS: Final[Mapping[str, str]] = {
+# The components of the manifest (Component): each is a part of one module whose files one
+# command installs (and refreshes) together, in one installer call; the value is that
+# command, as a user types it. Written by word, read by member (COMPONENTS).
+_COMMANDS: Final = {
     "btrfs:core": "cst btrfs install",
     # btrfs-notify and the login-time reader of the alerts it keeps: `cst btrfs install` always installs
     # them; `snapshots setup` (which alerts through them too) installs them as well.
@@ -180,14 +203,15 @@ COMPONENTS: Final[Mapping[str, str]] = {
     "toolchains:sccache": "cst toolchains config apply",
     "vm:backup-timer": "cst vm backup-timer on",
 }
+COMPONENTS: Final[Mapping[Component, str]] = {Component(word): command for word, command in _COMMANDS.items()}
 
 
 # The components whose files are all generated text (cst_install_text DEST MODE OWNER COMPONENT), so
 # no manifest entry names their owner: each with its owner (whose install record lists them).
-GENERATED_COMPONENTS: Final[Mapping[str, Owner]] = {
-    "btrfs:degraded-boot": Owner.ROOT,
-    "btrfs:report-launcher": Owner.USER,
-    "cpu:toolbox": Owner.USER,
+GENERATED_COMPONENTS: Final[Mapping[Component, Owner]] = {
+    Component.BTRFS_DEGRADED_BOOT: Owner.ROOT,
+    Component.BTRFS_REPORT_LAUNCHER: Owner.USER,
+    Component.CPU_TOOLBOX: Owner.USER,
 }
 
 

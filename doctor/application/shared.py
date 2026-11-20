@@ -6,9 +6,15 @@ command that installs a component again, and the decorator that registers a chec
 from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass, field
 
-from cst_core.domain.install import COMPONENTS
+from cst_core.domain.install import COMPONENTS, Component
 from cst_core.domain.ostree import OstreeStatus, query_status
-from cst_core.domain.text import SettingsProblem, ShellAssignments, parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.text import (
+    SettingsProblem,
+    ShellAssignments,
+    enum_member,
+    parse_shell_assignments,
+    parse_snapshots_conf,
+)
 from doctor.domain import (
     SNAP_CONF,
     WARN,
@@ -183,6 +189,8 @@ def ignored_line_text(note: str) -> str:
 
 
 def refresh(host: DoctorHostPort, component: str) -> str:
-    """The command that installs component's files again, as the hints name cst."""
-    cmd = COMPONENTS.get(component, "")
+    """The command that installs component's files again, as the hints name cst ("" for a word that names
+    no Component: a record line of a newer CST)."""
+    known = enum_member(Component, component)
+    cmd = "" if known is None else COMPONENTS[known]
     return f"{host.cst} {cmd.removeprefix('cst ')}" if cmd else ""

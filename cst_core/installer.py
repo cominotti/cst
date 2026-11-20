@@ -255,10 +255,10 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
 
 
 def _component_owner(component: str) -> Owner:
-    """Whose record lists the component: its manifest files' owner, or GENERATED_COMPONENTS' for one whose
-    files are all generated text."""
+    """Whose record lists the component (a word of the command line): its manifest files' owner, or
+    GENERATED_COMPONENTS' for one whose files are all generated text (KeyError for another word)."""
     owners = {e.owner for e in INSTALL_MANIFEST if e.component == component}
-    return owners.pop() if owners else GENERATED_COMPONENTS[component]
+    return owners.pop() if owners else {str(c): o for c, o in GENERATED_COMPONENTS.items()}[component]
 
 
 def _mark(service: InstallService, a: argparse.Namespace) -> int:
