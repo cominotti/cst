@@ -67,18 +67,11 @@ def mtime_matches(recorded: str, st: os.stat_result) -> bool:
     return mtime_matches_ns(recorded, st.st_mtime_ns)
 
 
-@check(CHECKS, "alerts")
-def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
-    pending = host.path(ALERT_PENDING)
-    if not host.isdir(pending):
-        yield Result(INFO, f"no alert folder {ALERT_PENDING} (installed by {host.cst} btrfs install)")
-        return
-    try:
-        names = sorted(n for n in host.listdir(pending) if ALERT_NAME.match(n))
-    except OSError as e:
-        yield Result(WARN, f"pending alerts: not readable ({e.strerror})")
-        return
-    seen = seen_record(host)
+def _sort_alerts(
+    host: DoctorHostPort, pending: ViewPath, names: list[str], seen: dict[str, str]
+) -> tuple[list[tuple[str, str, int]], int]:
+    """([(urgency, title, last) of each alert this user has not seen], how many were seen), of the
+    pending alerts named: files only (no link), younger than ALERT_KEEP_DAYS, that parse."""
     unseen: list[tuple[str, str, int]] = []
     seen_n = 0
     for n in names:
@@ -96,19 +89,40 @@ def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
             seen_n += 1
         else:
             unseen.append(a)
+    return unseen, seen_n
+
+
+def _unseen_result(host: DoctorHostPort, alert: tuple[str, str, int], *, reader: bool) -> Result:
+    """One alert not seen yet (reader: cst-pending-alerts is installed, so a login shows it)."""
+    urgency, title, last = alert
+    when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
+    return Result(
+        ERROR if urgency == Urgency.CRITICAL else WARN,
+        f"alert you have not seen yet ({urgency}, {when}): {title} ("
+        + (
+            f"shown at your next login; the fix shows it now, as does {host.cst} btrfs status)"
+            if reader
+            else f"no login shows it while {PENDING_READER_HOST} is missing: the fix installs it)"
+        ),
+        "cst-pending-alerts --list" if reader else refresh(host, "btrfs:alerts"),
+    )
+
+
+@check(CHECKS, "alerts")
+def check_pending_alerts(host: DoctorHostPort) -> Iterator[Result]:
+    pending = host.path(ALERT_PENDING)
+    if not host.isdir(pending):
+        yield Result(INFO, f"no alert folder {ALERT_PENDING} (installed by {host.cst} btrfs install)")
+        return
+    try:
+        names = sorted(n for n in host.listdir(pending) if ALERT_NAME.match(n))
+    except OSError as e:
+        yield Result(WARN, f"pending alerts: not readable ({e.strerror})")
+        return
+    unseen, seen_n = _sort_alerts(host, pending, names, seen_record(host))
     reader = runs(host, PENDING_READER_HOST)
-    for urgency, title, last in sorted(unseen, key=lambda a: a[2]):
-        when = time.strftime("%a %d %b %H:%M", time.localtime(last)) if last else "?"
-        yield Result(
-            ERROR if urgency == Urgency.CRITICAL else WARN,
-            f"alert you have not seen yet ({urgency}, {when}): {title} ("
-            + (
-                f"shown at your next login; the fix shows it now, as does {host.cst} btrfs status)"
-                if reader
-                else f"no login shows it while {PENDING_READER_HOST} is missing: the fix installs it)"
-            ),
-            "cst-pending-alerts --list" if reader else refresh(host, "btrfs:alerts"),
-        )
+    for alert in sorted(unseen, key=lambda a: a[2]):
+        yield _unseen_result(host, alert, reader=reader)
     if seen_n:
         yield Result(
             INFO,

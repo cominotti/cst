@@ -34,12 +34,11 @@ def deployments(host: DoctorHostPort) -> OstreeAnswer:
     return ostree_facts(host)[0]
 
 
-@check(CHECKS, "rpm-ostree")
-def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
-    booted, pending, err = deployments(host)
-    if err:
-        yield Result(INFO if err.startswith("not an") else WARN, f"layered packages: not checked ({err})")
-        return
+def _classified(
+    host: DoctorHostPort, booted: Deployment | None, pending: Deployment | None
+) -> dict[int, tuple[Deployment, list[str], list[Request], list[Request]]]:
+    """{id(d): (d, its requests, each classified, those pinned to a version)} of the booted and the pending
+    deployment, the ones there are."""
     found: dict[int, tuple[Deployment, list[str], list[Request], list[Request]]] = {}
     for d in (booted, pending):
         if d is None:
@@ -47,6 +46,33 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
         reqs = d.get("requested-packages") or []
         cls = classify_requests(reqs, installed_packages(host, d), host.arch)
         found[id(d)] = (d, reqs, cls, [c for c in cls if c[2] != PinHow.NAME])
+    return found
+
+
+def _pinned_message(d: Deployment, reqs: list[str], pinned: list[Request]) -> str:
+    """What a deployment's requests pinned to a version mean (reqs: all its requests)."""
+    listed = ", ".join(r for r, _, how in pinned if how != PinHow.INACTIVE)
+    inactive = [r for r, _, how in pinned if how == PinHow.INACTIVE]
+    msg = f"{describe(d)}: {len(pinned)} of {len(reqs)} layered packages are pinned to a version"
+    if listed:
+        msg += " (they never update, and an upgrade fails once that version leaves the repositories): " + listed
+    if any(how == PinHow.PINNED_FORM for _, _, how in pinned):
+        msg += " (recognised by their form only: the package list was not readable)"
+    if inactive:
+        msg += (
+            "; pinned but matching no installed package (probably inactive requests: the base "
+            "image may provide them now; the fix drops them without asking them back): " + ", ".join(inactive)
+        )
+    return msg
+
+
+@check(CHECKS, "rpm-ostree")
+def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
+    booted, pending, err = deployments(host)
+    if err:
+        yield Result(INFO if err.startswith("not an") else WARN, f"layered packages: not checked ({err})")
+        return
+    found = _classified(host, booted, pending)
     if not found:
         yield Result(WARN, "layered packages: no deployment in rpm-ostree status")
         return
@@ -58,18 +84,7 @@ def check_pinned_layering(host: DoctorHostPort) -> Iterator[Result]:
     for d, reqs, cls, pinned in found.values():
         if not pinned:
             continue
-        listed = ", ".join(r for r, _, how in pinned if how != PinHow.INACTIVE)
-        inactive = [r for r, _, how in pinned if how == PinHow.INACTIVE]
-        msg = f"{describe(d)}: {len(pinned)} of {len(reqs)} layered packages are pinned to a version"
-        if listed:
-            msg += " (they never update, and an upgrade fails once that version leaves the repositories): " + listed
-        if any(how == PinHow.PINNED_FORM for _, _, how in pinned):
-            msg += " (recognised by their form only: the package list was not readable)"
-        if inactive:
-            msg += (
-                "; pinned but matching no installed package (probably inactive requests: the base "
-                "image may provide them now; the fix drops them without asking them back): " + ", ".join(inactive)
-            )
+        msg = _pinned_message(d, reqs, pinned)
         if d is target:
             yield Result(WARN, msg, unpin_command(cls))
         elif not tpinned:

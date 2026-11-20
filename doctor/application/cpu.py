@@ -5,7 +5,7 @@ boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
-from cpu.game.domain import intended_records, newer_intended
+from cpu.game.domain import Record, intended_records, newer_intended
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -111,24 +111,85 @@ def unit_props(host: DoctorHostPort, base: list[str], unit: str, props: list[str
     return vals
 
 
+def _off_results(host: DoctorHostPort) -> Iterator[Result]:
+    """The profile is off: its MemoryLow drop-ins left behind, or ok (when cpu.conf is there)."""
+    left = game_dropins_left(host)
+    if left:
+        yield Result(
+            WARN,
+            f"game profile: off, but its MemoryLow drop-ins are still there: {', '.join(left)}. "
+            "At every daemon-reload systemd applies them, so the game's memory protection comes "
+            "back without a game (that memory is then harder to get for the VM and the builds) "
+            "until the next reboot. The watchdog (cpu-game-watchdog.timer) removes them within "
+            "30 s; if this stays, 'off' removes them and reloads systemd",
+            f"sudo {GAME_PROFILE_HOST} off",
+        )
+    elif host.exists(host.path(CPU_CONF)):
+        yield Result(OK, "game profile: off")
+
+
+def _current_props(host: DoctorHostPort, records: list[Record]) -> tuple[dict[tuple[str, str, str], str], list[str]]:
+    """({(manager, unit, property): value now} of the properties the records set, [the units that
+    could not be asked, with why]): one systemctl show per unit, in the order of the records."""
+    managers: dict[str, tuple[list[str] | None, str]] = {"sys": (["systemctl"], "")}
+    managers["usr"] = user_manager(host)
+    wanted: dict[tuple[str, str], list[str]] = {}
+    for r in records:
+        if r[0] == "prop" and r[5]:
+            wanted.setdefault((r[1], r[2]), []).append(r[3])
+    current: dict[tuple[str, str, str], str] = {}
+    unknown: list[str] = []
+    for (mgr, unit), props in wanted.items():
+        base, why = managers[mgr]
+        vals = unit_props(host, base, unit, props) if base is not None and len(base) > 0 else None
+        if vals is None:
+            unknown.append(f"{unit} ({why or 'not loaded, or systemd did not answer'})")
+            continue
+        for p in props:
+            current[mgr, unit, p] = vals.get(p, "")
+    return current, unknown
+
+
+def _record_drift(host: DoctorHostPort, r: Record, current: dict[tuple[str, str, str], str]) -> tuple[bool, str]:
+    """(whether the record could be compared, what no longer holds: "" when it holds). A property is
+    compared when systemd showed it; a cgroup file when it can still be read."""
+    if r[0] == "prop":
+        key = (r[1], r[2], r[3])
+        if not r[5] or key not in current:
+            return False, ""
+        return True, "" if current[key] == r[
+            5
+        ] else f"{r[2]} {r[3]} is {current[key] or 'not set'} (the profile set {r[5]})"
+    if not r[3]:
+        return False, ""
+    try:
+        with host.open_text(host.path(HostPath(r[1]))) as f:
+            now = f.read(256).strip()
+    except OSError:
+        return False, ""  # the cgroup is gone: nothing to compare
+    return True, "" if now == r[3] else f"{r[1]} is {now or 'empty'} (the profile wrote {r[3]})"
+
+
+def _drifted(
+    host: DoctorHostPort, records: list[Record], current: dict[tuple[str, str, str], str]
+) -> tuple[list[str], int]:
+    """([what no longer holds], how many records were compared), in the order of the records."""
+    drifted: list[str] = []
+    checked = 0
+    for r in records:
+        compared, drift = _record_drift(host, r, current)
+        checked += compared
+        if drift:
+            drifted.append(drift)
+    return drifted, checked
+
+
 @check(CHECKS, "cpu")
 def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
     """WARN while the game profile is on and a setting it made no longer
     holds; ok when they all hold; info when it cannot tell."""
     if not host.exists(host.path(GAME_STATE)):
-        left = game_dropins_left(host)
-        if left:
-            yield Result(
-                WARN,
-                f"game profile: off, but its MemoryLow drop-ins are still there: {', '.join(left)}. "
-                "At every daemon-reload systemd applies them, so the game's memory protection comes "
-                "back without a game (that memory is then harder to get for the VM and the builds) "
-                "until the next reboot. The watchdog (cpu-game-watchdog.timer) removes them within "
-                "30 s; if this stays, 'off' removes them and reloads systemd",
-                f"sudo {GAME_PROFILE_HOST} off",
-            )
-        elif host.exists(host.path(CPU_CONF)):
-            yield Result(OK, "game profile: off")
+        yield from _off_results(host)
         return
     try:
         with host.open_text(host.path(GAME_INTENDED)) as f:
@@ -149,41 +210,8 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(INFO, f"game profile: ON; drift not checked ({newer})")
         return
     records = intended_records(text)
-    managers: dict[str, tuple[list[str] | None, str]] = {"sys": (["systemctl"], "")}
-    managers["usr"] = user_manager(host)
-    wanted: dict[tuple[str, str], list[str]] = {}
-    for r in records:
-        if r[0] == "prop" and r[5]:
-            wanted.setdefault((r[1], r[2]), []).append(r[3])
-    current: dict[tuple[str, str, str], str] = {}
-    unknown: list[str] = []
-    for (mgr, unit), props in wanted.items():
-        base, why = managers[mgr]
-        vals = unit_props(host, base, unit, props) if base is not None and len(base) > 0 else None
-        if vals is None:
-            unknown.append(f"{unit} ({why or 'not loaded, or systemd did not answer'})")
-            continue
-        for p in props:
-            current[mgr, unit, p] = vals.get(p, "")
-    drifted: list[str] = []
-    checked = 0
-    for r in records:
-        if r[0] == "prop":
-            key = (r[1], r[2], r[3])
-            if not r[5] or key not in current:
-                continue
-            checked += 1
-            if current[key] != r[5]:
-                drifted.append(f"{r[2]} {r[3]} is {current[key] or 'not set'} (the profile set {r[5]})")
-        elif r[3]:
-            try:
-                with host.open_text(host.path(HostPath(r[1]))) as f:
-                    now = f.read(256).strip()
-            except OSError:
-                continue  # the cgroup is gone: nothing to compare
-            checked += 1
-            if now != r[3]:
-                drifted.append(f"{r[1]} is {now or 'empty'} (the profile wrote {r[3]})")
+    current, unknown = _current_props(host, records)
+    drifted, checked = _drifted(host, records, current)
     if drifted:
         yield Result(
             WARN,
