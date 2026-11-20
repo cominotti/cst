@@ -151,37 +151,50 @@ def checkout_commit(root: str | None) -> str:
         return "unknown"
     try:
         owner = os.lstat(root).st_uid
-
-        def read(path: str) -> str | None:
-            return _read_owned(path, owner)
-
-        git = os.path.join(root, ".git")
-        if os.path.isfile(git) and not os.path.islink(git):
-            line = (read(git) or "").strip()
-            if not line.startswith("gitdir:"):
-                return "unknown"
-            git = os.path.normpath(os.path.join(root, line.split(":", 1)[1].strip()))
-        common = git
-        commondir = read(os.path.join(git, "commondir"))
-        if commondir is not None:
-            common = os.path.normpath(os.path.join(git, commondir.strip()))
-        head = (read(os.path.join(git, "HEAD")) or "").strip()
+        folders = _git_dirs(root, owner)
+        if folders is None:
+            return "unknown"
+        git, common = folders
+        head = (_read_owned(os.path.join(git, "HEAD"), owner) or "").strip()
         if not head.startswith("ref:"):
             return head if _is_sha(head) else "unknown"
         ref = head.split(":", 1)[1].strip()
         if not _is_ref_name(ref):
             return "unknown"
-        for folder in (git, common):
-            text = read(os.path.join(folder, ref))
-            if text is not None:
-                sha = text.strip()
-                return sha if _is_sha(sha) else "unknown"
-        for line in (read(os.path.join(common, "packed-refs")) or "").splitlines():
-            sha, _, name = line.partition(" ")
-            if name == ref and _is_sha(sha):
-                return sha
+        return _resolve_ref(git, common, ref, owner)
     except OSError, UnicodeDecodeError:
         return "unknown"
+
+
+def _git_dirs(root: str, owner: int) -> tuple[str, str] | None:
+    """(the git folder, the common one that holds the branches) of the checkout at root: .git, or the
+    folder a worktree's .git file names, and the folder its commondir names. None when the .git file
+    names no folder."""
+    git = os.path.join(root, ".git")
+    if os.path.isfile(git) and not os.path.islink(git):
+        line = (_read_owned(git, owner) or "").strip()
+        if not line.startswith("gitdir:"):
+            return None
+        git = os.path.normpath(os.path.join(root, line.split(":", 1)[1].strip()))
+    common = git
+    commondir = _read_owned(os.path.join(git, "commondir"), owner)
+    if commondir is not None:
+        common = os.path.normpath(os.path.join(git, commondir.strip()))
+    return git, common
+
+
+def _resolve_ref(git: str, common: str, ref: str, owner: int) -> str:
+    """The commit of the branch ref: its file in git, else in common, else its line in common's
+    packed-refs; "unknown" when none of them holds a commit for it."""
+    for folder in (git, common):
+        text = _read_owned(os.path.join(folder, ref), owner)
+        if text is not None:
+            sha = text.strip()
+            return sha if _is_sha(sha) else "unknown"
+    for line in (_read_owned(os.path.join(common, "packed-refs"), owner) or "").splitlines():
+        sha, _, name = line.partition(" ")
+        if name == ref and _is_sha(sha):
+            return sha
     return "unknown"
 
 
