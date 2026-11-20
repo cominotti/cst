@@ -588,6 +588,11 @@ class CheckoutCommitTest(unittest.TestCase):
         self.assertEqual(checkout_commit(wt), "d" * 40)
         self.assertEqual(checkout_commit(os.path.join(self.tmp, "nothing")), "unknown")
         self.assertEqual(checkout_commit(None), "unknown")
+        # A .git file that names no git folder.
+        self.git("wt/.git", text="not a gitdir line\n")
+        self.assertEqual(checkout_commit(wt), "unknown")
+        self.git("wt/.git", text="")
+        self.assertEqual(checkout_commit(wt), "unknown")
 
     def test_a_crafted_head_cannot_point_outside_the_git_folder(self) -> None:
         # A file outside .git that holds a commit-shaped text: HEAD must not reach it.

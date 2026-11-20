@@ -62,7 +62,7 @@ DEFAULT_SWAP_NAME: Final[str] = "swap0"
 # The slice libvirt runs the VM in, whose MemoryLow swap sets.
 MACHINE_SLICE: Final[str] = "machine.slice"
 # GPT PARTUUIDs as /dev/disk/by-partuuid names them (lower case), or the MBR form (disk id-partition).
-_PARTUUID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{2}")
+_PARTUUID: Final = re.compile(r"[0-9a-f]{8}-(?:(?:[0-9a-f]{4}-){3}[0-9a-f]{12}|[0-9a-f]{2})")
 # A dm-crypt mapper name that is also safe in a crypttab line, an fstab line and a unit name.
 _MAPPER_NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _BY_PARTUUID: Final[str] = "/dev/disk/by-partuuid/"

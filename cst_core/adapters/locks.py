@@ -23,32 +23,45 @@ def take_lock(
     """
     path = checked_path(path)
     flags = os.O_WRONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
+    fd = _open_lock_file(path, flags, mode)
+    deadline = None if timeout is None or not wait else time.monotonic() + timeout
+    try:
+        locked = _flock(fd, wait=wait, deadline=deadline)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not locked:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _open_lock_file(path: str, flags: int, mode: int) -> int:
+    """An open fd of the lock file at path: created with exactly mode, or the one already there
+    (it keeps its mode). The fd of a new file is closed when its fchmod fails."""
     try:
         fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, mode)
     except FileExistsError:
-        # Already there (or a link: refused below with nofollow). One plain open, no retry loop:
+        # Already there (or a link: refused here with nofollow). One plain open, no retry loop:
         # a file removed in between is created by it, with the umask applied, as before.
-        fd = os.open(path, flags | os.O_CREAT, mode)
-    else:
-        try:
-            os.fchmod(fd, mode)
-        except BaseException:
-            os.close(fd)
-            raise
-    deadline = None if timeout is None or not wait else time.monotonic() + timeout
+        return os.open(path, flags | os.O_CREAT, mode)
     try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX if wait and deadline is None else fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if deadline is None or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.1)
-    except BlockingIOError:
-        os.close(fd)
-        return None
+        os.fchmod(fd, mode)
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def _flock(fd: int, *, wait: bool, deadline: float | None) -> bool:
+    """An exclusive flock on fd: True once held; False when another process holds it (wait=False,
+    or still at the deadline). Without a deadline, wait=True blocks until the lock is free."""
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if wait and deadline is None else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if deadline is None or time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+        else:
+            return True
