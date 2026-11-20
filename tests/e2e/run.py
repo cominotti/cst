@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping, Sequence
 import datetime
+import functools
 import os
 from pathlib import Path
 from types import ModuleType
@@ -161,6 +162,7 @@ def host_lsm_security_opts(apparmor: Path = APPARMOR_ENABLED) -> list[str]:
     return opts
 
 
+@functools.cache
 def _image_digest_module() -> ModuleType:
     """tests/e2e/image_digest.py, loaded by its path (run.py runs with -I: its folder is not on sys.path)."""
     import importlib.util

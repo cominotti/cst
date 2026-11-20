@@ -60,11 +60,16 @@ jobs:
 
           # Each image carries the digest of its sources (tests/e2e/image_digest.py): tests/e2e/run.py
           # uses a pulled image only when that label is the checkout's, and rebuilds it otherwise.
-          sources() { printf 'org.cst.e2e.sources=%s' "$(python3 -I -B tests/e2e/image_digest.py "$1")"; }
+          # Assignments, so that set -e stops the job when a digest cannot be computed (an image with an
+          # empty label would be rebuilt by every run).
+          systemd_src="$(python3 -I -B tests/e2e/image_digest.py systemd)"
+          nas_src="$(python3 -I -B tests/e2e/image_digest.py nas)"
+          priv_src="$(python3 -I -B tests/e2e/image_digest.py priv)"
+          sources="org.cst.e2e.sources"
 
-          docker build --pull --label "${source_label}" --label "$(sources systemd)" -t cst-e2e-systemd:local -t "${systemd_cache}" -f tests/e2e/images/systemd.Dockerfile .
-          docker build --pull --label "${source_label}" --label "$(sources nas)" -t cst-e2e-nas:local -t "${nas_cache}" -f tests/e2e/images/nas.Dockerfile .
-          docker build --label "${source_label}" --label "$(sources priv)" -t cst-e2e-priv:local -t "${priv_cache}" -f tests/e2e/images/priv.Dockerfile .
+          docker build --pull --label "${source_label}" --label "${sources}=${systemd_src}" -t cst-e2e-systemd:local -t "${systemd_cache}" -f tests/e2e/images/systemd.Dockerfile .
+          docker build --pull --label "${source_label}" --label "${sources}=${nas_src}" -t cst-e2e-nas:local -t "${nas_cache}" -f tests/e2e/images/nas.Dockerfile .
+          docker build --label "${source_label}" --label "${sources}=${priv_src}" -t cst-e2e-priv:local -t "${priv_cache}" -f tests/e2e/images/priv.Dockerfile .
 
           docker push "${systemd_cache}"
           docker push "${nas_cache}"

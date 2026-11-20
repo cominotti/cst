@@ -131,6 +131,10 @@ class DockerBuildTest(unittest.TestCase):
                 self.assertEqual(builds[0][:4], ["docker", "build", "--label", "org.cst.e2e.sources=d1"])
                 self.assertEqual(builds[0][-5:], ["-t", "img:local", "-f", "/x/img.Dockerfile", "."])
 
+    def test_the_label_is_the_one_image_digest_names(self) -> None:
+        digest = _load("cst_e2e_image_digest_label", "image_digest.py")
+        self.assertEqual(vars(self.mod)["SOURCES_LABEL"], vars(digest)["LABEL"])
+
     def test_rebuild_builds_without_asking(self) -> None:
         self.label = "d1"
         builds, _ = self.build(force=True)
