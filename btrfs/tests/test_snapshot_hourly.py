@@ -277,6 +277,12 @@ class CacheArgsTest(Base):
         args, skips, logs = self.hourly_and_caches(SNAPSHOT_CACHES_SKIP="")
         self.assertEqual((args, skips, logs), (["--exclude-caches"], [], []))
 
+    def test_a_home_at_the_subvolume_root_gets_paths_without_a_prefix(self) -> None:
+        # HOME_DIR is the home subvolume's root: a skip is relative to that root itself.
+        args, listed, logs = self.hourly_and_caches(HOME_DIR=self.home_mount, SNAPSHOT_CACHES_SKIP="notes x/y")
+        expected = ["--caches-skip", "home=notes", "--caches-skip", "home=x/y"]
+        self.assertEqual((args, listed, logs), (["--exclude-caches", *expected], expected, []))
+
 
 class ListAndCachesTest(Base):
     def test_list_passes_its_arguments_output_and_status_through(self) -> None:
