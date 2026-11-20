@@ -244,11 +244,11 @@ def check_game_profile_drift(host: DoctorHostPort) -> Iterator[Result]:
 
 def user_manager_cgroup(host: DoctorHostPort) -> HostPath | None:
     """The cgroup folder of the user manager to look at (the doctor's own
-    user, or TARGET_USER when run as root), or None."""
+    user; as root, the user the game profile acts for: profile_user), or None."""
     uid = host.uid
     if uid == 0:
-        target = conf_value(host, CPU_CONF, "TARGET_USER")
-        if target is None or target == "":
+        target = profile_user(host)  # the user game.state names while the profile is on, as the drift check
+        if target == "":
             return None
         found = host.user_id(target)
         if found is None:

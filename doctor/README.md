@@ -226,7 +226,8 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   `/run/systemd/system/*.d/zz-cst-game.conf`. The check of the user
   manager's boxes reads only files: the folder names and `cpu.stat` under
   `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service` (your uid,
-  or `TARGET_USER`'s when run as root; under `/run/host` in a toolbox).
+  or, when run as root, the user the profile acts for, as above: the one
+  `game.state` names, else `TARGET_USER`; under `/run/host` in a toolbox).
 - The `btrfs` check reads `/sys/fs/btrfs` (under `/run/host` in a toolbox),
   asks `findmnt -t btrfs` on the host to name each filesystem by its mount
   point, and `stat -f` on that mount point for the filesystem's size. It
@@ -531,7 +532,9 @@ indexer), `session.slice` (gnome-shell) and `sccache.slice` (kept for the
 host's sccache server: a later change may move it there from `app.slice`) are
 known and not reported. The
 user manager looked at is your own, or, when the doctor runs as root, the
-`TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
+user the game profile acts for: the one `game.state` names while the
+profile is on (as the drift check asks, and as the tick demotes that user's
+boxes), else the `TARGET_USER` of `/etc/cpu-setup/cpu-setup.conf`.
 
 ## 9. The install check
 

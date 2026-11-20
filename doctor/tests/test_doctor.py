@@ -2219,6 +2219,22 @@ class UserManagerBoxesTest(Scratch):
         self.assertEqual(self.calls(), [])  # files only, no command
         return res
 
+    def test_as_root_the_user_game_state_names_is_looked_at(self) -> None:
+        # The profile is on for the user game.state names (the tick demotes that user's boxes); TARGET_USER
+        # names another, here no account: the boxes looked at are game.state's user's, as the drift check's.
+        uid = os.getuid()
+        mine = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{uid}.slice", f"user@{uid}.service")
+        os.makedirs(os.path.join(mine, "x.slice"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='no-such-user-here'\n")
+        os.makedirs(os.path.join(self.root, "run", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "run", "cpu-setup", "game.state"), "w") as f:
+            f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("x.slice is a slice of its own", res[0].message)
+
     def test_only_known_boxes_is_ok(self) -> None:
         res = self.results()
         self.assertEqual(
