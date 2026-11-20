@@ -32,6 +32,8 @@ sys.dont_write_bytecode = True
 from cpu.game import cli as game_cli
 from cpu.game.adapters.host import read_settings, user_id, user_name
 from cpu.game.adapters.profile import GameProfile, load_profile
+from cst_core.adapters import files as cst_files
+from cst_core.adapters.files import read_text
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -213,9 +215,11 @@ class GameProfileCase(unittest.TestCase):
         return out.getvalue(), self.systemd.actions
 
     def drift_report(self) -> tuple[str, list[str]]:
+        """'state''s drift part over a snapshot of the two files, as 'state' reads them."""
         self.systemd.actions = []
         p, _ = self.profile()
-        return "".join(line + "\n" for line in p.drift_report()), self.systemd.actions
+        snapshot = records(read_text(self.state) or ""), read_text(self.intended)
+        return "".join(line + "\n" for line in p.drift_report(*snapshot)), self.systemd.actions
 
     def read(self, path: str) -> str:
         with open(path) as f:
@@ -777,6 +781,34 @@ class IntendedFormatTest(GameProfileCase):
         self.assertIn(said, self.run_profile("tick")[0])
         self.run_profile("off")
         self.assertFalse(os.path.exists(self.paths.drift_warned))
+
+
+class StateSnapshotTest(GameProfileCase):
+    """'state' takes no lock: it reads game.state and game.intended once, and every line it prints
+    judges that one snapshot, also when 'off' (or a tick) changes the files meanwhile."""
+
+    def test_state_reads_each_file_once_and_judges_that_snapshot(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        self.run_profile("tick")  # e2e.slice next to the game: idle, recorded in game.state
+        real = cst_files.read_text
+        seen: list[str] = []
+
+        def then_off(path: str, *args: object, **kwargs: object) -> str | None:
+            text = real(path)
+            if path in (self.state, self.intended):
+                seen.append(path)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)  # 'off' ended meanwhile: the next read would find nothing
+            return text
+
+        with unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=then_off):
+            out, _ = self.run_profile("state")
+        self.assertEqual(sorted(seen), sorted([self.state, self.intended]))
+        self.assertIn("game profile: ON (by hand)\n", out)
+        self.assertIn("  other boxes     idle: e2e.slice\n", out)
+        self.assertIn("  drift: none (every setting the profile made still holds)\n", out)
 
 
 class UnreadableRecordTest(GameProfileCase):

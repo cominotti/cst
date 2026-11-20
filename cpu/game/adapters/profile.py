@@ -597,7 +597,7 @@ class GameProfile:
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
         drifts = self.drift(text)
-        skipped = self._unheld(drifts)
+        skipped = unheld(drifts, records(self._state_text()))
         self._say_unheld(skipped)
         for d in drifts:
             if d in skipped:
@@ -611,10 +611,6 @@ class GameProfile:
                     == 0
                 )
             self.log(*repaired_text(d, ok=ok))
-
-    def _unheld(self, drifts: Sequence[Drift]) -> list[Drift]:
-        """The drifts game.state holds no record of (unheld)."""
-        return unheld(drifts, records(self._state_text()))
 
     def _say_unheld(self, skipped: Sequence[Drift]) -> None:
         """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
@@ -730,10 +726,13 @@ class GameProfile:
     def state(self) -> int:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
-        on = os.path.exists(self.paths.state)
+        # One snapshot of both files (None: not there; an empty game.state is on), with no lock: never waits.
+        state_text, intended_text = read_text(self.paths.state), read_text(self.paths.intended)
+        on = state_text is not None
+        state_recs = records(state_text or "")
         why = None if self.problems else self._target_refusal()  # as 'on' reads TARGET_USER
         if on:
-            self._user_from_state(records(self._state_text()), say=False)
+            self._user_from_state(state_recs, say=False)
         p, s = self.paths, self.s
         by_hand = " (by hand)" if os.path.exists(p.manual) else ""
         self.say(f"game profile: ON{by_hand}" if on else "game profile: off")
@@ -753,25 +752,26 @@ class GameProfile:
             effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
             self.say(f"  toolboxes       cpus effective={effective}")
             if on:
-                self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
+                self.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
+        newer = None if intended_text is None else newer_intended(p.intended, intended_text)
         if on:
-            intended_text, newer = self._intended()
-            self.say_lines(unreadable_report(p, self._state_text(), intended_text, judged=newer is None))
+            self.say_lines(unreadable_report(p, state_text or "", intended_text or "", judged=newer is None))
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
-            self.say_lines(self.drift_report())
+            self.say_lines(self.drift_report(state_recs, intended_text))
         return 0
 
-    def drift_report(self) -> list[str]:
-        """The drift part of 'state': each setting that no longer holds, or that none drifted."""
-        p = self.paths
-        if not os.path.exists(p.intended):
-            return drift_lines(None, manual=os.path.exists(p.manual))
-        text, newer = self._intended()
-        drifts = self.drift(text) if newer is None else None
-        not_held = [] if drifts is None else self._unheld(drifts)
-        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer, not_held=not_held)
+    def drift_report(self, state_recs: Sequence[Record], intended_text: str | None) -> list[str]:
+        """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None):
+        each setting that no longer holds, or that none drifted."""
+        manual = os.path.exists(self.paths.manual)
+        if intended_text is None:
+            return drift_lines(None, manual=manual)
+        newer = newer_intended(self.paths.intended, intended_text)
+        drifts = self.drift(intended_text) if newer is None else None
+        not_held = [] if drifts is None else unheld(drifts, state_recs)
+        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
 
     def _intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""
