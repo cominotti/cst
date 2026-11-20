@@ -258,6 +258,11 @@ class Scratch(unittest.TestCase):
             self.assertNotIn("--security-info", c)
 
 
+def area_lines(stdout: str, area: str) -> list[str]:
+    """The lines of one area of the report ("== AREA" up to the blank line that ends it)."""
+    return stdout.split(f"== {area}\n", 1)[1].split("\n\n", 1)[0].splitlines()
+
+
 # ---- names and versions ------------------------------------------------------------------------
 class ClassifyTest(unittest.TestCase):
     @override
@@ -386,6 +391,11 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(
             doc_domain.pkg_names([d["base-removals"], d["requested-base-removals"]]), ["firefox", "firefox-langpacks"]
         )
+
+    def test_pkg_names_walks_dicts_and_skips_values_that_are_no_package(self) -> None:
+        # A dict's values are walked; a number or None inside the lists names no package.
+        self.assertEqual(doc_domain.pkg_names({"a": ["vim-9.1-1.fc45.x86_64", 7, None], "b": {"c": 3.5}}), ["vim"])
+        self.assertEqual(doc_domain.pkg_names(7), [])
 
 
 # ---- whole runs ------------------------------------------------------------------------------------
@@ -517,6 +527,20 @@ class RpmOstreeTest(Scratch):
         self.assertEqual(r.returncode, 1)
         self.assertIn("layered packages: not checked (rpm-ostree status --json failed", r.stdout)
 
+    def test_a_status_without_a_deployment_warns(self) -> None:
+        path = os.path.join(self.tmp, "no-deployments.json")
+        with open(path, "w") as f:
+            json.dump({"deployments": []}, f)
+        self.env["FIX_STATUS"] = path
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "rpm-ostree"),
+            [
+                "  WARN   layered packages: no deployment in rpm-ostree status",
+                "  ok     no pending deployment: the next boot is the booted one",
+            ],
+        )
+
 
 class ServicesTest(Scratch):
     def test_failed_units(self) -> None:
@@ -618,6 +642,75 @@ class AlertsTest(Scratch):
         r = self.run_tool()
         self.assertEqual(r.returncode, 0)
         self.assertIn("no alert folder", r.stdout)
+
+    def test_no_pending_alerts_is_ok(self) -> None:
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "alerts"),
+            ["  ok     no pending alerts", "  ok     no leftovers of f44-tools in /var/lib"],
+        )
+
+    def test_files_that_are_no_pending_alert_are_not_counted(self) -> None:
+        # A folder, a dangling link, a file that does not parse and one older than ALERT_KEEP_DAYS, all
+        # named like alerts: none is unseen, none is seen.
+        os.makedirs(os.path.join(self.pending, "e" * 32 + ".alert"))
+        os.symlink(os.path.join(self.pending, "gone.alert"), os.path.join(self.pending, "1" * 32 + ".alert"))
+        with open(os.path.join(self.pending, "2" * 32 + ".alert"), "w") as f:
+            f.write("garbage\n")
+        self.alert("3" * 32 + ".alert", age=8 * 86400)
+        r = self.run_tool()
+        self.assertIn("  ok     no pending alerts\n", r.stdout)
+        self.assertNotIn("alert(s) of the last", r.stdout)
+
+    def test_a_live_link_named_like_an_alert_is_not_counted(self) -> None:
+        target = self.alert("f" * 32 + ".alert")
+        os.rename(target, os.path.join(self.tmp, "outside.alert"))
+        os.symlink(os.path.join(self.tmp, "outside.alert"), target)
+        r = self.run_tool()
+        self.assertIn("  ok     no pending alerts\n", r.stdout)
+
+    def test_an_alert_whose_lstat_fails_is_skipped(self) -> None:
+        self.alert("a" * 32 + ".alert")
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(host, "lstat", side_effect=PermissionError(13, "Permission denied")):
+            res = list(doc_alerts.check_pending_alerts(host))
+        self.assertEqual(res, [Result(doc_domain.OK, "no pending alerts")])
+
+    def test_a_pending_folder_that_cannot_be_listed_warns(self) -> None:
+        self.alert("a" * 32 + ".alert")
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(host, "listdir", side_effect=PermissionError(13, "Permission denied")):
+            res = list(doc_alerts.check_pending_alerts(host))
+        self.assertEqual(res, [Result(doc_domain.WARN, "pending alerts: not readable (Permission denied)")])
+
+    def test_unseen_and_seen_alerts_together(self) -> None:
+        # Both kinds in one folder: the unseen ones oldest first, then the count of the seen ones.
+        self.reader()
+        self.alert("a" * 32 + ".alert", "critical", "newer", age=600)
+        self.alert("b" * 32 + ".alert", "normal", "older", age=7200)
+        p = self.alert("d" * 32 + ".alert")
+        sec, ns = divmod(os.stat(p).st_mtime_ns, 10**9)
+        os.makedirs(os.path.join(self.state, "cst-alerts"))
+        with open(os.path.join(self.state, "cst-alerts", "delivered"), "w") as f:
+            f.write(f"{'d' * 32}.alert {sec}.{ns:09d}0 shown 1 {NOW}\n")
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "alerts"),
+            [
+                (
+                    "  WARN   alert you have not seen yet (normal, Thu 05 Nov 15:33): older (shown at your next login; "
+                    "the fix shows it now, as does cst btrfs status)"
+                ),
+                "         fix: cst-pending-alerts --list",
+                (
+                    "  ERROR  alert you have not seen yet (critical, Thu 05 Nov 17:23): newer (shown at your next login; "
+                    "the fix shows it now, as does cst btrfs status)"
+                ),
+                "         fix: cst-pending-alerts --list",
+                "  info   1 alert(s) of the last 7 days already shown to you (cst-pending-alerts --list)",
+                "  ok     no leftovers of f44-tools in /var/lib",
+            ],
+        )
 
 
 UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -1112,6 +1205,106 @@ class BtrfsTest(Scratch):
         self.assertIn("flatpak-spawn --host stat -f -c %S %b /var", self.calls())
         self.assertIn("btrfs /var: unallocated per device", r.stdout)
         self.assert_read_only()
+
+    # The allocation lines of one filesystem, whole, for the arms the tests above assert only in part.
+    OK_FILL = (
+        "  ok     btrfs /var (RAID1): data chunks 730.0 GiB used of 930.0 GiB allocated (78%), metadata chunks "
+        "14.0 GiB used of 20.0 GiB allocated (70%), metadata is 1.9% of data"
+    )
+    OK_RECLAIM = "  ok     btrfs /var: automatic data reclaim on (dynamic, periodic): 3 chunk(s) reclaimed since mount"
+    OK_UNALLOC = (
+        "  ok     btrfs /var: unallocated per device /dev/mapper/luks-0 586.0 GiB, /dev/mapper/luks-1 586.0 GiB "
+        "(warning below 50 GiB, critical below 5 GiB; from sysfs, each btrfs device fills its block device)"
+    )
+
+    def test_a_healthy_filesystem_whole(self) -> None:
+        self.fs()
+        r = self.run_tool()
+        self.assertEqual(area_lines(r.stdout, "btrfs"), [self.OK_FILL, self.OK_RECLAIM, self.OK_UNALLOC])
+
+    def test_chunk_usage_not_readable_and_reclaim_errors(self) -> None:
+        base = self.fs()
+        for kind in ("data", "metadata"):
+            os.unlink(os.path.join(base, "allocation", kind, "total_bytes"))
+        with open(os.path.join(base, "allocation", "data", "reclaim_errors"), "w") as f:
+            f.write("2\n")
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "btrfs"),
+            [
+                "  info   btrfs /var: chunk usage not readable in sysfs",
+                (
+                    "  info   btrfs /var: automatic data reclaim on (dynamic, periodic): 3 chunk(s) reclaimed since "
+                    "mount, 2 failed (journalctl -k -g BTRFS)"
+                ),
+                self.OK_UNALLOC,
+            ],
+        )
+
+    def test_a_statfs_larger_than_the_devices_is_not_estimated(self) -> None:
+        self.fs(fs_sectors=DEV_SECTORS + 300 * GIB // 512)
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "btrfs"),
+            [
+                self.OK_FILL,
+                self.OK_RECLAIM,
+                (
+                    "  info   btrfs /var: per-device unallocated needs root: sudo btrfs filesystem usage -T /var (the "
+                    "hourly btrfs-health-check watches it); not estimated: the filesystem size from statfs does not "
+                    "match its block devices"
+                ),
+            ],
+        )
+
+    def test_reclaim_off_elsewhere_whole(self) -> None:
+        self.fs(dyn=0, per=0)
+        with open(self.env["FIX_FINDMNT"], "w") as f:
+            f.write("/dev/dm-0 /mnt/usb\n")
+        r = self.run_tool()
+        self.assertIn(
+            "  info   btrfs /mnt/usb: automatic data reclaim off (dynamic_reclaim, periodic_reclaim); CST sets it up "
+            "only for the root filesystem\n",
+            r.stdout,
+        )
+
+    def test_a_striped_layout_without_disk_totals_names_only_root(self) -> None:
+        base = self.fs(profile="raid10", ndev=4, sectors=600 * GIB // 512)
+        for kind in ("data", "metadata", "system"):
+            os.unlink(os.path.join(base, "allocation", kind, "disk_total"))
+        r = self.run_tool()
+        self.assertIn(
+            "  info   btrfs /var: per-device unallocated needs root: sudo btrfs filesystem usage -T /var (the "
+            "hourly btrfs-health-check watches it)\n",
+            r.stdout,
+        )
+
+    def test_a_sysfs_that_cannot_be_listed_is_no_filesystem(self) -> None:
+        os.makedirs(os.path.join(self.root, "sys", "fs"))
+        with open(os.path.join(self.root, "sys", "fs", "btrfs"), "w") as f:
+            f.write("not a folder\n")
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "btrfs"),
+            ["  info   allocation: no mounted btrfs filesystem (/sys/fs/btrfs has none)"],
+        )
+
+    def test_a_filesystem_without_a_device_list(self) -> None:
+        # No devices/ folder: no mount point found (named by its uuid), and unallocated not estimated.
+        base = self.fs()
+        shutil.rmtree(os.path.join(base, "devices"))
+        r = self.run_tool()
+        self.assertEqual(
+            area_lines(r.stdout, "btrfs"),
+            [
+                self.OK_FILL.replace("btrfs /var", f"btrfs {UUID[:8]}"),
+                self.OK_RECLAIM.replace("btrfs /var", f"btrfs {UUID[:8]}"),
+                (
+                    f"  info   btrfs {UUID[:8]}: per-device unallocated needs root: sudo btrfs filesystem usage -T "
+                    "MOUNTPOINT (the hourly btrfs-health-check watches it); not estimated: no device list in sysfs"
+                ),
+            ],
+        )
 
 
 class SnapshotsWritableTest(Scratch):
@@ -1891,6 +2084,66 @@ class GameProfileTest(Scratch):
         self.assertIn("sudo systemctl restart cpu-game.service", res[0].message)
         self.assertEqual(self.calls(), [])  # nothing asked
 
+    def test_profile_off_with_drop_ins_left_warns_and_without_them_is_ok(self) -> None:
+        dropins = os.path.join(self.root, "run", "systemd", "system", "user.slice.d")
+        os.makedirs(dropins)
+        open(os.path.join(dropins, "zz-cst-game.conf"), "w").close()
+        self.assertEqual(
+            self.results(),
+            [
+                Result(
+                    doc_domain.WARN,
+                    "game profile: off, but its MemoryLow drop-ins are still there: "
+                    "/run/systemd/system/user.slice.d/zz-cst-game.conf. At every daemon-reload systemd applies "
+                    "them, so the game's memory protection comes back without a game (that memory is then harder "
+                    "to get for the VM and the builds) until the next reboot. The watchdog "
+                    "(cpu-game-watchdog.timer) removes them within 30 s; if this stays, 'off' removes them and "
+                    "reloads systemd",
+                    "sudo /usr/local/sbin/cpu-game-profile off",
+                )
+            ],
+        )
+        shutil.rmtree(dropins)
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: off")])
+
+    def test_a_profile_without_its_record_is_not_checked(self) -> None:
+        self.profile_on(intended=False)
+        self.assertEqual(
+            self.results(),
+            [
+                Result(
+                    doc_domain.INFO,
+                    "game profile: ON, but switched on by an older cpu-game-profile that kept no record of the "
+                    "values it set, so drift is not checked. Switching it off and on again records them: "
+                    "sudo systemctl restart cpu-game.service",
+                )
+            ],
+        )
+
+    def test_a_unit_the_manager_does_not_show_is_not_checked(self) -> None:
+        self.profile_on()
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+        os.unlink(os.path.join(self.tmp, "show", "sys", "machine.slice"))
+        self.assertEqual(
+            self.results(),
+            [
+                Result(doc_domain.OK, "game profile: ON, the 5 settings it made still hold"),
+                Result(
+                    doc_domain.INFO,
+                    "game profile: drift not checked for machine.slice (not loaded, or systemd did not answer)",
+                ),
+            ],
+        )
+
+    def test_a_cgroup_that_is_gone_is_not_compared(self) -> None:
+        # Its file is gone: not counted, not drifted.
+        self.intended += "cgw /sys/fs/cgroup/gone/cpuset.cpus 1-2 1-2\n"
+        self.profile_on()
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+        self.intended = "cgw /sys/fs/cgroup/gone/cpuset.cpus 1-2 1-2\n"
+        self.profile_on()
+        self.assertEqual(self.results(), [Result(doc_domain.INFO, "game profile: ON, no recorded setting to compare")])
+
 
 class UserManagerBoxesTest(Scratch):
     """The cpu check of the user manager's cgroup tree: top-level slices CST
@@ -2432,6 +2685,79 @@ class VmTest(Scratch):
             {"qemu-kvm": "2:11.1.3-1.fc45"},
         )
 
+    WHAT = (
+        "virtualization packages changed from the rollback deployment 44.20261028.0 to the booted one: "
+        "libvirt-daemon 12.6.0-2.fc44 -> 12.6.0-2.fc45, qemu-kvm 10.2.2-1.fc44 -> 11.1.3-1.fc45, "
+        "qemu-system-x86-core 10.2.2-1.fc44 -> 11.1.3-1.fc45"
+    )
+
+    def test_the_unpinned_and_no_backup_warnings_whole(self) -> None:
+        self.deployments()
+        r = self.run_tool()
+        self.assertIn(
+            f"  WARN   {self.WHAT}. The rollback deployment (index 1) is not pinned: the next upgrade can remove "
+            "it, and with it the way back if a VM stops booting. Keep it pinned until the VMs (win) work on the "
+            "new one\n"
+            "         fix: sudo ostree admin pin 1\n"
+            f"  WARN   {self.WHAT}. No VM backup since the booted deployment was built (2026-10-29; last backup: "
+            "never). Shut the VM down first\n"
+            "         fix: cst vm backup\n",
+            r.stdout,
+        )
+
+    def test_a_backup_older_than_the_build_names_its_date(self) -> None:
+        self.deployments(rollback_pinned=True)
+        self.backup_index(NOW - 10 * 86400)
+        r = self.run_tool()
+        self.assertIn(
+            f"  WARN   {self.WHAT}. No VM backup since the booted deployment was built (2026-10-29; last backup: "
+            "2026-10-26). Shut the VM down first\n"
+            "         fix: cst vm backup\n",
+            r.stdout,
+        )
+        os.makedirs(os.path.join(self.root, "etc", "btrfs-setup"))
+        with open(os.path.join(self.root, "etc", "btrfs-setup", "snapshots.conf"), "w") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/restic\n")
+        r = self.run_tool()
+        self.assertIn(
+            f"  WARN   {self.WHAT}. No VM backup since the booted deployment was built (2026-10-29; last backup: "
+            "2026-10-26). The NAS backup works with the VM running\n"
+            "         fix: cst vm backup --nas\n",
+            r.stdout,
+        )
+
+    def test_without_a_rollback_or_its_package_list_nothing_is_compared(self) -> None:
+        r = self.run_tool()
+        self.assertIn("  ok     virtualization packages: no rollback deployment to compare with\n", r.stdout)
+        self.deployments()
+        os.unlink(os.path.join(self.db, ROLLBACK))
+        r = self.run_tool()
+        self.assertIn("  info   virtualization packages: not compared (rpm-ostree db list did not answer)\n", r.stdout)
+
+    def test_a_change_with_no_vm_defined_is_info(self) -> None:
+        self.deployments()
+        self.libvirt([], {}, None)
+        r = self.run_tool()
+        self.assertIn(f"  info   {self.WHAT}; no libvirt VM defined\n", r.stdout)
+
+    def test_definitions_that_cannot_be_read_and_caps_that_cannot(self) -> None:
+        self.libvirt(["win", "bad", "gone"], {"win": PASSTHROUGH_BARE, "bad": "<domain"}, None)
+        r = self.run_tool()
+        self.assertEqual(
+            self.vm_lines(r)[:3],
+            [
+                (
+                    "  info   VM win: host-passthrough without disabling cet-ss, cet-ibt, vmx-mbec, vmx-exit-save-cet, "
+                    "vmx-entry-load-cet; whether this QEMU passes them was not checked (error: unsupported in the "
+                    "stub). If Windows loops in Automatic Repair: cst cpu vm-pin plan "
+                    "(https://gitlab.com/qemu-project/qemu/-/issues/3215)"
+                ),
+                "  info   VM bad: definition not readable (definition unreadable)",
+                "  info   VM gone: definition not readable (error: unsupported in the stub)",
+            ],
+        )
+        self.assert_read_only()
+
 
 class VmNasBackupTest(VmTest):
     """`cst vm backup --nas`: an overlay left behind, the timer, NAS backups in the freshness check."""
@@ -2699,6 +3025,48 @@ class VmNasBackupTest(VmTest):
         self.assertIn("rollback pinned and VM backup present", r.stdout)
         self.assertNotIn("No VM backup since", r.stdout)
 
+    LEFT = "an overlay left by `cst vm backup --nas` (it could not merge it back)"
+    GUIDE = '(vm/README.md, "If a backup left an overlay")'
+
+    def test_an_overlay_the_vm_writes_into_whole(self) -> None:
+        self.on_overlay(live=True, persistent=False)
+        expected = (
+            f"  WARN   VM win: disk sda is on {self.OVERLAY}, {self.LEFT}. The VM writes into it, and it grows. If "
+            "`virsh blockjob win sda --info` shows a commit ready (100 %), finish it with `virsh blockjob win sda "
+            "--pivot`; with no block job, merge it with the command below. Then check that `virsh domblklist win "
+            f"--details` (also with --inactive) shows {self.BASE}, and remove the overlay file {self.GUIDE}\n"
+            "         fix: sudo virsh -c qemu:///system blockcommit win sda --active --pivot --wait --verbose\n"
+        )
+        r = self.run_tool()
+        self.assertIn(expected, r.stdout)
+        # A definition that does not parse names no overlay: the live listing alone finds it.
+        with open(os.path.join(self.virsh, "win.xml"), "w") as f:
+            f.write("<domain")
+        r = self.run_tool()
+        self.assertIn(expected, r.stdout)
+        self.assert_read_only()
+
+    def test_an_overlay_whose_state_or_listing_does_not_tell_whole(self) -> None:
+        # Running, the definition on the overlay, the live listing not readable; then the state unreadable.
+        def expected(state: str) -> str:
+            return (
+                f"  WARN   VM win: disk sda is on {self.OVERLAY}, {self.LEFT}. The VM's state ({state}) or its disk "
+                "listing does not tell how to put it back. Do not remove or commit anything yet: look with "
+                f"`virsh domstate win` and `virsh domblklist win --details` (and --inactive) {self.GUIDE}\n"
+                "         fix: sudo virsh -c qemu:///system domblklist win --details\n"
+            )
+
+        self.on_overlay(live=False, persistent=True)
+        open(os.path.join(self.virsh, "win.blkfail"), "w").close()
+        r = self.run_tool()
+        self.assertIn(expected("running"), r.stdout)
+        os.unlink(os.path.join(self.virsh, "win.blkfail"))
+        self.on_overlay(live=True, persistent=True)
+        open(os.path.join(self.virsh, "win.state"), "w").close()
+        r = self.run_tool()
+        self.assertIn(expected("unreadable"), r.stdout)
+        self.assert_read_only()
+
 
 class VmHardwareTest(VmTest):
     """`cst vm tune` differences and the NOCOW of the VM image folders: info, never WARN."""
@@ -2813,6 +3181,15 @@ class VmHardwareTest(VmTest):
         self.assertEqual(res[0].status, doc_domain.INFO)
         self.assertIn("VM hardware: not checked (the vm package is not wired in)", res[0].message)
         self.assertEqual(list(doc_vm.check_vm_image_dirs(host, vm_tools=None)), [])
+
+    def test_a_marked_folder_with_marked_images_is_ok_whole(self) -> None:
+        boxes = os.path.join(self.tmp, ".local", "share", "gnome-boxes", "images")
+        os.makedirs(boxes)
+        with open(os.path.join(boxes, "fedora"), "wb") as f:
+            f.write(b"x" * 8192)
+        nocow: int = inode_attrs.FS_NOCOW_FL
+        res = self.folders({boxes: nocow, os.path.join(boxes, "fedora"): nocow})
+        self.assertEqual(res, [Result(doc_domain.OK, f"VM image folder {boxes}: NOCOW, no copy-on-write image")])
 
 
 class CommandLineTest(Scratch):
@@ -3216,6 +3593,52 @@ class InstallAreaTest(Scratch):
         r = self.run_tool()
         self.assertIn("btrfs:docker-gc: installed only in part", r.stdout)
 
+    def put(self, dest: str, content: bytes) -> None:
+        """A file at an installed path under the fixture root (~ is the fixture home)."""
+        p = self.root + dest.replace("~", self.env["HOME"], 1)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(content)
+
+    def test_without_a_record_templates_the_rustc_wrapper_and_recorded_components_are_not_compared(self) -> None:
+        # A template needs the install's values; the rustc wrapper is written by toolchains itself.
+        self.put("/etc/polkit-1/rules.d/50-cpu-setup-game.rules", b"changed\n")
+        self.put("~/.local/libexec/cst/rustc-wrapper", b"changed\n")
+        self.assertEqual(self.results(), [])
+        self.put("/etc/sysctl.d/99-swap-tuning.conf", b"vm.swappiness = 60\n")
+        self.assertEqual(
+            list(doc_install._without_record(self.host, self.files, Owner.ROOT, frozenset({"swap:core"}))), []
+        )
+        self.assertEqual(list(doc_install._without_record(self.host, self.files, Owner.USER)), [])
+        self.assertEqual(len(list(doc_install._without_record(self.host, self.files, Owner.ROOT))), 1)
+
+    def test_without_a_record_only_the_files_this_checkout_can_judge_count(self) -> None:
+        # One file as this checkout builds it, one that differs, one this checkout cannot say about, one
+        # missing: 1 of 2 differs.
+        entries = {e.src: e for e in INSTALL_MANIFEST if e.component == "swap:core"}
+        same = entries["swap/tmpfiles/zswap.conf"]
+        self.put(same.dest, entry_payload(REPO, same))
+        self.put("/etc/sysctl.d/99-swap-tuning.conf", b"vm.swappiness = 60\n")
+        unknown = entries["swap/units/machine.slice.d-10-swap-memory-low.conf"]
+        self.put(unknown.dest, b"changed\n")
+        real = self.files.desired_sha256
+        with mock.patch.object(
+            self.files,
+            "desired_sha256",
+            side_effect=lambda src, values: None if src == unknown.src else real(src, values),
+        ):
+            res = self.results()
+        self.assertEqual(
+            res,
+            [
+                Result(
+                    doc_domain.INFO,
+                    "swap:core: installed before the install record; 1 of 2 file(s) differ from this checkout "
+                    "(/etc/sysctl.d/99-swap-tuning.conf): cst swap apply installs them again and records them",
+                )
+            ],
+        )
+
 
 class ToolboxTest(Scratch):
     def test_commands_go_through_flatpak_spawn(self) -> None:
@@ -3414,6 +3837,94 @@ class CstIntegrationTest(Scratch):
     def test_cst_help_lists_doctor(self) -> None:
         r = self.run_tool(cmd=["bash", self.cst, "help"])
         self.assertIn("cst doctor [--brief]", r.stdout)
+
+
+class RenderTest(unittest.TestCase):
+    """The report's text, whole: the full report and --brief, on the host and in a toolbox."""
+
+    RESULTS = (
+        ("rpm-ostree", Result(doc_domain.OK, "a")),
+        ("rpm-ostree", Result(doc_domain.WARN, "b", "fix b")),
+        ("vm", Result(doc_domain.ERROR, "c")),
+        ("vm", Result(doc_domain.INFO, "d")),
+    )
+    SUMMARY = "doctor: needs attention: 1 ERROR, 1 WARN, 1 info, 1 ok\n"
+    FOOTER = "Each fix is a suggestion: read it before you run it. Details: doctor/README.md in CST.\n"
+    TOOLBOX = (
+        "Inside a toolbox: run every command shown here on the host (a host terminal, or put flatpak-spawn "
+        "--host in front of a command without sudo).\n"
+    )
+
+    def render(self, results: Sequence[tuple[str, Result]], *, brief: bool, container: bool) -> tuple[int, str]:
+        out = io.StringIO()
+        rc = doc_presenter.render(results, brief, out, container, prog="cst doctor")
+        return rc, out.getvalue()
+
+    def test_the_full_report(self) -> None:
+        for container, label, toolbox in ((False, "fix:", ""), (True, "fix (on the host):", self.TOOLBOX)):
+            with self.subTest(container=container):
+                self.assertEqual(
+                    self.render(self.RESULTS, brief=False, container=container),
+                    (
+                        1,
+                        (
+                            "cst doctor: read-only check-up (nothing is changed)\n"
+                            f"{toolbox}\n== rpm-ostree\n  ok     a\n  WARN   b\n         {label} fix b\n"
+                            f"\n== vm\n  ERROR  c\n  info   d\n\n{self.SUMMARY}{self.FOOTER}"
+                        ),
+                    ),
+                )
+
+    def test_the_brief_report(self) -> None:
+        for container, label in ((False, "fix:"), (True, "fix (on the host):")):
+            with self.subTest(container=container):
+                self.assertEqual(
+                    self.render(self.RESULTS, brief=True, container=container),
+                    (1, f"{self.SUMMARY}  WARN   [rpm-ostree] b\n         {label} fix b\n  ERROR  [vm] c\n"),
+                )
+
+    def test_all_good_has_no_footer(self) -> None:
+        out = io.StringIO()
+        rc = doc_presenter.render([("vm", Result(doc_domain.OK, "a"))], brief=False, out=out)
+        self.assertEqual(
+            (rc, out.getvalue()),
+            (
+                0,
+                (
+                    "cst-doctor: read-only check-up (nothing is changed)\n\n== vm\n  ok     a\n\n"
+                    "doctor: all good: 0 ERROR, 0 WARN, 0 info, 1 ok\n"
+                ),
+            ),
+        )
+
+
+class SettingsWarningsTest(Scratch):
+    """settings_file_warnings' note after "take nothing from the line": its default for a file bash also
+    sources, none for a file only Python reads, or the caller's."""
+
+    def warnings(self, *, bash_sourced: bool, note: str | None = None) -> list[str]:
+        d = os.path.join(self.root, "etc", "cst")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "vm.conf"), "w") as f:
+            f.write("FOO=$X\n")
+        host = doc_adapters.Host(self.env, repo=REPO)
+        path = doc_domain.HostPath("/etc/cst/vm.conf")
+        return [r.message for r in doc_shared.settings_file_warnings(host, path, bash_sourced=bash_sourced, note=note)]
+
+    def test_the_note(self) -> None:
+        rest = ", and the cst commands that change the machine with these settings refuse to run until it is fixed"
+        line = "/etc/cst/vm.conf line 1: FOO=$X"
+        for bash_sourced, note, said in (
+            (True, None, " (bash, which also sources this file, reads it its own way)"),
+            (False, None, ""),
+            (True, " (mine)", " (mine)"),
+            (False, "", ""),
+        ):
+            with self.subTest(bash_sourced=bash_sourced, note=note):
+                ws = self.warnings(bash_sourced=bash_sourced, note=note)
+                self.assertEqual(len(ws), 1, ws)
+                self.assertTrue(ws[0].startswith(line), ws)
+                self.assertTrue(ws[0].endswith(f". CST's Python programs take nothing from the line{said}{rest}"), ws)
 
 
 class DoctorDomainTest(unittest.TestCase):
