@@ -165,6 +165,11 @@ def _short_etc_path(etc_dir: str, path: str) -> str:
     return path.removeprefix(prefix).removeprefix("systemd/system/")
 
 
+def _low_text(low: str) -> str:
+    """A cgroup's memory.low as status shows it: a size, or the text itself ("0", "max", "-")."""
+    return human(int(low)) if low.isdigit() and int(low) else low
+
+
 class _FileSettingsFacts:
     """swap.ports' SwapSettingsFacts over swap's file system (the paths of env; partition: the
     device a path leads to and its size, from sysfs)."""
@@ -453,40 +458,11 @@ class SwapReports:
                 )
             )
 
-        if self._zram_masked():
-            file_items.append(
-                PlanItem(
-                    "ok",
-                    _short_etc_path(env.etc_dir, env.zram_conf),
-                    "masked (-> /dev/null): no zram devices at boot",
-                )
-            )
-        else:
-            file_items.append(
-                PlanItem(
-                    "mask",
-                    _short_etc_path(env.etc_dir, env.zram_conf),
-                    "not masked: zram-generator would create zram0 at boot",
-                )
-            )
+        file_items.append(self._zram_conf_item())
 
         swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
         runtime_items = [] if spec is None else self._partition_items(spec, swaps_text, tier_change=tier_change)
-
-        zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
-        if zram_used is None:
-            runtime_items.append(PlanItem("ok", "zram0", "not active as swap"))
-        else:
-            meminfo = parse_meminfo(self._fs.read_text(posixpath.join(env.proc_dir, "meminfo"), "") or "")
-            avail_kib = meminfo.get("MemAvailable", 0) // 1024
-            if can_evict_zram(zram_used, avail_kib):
-                runtime_items.append(
-                    PlanItem("swapoff", "zram0", "active; free RAM can take its contents: apply swaps it off")
-                )
-            else:
-                runtime_items.append(
-                    PlanItem("later", "zram0", "active; not enough free RAM to swap it off now: gone after a reboot")
-                )
+        runtime_items.append(self._zram_runtime_item(swaps_text))
 
         return ConfigSectionReport(
             etc_visible=True,
@@ -496,6 +472,25 @@ class SwapReports:
             file_items=tuple(file_items),
             runtime_items=tuple(runtime_items),
         )
+
+    def _zram_conf_item(self) -> PlanItem:
+        """The row of zram-generator.conf: masked, or apply masks it."""
+        path = _short_etc_path(self._env.etc_dir, self._env.zram_conf)
+        if self._zram_masked():
+            return PlanItem("ok", path, "masked (-> /dev/null): no zram devices at boot")
+        return PlanItem("mask", path, "not masked: zram-generator would create zram0 at boot")
+
+    def _zram_runtime_item(self, swaps_text: str) -> PlanItem:
+        """The row of zram0 (swaps_text: /proc/swaps): not active, apply swaps it off, or only a reboot
+        removes it (meminfo is read only when it is active)."""
+        zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
+        if zram_used is None:
+            return PlanItem("ok", "zram0", "not active as swap")
+        meminfo = parse_meminfo(self._fs.read_text(posixpath.join(self._env.proc_dir, "meminfo"), "") or "")
+        avail_kib = meminfo.get("MemAvailable", 0) // 1024
+        if can_evict_zram(zram_used, avail_kib):
+            return PlanItem("swapoff", "zram0", "active; free RAM can take its contents: apply swaps it off")
+        return PlanItem("later", "zram0", "active; not enough free RAM to swap it off now: gone after a reboot")
 
     def build_settings_report(self, params: Mapping[str, str]) -> SettingsReport:
         """Compare live zswap, sysctl, and MemoryLow settings against swap/ desired values."""
@@ -611,16 +606,20 @@ class SwapReports:
         rows: list[CgroupSwapRow] = []
         for label, path in self._cgroups():
             stat = parse_kv(self._fs.read_text(posixpath.join(path, "memory.stat"), "") or "")
-            cur = self._fs.read_first_line(posixpath.join(path, "memory.swap.current"))
-            if cur is None and path == self._env.cgroup_dir and "SwapTotal" in meminfo:
-                cur = str(meminfo["SwapTotal"] - meminfo.get("SwapFree", 0))
-            row = cgroup_row(stat, int(cur) if cur is not None and cur.isdigit() else None)
+            row = cgroup_row(stat, self._swap_current(path, meminfo))
             wb = self._read_first(posixpath.join(path, "memory.zswap.writeback"), "-")
-            low = self._read_first(posixpath.join(path, "memory.low"), "-")
-            low_disp = human(int(low)) if low.isdigit() and int(low) else low
+            low = _low_text(self._read_first(posixpath.join(path, "memory.low"), "-"))
             psi = psi_value(self._fs.read_text(posixpath.join(path, "memory.pressure"), "") or "") or "-"
-            rows.append(CgroupSwapRow(label, row, wb, low_disp, psi))
+            rows.append(CgroupSwapRow(label, row, wb, low, psi))
         return tuple(rows)
+
+    def _swap_current(self, path: str, meminfo: Mapping[str, int]) -> int | None:
+        """The cgroup's memory.swap.current in bytes; the root cgroup has none, so the whole system's
+        swap in use comes from meminfo there. None when it is not a number."""
+        cur = self._fs.read_first_line(posixpath.join(path, "memory.swap.current"))
+        if cur is None and path == self._env.cgroup_dir and "SwapTotal" in meminfo:
+            cur = str(meminfo["SwapTotal"] - meminfo.get("SwapFree", 0))
+        return int(cur) if cur is not None and cur.isdigit() else None
 
     def plan_report(self) -> SwapPlanReport:
         """Compute dry-run plan without modifying files or system state."""
