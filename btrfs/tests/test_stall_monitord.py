@@ -469,6 +469,70 @@ class ShortCgroupTest(unittest.TestCase):
         self.assertEqual(self.short("\n"), "/")  # only blanks: no 0:: line (it raised IndexError before)
 
 
+class TopologyTest(unittest.TestCase):
+    """Topology's btrfs filesystems and swap devices, on a fake /sys and /proc."""
+
+    def test_filesystems_and_swap(self) -> None:
+        a, b = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbbbb-1-2-3-4"
+        dirs = {
+            f"/sys/fs/btrfs/{a}/devices": ["dm-1", "dm-0"],
+            f"/sys/fs/btrfs/{a}/devinfo": ["2", "1"],
+            f"/sys/fs/btrfs/{b}/devices": ["nvme0n1p3"],
+        }
+        files = {
+            f"/sys/fs/btrfs/{a}/label": "data\n",
+            "/sys/class/block/dm-0/dev": "253:0\n",
+            "/sys/class/block/dm-1/dev": "253:1\n",
+            "/sys/class/block/dm-2/dev": "253:2\n",
+            "/sys/class/block/zram0/dev": "251:0\n",
+            "/proc/swaps": "Filename Type Size Used Priority\n/dev/dm-0 partition 8 0 -2\n/dev/zram0 partition 8 0 100\n"
+            "/swapfile file 8 0 -3\n\n/dev/mapper/swap partition 8 0 -4\n",
+        }
+        parents = {"dm-0": ["nvme0n1"], "dm-1": ["sda"], "dm-2": ["sdb"], "nvme0n1p3": ["nvme0n1"], "zram0": []}
+        real_isdir, real_listdir, real_realpath = os.path.isdir, os.listdir, os.path.realpath
+
+        def isdir(p: str) -> bool:
+            return p in dirs or (not p.startswith("/sys/fs/btrfs/") and real_isdir(p))
+
+        def listdir(p: str) -> list[str]:
+            return list(dirs[p]) if p in dirs else real_listdir(p)
+
+        def realpath(p: str) -> str:
+            return "/dev/dm-2" if p == "/dev/mapper/swap" else p if p.startswith("/dev/") else real_realpath(p)
+
+        with (
+            mock.patch.object(md_proc.glob, "glob", return_value=[f"/sys/fs/btrfs/{a}", f"/sys/fs/btrfs/{b}"]),
+            mock.patch.object(md_proc.os.path, "isdir", isdir),
+            mock.patch.object(md_proc.os, "listdir", listdir),
+            mock.patch.object(md_proc.os.path, "realpath", realpath),
+            mock.patch.object(md_proc, "read_text", files.get),
+            mock.patch.object(md_proc, "block_parents", lambda name: list(parents[name])),
+        ):
+            topo = md_proc.Topology()
+        self.assertEqual(
+            topo.fs,
+            {
+                a: {"label": "data", "devs": ["dm-0", "dm-1"], "disks": ["nvme0n1", "sda"], "devids": ["1", "2"]},
+                b: {"label": "", "devs": ["nvme0n1p3"], "disks": ["nvme0n1"], "devids": []},
+            },
+        )
+        # A device keeps its first role (btrfs before swap); a btrfs member without a dev file adds "".
+        self.assertEqual(
+            list(topo.disks.items()),
+            [
+                ("dm-0", "btrfs:data"),
+                ("dm-1", "btrfs:data"),
+                ("nvme0n1", "btrfs:data"),
+                ("sda", "btrfs:data"),
+                ("nvme0n1p3", "btrfs:bbbbbbbb"),
+                ("zram0", "swap"),
+                ("dm-2", "swap"),
+                ("sdb", "swap"),
+            ],
+        )
+        self.assertEqual(topo.top_devs, {"253:0", "253:1", "", "251:0", "253:2"})
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
