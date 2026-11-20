@@ -15,7 +15,7 @@ from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state
 from vm.application.backup import (
-    backup_sources,
+    SourceWalk,
     backup_time,
     check_backup_start,
     check_shut_off,
@@ -214,8 +214,8 @@ def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -
 def nas_sources(
     cfg: VmSettings, store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str]
 ) -> list[tuple[str, str]]:
-    """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder (backup_sources)."""
-    found = backup_sources(cfg, store, vm, parts, notes, nas=True)
+    """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder (SourceWalk)."""
+    found = SourceWalk(cfg, store, vm, notes, nas=True).sources(parts)
     state = [(f, k) for f, k in ((found.nvram, "nvram"), (found.tpm, "tpm")) if f is not None]
     return [(d, "disk") for d in found.disks] + state
 

@@ -116,7 +116,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     check_shut_off(p.commands, vm)
     xml_text, parts = read_backup_definition(p.commands, vm, "nothing copied")
     notes = list(parts.skipped)
-    found = backup_sources(cfg, store, vm, parts, notes, nas=False)
+    found = SourceWalk(cfg, store, vm, notes, nas=False).sources(parts)
     sources = [(d, True) for d in found.disks] + [(f, False) for f in (found.nvram, found.tpm) if f is not None]
     tpm_dir = found.tpm_dir
     mode = BackupMode.FULL if full else BackupMode.REFLINK
@@ -184,7 +184,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
 
 @dataclass(frozen=True, slots=True)
 class BackupSources:
-    """What a backup of a VM reads (backup_sources): its disks, in the order of its definition (each file
+    """What a backup of a VM reads (SourceWalk.sources): its disks, in the order of its definition (each file
     once), the files its UEFI variables and TPM state are read from (None: not read), and the
     TPM folder a local copy records (its real path when read; the folder named for its uuid when not
     there; "" without a TPM)."""
@@ -195,63 +195,70 @@ class BackupSources:
     tpm_dir: str
 
 
-def _through(store: BackupStorePort, notes: list[str], path: str, what: str, *, nas: bool) -> str:
-    """The file path is or points to: the backup reads (cp -a would copy a link as a link, no data) and
-    restores the file it points to instead, which a note says for each file."""
-    r = store.realpath(path)
-    if r != path:
-        notes.append(f"{what} {path} is a symbolic link: {'read' if nas else 'copied'} (and restored) through it: {r}")
-    return r
+@dataclass(frozen=True, slots=True)
+class SourceWalk:
+    """The walk over a VM's definition that finds what its backup reads (sources): for a local copy
+    (nas False) or a NAS backup of vm, through store, its notes added to notes."""
 
+    cfg: VmSettings
+    store: BackupStorePort
+    vm: str
+    notes: list[str]
+    nas: bool
 
-def _disk_source(cfg: VmSettings, store: BackupStorePort, vm: str, disk: str, notes: list[str], *, nas: bool) -> str:
-    """The file a backup reads for a disk of the definition; Refused when it is not there, is an overlay a
-    NAS backup left behind (NAS only), or has a backing file."""
-    if not store.is_file(disk):
-        raise Refused(f"{vm}: disk {disk} not found")
-    if nas and OVERLAY_MARK in disk:
-        raise Refused(
-            f"{vm}: disk {disk} is an overlay a NAS backup left behind (its blockcommit did not "
-            f"finish). Put the disk back first; `{cfg.cst} doctor` shows the commands"
-        )
-    path = _through(store, notes, disk, "disk", nas=nas)
-    if store.has_backing_file(path):
-        raise Refused(
-            f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
-            "(qemu-img info --backing-chain)"
-        )
-    return path
+    def through(self, path: str, what: str) -> str:
+        """The file path is or points to: the backup reads (cp -a would copy a link as a link, no data)
+        and restores the file it points to instead, which a note says for each file."""
+        r = self.store.realpath(path)
+        if r != path:
+            verb = "read" if self.nas else "copied"
+            self.notes.append(f"{what} {path} is a symbolic link: {verb} (and restored) through it: {r}")
+        return r
 
-
-def backup_sources(
-    cfg: VmSettings, store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str], *, nas: bool
-) -> BackupSources:
-    """What a local copy (nas False) or a NAS backup reads of the VM: its disks (Refused for one it cannot
-    back up), its UEFI variables and its TPM folder; notes say which is not there, and which is read
-    through a symbolic link."""
-    disks: list[str] = []
-    for disk in parts.disks:
-        path = _disk_source(cfg, store, vm, disk, notes, nas=nas)
-        if path not in disks:  # a file the definition names twice (or two links to it) is read once
-            disks.append(path)
-    nvram = None
-    if parts.nvram and store.is_file(parts.nvram):
-        nvram = _through(store, notes, parts.nvram, "UEFI variables", nas=nas)
-    elif parts.nvram:
-        notes.append(
-            f"UEFI variables {parts.nvram} not there yet (the VM never started?): not {'backed up' if nas else 'copied'}"
-        )
-    tpm, tpm_dir = None, ""
-    if parts.tpm:
-        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
-        if parts.uuid and store.is_dir(tpm_dir):
-            tpm = tpm_dir = _through(store, notes, tpm_dir, "TPM state", nas=nas)
-        else:
-            notes.append(
-                f"TPM state {tpm_dir} not found: not {'backed up' if nas else 'copied'} (BitLocker may then ask "
-                "for its recovery key after a restore)"
+    def disk(self, disk: str) -> str:
+        """The file a backup reads for a disk of the definition; Refused when it is not there, is an
+        overlay a NAS backup left behind (NAS only), or has a backing file."""
+        if not self.store.is_file(disk):
+            raise Refused(f"{self.vm}: disk {disk} not found")
+        if self.nas and OVERLAY_MARK in disk:
+            raise Refused(
+                f"{self.vm}: disk {disk} is an overlay a NAS backup left behind (its blockcommit did not "
+                f"finish). Put the disk back first; `{self.cfg.cst} doctor` shows the commands"
             )
-    return BackupSources(disks, nvram, tpm, tpm_dir)
+        path = self.through(disk, "disk")
+        if self.store.has_backing_file(path):
+            raise Refused(
+                f"{self.vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
+                "(qemu-img info --backing-chain)"
+            )
+        return path
+
+    def sources(self, parts: DomainParts) -> BackupSources:
+        """What the backup reads of the VM: its disks (Refused for one it cannot back up), its UEFI
+        variables and its TPM folder; notes say which is not there, and which is read through a
+        symbolic link."""
+        disks: list[str] = []
+        for disk in parts.disks:
+            path = self.disk(disk)
+            if path not in disks:  # a file the definition names twice (or two links to it) is read once
+                disks.append(path)
+        not_read = "backed up" if self.nas else "copied"
+        nvram = None
+        if parts.nvram and self.store.is_file(parts.nvram):
+            nvram = self.through(parts.nvram, "UEFI variables")
+        elif parts.nvram:
+            self.notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not {not_read}")
+        tpm, tpm_dir = None, ""
+        if parts.tpm:
+            tpm_dir = os.path.join(self.cfg.paths.swtpm_dir, parts.uuid)
+            if parts.uuid and self.store.is_dir(tpm_dir):
+                tpm = tpm_dir = self.through(tpm_dir, "TPM state")
+            else:
+                self.notes.append(
+                    f"TPM state {tpm_dir} not found: not {not_read} (BitLocker may then ask for its recovery "
+                    "key after a restore)"
+                )
+        return BackupSources(disks, nvram, tpm, tpm_dir)
 
 
 def _check_full_space(cfg: VmSettings, store: BackupStorePort, sizes: Mapping[str, tuple[int, int]]) -> None:
