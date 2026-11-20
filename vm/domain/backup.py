@@ -4,7 +4,7 @@ the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and t
 backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
 lines status and backup-timer status print about them. Pure."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 import datetime
 import json
@@ -347,7 +347,7 @@ def restic_failure_why(rc: int) -> str:
     }.get(rc, f"restic exit {rc}")
 
 
-def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: set[str] | None) -> list[IndexEntry]:
+def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractSet[str] | None) -> list[IndexEntry]:
     """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: the ids
     of the VM's snapshots restic lists (None: not readable), without which the VM's NAS entries of
     entry's repository leave it."""
@@ -355,7 +355,7 @@ def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: set[str] 
     out = [e for e in entries if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
     out.append(entry)
     if alive is not None:
-        alive.add(snap)
+        alive = alive | {snap}
         out = [
             e
             for e in out
