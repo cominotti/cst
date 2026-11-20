@@ -2226,6 +2226,13 @@ class UserManagerBoxesTest(Scratch):
             [(doc_domain.OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")],
         )
 
+    def test_the_slice_kept_for_the_host_sccache_server_is_known(self) -> None:
+        # sccache.slice (dashless: systemd nests a dashed name under its prefix's slice) is where the
+        # host's sccache server may move from app.slice: no warning for it.
+        self.cg("sccache.slice/cst-sccache-host.scope", usage_usec=1_000_000)
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+
     def test_unknown_top_level_slice_warns_with_cpu_time_and_the_name_to_use(self) -> None:
         self.cg("lushtext.slice", usage_usec=69_000_123_456)
         self.cg("_cpu.slice")  # cgroupfs name of cpu.slice
