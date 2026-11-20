@@ -418,8 +418,8 @@ everything with `plan`, `status` or `doctor` before changing anything:
   install record does not list yet, or lists otherwise (a record not saved
   after a write). Each file belongs to a **component**, the part of a module that
   one command installs as a whole (`btrfs:core` by `cst btrfs install`,
-  `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: `COMPONENTS` in
-  the same file). Every file installed is listed, with its sha256 and the
+  `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: the `Component`
+  enum in the same file, and `COMPONENTS`, its command for each). Every file installed is listed, with its sha256 and the
   commit of this folder it came from, in the **install record**
   (`/var/lib/cst/installed.json`, and `~/.local/state/cst/installed.json` for
   your own files), which `cst doctor` compares with the files and with this
