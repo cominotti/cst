@@ -12,6 +12,7 @@ import io
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import signal
 import stat
@@ -951,22 +952,45 @@ _COMPONENT_CALLS: dict[str, int | None] = {
 _SHELL_END = ("|", ";", "&", "<", ">", ")")
 
 
+_REDIRECTION = re.compile(r"[0-9]*[<>]|&>")
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """(number of its first line, text) of each command line, a line ending in a backslash joined with
+    the next one."""
+    out: list[tuple[int, str]] = []
+    first, parts = 0, []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not parts:
+            first = number
+        if line.endswith("\\"):
+            parts.append(line[:-1])
+            continue
+        out.append((first, " ".join([*parts, line])))
+        parts = []
+    if parts:
+        out.append((first, " ".join(parts)))
+    return out
+
+
 def shell_component_words(text: str) -> list[tuple[int, str]]:
     """(line, word) of every component a shell text names as an argument: after --component, and in
     the component position of _COMPONENT_CALLS. Comment lines and words with a $ (variables) are none."""
     found: list[tuple[int, str]] = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in _logical_lines(text):
         if line.lstrip().startswith("#"):
             continue
         words = line.split()
         for i, word in enumerate(words):
             args: list[str] = []
-            if word == "--component" and i + 1 < len(words):
+            if word.startswith("--component="):
+                args = [word.removeprefix("--component=").removesuffix(";")]
+            elif word == "--component" and i + 1 < len(words):
                 args = [words[i + 1].removesuffix(";")]
             elif word in _COMPONENT_CALLS:
                 rest: list[str] = []
                 for w in words[i + 1 :]:
-                    if w.startswith(_SHELL_END) or w == "||":
+                    if w.startswith(_SHELL_END) or w == "||" or _REDIRECTION.match(w):
                         break
                     rest.append(w.removesuffix(";"))
                     if w.endswith(";"):  # `cst_mark C; fi`: the command ends there
@@ -1013,7 +1037,10 @@ class ShellComponentWordsTest(unittest.TestCase):
             'cst_install_text "${f}" 0644 root btrfs:degraded-boot <"${x}"\n'
             'cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?\n'
             'cst_mark_as "${user}" btrfs:report-launcher\n'
-            "check_component_syntax btrfs:alerts btrfs:cor\n"
+            "check_component_syntax btrfs:alerts btrfs:cor 2>/dev/null\n"
+            'cst_install_text "${f}" 0644 \\\n'
+            "    root btrfs:degraded-boo\n"
+            "cst_installer dests --component=btrfs:snapshot\n"
             "# cst_mark btrfs:nope (a comment)\n"
             'cst_mark "$1"\n'
         )
@@ -1025,6 +1052,8 @@ class ShellComponentWordsTest(unittest.TestCase):
                 (4, "btrfs:report-launcher"),
                 (5, "btrfs:alerts"),
                 (5, "btrfs:cor"),
+                (6, "btrfs:degraded-boo"),
+                (8, "btrfs:snapshot"),
             ],
         )
         # A planted misspelt word is reported by the gate's check.
