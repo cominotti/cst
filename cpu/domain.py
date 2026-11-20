@@ -501,6 +501,7 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
     wait: float | None = None
     as_json = False
     flags = {lim.flag: lim.name for lim in QUIET_LIMITS}
+    known = {*flags, "--for", "--wait"}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -508,15 +509,13 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
             as_json = True
             i += 1
             continue
-        if a not in flags and a not in ("--for", "--wait"):
+        if a not in known:
             raise ValueError(f"unknown argument {a}")
         if i + 1 >= len(argv):
             raise ValueError(f"{a} needs a value")
         val = argv[i + 1]
         if a == "--for":
-            if not re.fullmatch(r"\d+", val) or int(val) < 1:
-                raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
-            seconds = int(val)
+            seconds = _window_seconds(val)
         elif a == "--wait":
             wait = duration(val)
         else:
@@ -525,6 +524,13 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
     if wait is not None and wait < seconds:
         raise ValueError(f"--wait ({wait:g} s) is shorter than the window (--for {seconds})")
     return seconds, wait, as_json, limits
+
+
+def _window_seconds(val: str) -> int:
+    """--for's value: a whole number of seconds, at least 1; ValueError for anything else."""
+    if not re.fullmatch(r"\d+", val) or int(val) < 1:
+        raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
+    return int(val)
 
 
 def positive(text: str, what: str) -> float:
@@ -558,23 +564,26 @@ def quiet_result(
     }
 
 
+def _quiet_test_line(t: QuietTest) -> str:
+    """One test's line of quiet's result: its value, its limit and its verdict."""
+    unit = f" {t['unit']}" if t["unit"] else ""
+    err = t["error"]
+    unreadable = err is not None and err != ""
+    if unreadable:
+        value = "unreadable"
+    elif isinstance(t["value"], float):
+        value = f"{t['value']:.2f}{unit}"
+    else:
+        value = t["value"]
+    limit = f"< {t['limit']:g}{unit}" if t["unit"] else t["limit"]
+    verdict = "ok"
+    if not t["ok"]:
+        verdict = f"FAIL ({err})" if unreadable else "FAIL"
+    return f"  {t['label']:<16} {value:<12} limit {limit:<11} {verdict}"
+
+
 def quiet_text(result: QuietResult) -> str:
-    lines = []
-    for t in result["tests"]:
-        unit = f" {t['unit']}" if t["unit"] else ""
-        err = t["error"]
-        unreadable = err is not None and err != ""
-        if unreadable:
-            value = "unreadable"
-        elif isinstance(t["value"], float):
-            value = f"{t['value']:.2f}{unit}"
-        else:
-            value = t["value"]
-        limit = f"< {t['limit']:g}{unit}" if t["unit"] else t["limit"]
-        verdict = "ok"
-        if not t["ok"]:
-            verdict = f"FAIL ({err})" if unreadable else "FAIL"
-        lines.append(f"  {t['label']:<16} {value:<12} limit {limit:<11} {verdict}")
+    lines = [_quiet_test_line(t) for t in result["tests"]]
     span = f"{result['seconds']} s, {result['start']} to {result['end']}"
     if result.get("waited_s") is not None:
         span += f", after waiting {result['waited_s']:.0f} s"
