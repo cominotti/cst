@@ -239,13 +239,34 @@ class SwapApplicationService(SwapReports):
             note = self._settings_item(res, "plan").note
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{env.prog}: ERROR: {env.settings_path}: {note}."))
             return self._stopped(1, events)
-        tmpfiles_text = self._check_preconditions(spec, events)
+        tmpfiles_text = self._check_before_writing(spec, events)
         if tmpfiles_text is None:
             return self._stopped(1, events)
-        c_spec = spec.crypttab_spec()
-        f_spec = spec.fstab_spec()
-        # Every refusal comes before the first write: the settings file too.
-        if self._inspect_marked(env.crypttab, c_spec) == OwnedState.CONFLICT:
+        if res.state == SwapSpecState.WRITE:
+            self._write_settings(spec, events)
+        line_changed = self._write_swap_lines(spec, events)
+        if line_changed is None:
+            return self._stopped(1, events)
+        rc = self._activate_swap(spec, events, line_changed=line_changed)
+        if rc != 0:
+            return self._stopped(rc, events)
+        self._apply_zswap(tmpfiles_text, events)
+        self._mask_zram(events)
+        self._swapoff_zram(events)
+        rc = self._apply_sysctl(events)
+        if rc != 0:
+            return self._stopped(rc, events)
+        self._apply_slice(events)
+        return self._verified(spec, events)
+
+    def _check_before_writing(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> str | None:
+        """Every refusal, before the first write (the settings file too): the preconditions, and an
+        unmarked swap line in crypttab or fstab. The desired tmpfiles text, or None when apply stops."""
+        env = self._env
+        tmpfiles_text = self._check_preconditions(spec, events)
+        if tmpfiles_text is None:
+            return None
+        if self._inspect_marked(env.crypttab, spec.crypttab_spec()) == OwnedState.CONFLICT:
             events.append(
                 ApplyEvent(
                     "err",
@@ -254,8 +275,8 @@ class SwapApplicationService(SwapReports):
                     "remove it by hand, then run apply again.",
                 )
             )
-            return self._stopped(1, events)
-        if self._inspect_marked(env.fstab, f_spec) == OwnedState.CONFLICT:
+            return None
+        if self._inspect_marked(env.fstab, spec.fstab_spec()) == OwnedState.CONFLICT:
             events.append(
                 ApplyEvent(
                     "err",
@@ -264,64 +285,70 @@ class SwapApplicationService(SwapReports):
                     "remove it by hand, then run apply again.",
                 )
             )
-            return self._stopped(1, events)
-        if res.state == SwapSpecState.WRITE:
-            self._write_settings(spec, events)
+            return None
+        return tmpfiles_text
 
+    def _write_swap_lines(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> bool | None:
+        """The "crypttab and fstab" section: both marked lines, then a daemon-reload when one was
+        written. Whether a line changed, or None when one was refused (apply stops)."""
+        env = self._env
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, f"== {spec.name}: crypttab and fstab"))
-        ok_c, changed_c, written_c = self._apply_marked_line(env.crypttab, c_spec, 0o600, events, name=spec.name)
+        ok_c, changed_c, written_c = self._apply_marked_line(
+            env.crypttab, spec.crypttab_spec(), 0o600, events, name=spec.name
+        )
         if not ok_c:
-            return self._stopped(1, events)
-        ok_f, changed_f, written_f = self._apply_marked_line(env.fstab, f_spec, 0o644, events, name=spec.name)
+            return None
+        ok_f, changed_f, written_f = self._apply_marked_line(
+            env.fstab, spec.fstab_spec(), 0o644, events, name=spec.name
+        )
         if not ok_f:
-            return self._stopped(1, events)
-        line_changed = changed_c or changed_f
-        line_written = written_c or written_f
-        if line_written:
+            return None
+        if written_c or written_f:
             self._systemd.daemon_reload()
+        return changed_c or changed_f
 
-        swap_unit = self._systemd.escape_path(spec.mapper_path, suffix="swap")
-        swaps_text = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
+    def _activate_swap(self, spec: SwapHardwareSpec, events: list[ApplyEvent], *, line_changed: bool) -> int:
+        """swap0 on: started when it is not active; started again when its line changed and it is
+        empty; left as it is otherwise (a line change then waits for a reboot). The status of the
+        first systemctl call that failed, else 0."""
+        sd = self._systemd
+        swap_unit = sd.escape_path(spec.mapper_path, suffix="swap")
+        swaps_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "swaps"), "") or ""
         real_swap0 = self._fs.readlink(spec.mapper_path, canonicalize=True) or spec.mapper_path
         swap0_used = find_swap_used_kib(swaps_text, real_swap0)
         crypt_unit = UnitName(f"systemd-cryptsetup@{spec.name}.service")
-        if swap0_used is not None:
-            if line_changed:
-                if swap0_used == 0:
-                    events.append(
-                        ApplyEvent(
-                            "out",
-                            ApplyEventKind.LINE,
-                            f"{spec.mapper_path}: entry changed and the device is empty: re-activating",
-                        )
-                    )
-                    sd = self._systemd
-                    rc = self._run_units(
-                        ((sd.stop, swap_unit), (sd.restart, crypt_unit), (sd.start, swap_unit)), events
-                    )
-                    if rc != 0:
-                        return self._stopped(rc, events)
-                else:
-                    events.append(
-                        ApplyEvent(
-                            "err",
-                            ApplyEventKind.WARN,
-                            f"WARNING: {spec.mapper_path}: entry changed but {swap0_used // 1024} MiB are in use; "
-                            "the live device keeps the old options until reboot.",
-                        )
-                    )
-            else:
-                events.append(ApplyEvent("out", ApplyEventKind.LINE, f"{spec.mapper_path} is active as swap."))
-        else:
+        if swap0_used is None:
             events.append(
                 ApplyEvent(
                     "out", ApplyEventKind.LINE, f"{spec.mapper_path}: activating (dm-crypt open + mkswap + swapon)"
                 )
             )
-            rc = self._run_units(((self._systemd.start, crypt_unit), (self._systemd.start, swap_unit)), events)
-            if rc != 0:
-                return self._stopped(rc, events)
+            return self._run_units(((sd.start, crypt_unit), (sd.start, swap_unit)), events)
+        if not line_changed:
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, f"{spec.mapper_path} is active as swap."))
+            return 0
+        if swap0_used != 0:
+            events.append(
+                ApplyEvent(
+                    "err",
+                    ApplyEventKind.WARN,
+                    f"WARNING: {spec.mapper_path}: entry changed but {swap0_used // 1024} MiB are in use; "
+                    "the live device keeps the old options until reboot.",
+                )
+            )
+            return 0
+        events.append(
+            ApplyEvent(
+                "out",
+                ApplyEventKind.LINE,
+                f"{spec.mapper_path}: entry changed and the device is empty: re-activating",
+            )
+        )
+        return self._run_units(((sd.stop, swap_unit), (sd.restart, crypt_unit), (sd.start, swap_unit)), events)
 
+    def _apply_zswap(self, tmpfiles_text: str, events: list[ApplyEvent]) -> None:
+        """The "zswap" section: tmpfiles.d/zswap.conf for the next boot, and each parameter set live."""
+        env = self._env
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== zswap"))
         self._apply_managed_file(TMPFILES_ENTRY, env.src_tmpfiles, env.tmpfiles_conf, events)
         for name, val in parse_tmpfiles_params(tmpfiles_text):
@@ -339,50 +366,60 @@ class SwapApplicationService(SwapReports):
                 self._fs.write_text_direct(param_path, f"{val}\n")
                 events.append(ApplyEvent("out", ApplyEventKind.LINE, f"set:       zswap {name} = {val} (was {live})"))
 
+    def _mask_zram(self, events: list[ApplyEvent]) -> None:
+        """The "zram" section: zram-generator.conf masked, so no zram device comes up at boot."""
+        env = self._env
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== zram"))
         if self._zram_masked():
             events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {env.zram_conf} (masked)"))
-        else:
-            self._fs.force_symlink("/dev/null", env.zram_conf)
-            events.append(
-                ApplyEvent(
-                    "out", ApplyEventKind.LINE, f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)"
-                )
-            )
-            self._systemd.daemon_reload()
+            return
+        self._fs.force_symlink("/dev/null", env.zram_conf)
+        events.append(
+            ApplyEvent("out", ApplyEventKind.LINE, f"masked:    {env.zram_conf} -> /dev/null (no zram devices at boot)")
+        )
+        self._systemd.daemon_reload()
 
+    def _swapoff_zram(self, events: list[ApplyEvent]) -> None:
+        """zram0 swapped off now when it is active and free RAM can take its contents; a warning
+        otherwise (it is gone after a reboot)."""
+        env = self._env
         swaps_after_zswap = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
         zram_used = find_swap_used_kib(swaps_after_zswap, "/dev/zram0")
-        if zram_used is not None:
-            meminfo = parse_meminfo(self._fs.read_text(posixpath.join(env.proc_dir, "meminfo"), "") or "")
-            avail_kib = meminfo.get("MemAvailable", 0) // 1024
-            if can_evict_zram(zram_used, avail_kib):
-                events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: swapping off"))
-                swapoff = self._systemd.stop(UnitName("dev-zram0.swap"))
-                _show_output(swapoff, events, self._env.prog)
-                if swapoff.returncode == 0:
-                    # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
-                    self._systemd.stop(UnitName("systemd-zram-setup@zram0.service"))
-                    self._system.reset_zram0()
-                    events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: removed"))
-                else:
-                    events.append(
-                        ApplyEvent(
-                            "err",
-                            ApplyEventKind.WARN,
-                            "WARNING: swapoff of zram0 failed; it is disabled in the config and gone after a reboot.",
-                        )
-                    )
-            else:
-                events.append(
-                    ApplyEvent(
-                        "err",
-                        ApplyEventKind.WARN,
-                        "WARNING: not enough free RAM to swap off zram0 now; it is gone after a reboot "
-                        "(or run apply again under lower pressure).",
-                    )
+        if zram_used is None:
+            return
+        meminfo = parse_meminfo(self._fs.read_text(posixpath.join(env.proc_dir, "meminfo"), "") or "")
+        avail_kib = meminfo.get("MemAvailable", 0) // 1024
+        if not can_evict_zram(zram_used, avail_kib):
+            events.append(
+                ApplyEvent(
+                    "err",
+                    ApplyEventKind.WARN,
+                    "WARNING: not enough free RAM to swap off zram0 now; it is gone after a reboot "
+                    "(or run apply again under lower pressure).",
                 )
+            )
+            return
+        events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: swapping off"))
+        swapoff = self._systemd.stop(UnitName("dev-zram0.swap"))
+        _show_output(swapoff, events, self._env.prog)
+        if swapoff.returncode == 0:
+            # Silent, as `systemctl stop ... 2>/dev/null || true` was: the reset below is the fallback.
+            self._systemd.stop(UnitName("systemd-zram-setup@zram0.service"))
+            self._system.reset_zram0()
+            events.append(ApplyEvent("out", ApplyEventKind.LINE, "zram0: removed"))
+        else:
+            events.append(
+                ApplyEvent(
+                    "err",
+                    ApplyEventKind.WARN,
+                    "WARNING: swapoff of zram0 failed; it is disabled in the config and gone after a reboot.",
+                )
+            )
 
+    def _apply_sysctl(self, events: list[ApplyEvent]) -> int:
+        """The "sysctl" section: the legacy zram file removed, 99-swap-tuning.conf written and applied
+        live (without the key a cpu experiment holds). sysctl's exit status."""
+        env = self._env
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== sysctl"))
         if self._fs.exists(env.old_sysctl_conf):
             self._fs.remove_file(env.old_sysctl_conf)
@@ -409,9 +446,12 @@ class SwapApplicationService(SwapReports):
         else:
             sysctl = self._system.apply_sysctl_file(env.sysctl_conf)
         _show_output(sysctl, events, self._env.prog)
-        if sysctl.returncode != 0:
-            return self._stopped(sysctl.returncode, events)
+        return sysctl.returncode
 
+    def _apply_slice(self, events: list[ApplyEvent]) -> None:
+        """The "machine.slice" section: the MemoryLow drop-in (the old name removed), then the install
+        record marks swap:core complete."""
+        env = self._env
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== machine.slice"))
         written = self._apply_managed_file(DROPIN_ENTRY, env.src_dropin, env.slice_dropin, events)
         if self._remove_old_dropin(events) or written:
@@ -419,6 +459,9 @@ class SwapApplicationService(SwapReports):
         # swap:core's files are all in place: the install record says the component is complete.
         self._installer.mark(env.install_record, DROPIN_ENTRY.component)
 
+    def _verified(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> SwapApplyResult:
+        """The result of a whole apply: the settings as they are now, swap0 active, zram0 gone."""
+        env = self._env
         settings = self.build_settings_report(self.zswap_params())
         fail = settings.has_diff
         swaps_final = self._fs.read_text(posixpath.join(env.proc_dir, "swaps"), "") or ""
