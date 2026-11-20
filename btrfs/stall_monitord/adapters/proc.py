@@ -146,6 +146,11 @@ class Topology:
         self.refresh_fs()
 
     def refresh_fs(self) -> None:
+        self._refresh_btrfs()
+        self._refresh_swaps()
+
+    def _refresh_btrfs(self) -> None:
+        """Each btrfs filesystem: its devices and disks, label and devids; their roles and dev numbers."""
         for d in glob.glob("/sys/fs/btrfs/*-*-*-*-*"):
             uuid = os.path.basename(d)
             devs = sorted(os.listdir(f"{d}/devices")) if os.path.isdir(f"{d}/devices") else []
@@ -157,6 +162,9 @@ class Topology:
                 self.disks.setdefault(name, f"btrfs:{label or uuid[:8]}")
             for name in devs:
                 self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
+
+    def _refresh_swaps(self) -> None:
+        """The swap devices of /proc/swaps and their disks: role "swap" unless they have one."""
         for line in (read_text("/proc/swaps") or "").splitlines()[1:]:
             dev = line.split()[0] if line.split() else ""
             if dev.startswith("/dev/"):
