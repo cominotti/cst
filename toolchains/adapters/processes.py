@@ -5,17 +5,19 @@ processes (their folder, program, arguments and settings).
 
 from __future__ import annotations
 
-import contextlib
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+from cst_core.adapters.files import LocalFileSystemAdapter
 from toolchains.domain.build import CARGO_COMM, CARGO_ENV, CargoProc, RUST_TOOLS, folder_key, prefixes
 
 
 PROC = "/proc"
+# readlink: where a /proc link points, None when it cannot be read.
+_LINKS: Final = LocalFileSystemAdapter()
 
 
 def own_processes(target_uid: int) -> Iterator[tuple[str, str, str]]:
@@ -54,6 +56,8 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     unreadable = 0
     for pid, comm, base in own_processes(target_uid):
         try:
+            # os.readlink itself, not _LINKS: a PermissionError (a process of
+            # another container's user namespace) is told apart from the rest.
             cwd: str | None = os.readlink(os.path.join(base, "cwd"))
         except PermissionError:
             if RUST_TOOLS.fullmatch(comm):
@@ -66,14 +70,6 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
             if (pid, comm) not in lst:
                 lst.append((pid, comm))
     return found, unreadable
-
-
-def _link_or_none(path: str) -> str | None:
-    """Where the link PATH points, or None when it cannot be read."""
-    try:
-        return os.readlink(path)
-    except OSError:
-        return None
 
 
 def _used_keys(pre: Sequence[str], base: str, cwd: str | None) -> Iterator[str]:
@@ -91,7 +87,7 @@ def _used_paths(base: str, cwd: str | None) -> Iterator[str]:
     mapped files; what cannot be read is left out."""
     if cwd is not None:
         yield cwd
-    exe = _link_or_none(os.path.join(base, "exe"))
+    exe = _LINKS.readlink(os.path.join(base, "exe"))
     if exe is not None:
         yield exe
     try:
@@ -99,7 +95,7 @@ def _used_paths(base: str, cwd: str | None) -> Iterator[str]:
     except OSError:
         fds = []
     for fd in fds:
-        target = _link_or_none(os.path.join(base, "fd", fd))
+        target = _LINKS.readlink(os.path.join(base, "fd", fd))
         if target is not None:
             yield target
     try:
@@ -120,14 +116,10 @@ def cargo_procs(uid: int | None = None) -> list[CargoProc]:
     for pid, comm, base in own_processes(target_uid):
         if not CARGO_COMM.fullmatch(comm):
             continue
-        cwd: str | None = None
-        exe = ""
+        cwd = _LINKS.readlink(os.path.join(base, "cwd"))
+        exe = _LINKS.readlink(os.path.join(base, "exe")) or ""
         args: tuple[str, ...] = ()
         env: dict[str, str] = {}
-        with contextlib.suppress(OSError):
-            cwd = os.readlink(os.path.join(base, "cwd"))
-        with contextlib.suppress(OSError):
-            exe = os.readlink(os.path.join(base, "exe"))
         raw = b""
         try:
             with open(os.path.join(base, "cmdline"), "rb") as f:
