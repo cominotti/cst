@@ -75,6 +75,20 @@ class _InspectResult(TypedDict):
 
 
 # ---- reading the flags file ---------------------------------------------------------------
+def parse_chrome_args(args: Sequence[str]) -> tuple[ChromeCacheCommand, str | None] | None:
+    """The command (status when ARGS is empty) and the --home folder (None without --home) of
+    chrome-cache's arguments; None for a usage error: an unknown command, or --home without a
+    folder."""
+    cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
+    home = None
+    if "--home" in args:
+        i = args.index("--home")
+        home = args[i + 1] if i + 1 < len(args) else None
+    if cmd is None or (("--home" in args) and (home is None or home == "")):
+        return None
+    return cmd, home
+
+
 def marked(s: str, rest: str) -> bool:
     """Whether the stripped line S starts with one of the MARKS followed by REST."""
     return any(s.startswith(m + rest) for m in MARKS)
