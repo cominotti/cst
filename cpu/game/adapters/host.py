@@ -31,7 +31,12 @@ def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]
 
 def read_snapshot(path: str) -> str | None:
     """The file's text for a snapshot 'state' judges, in one look: None when it is not there; "" when it
-    is there but cannot be read (it still counts as there, as os.path.exists said before the snapshot)."""
+    is there but cannot be read (it still counts as there, as os.path.exists said before the snapshot).
+
+    "Not there" is only no such file (ENOENT) or a path through a file (ENOTDIR). Any other error reads
+    as there but unreadable, so the profile shows ON: EACCES on a parent folder, ELOOP, ENAMETOOLONG.
+    os.path.exists said off for those. It matters only for a user who cannot search the state folder
+    (/run/cpu-setup); root and a user who can search it see a missing file as absent."""
     return read_text(path, unreadable="")
 
 

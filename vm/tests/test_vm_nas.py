@@ -2557,8 +2557,9 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             backup_fn=lambda: (1, {}),
         )
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        cfg = self._cfg()
         with self.assertRaises(Refused) as ctx:
-            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+            vm_app_nas.nas_run(cfg, port, "win", None, nas, quiesce=False, live=True)
         msg = str(ctx.exception)
         self.assertIn("DISK NOT MERGED BACK:\n  the disks could not be listed: RuntimeError('list boom')", msg)
         self.assertIn("(the backup itself: restic backup failed: restic exit 1; no backup recorded)", msg)
@@ -2591,8 +2592,9 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         port, _commands, _store, _signals, alerts = self._make_backup([("vda", disk_a)], on_virsh=hook)
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        cfg = self._cfg()
         with self.assertRaises(Refused) as ctx:
-            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+            vm_app_nas.nas_run(cfg, port, "win", None, nas, quiesce=False, live=True)
         msg = str(ctx.exception)
         self.assertIn(
             "DISK NOT MERGED BACK:\n  the disks could not be listed: RuntimeError('blklist unavailable')", msg
@@ -2623,8 +2625,9 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             [("vda", disk_a)], on_virsh=hook, backup_fn=fail_backup
         )
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        cfg = self._cfg()
         with self.assertRaises(Refused) as ctx:
-            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+            vm_app_nas.nas_run(cfg, port, "win", None, nas, quiesce=False, live=True)
         msg = str(ctx.exception)
         self.assertIn("DISK NOT MERGED BACK:\n  the merge back failed: OSError('libvirt vanished')", msg)
         self.assertIn(overlay_a, msg)
@@ -2651,8 +2654,9 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         port, _commands, _store, _signals, alerts = self._make_backup([("vda", disk_a)], on_virsh=hook)
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        cfg = self._cfg()
         with self.assertRaises(Refused) as ctx:
-            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+            vm_app_nas.nas_run(cfg, port, "win", None, nas, quiesce=False, live=True)
         msg = str(ctx.exception)
         self.assertIn(
             "DISK NOT MERGED BACK:\n  the disks could not be listed: RuntimeError('list failed')\n"

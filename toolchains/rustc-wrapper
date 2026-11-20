@@ -63,8 +63,9 @@
 # stay, so an upgrade never breaks an active server; once it stops, the next
 # compile starts in sccache.slice. A lock file next to the socket makes
 # parallel compiles start one server; the socket is removed first, so "the
-# scope's folder and the socket exist" means a server has started there. Each compile checks that with shell
-# builtins only (the folder comes from /proc/self/cgroup); only a missing
+# scope's folder and the socket exist" means a server has started there. Each
+# compile checks that with shell builtins only (the folder comes from
+# /proc/self/cgroup); only a missing
 # server costs flock and systemd-run. Without a user manager above the compile
 # (an ssh session, docker exec), without the user manager's socket
 # ($XDG_RUNTIME_DIR/systemd/private, what systemd-run --user connects to),
@@ -186,7 +187,10 @@ if [ "$own_address" = yes ]; then
         # keep using that live server until it stops, so an upgrade never drops
         # its socket or collides on the same unit name; the next start uses
         # sccache.slice.
-        old_host_server() { [ "$env_id" = host ] && [ -d "${manager_dir}/app.slice/${scope}" ] && [ -S "$SCCACHE_SERVER_UDS" ]; }
+        old_host_server() {
+            [ "$env_id" = host ] && [ -d "${manager_dir}/app.slice/${scope}" ] &&
+                [ -S "$SCCACHE_SERVER_UDS" ]
+        }
         # A start failed less than 10 minutes ago (the marker holds the seconds
         # since boot of that failure): try no start, leave the server that the
         # client started then alone. Sets now, which a failed start writes.

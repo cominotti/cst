@@ -701,6 +701,14 @@ that has GameMode's library (`libgamemode`) loaded.
 it never waits: it reads `game.state` and `game.intended` once, and every line
 it prints (on or off, the user, the idle boxes, unreadable lines, drift) judges
 that one reading, also when `off` or a tick changes the files meanwhile.
+In that reading, a missing `game.state` means off; a `game.state` that is
+there but cannot be read still means on. Only "no such file" (or a path
+through a file) counts as missing: any other error opening it, such as no
+permission to search a parent folder (EACCES), a loop of links (ELOOP) or a
+name too long (ENAMETOOLONG), reads as unreadable, and `state` shows the
+profile ON. This matters only for a user who cannot search
+`/run/cpu-setup`; root, and a user who can search it, see a missing file as
+off.
 
 ### 7.3 By hand (manual)
 
