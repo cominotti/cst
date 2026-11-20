@@ -75,7 +75,9 @@ ARCHES = frozenset({"x86_64", "i686", "i386", "noarch", "aarch64", "ppc64le", "s
 # name-[epoch:]version-release with a distribution tag in the release
 # (.fc44, .el9, .eln140), and an optional .arch: only the form gives it away
 # when the deployment's package list cannot be read.
-NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d[^-]*\.(?:fc|el|eln)\d+[^-]*)$")
+# The release is checked for the tag with a lookahead, then taken whole: [^-]* followed by the tag made
+# the match backtrack over every ".fcN" of a long release.
+NVR_FORM = re.compile(r"^(?P<name>.+)-(?:\d+:)?(?P<ver>\d[^-]*)-(?P<rel>\d(?=[^-]*\.(?:fc|el|eln)\d)[^-]*)$")
 
 TRANSIENT = re.compile(r"^run-[^ ]+\.(scope|service)$")
 
