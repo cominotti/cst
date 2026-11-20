@@ -1638,6 +1638,12 @@ status
         self.assertEqual(
             sorted(os.path.relpath(p, self.root) for p in self.tree()), ["usr/lib/udev/rules.d/64-btrfs.rules"]
         )
+        # cst_forget_text (the real installer here) then drops their record lines: the record lists no
+        # file that is gone.
+        self.assertIn(
+            "installer forget-text " + " ".join(self.at(d) for d in (*TRACKED, RECORD, SYNCED)), self.installer_calls()
+        )
+        self.assertEqual(self.record(), ({}, {}))
 
     def test_uninstall_keeps_a_foreign_64_btrfs_rule_and_past_markers(self) -> None:
         self.install()
