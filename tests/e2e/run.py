@@ -264,7 +264,7 @@ def dump_logs(containers: Sequence[str], out_dir: Path) -> None:
         for label, cmd in (
             ("system_failed", ["docker", "exec", c, "systemctl", "--failed", "--no-pager"]),
             ("user_failed", ["docker", "exec", c, "systemctl", "--user", "-M", "tester@", "--failed", "--no-pager"]),
-            ("journal_tail", ["docker", "exec", c, "journalctl", "-b", "--no-pager", "-n", "200"]),
+            ("journal_boot", ["docker", "exec", c, "journalctl", "-b", "--no-pager"]),
             ("docker_logs", ["docker", "logs", c]),
         ):
             p = run(cmd, check=False, capture=True)

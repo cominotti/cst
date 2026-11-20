@@ -106,8 +106,10 @@ Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 - `test_20`: `cst vm tune` against the real `virtqemud` (`qemu:///system`; a `type='qemu'` guest is defined, none is started): `plan` lists the changes of a Linux guest with a SATA disk and an e1000e card and changes nothing (the inactive definition byte for byte, no backup folder); `apply` without a terminal refuses, answered no changes nothing, answered yes saves the old `--security-info` definition (0600) and defines the new hardware, keeping the VNC password, which is never printed; a second `plan` and `apply` have nothing to do (no question, no second saved file) and `status` agrees; defining the saved file restores the old definition byte for byte; `VM_TUNE_NIC=no` leaves the network card out. `apply` asks on a pseudo-terminal (`PTY_ANSWER_DRIVER`).
 - `test_21`: `cst vm nocow` on the loop btrfs, as the user (sudo for the system folder, a scratch path through `CST_VM_SYSTEM_IMAGES`): `plan` lists the missing system folder, a user folder with a copy-on-write image (and the commands to convert it) and a conversion leftover, and changes nothing; `apply` without a terminal refuses, answered no changes nothing, answered yes creates the system folder (root:root 0711) and sets `+C` on it and on the user folders, the existing image stays copy-on-write, new files get `+C`, a missing user folder is not created; afterwards, as root, `plan --root` has nothing to mark and a second `apply` asks nothing and changes nothing; a second `apply` as the user sets the mark again only on the root-only folder it cannot read; `VM_NOCOW=no` leaves a new folder alone. There is no undo command.
 
-Both commands take `--keep_logs` (keep the journald/systemd logs in
-`tests/e2e/.artifacts/` even on success) and `--rebuild` (rebuild the images).
+Both commands take `--keep_logs` (keep the systemd, full boot journal and
+docker logs in `tests/e2e/.artifacts/` even on success; CI and nightly upload
+them from there with `include-hidden-files: true`) and `--rebuild` (rebuild
+the images).
 Without `--rebuild`, `run.py` uses a local image only when its label
 `org.cst.e2e.sources` is the digest of this checkout's sources
 (`tests/e2e/image_digest.py`: the image's Dockerfile, every file under
