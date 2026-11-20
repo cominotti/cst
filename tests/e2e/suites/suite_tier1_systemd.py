@@ -5366,6 +5366,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -q 'no GameMode client left: switching off' <<<"$($gp tick)"
             for _ in $(seq 100); do [[ -e /run/cpu-setup/game.state ]] || break; sleep 0.1; done
             test ! -e /run/cpu-setup/game.state
+            # 'off' removes game.state before it ends: the unit is deactivating until its ExecStop exits.
+            for _ in $(seq 100); do
+                [[ "$(systemctl show -P ActiveState cpu-game.service)" == deactivating ]] || break; sleep 0.1
+            done
             [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
             [[ "$(systemctl show -P Result cpu-game.service)" == success ]]
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
