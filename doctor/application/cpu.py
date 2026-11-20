@@ -154,12 +154,11 @@ def _record_drift(host: DoctorHostPort, r: Record, current: dict[tuple[str, str,
     """(whether the record could be compared, what no longer holds: "" when it holds). A property is
     compared when systemd showed it; a cgroup file when it can still be read."""
     if r[0] == GameRecordKind.PROP:
-        key = (r[1], r[2], r[3])
-        if not r[5] or key not in current:
+        key, want = (r[1], r[2], r[3]), r[5]
+        if not want or key not in current:
             return False, ""
-        return True, "" if current[key] == r[
-            5
-        ] else f"{r[2]} {r[3]} is {current[key] or 'not set'} (the profile set {r[5]})"
+        now = current[key]
+        return True, "" if now == want else f"{r[2]} {r[3]} is {now or 'not set'} (the profile set {want})"
     if not r[3]:
         return False, ""
     try:
