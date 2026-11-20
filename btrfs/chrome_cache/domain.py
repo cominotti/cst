@@ -80,13 +80,13 @@ def parse_chrome_args(args: Sequence[str]) -> tuple[ChromeCacheCommand, str | No
     chrome-cache's arguments; None for a usage error: an unknown command, or --home without a
     folder."""
     cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
-    home = None
-    if "--home" in args:
-        i = args.index("--home")
-        home = args[i + 1] if i + 1 < len(args) else None
-    if cmd is None or (("--home" in args) and (home is None or home == "")):
+    if cmd is None:
         return None
-    return cmd, home
+    if "--home" not in args:
+        return cmd, None
+    i = args.index("--home")
+    home = args[i + 1] if i + 1 < len(args) else ""
+    return (cmd, home) if home else None
 
 
 def marked(s: str, rest: str) -> bool:
@@ -174,9 +174,9 @@ def _ram_note(d: str | None, s: str | None) -> str:
     with a size S above the cap or no cap at all; "" for any other flags."""
     if d != CACHE_DIR:
         return ""
-    if s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
+    if s is not None and s.isdigit() and int(s) > CACHE_SIZE:
         return "; WARNING: that cache lives in RAM, keep it small"
-    if s is None or s in ("", "0"):
+    if s in (None, "", "0"):
         return "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
     return ""
 
