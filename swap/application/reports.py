@@ -617,7 +617,7 @@ class SwapReports:
             row = cgroup_row(stat, int(cur) if cur is not None and cur.isdigit() else None)
             wb = self._read_first(posixpath.join(path, "memory.zswap.writeback"), "-")
             low = self._read_first(posixpath.join(path, "memory.low"), "-")
-            low_disp = human(int(low)) if low.isdigit() and int(low) else ("0" if low == "0" else low)
+            low_disp = human(int(low)) if low.isdigit() and int(low) else low
             psi = psi_value(self._fs.read_text(posixpath.join(path, "memory.pressure"), "") or "") or "-"
             rows.append(CgroupSwapRow(label, row, wb, low_disp, psi))
         return tuple(rows)
