@@ -1,15 +1,29 @@
 # SPDX-License-Identifier: MPL-2.0
 """The records of the backups: an index entry, the two manifests, restic's summary of a backup,
-the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). Pure."""
+the fingerprint of a source, the two ways a backup stops (Stop, Uncertain) and the state of one NAS
+backup run (NasRun); the NAS backup's snapshot arguments, index, torn records and last lines, and the
+lines status and backup-timer status print about them. Pure."""
 
+from collections.abc import Mapping, Sequence, Set as AbstractSet
+from dataclasses import dataclass, field
 import datetime
 import json
 from enum import StrEnum
-from typing import Final, NotRequired, Required, TypedDict, TypeIs
+from typing import Final, NamedTuple, NotRequired, Required, TypedDict, TypeIs
 
-from cst_core.domain.errors import Refused
+from cst_core.domain.errors import ExitStatus, Refused, ResticExit
 from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import MINUTE, Json
+from vm.domain import (
+    KEEP_TAG,
+    ON_CALENDAR,
+    TAG,
+    DomainParts,
+    NasRepo,
+    TimerStatus,
+    VmOverlayKind,
+    timer_file_words,
+)
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
 DOMAIN_XML = "domain.xml"
@@ -27,6 +41,15 @@ class BootedDeployment(TypedDict):
     version: Json
     checksum: Json
     timestamp: Json
+
+
+class BackupMode(StrEnum):
+    """How a backup was made, the mode of its manifest and its index entry: a local copy by reflink
+    or in full (--full), or a restic snapshot on the NAS."""
+
+    REFLINK = "reflink"
+    FULL = "full"
+    NAS = "nas"
 
 
 class IndexEntry(TypedDict, total=False):
@@ -75,7 +98,7 @@ def is_index_entry(e: object) -> TypeIs[IndexEntry]:
         return False
     if deployment is not None and not (json_object(deployment) and all(k in deployment for k in _DEPLOYMENT_KEYS)):
         return False
-    where = e.get("snapshot") if e.get("mode") == "nas" else e.get("path")
+    where = e.get("snapshot") if e.get("mode") == BackupMode.NAS else e.get("path")
     return isinstance(where, str) and where != ""
 
 
@@ -133,6 +156,11 @@ _TORN_KEYS: KeyTypes = {
     "timestamp": (str,),
     "why": (str,),
 }
+
+
+def torn_entry(nas: NasRepo, snap: str, vm: str, stamp: str, why: str) -> TornEntry:
+    """The record of snap, a torn snapshot of vm's run at stamp (why: what tore it)."""
+    return {"snapshot": snap, "vm": vm, "repository": nas["repo"], "host": nas["host"], "timestamp": stamp, "why": why}
 
 
 def is_torn_entry(e: object) -> TypeIs[TornEntry]:
@@ -269,3 +297,170 @@ def utc_stamp(seconds: float) -> str:
 def manifest_text(manifest: Manifest) -> str:
     """manifest.json as a backup writes it."""
     return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+
+def package_change_lines(changes: Sequence[str]) -> list[str]:
+    """status's lines about the virtualization packages since the last backup (changes: version_changes)."""
+    if not changes:
+        return ["  virtualization packages: unchanged since the last backup"]
+    return [
+        "  virtualization packages changed since then (back up again once the VM works on them):",
+        *(f"    {c}" for c in changes),
+    ]
+
+
+def timer_status_lines(st: TimerStatus, vm: str, prog: str) -> list[str]:
+    """backup-timer status's lines from the timer's state (st): on or off, its files, the next run
+    and the last result."""
+    words = timer_file_words(prog, vm)
+    out = [f"weekly NAS backup of {vm}: {'on' if st.on else 'off'} ({st.unit}; {ON_CALENDAR}, up to 30 min later)"]
+    out += [f"  {p}: {words[state]}" for p, state in st.files.items()]
+    if st.next_run:
+        out.append(f"  next run: {st.next_run}")
+    if st.last_result:
+        out.append(f"  last run of the service: {st.last_result}")
+    return out
+
+
+def snapshot_args(
+    vm: str, stamp: str, specs: Mapping[str, tuple[str, str]], others: Sequence[str], *, quiesce: bool
+) -> list[str]:
+    """virsh's arguments of the NAS backup's external disk-only snapshot: an overlay for each disk of
+    specs (target -> (image, overlay); a comma in its path doubled, as virsh reads it), none for the
+    others; quiesce: the guest's file systems frozen through its agent."""
+    args: list[str] = [
+        "snapshot-create-as",
+        vm,
+        "--name",
+        f"cst-nas-{stamp}",
+        "--disk-only",
+        "--atomic",
+        "--no-metadata",
+    ]
+    if quiesce:
+        args.append("--quiesce")
+    for t, (_, overlay) in specs.items():
+        args += ["--diskspec", f"{t},snapshot=external,file={overlay.replace(',', ',,')}"]
+    for t in others:
+        args += ["--diskspec", f"{t},snapshot=no"]
+    return args
+
+
+def restic_failure_why(rc: int) -> str:
+    """Why restic backup gave no backup, from its exit status."""
+    return {
+        ResticExit.INCOMPLETE: "some files could not be read",
+        ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
+        ExitStatus.NOT_FOUND: "restic not found",
+        ResticExit.LOCKED: "the repository stayed locked",
+    }.get(rc, f"restic exit {rc}")
+
+
+def nas_index(entries: Sequence[IndexEntry], entry: IndexEntry, alive: AbstractSet[str] | None) -> list[IndexEntry]:
+    """The index with entry, a new NAS backup (an entry of the same snapshot replaced); alive: the ids
+    of the VM's snapshots restic lists (None: not readable), without which the VM's NAS entries of
+    entry's repository leave it."""
+    snap = entry["snapshot"]
+    out = [e for e in entries if not (e.get("mode") == BackupMode.NAS and e.get("snapshot") == snap)]
+    out.append(entry)
+    if alive is not None:
+        alive = alive | {snap}
+        out = [
+            e
+            for e in out
+            if not (
+                e["vm"] == entry["vm"]
+                and e.get("mode") == BackupMode.NAS
+                and e.get("repository") == entry["repository"]
+                and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
+            )
+        ]
+    out.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+    return out
+
+
+def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, keep: str | None) -> list[str]:
+    """The last lines of a NAS backup: its notes, the snapshot it made, how to restore it."""
+    kept = f"; kept until removed by hand: tags {KEEP_TAG},{keep}" if keep is not None and keep != "" else ""
+    return [
+        *(f"  note: {n}" for n in notes),
+        f"Done: restic snapshot {snap[:8]} of {vm} ({consistency}{kept}).",
+        (
+            'Restore: vm/README.md in CST, section "Restore from the NAS" (restic restore '
+            f"{snap[:8]} --sparse --target <a NOCOW folder>)."
+        ),
+    ]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NasRun:
+    """One NAS backup: what its checks read before restic is asked anything (the definition, the
+    sources, the stamp, the live snapshot's overlays: specs target -> (image, overlay), others the
+    targets left out), and what it fills in as it goes, also when a step fails: notes, before (the
+    fingerprints of what is checked after the read) and overlaid (the overlays the VM runs on), which
+    the merge back reads."""
+
+    vm: str
+    live: bool
+    quiesce: bool
+    xml_text: str
+    parts: DomainParts
+    notes: list[str]
+    sources: list[tuple[str, str]]
+    epoch: float
+    stamp: str
+    specs: dict[str, tuple[str, str]]
+    others: list[str]
+    agent: str
+    versions: dict[str, str]
+    deployment: BootedDeployment | None
+    before: dict[str, Fingerprint] = field(default_factory=dict)
+    overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+class NasMergeBack(NamedTuple):
+    """What the merge back after a NAS backup could not do (problems) and how each overlay stood (how)."""
+
+    problems: list[str]
+    how: dict[str, VmOverlayKind]
+
+
+def nas_tags(vm: str, keep: str | None) -> list[str]:
+    """restic's tags of a NAS backup of vm: every VM backup's, the VM's, and cst-keep with keep (--keep-tag)."""
+    return [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep is not None and keep != "" else [])
+
+
+def nas_manifest(run: NasRun, files: list[CopiedFile], consistency: str, keep: str | None) -> Manifest:
+    """The manifest a NAS backup stages for restic (files: the sources with their sizes), with
+    restic's tags (nas_tags)."""
+    return {
+        "vm": run.vm,
+        "uuid": run.parts.uuid,
+        "timestamp": run.stamp,
+        "epoch": int(run.epoch),
+        "mode": BackupMode.NAS,
+        "consistency": consistency,
+        "keep": keep,
+        "tags": nas_tags(run.vm, keep),
+        "files": files,
+        "versions": run.versions,
+        "deployment": run.deployment,
+        "notes": run.notes,
+    }
+
+
+def nas_index_entry(run: NasRun, nas: NasRepo, snap: str, consistency: str, keep: str | None) -> IndexEntry:
+    """The index entry of a NAS backup: restic's snapshot snap in nas's repository."""
+    return {
+        "vm": run.vm,
+        "timestamp": run.stamp,
+        "epoch": int(run.epoch),
+        "mode": BackupMode.NAS,
+        "snapshot": snap,
+        "repository": nas["repo"],
+        "host": nas["host"],
+        "consistency": consistency,
+        "keep": keep,
+        "versions": run.versions,
+        "deployment": run.deployment,
+    }

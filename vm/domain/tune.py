@@ -12,6 +12,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.libvirt_xml import keep_prefixes
+from vm.domain import KNOBS
 
 
 class GuestKind(StrEnum):
@@ -119,42 +120,61 @@ def tune_domain(
     the desired state are touched."""
     keep_prefixes(xml_text)
     root = ET.fromstring(xml_text)
-    changes: list[str] = []
-    held: list[str] = []
-    notes: list[str] = []
     devices = root.find("devices")
     if devices is None:
-        return None, changes, held, ["no <devices> in the definition"]
-    disks = devices.findall("disk")
-    names: set[str | None] = {(t.get("dev") if (t := d.find("target")) is not None else None) for d in disks}
-    ctrl_idx: int | None = None
+        return None, [], [], ["no <devices> in the definition"]
+    run = _DomainTune(devices, kn, allow_bus=allow_bus)
+    for disk in run.disks:
+        run.tune_disk(disk)
+    for nic in devices.findall("interface"):
+        run.tune_nic(nic)
+    run.balloon_notes()
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="unicode") + "\n", run.changes, run.held, run.notes
 
-    def virtio_scsi_index() -> int:
-        nonlocal ctrl_idx
-        if ctrl_idx is not None:
-            return ctrl_idx
-        scsi = [c for c in devices.findall("controller") if c.get("type") == "scsi"]
+
+class _DomainTune:
+    """One tune_domain over a definition's <devices>, which it changes in place: what it changes,
+    holds back (allow_bus False) and notes, and the virtio-scsi controller it moves disks to (found,
+    or added the first time a disk needs it)."""
+
+    def __init__(self, devices: ET.Element, kn: Mapping[str, bool], *, allow_bus: bool) -> None:
+        self.devices, self.kn, self.allow_bus = devices, kn, allow_bus
+        self.disks = devices.findall("disk")
+        self.names: set[str | None] = {
+            (t.get("dev") if (t := d.find("target")) is not None else None) for d in self.disks
+        }
+        self.changes: list[str] = []
+        self.held: list[str] = []
+        self.notes: list[str] = []
+        self.ctrl_idx: int | None = None
+
+    def virtio_scsi_index(self) -> int:
+        """The index of the virtio-scsi controller: the definition's, else one added (a change)."""
+        if self.ctrl_idx is not None:
+            return self.ctrl_idx
+        scsi = [c for c in self.devices.findall("controller") if c.get("type") == "scsi"]
         found = next((c for c in scsi if c.get("model") == "virtio-scsi"), None)
         if found is not None:
-            ctrl_idx = int(found.get("index", "0"))
-            return ctrl_idx
+            self.ctrl_idx = int(found.get("index", "0"))
+            return self.ctrl_idx
         idx = max((int(c.get("index", "0")) for c in scsi), default=-1) + 1
         el = ET.Element("controller", {"type": "scsi", "index": str(idx), "model": "virtio-scsi"})
-        kids = list(devices)
+        kids = list(self.devices)
         last = max((i for i, c in enumerate(kids) if c.tag == "controller"), default=None)
         if last is None:
             last = max((i for i, c in enumerate(kids) if c.tag == "disk"), default=len(kids) - 1)
-        devices.insert(last + 1, el)
-        changes.append(f"add a virtio-scsi controller (index {idx})")
-        ctrl_idx = idx
+        self.devices.insert(last + 1, el)
+        self.changes.append(f"add a virtio-scsi controller (index {idx})")
+        self.ctrl_idx = idx
         return idx
 
-    def used_units(idx: int) -> set[int]:
+    def used_units(self, idx: int) -> set[int]:
         """Units taken on controller idx (bus 0, target 0): SCSI disks and
         CD-ROMs, and SCSI host devices (<hostdev type='scsi'>)."""
         out: set[int] = set()
-        on_scsi = [d for d in disks if (t := d.find("target")) is not None and t.get("bus") == "scsi"]
-        on_scsi += [h for h in devices.findall("hostdev") if h.get("type") == "scsi"]
+        on_scsi = [d for d in self.disks if (t := d.find("target")) is not None and t.get("bus") == "scsi"]
+        on_scsi += [h for h in self.devices.findall("hostdev") if h.get("type") == "scsi"]
         for d in on_scsi:
             a = d.find("address")
             if (
@@ -167,82 +187,96 @@ def tune_domain(
                 out.add(int(a.get("unit", "0")))
         return out
 
-    for disk in disks:
+    def tune_disk(self, disk: ET.Element) -> None:
+        """A file or block disk: its driver's attributes, and its move from SATA or IDE to virtio-scsi."""
         if disk.get("device", "disk") != "disk":
-            continue  # cdrom, floppy, lun: left as they are
+            return  # cdrom, floppy, lun: left as they are
         target = disk.find("target")
         dev = (target.get("dev") or "?") if target is not None else "?"
         kind = disk.get("type", "file")
         if kind not in ("file", "block"):
-            notes.append(f"disk {dev}: a {kind} disk: left as it is (only file and block disks are tuned)")
-            continue
-        if kn["VM_TUNE_DISK_DRIVER"]:
-            drv = disk.find("driver")
-            if drv is None:
-                drv = ET.Element("driver", {"name": "qemu"})
-                disk.insert(0, drv)
-            if drv.get("name", "qemu") != "qemu":
-                notes.append(f"disk {dev}: driver {drv.get('name')}: left as it is")
-            else:
-                for k, v in DRIVER_WANTED:
-                    if drv.get(k) != v:
-                        changes.append(f"disk {dev}: {k} {drv.get(k) or '(default)'} -> {v}")
-                        drv.set(k, v)
+            self.notes.append(f"disk {dev}: a {kind} disk: left as it is (only file and block disks are tuned)")
+            return
+        if self.kn["VM_TUNE_DISK_DRIVER"]:
+            self.tune_driver(disk, dev)
         bus = target.get("bus") if target is not None else None
-        if not kn["VM_TUNE_DISK_BUS"] or bus not in ("sata", "ide"):
-            continue
-        if not allow_bus:
-            held.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi)")
-            continue
+        if not self.kn["VM_TUNE_DISK_BUS"] or bus not in ("sata", "ide"):
+            return
+        if not self.allow_bus:
+            self.held.append(f"disk {dev}: bus {bus} -> scsi (virtio-scsi)")
+            return
         assert target is not None
-        idx = virtio_scsi_index()
+        self.move_to_scsi(disk, target, dev, bus)
+
+    def tune_driver(self, disk: ET.Element, dev: str) -> None:
+        """The disk's qemu driver gets DRIVER_WANTED (a driver element added when there is none)."""
+        drv = disk.find("driver")
+        if drv is None:
+            drv = ET.Element("driver", {"name": "qemu"})
+            disk.insert(0, drv)
+        if drv.get("name", "qemu") != "qemu":
+            self.notes.append(f"disk {dev}: driver {drv.get('name')}: left as it is")
+            return
+        for k, v in DRIVER_WANTED:
+            if drv.get(k) != v:
+                self.changes.append(f"disk {dev}: {k} {drv.get(k) or '(default)'} -> {v}")
+                drv.set(k, v)
+
+    def move_to_scsi(self, disk: ET.Element, target: ET.Element, dev: str, bus: str | None) -> None:
+        """The disk on the virtio-scsi controller: an sdX name, a free unit (its own index if free)."""
+        idx = self.virtio_scsi_index()
         new = dev
         if not dev.startswith("sd"):
             n = 0
-            while disk_name(n) in names:
+            while disk_name(n) in self.names:
                 n += 1
             new = disk_name(n)
-            names.add(new)
+            self.names.add(new)
             target.set("dev", new)
         target.set("bus", "scsi")
         addr = disk.find("address")
         if addr is not None and addr.get("type") == "drive":
             disk.remove(addr)
-        taken = used_units(idx)
+        taken = self.used_units(idx)
         want = disk_index(new)
         unit = want if want is not None and want not in taken else min(set(range(len(taken) + 1)) - taken)
         ET.SubElement(
             disk, "address", {"type": "drive", "controller": str(idx), "bus": "0", "target": "0", "unit": str(unit)}
         )
-        changes.append(
+        self.changes.append(
             f"disk {dev}: bus {bus} -> scsi (virtio-scsi controller {idx}, unit {unit})"
             + (f", renamed {dev} -> {new}" if new != dev else "")
         )
-    for nic in devices.findall("interface"):
+
+    def tune_nic(self, nic: ET.Element) -> None:
+        """An emulated network card of an old model becomes virtio (same MAC)."""
         mac = nic.find("mac")
         label = f"network card {mac.get('address') if mac is not None else '(no MAC)'}"
         if nic.get("type") not in NIC_TYPES:
-            continue  # hostdev, vhostuser, vdpa: not an emulated card
+            return  # hostdev, vhostuser, vdpa: not an emulated card
         model = nic.find("model")
         m = model.get("type") if model is not None else None
         if m is None:
-            notes.append(f"{label}: no <model> (QEMU's default card): add <model type='virtio'/> by hand if wanted")
-            continue
-        if not kn["VM_TUNE_NIC"] or m not in OLD_NICS:
-            continue
-        if not allow_bus:
-            held.append(f"{label}: {m} -> virtio")
-            continue
+            self.notes.append(
+                f"{label}: no <model> (QEMU's default card): add <model type='virtio'/> by hand if wanted"
+            )
+            return
+        if not self.kn["VM_TUNE_NIC"] or m not in OLD_NICS:
+            return
+        if not self.allow_bus:
+            self.held.append(f"{label}: {m} -> virtio")
+            return
         assert model is not None
         model.set("type", "virtio")
-        changes.append(f"{label}: {m} -> virtio (same MAC)")
-    bal = devices.find("memballoon")
-    if bal is None:
-        notes.append("no <memballoon>: not added (libvirt adds one by default; it was removed on purpose?)")
-    elif bal.get("model") == "none":
-        notes.append("memballoon model='none': left as it is")
-    ET.indent(root, space="  ")
-    return ET.tostring(root, encoding="unicode") + "\n", changes, held, notes
+        self.changes.append(f"{label}: {m} -> virtio (same MAC)")
+
+    def balloon_notes(self) -> None:
+        """A memballoon removed, or of model none: noted, never changed."""
+        bal = self.devices.find("memballoon")
+        if bal is None:
+            self.notes.append("no <memballoon>: not added (libvirt adds one by default; it was removed on purpose?)")
+        elif bal.get("model") == "none":
+            self.notes.append("memballoon model='none': left as it is")
 
 
 def normalized(xml_text: str) -> str:
@@ -286,6 +320,35 @@ def cpu_owner_line(root: ET.Element, names: Sequence[str], cst: str) -> str:
     else:
         feat = f"cpu mode {mode}"
     return f"CPU (owned by {cst} cpu vm-pin, not by tune): {feat}; {pin}; check: {cst} cpu vm-pin plan"
+
+
+def tune_plan_lines(plan: TunePlan, cpu_disable: Sequence[str], *, vm_conf: str, cst: str) -> list[str]:
+    """What tune plan and apply print before the diff: the guest, the knobs vm_conf turns off, the
+    changes, what is held back, the notes, the CPU's owner (cpu_disable: the features vm-pin keeps
+    disabled), the Linux and Windows hints, and, when nothing differs, that nothing does."""
+    label = {GuestKind.WINDOWS: "Windows", GuestKind.LINUX: "Linux", GuestKind.UNKNOWN: "not known"}[plan.kind]
+    out = [f"{plan.vm}: {plan.state}; guest: {label} ({plan.why})"]
+    off = [k for k in KNOBS[1:] if not plan.knobs[k]]
+    if off:
+        out.append(f"  skipped by {vm_conf}: {', '.join(k + '=no' for k in off)}")
+    out += [f"  change: {c}" for c in plan.changes]
+    out += [f"  held back: {h}" for h in plan.held]
+    out += [f"  note: {n}" for n in plan.notes]
+    out.append(f"  {cpu_owner_line(plan.root, cpu_disable, cst)}")
+    if plan.kind == GuestKind.LINUX and plan.changes and any("bus" in c or "network card" in c for c in plan.changes):
+        out.append(
+            "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
+            "drivers (hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first."
+        )
+    if plan.held:
+        out.append(f"\nHeld back: the guest is {label}, and its virtio drivers are not known to be installed.")
+        out.append(WINDOWS_STEPS.format(cst=cst, vm=plan.vm))
+    if not plan.diff:
+        out.append(
+            f"\n{plan.vm}: disks and network card already as {cst} vm tune recommends"
+            + (" (except what is held back above)." if plan.held else ".")
+        )
+    return out
 
 
 def tune_line(xml_text: str, kn: Mapping[str, bool], cst: str) -> str:

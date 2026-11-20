@@ -2,6 +2,7 @@
 """`cst vm backup [VM] [--full]`: the local copy of a shut-off VM (reflink or full), and the checks
 every backup makes before it copies anything (also the NAS backup's, vm.application.nas)."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import os.path
 import shlex
@@ -11,10 +12,21 @@ from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state, has_managed_save
-from vm.domain import FULL_MARGIN, SHUT_OFF, URI, VmSettings, domain_parts, restore_lines, stored, stored_name
+from vm.domain import (
+    FULL_MARGIN,
+    SHUT_OFF,
+    URI,
+    DomainParts,
+    VmSettings,
+    domain_parts,
+    restore_lines,
+    stored,
+    stored_name,
+)
 from vm.domain.backup import (
     DOMAIN_XML,
     MANIFEST_JSON,
+    BackupMode,
     Fingerprint,
     IndexRefused,
     Manifest,
@@ -71,6 +83,29 @@ def check_shut_off(commands: VmCommandsPort, vm: str) -> None:
         )
 
 
+def read_backup_definition(commands: VmCommandsPort, vm: str, nothing: str) -> tuple[str, DomainParts]:
+    """(the inactive definition with its secrets, what it is made of) of a backup; Refused when virsh
+    cannot give it, when a disk cannot be backed up (nothing: "nothing copied", "nothing backed up"),
+    or when it has no file disk."""
+    rc, xml_text, err = commands.virsh(("dumpxml", "--inactive", "--security-info", vm), 60, detach=None)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+    parts = domain_parts(xml_text)
+    if parts.problems:
+        raise Refused(f"{vm}: {nothing}:\n  " + "\n  ".join(parts.problems))
+    if not parts.disks:
+        raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
+    return xml_text, parts
+
+
+def fingerprint_or_none(store: BackupStorePort, path: str) -> Fingerprint | None:
+    """The fingerprint of path, None when it is gone (removed meanwhile: changed as well)."""
+    try:
+        return store.fingerprint(path)
+    except OSError:
+        return None
+
+
 def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> None:
     """Copy the shut-off vm into BACKUP_DIR/VM/STAMP (reflink, or real copies with full), check that
     nothing changed meanwhile, record it in the index and print how to restore it. Refused, with
@@ -78,53 +113,12 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     store, out = p.store, p.out
     check_backup_start(cfg, store, "backup", root=p.root)
     check_shut_off(p.commands, vm)
-    rc, xml_text, err = p.commands.virsh(("dumpxml", "--inactive", "--security-info", vm), 60, detach=None)
-    if rc != 0:
-        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
-    parts = domain_parts(xml_text)
-    if parts.problems:
-        raise Refused(f"{vm}: nothing copied:\n  " + "\n  ".join(parts.problems))
-    if not parts.disks:
-        raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
+    xml_text, parts = read_backup_definition(p.commands, vm, "nothing copied")
     notes = list(parts.skipped)
-
-    def real(path: str, what: str) -> str:
-        # cp -a copies a symbolic link as a link (no data): the file it points
-        # to is what gets copied, and restored, instead.
-        r = store.realpath(path)
-        if r != path:
-            notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
-        return r
-
-    sources: list[tuple[str, bool]] = []
-    for disk in parts.disks:
-        if not store.is_file(disk):
-            raise Refused(f"{vm}: disk {disk} not found")
-        path = real(disk, "disk")
-        if store.has_backing_file(path):
-            raise Refused(
-                f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
-                "(qemu-img info --backing-chain)"
-            )
-        if (path, True) not in sources:
-            sources.append((path, True))
-    if parts.nvram:
-        if store.is_file(parts.nvram):
-            sources.append((real(parts.nvram, "UEFI variables"), False))
-        else:
-            notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not copied")
-    tpm_dir = ""
-    if parts.tpm:
-        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
-        if parts.uuid and store.is_dir(tpm_dir):
-            tpm_dir = real(tpm_dir, "TPM state")
-            sources.append((tpm_dir, False))
-        else:
-            notes.append(
-                f"TPM state {tpm_dir} not found: not copied (BitLocker may then ask for its "
-                "recovery key after a restore)"
-            )
-    mode = "full" if full else "reflink"
+    sources = _local_disk_sources(store, vm, parts, notes)
+    state, tpm_dir = _local_state_sources(cfg, store, parts, notes)
+    sources += state
+    mode = BackupMode.FULL if full else BackupMode.REFLINK
     epoch, stamp = backup_time(cfg, p.clock)
     vm_dir = os.path.join(cfg.paths.backup_dir, vm)
     dest_dir = os.path.join(vm_dir, stamp)
@@ -132,14 +126,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         raise Refused(f"{dest_dir} already exists: wait a second and run it again")
     sizes = {src: store.sizes(src) for src, _ in sources}
     if full:
-        need = sum(a for a, _ in sizes.values())
-        margin = max(FULL_MARGIN[0], int(need * FULL_MARGIN[1]))
-        probe, free = store.free_space(cfg.paths.backup_dir)
-        if free < need + margin:
-            raise Refused(
-                f"--full needs {format_bytes_gib_mib(need, mib_decimals=1)} (allocated size) + {format_bytes_gib_mib(margin, mib_decimals=1)} margin, but "
-                f"{probe} has {format_bytes_gib_mib(free, mib_decimals=1)} free: free space first, or use the default reflink copy"
-            )
+        _check_full_space(cfg, store, sizes)
     store.make_backup_folder(cfg.paths.backup_dir, vm_dir, dest_dir)
     out.say(f"{vm}: {mode} backup to {dest_dir}")
     copied: list[tuple[str, bool]] = []
@@ -153,26 +140,7 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
             )
             store.copy(src, stored(dest_dir, src), mode, big=big)
             copied.append((src, big))
-        # Nothing stops the VM from starting during a long copy: check again,
-        # and that no source changed while it was read.
-        try:
-            check_shut_off(p.commands, vm)
-        except Refused as e:
-            raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}") from e
-
-        def now_fp(path: str) -> Fingerprint | None:
-            try:
-                return store.fingerprint(path)
-            except OSError:
-                return None  # removed during the copy: changed as well
-
-        changed = [src for src, _ in sources if now_fp(src) != before[src]]
-        if changed:
-            raise Refused(
-                "changed during the copy (the VM was started?), the copy is not consistent: "
-                + ", ".join(changed)
-                + ". Shut the VM off and run the backup again"
-            )
+        _check_copy_unchanged(p, vm, sources, before)
         # The definition holds --security-info secrets (graphics passwords): 0600 from the start.
         store.write_private(os.path.join(dest_dir, DOMAIN_XML), xml_text)
         manifest: Manifest = {
@@ -200,34 +168,8 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         store.remove_tree(dest_dir)
         out.warn(f"  incomplete backup removed: {dest_dir}")
         raise
-    # Entries whose folder was removed by hand leave the index here. The index was read before the
-    # copy too, but a newer cst vm (or a damage) can have changed it since: the backup stays, and its
-    # notes and restore lines are printed before the refusal.
-    refused: Refused | None = None
-    try:
-        entries = [
-            e
-            for e in store.read_index()
-            if e.get("mode") == "nas" or (store.is_dir(e["path"]) and e["path"] != dest_dir)
-        ]
-        entries.append(index_entry(manifest, dest_dir))
-        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-        store.write_index(entries)
-    except IndexRefused as e:
-        kept = (
-            f"the folder stays until removed by hand, and its {MANIFEST_JSON} says what it holds "
-            "(restore by hand: vm/README.md, section 5)"
-        )
-        refused = Refused(not_indexed_text(f"the backup {dest_dir}", kept, e))
-    for n in notes:
-        out.say(f"  note: {n}")
-    out.say(f"Done: {len(copied)} item(s), definition and manifest in {dest_dir}")
-    if mode == "reflink":
-        out.say(
-            "Reflink copies share disk blocks with the VM: they protect against changes to the image "
-            "(a repair tool, an upgrade), not against losing the disks. For that: --full, or a copy "
-            "on another machine."
-        )
+    refused = _index_local_backup(store, manifest, dest_dir)
+    _say_local_done(out, notes, dest_dir, len(copied), reflink=mode == BackupMode.REFLINK)
     out.say("\nTo restore (never done automatically; read each line first):")
     for line in restore_lines(vm, dest_dir, copied, tpm_dir):
         out.say(f"  {line}")
@@ -237,3 +179,124 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
         f"\nRemove an old backup by hand: sudo rm -r {shlex.quote(vm_dir)}/TIMESTAMP "
         f"(the next backup drops it from {cfg.cst} vm list)"
     )
+
+
+def _copied_through(store: BackupStorePort, notes: list[str], path: str, what: str) -> str:
+    """The file path is or points to: cp -a copies a symbolic link as a link (no data), so the file it
+    points to is what gets copied, and restored, instead (noted)."""
+    r = store.realpath(path)
+    if r != path:
+        notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
+    return r
+
+
+def _local_disk_sources(
+    store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str]
+) -> list[tuple[str, bool]]:
+    """[(path, True)] of the disks a local copy reads, once each; Refused for one that is not there or
+    is a qcow2 overlay."""
+    sources: list[tuple[str, bool]] = []
+    for disk in parts.disks:
+        if not store.is_file(disk):
+            raise Refused(f"{vm}: disk {disk} not found")
+        path = _copied_through(store, notes, disk, "disk")
+        if store.has_backing_file(path):
+            raise Refused(
+                f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
+                "(qemu-img info --backing-chain)"
+            )
+        if (path, True) not in sources:
+            sources.append((path, True))
+    return sources
+
+
+def _local_state_sources(
+    cfg: VmSettings, store: BackupStorePort, parts: DomainParts, notes: list[str]
+) -> tuple[list[tuple[str, bool]], str]:
+    """([(path, False)] of the UEFI variables and the TPM folder a local copy reads, the TPM folder
+    or ""); notes say which is not there."""
+    sources: list[tuple[str, bool]] = []
+    if parts.nvram:
+        if store.is_file(parts.nvram):
+            sources.append((_copied_through(store, notes, parts.nvram, "UEFI variables"), False))
+        else:
+            notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not copied")
+    tpm_dir = ""
+    if parts.tpm:
+        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
+        if parts.uuid and store.is_dir(tpm_dir):
+            tpm_dir = _copied_through(store, notes, tpm_dir, "TPM state")
+            sources.append((tpm_dir, False))
+        else:
+            notes.append(
+                f"TPM state {tpm_dir} not found: not copied (BitLocker may then ask for its "
+                "recovery key after a restore)"
+            )
+    return sources, tpm_dir
+
+
+def _check_full_space(cfg: VmSettings, store: BackupStorePort, sizes: Mapping[str, tuple[int, int]]) -> None:
+    """Refused when the backup folder's file system has not the allocated size of the sources free,
+    plus FULL_MARGIN (--full)."""
+    need = sum(a for a, _ in sizes.values())
+    margin = max(FULL_MARGIN[0], int(need * FULL_MARGIN[1]))
+    probe, free = store.free_space(cfg.paths.backup_dir)
+    if free < need + margin:
+        raise Refused(
+            f"--full needs {format_bytes_gib_mib(need, mib_decimals=1)} (allocated size) + {format_bytes_gib_mib(margin, mib_decimals=1)} margin, but "
+            f"{probe} has {format_bytes_gib_mib(free, mib_decimals=1)} free: free space first, or use the default reflink copy"
+        )
+
+
+def _check_copy_unchanged(
+    p: LocalBackup, vm: str, sources: Sequence[tuple[str, bool]], before: Mapping[str, Fingerprint]
+) -> None:
+    """Nothing stops the VM from starting during a long copy: Refused unless it is still shut off and
+    no source changed while it was read (before: their fingerprints)."""
+    try:
+        check_shut_off(p.commands, vm)
+    except Refused as e:
+        raise Refused(f"the VM's state changed during the copy, the copy is not consistent: {e}") from e
+    changed = [src for src, _ in sources if fingerprint_or_none(p.store, src) != before[src]]
+    if changed:
+        raise Refused(
+            "changed during the copy (the VM was started?), the copy is not consistent: "
+            + ", ".join(changed)
+            + ". Shut the VM off and run the backup again"
+        )
+
+
+def _index_local_backup(store: BackupStorePort, manifest: Manifest, dest_dir: str) -> Refused | None:
+    """The index with the new backup (entries whose folder was removed by hand leave it); the refusal
+    to raise once the notes and restore lines are printed when the index is not this cst vm's."""
+    # The index was read before the copy too, but a newer cst vm (or a damage) can have changed it
+    # since: the backup stays, and its notes and restore lines are printed before the refusal.
+    try:
+        entries = [
+            e
+            for e in store.read_index()
+            if e.get("mode") == BackupMode.NAS or (store.is_dir(e["path"]) and e["path"] != dest_dir)
+        ]
+        entries.append(index_entry(manifest, dest_dir))
+        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
+        store.write_index(entries)
+    except IndexRefused as e:
+        kept = (
+            f"the folder stays until removed by hand, and its {MANIFEST_JSON} says what it holds "
+            "(restore by hand: vm/README.md, section 5)"
+        )
+        return Refused(not_indexed_text(f"the backup {dest_dir}", kept, e))
+    return None
+
+
+def _say_local_done(out: ProgressPort, notes: Sequence[str], dest_dir: str, items: int, *, reflink: bool) -> None:
+    """The notes of a local copy, its Done line, and what a reflink copy protects against."""
+    for n in notes:
+        out.say(f"  note: {n}")
+    out.say(f"Done: {items} item(s), definition and manifest in {dest_dir}")
+    if reflink:
+        out.say(
+            "Reflink copies share disk blocks with the VM: they protect against changes to the image "
+            "(a repair tool, an upgrade), not against losing the disks. For that: --full, or a copy "
+            "on another machine."
+        )

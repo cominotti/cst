@@ -27,6 +27,7 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -79,20 +80,23 @@ cmd = args[0]
 fail = vm.get("fail", [])
 def xml(sources, secret):
     disks = "".join(
-        f"<disk type='file' device='{d['device']}'><source file='{sources[d['target']]}'/>"
+        f"<disk type='{d.get('type', 'file')}' device='{d['device']}'><source file='{sources[d['target']]}'/>"
         + ("<backingStore type='file'><source file='x'/></backingStore>" if vm.get("chain") else "<backingStore/>")
         + f"<target dev='{d['target']}'/></disk>" for d in vm["disks"])
     agent = vm.get("agent")
     chan = (f"<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0' state='{agent}'/></channel>"
             if agent else "")
     pw = "<graphics type='spice' passwd='s3cret'/>" if secret else "<graphics type='spice'/>"
+    tpm = "<tpm><backend type='emulator'/></tpm>" if vm.get("tpm", True) else ""
     return (f"<domain type='kvm'><name>win</name><uuid>{vm['uuid']}</uuid><os><nvram>{vm['nvram']}</nvram></os>"
-            f"<devices>{disks}{chan}{pw}<tpm><backend type='emulator'/></tpm></devices></domain>\n")
+            f"<devices>{disks}{chan}{pw}{tpm}</devices></domain>\n")
 if cmd == "domstate":
     print(vm["state"]); print()
 elif cmd == "list":
     print("\n".join(vm.get("managed", [])))
 elif cmd == "dumpxml":
+    if ("dumpxml-inactive" if "--inactive" in args else "dumpxml-live") in fail:
+        sys.exit("error: failed to get domain 'win'")
     print(xml(vm["persistent"] if "--inactive" in args else vm["live"], "--security-info" in args))
 elif cmd == "domblklist":
     if "blklist" in fail or "--inactive" in args and "blklist-inactive" in fail and vm["live"]["sda"].endswith(".qcow2"):
@@ -106,6 +110,9 @@ elif cmd == "snapshot-create-as":
         sys.exit("error: Guest agent is not responding: QEMU guest agent is not connected")
     if "snapshot" in fail:
         sys.exit("error: internal error: snapshot failed")
+    if "snapshot-hang-none" in fail:
+        # virsh hangs; libvirt made no overlay file and never switched the disk.
+        import time; time.sleep(30)
     if "snapshot-hang-nothing" in fail:
         # virsh hangs; libvirt made the file but never switched the disk (yet).
         for i, a in enumerate(args):
@@ -121,6 +128,8 @@ elif cmd == "snapshot-create-as":
                 vm["live"][t] = spec["file"]
                 vm["persistent"][t] = spec["file"]
     save()
+    if "snapshot-error-in-place" in fail:
+        sys.exit("error: internal error: unexpected answer")
     if "term-after-snapshot" in fail:
         import signal
         os.kill(os.getppid(), signal.SIGTERM)
@@ -198,6 +207,8 @@ if cmd == "backup":
             json.dump(vm, open(os.path.join(fix, "vm.json"), "w"))
     if "touch-nvram" in vm.get("fail", []):
         open(vm["nvram"], "a").write("more")
+    if "remove-nvram" in vm.get("fail", []):
+        os.unlink(vm["nvram"])
     if "slow-backup" in vm.get("fail", []):
         open(os.path.join(fix, "backup-started"), "w").close()
         import time; time.sleep(3)
@@ -1004,6 +1015,214 @@ class RobustnessTest(Nas):
         self.assertEqual(vm_domain.overlay_kind("shut off", self.overlay, self.disk), "offline")
 
 
+class NasPreflightAndSourcesTest(Nas):
+    """What the NAS backup reads and refuses before restic starts, the notes of its sources, and the
+    snapshot attempts whose answer and outcome differ."""
+
+    def refused(self, words: str) -> None:
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"cst vm: {words}\n", r.stderr)
+        self.assertEqual(self.virsh_calls("snapshot-create-as"), [])
+        self.assertEqual(self.restic_calls(), [])
+
+    def test_the_inactive_definition_refusals(self) -> None:
+        missing = os.path.join(self.images, "gone.qcow2")
+        for kw, words in (
+            ({"fail": ["dumpxml-inactive"]}, "virsh dumpxml win: error: failed to get domain 'win'"),
+            (
+                {"disks": [{"target": "sda", "device": "disk", "type": "block"}]},
+                "win: nothing backed up:\n  sda: a block disk: only file disks can be copied; back it up by hand",
+            ),
+            (
+                {"disks": [{"target": "sdb", "device": "cdrom"}]},
+                "win: no file disk in its definition: nothing to back up",
+            ),
+            ({"persistent": {"sda": missing, "sdb": "/iso/virtio.iso"}}, f"win: disk {missing} not found"),
+            (
+                {"persistent": {"sda": missing + ".cst-overlay-20261101T000000Z", "sdb": "/iso/virtio.iso"}},
+                f"win: disk {missing}.cst-overlay-20261101T000000Z not found",
+            ),
+        ):
+            with self.subTest(kw=kw):
+                self.vm(**kw)
+                self.refused(words)
+
+    def test_an_overlay_left_behind_and_a_backing_file_are_refused(self) -> None:
+        left = f"{self.disk}.cst-overlay-20261101T000000Z"
+        with open(left, "w") as f:
+            f.write("x")
+        self.vm(persistent={"sda": left, "sdb": "/iso/virtio.iso"})
+        self.refused(
+            f"win: disk {left} is an overlay a NAS backup left behind (its blockcommit did not finish). Put the disk "
+            "back first; `cst doctor` shows the commands"
+        )
+        self.vm()
+        with open(self.disk, "wb") as f:
+            f.write(b"QFI\xfb\0\0\0\3" + struct.pack(">Q", 512))
+        self.refused(
+            f"win: {self.disk} is a qcow2 overlay with a backing file: back up the chain by hand "
+            "(qemu-img info --backing-chain)"
+        )
+
+    def test_the_running_definition_refusals(self) -> None:
+        other = os.path.join(self.images, "other.qcow2")
+        for kw, words in (
+            ({"fail": ["dumpxml-live"]}, "virsh dumpxml win: error: failed to get domain 'win'"),
+            (
+                {"chain": True},
+                (
+                    f"win: disk sda runs on {self.disk} with a backing chain (an overlay left by an earlier backup?). "
+                    "Put it back first; `cst doctor` shows the commands"
+                ),
+            ),
+            (
+                {"live": {"sda": other, "sdb": "/iso/virtio.iso"}},
+                (
+                    "win: the running VM's disks differ from its definition (changed since it started): restart it, "
+                    "then back up"
+                ),
+            ),
+        ):
+            with self.subTest(kw=kw):
+                self.vm(**kw)
+                self.refused(words)
+        self.vm()
+        with open(self.overlay, "w") as f:
+            f.write("x")
+        self.refused(f"{self.overlay} already exists: wait a second and run it again")
+
+    def test_the_notes_of_a_linked_disk_missing_uefi_variables_and_no_tpm(self) -> None:
+        link = os.path.join(self.images, "link.qcow2")
+        os.symlink(self.disk, link)
+        missing = os.path.join(self.images, "gone_VARS.qcow2")
+        self.vm(
+            live={"sda": link, "sdb": "/iso/virtio.iso"},
+            persistent={"sda": link, "sdb": "/iso/virtio.iso"},
+            nvram=missing,
+            tpm=False,
+            agent="connected",
+        )
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        notes = [ln for ln in r.stdout.splitlines() if ln.startswith("  note: ")]
+        self.assertEqual(
+            notes,
+            [
+                "  note: sdb (cdrom, not copied)",
+                f"  note: disk {link} is a symbolic link: read through it: {self.disk}",
+                f"  note: UEFI variables {missing} not there yet: not backed up",
+            ],
+        )
+        backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
+        self.assertEqual(backup["args"][-2:], [self.disk, os.path.join(self.stage, "win")])
+
+    def test_uefi_variables_removed_while_restic_reads_them(self) -> None:
+        self.vm(fail=["remove-nvram"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f"  note: {self.nvram} changed while restic read it (the VM wrote it): that copy may be torn; the next "
+            "backup reads it again\n",
+            r.stdout,
+        )
+        self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID)
+        self.restic_cfg()
+        open(self.log, "w").close()
+        os.unlink(os.path.join(self.fix, "restic.log"))
+        with open(self.nvram, "wb") as f:
+            f.write(b"vars")
+        self.vm(state="shut off", fail=["remove-nvram"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "cst vm: changed during the backup (the VM was started?), the copy is not consistent (restic snapshot "
+            f"{SNAP_ID[:8]} forgotten): {self.nvram}\n",
+            r.stderr,
+        )
+        forgets = [c["args"] for c in self.restic_calls() if c["args"][0] == "forget"]
+        self.assertEqual(forgets, [["forget", "--retry-lock", "30m", SNAP_ID]])
+
+    def test_a_restic_line_that_is_not_json_is_shown(self) -> None:
+        self.restic_cfg(backup_lines=["not json at all"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("  restic: not json at all\n", r.stdout)
+        self.assertEqual(self.index_entries()[0]["snapshot"], SNAP_ID)
+
+    def test_a_quiesced_snapshot_virsh_calls_failed_but_in_place(self) -> None:
+        self.vm(agent="connected", fail=["snapshot-error-in-place"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        snaps = self.virsh_calls("snapshot-create-as")
+        self.assertEqual(len(snaps), 1)
+        self.assertIn("--quiesce", snaps[0])
+        self.assertEqual(len(self.virsh_calls("domfsthaw")), 1)
+        self.assertNotIn("quiesced, QEMU guest agent", r.stdout)
+        self.assertNotIn("crash-consistent snapshot (", r.stdout)
+        self.assertIn(
+            "  note: virsh reported an error but the snapshot is in place: error: internal error: unexpected answer\n",
+            r.stdout,
+        )
+        self.assertEqual(self.index_entries()[0]["consistency"], "crash-consistent")
+        self.assertEqual(len(self.virsh_calls("blockcommit")), 1)
+
+    def test_a_crash_consistent_snapshot_virsh_calls_failed_but_in_place(self) -> None:
+        self.vm(agent=None, fail=["snapshot-error-in-place"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.virsh_calls("snapshot-create-as")), 1)
+        self.assertEqual(self.virsh_calls("domfsthaw"), [])
+        notes = [ln for ln in r.stdout.splitlines() if ln.startswith("  note: ")]
+        self.assertEqual(
+            notes,
+            [
+                "  note: sdb (cdrom, not copied)",
+                "  note: virsh reported an error but the snapshot is in place: error: internal error: unexpected answer",
+                "  note: crash-consistent: no guest agent channel (org.qemu.guest_agent.0) in the definition",
+            ],
+        )
+        self.assertEqual(self.index_entries()[0]["consistency"], "crash-consistent")
+
+    def test_a_failed_merge_back_names_the_backups_own_failure(self) -> None:
+        self.restic_cfg(backup_rc=1)
+        self.vm(fail=["commit"], agent="connected")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("DISK NOT MERGED BACK:\n  ", r.stderr)
+        self.assertIn("\n(the backup itself: restic backup failed: restic exit 1; no backup recorded)\n", r.stderr)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertTrue(os.path.exists(self.overlay))
+
+    def test_an_unclear_snapshot_without_any_overlay_file_alerts_and_names_no_file(self) -> None:
+        self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
+        self.vm(agent=None, fail=["snapshot-hang-none"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "cst vm: DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within 2 s and, 3 s later, "
+            "the VM's disks still do not all show the overlay: libvirt may still switch to it. Nothing was removed\n",
+            r.stderr,
+        )
+        self.assertNotIn("(kept:", r.stderr)
+        self.assertNotIn("(the backup itself", r.stderr)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertFalse(os.path.exists(self.overlay))
+        self.assertEqual(self.virsh_calls("blockcommit"), [])
+        self.assertNotIn("backup", [c["args"][0] for c in self.restic_calls()])
+
+    def test_a_snapshot_timeout_without_quiesce_thaws_nothing(self) -> None:
+        self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
+        self.vm(agent=None, fail=["snapshot-hang-nothing"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("may still switch to it", r.stderr)
+        self.assertIn(f"(kept: {self.overlay})", r.stderr)
+        self.assertEqual(self.virsh_calls("domfsthaw"), [])
+        self.assertTrue(os.path.exists(self.overlay))
+        self.assertNotIn("backup", [c["args"][0] for c in self.restic_calls()])
+
+
 class ShutOffAndRefusalTest(Nas):
     def test_shut_off_vm_is_read_directly(self) -> None:
         self.vm(state="shut off")
@@ -1612,6 +1831,23 @@ class TimerTest(Nas):
             [
                 "systemctl show -p NextElapseUSecRealtime cst-vm-backup@win.timer",
                 "systemctl show -p Result cst-vm-backup@win.service",
+            ],
+        )
+
+    def test_status_says_when_the_nas_backup_is_not_set_up(self) -> None:
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=0\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            r.stdout.replace(self.tmp, "TMP").splitlines(),
+            [
+                "weekly NAS backup of win: off (cst-vm-backup@win.timer; Sat *-*-* 04:30:00, up to 30 min later)",
+                "  TMP/sbin/cst-vm: not installed",
+                "  TMP/units/cst-vm-backup@.service: not installed",
+                "  TMP/units/cst-vm-backup@.timer: not installed",
+                "  last NAS backup: none",
+                "  the NAS backup is not set up: cst btrfs snapshots nas setup",
             ],
         )
 

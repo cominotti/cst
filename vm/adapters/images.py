@@ -129,19 +129,31 @@ def mark_system_dir(d: ImageProbe, say: Callable[[str], None]) -> str:
     """Create (root:root 0711, as libvirt does) and mark the system folder:
     directly as root, else with sudo (say shows each sudo command before it runs).
     Returns an error text or ""."""
-    path, q = d.path, shlex.quote(d.path)
+    path = d.path
     if os.path.islink(path) or (not d.present and os.path.lexists(path)):
         return f"{path}: appeared or is a symbolic link: not touched"
     if os.geteuid() == 0:
-        try:
-            if not d.present:
-                os.mkdir(path, 0o711)
-                os.chmod(path, 0o711)
-                run(["restorecon", path])
-            mark_folder_nocow(path)
-        except OSError as e:
-            return f"{path}: {e.strerror}"
-        return "" if flag_state(readable_inode_flags(path)) is True else f"{path}: the mark did not stick"
+        return _mark_system_dir_as_root(d)
+    return _mark_system_dir_with_sudo(d, say)
+
+
+def _mark_system_dir_as_root(d: ImageProbe) -> str:
+    """mark_system_dir as root: the folder created (0711, relabelled) when absent, then marked."""
+    path = d.path
+    try:
+        if not d.present:
+            os.mkdir(path, 0o711)
+            os.chmod(path, 0o711)
+            run(["restorecon", path])
+        mark_folder_nocow(path)
+    except OSError as e:
+        return f"{path}: {e.strerror}"
+    return "" if flag_state(readable_inode_flags(path)) is True else f"{path}: the mark did not stick"
+
+
+def _mark_system_dir_with_sudo(d: ImageProbe, say: Callable[[str], None]) -> str:
+    """mark_system_dir as a user: each step through sudo (say shows it first), then lsattr checks."""
+    path, q = d.path, shlex.quote(d.path)
     steps: list[list[str]] = []
     if not d.present:
         steps += [["install", "-d", "-o", "root", "-g", "root", "-m", "0711", path], ["restorecon", path]]

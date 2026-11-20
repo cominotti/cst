@@ -48,6 +48,35 @@ def progress_text(status: object) -> str:
     return f"{shown_pct} % ({done_text} of {total_text} read)"
 
 
+def _backup_json_line(
+    line: str, summary: ResticSummary, shown: float, out: ResticOutput
+) -> tuple[ResticSummary, float]:
+    """One line of restic backup --json: shown as it is when it is not JSON, a status line every
+    minute (shown: when the last one was), an error on stderr, the summary kept. (summary, shown)."""
+    try:
+        msg = parse_json(line)
+    except ValueError, RecursionError:
+        out.say(f"  restic: {line.rstrip()}", flush=True)
+        return summary, shown
+    if not json_object(msg):
+        return summary, shown
+    # A line's shape never stops the backup: a field of another type shows as "?", a
+    # summary of another shape counts as no summary (no snapshot: the run refuses).
+    match msg.get("message_type"):
+        case ResticMessage.SUMMARY:
+            summary = msg if is_restic_summary(msg) else {}
+        case ResticMessage.STATUS if time.monotonic() - shown >= MINUTE:
+            shown = time.monotonic()
+            out.say(f"  restic: {progress_text(msg)}", flush=True)
+        case ResticMessage.ERROR:
+            err = msg.get("error") or {}
+            text = (err.get("message") or err) if json_object(err) else err
+            out.warn(f"  restic error: {msg.get('item') or ''} {text}")
+        case _:
+            pass
+    return summary, shown
+
+
 class Restic:
     """restic through run (a command and its answer: the caller's runner, in the C locale) and,
     for a backup, a child of its own whose JSON lines are read as they come."""
@@ -77,27 +106,7 @@ class Restic:
         try:
             assert p.stdout is not None
             for line in p.stdout:
-                try:
-                    msg = parse_json(line)
-                except ValueError, RecursionError:
-                    out.say(f"  restic: {line.rstrip()}", flush=True)
-                    continue
-                if not json_object(msg):
-                    continue
-                # A line's shape never stops the backup: a field of another type shows as "?", a
-                # summary of another shape counts as no summary (no snapshot: the run refuses).
-                match msg.get("message_type"):
-                    case ResticMessage.SUMMARY:
-                        summary = msg if is_restic_summary(msg) else {}
-                    case ResticMessage.STATUS if time.monotonic() - shown >= MINUTE:
-                        shown = time.monotonic()
-                        out.say(f"  restic: {progress_text(msg)}", flush=True)
-                    case ResticMessage.ERROR:
-                        err = msg.get("error") or {}
-                        text = (err.get("message") or err) if json_object(err) else err
-                        out.warn(f"  restic error: {msg.get('item') or ''} {text}")
-                    case _:
-                        pass
+                summary, shown = _backup_json_line(line, summary, shown, out)
             rc = p.wait()
         except BaseException:
             p.terminate()
