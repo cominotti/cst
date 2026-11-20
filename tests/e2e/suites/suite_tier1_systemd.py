@@ -575,6 +575,14 @@ rec = json.load(open(sys.argv[1]))
 for dest in sys.argv[2:]:
     del rec["files"][dest]
 json.dump(rec, open(sys.argv[1], "w"))' "$record" "$watch" "$unit"
+# installer check counts the current but unrecorded copy as not current (exit 1); plan (through the
+# installer's plan) says apply adopts it; the install then adds it to the record and check exits 0.
+inst() { /usr/bin/python3 -I /opt/cst-rw/cst_core/installer.py "$@"; }
+rc=0; inst check --home "$H" bluetooth/bt-ldac-watch || rc=$?
+[[ "$rc" == 1 ]] || { echo "test_80: check took the unrecorded watcher for current (exit $rc)" >&2; false; }
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan over an unrecorded watcher" "$out"
+grep -qE '^  adopt +~/\.local/lib/cst/bt-ldac-watch +same as bt-ldac-watch in CST; apply adds it to the install record$' <<<"$out"
 lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
 step "apply over an unrecorded watcher" apply --yes
 no_writes "apply over an unrecorded watcher" "$out"
@@ -588,6 +596,7 @@ python3 -I -c 'import json, sys
 files = json.load(open(sys.argv[1]))["files"]
 assert files[sys.argv[2]]["src"] == "bluetooth/bt-ldac-watch", files.get(sys.argv[2])
 assert files[sys.argv[3]]["component"] == "bluetooth:ldac", files.get(sys.argv[3])' "$record" "$watch" "$unit"
+inst check --home "$H" bluetooth/bt-ldac-watch
 
 # 4. le-audio without on/off only shows the setting.
 out="$(bt le-audio)"
@@ -4079,8 +4088,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         writes nothing; `plan` then has nothing to do (exit 0). A second
         `apply` changes nothing: the same inode, mtime and content of each
         file, no new main.conf backup, no restart of WirePlumber. With the watcher's program and unit
-        taken out of the install record, the next `apply` adds them back, writes nothing and restarts
-        neither the watcher nor WirePlumber. `le-audio` alone only shows the setting.
+        taken out of the install record, `installer.py check` counts the program as not current (exit 1)
+        and `plan` says apply adopts it; the next `apply` adds them back, writes nothing and restarts
+        neither the watcher nor WirePlumber, and check then exits 0. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
         defaults; nothing else changes and `plan` exits 0. A second
@@ -5356,6 +5366,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -q 'no GameMode client left: switching off' <<<"$($gp tick)"
             for _ in $(seq 100); do [[ -e /run/cpu-setup/game.state ]] || break; sleep 0.1; done
             test ! -e /run/cpu-setup/game.state
+            # 'off' removes game.state before it ends: the unit is deactivating until its ExecStop exits.
+            for _ in $(seq 100); do
+                [[ "$(systemctl show -P ActiveState cpu-game.service)" == deactivating ]] || break; sleep 0.1
+            done
             [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
             [[ "$(systemctl show -P Result cpu-game.service)" == success ]]
             [[ "$(systemctl show -P CPUWeight machine.slice)" == "$base" ]]
@@ -5855,6 +5869,63 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)" == "$own" ]] \
                 || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
             systemctl --user -M tester@ stop e2e154-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_156_cpu_game_profile_tick_sets_a_box_whose_record_bash_cannot_read(self) -> None:
+        """The real game profile, on for tester, then a box next to the game (a slice of the user
+        manager's own, made by systemd-run --user) whose only record in game.state is a whole line that
+        bash cannot read (an unclosed quote): 'off' would skip it, so the box is not handled. The tick
+        sets the box (CPUWeight idle in the real user manager) and writes a record 'off' can read; a
+        second tick adds nothing, and 'off' gives the box its own CPUWeight back."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e156-box.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-156-conf.bak ]]; then mv /tmp/e2e-156-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-156-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            touch /run/cpu-setup/manual
+            gp on
+            systemd-run --user -M tester@ --quiet --slice=e2e156.slice --unit=e2e156-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e156.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            own=$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)
+            [[ "$own" != idle ]]
+            printf '%s\n' "prop usr e2e156.slice CPUWeight existed 'x" >>"$st"   # an unclosed quote
+            got=$(gp tick)
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)" == idle ]] \
+                || { echo "the tick did not set the box: $got" >&2; cat "$st" >&2; exit 1; }
+            grep -qxF 'prop usr e2e156.slice CPUWeight new -' "$st" \
+                || { echo "no record 'off' can read" >&2; cat "$st" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            gp tick >/dev/null
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a second tick added a record" >&2; cat "$st" >&2; exit 1; }
+            gp off
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)" == "$own" ]] \
+                || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e156-box.service
             echo E2E-OK
             """,
         ).stdout
@@ -6700,8 +6771,9 @@ echo E2E-OK
         that component (another test's) stay as they are. Then cpu:gamemode (tester's ~/.config/gamemode.ini,
         through the real runuser, so tester's record is the one read; no test before this one leaves it,
         and its being there fails the test) installed as an older CST left it (installed, its lines
-        taken out): plan prints "would record:" for it and changes nothing, check exits 0, install writes
-        nothing and lists it, plan then says "unchanged:", and a second install changes nothing."""
+        taken out): plan prints "would record:" for it and changes nothing, check exits 1 (current means
+        current and recorded), install writes nothing and lists it, plan then says "unchanged:" and check
+        exits 0, and a second install changes nothing."""
         c = self.SYSTEMD_CONTAINER
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         script = (
@@ -6774,12 +6846,14 @@ echo E2E-OK
             plan="$({user_installer} plan "${{sel[@]}}")"
             [[ "$plan" == "would record: {ini}" ]] || {{ echo "plan said: $plan" >&2; exit 1; }}
             [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "plan changed the record" >&2; exit 1; }}
-            {user_installer} check "${{sel[@]}}" || {{ echo "check: exit $?" >&2; exit 1; }}
+            rc=0; {user_installer} check "${{sel[@]}}" || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "check took the unrecorded file for current: exit $rc" >&2; exit 1; }}
             out="$({user_installer} install "${{sel[@]}}")"
             [[ "$out" == "unchanged: {ini}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
             [[ "$({lines} "$U" cpu:gamemode)" == "{ini} pending" ]]
             plan="$({user_installer} plan "${{sel[@]}}")"
             [[ "$plan" == "unchanged: {ini}" ]] || {{ echo "plan after install said: $plan" >&2; exit 1; }}
+            {user_installer} check "${{sel[@]}}" || {{ echo "check after install: exit $?" >&2; exit 1; }}
             before="$(sha256sum "$U" {ini})"
             again="$({user_installer} install "${{sel[@]}}")"
             [[ "$again" == "unchanged: {ini}" && "$(sha256sum "$U" {ini})" == "$before" ]] ||

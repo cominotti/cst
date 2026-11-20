@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The user manager (systemctl --user): checked calls before files are
 removed, daemon-reload, the timer's enable and disable, what it says of a timer,
-the manager's PATH (UserUnits, the UserUnitsPort; a test replaces its systemctl,
-or names a stub program instead of systemctl).
+the manager's PATH (UserUnits, the UserUnitsPort, over cst_core's SystemdPort of
+the user manager: user_systemctl, which may name a stub program instead of
+systemctl; a test may pass a fake SystemdPort instead).
 """
 
 from __future__ import annotations
@@ -11,15 +12,15 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
-    from cst_core.ports import CommandResult
+    from cst_core.ports import CommandResult, SystemdPort
     from toolchains.ports import RunOutputPort
 
 from cst_core.adapters import SystemctlAdapter
 from cst_core.domain.errors import Refused
 from cst_core.domain.values import MINUTE
-from cst_core.ports import SystemctlHost
+from cst_core.ports import SystemctlHost, UnitName
 from toolchains.domain.auto import (
     TIMER_RUNNING_STATES,
     UNIT_STOPPED_STATES,
@@ -55,94 +56,71 @@ def user_systemctl(program: str | None) -> SystemctlAdapter:
     )
 
 
-def _result(manager: SystemctlAdapter, args: Sequence[str]) -> CommandResult:
-    """The adapter's call for one systemctl command line (ARGS without systemctl --user)."""
-    match args:
-        case (UserManagerVerb.IS_ACTIVE, unit):
-            res = manager.is_active(unit)
-        case (UserManagerVerb.IS_ENABLED, unit):
-            res = manager.is_enabled(unit)
-        case (UserManagerVerb.SHOW, "-p", prop, "--value", unit):
-            res = manager.show_value(unit, prop)
-        case (UserManagerVerb.SHOW_ENVIRONMENT,):
-            res = manager.show_environment()
-        case (UserManagerVerb.START, unit):
-            res = manager.start(unit)
-        case (UserManagerVerb.STOP, unit):
-            res = manager.stop(unit)
-        case (UserManagerVerb.ENABLE, "--now", unit):
-            res = manager.enable(unit, now=True)
-        case (UserManagerVerb.DISABLE, "--now", unit):
-            res = manager.disable(unit, now=True)
-        case (UserManagerVerb.CLEAN, flag, unit) if flag.startswith("--what="):
-            res = manager.clean(unit, what=flag.removeprefix("--what="))
-        case (UserManagerVerb.DAEMON_RELOAD,):
-            res = manager.daemon_reload_result()
-        case _:
-            raise ValueError(f"systemctl --user {' '.join(args)}: not a call cst-toolchains makes")
-    return res
-
-
-def systemctl(*args: str, program: str | None, check: bool = False, ok: Sequence[int] = (0,)) -> str:
-    """Output (stripped) of systemctl --user (PROGRAM: a stub run instead); '' when it could not run.
-    check: Refused when it could not run or exited with a code not in ok."""
-    r = _result(user_systemctl(program), args)
-    if r.cause is not None:
+def said(res: CommandResult, words: Sequence[str], *, check: bool = False, ok: Sequence[int] = (0,)) -> str:
+    """The output (stripped) of one systemctl --user call (WORDS: its command line after systemctl
+    --user, for the messages); '' when it could not run. check: Refused when it could not run or
+    exited with a code not in ok."""
+    if res.cause is not None:
         if check:
-            raise Refused(f"systemctl --user {' '.join(args)}: {r.cause}") from None
+            raise Refused(f"systemctl --user {' '.join(words)}: {res.cause}") from None
         return ""
-    if check and r.returncode not in ok:
-        raise Refused(f"systemctl --user {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")
-    return r.stdout.strip()
+    if check and res.returncode not in ok:
+        raise Refused(f"systemctl --user {' '.join(words)} failed: {res.stderr.strip() or res.stdout.strip()}")
+    return res.stdout.strip()
 
 
 class UserUnits:
-    """UserUnitsPort: the user manager, as auto on, auto off and status use it (PROGRAM: a
-    test's stub run instead of systemctl). Every call goes through systemctl(), which a
-    test's subclass may replace."""
+    """UserUnitsPort: the user manager, as auto on, auto off and status use it, through a SystemdPort
+    of the user manager that MANAGER makes for each call (user_systemctl, which reads this user's
+    session environment then; a test passes a fake)."""
 
-    def __init__(self, out: RunOutputPort, program: str | None) -> None:
+    def __init__(self, out: RunOutputPort, manager: Callable[[], SystemdPort]) -> None:
         self.out = out
-        self.program = program
+        self._manager = manager
 
-    def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
-        """See systemctl()."""
-        return systemctl(*args, check=check, ok=ok, program=self.program)
+    @property
+    def manager(self) -> SystemdPort:
+        """The user manager for one call (built anew each time: its environment is read then)."""
+        return self._manager()
 
     def active_state(self, name: str) -> str:
-        return self.systemctl(UserManagerVerb.IS_ACTIVE, name)
+        return said(self.manager.is_active(UnitName(name)), (UserManagerVerb.IS_ACTIVE, name))
 
     def timer_facts(self, name: str) -> TimerFacts:
-        enabled = self.systemctl(UserManagerVerb.IS_ENABLED, name)
-        active = self.systemctl(UserManagerVerb.IS_ACTIVE, name)
+        enabled = said(self.manager.is_enabled(UnitName(name)), (UserManagerVerb.IS_ENABLED, name))
+        active = self.active_state(name)
         if active not in TIMER_RUNNING_STATES:
             return TimerFacts(enabled, active)
-        next_elapse = self.systemctl(UserManagerVerb.SHOW, "-p", "NextElapseUSecRealtime", "--value", name)
+        prop = "NextElapseUSecRealtime"
+        next_elapse = said(
+            self.manager.show_value(UnitName(name), prop), (UserManagerVerb.SHOW, "-p", prop, "--value", name)
+        )
         return TimerFacts(enabled, active, next_elapse)
 
     def stop_if_running(self, name: str) -> bool:
         # is-active prints the state; it exits 3 when the unit is not active,
         # and 4 when the manager does not know it (nothing loaded it).
-        state = self.before_removal(name, UserManagerVerb.IS_ACTIVE, ok=(0, 3, 4))
+        state = self.before_removal(name, self.manager.is_active, (UserManagerVerb.IS_ACTIVE,), ok=(0, 3, 4))
         if state in UNIT_STOPPED_STATES:
             return False
-        self.before_removal(name, UserManagerVerb.STOP)
+        self.before_removal(name, self.manager.stop, (UserManagerVerb.STOP,))
         return True
 
     def reload(self) -> None:
-        self.systemctl(UserManagerVerb.DAEMON_RELOAD, check=True)
+        said(self.manager.daemon_reload_result(), (UserManagerVerb.DAEMON_RELOAD,), check=True)
 
     def enable_now(self, name: str) -> None:
-        self.systemctl(UserManagerVerb.ENABLE, "--now", name, check=True)
+        said(self.manager.enable(UnitName(name), now=True), (UserManagerVerb.ENABLE, "--now", name), check=True)
 
-    def before_removal(self, name: str, *args: str, ok: Sequence[int] = (0,)) -> str:
-        """systemctl --user ARGS NAME for a timer, checked, before auto on/off
-        removes any file. When the user manager refuses or cannot be reached,
-        nothing has been removed yet: Refused, and a second run (once the
-        manager answers) can finish the job. Removing the files anyway would
-        leave a timer that keeps running with no file left to show it."""
+    def before_removal(
+        self, name: str, call: Callable[[UnitName], CommandResult], words: Sequence[str], *, ok: Sequence[int] = (0,)
+    ) -> str:
+        """call(NAME) (WORDS: systemctl --user's command line before NAME) for a timer, checked, before
+        auto on/off removes any file. When the user manager refuses or cannot be reached, nothing has
+        been removed yet: Refused, and a second run (once the manager answers) can finish the job.
+        Removing the files anyway would leave a timer that keeps running with no file left to show it."""
         try:
-            return self.systemctl(*args, name, check=True, ok=ok)
+            return said(call(UnitName(name)), (*words, name), check=True, ok=ok)
         except Refused as e:
             raise Refused(
                 f"{e}; nothing was removed and {name} may still be running: run this again once your user "
@@ -172,13 +150,13 @@ class UserUnits:
         `clean` needs the timer loaded and stopped, so this runs before its file
         is removed; a failed clean leaves that file, which auto on and auto off
         then remove themselves (AutoTimer.forget_stamp)."""
-        self.before_removal(name, UserManagerVerb.DISABLE, "--now")
-        self.systemctl(UserManagerVerb.CLEAN, "--what=state", name)
+        self.before_removal(name, lambda n: self.manager.disable(n, now=True), (UserManagerVerb.DISABLE, "--now"))
+        said(self.manager.clean(UnitName(name), what="state"), (UserManagerVerb.CLEAN, "--what=state", name))
 
     def manager_path(self) -> str | None:
         """PATH of the user manager (what the service runs with), or None when
         it cannot be read."""
-        for line in self.systemctl(UserManagerVerb.SHOW_ENVIRONMENT).splitlines():
+        for line in said(self.manager.show_environment(), (UserManagerVerb.SHOW_ENVIRONMENT,)).splitlines():
             if line.startswith("PATH="):
                 val = line[len("PATH=") :]
                 # systemd quotes a value with special characters ($'...'): not parsed here.

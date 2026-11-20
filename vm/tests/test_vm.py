@@ -43,6 +43,7 @@ from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.errors import Refused, Usage
 from cst_core.domain.files import OwnedState, UnitFileState
 from cst_core.ports import CommandFailed, CommandResult, DecodeErrors, OutputMode, StdinMode, UnitName
+from tests.probes import NoUnitQueries
 from tests.probes import assert_replaced_durably, bytes_program, recorded_fsyncs
 from vm import adapters as vm_adapters, cli as vm_cli, domain as vm_domain
 from vm.adapters import backup as vm_adapters_backup, images as vm_adapters_images
@@ -2461,7 +2462,7 @@ class FakeTimers:
         return list(self.on)
 
 
-class FakeSystemd:
+class FakeSystemd(NoUnitQueries):
     """A SystemdPort for the timer use cases: what they ask goes to timers.done (one order for both),
     enable and disable change timers.on; fail: "on", "off" or "reload" fails that step."""
 

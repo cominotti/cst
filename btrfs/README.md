@@ -1285,7 +1285,9 @@ after 45 s and alert` when everything is in place.
 the files with their install record lines (`removed:   PATH` for each;
 `removed 'PATH'` for a file an older version left, which the record never
 listed). When the installer cannot change the install record (one written by a newer
-CST), it removes the files without it, with a warning, and goes on. It
+CST), it removes the files without it, with a warning, tries once more to
+drop their lines (which helps when the installer stopped for a reason that is
+gone, such as a full disk), and goes on. It
 keeps `/var/lib/btrfs-degraded-boot` if markers of a past degraded boot are
 there (it tells you so); remove them once RAID1 is restored.
 
@@ -1391,7 +1393,8 @@ There is an optional daily backup to the NAS with **restic** (a backup program).
 Commands: `snapshots setup [--yes]`, `status`, `list [--json]`,
 `caches [--json]`, `prune [--confirm]`, `clean-targets [--apply]`, `disable [--purge]`,
 `nas setup --path DIR ...`, `nas status|disable|run`,
-`chrome-cache [status|apply|off]`.
+`chrome-cache [status|apply|off]` (`btrfs/chrome-cache` itself takes only
+`--home DIR` after the action and refuses any other argument, exit 2).
 
 **All details, and how to restore files: [SNAPSHOTS.md](SNAPSHOTS.md).**
 

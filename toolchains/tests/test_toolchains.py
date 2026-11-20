@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import override
 from unittest import mock
 
@@ -33,6 +33,7 @@ sys.dont_write_bytecode = True
 
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused, Usage
+from cst_core.ports import SystemdPort
 from toolchains.domain import auto as tcd_auto
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
@@ -52,6 +53,7 @@ from toolchains.adapters import sccache as tc_sccache
 from toolchains.adapters import units as tc_units
 from toolchains.application import auto as tc_app_auto
 from tests.probes import bytes_program
+from toolchains.tests.systemctl_lines import systemctl as systemctl_line
 from toolchains.tests.test_prune_rust_build import HELP, NOW, TOOL, quiet_signals
 
 TOOLCHAINS = os.path.dirname(TOOL)
@@ -1572,24 +1574,21 @@ class PackageLayersTest(Scratch):
     def test_systemctl_adapter_uses_the_configured_stub(self) -> None:
         with mock.patch.dict(os.environ, {"SYSTEMCTL_ACTIVE": "active"}):
             self.assertEqual(
-                tc_units.systemctl("is-active", "cst-toolchains-prune.timer", program=tc_wiring.systemctl_program()),
+                systemctl_line("is-active", "cst-toolchains-prune.timer", program=tc_wiring.systemctl_program()),
                 "active",
             )
         self.assertIsNone(self.session().units.manager_path())
         with self.failing("is-active"), self.assertRaises(Refused):
-            tc_units.systemctl(
-                "is-active", "cst-toolchains-prune.timer", check=True, program=tc_wiring.systemctl_program()
-            )
+            systemctl_line("is-active", "cst-toolchains-prune.timer", check=True, program=tc_wiring.systemctl_program())
 
     def test_no_systemctl_call_may_leave_its_program_out(self) -> None:
         # Left out, the real systemctl would run: every caller must name the stub (or None).
         none: dict[str, str | None] = {}  # no program= (a call the type checker cannot see as one)
-        with self.assertRaises(TypeError):
-            tc_units.systemctl("is-active", "cst-toolchains-prune.timer", check=False, ok=(0,), **none)
+        no_manager: dict[str, Callable[[], SystemdPort]] = {}  # no manager: UserUnits has no default either
         with self.assertRaises(TypeError):
             tc_units.user_systemctl(**none)
         with self.assertRaises(TypeError):
-            tc_units.UserUnits(tc_program.RunOutput(self.home, journal=False), **none)
+            tc_units.UserUnits(tc_program.RunOutput(self.home, journal=False), **no_manager)
 
 
 class ParseSizeTest(unittest.TestCase):
@@ -1668,9 +1667,9 @@ class CommandFaultTextTest(unittest.TestCase):
             (None, f"cargo metadata: [Errno 2] No such file or directory: '{missing}'"),
         )
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": "/nonexistent/cst-systemctl"}):
-            self.assertEqual(tc_units.systemctl("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "")
+            self.assertEqual(systemctl_line("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "")
             with self.assertRaises(Refused) as stop:
-                tc_units.systemctl("start", "x.service", check=True, program=tc_wiring.systemctl_program())
+                systemctl_line("start", "x.service", check=True, program=tc_wiring.systemctl_program())
         self.assertEqual(
             str(stop.exception),
             "systemctl --user start x.service: [Errno 2] No such file or directory: '/nonexistent/cst-systemctl'",
@@ -1715,7 +1714,7 @@ class NotUtf8OutputTest(unittest.TestCase):
         systemctl = self.stub("systemctl", b"enabled\xff\n")
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": systemctl}):
             self.assertEqual(
-                tc_units.systemctl("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "enabled\ufffd"
+                systemctl_line("is-enabled", "x.timer", program=tc_wiring.systemctl_program()), "enabled\ufffd"
             )
 
 
@@ -1737,7 +1736,20 @@ class SessionEnvTest(unittest.TestCase):
 
     def seen(self, **env: str) -> str:
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
-            return tc_units.systemctl("show-environment", program=tc_wiring.systemctl_program())
+            return systemctl_line("show-environment", program=tc_wiring.systemctl_program())
+
+    def test_the_sessions_user_manager_reads_the_environment_at_each_call(self) -> None:
+        # The session's UserUnits (wiring) builds the adapter for each call, so each systemctl --user call
+        # gets this user's session environment as it is then, as each call did before UserUnits took a
+        # SystemdPort; a session built once must not keep the environment of its start.
+        first, then = os.path.join(self.tmp, "one"), os.path.join(self.tmp, "two")
+        for d in (first, then):
+            os.mkdir(d)
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, "XDG_RUNTIME_DIR": first}):
+            units = tc_wiring.session(self.tmp, os.path.join(self.tmp, "cst-toolchains")).units
+            self.assertTrue(units.active_state("t.timer").startswith(f"{first}|"))
+            os.environ["XDG_RUNTIME_DIR"] = then
+            self.assertTrue(units.active_state("t.timer").startswith(f"{then}|"))
 
     def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
         other = f"/run/user/{self.uid + 1}"

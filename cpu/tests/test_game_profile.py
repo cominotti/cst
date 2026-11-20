@@ -30,8 +30,10 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters.host import read_settings, user_id, user_name
+from cpu.game.adapters.host import read_settings, read_snapshot, user_id, user_name
 from cpu.game.adapters.profile import GameProfile, load_profile
+from cst_core.adapters import files as cst_files
+from cst_core.adapters.files import read_text
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -41,8 +43,10 @@ from cpu.game.domain import (
     drifted,
     escapes_in_state,
     expand_cpus,
-    has_record_part,
+    has_prop_record,
     intended_records,
+    newer_intended,
+    record_line,
     records,
     game_settings,
     unheld,
@@ -212,9 +216,15 @@ class GameProfileCase(unittest.TestCase):
         return out.getvalue(), self.systemd.actions
 
     def drift_report(self) -> tuple[str, list[str]]:
+        """'state''s drift part over a snapshot of the two files, as 'state' reads them."""
         self.systemd.actions = []
         p, _ = self.profile()
-        return "".join(line + "\n" for line in p.drift_report()), self.systemd.actions
+        intended = read_text(self.intended)
+        newer = None if intended is None else newer_intended(self.intended, intended)
+        report = p.drift_report(
+            records(read_text(self.state) or ""), intended, newer, manual=os.path.exists(self.manual)
+        )
+        return "".join(line + "\n" for line in report), self.systemd.actions
 
     def read(self, path: str) -> str:
         with open(path) as f:
@@ -291,13 +301,21 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
 
-    def test_a_record_part_of_a_last_line_cut_short_is_none(self) -> None:
-        part = " S MemoryLow "
-        self.assertFalse(has_record_part("prop usr S MemoryLow existed 1", part))
-        self.assertTrue(has_record_part("prop usr S MemoryLow existed 1\n", part))
-        self.assertTrue(has_record_part("prop usr S MemoryLow new -\nepp 0 x", part))  # a whole line before it
-        self.assertFalse(has_record_part("prop usr S MemoryLow new -\nprop usr T MemoryLow", " T MemoryLow "))
-        self.assertFalse(has_record_part("", part))
+    def test_a_prop_record_is_matched_by_its_fields(self) -> None:
+        self.assertFalse(has_prop_record("prop usr S MemoryLow existed 1", "usr", "S", "MemoryLow"))  # cut short
+        self.assertTrue(has_prop_record("prop usr S MemoryLow existed 1\n", "usr", "S", "MemoryLow"))
+        self.assertTrue(has_prop_record("prop usr S MemoryLow new -\nepp 0 x", "usr", "S", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr S MemoryLow new -\nprop usr T MemoryLow", "usr", "T", "MemoryLow"))
+        self.assertFalse(has_prop_record("", "usr", "S", "MemoryLow"))
+        # A line bash cannot read (an unclosed quote) is no record 'off' can undo, so it holds none.
+        self.assertFalse(has_prop_record("prop usr S MemoryLow existed 'x\n", "usr", "S", "MemoryLow"))
+        # The unit as it is, whatever printf %q made of it; another manager, unit or property is none.
+        quoted = record_line("prop", "usr", "a\\x2db.scope", "MemoryLow", "new", "-")
+        self.assertIn("\\\\x2d", quoted)
+        self.assertTrue(has_prop_record(quoted, "usr", "a\\x2db.scope", "MemoryLow"))
+        self.assertFalse(has_prop_record(quoted, "sys", "a\\x2db.scope", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr Steam.scope MemoryLow new -\n", "usr", "S", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr S IOWeight new -\n", "usr", "S", "MemoryLow"))
 
     def test_intended_records(self) -> None:
         text = (
@@ -770,6 +788,132 @@ class IntendedFormatTest(GameProfileCase):
         self.assertFalse(os.path.exists(self.paths.drift_warned))
 
 
+class StateSnapshotTest(GameProfileCase):
+    """'state' takes no lock: it reads game.state and game.intended once, and every line it prints
+    judges that one snapshot, also when 'off' (or a tick) changes the files meanwhile."""
+
+    def test_state_reads_each_file_once_and_judges_that_snapshot(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        self.run_profile("tick")  # e2e.slice next to the game: idle, recorded in game.state
+        real = cst_files.read_text
+        seen: list[str] = []
+
+        def then_off(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
+            if path in (self.state, self.intended):
+                seen.append(path)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)  # 'off' ended meanwhile: the next read would find nothing
+            return text
+
+        with (
+            unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_off),
+            unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=then_off),
+        ):
+            out, _ = self.run_profile("state")
+        self.assertEqual(sorted(seen), sorted([self.state, self.intended]))
+        self.assertIn("game profile: ON (by hand)\n", out)
+        self.assertIn("  other boxes     idle: e2e.slice\n", out)
+        self.assertIn("  drift: none (every setting the profile made still holds)\n", out)
+
+    def test_the_by_hand_mark_is_read_once(self) -> None:
+        # The header ("ON (by hand)") and the drift line's fix command judge one reading of the mark.
+        self.run_profile("on")
+        self.write(self.manual, "")
+        real = os.path.exists
+        asked: list[str] = []
+
+        def exists(path: str) -> bool:
+            if path == self.manual:
+                asked.append(path)
+            return real(path)
+
+        with unittest.mock.patch("cpu.game.adapters.profile.os.path.exists", side_effect=exists):
+            out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON (by hand)\n", out)
+        self.assertEqual(asked, [self.manual])
+
+    def test_a_game_state_there_but_unreadable_is_still_on(self) -> None:
+        # A game.state there that cannot be read (a folder here) is on, as os.path.exists said before the
+        # snapshot, with no records.
+        self.run_profile("on")
+        for path in (self.state, self.intended):
+            os.unlink(path)
+            os.mkdir(path)
+        out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON\n", out)  # before the fix: "game profile: off"
+        self.assertIn("  drift: none", out)  # an unreadable game.intended holds no record, as before the snapshot
+
+    def test_without_game_intended_only_game_state_is_judged_and_drift_is_not_checked(self) -> None:
+        # Switched on by an older version (no game.intended), not by hand: game.state's unreadable lines are
+        # named, game.intended has none, and the drift line says how to switch the profile on again.
+        self.run_profile("on")
+        os.unlink(self.intended)
+        with open(self.state, "a") as f:
+            f.write("epp 3\n")
+        number = len(self.read(self.state).split("\n")) - 1
+        out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON\n", out)
+        self.assertEqual(
+            [x for x in out.split("\n") if "unreadable:" in x],
+            [f"  unreadable: {self.state} line {number} (skipped): epp 3"],
+        )
+        self.assertTrue(
+            out.endswith(
+                "  drift: not checked (switched on by an older version, which kept no record of its values;\n"
+                "         sudo systemctl restart cpu-game.service switches it off and on again with one)\n"
+            ),
+            out,
+        )
+
+
+class ReadSnapshotTest(unittest.TestCase):
+    """read_snapshot looks once: None for a file that is not there, "" for one there that it cannot read
+    (still on), else its text. What changes after that look does not change its answer."""
+
+    @override
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "game.state")
+
+    def test_not_there_unreadable_and_read(self) -> None:
+        self.assertIsNone(read_snapshot(self.path))
+        os.mkdir(self.path)
+        self.assertEqual(read_snapshot(self.path), "")
+        os.rmdir(self.path)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        self.assertEqual(read_snapshot(self.path), "x\n")
+
+    def test_a_file_there_that_goes_after_the_look_was_there(self) -> None:
+        # 'off' ended right after the read: the unreadable file it saw still counts as there.
+        os.mkdir(self.path)
+        real = cst_files.read_text
+
+        def then_gone(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
+            os.rmdir(path)
+            return text
+
+        with unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_gone):
+            self.assertEqual(read_snapshot(self.path), "")  # before the fix: None (off)
+
+    def test_a_file_that_comes_after_the_look_was_not_there(self) -> None:
+        # 'on' began right after the read: the file it did not see is still not there.
+        real = cst_files.read_text
+
+        def then_made(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
+            os.mkdir(path)
+            return text
+
+        with unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_made):
+            self.assertIsNone(read_snapshot(self.path))  # before the fix: "" (on)
+
+
 class UnreadableRecordTest(GameProfileCase):
     """A line of game.state or game.intended that holds no record (cut short when 'on' died while it
     wrote it, an unclosed quote): 'off' names it in the journal, skips it and undoes every other
@@ -940,6 +1084,37 @@ class UnreadableRecordTest(GameProfileCase):
         self.run_profile("on")
         self.systemd.units["sys"] = [scope]  # started after 'on', outside builds.slice
         self.tick_after_a_cut_record(f"prop sys {scope} AllowedCPUs new -", "sys", scope, "AllowedCPUs=12-23")
+
+    def test_a_steam_scope_whose_record_bash_cannot_read_is_protected(self) -> None:
+        # A record of the scope with an unclosed quote: 'off' cannot read it, so the scope is not
+        # handled; the tick sets MemoryLow again and writes a record 'off' can undo.
+        steam = "app-flatpak-com.valvesoftware.Steam-7.scope"
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [steam]
+        with open(self.state, "a") as f:
+            f.write(f"prop usr {steam} MemoryLow existed 'x\n")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime {steam} MemoryLow=16G", actions)
+        self.assertTrue(self.read(self.state).endswith(f"\nprop usr {steam} MemoryLow new -\n"))
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("usr", steam, "MemoryLow")))
+
+    def test_a_steam_scope_whose_name_printf_quotes_is_handled_once(self) -> None:
+        # systemd escapes a dash of a name part as \x2d; printf %q writes that backslash quoted, and
+        # the scope is still the same one at the next tick: set once, not at every tick.
+        steam = "app-flatpak-com.valvesoftware.Steam-a\\x2db.scope"
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [steam]
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime {steam} MemoryLow=16G", actions)
+        _, actions = self.run_profile("tick")
+        self.assertEqual([a for a in self.sets(actions) if steam in a], [])
+        self.assertEqual(
+            [r for r in records(self.read(self.state)) if r[2:4] == (steam, "MemoryLow")],
+            [("prop", "usr", steam, "MemoryLow", "new", "-")],
+        )
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")

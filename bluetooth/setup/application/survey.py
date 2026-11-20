@@ -60,6 +60,7 @@ from bluetooth.setup.domain import (
     home_tilde,
     wp_label,
     wp_note,
+    watcher_prog_state,
     wp_word,
 )
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
@@ -494,14 +495,7 @@ class Survey:
         self.lw_unit_st = self.file_state(
             self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
-        if not f.exists(self.p.lw_prog):
-            self.lw_prog_st = OwnedState.MISSING
-        elif self.installer("check", "--home", self.p.home, "bluetooth/bt-ldac-watch").returncode == 0:
-            self.lw_prog_st = OwnedState.OK
-        elif f.contains(self.p.lw_prog, MARKER, quiet=False):
-            self.lw_prog_st = OwnedState.CHANGE
-        else:
-            self.lw_prog_st = OwnedState.CONFLICT
+        self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
         self.lw_enabled = self.quiet(["systemctl", "--user", "is-enabled", LDAC_UNIT], host=True)
         self.lw_active = self.quiet(["systemctl", "--user", "is-active", LDAC_UNIT], host=True)
         if self.lw_want:
@@ -515,14 +509,22 @@ class Survey:
         else:
             self.lw_change = self.lw_ours_present()
 
+    def _lw_prog_state(self) -> OwnedState:
+        """The watcher's program by the installer's plan (watcher_prog_state; a failed plan's error on stderr)."""
+        r = self.installer(
+            "plan", "--home", self.p.home, "bluetooth/bt-ldac-watch", output=OutputMode.STDOUT_SHOW_STDERR
+        )
+        said, prog = (r.stdout if r.returncode == 0 else ""), self.p.lw_prog
+        return watcher_prog_state(said, prog, lambda: self.m.files.contains(prog, MARKER, quiet=False))
+
     def lw_off_why(self) -> str:
         """Why apply keeps the watcher off: LDAC_RATE is empty, or no headset is set for it."""
         rate = self.c.ldac_rate
         return f"no headset is set (LDAC_RATE={rate} needs one)" if rate else "LDAC_RATE is empty"
 
     def lw_ours_present(self) -> bool:
-        ours = (OwnedState.OK, OwnedState.CHANGE)
-        return self.lw_unit_st in ours or self.lw_prog_st in ours
+        prog_ours = (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE)
+        return self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE) or self.lw_prog_st in prog_ours
 
     def lw_unit_label(self) -> str:
         return f"systemd/user/{LDAC_UNIT}"
@@ -661,6 +663,7 @@ class Survey:
         }
         prog_rows = {
             OwnedState.OK: ("ok", "same as bt-ldac-watch in CST"),
+            OwnedState.ADOPT: ("adopt", "same as bt-ldac-watch in CST; apply adds it to the install record"),
             OwnedState.CHANGE: ("update", "older copy (apply installs the one in CST)"),
             OwnedState.MISSING: ("write", "copy of bluetooth/bt-ldac-watch"),
             OwnedState.CONFLICT: ("CONFLICT", REFUSED_CONFLICT_NOTE),
@@ -677,7 +680,7 @@ class Survey:
                 svc,
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it",
             )
-        elif self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
+        elif self.lw_unit_st == OwnedState.OK and self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT):
             self.item("ok", svc, "enabled, active")
         else:
             self.item("restart", svc, "apply restarts it with the new files")
@@ -759,7 +762,7 @@ class Survey:
         """plan: what apply would change. 0: nothing to do; 10: apply would write or restart something."""
         self.compute_plan()
         self.out(
-            "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments, restarts nothing;\n"
+            "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments or the install record, restarts nothing;\n"
             "write/update/remove/set/restart = apply would change that; CONFLICT = apply stops; ? = could not be read;\n"
             "warn/note = for your information.\n"
         )

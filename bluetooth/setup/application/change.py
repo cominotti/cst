@@ -39,6 +39,7 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
+from cst_core.domain.install import Component
 from cst_core.domain.units import ActiveState
 from cst_core.ports import OutputMode
 
@@ -434,7 +435,7 @@ class Change(Checks):
         (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
         that changed after plan (a git pull meanwhile) is still taken up."""
         p, unit = self.p, LDAC_UNIT
-        if self.lw_prog_st != OwnedState.OK:
+        if self.lw_prog_st not in (OwnedState.OK, OwnedState.ADOPT):
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
         r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
         self.out(r.stdout)  # its lines, then its error, as it printed them
@@ -443,7 +444,7 @@ class Change(Checks):
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
         said = self.checked(
-            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", "bluetooth:ldac"],
+            ["text", "--home", p.home, p.lw_unit_file, "0644", "--component", Component.BLUETOOTH_LDAC],
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
@@ -463,7 +464,7 @@ class Change(Checks):
         else:
             self.out(f"unchanged: {unit} enabled and active\n")
         self.lw_active = self.quiet(["systemctl", "--user", "is-active", unit])
-        r = self.installer("mark", "--home", p.home, "--component", "bluetooth:ldac", "done")
+        r = self.installer("mark", "--home", p.home, "--component", Component.BLUETOOTH_LDAC, "done")
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
 
@@ -485,7 +486,7 @@ class Change(Checks):
             self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
             self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
             self.must(["systemctl", "--user", "daemon-reload"])
-        if self.lw_prog_st in (OwnedState.OK, OwnedState.CHANGE):
+        if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))
             self.out(f"removed:   {p.lw_prog}\n")

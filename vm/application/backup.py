@@ -14,6 +14,7 @@ from cst_core.ports import ClockPort
 from vm.application import domain_state, has_managed_save
 from vm.domain import (
     FULL_MARGIN,
+    OVERLAY_MARK,
     SHUT_OFF,
     URI,
     DomainParts,
@@ -115,9 +116,9 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     check_shut_off(p.commands, vm)
     xml_text, parts = read_backup_definition(p.commands, vm, "nothing copied")
     notes = list(parts.skipped)
-    sources = _local_disk_sources(store, vm, parts, notes)
-    state, tpm_dir = _local_state_sources(cfg, store, parts, notes)
-    sources += state
+    found = SourceWalk(cfg, store, vm, notes, nas=False).sources(parts)
+    sources = [(d, True) for d in found.disks] + [(f, False) for f in (found.nvram, found.tpm) if f is not None]
+    tpm_dir = found.tpm_dir
     mode = BackupMode.FULL if full else BackupMode.REFLINK
     epoch, stamp = backup_time(cfg, p.clock)
     vm_dir = os.path.join(cfg.paths.backup_dir, vm)
@@ -181,58 +182,83 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
     )
 
 
-def _copied_through(store: BackupStorePort, notes: list[str], path: str, what: str) -> str:
-    """The file path is or points to: cp -a copies a symbolic link as a link (no data), so the file it
-    points to is what gets copied, and restored, instead (noted)."""
-    r = store.realpath(path)
-    if r != path:
-        notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
-    return r
+@dataclass(frozen=True, slots=True)
+class BackupSources:
+    """What a backup of a VM reads (SourceWalk.sources): its disks, in the order of its definition (each file
+    once), the files its UEFI variables and TPM state are read from (None: not read), and the
+    TPM folder a local copy records (its real path when read; the folder named for its uuid when not
+    there; "" without a TPM)."""
+
+    disks: list[str]
+    nvram: str | None
+    tpm: str | None
+    tpm_dir: str
 
 
-def _local_disk_sources(
-    store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str]
-) -> list[tuple[str, bool]]:
-    """[(path, True)] of the disks a local copy reads, once each; Refused for one that is not there or
-    is a qcow2 overlay."""
-    sources: list[tuple[str, bool]] = []
-    for disk in parts.disks:
-        if not store.is_file(disk):
-            raise Refused(f"{vm}: disk {disk} not found")
-        path = _copied_through(store, notes, disk, "disk")
-        if store.has_backing_file(path):
+@dataclass(frozen=True, slots=True)
+class SourceWalk:
+    """The walk over a VM's definition that finds what its backup reads (sources): for a local copy
+    (nas False) or a NAS backup of vm, through store, its notes added to notes."""
+
+    cfg: VmSettings
+    store: BackupStorePort
+    vm: str
+    notes: list[str]
+    nas: bool
+
+    def through(self, path: str, what: str) -> str:
+        """The file path is or points to: the backup reads (cp -a would copy a link as a link, no data)
+        and restores the file it points to instead, which a note says for each file."""
+        r = self.store.realpath(path)
+        if r != path:
+            verb = "read" if self.nas else "copied"
+            self.notes.append(f"{what} {path} is a symbolic link: {verb} (and restored) through it: {r}")
+        return r
+
+    def disk(self, disk: str) -> str:
+        """The file a backup reads for a disk of the definition; Refused when it is not there, is an
+        overlay a NAS backup left behind (NAS only), or has a backing file."""
+        if not self.store.is_file(disk):
+            raise Refused(f"{self.vm}: disk {disk} not found")
+        if self.nas and OVERLAY_MARK in disk:
             raise Refused(
-                f"{vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
+                f"{self.vm}: disk {disk} is an overlay a NAS backup left behind (its blockcommit did not "
+                f"finish). Put the disk back first; `{self.cfg.cst} doctor` shows the commands"
+            )
+        path = self.through(disk, "disk")
+        if self.store.has_backing_file(path):
+            raise Refused(
+                f"{self.vm}: {path} is a qcow2 overlay with a backing file: back up the chain by hand "
                 "(qemu-img info --backing-chain)"
             )
-        if (path, True) not in sources:
-            sources.append((path, True))
-    return sources
+        return path
 
-
-def _local_state_sources(
-    cfg: VmSettings, store: BackupStorePort, parts: DomainParts, notes: list[str]
-) -> tuple[list[tuple[str, bool]], str]:
-    """([(path, False)] of the UEFI variables and the TPM folder a local copy reads, the TPM folder
-    or ""); notes say which is not there."""
-    sources: list[tuple[str, bool]] = []
-    if parts.nvram:
-        if store.is_file(parts.nvram):
-            sources.append((_copied_through(store, notes, parts.nvram, "UEFI variables"), False))
-        else:
-            notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not copied")
-    tpm_dir = ""
-    if parts.tpm:
-        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
-        if parts.uuid and store.is_dir(tpm_dir):
-            tpm_dir = _copied_through(store, notes, tpm_dir, "TPM state")
-            sources.append((tpm_dir, False))
-        else:
-            notes.append(
-                f"TPM state {tpm_dir} not found: not copied (BitLocker may then ask for its "
-                "recovery key after a restore)"
-            )
-    return sources, tpm_dir
+    def sources(self, parts: DomainParts) -> BackupSources:
+        """What the backup reads of the VM: its disks (Refused for one it cannot back up), its UEFI
+        variables and its TPM folder; notes say which is not there, and which is read through a
+        symbolic link."""
+        disks: list[str] = []
+        for disk in parts.disks:
+            path = self.disk(disk)
+            if path not in disks:  # a file the definition names twice (or two links to it) is read once
+                disks.append(path)
+        not_read = "backed up" if self.nas else "copied"
+        nvram = None
+        if parts.nvram and self.store.is_file(parts.nvram):
+            nvram = self.through(parts.nvram, "UEFI variables")
+        elif parts.nvram:
+            self.notes.append(f"UEFI variables {parts.nvram} not there yet (the VM never started?): not {not_read}")
+        tpm, tpm_dir = None, ""
+        if parts.tpm:
+            tpm_dir = os.path.join(self.cfg.paths.swtpm_dir, parts.uuid)
+            if parts.uuid and self.store.is_dir(tpm_dir):
+                tpm = tpm_dir = self.through(tpm_dir, "TPM state")
+            else:
+                self.notes.append(
+                    f"TPM state {tpm_dir} not found: not {not_read} (BitLocker may then ask for its recovery "
+                    "key after a restore)"
+                )
+        return BackupSources(disks, nvram, tpm, tpm_dir)
 
 
 def _check_full_space(cfg: VmSettings, store: BackupStorePort, sizes: Mapping[str, tuple[int, int]]) -> None:

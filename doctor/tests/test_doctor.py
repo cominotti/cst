@@ -884,12 +884,13 @@ class BtrfsTest(Scratch):
         ):
             self.assertIn(words, named[0])
 
-    def test_a_scrub_limit_line_only_bash_refuses_names_only_the_install(self) -> None:
-        # Text mode takes the CR as the line end: CST's Python programs read the value.
+    def test_a_scrub_limit_line_ending_in_a_cr_is_ignored_by_the_python_programs_too(self) -> None:
+        # btrfs-snapshot and btrfs-health-check read the file with its line ends, as bash does: the CR is
+        # part of the line, which sets nothing for them either (before, doctor read it in text mode).
         out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
         named = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")
         self.assertEqual(len(named), 1, out)
-        self.assertNotIn("CST's Python programs", named[0])
+        self.assertIn("CST's Python programs take nothing from the line", named[0])
 
     def assert_one_scrub_limit_warning(self, conf: str, line: str) -> None:
         """One WARN names the bad SCRUB_LIMIT line of conf, at bash's line number, with both effects."""
@@ -911,14 +912,23 @@ class BtrfsTest(Scratch):
     def test_a_bad_scrub_limit_line_after_a_lone_cr_gets_one_warning(self) -> None:
         self.assert_one_scrub_limit_warning("A=1\rB=2\nSCRUB_LIMIT=$X\n", "line 2")
 
-    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_still_warned(self) -> None:
-        # bash reads one line, text mode two: A=$Y is a line of its own for CST's Python programs.
+    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_part_of_it(self) -> None:
+        # A lone CR ends no line for bash nor for btrfs-snapshot: A=$Y is part of the SCRUB_LIMIT line,
+        # which gets one warning (both effects), and no line 2 is named.
         out = self.scrub(conf="SCRUB_LIMIT=$X\rA=$Y\n", dropin="1G")
         scrub = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=$X")
         self.assertEqual(len(scrub), 1, out)
-        other = self.scrub_warnings(out, "line 2: A=$Y")
-        self.assertEqual(len(other), 1, out)
-        self.assertIn("CST's Python programs take nothing from the line", other[0])
+        self.assertIn("CST's Python programs take nothing from the line", out)  # after the CR on that line
+        self.assertEqual(self.scrub_warnings(out, "line 2:"), [], out)
+
+    def test_a_setting_ending_in_a_cr_is_named_as_btrfs_snapshot_ignores_it(self) -> None:
+        # NAS_ENABLED=1 with a Windows line end: btrfs-snapshot (which reads the file with its line ends)
+        # takes nothing from the line; doctor names it (before, it read the value in text mode and said
+        # nothing).
+        out = self.scrub(conf="NAS_ENABLED=1\r\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 1: NAS_ENABLED=1")
+        self.assertEqual(len(named), 1, out)
+        self.assertIn("carriage return", named[0])
 
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
@@ -2048,6 +2058,28 @@ class GameProfileTest(Scratch):
         self.assertIn("user@1000.service", res[1].message)
         self.assertIn("user.slice", res[1].message)
 
+    def test_the_user_game_state_names_is_asked_not_a_changed_target_user(self) -> None:
+        # 'on' acted for the user whose user@UID.service it recorded first; TARGET_USER names another
+        # user now (results() sets tester). The profile's tick and 'state' ask the user game.state
+        # names, and so does the doctor; a uid that names no account leaves TARGET_USER's.
+        me = pwd.getpwuid(os.getuid()).pw_name
+        state = os.path.join(self.run_dir, "game.state")
+        for uid, asked in ((os.getuid(), me), (999999, "tester")):
+            with self.subTest(uid=uid):
+                self.profile_on()
+                with open(state, "w") as f:
+                    f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+                before = len(self.calls())
+                host = doc_adapters.Host(self.env, repo=REPO)
+                host.uid = 0
+                with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+                    f.write("TARGET_USER='tester'\n")
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    list(doc_cpu.check_game_profile_drift(host))
+                calls = self.calls()[before:]
+                self.assertIn(f"systemctl --user -M {asked}@ show -p LoadState -p CPUWeight user.slice", calls)
+                self.assertEqual([c for c in calls if " -M " in c and f"-M {asked}@" not in c], [])
+
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
         host = doc_adapters.Host(self.env, repo=REPO)
@@ -2187,12 +2219,35 @@ class UserManagerBoxesTest(Scratch):
         self.assertEqual(self.calls(), [])  # files only, no command
         return res
 
+    def test_as_root_the_user_game_state_names_is_looked_at(self) -> None:
+        # The profile is on for the user game.state names (the tick demotes that user's boxes); TARGET_USER
+        # names another, here no account: the boxes looked at are game.state's user's, as the drift check's.
+        uid = os.getuid()
+        mine = os.path.join(self.root, "sys", "fs", "cgroup", "user.slice", f"user-{uid}.slice", f"user@{uid}.service")
+        os.makedirs(os.path.join(mine, "x.slice"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+            f.write("TARGET_USER='no-such-user-here'\n")
+        os.makedirs(os.path.join(self.root, "run", "cpu-setup"), exist_ok=True)
+        with open(os.path.join(self.root, "run", "cpu-setup", "game.state"), "w") as f:
+            f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+        res = self.results(uid=0)
+        self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+        self.assertIn("x.slice is a slice of its own", res[0].message)
+
     def test_only_known_boxes_is_ok(self) -> None:
         res = self.results()
         self.assertEqual(
             [(r.status, r.message) for r in res],
             [(doc_domain.OK, "user manager: no slices or systemd-run jobs outside the boxes CST manages")],
         )
+
+    def test_the_slice_kept_for_the_host_sccache_server_is_known(self) -> None:
+        # sccache.slice (dashless: systemd nests a dashed name under its prefix's slice) is where the
+        # host's sccache server may move from app.slice: no warning for it.
+        self.cg("sccache.slice/cst-sccache-host.scope", usage_usec=1_000_000)
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
 
     def test_unknown_top_level_slice_warns_with_cpu_time_and_the_name_to_use(self) -> None:
         self.cg("lushtext.slice", usage_usec=69_000_123_456)

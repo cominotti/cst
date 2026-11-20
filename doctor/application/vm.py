@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 from cpu.domain import CPU_DISABLE_DEFAULT
 from cst_core.domain.errors import ExitStatus
+from cst_core.domain.install import Component
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import format_bytes_gib_mib
@@ -718,5 +719,5 @@ def check_vm_backup_alerts(host: DoctorHostPort) -> Iterator[Result]:
     yield Result(
         WARN,
         f"{', '.join(timers)} on, but {NOTIFY_HOST} is missing: a failed NAS backup of the VM reaches no desktop, only the journal and the pending alerts above",
-        refresh(host, "btrfs:alerts"),
+        refresh(host, Component.BTRFS_ALERTS),
     )

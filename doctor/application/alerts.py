@@ -6,6 +6,7 @@ import os
 import time
 
 from cst_core.domain.contracts import Urgency
+from cst_core.domain.install import Component
 from cst_core.domain.values import DAY
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import (
@@ -104,7 +105,7 @@ def _unseen_result(host: DoctorHostPort, alert: tuple[str, str, int], *, reader:
             if reader
             else f"no login shows it while {PENDING_READER_HOST} is missing: the fix installs it)"
         ),
-        "cst-pending-alerts --list" if reader else refresh(host, "btrfs:alerts"),
+        "cst-pending-alerts --list" if reader else refresh(host, Component.BTRFS_ALERTS),
     )
 
 
@@ -143,7 +144,7 @@ def check_alert_program(host: DoctorHostPort) -> Iterator[Result]:
         WARN,
         f"{', '.join(units)} alert through {NOTIFY_HOST}, which is missing: their alerts reach no desktop, only the "
         "journal" + (f"; {kept}: also the pending alerts above" if kept else ""),
-        refresh(host, "btrfs:alerts"),
+        refresh(host, Component.BTRFS_ALERTS),
     )
 
 

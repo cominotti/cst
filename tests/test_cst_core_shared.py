@@ -297,6 +297,18 @@ class AdaptersTest(unittest.TestCase):
         self.assertIsNone(read_text(self.path("missing"), keep_line_ends=True))
         self.assertEqual(read_text(self.path("missing"), "d", keep_line_ends=True), "d")
 
+    def test_read_text_tells_a_file_not_there_from_one_it_cannot_read(self) -> None:
+        # unreadable: what a file there that cannot be read gives (a folder here); one that is not there
+        # (no such file, a path through a file) still gives None. Without it both give None.
+        p = self.path("f", b"text\n")
+        folder = self.path("folder")
+        os.mkdir(folder)
+        self.assertEqual(read_text(p, unreadable="u"), "text\n")
+        self.assertEqual(read_text(folder, unreadable="u"), "u")
+        self.assertIsNone(read_text(self.path("missing"), unreadable="u"))
+        self.assertIsNone(read_text(os.path.join(p, "below"), unreadable="u"))
+        self.assertIsNone(read_text(folder))
+
     def test_read_int_gives_the_default_for_anything_but_an_ascii_integer(self) -> None:
         # "--5" and a superscript two passed str.isdigit and then raised ValueError out of int().
         superscript_two, arabic_three = chr(0xB2).encode(), chr(0x663).encode()
@@ -675,7 +687,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
             mock.patch.object(core_files.os, "geteuid", return_value=0),
             mock.patch.object(core_files.os, "fchown"),
             mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
-            mock.patch.object(core_files.subprocess, "run", side_effect=run),
+            mock.patch.object(core_runner.subprocess, "run", side_effect=run),
             contextlib.redirect_stderr(stderr),
         ):
             core_files.write_bytes_atomic(dest, b"x")
@@ -823,7 +835,7 @@ class WriteAtomicTest(unittest.TestCase):
                 mock.patch.object(core_files.os, "geteuid", return_value=0),
                 mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
                 mock.patch.object(
-                    core_files.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                    core_runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
                 ) as run,
             ):
                 core_files.write_atomic(self.dest, b"x", mode=0o644, relabel=relabel)

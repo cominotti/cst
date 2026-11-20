@@ -1110,12 +1110,50 @@ class NasPreflightAndSourcesTest(Nas):
             notes,
             [
                 "  note: sdb (cdrom, not copied)",
-                f"  note: disk {link} is a symbolic link: read through it: {self.disk}",
-                f"  note: UEFI variables {missing} not there yet: not backed up",
+                f"  note: disk {link} is a symbolic link: read (and restored) through it: {self.disk}",
+                f"  note: UEFI variables {missing} not there yet (the VM never started?): not backed up",
             ],
         )
         backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
         self.assertEqual(backup["args"][-2:], [self.disk, os.path.join(self.stage, "win")])
+
+    def test_a_disk_the_definition_names_twice_is_read_once(self) -> None:
+        # Two targets on one file (or a link to it): restic reads it once and the manifest lists it once,
+        # as a local copy copies it once; before, the NAS backup listed it twice.
+        link = os.path.join(self.images, "again.qcow2")
+        os.symlink(self.disk, link)
+        both = [{"target": "sda", "device": "disk"}, {"target": "sdb", "device": "disk"}]
+        self.vm(state="shut off", disks=both, live={}, persistent={"sda": self.disk, "sdb": link})
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
+        self.assertEqual(backup["args"].count(self.disk), 1, backup["args"])
+        self.assertEqual(r.stdout.count(f"  reading {self.disk} (disk,"), 1, r.stdout)
+
+    def test_a_running_vm_with_one_file_on_two_disks_is_refused(self) -> None:
+        # Two targets of the running VM on one file would get one overlay path: refused before anything
+        # changes (before, the deduplicated sources and the set of live files matched, and the snapshot ran).
+        both = [{"target": "sda", "device": "disk"}, {"target": "sdb", "device": "disk"}]
+        self.vm(disks=both, live={"sda": self.disk, "sdb": self.disk}, persistent={"sda": self.disk, "sdb": self.disk})
+        self.refused(
+            f"win: two disks of the running VM are one file ({self.disk}): a live snapshot cannot give each "
+            "its own overlay; shut the VM down and back it up then"
+        )
+
+    def test_uefi_variables_through_a_link_are_noted_as_a_local_copy_notes_them(self) -> None:
+        # restic reads (and a restore writes) the file the link points to; before, only a linked disk had a note.
+        link = os.path.join(self.images, "link_VARS.fd")
+        os.symlink(self.nvram, link)
+        self.vm(nvram=link, tpm=False)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f"  note: UEFI variables {link} is a symbolic link: read (and restored) through it: {self.nvram}\n",
+            r.stdout,
+        )
+        backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
+        self.assertIn(self.nvram, backup["args"])
+        self.assertNotIn(link, backup["args"])
 
     def test_uefi_variables_removed_while_restic_reads_them(self) -> None:
         self.vm(fail=["remove-nvram"])

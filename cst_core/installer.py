@@ -14,8 +14,10 @@ Usage:
   installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file (would record: for a
                                           current file the install record does not list yet,
                                           or lists otherwise); changes nothing
-  installer.py check [OPTIONS] SRC...     exit 0 when every file is current (also one only the
-                                          record lacks), else 1; prints nothing
+  installer.py check [OPTIONS] SRC...     exit 0 when every file is current and its install record
+                                          lists it as install would (plan's unchanged: for each),
+                                          else 1 (also a file only the record lacks or lists
+                                          otherwise: install adopts it); prints nothing
   installer.py text DEST MODE [--root DIR] [--component C]
                                           generated content (stdin) to DEST, same rules; with
                                           --component, listed in the install record under C
@@ -253,10 +255,10 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
 
 
 def _component_owner(component: str) -> Owner:
-    """Whose record lists the component: its manifest files' owner, or GENERATED_COMPONENTS' for one whose
-    files are all generated text."""
+    """Whose record lists the component (a word of the command line): its manifest files' owner, or
+    GENERATED_COMPONENTS' for one whose files are all generated text (KeyError for another word)."""
     owners = {e.owner for e in INSTALL_MANIFEST if e.component == component}
-    return owners.pop() if owners else GENERATED_COMPONENTS[component]
+    return owners.pop() if owners else {str(c): o for c, o in GENERATED_COMPONENTS.items()}[component]
 
 
 def _mark(service: InstallService, a: argparse.Namespace) -> int:
@@ -316,7 +318,8 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
     if a.command == InstallerCommand.PLAN:
         print("\n".join(lines))
         return 0
-    return 0 if todo == 0 else 1
+    # check: current means current and recorded; a "would record:" file is one install adopts.
+    return 0 if todo == 0 and not any(line.startswith("would record:") for line in lines) else 1
 
 
 # The commands that act on the files they select (dests, srcs and payload only list them).

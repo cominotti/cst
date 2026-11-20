@@ -15,6 +15,7 @@ from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state
 from vm.application.backup import (
+    SourceWalk,
     backup_time,
     check_backup_start,
     check_shut_off,
@@ -213,44 +214,10 @@ def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -
 def nas_sources(
     cfg: VmSettings, store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str]
 ) -> list[tuple[str, str]]:
-    """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder."""
-    out: list[tuple[str, str]] = [(_nas_disk_source(cfg, store, vm, p, notes), "disk") for p in parts.disks]
-    if parts.nvram:
-        if store.is_file(parts.nvram):
-            out.append((store.realpath(parts.nvram), "nvram"))
-        else:
-            notes.append(f"UEFI variables {parts.nvram} not there yet: not backed up")
-    if parts.tpm:
-        tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)
-        if parts.uuid and store.is_dir(tpm_dir):
-            out.append((store.realpath(tpm_dir), "tpm"))
-        else:
-            notes.append(
-                f"TPM state {tpm_dir} not found: not backed up (BitLocker may then ask for its "
-                "recovery key after a restore)"
-            )
-    return out
-
-
-def _nas_disk_source(cfg: VmSettings, store: BackupStorePort, vm: str, p: str, notes: list[str]) -> str:
-    """The file restic reads for the disk p (through a symbolic link, noted); Refused when it is not
-    there, is an overlay a NAS backup left behind, or has a backing file."""
-    if not store.is_file(p):
-        raise Refused(f"{vm}: disk {p} not found")
-    if OVERLAY_MARK in p:
-        raise Refused(
-            f"{vm}: disk {p} is an overlay a NAS backup left behind (its blockcommit did not "
-            f"finish). Put the disk back first; `{cfg.cst} doctor` shows the commands"
-        )
-    r = store.realpath(p)
-    if r != p:
-        notes.append(f"disk {p} is a symbolic link: read through it: {r}")
-    if store.has_backing_file(r):
-        raise Refused(
-            f"{vm}: {r} is a qcow2 overlay with a backing file: back up the chain by hand "
-            "(qemu-img info --backing-chain)"
-        )
-    return r
+    """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder (SourceWalk)."""
+    found = SourceWalk(cfg, store, vm, notes, nas=True).sources(parts)
+    state = [(f, k) for f, k in ((found.nvram, "nvram"), (found.tpm, "tpm")) if f is not None]
+    return [(d, "disk") for d in found.disks] + state
 
 
 def backup_nas(cfg: VmSettings, vm: str, keep: str | None, p: NasBackup, *, quiesce: bool) -> None:
@@ -361,7 +328,13 @@ def _nas_live_specs(
             base,
             os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
         )
-    if sorted(b for b, _ in specs.values()) != sorted(src for src, k in sources if k == "disk"):
+    bases = sorted(b for b, _ in specs.values())
+    if len(set(bases)) != len(bases):  # two targets on one file would share one overlay
+        raise Refused(
+            f"{vm}: two disks of the running VM are one file ({', '.join(sorted({b for b in bases if bases.count(b) > 1}))}): "
+            "a live snapshot cannot give each its own overlay; shut the VM down and back it up then"
+        )
+    if bases != sorted(src for src, k in sources if k == "disk"):
         raise Refused(
             f"{vm}: the running VM's disks differ from its definition (changed since it started): "
             "restart it, then back up"

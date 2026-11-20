@@ -12,6 +12,7 @@ import io
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import signal
 import stat
@@ -34,9 +35,12 @@ from cst_core.adapters.runtime import (
 from cst_core.adapters.zipapp import build_python_zipapp, entry_payload, import_closure
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService
 from cst_core.domain.dispatch import step_down_argv
+from cst_core.domain import install as install_domain
 from cst_core.domain.install import (
+    COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
+    Component,
     InstallEntry,
     OnDisk,
     Owner,
@@ -52,6 +56,8 @@ from cst_core.domain.record import parse_record
 from cst_core.domain.values import DomainValidationError, OctalMode
 from cst_core.installer import main as installer_main
 from cst_core.ports import WriteFailed
+from tests.budgets import is_test_file
+from tests.shell_files import shell_files
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLER = os.path.join(REPO, "cst_core", "installer.py")
@@ -931,6 +937,169 @@ class CstAsUserTest(unittest.TestCase):
         r = self.run_bash("cst_as_user no-such-user-cst-test true")
         self.assertEqual((r.returncode, r.stdout), (1, b""))
         self.assertIn(b"no home folder for user 'no-such-user-cst-test'", r.stderr)
+
+
+# The cst-install.bash functions (and btrfs-setup.sh's check) that take a component, and how many of
+# their first arguments come before it (None: every argument is one; --component C anywhere too).
+_COMPONENT_CALLS: dict[str, int | None] = {
+    "cst_mark": 0,
+    "cst_mark_as": 1,
+    "cst_component_units": 0,
+    "cst_install_text": 3,
+    "cst_install_text_plan": 3,
+    "check_component_syntax": None,
+}
+_SHELL_END = ("|", ";", "&", "<", ">", ")")
+
+
+_REDIRECTION = re.compile(r"[0-9]*[<>]|&>")
+_COMMENT = re.compile(r"(?:^|\s)#")
+
+
+def _before_redirection(word: str) -> tuple[str, bool]:
+    """The part of a word before a redirection glued to it (`C>/dev/null`, `C&>/dev/null`: C), and whether
+    one was there."""
+    cut = min((i for i in (word.find("<"), word.find(">")) if i >= 0), default=-1)
+    if cut < 0:
+        return word, False
+    return word[: cut - 1 if word[cut - 1 : cut] == "&" else cut], True
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """(number of its first line, text) of each command line, a line ending in a backslash joined with
+    the next one, unless that backslash is in a comment (bash continues no comment)."""
+    out: list[tuple[int, str]] = []
+    first, parts = 0, []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not parts:
+            first = number
+        if line.endswith("\\") and not _COMMENT.search("".join([*parts, line])):
+            parts.append(line[:-1])
+            continue
+        out.append((first, " ".join([*parts, line])))
+        parts = []
+    if parts:
+        out.append((first, " ".join(parts)))
+    return out
+
+
+def shell_component_words(text: str) -> list[tuple[int, str]]:
+    """(line, word) of every component a shell text names as an argument: after --component, and in
+    the component position of _COMPONENT_CALLS. Comment lines and words with a $ (variables) are none."""
+    found: list[tuple[int, str]] = []
+    for number, line in _logical_lines(text):
+        if line.lstrip().startswith("#"):
+            continue
+        words = line.split()
+        for i, word in enumerate(words):
+            args: list[str] = []
+            if word.startswith("--component="):
+                args = [_before_redirection(word.removeprefix("--component="))[0].removesuffix(";")]
+            elif word == "--component" and i + 1 < len(words):
+                args = [_before_redirection(words[i + 1])[0].removesuffix(";")]
+            elif word in _COMPONENT_CALLS:
+                rest: list[str] = []
+                for w in words[i + 1 :]:
+                    if w.startswith(_SHELL_END) or w == "||" or _REDIRECTION.match(w):
+                        break
+                    head, redirected = _before_redirection(w)
+                    if redirected:  # `cst_mark C>/dev/null`: C, then the redirection ends the arguments
+                        rest.append(head)
+                        break
+                    rest.append(w.removesuffix(";"))
+                    if w.endswith(";"):  # `cst_mark C; fi`: the command ends there
+                        break
+                skip = _COMPONENT_CALLS[word]
+                args = rest if skip is None else rest[skip : skip + 1]
+            found += [(number, a.strip("\"'")) for a in args if "$" not in a]
+    return found
+
+
+class ComponentTableTest(unittest.TestCase):
+    """Component and the word table of the commands that install each component (_COMMANDS) name the
+    same components: COMPONENTS is built from Component, and a row with another word would be ignored."""
+
+    def test_every_member_has_one_command_row_and_no_row_is_extra(self) -> None:
+        self.assertEqual(sorted(install_domain._COMMANDS), sorted(str(c) for c in Component))
+        self.assertEqual(list(COMPONENTS), list(Component))
+
+
+class ShellComponentWordsTest(unittest.TestCase):
+    """Every component a shell setup script names (cst_install --component C, cst_mark C,
+    cst_install_text DEST MODE OWNER C, ...) is a word of Component: a misspelt one would be a usage
+    error at run time, or a record line under a component no command refreshes."""
+
+    def test_every_component_word_of_the_shell_files_is_a_component(self) -> None:
+        words = {str(c) for c in Component}
+        seen: set[str] = set()
+        for rel in shell_files():
+            if is_test_file(rel):
+                continue
+            text = Path(REPO, rel).read_text(encoding="utf-8", errors="replace")
+            for number, word in shell_component_words(text):
+                seen.add(word)
+                with self.subTest(file=rel, line=number):
+                    self.assertIn(word, words)
+        # The gate reads the calls it is meant for: the scripts name these components.
+        self.assertLessEqual(
+            {"btrfs:core", "btrfs:alerts", "btrfs:degraded-boot", "btrfs:report-launcher", "btrfs:snapshots"}, seen
+        )
+
+    def test_the_words_are_found_where_the_calls_take_them(self) -> None:
+        text = (
+            "cst_install --component btrfs:core\n"
+            'cst_install_text "${f}" 0644 root btrfs:degraded-boot <"${x}"\n'
+            'cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?\n'
+            'cst_mark_as "${user}" btrfs:report-launcher\n'
+            "check_component_syntax btrfs:alerts btrfs:cor 2>/dev/null\n"
+            'cst_install_text "${f}" 0644 \\\n'
+            "    root btrfs:degraded-boo\n"
+            "cst_installer dests --component=btrfs:snapshot\n"
+            "# cst_mark btrfs:nope (a comment)\n"
+            'cst_mark "$1"\n'
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [
+                (1, "btrfs:core"),
+                (2, "btrfs:degraded-boot"),
+                (4, "btrfs:report-launcher"),
+                (5, "btrfs:alerts"),
+                (5, "btrfs:cor"),
+                (6, "btrfs:degraded-boo"),
+                (8, "btrfs:snapshot"),
+            ],
+        )
+        # A planted misspelt word is reported by the gate's check.
+        self.assertNotIn("btrfs:cor", {str(c) for c in Component})
+
+    def test_a_comment_does_not_continue_and_a_glued_redirection_ends_the_word(self) -> None:
+        # bash: a backslash at the end of a comment continues nothing, and `C>/dev/null` is the word C
+        # with a redirection after it.
+        text = (
+            "# see cst_mark \\\n"
+            "cst_mark btrfs:snapshot\n"
+            "cst_install_text a 0644 root \\\n"
+            "    btrfs:core # a note \\\n"
+            "cst_mark btrfs:alerts\n"
+            "cst_mark btrfs:cor>/dev/null\n"
+            "check_component_syntax btrfs:core btrfs:x2>/dev/null 2>&1\n"
+            "cst_mark btrfs:y&>/dev/null\n"
+            "cst_installer dests --component=btrfs:z>/dev/null\n"
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [
+                (2, "btrfs:snapshot"),
+                (3, "btrfs:core"),
+                (5, "btrfs:alerts"),
+                (6, "btrfs:cor"),
+                (7, "btrfs:core"),
+                (7, "btrfs:x2"),
+                (8, "btrfs:y"),
+                (9, "btrfs:z"),
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -416,12 +416,17 @@ uninstall() {
     systemctl stop 'btrfs-last-resort@*.timer' 2>/dev/null || true
     old_rule_is_ours && rm -fv "${OLD_RULE}"
     # The files this script generated, with their install record lines; the old ones were never listed.
-    # An installer that fails (a record of a newer CST) leaves the record as it is: the files go
-    # without it, and uninstall goes on (the initramfs no longer has them).
+    # An installer that fails leaves the record as it is: the files go without it, and uninstall goes
+    # on (the initramfs no longer has them). As in the self-test's cleanup, cst_forget_text then tries
+    # once more to drop their lines, so the record lists no file that is gone: it works when the
+    # installer stopped before it could change the record for a reason that is gone now (it could not
+    # start, the disk was full), and fails again for a record of a newer CST; neither stops uninstall.
+    # An rm -f that fails ends the script under set -e, as it always did.
     generated=("${TRACKED[@]}" "${UNIT_DIR}/${RECORD_UNIT}" "${SYNCED_SUM_FILE}")
     if ! cst_remove_text "${generated[@]}"; then
         warn "the install record was not changed (see above); removing the files without it"
         rm -fv "${generated[@]}"
+        cst_forget_text "${generated[@]}" || true
     fi
     rm -fv "${OLD_FILES[@]}"
     rmdir -v "${CONF_DIR}" 2>/dev/null || true

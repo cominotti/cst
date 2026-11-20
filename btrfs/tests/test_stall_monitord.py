@@ -949,7 +949,7 @@ class HungKindTest(unittest.TestCase):
         self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["fsync"])})
         d_tasks = [("10", "100", "java", STACKS["fsync"], None, "storage")]
         runs = iter(range(100))
-        with self.mon.fake, mock.patch.object(self.m, "run_slices", lambda _pid, _tid: next(runs)):
+        with self.mon.fake, mock.patch.object(self.m, "run_slices", autospec=True, side_effect=runs):
             for now in (1000.0, 1000.0 + self.m.HUNG_SECONDS + 1, 1000.0 + self.m.HUNG_SECONDS + 2):
                 self.mon.track_hung(d_tasks, now)
         events = [json.loads(line) for _, line in self.mon.buffer]

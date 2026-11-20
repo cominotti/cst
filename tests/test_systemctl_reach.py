@@ -19,6 +19,7 @@ from cst_core.domain.files import UnitFileState
 from cst_core.ports import CommandResult, UnitName
 from swap import wiring as swap_wiring
 from toolchains.adapters import units as tc_units
+from toolchains.tests.systemctl_lines import systemctl as systemctl_line
 from vm import application as vm_application, wiring as vm_wiring
 from vm.domain import TimerStep
 
@@ -160,7 +161,7 @@ class SystemctlReachTest(unittest.TestCase):
                     spawned() as seen,
                 ):
                     for args in verbs:
-                        tc_units.systemctl(*args, program=program)
+                        systemctl_line(*args, program=program)
                     host = container and program is None
                     self.assertEqual(reach(seen), [(args[0], host) for args in verbs])
 

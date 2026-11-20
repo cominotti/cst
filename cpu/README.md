@@ -682,7 +682,11 @@ that has GameMode's library (`libgamemode`) loaded.
   Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
   other boxes next to the game that appeared in the meantime get the idle
   class (7.1). A box it already handled is skipped, so `game.state` does not
-  grow at each run. A setting of the profile that something undid in the
+  grow at each run. Handled means that `game.state` holds a record of that
+  box and setting which `off` can read, compared field by field (manager,
+  unit, property): a line `off` cannot read (an unclosed quote) does not
+  count, and a unit name that `printf %q` writes quoted (systemd's `\x2d`)
+  still does. A setting of the profile that something undid in the
   meantime is set again (section 7.5). When the user the profile acts for has
   no account (6.2: `TARGET_USER` names none, or the account was deleted
   while the profile was on), the Steam scopes and the boxes of its user
@@ -693,7 +697,10 @@ that has GameMode's library (`libgamemode`) loaded.
   there, it removes them and reloads systemd (logged at level warning).
 
 `on`, `off` and `tick` never run at the same time: they share a lock file,
-`/run/cpu-setup/lock`, and wait up to 60 s for it.
+`/run/cpu-setup/lock`, and wait up to 60 s for it. `state` takes no lock, so
+it never waits: it reads `game.state` and `game.intended` once, and every line
+it prints (on or off, the user, the idle boxes, unreadable lines, drift) judges
+that one reading, also when `off` or a tick changes the files meanwhile.
 
 ### 7.3 By hand (manual)
 

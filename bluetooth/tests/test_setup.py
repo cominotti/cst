@@ -20,7 +20,9 @@ import stat
 from typing import Final
 import unittest
 
+from bluetooth.setup.domain import watcher_prog_state
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
+from cst_core.domain.files import OwnedState
 from bluetooth.tests.test_bluetooth import JOURNAL, OLD_WP, VENDOR
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from tests.test_module_routing import userns_root
@@ -1382,6 +1384,33 @@ class MainConfTest(SetupCase):
         self.assertIn(f"WARNING: no backup {m.main_conf}.bak-* found; main.conf not changed\n", r.stderr)
 
 
+class WatcherProgStateTest(unittest.TestCase):
+    """The watcher's program is judged by the plan line that names its path, wherever plan prints it."""
+
+    def test_the_line_of_the_watchers_path_decides(self) -> None:
+        prog = "/h/.local/lib/cst/bt-ldac-watch"
+        settings = "would write: /h/.config/cst/x.conf (from /h/old, before it is replaced)\n"
+        self.assertEqual(watcher_prog_state(f"{settings}would record: {prog}\n", prog, lambda: True), OwnedState.ADOPT)
+        self.assertEqual(watcher_prog_state(f"unchanged: {prog}\n", prog, lambda: False), OwnedState.OK)
+        self.assertEqual(watcher_prog_state(f"would write: {prog}\n", prog, lambda: True), OwnedState.CHANGE)
+        self.assertEqual(watcher_prog_state(f"would write: {prog}\n", prog, lambda: False), OwnedState.CONFLICT)
+        self.assertEqual(watcher_prog_state("", prog, lambda: True), OwnedState.CHANGE)  # a plan that failed
+
+    def test_a_home_with_a_trailing_slash_is_the_same_path(self) -> None:
+        # HOME=/h/: the program's path is /h//.local/...; installer.py plan prints home.rstrip("/") + ...
+        prog, printed = "/h//.local/lib/cst/bt-ldac-watch", "/h/.local/lib/cst/bt-ldac-watch"
+        self.assertEqual(watcher_prog_state(f"unchanged: {printed}\n", prog, lambda: True), OwnedState.OK)
+        self.assertEqual(watcher_prog_state(f"would record: {printed}\n", prog, lambda: True), OwnedState.ADOPT)
+
+    def test_a_plan_with_no_line_of_that_path_is_judged_by_its_last_line(self) -> None:
+        prog = "/h/.local/lib/cst/bt-ldac-watch"
+        settings = "would write: /h/.config/cst/x.conf (from /o/bt-ldac-watch, before it is replaced)\n"
+        self.assertEqual(watcher_prog_state("unchanged: /o/bt-ldac-watch\n", prog, lambda: False), OwnedState.OK)
+        self.assertEqual(
+            watcher_prog_state(f"{settings}would record: /o/bt-ldac-watch\n", prog, lambda: False), OwnedState.ADOPT
+        )
+
+
 class WatcherTest(SetupCase):
     """The LDAC rate watcher (LDAC_RATE=48000): installed through the installer, enabled, started; removed."""
 
@@ -1463,6 +1492,18 @@ class WatcherTest(SetupCase):
         with open(m.record, "w", encoding="utf-8") as f:
             json.dump(rec, f)
         stats = {path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in (m.lw_prog, m.lw_unit)}
+        # plan reads the installer's plan: a current copy its record does not list is "adopt" (apply adds it
+        # to the record, writing nothing), and the service needs no restart for it.
+        r = m.run("plan")
+        self.assertIn(
+            row(
+                "adopt",
+                "~/.local/lib/cst/bt-ldac-watch",
+                "same as bt-ldac-watch in CST; apply adds it to the install record",
+            ),
+            r.stdout,
+        )
+        self.assertIn(row("ok", f"{LW} (your session)", "enabled, active"), r.stdout)
         r = m.run("apply", "--no-restart")
         self.assertIn(
             f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\nunchanged: {LW} enabled and active\n",

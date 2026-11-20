@@ -7,7 +7,7 @@ rules (main.conf, the WirePlumber files, the watcher's unit) are in
 bluetooth.domain.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import os.path
@@ -16,6 +16,7 @@ from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.dispatch import MODULE_BY_NAME
+from cst_core.domain.files import OwnedState
 from cst_core.domain.text import HELP_WORDS, enum_member, group
 from cst_core.domain.units import ActiveState
 
@@ -466,6 +467,25 @@ def wp_word(state: WpState | Literal[""]) -> str:
         WpState.MISSING: "write",
         WpState.CONFLICT: "CONFLICT",
     }.get(state, "")
+
+
+def watcher_prog_state(plan_out: str, prog: str, marked: Callable[[], bool]) -> OwnedState:
+    """The LDAC watcher's program (its path prog) by the line installer.py plan prints for it, found by
+    that path among the plan's lines, both paths normalised (a HOME with a trailing slash: plan prints
+    it without), else the plan's last line, its file's line (plan_out: "" when that plan failed: a
+    record of a newer CST): unchanged: ok; would record: adopt (current, but its install record does
+    not list it as install would: apply adds it there and writes nothing); else it is to be written:
+    change for a copy with CST's marker (an older one; marked() reads the file), conflict for any
+    other file."""
+    lines, path = plan_out.splitlines(), os.path.normpath(prog)
+    plan_line = next(
+        (line for line in lines if os.path.normpath(line.partition(": ")[2]) == path), lines[-1] if lines else ""
+    )
+    if plan_line.startswith("unchanged:"):
+        return OwnedState.OK
+    if plan_line.startswith("would record:"):
+        return OwnedState.ADOPT
+    return OwnedState.CHANGE if marked() else OwnedState.CONFLICT
 
 
 def bearer_matches(info: str, bearer: str) -> bool:

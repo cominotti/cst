@@ -21,11 +21,11 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from typing import Literal, overload
 
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import first_line
@@ -33,15 +33,26 @@ from cst_core.domain.units import MASK_TARGET
 
 
 @overload
-def read_text(path: str, *, keep_line_ends: bool = False) -> str | None: ...
+def read_text(path: str, *, keep_line_ends: bool = False, unreadable: str | None = None) -> str | None: ...
 
 
 @overload
 def read_text(path: str, default: str, *, limit: int = -1, keep_line_ends: bool = False) -> str: ...
 
 
-def read_text(path: str, default: str | None = None, *, limit: int = -1, keep_line_ends: bool = False) -> str | None:
+def read_text(
+    path: str,
+    default: str | None = None,
+    *,
+    limit: int = -1,
+    keep_line_ends: bool = False,
+    unreadable: str | None = None,
+) -> str | None:
     """The file as UTF-8 text, at most limit characters; default on OSError.
+
+    With unreadable, default only for a file that is not there (no such file, or a path through a
+    file) and unreadable for one there that cannot be read (any other OSError): one open tells the
+    two apart, with no second look that could see another file.
 
     The lenient decode policy (see the module docstring): a byte that is not
     UTF-8 becomes U+FFFD. Not for a file that is written back.
@@ -53,8 +64,10 @@ def read_text(path: str, default: str | None = None, *, limit: int = -1, keep_li
     try:
         with open(path, encoding="utf-8", errors="replace", newline="" if keep_line_ends else None) as fh:
             return fh.read(limit)
-    except OSError:
+    except FileNotFoundError, NotADirectoryError:
         return default
+    except OSError:
+        return default if unreadable is None else unreadable
 
 
 def read_bytes(path: str, *, limit: int = -1) -> bytes | None:
@@ -338,19 +351,13 @@ def _fsync_dir(folder: str) -> None:
 
 
 def _relabel(path: str) -> None:
-    """restorecon as root; a failure is reported on stderr (the file is written, its label may be wrong)."""
+    """restorecon as root, through cst_core's command runner; a failure is reported on stderr (the file is
+    written, its label may be wrong). A restorecon that cannot start raises, as subprocess.run did."""
     restorecon = shutil.which("restorecon")
     if restorecon is None:
         return
     # "--": the path is an operand even if a caller ever passes one starting with "-".
-    done = subprocess.run(
-        [restorecon, "-F", "--", path],
-        check=False,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-    )
+    done = SubprocessCommandRunner().run([restorecon, "-F", "--", path]).raise_cause()
     if done.returncode != 0:
         why = first_line(done.stderr) or f"exit status {done.returncode}"
         print(f"warning: restorecon {path}: {why} (its SELinux label may be wrong)", file=sys.stderr)

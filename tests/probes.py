@@ -7,7 +7,8 @@
 - python_program: a program made of given Python lines, run by this
   interpreter (a Python program, not sh: a test that hands on its stdin
   would run bash with a socket there, and bash then reads ~/.bashrc);
-- bytes_program: a program that prints given bytes, which need not be UTF-8.
+- bytes_program: a program that prints given bytes, which need not be UTF-8;
+- NoUnitQueries: the SystemdPort calls a module's fake of systemd never gets.
 """
 
 import os
@@ -16,6 +17,8 @@ import unittest
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from unittest import mock
+
+from cst_core.ports import CommandResult, UnitName
 
 
 @contextmanager
@@ -53,3 +56,23 @@ def python_program(folder: str, name: str, body: str) -> str:
 def bytes_program(folder: str, name: str, out: bytes) -> str:
     """An executable FOLDER/NAME that writes OUT to its stdout as it is; its path."""
     return python_program(folder, name, f"sys.stdout.buffer.write({out!r})\n")
+
+
+class NoUnitQueries:
+    """The SystemdPort calls a fake of a module that never makes them (vm's timer use cases, swap):
+    systemctl's queries and daemon-reload's result; each one fails the test."""
+
+    def daemon_reload_result(self) -> CommandResult:
+        raise AssertionError("not asked here: daemon-reload's result")
+
+    def is_active(self, unit: UnitName) -> CommandResult:
+        raise AssertionError(f"not asked here: is-active {unit}")
+
+    def is_enabled(self, unit: UnitName) -> CommandResult:
+        raise AssertionError(f"not asked here: is-enabled {unit}")
+
+    def show_environment(self) -> CommandResult:
+        raise AssertionError("not asked here: show-environment")
+
+    def show_value(self, unit: UnitName, prop: str) -> CommandResult:
+        raise AssertionError(f"not asked here: show -p {prop} --value {unit}")

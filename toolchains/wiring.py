@@ -31,7 +31,7 @@ from toolchains.adapters.program import (
     real_user_is_root,
 )
 from toolchains.adapters.rustup import InstalledTools
-from toolchains.adapters.units import UserUnits
+from toolchains.adapters.units import UserUnits, user_systemctl
 from toolchains.adapters.uv import UvTool
 from toolchains.application.auto import AutoTimer
 from toolchains.application.config import ToolConfig
@@ -136,7 +136,7 @@ def session(home_arg: str | None, entry_file: str, parts: Parts | None = None) -
     procs = cargo_procs if p.procs is None else p.procs
     tree = p.tree if p.tree is not None else CargoBuildTree(home, prog, limits, clock, procs=procs)
     machine = TargetPorts(tree, UvTool(home) if p.uv is None else p.uv, RunSummaries(home, out), out, clock)
-    units = UserUnits(out, systemctl_program()) if p.units is None else p.units(out)
+    units = UserUnits(out, lambda: user_systemctl(systemctl_program())) if p.units is None else p.units(out)
     lock = ToolchainsLock(home, out)
     return Session(home, now, prog, entry_file, limits, out, units, lock, HomeFiles(home, entry_file), machine)
 

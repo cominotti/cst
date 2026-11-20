@@ -315,6 +315,20 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     return out
 
 
+def state_head(*, on: bool, manual: bool, problem_lines: Sequence[str], why: str | None) -> list[str]:
+    """The first lines of 'state': on (by hand) or off, then each problem line of the settings file and why
+    'on' refuses for TARGET_USER (why: None when it does not)."""
+    head = "game profile: ON (by hand)" if manual else "game profile: ON"
+    lines = [head if on else "game profile: off"]
+    lines += [
+        f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+        for line in problem_lines
+    ]
+    if why is not None:
+        lines.append(f"  settings: {why} ('on' refuses until it is fixed)")
+    return lines
+
+
 def unreadable_report(paths: GamePaths, state_text: str, intended_text: str, *, judged: bool) -> list[str]:
     """The lines of 'state' that name each line of game.state, and of game.intended when it is judged (not
     a newer format's: its lines may mean something else), that holds no record (unreadable_lines)."""
@@ -359,12 +373,6 @@ def state_uid(recs: Sequence[Record]) -> str | None:
             if m:
                 return group(m, 1)
     return None
-
-
-def has_record_part(text: str, part: str) -> bool:
-    """A whole line of the file holds part (bash: grep -F on the file); a last line cut short (no
-    newline at its end) holds none: its change was never made (records())."""
-    return any(part in line for line in _whole_lines(text))
 
 
 def escaped_unit(name: str) -> str | None:
@@ -513,6 +521,14 @@ def _state_keys(state_recs: Sequence[Record]) -> set[Record]:
             case _:
                 pass
     return keys
+
+
+def has_prop_record(text: str, mgr: Manager, unit: str, prop: str) -> bool:
+    """game.state (its text) holds a record of unit's prop under manager mgr that 'off' can undo: the
+    fields of each record are compared, as 'off' reads them (records(), state_undo), so a line bash
+    cannot read (an unclosed quote) or a last line cut short holds none, and a unit name is matched
+    as it is, whatever printf %q made of it in the file (a backslash of systemd's \\x2d)."""
+    return (GameRecordKind.PROP, mgr, unit, prop) in _state_keys(records(text))
 
 
 def _drift_key(d: Drift) -> Record:

@@ -108,6 +108,32 @@ def _used_paths(base: str, cwd: str | None) -> Iterator[str]:
         pass
 
 
+def _cmdline_and_environ(base: str) -> tuple[tuple[str, ...], bytes]:
+    """The arguments (decoded, bad bytes replaced) and the raw environment of the process whose /proc
+    folder is base; what could not be read stays empty (an environ after a cmdline that failed is
+    not read)."""
+    args: tuple[str, ...] = ()
+    raw = b""
+    try:
+        with open(os.path.join(base, "cmdline"), "rb") as f:
+            args = tuple(a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1])
+        with open(os.path.join(base, "environ"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        pass
+    return args, raw
+
+
+def _cargo_env(raw: bytes) -> dict[str, str]:
+    """The CARGO_ENV variables of a raw /proc environ."""
+    env: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        k, sep, v = item.decode("utf-8", "replace").partition("=")
+        if sep and k in CARGO_ENV:
+            env[k] = v
+    return env
+
+
 def cargo_procs(uid: int | None = None) -> list[CargoProc]:
     """The user's processes named cargo or cargo-* (cargo-nextest,
     cargo-clippy, ...). cwd is None when it cannot be read."""
@@ -118,20 +144,8 @@ def cargo_procs(uid: int | None = None) -> list[CargoProc]:
             continue
         cwd = _LINKS.readlink(os.path.join(base, "cwd"))
         exe = _LINKS.readlink(os.path.join(base, "exe")) or ""
-        args: tuple[str, ...] = ()
-        env: dict[str, str] = {}
-        raw = b""
-        try:
-            with open(os.path.join(base, "cmdline"), "rb") as f:
-                args = tuple(a.decode("utf-8", "replace") for a in f.read().split(b"\0")[:-1])
-            with open(os.path.join(base, "environ"), "rb") as f:
-                raw = f.read()
-        except OSError:
-            pass
-        for item in raw.split(b"\0"):
-            k, sep, v = item.decode("utf-8", "replace").partition("=")
-            if sep and k in CARGO_ENV:
-                env[k] = v
+        args, raw = _cmdline_and_environ(base)
+        env = _cargo_env(raw)
         if not os.path.exists(base):
             continue  # ended meanwhile
         # Empty (the kernel gives nothing while a process starts or ends; also a cargo started with

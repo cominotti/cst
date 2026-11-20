@@ -110,6 +110,16 @@ runs:
             if [[ "${TAG_LOCAL}" == "true" ]]; then
               docker tag "${ref}" "cst-e2e-${name}:local"
             fi
+            # The label of its sources (tests/e2e/image_digest.py): run.py rebuilds an image whose label
+            # is not the checkout's (the cache was built from other sources, or before the label).
+            # Only a notice: a digest that cannot be computed here does not stop the step.
+            want="$(python3 -I -B tests/e2e/image_digest.py "${name}")" || want=""
+            got="$(docker image inspect -f '{{ index .Config.Labels "org.cst.e2e.sources" }}' "${ref}" 2>/dev/null || true)"
+            if [[ -z "${want}" ]]; then
+              echo "::notice::the sources digest of ${name} could not be computed; run.py decides"
+            elif [[ "${got}" != "${want}" ]]; then
+              echo "::notice::${ref} was built from other sources (label ${got:-none}, checkout ${want}); run.py rebuilds it"
+            fi
           else
             echo "::notice::GHCR cache miss for ${ref}; will build locally"
           fi

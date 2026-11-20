@@ -29,6 +29,12 @@ def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]
     return game_settings(parsed.values), parsed.problems
 
 
+def read_snapshot(path: str) -> str | None:
+    """The file's text for a snapshot 'state' judges, in one look: None when it is not there; "" when it
+    is there but cannot be read (it still counts as there, as os.path.exists said before the snapshot)."""
+    return read_text(path, unreadable="")
+
+
 def user_id(user: str) -> str:
     """The user's uid as `id -u USER` prints it, "" for an unknown user (quietly: GameProfile says id's
     message where it is wanted)."""

@@ -6,9 +6,15 @@ command that installs a component again, and the decorator that registers a chec
 from collections.abc import Callable, Container, Iterator
 from dataclasses import dataclass, field
 
-from cst_core.domain.install import COMPONENTS
+from cst_core.domain.install import COMPONENTS, Component
 from cst_core.domain.ostree import OstreeStatus, query_status
-from cst_core.domain.text import SettingsProblem, ShellAssignments, parse_shell_assignments, parse_snapshots_conf
+from cst_core.domain.text import (
+    SettingsProblem,
+    ShellAssignments,
+    enum_member,
+    parse_shell_assignments,
+    parse_snapshots_conf,
+)
 from doctor.domain import (
     SNAP_CONF,
     WARN,
@@ -18,7 +24,6 @@ from doctor.domain import (
     Result,
     ViewPath,
     is_deployment,
-    universal_newlines,
 )
 from doctor.ports import CheckFn, DoctorHostPort
 
@@ -127,12 +132,14 @@ def snapshots_conf_text(host: DoctorHostPort) -> str | None:
 
 def settings_of(host: DoctorHostPort, path: HostPath, *, bash_sourced: bool = True) -> ShellAssignments | None:
     """A settings file read with cst_core's one reader (as bash reads it when
-    bash_sourced), or None when it cannot be read. Read as text, as cst vm reads them (each
-    line end a newline). snapshots.conf also takes the lines an older CST wrote there with
-    printf %q (parse_snapshots_conf)."""
+    bash_sourced), or None when it cannot be read. Read as text, as the game profile and cst vm
+    read cpu-setup.conf and vm.conf (each line end a newline). snapshots.conf with its line ends
+    as they are, as btrfs-snapshot and btrfs-health-check read it (a "\r" is part of its line,
+    which then sets nothing), and also with the lines an older CST wrote there with printf %q
+    (parse_snapshots_conf)."""
     if path == SNAP_CONF:
         text = snapshots_conf_text(host)
-        return None if text is None else parse_snapshots_conf(universal_newlines(text))
+        return None if text is None else parse_snapshots_conf(text)
     try:
         with host.open_text(host.path(path)) as f:
             return parse_shell_assignments(f.read(), bash_sourced=bash_sourced)
@@ -182,6 +189,8 @@ def ignored_line_text(note: str) -> str:
 
 
 def refresh(host: DoctorHostPort, component: str) -> str:
-    """The command that installs component's files again, as the hints name cst."""
-    cmd = COMPONENTS.get(component, "")
+    """The command that installs component's files again, as the hints name cst ("" for a word that names
+    no Component: a record line of a newer CST)."""
+    known = enum_member(Component, component)
+    cmd = "" if known is None else COMPONENTS[known]
     return f"{host.cst} {cmd.removeprefix('cst ')}" if cmd else ""

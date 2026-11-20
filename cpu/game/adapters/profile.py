@@ -20,9 +20,9 @@ from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_ato
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
-from cst_core.domain.text import SettingsProblem, describe_problems, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
-from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
+from cpu.game.adapters.host import holds, read_settings, read_snapshot, read_stripped, user_id, user_name
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -50,7 +50,7 @@ from cpu.game.domain import (
     escapes_in_state,
     expand_cpus,
     first_cpu,
-    has_record_part,
+    has_prop_record,
     intended_header,
     intended_props,
     intended_records,
@@ -64,6 +64,7 @@ from cpu.game.domain import (
     unreadable_lines,
     unreadable_report,
     show_values,
+    state_head,
     state_uid,
     state_undo,
     shown,
@@ -325,14 +326,14 @@ class GameProfile:
     def protect_steam(self) -> None:
         """MemoryLow for each Steam scope not handled yet (a game started after 'on')."""
         for s in self.steam_scopes():
-            if has_record_part(self._state_text(), f" {s} MemoryLow "):
+            if has_prop_record(self._state_text(), "usr", s, "MemoryLow"):
                 continue
             self.setp("usr", s, f"MemoryLow={self.s.game_memory_low}")
 
     def pin_docker(self) -> None:
         """The game's CPUs off for each Docker container not handled yet."""
         for s in self.loose_docker_scopes():
-            if has_record_part(self._state_text(), f" {s} AllowedCPUs "):
+            if has_prop_record(self._state_text(), "sys", s, "AllowedCPUs"):
                 continue
             self.setp("sys", s, f"AllowedCPUs={self.s.build_cpus}")
 
@@ -359,7 +360,7 @@ class GameProfile:
         records them one after the other before it sets any, so a box whose last record was cut short
         (or never written) is not handled yet, even when its first record is whole."""
         text = self._state_text()
-        return all(has_record_part(text, f"prop usr {printf_q(unit)} {kv.split('=', 1)[0]} ") for kv in settings)
+        return all(has_prop_record(text, "usr", unit, kv.split("=", 1)[0]) for kv in settings)
 
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of
@@ -597,7 +598,7 @@ class GameProfile:
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
         drifts = self.drift(text)
-        skipped = self._unheld(drifts)
+        skipped = unheld(drifts, records(self._state_text()))
         self._say_unheld(skipped)
         for d in drifts:
             if d in skipped:
@@ -611,10 +612,6 @@ class GameProfile:
                     == 0
                 )
             self.log(*repaired_text(d, ok=ok))
-
-    def _unheld(self, drifts: Sequence[Drift]) -> list[Drift]:
-        """The drifts game.state holds no record of (unheld)."""
-        return unheld(drifts, records(self._state_text()))
 
     def _say_unheld(self, skipped: Sequence[Drift]) -> None:
         """Say the drifts the tick does not set again ('off' could not undo them) once per boot, at
@@ -730,48 +727,50 @@ class GameProfile:
     def state(self) -> int:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
-        on = os.path.exists(self.paths.state)
+        # One snapshot of both files (None: not there; an empty game.state is on), with no lock: never waits.
+        state_text, intended_text = read_snapshot(self.paths.state), read_snapshot(self.paths.intended)
+        on, manual = state_text is not None, os.path.exists(self.paths.manual)
+        state_recs = records(state_text or "")
         why = None if self.problems else self._target_refusal()  # as 'on' reads TARGET_USER
         if on:
-            self._user_from_state(records(self._state_text()), say=False)
+            self._user_from_state(state_recs, say=False)
         p, s = self.paths, self.s
-        by_hand = " (by hand)" if os.path.exists(p.manual) else ""
-        self.say(f"game profile: ON{by_hand}" if on else "game profile: off")
-        self.say_lines(
-            f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
-            for line in self._problem_lines()
-        )
-        if why is not None:
-            self.say(f"  settings: {why} ('on' refuses until it is fixed)")
+        self.say_lines(state_head(on=on, manual=manual, problem_lines=self._problem_lines(), why=why))
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line(BUILDS_SLICE)
-        if self._target_refusal() is None:  # a user manager to ask (the user 'on' acted for, with the profile on)
-            self.say(f"  toolboxes       weight={self.prop('usr', USER_SLICE, 'CPUWeight')}")
-            self.say(f"  app.slice       zswap writeback={self.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
-            cg = self.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
-            effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
-            self.say(f"  toolboxes       cpus effective={effective}")
-            if on:
-                self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
+        self._user_manager_lines(state_recs if on else None)
+        newer = None if intended_text is None else newer_intended(p.intended, intended_text)
         if on:
-            intended_text, newer = self._intended()
-            self.say_lines(unreadable_report(p, self._state_text(), intended_text, judged=newer is None))
+            self.say_lines(unreadable_report(p, state_text or "", intended_text or "", judged=newer is None))
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
-            self.say_lines(self.drift_report())
+            self.say_lines(self.drift_report(state_recs, intended_text, newer, manual=manual))
         return 0
 
-    def drift_report(self) -> list[str]:
-        """The drift part of 'state': each setting that no longer holds, or that none drifted."""
-        p = self.paths
-        if not os.path.exists(p.intended):
-            return drift_lines(None, manual=os.path.exists(p.manual))
-        text, newer = self._intended()
-        drifts = self.drift(text) if newer is None else None
-        not_held = [] if drifts is None else self._unheld(drifts)
-        return drift_lines(drifts, manual=os.path.exists(p.manual), newer=newer, not_held=not_held)
+    def _user_manager_lines(self, state_recs: Sequence[Record] | None) -> None:
+        """The lines of the user manager 'on' acted for (none without one), with game.state's idle boxes when on."""
+        if self._target_refusal() is not None:
+            return
+        self.say(f"  toolboxes       weight={self.prop('usr', USER_SLICE, 'CPUWeight')}")
+        self.say(f"  app.slice       zswap writeback={self.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
+        cg = self.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
+        effective = read_stripped(f"{self.paths.cgroot}{cg}/cpuset.cpus.effective") or ""
+        self.say(f"  toolboxes       cpus effective={effective}")
+        if state_recs is not None:
+            self.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
+
+    def drift_report(
+        self, state_recs: Sequence[Record], intended_text: str | None, newer: str | None, *, manual: bool
+    ) -> list[str]:
+        """The drift part of 'state' from its snapshot (game.state's records, game.intended's text or None, why
+        it cannot be compared, the by-hand mark): each setting that no longer holds, or that none drifted."""
+        if intended_text is None:
+            return drift_lines(None, manual=manual)
+        drifts = self.drift(intended_text) if newer is None else None
+        not_held = [] if drifts is None else unheld(drifts, state_recs)
+        return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
 
     def _intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""

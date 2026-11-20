@@ -35,6 +35,11 @@ from adding them again.
   chrome-cache apply  --home DIR   add the flags if needed (idempotent)
   chrome-cache off    --home DIR   remove our flag lines, keep "off" marker
 
+After the command, only nothing or exactly `--home DIR` is accepted: any
+other argument (`--home=DIR`, a misspelt option, an extra word, `--home`
+before the command or without a folder) is a usage error (exit 2), so a word
+it does not understand never turns into the caller's own home.
+
 Exit status: 0 fine (also "nothing to do"), 1 refused or failed, 2 usage.
 """
 
