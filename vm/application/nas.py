@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst vm backup [VM] --nas`: the NAS backup with restic, through a live snapshot that is
-merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli/nas.py as it was;
-it reaches the machine through the ports of vm/ports.py (NasBackup)."""
+merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli/nas.py; it
+reaches the machine through the ports of vm/ports.py (NasBackup)."""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass

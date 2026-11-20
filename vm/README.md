@@ -1160,7 +1160,7 @@ The Python code inside `vm/` (standard library only at run time):
   `ProgressPort` (the lines it prints as it goes). `nas.py`: the NAS backup
   (`backup_nas`: the snapshot, restic, the merge back, the torn snapshots of
   earlier runs, the retention), moved
-  from the cli as it was, over the same ports plus `SettingsPort` (vm.conf and
+  from the cli, over the same ports plus `SettingsPort` (vm.conf and
   the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
   the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,
   held during the snapshot call, ignored during the merge back), the per-VM
