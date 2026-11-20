@@ -2447,9 +2447,17 @@ class SwapApplyBranchesTest(_SwapScratch):
         }
         out, err = io.StringIO(), io.StringIO()
         rc = execute_cli(
-            ["plan", "--root"], env=env, out=out, err=err, runner=_ScriptedRunner({}), ctx=ctx, elevate=_no_elevate
+            ["plan", "--root"],
+            env=env,
+            out=out,
+            err=err,
+            runner=_ScriptedRunner({}),
+            fs=self._fs(),
+            ctx=ctx,
+            elevate=_no_elevate,
         )
         self.assertEqual(rc, 0, err.getvalue())
+        self.assertIn("/dev/nvme0n1p5, 137438953472 bytes as expected", out.getvalue())
         self.assertIn("vm.swappiness", out.getvalue())
 
 
