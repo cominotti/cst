@@ -441,20 +441,7 @@ class Survey:
         # The rule's oldest name is renamed to the headset's rule; with no headset it is left alone.
         self.legacy = self.headset and f.is_file(self.p.legacy_wp_conf) and self.p.legacy_wp_conf != self.wp_conf
         self.le_plan()
-        self.bearer_state = BearerState.NONE
-        if self.c.bearer and not self.headset:
-            self.bearer_state = BearerState.NOHEADSET
-        elif self.c.bearer:
-            if not f.which("bluetoothctl") and not self.m.container:
-                self.bearer_state = BearerState.UNKNOWN
-            else:
-                info = self.bt_info()
-                if "Paired: yes" not in info:
-                    self.bearer_state = BearerState.UNPAIRED
-                elif bearer_matches(info, self.c.bearer):
-                    self.bearer_state = BearerState.OK
-                else:
-                    self.bearer_state = BearerState.SET
+        self.bearer_state = self._bearer_state()
         self.lw_plan()
         self.owed = self.restart_state("show") or ""
         owed = self.owed.split("\n")
@@ -470,6 +457,19 @@ class Survey:
             or self.le_change
             or self.wp_state in (WpState.MISSING, WpState.CHANGE)
         )
+
+    def _bearer_state(self) -> BearerState:
+        """What apply does with the headset's preferred bearer (BEARER)."""
+        if not self.c.bearer:
+            return BearerState.NONE
+        if not self.headset:
+            return BearerState.NOHEADSET
+        if not self.m.files.which("bluetoothctl") and not self.m.container:
+            return BearerState.UNKNOWN
+        info = self.bt_info()
+        if "Paired: yes" not in info:
+            return BearerState.UNPAIRED
+        return BearerState.OK if bearer_matches(info, self.c.bearer) else BearerState.SET
 
     def le_plan(self) -> None:
         """The LE Audio drop-in: its state, and whether apply writes or removes it."""
@@ -637,17 +637,7 @@ class Survey:
         svc = f"{LDAC_UNIT} (your session)"
         rate = self.c.ldac_rate
         if not self.lw_want:
-            why = self.lw_off_why()
-            if self.lw_ours_present():
-                self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {LDAC_UNIT} and its program")
-            elif rate:
-                self.item("skip", LDAC_WATCHER_LABEL, f"off: {why}")
-            else:
-                self.item("ok", LDAC_WATCHER_LABEL, "off (LDAC_RATE empty; 48000 turns it on)")
-            if self.lw_unit_st == OwnedState.CONFLICT:
-                self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
-            if self.lw_prog_st == OwnedState.CONFLICT:
-                self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
+            self._lw_off_report(rate)
             return
         if self.user_sets("LDAC_RATE"):
             self.item(
@@ -680,17 +670,30 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        if self.lw_enabled == "enabled" and self.lw_active == ActiveState.ACTIVE:
-            if self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
-                self.item("ok", svc, "enabled, active")
-            else:
-                self.item("restart", svc, "apply restarts it with the new files")
-        else:
+        if self.lw_enabled != "enabled" or self.lw_active != ActiveState.ACTIVE:
             self.item(
                 "enable",
                 svc,
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it",
             )
+        elif self.lw_unit_st == OwnedState.OK and self.lw_prog_st == OwnedState.OK:
+            self.item("ok", svc, "enabled, active")
+        else:
+            self.item("restart", svc, "apply restarts it with the new files")
+
+    def _lw_off_report(self, rate: str) -> None:
+        """The watcher's rows when apply keeps it off."""
+        why = self.lw_off_why()
+        if self.lw_ours_present():
+            self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {LDAC_UNIT} and its program")
+        elif rate:
+            self.item("skip", LDAC_WATCHER_LABEL, f"off: {why}")
+        else:
+            self.item("ok", LDAC_WATCHER_LABEL, "off (LDAC_RATE empty; 48000 turns it on)")
+        if self.lw_unit_st == OwnedState.CONFLICT:
+            self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
+        if self.lw_prog_st == OwnedState.CONFLICT:
+            self.item("CONFLICT", self.lw_prog_label(), "not written by CST: left alone")
 
     def lw_last_failure(self) -> bool:
         """The watcher's last outcome in its log was a failure (sets lw_fail)."""
@@ -729,16 +732,8 @@ class Survey:
             *lines, last = r.stdout.split("\n")
             self.out("".join(f"    {line}\n" for line in lines) + (f"    {last}" if last else ""))
 
-    def plan(self) -> int:
-        """plan: what apply would change. 0: nothing to do; 10: apply would write or restart something."""
-        self.compute_plan()
-        self.out(
-            "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments, restarts nothing;\n"
-            "write/update/remove/set/restart = apply would change that; CONFLICT = apply stops; ? = could not be read;\n"
-            "warn/note = for your information.\n"
-        )
-        self.header()
-        self.files_report()
+    def _restarts_report(self) -> None:
+        """The restarts section of plan: what apply restarts, and why."""
         self.section("restarts")
         if self.bt_restart:
             self.item(
@@ -758,6 +753,18 @@ class Survey:
                 self.item("", "", "(still owed: an earlier run did not restart it)")
         else:
             self.item("ok", "wireplumber (your session)", "no restart needed")
+
+    def plan(self) -> int:
+        """plan: what apply would change. 0: nothing to do; 10: apply would write or restart something."""
+        self.compute_plan()
+        self.out(
+            "Dry run: nothing is changed. ok = nothing to do; adopt = apply only renews comments, restarts nothing;\n"
+            "write/update/remove/set/restart = apply would change that; CONFLICT = apply stops; ? = could not be read;\n"
+            "warn/note = for your information.\n"
+        )
+        self.header()
+        self.files_report()
+        self._restarts_report()
         if self.mc_changed:
             self.section("main.conf, as apply would write it")
             self.diff(self.p.main_conf, new_path=self.tmp)

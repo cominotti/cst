@@ -196,16 +196,10 @@ class Change(Checks):
             )
             return
         if a2dp != "1":
-            self.out("reconnect: the headset's A2DP profile (Audio Sink)\n")
-            self.run(["timeout", "20", "bluetoothctl", "connect", self.c.device, A2DP_SINK_UUID])
-            for _ in range(20):
-                prof, a2dp, mic = self.card_state() or ("", "", "")
-                if a2dp == "1":
-                    break
-                self.m.clock.sleep(0.5)
-            if a2dp != "1":
-                self.err("WARNING: A2DP did not come back; switch the headset off and on\n")
+            back = self._reconnect_a2dp()
+            if back is None:
                 return
+            prof = back
         if not prof.startswith("a2dp-sink"):
             r = self.run(
                 ["pactl", "set-card-profile", f"bluez_card.{self.c.device_id}", "a2dp-sink"], output=OutputMode.STDOUT
@@ -215,6 +209,18 @@ class Change(Checks):
                 self.err("WARNING: could not switch the profile to a2dp-sink\n")
                 return
         self.out("restored:  the headset is back on A2DP\n")
+
+    def _reconnect_a2dp(self) -> str | None:
+        """Connect the Audio Sink again and wait 10 s for it: the card's profile then, or None (warned)."""
+        self.out("reconnect: the headset's A2DP profile (Audio Sink)\n")
+        self.run(["timeout", "20", "bluetoothctl", "connect", self.c.device, A2DP_SINK_UUID])
+        for _ in range(20):
+            prof, a2dp, _mic = self.card_state() or ("", "", "")
+            if a2dp == "1":
+                return prof
+            self.m.clock.sleep(0.5)
+        self.err("WARNING: A2DP did not come back; switch the headset off and on\n")
+        return None
 
     def confirm_bt_restart(self) -> bool:
         if self.o.yes:
