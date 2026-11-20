@@ -2314,6 +2314,145 @@ class SwapApplyOutputTest(_SwapScratch):
             self.assertTrue(f.read().startswith(b"# caf\xe9 comment\nUUID=x / btrfs defaults 0 0\n"))
 
 
+class SwapApplyBranchesTest(_SwapScratch):
+    """apply's and the reports' branches no other test reached: a marked line apply cannot read, swap0
+    active when its line changed, zram0 that cannot be swapped off now, the root cgroup without
+    memory.swap.current, and --root as root."""
+
+    def _swaps(self, *lines: str) -> None:
+        with open(os.path.join(self.env.proc_dir, "swaps"), "w", encoding="utf-8") as f:
+            f.write("\n".join(["Filename\tType\tSize\tUsed\tPriority", *lines]) + "\n")
+
+    def _run(
+        self, *, mapper_present: bool, unreadable: set[str] | None = None, fail_unit: str | None = None
+    ) -> tuple[int, str, str, _FakeSystemd]:
+        fs = self._fs(mapper_present=mapper_present, unreadable=unreadable)
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            fail_unit=fail_unit,
+            fail_result=CommandResult(3, "", "Job failed.\n"),
+        )
+        system = _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(self.env, fs, systemd, system, installer=_installer())
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd
+
+    def test_an_unreadable_crypttab_stops_apply_before_any_change(self) -> None:
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.crypttab})
+        self.assertEqual(rc, 1)
+        self.assertIn("== swap0: crypttab and fstab", out)
+        self.assertIn(f"cst swap: ERROR: {self.env.crypttab}: unreadable", err)
+        self.assertNotIn("== zswap", out)
+        self.assertFalse(os.path.exists(self.env.fstab))
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_an_unreadable_fstab_stops_apply_after_crypttab_without_a_reload(self) -> None:
+        with open(self.env.fstab, "w", encoding="utf-8") as f:
+            f.write("UUID=1 / btrfs defaults 0 0\n")
+        rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.fstab})
+        self.assertEqual(rc, 1)
+        self.assertIn(f"written:   {self.env.crypttab} (swap0 entry)", out)
+        self.assertIn(f"cst swap: ERROR: {self.env.fstab}: unreadable", err)
+        self.assertNotIn("== zswap", out)
+        self.assertTrue(os.path.exists(self.env.crypttab))
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_an_empty_active_swap0_whose_line_changed_is_activated_again(self) -> None:
+        self._swaps("/dev/dm-0 partition 134217724 0 -2", "/dev/zram0 partition 8388604 102400 100")
+        rc, out, err, systemd = self._run(mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/dev/mapper/swap0: entry changed and the device is empty: re-activating\n", out)
+        self.assertEqual(
+            systemd.calls[:3],
+            [
+                ("stop", "dev-mapper-swap0.swap"),
+                ("restart", "systemd-cryptsetup@swap0.service"),
+                ("start", "dev-mapper-swap0.swap"),
+            ],
+        )
+        self.assertEqual(systemd.calls[3:], [("stop", "dev-zram0.swap"), ("stop", "systemd-zram-setup@zram0.service")])
+
+    def test_a_failing_step_of_the_reactivation_stops_apply_with_its_status(self) -> None:
+        self._swaps("/dev/dm-0 partition 134217724 0 -2")
+        rc, out, err, systemd = self._run(mapper_present=True, fail_unit="systemd-cryptsetup@swap0.service")
+        self.assertEqual(rc, 3)
+        self.assertEqual(err, "Job failed.\n")
+        self.assertIn("re-activating", out)
+        self.assertNotIn("== zswap", out)
+        self.assertEqual(
+            systemd.calls, [("stop", "dev-mapper-swap0.swap"), ("restart", "systemd-cryptsetup@swap0.service")]
+        )
+
+    def test_an_active_swap0_in_use_whose_line_changed_keeps_running_with_a_warning(self) -> None:
+        self._swaps("/dev/dm-0 partition 134217724 2048 -2")
+        rc, out, err, systemd = self._run(mapper_present=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(
+            "WARNING: /dev/mapper/swap0: entry changed but 2 MiB are in use; "
+            "the live device keeps the old options until reboot.\n",
+            err,
+        )
+        self.assertNotIn("re-activating", out)
+        self.assertEqual(systemd.calls, [])
+
+    def test_plan_says_later_for_a_zram0_free_ram_cannot_take(self) -> None:
+        with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as f:
+            f.write("MemTotal: 8000000 kB\nMemAvailable: 500 kB\n")
+        plan = self._plan_text(self.env)
+        self.assertRegex(plan, r"later +zram0 +active; not enough free RAM to swap it off now: gone after a reboot")
+        self.assertNotRegex(plan, r"swapoff +zram0")
+
+    def test_the_whole_system_row_takes_its_swap_from_meminfo_without_memory_swap_current(self) -> None:
+        with open(os.path.join(self.env.proc_dir, "meminfo"), "a", encoding="utf-8") as f:
+            f.write("SwapTotal:       4096 kB\nSwapFree:        1024 kB\n")
+        with open(
+            os.path.join(self.env.cgroup_dir, "machine.slice", "memory.swap.current"), "w", encoding="utf-8"
+        ) as f:
+            f.write("512\n")
+        fs = self._fs()
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        rows = {r.label: r for r in service.status_report(include_config=False).cgroups}
+        self.assertEqual(rows["(whole system)"].row["swap"], 3072 * 1024, "SwapTotal - SwapFree, in bytes")
+        self.assertEqual(rows["machine.slice"].row["swap"], 512)
+        self.assertEqual(rows["machine.slice"].low_display, "48.0 GiB")
+        for low in ("0", "max"):
+            with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
+                f.write(low + "\n")
+            rows = {r.label: r for r in service.status_report(include_config=False).cgroups}
+            self.assertEqual(rows["machine.slice"].low_display, low)
+        os.remove(os.path.join(self.env.proc_dir, "meminfo"))
+        rows = {r.label: r for r in service.status_report(include_config=False).cgroups}
+        self.assertIsNone(rows["(whole system)"].row["swap"], "no meminfo: no number")
+
+    def test_root_on_the_host_goes_on_without_sudo(self) -> None:
+        def _no_elevate(argv: list[str]) -> NoReturn:
+            raise AssertionError(f"already root: no sudo, got {argv}")
+
+        ctx = _FakeContext(container=False, root=True, etc_dir=self.env.etc_dir, run_dir=os.path.join(self.tmp, "run"))
+        env = {
+            "CST_PROG": "cst swap",
+            "CST_SWAP_PROC": self.env.proc_dir,
+            "CST_SWAP_SYS": os.path.join(self.tmp, "sys"),
+        }
+        out, err = io.StringIO(), io.StringIO()
+        rc = execute_cli(
+            ["plan", "--root"], env=env, out=out, err=err, runner=_ScriptedRunner({}), ctx=ctx, elevate=_no_elevate
+        )
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertIn("vm.swappiness", out.getvalue())
+
+
 class SwapArgumentsTest(unittest.TestCase):
     """The command line, as swap-setup.sh parsed it."""
 
