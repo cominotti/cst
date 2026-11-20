@@ -6,7 +6,14 @@ import time
 
 from btrfs.stall_monitord.domain import HUNG_SECONDS
 from btrfs.stall_report.domain.categories import HINTS
-from btrfs.stall_report.domain.records import AnalyseResult, DiskTotals, MetaRecord, VmTotals
+from btrfs.stall_report.domain.records import (
+    AnalyseResult,
+    CategoryShare,
+    DiskTotals,
+    MetaRecord,
+    OpenEpisode,
+    VmTotals,
+)
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 
 
@@ -168,6 +175,82 @@ def maint_lines(res: AnalyseResult) -> list[str]:
     ]
 
 
+def _not_a_bottleneck(res: AnalyseResult, longest: int, written: int, mem_lines: list[str]) -> list[str]:
+    """The verdict's lines when storage was not a bottleneck: the figures, the memory lines, and
+    CPU, memory pressure or too little activity when they show."""
+    pct, peak = res["pressure"], res["peak"]
+    out = [
+        (
+            f"Storage was NOT a bottleneck: IO pressure {pct['io_some_pct']:.1f}%, at most "
+            f"{peak['d_tasks']} task(s) waiting on storage, longest btrfs commit {longest} ms "
+            f"(written {fmt_bytes(written)})."
+        ),
+        *mem_lines,
+    ]
+    if pct["cpu_some_pct"] >= 20:
+        out.append(f"CPU contention: runnable tasks waited for a CPU {pct['cpu_some_pct']:.0f}% of the time.")
+    if pct["mem_some_pct"] >= 5:
+        out.append(f"Memory pressure {pct['mem_some_pct']:.1f}%: see the memory line.")
+    if written < 50 * 2**20 and pct["cpu_some_pct"] < 2:
+        out.append("Little activity recorded: check that the window really covers the workload.")
+    return out
+
+
+def _blocked_lines(storage_d: int, mem_lines: list[str], *, d_stall: bool, mem_dominates: bool) -> list[str]:
+    """The blocked tasks' line (when D-state tasks waited on storage) and the memory lines, memory
+    first when it dominates."""
+    if d_stall and mem_dominates:
+        return [*mem_lines, f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
+    if d_stall:
+        return [
+            (
+                f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
+                f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."
+            ),
+            *mem_lines,
+        ]
+    return mem_lines
+
+
+def _open_episode_lines(oe: OpenEpisode | None) -> list[str]:
+    """The line of an episode that is still open (no record yet), or none."""
+    if not oe:
+        return []
+    return [
+        (
+            f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
+            f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
+            f"ends; run the report again after that for the details."
+        )
+    ]
+
+
+def _commit_line(longest: int, longest_at: float | None) -> str:
+    """The slow commits' line: the longest, and when it was."""
+    at = " at " + fmt_ts(longest_at) if longest_at is not None and longest_at != 0 else ""
+    return f"Slow btrfs commits: longest {longest / 1000:.1f} s{at}."
+
+
+def _category_lines(cats: list[CategoryShare], meta: MetaRecord) -> list[str]:
+    """Where blocked tasks waited (the first three categories) and the main category's hint."""
+    if not cats:
+        return []
+    desc = ", ".join(f"{c['description']} {c['share'] * 100:.0f}%" for c in cats[:3])
+    out = [f"Where blocked tasks waited (share of sampled D-state tasks): {desc}."]
+    main = cats[0]["category"]
+    if main == "zstd-workspace":
+        if kernel_tuple(meta.get("kernel")) < (7, 2, 6):
+            out.append("Matches the btrfs zstd lost-wakeup bug fixed in 7.2.6; a kernel update fixes it.")
+        else:
+            out.append(
+                "zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; "
+                "may be plain compression contention."
+            )
+    elif HINTS.get(main) is not None:
+        out.append(HINTS[main])
+    return out
+
+
 def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     out = []
     cov = res["coverage"]
@@ -206,18 +289,6 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
     d_stall = storage_d >= 3
     mem_lines = memory_lines(res, storage_d)
     mem_dominates = bool(mem_lines) and mem_lines[0].startswith("Memory, not storage")
-    oe = res.get("open_episode")
-    open_lines = (
-        [
-            (
-                f"Episode still open: since {fmt_ts(oe['since'])} the monitor samples every second and up to "
-                f"{oe['d_tasks']} tasks wait on storage. Its record (stacks, categories) is written when it "
-                f"ends; run the report again after that for the details."
-            )
-        ]
-        if oe
-        else []
-    )
     commit_stall = longest >= 1000
     # Logical bytes: one RAID1 member's dm-crypt device.
     written = max(
@@ -225,59 +296,31 @@ def verdict(res: AnalyseResult, meta: MetaRecord) -> list[str]:
         default=0,
     )
     if not (psi_stall or d_stall or commit_stall):
-        out.append(
-            f"Storage was NOT a bottleneck: IO pressure {pct['io_some_pct']:.1f}%, at most "
-            f"{peak['d_tasks']} task(s) waiting on storage, longest btrfs commit {longest} ms "
-            f"(written {fmt_bytes(written)})."
+        return (
+            out
+            + _not_a_bottleneck(res, longest, written, mem_lines)
+            + fuse_lines(res)
+            + busy_lines(res)
+            + maint_lines(res)
         )
-        out += mem_lines
-        if pct["cpu_some_pct"] >= 20:
-            out.append(f"CPU contention: runnable tasks waited for a CPU {pct['cpu_some_pct']:.0f}% of the time.")
-        if pct["mem_some_pct"] >= 5:
-            out.append(f"Memory pressure {pct['mem_some_pct']:.1f}%: see the memory line.")
-        if written < 50 * 2**20 and pct["cpu_some_pct"] < 2:
-            out.append("Little activity recorded: check that the window really covers the workload.")
-        return out + fuse_lines(res) + busy_lines(res) + maint_lines(res)
     if psi_stall:
         out.append(
             f"IO wait: tasks waited on IO {pct['io_some_pct']:.1f}% of the time (every non-idle task at "
             f"once {pct['io_full_pct']:.1f}%), peak 10 s average {peak['io_some_avg10']:.0f}%."
         )
-    if d_stall and mem_dominates:
-        out += [*mem_lines, f"Blocked tasks: also up to {storage_d} tasks waiting on storage in D state."]
-    elif d_stall:
-        out += [
-            (
-                f"Blocked tasks: up to {storage_d} tasks waiting on storage in D state "
-                f"(btrfs commit/log/lock waits block tasks without showing up as IO pressure)."
-            ),
-            *mem_lines,
-        ]
-    else:
-        out += mem_lines
-    out += open_lines
+    out += _blocked_lines(storage_d, mem_lines, d_stall=d_stall, mem_dominates=mem_dominates)
+    out += _open_episode_lines(res.get("open_episode"))
     if commit_stall:
-        out.append(
-            f"Slow btrfs commits: longest {longest / 1000:.1f} s{' at ' + fmt_ts(longest_at) if longest_at is not None and longest_at != 0 else ''}."
-        )
-    cats = res["categories"]
-    if cats:
-        desc = ", ".join(f"{c['description']} {c['share'] * 100:.0f}%" for c in cats[:3])
-        out.append(f"Where blocked tasks waited (share of sampled D-state tasks): {desc}.")
-        main = cats[0]["category"]
-        if main == "zstd-workspace":
-            if kernel_tuple(meta.get("kernel")) < (7, 2, 6):
-                out.append("Matches the btrfs zstd lost-wakeup bug fixed in 7.2.6; a kernel update fixes it.")
-            else:
-                out.append(
-                    "zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; "
-                    "may be plain compression contention."
-                )
-        elif HINTS.get(main) is not None:
-            out.append(HINTS[main])
+        out.append(_commit_line(longest, longest_at))
+    out += _category_lines(res["categories"], meta)
     if meta.get("stacks") is False:
         out.append("Caveat: the daemon could not read kernel stacks, so attribution is coarse (wchan only).")
-    out += fuse_lines(res) + busy_lines(res) + maint_lines(res)
+    return out + fuse_lines(res) + busy_lines(res) + maint_lines(res) + _worst_and_load_lines(res)
+
+
+def _worst_and_load_lines(res: AnalyseResult) -> list[str]:
+    """The verdict's last lines: the worst episode, a saturated disk and a large swap-out."""
+    out = []
     if res["episodes"]:
         w = res["episodes"][0]
         out.append(
