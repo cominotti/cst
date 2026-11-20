@@ -16,7 +16,7 @@ from bluetooth.setup import wiring as bt_wiring
 from bluetooth.setup.domain import Config, Options, Paths, parse_command_line, resolve
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.domain.files import UnitFileState
-from cst_core.ports import CommandResult, UnitName
+from cst_core.ports import CommandResult, OutputMode, UnitName
 from swap import wiring as swap_wiring
 from toolchains.adapters import units as tc_units
 from toolchains.tests.systemctl_lines import systemctl as systemctl_line
@@ -114,7 +114,34 @@ class SystemctlReachTest(unittest.TestCase):
                 run = bt_wiring.build(opts, cfg, where, container=container, bt_timeout=5)
                 run.unit_show("bluetooth.service", user=False)
                 run.unit_show("wireplumber.service", user=True)
-                self.assertEqual(reach(seen), [("show", container), ("show", container)])
+                run.m.user_systemd_host.show_value(UnitName("wireplumber"), "MainPID", output=OutputMode.STDOUT)
+                run.m.user_systemd_host.is_enabled(UnitName("cst-bt-ldac48.service"), output=OutputMode.STDOUT)
+                run.m.user_systemd_host.is_active(UnitName("cst-bt-ldac48.service"), output=OutputMode.STDOUT)
+                run.m.user_systemd.show_environment()
+                run.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT)
+                run.m.user_systemd.enable(UnitName("cst-bt-ldac48.service"), output=OutputMode.INHERIT)
+                run.m.user_systemd.start(UnitName("cst-bt-ldac48.service"), output=OutputMode.INHERIT)
+                run.m.user_systemd.restart(UnitName("wireplumber"), output=OutputMode.INHERIT)
+                run.m.user_systemd.is_active(UnitName("cst-bt-ldac48.service"), output=OutputMode.STDOUT)
+                run.m.user_systemd.disable(UnitName("cst-bt-ldac48.service"), now=True, output=OutputMode.STDOUT)
+                self.assertEqual(
+                    reach(seen),
+                    [
+                        ("show", container),
+                        ("show", container),
+                        ("show", container),
+                        ("is-enabled", container),
+                        ("is-active", container),
+                        ("show-environment", False),
+                        ("daemon-reload", False),
+                        ("enable", False),
+                        ("start", False),
+                        ("restart", False),
+                        ("is-active", False),
+                        ("disable", False),
+                    ],
+                )
+                self.assertTrue(all("--user" in cmd for cmd in seen[1:]), seen[1:])
 
     def test_vm_reads_and_changes_the_systemd_it_runs_under(self) -> None:
         def runner(*, words: FaultWords | None = None) -> SubprocessCommandRunner:
