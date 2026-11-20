@@ -1495,7 +1495,7 @@ class ClockGuardTests(CliTestCase):
         self.assertEqual(self.cli(h, "snapshot", source="home=/top/home:1h"), 4)
         self.assertIn("home.20261013T1407", h.snapshots())  # creation still happened
         self.assertIn("the name uses the unverified time", self.out)
-        self.assertTrue(set(old) <= set(h.snapshots()))
+        self.assertLessEqual(set(old), set(h.snapshots()))
         self.assertIn("not NTP-synchronized", self.out)
         self.assertIsNone(self.recorded())
         h.ntp = "yes"
@@ -1669,7 +1669,7 @@ class ClockGuardTests(CliTestCase):
                 with open(os.path.join(self.state, core.STATE_FILE), "w") as f:
                     f.write(garbage)
                 self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4)
-                self.assertTrue(set(old) <= set(h.snapshots()))
+                self.assertLessEqual(set(old), set(h.snapshots()))
                 self.assertIn("unreadable state", self.out)
 
     def test_state_records_the_boot(self) -> None:
@@ -1807,7 +1807,7 @@ class CircuitBreakerTests(CliTestCase):
         h.subvols["/top/home"]["gen"] = 50_000
         self.assertEqual(self.cli(h, "snapshot"), 4)
         self.assertIn("the clock moved 10 days further than the time elapsed since then", self.out)
-        self.assertTrue(set(before) <= set(h.snapshots()))
+        self.assertLessEqual(set(before), set(h.snapshots()))
         # The same ten days really passing (or across a reboot, where the jump is
         # indistinguishable from downtime) is normal aging.
         h2 = self.steady_state("72h 7d 4w 3m")
