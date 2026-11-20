@@ -339,13 +339,12 @@ def _backup_warning(host: DoctorHostPort, what: str, built: float, backup: float
     """No VM backup since the booted deployment was built (built: its epoch, 0 unknown; backup: the
     newest backup's, 0 none, None unknown)."""
     when = time.strftime("%Y-%m-%d", time.localtime(built)) if built else "?"
-    last = (
-        "unknown (see the index line)"
-        if backup is None
-        else time.strftime("%Y-%m-%d", time.localtime(backup))
-        if backup
-        else "never"
-    )
+    if backup is None:
+        last = "unknown (see the index line)"
+    elif backup:
+        last = time.strftime("%Y-%m-%d", time.localtime(backup))
+    else:
+        last = "never"
     if nas_configured(host):
         return Result(
             WARN,
