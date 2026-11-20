@@ -109,7 +109,8 @@ def load_lists(conf: Mapping[str, Any]) -> tuple[list[str], list[str]]:
 
 def _strings(value: object) -> list[str]:
     """A TOML array of strings, as a list."""
-    assert isinstance(value, list) and all(isinstance(v, str) for v in value), value
+    assert isinstance(value, list), value
+    assert all(isinstance(v, str) for v in value), value
     return [v for v in value if isinstance(v, str)]
 
 

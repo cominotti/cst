@@ -53,7 +53,8 @@ M = load()
 
 def _strs(value: object) -> list[str]:
     """A list of strings the helper returned, as such (it is loaded by path: its values are untyped)."""
-    assert isinstance(value, list) and all(isinstance(v, str) for v in value), value
+    assert isinstance(value, list), value
+    assert all(isinstance(v, str) for v in value), value
     return [v for v in value if isinstance(v, str)]
 
 
