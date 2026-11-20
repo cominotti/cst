@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import override
 from unittest import mock
 
@@ -1584,7 +1584,7 @@ class PackageLayersTest(Scratch):
     def test_no_systemctl_call_may_leave_its_program_out(self) -> None:
         # Left out, the real systemctl would run: every caller must name the stub (or None).
         none: dict[str, str | None] = {}  # no program= (a call the type checker cannot see as one)
-        no_manager: dict[str, SystemdPort] = {}  # no manager: UserUnits has no default either
+        no_manager: dict[str, Callable[[], SystemdPort]] = {}  # no manager: UserUnits has no default either
         with self.assertRaises(TypeError):
             tc_units.user_systemctl(**none)
         with self.assertRaises(TypeError):
@@ -1737,6 +1737,19 @@ class SessionEnvTest(unittest.TestCase):
     def seen(self, **env: str) -> str:
         with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, **env}):
             return systemctl_line("show-environment", program=tc_wiring.systemctl_program())
+
+    def test_the_sessions_user_manager_reads_the_environment_at_each_call(self) -> None:
+        # The session's UserUnits (wiring) builds the adapter for each call, so each systemctl --user call
+        # gets this user's session environment as it is then, as each call did before UserUnits took a
+        # SystemdPort; a session built once must not keep the environment of its start.
+        first, then = os.path.join(self.tmp, "one"), os.path.join(self.tmp, "two")
+        for d in (first, then):
+            os.mkdir(d)
+        with mock.patch.dict(os.environ, {"CST_TOOLCHAINS_SYSTEMCTL": self.stub, "XDG_RUNTIME_DIR": first}):
+            units = tc_wiring.session(self.tmp, os.path.join(self.tmp, "cst-toolchains")).units
+            self.assertTrue(units.active_state("t.timer").startswith(f"{first}|"))
+            os.environ["XDG_RUNTIME_DIR"] = then
+            self.assertTrue(units.active_state("t.timer").startswith(f"{then}|"))
 
     def test_another_uids_runtime_folder_and_bus_become_this_users(self) -> None:
         other = f"/run/user/{self.uid + 1}"

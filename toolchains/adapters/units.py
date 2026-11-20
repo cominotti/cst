@@ -71,11 +71,17 @@ def said(res: CommandResult, words: Sequence[str], *, check: bool = False, ok: S
 
 class UserUnits:
     """UserUnitsPort: the user manager, as auto on, auto off and status use it, through a SystemdPort
-    of the user manager (user_systemctl; a test passes a fake)."""
+    of the user manager that MANAGER makes for each call (user_systemctl, which reads this user's
+    session environment then; a test passes a fake)."""
 
-    def __init__(self, out: RunOutputPort, manager: SystemdPort) -> None:
+    def __init__(self, out: RunOutputPort, manager: Callable[[], SystemdPort]) -> None:
         self.out = out
-        self.manager = manager
+        self._manager = manager
+
+    @property
+    def manager(self) -> SystemdPort:
+        """The user manager for one call (built anew each time: its environment is read then)."""
+        return self._manager()
 
     def active_state(self, name: str) -> str:
         return said(self.manager.is_active(UnitName(name)), (UserManagerVerb.IS_ACTIVE, name))

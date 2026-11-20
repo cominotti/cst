@@ -193,7 +193,7 @@ class Base(unittest.TestCase):
         tree = self.tree_for_main
         return tc_wiring.Parts(
             limits=self.limits,
-            units=lambda out: tc_units.UserUnits(out, fake_manager(self.fake_systemctl)),
+            units=lambda out: tc_units.UserUnits(out, lambda: fake_manager(self.fake_systemctl)),
             procs=lambda: list(self.cargo_running),
             tree=tree,
             journal=False,
