@@ -60,13 +60,12 @@ def summarise(
     episodes and events (now: the clock, for whether the newest data is in yet).
     The events and alerts in the window are rewritten in place where an older
     daemon named their kind wrongly."""
-    meta_or_none, first_at = _window_meta(recorded.metas, until)
+    meta, first_at = _window_meta(recorded.metas, until)
     samples = _window_samples(recorded.samples, since, until)
     episodes = [r for r in recorded.episodes if r["end"] >= since and r["start"] <= until]
     events = [r for r in recorded.events if since <= r["ts"] <= until]
     alerts = [r for r in recorded.alerts if since <= r["ts"] <= until]
 
-    meta = meta_or_none or {}
     res: AnalyseResult = {
         "window": {"since": since, "until": until},
         "kernel": meta.get("kernel"),
@@ -134,9 +133,10 @@ def summarise(
     return res, meta
 
 
-def _window_meta(metas: list[MetaRecord], until: float) -> tuple[MetaRecord | None, dict[int, float]]:
-    """The newest meta record up to until (the last of the file order), and the earliest time of a
-    daemon at version >= N: v6 added progress checks, v7 reads all of /proc/vmstat (zswap counters)."""
+def _window_meta(metas: list[MetaRecord], until: float) -> tuple[MetaRecord, dict[int, float]]:
+    """The newest meta record up to until (the last of the file order; {} without one), and the
+    earliest time of a daemon at version >= N: v6 added progress checks, v7 reads all of
+    /proc/vmstat (zswap counters)."""
     meta: MetaRecord | None = None
     first_at: dict[int, float] = {}
     for r in metas:
@@ -145,7 +145,7 @@ def _window_meta(metas: list[MetaRecord], until: float) -> tuple[MetaRecord | No
         for n in (6, 7):
             if r.get("v", 0) >= n:
                 first_at[n] = min(first_at.get(n, r.get("ts", 0)), r.get("ts", 0))
-    return meta, first_at
+    return meta or {}, first_at
 
 
 def _window_samples(samples: list[SampleRecord], since: float, until: float) -> list[SampleRecord]:
