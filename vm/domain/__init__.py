@@ -721,7 +721,12 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
     while rest:
         x = rest.pop(0)
         if cmd == VmCommand.BACKUP and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
-            value = x.split("=", 1)[1] if "=" in x else (rest.pop(0) if rest else "")
+            if "=" in x:
+                value = x.split("=", 1)[1]
+            elif rest:
+                value = rest.pop(0)
+            else:
+                value = ""
             if not valid_keep(value):
                 raise Usage(
                     f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
