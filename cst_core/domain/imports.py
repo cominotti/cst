@@ -2,9 +2,13 @@
 """Pure rules about which modules a Python source imports (by AST, without running it)."""
 
 import ast
+from typing import Final
+
+# The file name ast.parse puts in a SyntaxError when the caller names none.
+_SOURCE_PLACEHOLDER: Final = "<source>"
 
 
-def imported_modules(source: str, filename: str = "<source>") -> frozenset[str]:
+def imported_modules(source: str, filename: str = _SOURCE_PLACEHOLDER) -> frozenset[str]:
     """Dotted names of every absolute import in `source`, at any depth.
 
     Function-level imports count too: a helper that imports inside main()
@@ -22,12 +26,12 @@ def imported_modules(source: str, filename: str = "<source>") -> frozenset[str]:
     return frozenset(names)
 
 
-def top_level_packages(source: str, filename: str = "<source>") -> frozenset[str]:
+def top_level_packages(source: str, filename: str = _SOURCE_PLACEHOLDER) -> frozenset[str]:
     """The first component of every absolute import in `source`."""
     return frozenset(name.split(".", 1)[0] for name in imported_modules(source, filename))
 
 
-def loads_code_by_path(source: str, filename: str = "<source>") -> list[int]:
+def loads_code_by_path(source: str, filename: str = _SOURCE_PLACEHOLDER) -> list[int]:
     """Line numbers where `source` loads Python code from a file path at run time.
 
     Such loads (SourceFileLoader, spec_from_file_location, runpy.run_path,

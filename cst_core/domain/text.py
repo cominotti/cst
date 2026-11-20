@@ -105,6 +105,8 @@ _BLANKS: Final = " \t"  # what bash splits words at (not \f, \v or NBSP: bash ke
 # Characters bash treats as syntax in an unquoted word; any of them makes the line a problem.
 _SHELL_SYNTAX: Final = frozenset(";&|<>()")
 _EXPANDING: Final = frozenset("$`\\")
+# The problem of a line that is no assignment at all (no key, or no = after it).
+_NOT_AN_ASSIGNMENT: Final = "not a KEY=VALUE line"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,13 +202,13 @@ def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | Non
         s = s[6:].lstrip(_BLANKS)
     m = _KEY.match(s)
     if not m:
-        return "not a KEY=VALUE line"
+        return _NOT_AN_ASSIGNMENT
     key, rest = m.group(0), s[m.end() :]
     if bash_sourced:
         if not rest.startswith("="):
             if rest.lstrip(_BLANKS).startswith("="):
                 return "blanks around =: bash runs it as a command and sets nothing"
-            return "not a KEY=VALUE line"
+            return _NOT_AN_ASSIGNMENT
         raw = rest[1:]
         if raw[:1] in _BLANKS:
             if _rest_is_comment(raw, _BLANKS):
@@ -215,7 +217,7 @@ def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | Non
     else:
         rest = rest.lstrip()
         if not rest.startswith("="):
-            return "not a KEY=VALUE line"
+            return _NOT_AN_ASSIGNMENT
         raw = rest[1:].strip()
     value, why = _value(raw, bash_sourced=bash_sourced, exported=exported)
     return why if value is None else (key, value)
