@@ -132,17 +132,10 @@ def _passthrough_cpu(host: DoctorHostPort, vm: str) -> ET.Element | Result:
 
 
 def _features_result(
-    host: DoctorHostPort,
-    vm: str,
-    wanted: list[str],
-    missing: list[str],
-    offered_answer: tuple[set[str | None] | None, str | None],
+    host: DoctorHostPort, vm: str, missing: list[str], offered: set[str | None] | None, oproblem: str | None
 ) -> Result:
-    """A host-passthrough VM: the features of wanted its definition does not disable (missing), against
-    what this QEMU offers (offered_features' answer, (None, None) when not asked)."""
-    offered, oproblem = offered_answer
-    if not missing:
-        return Result(OK, f"VM {vm}: host-passthrough with {', '.join(wanted)} disabled")
+    """A host-passthrough VM whose definition does not disable the features of missing, against what this
+    QEMU offers (offered_features' answer: offered, None with why in oproblem when it could not be read)."""
     if offered is None:
         return Result(
             INFO,
@@ -190,10 +183,13 @@ def check_vm_cpu_features(host: DoctorHostPort, *, domains_fn: DomainsFn | None 
             continue
         off = {f.get("name") for f in cpu.findall("feature") if f.get("policy") == "disable"}
         missing = [n for n in wanted if n not in off]
+        if not missing:
+            yield Result(OK, f"VM {vm}: host-passthrough with {', '.join(wanted)} disabled")
+            continue
         # Asked at most once per check-up, and only for a VM that misses a disable.
-        if missing and oproblem is None:
+        if oproblem is None:
             offered, oproblem = offered_features(host)
-        yield _features_result(host, vm, wanted, missing, (offered, oproblem))
+        yield _features_result(host, vm, missing, offered, oproblem)
 
 
 def read_vm_index(host: DoctorHostPort) -> tuple[object, str | None] | None:
