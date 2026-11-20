@@ -380,10 +380,9 @@ class CpuSetup:
         if not self._has_group(GAMEMODE_GROUP):
             self.warn("no 'gamemode' group on this system (is the gamemode package installed?)")
             return
-        if not _line_starts(p.etc_group, f"{GAMEMODE_GROUP}:"):
-            found = [
-                line for line in (read_text(p.lib_group) or "").split("\n") if line.startswith(f"{GAMEMODE_GROUP}:")
-            ]
+        entry = f"{GAMEMODE_GROUP}:"
+        if not _line_starts(p.etc_group, entry):
+            found = [line for line in (read_text(p.lib_group) or "").split("\n") if line.startswith(entry)]
             if not found:
                 raise Halt(
                     1,
@@ -391,8 +390,8 @@ class CpuSetup:
                     "add its line to /etc/group by hand, then run install again",
                 )
             _append(p.etc_group, "\n".join(found) + "\n")
-            if not _line_starts(p.etc_gshadow, f"{GAMEMODE_GROUP}:"):
-                _append(p.etc_gshadow, f"{GAMEMODE_GROUP}:!::\n")
+            if not _line_starts(p.etc_gshadow, entry):
+                _append(p.etc_gshadow, f"{entry}!::\n")
         if not self.in_gamemode_group():
             self.run(["usermod", "-aG", GAMEMODE_GROUP, self.user])
             self.say(f"added {self.user} to the 'gamemode' group (effective at the next login)")
