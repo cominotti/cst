@@ -12,7 +12,7 @@ import tomllib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from toolchains.domain.prune import Limits
 
@@ -112,20 +112,7 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
     except OSError:
         return [f"{where_text(tdir, home)}: none installed (or not readable)"]
     ws = claimed_folders(None, home, limits, with_cargo=False)
-    pins: dict[str, list[str]] = {}
-    for p in ws.pins:
-        ch = pinned_channel(p)
-        if ch:
-            pins.setdefault(ch, []).append(p)
-    try:
-        with open(os.path.join(rh, "settings.toml"), "rb") as f:
-            data = parse_toml(f.read())
-        overrides = (data.get("overrides") if json_object(data) else None) or {}
-    except OSError, tomllib.TOMLDecodeError:
-        overrides = {}
-    for path, ch in overrides.items() if isinstance(overrides, dict) else ():
-        if isinstance(ch, str):
-            pins.setdefault(short_toolchain(ch), []).append(f"rustup override for {path}")
+    pins = _toolchain_pins(ws.pins, rh)
     default = rustup_default(home, rh)
     out = [f"where:    {where_text(tdir, home)}", f"default:  {short_toolchain(default) if default else 'unknown'}"]
     if ws.incomplete:
@@ -146,26 +133,68 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
         ws.incomplete = ws.incomplete or f"more than {limits.tool_files_max} build files to read"
     for n in names:
         short = short_toolchain(n)
-        path = os.path.join(tdir, n)
-        size = 0 if os.path.islink(path) else tree_size(path)
-        total += size
         by = pins.get(short, []) + (pins.get(n, []) if n != short else [])
-        if by:
-            first = tilde(by[0], home)
-            pin = f"pinned by {len(by)} file(s), e.g. {first}" if len(by) > 1 else f"pinned by {first}"
-        elif is_default[n]:
-            pin = "the default"
-        elif short in named:
-            pin = f"named in {tilde(named[short], home)} (not offered for removal)"
-        else:
+        pin = _toolchain_pin_text(by, named.get(short), home, is_default=is_default[n])
+        if pin is None:
             pin = "not pinned or named under ~/Workspace"
             unused.append(short)
-        rows.append(
-            f"  {gib(size):>10}  {short:<22} {pin}"
-            + ("  (a link: rustup toolchain link)" if os.path.islink(path) else "")
-        )
+        row, size = _toolchain_row(os.path.join(tdir, n), short, pin)
+        rows.append(row)
+        total += size
     out.append(f"{len(names)} toolchain(s), {gib(total)} (as du shows it):")
     out += rows
+    return out + _toolchain_closing_notes(names, pins, unused, ws.incomplete)
+
+
+def _toolchain_row(path: str, short: str, pin: str) -> tuple[str, int]:
+    """(row, size) of the toolchain installed at PATH (SHORT: its name without
+    the host, PIN: why it is kept); a linked toolchain counts 0 bytes."""
+    size = 0 if os.path.islink(path) else tree_size(path)
+    row = f"  {gib(size):>10}  {short:<22} {pin}" + (
+        "  (a link: rustup toolchain link)" if os.path.islink(path) else ""
+    )
+    return row, size
+
+
+def _toolchain_pins(pin_files: Sequence[str], rh: str) -> dict[str, list[str]]:
+    """{toolchain: [what pins it]}: the rust-toolchain files PIN_FILES first,
+    then the rustup overrides in RH's settings.toml."""
+    pins: dict[str, list[str]] = {}
+    for p in pin_files:
+        ch = pinned_channel(p)
+        if ch:
+            pins.setdefault(ch, []).append(p)
+    try:
+        with open(os.path.join(rh, "settings.toml"), "rb") as f:
+            data = parse_toml(f.read())
+        overrides = (data.get("overrides") if json_object(data) else None) or {}
+    except OSError, tomllib.TOMLDecodeError:
+        overrides = {}
+    for path, ch in overrides.items() if isinstance(overrides, dict) else ():
+        if isinstance(ch, str):
+            pins.setdefault(short_toolchain(ch), []).append(f"rustup override for {path}")
+    return pins
+
+
+def _toolchain_pin_text(by: Sequence[str], named_at: str | None, home: str, *, is_default: bool) -> str | None:
+    """Why a toolchain is kept: the files that pin it (BY), being the default,
+    or the build file that names it (NAMED_AT); None for none of them."""
+    if by:
+        first = tilde(by[0], home)
+        return f"pinned by {len(by)} file(s), e.g. {first}" if len(by) > 1 else f"pinned by {first}"
+    if is_default:
+        return "the default"
+    if named_at is not None:
+        return f"named in {tilde(named_at, home)} (not offered for removal)"
+    return None
+
+
+def _toolchain_closing_notes(
+    names: Sequence[str], pins: Mapping[str, Sequence[str]], unused: Sequence[str], incomplete: str
+) -> list[str]:
+    """The lines after the toolchains: the pinned ones not installed, what was
+    read, and the unused ones (INCOMPLETE: why the search was, or '')."""
+    out: list[str] = []
     known = {short_toolchain(n) for n in names} | set(names)
     missing = sorted(ch for ch in pins if ch not in known)
     if missing:
@@ -175,7 +204,7 @@ def toolchain_lines(home: str, limits: Limits) -> list[str]:
         f"files, CI workflows and .cargo/config.toml of the git worktrees under ~/{WORKSPACE_REL}, and "
         "rustup overrides)"
     )
-    if unused and ws.incomplete:
+    if unused and incomplete:
         out.append(
             f"not pinned, not the default and not named in the files read: {', '.join(unused)}; no "
             "removal command, because the search was incomplete"

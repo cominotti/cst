@@ -8,6 +8,7 @@ them, and deletes a folder only while it holds its locks and nothing uses it.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import os
 import stat
@@ -16,7 +17,7 @@ import tomllib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from cst_core.ports import ClockPort
     from toolchains.domain.prune import Limits
@@ -99,8 +100,6 @@ def measure(folder: Folder, dev: int, now: float) -> Folder:
     st_blocks is the size before compression (what du shows), not the
     compressed extents actually on disk. Also sizes the incremental
     folders (folder.inc) on the way."""
-    seen: set[int] = set()
-    newest = 0.0
     try:
         st = os.lstat(folder.path)
     except OSError as e:
@@ -108,52 +107,82 @@ def measure(folder: Folder, dev: int, now: float) -> Folder:
         return folder
     # (path, depth below the folder, index into folder.inc or -1)
     stack = [(folder.path, 0, -1)]
-    if st.st_mtime <= now + FUTURE_SLACK:
-        newest = st.st_mtime
+    walk = _MeasureWalk(folder, dev, now, set(), st.st_mtime if st.st_mtime <= now + FUTURE_SLACK else 0.0)
     folder.size += st.st_blocks * 512
     while stack:
         d, depth, inc = stack.pop()
-        try:
-            it = os.scandir(d)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            folder.problem = f"cannot read {d}: {e.strerror}"
-            continue
-        with it:
-            for e in it:
-                try:
-                    s = e.stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                except OSError as err:
-                    folder.problem = f"cannot read {e.path}: {err.strerror}"
-                    continue
-                folder.entries += 1
-                if s.st_dev != dev:
-                    folder.foreign += 1
-                    continue
-                if s.st_mtime > now + FUTURE_SLACK:
-                    folder.future += 1
-                elif s.st_mtime > newest:
-                    newest = s.st_mtime
-                if s.st_nlink > 1 and not stat.S_ISDIR(s.st_mode):
-                    if s.st_ino in seen:
-                        continue
-                    seen.add(s.st_ino)
-                sub = inc
-                if sub < 0 and depth + 1 in (2, 3) and e.name == INCREMENTAL and stat.S_ISDIR(s.st_mode):
-                    folder.inc.append(IncrementalDir(e.path))
-                    sub = len(folder.inc) - 1
-                folder.size += s.st_blocks * 512
-                if sub >= 0:
-                    folder.inc[sub].size += s.st_blocks * 512
-                if stat.S_ISDIR(s.st_mode):
-                    stack.append((e.path, depth + 1, sub))
-    folder.activity = newest or now
+        for e, s in _measured_entries(folder, d):
+            sub = _count_measured_entry(walk, e, s, depth, inc)
+            if sub is not None and stat.S_ISDIR(s.st_mode):
+                stack.append((e.path, depth + 1, sub))
+    folder.activity = walk.newest or now
     if folder.foreign:
         folder.problem = folder.problem or f"{folder.foreign} entr(y/ies) on another filesystem"
     return folder
+
+
+@dataclasses.dataclass(slots=True)
+class _MeasureWalk:
+    """What measure's walk of FOLDER carries from entry to entry: the device
+    it stays on, now, the inodes of the hardlinked files counted, and the
+    newest mtime seen that is not in the future."""
+
+    folder: Folder
+    dev: int
+    now: float
+    seen: set[int]
+    newest: float
+
+
+def _measured_entries(folder: Folder, d: str) -> Iterator[tuple[os.DirEntry[str], os.stat_result]]:
+    """(entry, its lstat) of each entry of D, a folder of FOLDER: one gone
+    meanwhile is left out; one that cannot be read (or D itself) is left out
+    and noted in folder.problem."""
+    try:
+        it = os.scandir(d)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        folder.problem = f"cannot read {d}: {e.strerror}"
+        return
+    with it:
+        for e in it:
+            try:
+                s = e.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as err:
+                folder.problem = f"cannot read {e.path}: {err.strerror}"
+                continue
+            yield e, s
+
+
+def _count_measured_entry(w: _MeasureWalk, e: os.DirEntry[str], s: os.stat_result, depth: int, inc: int) -> int | None:
+    """Count entry E (its lstat S; in a folder DEPTH levels below w.folder,
+    inside its incremental folder INC, or -1) into the walk. The index into
+    folder.inc the entry is inside (or -1), or None for an entry not counted
+    further: one on another filesystem, or a hardlinked file counted before."""
+    f = w.folder
+    f.entries += 1
+    if s.st_dev != w.dev:
+        f.foreign += 1
+        return None
+    if s.st_mtime > w.now + FUTURE_SLACK:
+        f.future += 1
+    elif s.st_mtime > w.newest:
+        w.newest = s.st_mtime
+    if s.st_nlink > 1 and not stat.S_ISDIR(s.st_mode):
+        if s.st_ino in w.seen:
+            return None
+        w.seen.add(s.st_ino)
+    sub = inc
+    if sub < 0 and depth + 1 in (2, 3) and e.name == INCREMENTAL and stat.S_ISDIR(s.st_mode):
+        f.inc.append(IncrementalDir(e.path))
+        sub = len(f.inc) - 1
+    f.size += s.st_blocks * 512
+    if sub >= 0:
+        f.inc[sub].size += s.st_blocks * 512
+    return sub
 
 
 def scan(root: str, now: float) -> tuple[list[Folder], list[Folder], list[tuple[str, str]]]:
@@ -186,25 +215,36 @@ def scan(root: str, now: float) -> tuple[list[Folder], list[Folder], list[tuple[
         if why:
             others.append((e.name, why))
             continue
-        try:
-            with os.scandir(e.path) as it2:
-                leaves = sorted(it2, key=lambda x: x.name)
-        except FileNotFoundError:
-            continue  # removed meanwhile (apply removes an XX/ it emptied)
-        except OSError as err:
-            others.append((e.name, f"cannot read: {err.strerror}"))
-            continue
-        for leaf in leaves:
-            try:
-                ls = leaf.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            why = classify(leaf.name, ls, dev, HASH_LEAF)
-            if why:
-                others.append((f"{e.name}/{leaf.name}", why))
-                continue
-            folders.append(measure(Folder(root, e.name, leaf.name), dev, now))
+        found, left = _scan_hash_top(root, e, dev, now)
+        folders += found
+        others += left
     return folders, trash, others
+
+
+def _scan_hash_top(root: str, e: os.DirEntry[str], dev: int, now: float) -> tuple[list[Folder], list[tuple[str, str]]]:
+    """(folders, others) of E, an XX/ folder of ROOT: its hash folders,
+    measured, and the entries left alone (name, why), in name order; none
+    when it is gone meanwhile."""
+    try:
+        with os.scandir(e.path) as it:
+            leaves = sorted(it, key=lambda x: x.name)
+    except FileNotFoundError:
+        return [], []  # removed meanwhile (apply removes an XX/ it emptied)
+    except OSError as err:
+        return [], [(e.name, f"cannot read: {err.strerror}")]
+    folders: list[Folder] = []
+    others: list[tuple[str, str]] = []
+    for leaf in leaves:
+        try:
+            ls = leaf.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        why = classify(leaf.name, ls, dev, HASH_LEAF)
+        if why:
+            others.append((f"{e.name}/{leaf.name}", why))
+            continue
+        folders.append(measure(Folder(root, e.name, leaf.name), dev, now))
+    return folders, others
 
 
 def lock_files(path: str) -> list[str]:

@@ -5,6 +5,7 @@ which build folders the workspaces under ~/Workspace still claim.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import shutil
@@ -142,10 +143,8 @@ def walk_dirs(
         if time.monotonic() > deadline:
             raise Incomplete(f"the search of workspaces took longer than {ENUM_BUDGET}s")
         d, depth = stack.pop()
-        try:
-            with os.scandir(d) as it:
-                entries = list(it)
-        except OSError:
+        entries = _dir_listing_or_none(d)
+        if entries is None:
             continue
         names = {e.name for e in entries}
         if CACHE_TAG in names and d != top:
@@ -153,14 +152,32 @@ def walk_dirs(
         yield d, names
         if depth >= depth_max or (stop and stop(d, names)):
             continue
-        for e in sorted(entries, key=lambda x: x.name, reverse=True):
-            if e.name.startswith(".") or e.name in SCAN_SKIP:
-                continue
-            try:
-                if e.is_dir(follow_symlinks=False):
-                    stack.append((e.path, depth + 1))
-            except OSError:
-                pass
+        stack.extend((p, depth + 1) for p in _walked_into(entries))
+
+
+def _dir_listing_or_none(d: str) -> list[os.DirEntry[str]] | None:
+    """The entries of folder D, or None when it cannot be read."""
+    try:
+        with os.scandir(d) as it:
+            return list(it)
+    except OSError:
+        return None
+
+
+def _walked_into(entries: Sequence[os.DirEntry[str]]) -> list[str]:
+    """The folders of ENTRIES walk_dirs goes into, the last name first (the
+    stack takes the first name first): not hidden, not in SCAN_SKIP, never a
+    symlink; an entry whose type cannot be read is left out."""
+    out: list[str] = []
+    for e in sorted(entries, key=lambda x: x.name, reverse=True):
+        if e.name.startswith(".") or e.name in SCAN_SKIP:
+            continue
+        try:
+            if e.is_dir(follow_symlinks=False):
+                out.append(e.path)
+        except OSError:
+            pass
+    return out
 
 
 def git_common_dir(wt: str) -> str | None:
@@ -358,14 +375,82 @@ def cargo_users(
         if why is not None or bd is None:
             unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
             continue
-        for pr in pre:
-            if bd.startswith(pr + "/"):
-                k = "/".join(bd[len(pr) + 1 :].split("/")[:2])
-                lst = found.setdefault(k, [])
-                if (p.pid, p.comm) not in lst:
-                    lst.append((p.pid, p.comm))
-                break
+        k = _build_folder_key(pre, bd)
+        if k is not None:
+            lst = found.setdefault(k, [])
+            if (p.pid, p.comm) not in lst:
+                lst.append((p.pid, p.comm))
     return found, unknown
+
+
+def _build_folder_key(pre: Sequence[str], bd: str) -> str | None:
+    """The key ('XX/YYYY') of build folder BD under the first of the root's
+    paths PRE it is in, or None when it is under none of them."""
+    for pr in pre:
+        if bd.startswith(pr + "/"):
+            return "/".join(bd[len(pr) + 1 :].split("/")[:2])
+    return None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _MetadataSearch:
+    """What each cargo metadata call of one claimed_folders run takes: the
+    cargo to ask, its environment, the run's deadline, the seconds one call
+    may take, and the root's paths (PRE) the build folders are keyed under."""
+
+    cargo: str
+    env: Mapping[str, str]
+    deadline: float
+    cmd_timeout: float
+    pre: tuple[str, ...]
+
+
+def _ask_manifests(search: _MetadataSearch, ws: Workspaces, manifests: Sequence[str]) -> None:
+    """Ask cargo metadata about the MANIFESTS of one worktree, into WS (asked,
+    failures, claimed). The shallowest first: a workspace's root answers for
+    its members."""
+    covered: set[str] = set()
+    for m in sorted(manifests, key=lambda p: (p.count("/"), p)):
+        if m in covered:
+            continue
+        data, why = workspace_metadata(search.cargo, m, search.env, search.deadline, search.cmd_timeout)
+        ws.asked += 1
+        if why is not None or data is None:
+            ws.failures.append((m, why or "unknown"))
+            continue
+        covered.add(m)
+        covered |= _manifests_answered(data)
+        _claim_build_folder(ws, search.pre, data, m)
+
+
+def _manifests_answered(data: CargoMetadata) -> set[str]:
+    """The Cargo.toml files cargo's answer DATA speaks for: its packages' and
+    its workspace root's."""
+    out: set[str] = set()
+    for p in json_items(data.get("packages")):
+        mp = p.get("manifest_path") if isinstance(p, dict) else None
+        if isinstance(mp, str):
+            out.add(os.path.normpath(mp))
+    wr = data.get("workspace_root")
+    if isinstance(wr, str):
+        out.add(os.path.join(os.path.normpath(wr), CARGO_MANIFEST))
+    return out
+
+
+def _claim_build_folder(ws: Workspaces, pre: Sequence[str], data: CargoMetadata, m: str) -> None:
+    """The build folder of cargo's answer DATA (for Cargo.toml M), when it is
+    under the root (paths PRE), is claimed by its workspace in WS."""
+    bd = data.get("build_directory")
+    if not isinstance(bd, str) or not bd:
+        return  # a cargo without build-dir support: not in this root
+    key = _build_folder_key(pre, os.path.normpath(bd))
+    if key is None:
+        return
+    wr = data.get("workspace_root")
+    lst = ws.claimed.setdefault(key, [])
+    shown = wr if isinstance(wr, str) else os.path.dirname(m)
+    if shown not in lst:
+        lst.append(shown)
 
 
 def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: bool = True) -> Workspaces:
@@ -381,44 +466,14 @@ def claimed_folders(root: str | None, home: str, limits: Limits, *, with_cargo: 
         cargo = user_cargo(home) if with_cargo else ""
         if with_cargo and not cargo:
             raise Incomplete("no cargo program found to ask")
-        env = metadata_env(home)
+        search = _MetadataSearch(cargo, metadata_env(home), deadline, limits.cmd_timeout, pre)
         for wt in ws.worktrees:
             manifests, pins, tools = find_manifests(wt, deadline)
             ws.pins += pins
             ws.tool_files += tools
             ws.manifests += len(manifests)
-            if not with_cargo:
-                continue
-            covered: set[str] = set()
-            # The shallowest first: a workspace's root answers for its members.
-            for m in sorted(manifests, key=lambda p: (p.count("/"), p)):
-                if m in covered:
-                    continue
-                data, why = workspace_metadata(cargo, m, env, deadline, limits.cmd_timeout)
-                ws.asked += 1
-                if why is not None or data is None:
-                    ws.failures.append((m, why or "unknown"))
-                    continue
-                covered.add(m)
-                for p in json_items(data.get("packages")):
-                    mp = p.get("manifest_path") if isinstance(p, dict) else None
-                    if isinstance(mp, str):
-                        covered.add(os.path.normpath(mp))
-                wr = data.get("workspace_root")
-                if isinstance(wr, str):
-                    covered.add(os.path.join(os.path.normpath(wr), CARGO_MANIFEST))
-                bd = data.get("build_directory")
-                if not isinstance(bd, str) or not bd:
-                    continue  # a cargo without build-dir support: not in this root
-                bd = os.path.normpath(bd)
-                for pr in pre:
-                    if bd.startswith(pr + "/"):
-                        key = "/".join(bd[len(pr) + 1 :].split("/")[:2])
-                        lst = ws.claimed.setdefault(key, [])
-                        shown = wr if isinstance(wr, str) else os.path.dirname(m)
-                        if shown not in lst:
-                            lst.append(shown)
-                        break
+            if with_cargo:
+                _ask_manifests(search, ws, manifests)
         if ws.failures:
             m, why = ws.failures[0]
             more = f" (and {len(ws.failures) - 1} more)" if len(ws.failures) > 1 else ""
