@@ -640,7 +640,8 @@ class Monitor:
             if now >= next_probe:
                 self.probe_commits()
                 next_probe = now + PROBE_INTERVAL
-            if self._wants_sample_now(triggered=triggered):
+            self._name_psi_episode(triggered=triggered)
+            if self._sample_wanted():
                 next_sample = now
             if now >= next_sample:
                 next_sample, day = self._take_sample(now, day)
@@ -687,14 +688,15 @@ class Monitor:
                 self.drain_kmsg()
         return triggered
 
-    def _wants_sample_now(self, *, triggered: bool) -> bool:
-        """Whether a sample is due at once: no episode yet, and the PSI trigger fired or something asked for
-        one (a long commit); a fired trigger names the episode's reason."""
-        if self.episode is None and (triggered or self.want_episode is not None):
-            if triggered and self.want_episode is None:
-                self.want_episode = "psi trigger"
-            return True
-        return False
+    def _name_psi_episode(self, *, triggered: bool) -> None:
+        """A fired PSI trigger asks for an episode, "psi trigger" its reason, when none is open and nothing
+        else (a long commit) asked for one first."""
+        if triggered and self.episode is None and self.want_episode is None:
+            self.want_episode = "psi trigger"
+
+    def _sample_wanted(self) -> bool:
+        """Whether a sample is due at once: no episode open, and something asked for one."""
+        return self.episode is None and self.want_episode is not None
 
     def _take_sample(self, now: float, day: str) -> tuple[float, str]:
         """One sample: the D-state tasks, the record, the episode and hung-task checks; the meta record
