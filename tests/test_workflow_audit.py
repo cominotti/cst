@@ -408,11 +408,10 @@ def _step_blocks(text: str) -> list[list[tuple[int, str]]]:
         if steps_indent is None:
             continue
         item = _DASH_ITEM.match(line)
-        dash_indent = len(line) - len(stripped)
         if indent < steps_indent or (indent == steps_indent and item is None):
             steps_indent, step_indent = None, None
-        elif item is not None and (step_indent is None or dash_indent == step_indent):
-            step_indent = dash_indent
+        elif item is not None and (step_indent is None or indent == step_indent):
+            step_indent = indent
             blocks.append([(lineno, line)])
         elif blocks and step_indent is not None:
             blocks[-1].append((lineno, line))

@@ -956,26 +956,22 @@ _REDIRECTION = re.compile(r"[0-9]*[<>]|&>")
 
 
 def _has_unquoted_comment(text: str) -> bool:
-    """Whether text holds a # that bash reads as starting a comment (unquoted, at start or after whitespace)."""
-    quote, escaped, blank = "", False, True
+    """Whether text holds a # that bash reads as starting a comment (unquoted, at start or after delimiter)."""
+    quote, escaped, word_start = "", False, True
     for ch in text:
         if escaped:
-            escaped, blank = False, False
-            continue
-        if ch == "\\" and quote != "'":
-            escaped, blank = True, False
-            continue
-        if quote:
-            if ch == quote:
-                quote = ""
-            blank = False
-            continue
-        if ch in ("'", '"'):
-            quote, blank = ch, False
-        elif ch == "#" and blank:
+            escaped, word_start = False, False
+        elif ch == "\\" and quote != "'":
+            escaped, word_start = True, False
+        elif quote:
+            quote = "" if ch == quote else quote
+            word_start = False
+        elif ch in ("'", '"'):
+            quote, word_start = ch, False
+        elif ch == "#" and word_start:
             return True
         else:
-            blank = ch.isspace()
+            word_start = ch.isspace() or ch in ";|&()<>"
     return False
 
 
@@ -989,14 +985,14 @@ def _before_redirection(word: str) -> tuple[str, bool]:
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
-    """(number of its first line, text) of each command line, a line ending in a backslash joined with
-    the next one, unless that backslash is in an unquoted comment (bash continues no comment)."""
+    """(number of its first line, text) of each command line, a line ending in an odd number of
+    backslashes joined with the next one, unless those backslashes are in an unquoted comment."""
     out: list[tuple[int, str]] = []
     first, parts = 0, []
     for number, line in enumerate(text.splitlines(), 1):
         if not parts:
             first = number
-        if line.endswith("\\") and not _has_unquoted_comment("".join([*parts, line])):
+        if (len(line) - len(line.rstrip("\\"))) % 2 == 1 and not _has_unquoted_comment("".join([*parts, line])):
             parts.append(line[:-1])
             continue
         out.append((first, " ".join([*parts, line])))
@@ -1135,8 +1131,19 @@ class ShellComponentWordsTest(unittest.TestCase):
 
     def test_quoted_hash_continues_line_and_semicolon_before_redirection_ends_word(self) -> None:
         self.assertEqual(
-            _logical_lines("echo \" # \" \\\nmore\necho ' # ' \\\nmore\n# comment \\\nnext\n"),
-            [(1, 'echo " # "  more'), (3, "echo ' # '  more"), (5, "# comment \\"), (6, "next")],
+            _logical_lines(
+                "echo \" # \" \\\nmore\necho ' # ' \\\nmore\n# comment \\\nnext\necho a;# comment \\\nnext\necho foo \\\\\ncst_mark btrfs:alerts\n"
+            ),
+            [
+                (1, 'echo " # "  more'),
+                (3, "echo ' # '  more"),
+                (5, "# comment \\"),
+                (6, "next"),
+                (7, "echo a;# comment \\"),
+                (8, "next"),
+                (9, "echo foo \\\\"),
+                (10, "cst_mark btrfs:alerts"),
+            ],
         )
         text = (
             'echo " # "; cst_install_text a 0644 \\\n'
@@ -1145,6 +1152,9 @@ class ShellComponentWordsTest(unittest.TestCase):
             "    root btrfs:alerts\n"
             "cst_install_text e 0644 \\#notacomment \\\n"
             "    btrfs:snapshot\n"
+            "echo a;# note \\\n"
+            "echo foo \\\\\n"
+            "# cst_mark btrfs:bogus\n"
             "cst_mark btrfs:core;>/dev/null extra\n"
             "cst_mark btrfs:alerts;2>/dev/null extra\n"
             "cst_installer dests --component=btrfs:z;>/dev/null\n"
@@ -1157,11 +1167,11 @@ class ShellComponentWordsTest(unittest.TestCase):
                 (1, "btrfs:core"),
                 (3, "btrfs:alerts"),
                 (5, "btrfs:snapshot"),
-                (7, "btrfs:core"),
-                (8, "btrfs:alerts"),
-                (9, "btrfs:z"),
-                (10, "btrfs:q"),
-                (11, "btrfs:core"),
+                (10, "btrfs:core"),
+                (11, "btrfs:alerts"),
+                (12, "btrfs:z"),
+                (13, "btrfs:q"),
+                (14, "btrfs:core"),
             ],
         )
 

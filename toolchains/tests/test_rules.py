@@ -2054,7 +2054,8 @@ class RustcWrapperTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.scope_dir("sccache.slice", "host")))
 
         prlimit = shutil.which("prlimit")
-        assert prlimit is not None and self.sh is not None
+        assert prlimit is not None
+        assert self.sh is not None
         open(self.log, "w").close()
         r = subprocess.run(
             [prlimit, "--nproc=0", self.sh, self.script, self.rustc(), "x"],

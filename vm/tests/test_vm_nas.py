@@ -2567,7 +2567,8 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertEqual(store.removed, [overlay_a])
         commits = [c for c in commands.virsh_log if c[0][0] == "blockcommit"]
         self.assertEqual(len(commits), 1)
-        self.assertTrue(commits[0][1] and commits[0][2], commits)
+        self.assertTrue(commits[0][1], commits)
+        self.assertTrue(commits[0][2], commits)
 
     def test_find_overlays_raises_with_empty_overlaid_finds_overlay_on_disk(self) -> None:
         disk_a = "/img/a.qcow2"
