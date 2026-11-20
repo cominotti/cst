@@ -2107,7 +2107,7 @@ class TimerUseCaseTest(unittest.TestCase):
         # A refusal is any text, "" too: on must not go on and install the files.
         timers = FakeTimers({"/p": OwnedState.MISSING}, [])
         with (
-            mock.patch.object(vm_application, "masked_refusal", lambda *_args, **_kwargs: ""),
+            mock.patch.object(vm_application, "masked_refusal", return_value=""),
             self.assertRaisesRegex(Refused, "nothing was changed"),
         ):
             vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, lambda s: None)
