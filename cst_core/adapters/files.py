@@ -21,11 +21,11 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from typing import Literal, overload
 
+from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.files import OwnedState, UnitFileState, WholeFileState, owned_file_state
 from cst_core.domain.install import Owner, link_read_through
 from cst_core.domain.text import first_line
@@ -338,19 +338,13 @@ def _fsync_dir(folder: str) -> None:
 
 
 def _relabel(path: str) -> None:
-    """restorecon as root; a failure is reported on stderr (the file is written, its label may be wrong)."""
+    """restorecon as root, through cst_core's command runner; a failure is reported on stderr (the file is
+    written, its label may be wrong). A restorecon that cannot start raises, as subprocess.run did."""
     restorecon = shutil.which("restorecon")
     if restorecon is None:
         return
     # "--": the path is an operand even if a caller ever passes one starting with "-".
-    done = subprocess.run(
-        [restorecon, "-F", "--", path],
-        check=False,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        stdin=subprocess.DEVNULL,
-    )
+    done = SubprocessCommandRunner().run([restorecon, "-F", "--", path]).raise_cause()
     if done.returncode != 0:
         why = first_line(done.stderr) or f"exit status {done.returncode}"
         print(f"warning: restorecon {path}: {why} (its SELinux label may be wrong)", file=sys.stderr)

@@ -675,7 +675,7 @@ class WriteBytesAtomicTest(unittest.TestCase):
             mock.patch.object(core_files.os, "geteuid", return_value=0),
             mock.patch.object(core_files.os, "fchown"),
             mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
-            mock.patch.object(core_files.subprocess, "run", side_effect=run),
+            mock.patch.object(core_runner.subprocess, "run", side_effect=run),
             contextlib.redirect_stderr(stderr),
         ):
             core_files.write_bytes_atomic(dest, b"x")
@@ -823,7 +823,7 @@ class WriteAtomicTest(unittest.TestCase):
                 mock.patch.object(core_files.os, "geteuid", return_value=0),
                 mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
                 mock.patch.object(
-                    core_files.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                    core_runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
                 ) as run,
             ):
                 core_files.write_atomic(self.dest, b"x", mode=0o644, relabel=relabel)
