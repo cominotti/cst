@@ -5870,6 +5870,63 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_156_cpu_game_profile_tick_sets_a_box_whose_record_bash_cannot_read(self) -> None:
+        """The real game profile, on for tester, then a box next to the game (a slice of the user
+        manager's own, made by systemd-run --user) whose only record in game.state is a whole line that
+        bash cannot read (an unclosed quote): 'off' would skip it, so the box is not handled. The tick
+        sets the box (CPUWeight idle in the real user manager) and writes a record 'off' can read; a
+        second tick adds nothing, and 'off' gives the box its own CPUWeight back."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e156-box.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-156-conf.bak ]]; then mv /tmp/e2e-156-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-156-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            touch /run/cpu-setup/manual
+            gp on
+            systemd-run --user -M tester@ --quiet --slice=e2e156.slice --unit=e2e156-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e156.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            own=$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)
+            [[ "$own" != idle ]]
+            printf '%s\n' "prop usr e2e156.slice CPUWeight existed 'x" >>"$st"   # an unclosed quote
+            got=$(gp tick)
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)" == idle ]] \
+                || { echo "the tick did not set the box: $got" >&2; cat "$st" >&2; exit 1; }
+            grep -qxF 'prop usr e2e156.slice CPUWeight new -' "$st" \
+                || { echo "no record 'off' can read" >&2; cat "$st" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            gp tick >/dev/null
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a second tick added a record" >&2; cat "$st" >&2; exit 1; }
+            gp off
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e156.slice)" == "$own" ]] \
+                || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e156-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
