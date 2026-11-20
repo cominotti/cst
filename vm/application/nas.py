@@ -291,7 +291,7 @@ def nas_run(
         merge = _nas_merge_back(cfg, p, run)
     if isinstance(failure, Uncertain) and not merge.problems:
         merge.problems.append(str(failure))
-        run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
+        _add_overlay_files(p, run)
     if merge.problems:
         raise _nas_not_merged_back(cfg, p, run, merge, failure)
     if failure is not None:
@@ -445,11 +445,7 @@ def _nas_check_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRe
 def _nas_note_changed(store: BackupStorePort, run: NasRun) -> None:
     """A note for each file read live (the UEFI variables, the TPM state) that changed meanwhile."""
     for src in run.before:
-        try:
-            same = store.fingerprint(src) == run.before[src]
-        except OSError:
-            same = False
-        if not same:
+        if fingerprint_or_none(store, src) != run.before[src]:
             run.notes.append(
                 f"{src} changed while restic read it (the VM wrote it): that copy may be torn; "
                 "the next backup reads it again"
@@ -491,7 +487,7 @@ def _nas_not_merged_back(
     )
     p.alert("VM backup: disk left on a snapshot overlay", body)
     if not run.overlaid:  # nothing known: the files this run could have made
-        run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
+        _add_overlay_files(p, run)
     lines = overlay_recovery(vm, run.overlaid.items(), merge.how)
     msg = (
         "DISK NOT MERGED BACK:\n  "
@@ -502,6 +498,11 @@ def _nas_not_merged_back(
     if failure is not None and not isinstance(failure, Uncertain):
         msg += f"\n(the backup itself: {failure})"
     return Refused(msg)
+
+
+def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
+    """run.overlaid gets each overlay of run.specs whose file is there."""
+    run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
 
 
 def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
@@ -534,9 +535,8 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
             if rc != 0 or unsure:
                 if rc != 0:
                     run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
-                    p.commands.virsh(
-                        ("domfsthaw", run.vm), 60, detach=None
-                    )  # best effort: never leave the guest frozen
+                    # best effort: never leave the guest frozen
+                    p.commands.virsh(("domfsthaw", run.vm), 60, detach=None)
                 return "crash-consistent"
             p.out.say("  snapshot taken with the guest's file systems frozen (quiesced, QEMU guest agent)")
             return "quiesced"
