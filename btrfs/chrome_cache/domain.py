@@ -152,12 +152,19 @@ def decide(text: str) -> tuple[DecidedState, str | None, str]:
             add_after(text, FLAG_DIR, FLAG_SIZE),
             "the 512 MiB cap line is missing under the marker: add it back",
         )
-    note = ""
-    if ours_d and s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
-        note = "; WARNING: that cache lives in RAM, keep it small"
-    elif ours_d and (s is None or s in ("", "0")):
-        note = "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
-    return ChromeFlagsState.USER, None, f"set by you ({fmt(d, s)}): left as it is{note}"
+    return ChromeFlagsState.USER, None, f"set by you ({fmt(d, s)}): left as it is{_ram_note(d, s)}"
+
+
+def _ram_note(d: str | None, s: str | None) -> str:
+    """The warning decide adds to flags of the user's own that put the cache in our RAM folder D
+    with a size S above the cap or no cap at all; "" for any other flags."""
+    if d != CACHE_DIR:
+        return ""
+    if s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
+        return "; WARNING: that cache lives in RAM, keep it small"
+    if s is None or s in ("", "0"):
+        return "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
+    return ""
 
 
 def fmt(d: str | None, s: str | None) -> str:
