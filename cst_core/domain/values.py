@@ -84,7 +84,10 @@ def format_bytes_decimal(n: float) -> str:
     val = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if val < 1000 or unit == "TB":
-            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val) if val.is_integer() else val} B"
+            if unit == "B":
+                shown = int(val) if val.is_integer() else val
+                return f"{shown} B"
+            return f"{val:.1f} {unit}"
         val /= 1000
     return f"{val} B"
 

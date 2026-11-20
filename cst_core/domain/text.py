@@ -295,7 +295,12 @@ def _ansi_c_value(body: str) -> str:
     for m in _ANSI_C_ESCAPE.finditer(body):
         out += body[pos : m.start()].encode("utf-8", "surrogatepass")
         char, octal, hexa = m.groups()
-        out.append(_ANSI_C_CHARS[char] if char else int(octal or hexa, 8 if octal else 16) & 0xFF)
+        if char:
+            out.append(_ANSI_C_CHARS[char])
+        elif octal:
+            out.append(int(octal, 8) & 0xFF)
+        else:
+            out.append(int(hexa, 16) & 0xFF)
         pos = m.end()
     out += body[pos:].encode("utf-8", "surrogatepass")
     return bytes(out).split(b"\0", 1)[0].decode("utf-8", "replace")
