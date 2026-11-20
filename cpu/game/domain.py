@@ -415,12 +415,13 @@ def drifted(
     """
     out: list[Drift] = []
     for r in recs:
-        if r[:1] == (GameRecordKind.PROP,):
-            found = _prop_drift(r, now)
-        elif r[:1] == (GameRecordKind.CGW,):
-            found = _cgw_drift(r, read_file)
-        else:
-            continue
+        match _kind(r):
+            case GameRecordKind.PROP:
+                found = _prop_drift(r, now)
+            case GameRecordKind.CGW:
+                found = _cgw_drift(r, read_file)
+            case _:
+                continue
         if found is not None:
             out.append(found)
     return out
@@ -428,23 +429,23 @@ def drifted(
 
 def _prop_drift(r: Record, now: Mapping[tuple[str, str], Mapping[str, str]]) -> Drift | None:
     """A prop record's drift (drifted): what systemd shows now, None when it holds or cannot be compared."""
-    if len(r) < 6:
+    if len(r) < INTENDED_PROP_FIELDS:
         return None
     vals = now.get((r[1], r[2]))
     if not r[5] or vals is None:
         return None
     value = vals.get(r[3], "")
-    return Drift(r[:6], value) if value != r[5] else None
+    return Drift(r[:INTENDED_PROP_FIELDS], value) if value != r[5] else None
 
 
 def _cgw_drift(r: Record, read_file: Callable[[str], str | None]) -> Drift | None:
     """A cgw record's drift (drifted): the cgroup file's text now, None when it holds or is gone."""
-    if len(r) < 4 or not r[3]:
+    if len(r) < INTENDED_CGW_FIELDS or not r[3]:
         return None
     value = read_file(r[1])
     if value is None or value == r[3]:
         return None
-    return Drift(r[:4], value)
+    return Drift(r[:INTENDED_CGW_FIELDS], value)
 
 
 # The fields of a game.state record 'off' undoes: "prop MGR UNIT PROP MODE OLD", "cgw FILE OLD" and
