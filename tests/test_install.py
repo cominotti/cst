@@ -37,6 +37,7 @@ from cst_core.domain.dispatch import step_down_argv
 from cst_core.domain.install import (
     INSTALL_MANIFEST,
     ArtifactKind,
+    Component,
     InstallEntry,
     OnDisk,
     Owner,
@@ -52,6 +53,8 @@ from cst_core.domain.record import parse_record
 from cst_core.domain.values import DomainValidationError, OctalMode
 from cst_core.installer import main as installer_main
 from cst_core.ports import WriteFailed
+from tests.budgets import is_test_file
+from tests.shell_files import shell_files
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALLER = os.path.join(REPO, "cst_core", "installer.py")
@@ -931,6 +934,90 @@ class CstAsUserTest(unittest.TestCase):
         r = self.run_bash("cst_as_user no-such-user-cst-test true")
         self.assertEqual((r.returncode, r.stdout), (1, b""))
         self.assertIn(b"no home folder for user 'no-such-user-cst-test'", r.stderr)
+
+
+# The cst-install.bash functions (and btrfs-setup.sh's check) that take a component, and how many of
+# their first arguments come before it (None: every argument is one; --component C anywhere too).
+_COMPONENT_CALLS: dict[str, int | None] = {
+    "cst_mark": 0,
+    "cst_mark_as": 1,
+    "cst_component_units": 0,
+    "cst_install_text": 3,
+    "cst_install_text_plan": 3,
+    "check_component_syntax": None,
+}
+_SHELL_END = ("|", ";", "&", "<", ">", ")")
+
+
+def shell_component_words(text: str) -> list[tuple[int, str]]:
+    """(line, word) of every component a shell text names as an argument: after --component, and in
+    the component position of _COMPONENT_CALLS. Comment lines and words with a $ (variables) are none."""
+    found: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        words = line.split()
+        for i, word in enumerate(words):
+            args: list[str] = []
+            if word == "--component" and i + 1 < len(words):
+                args = [words[i + 1].removesuffix(";")]
+            elif word in _COMPONENT_CALLS:
+                rest: list[str] = []
+                for w in words[i + 1 :]:
+                    if w.startswith(_SHELL_END) or w == "||":
+                        break
+                    rest.append(w.removesuffix(";"))
+                    if w.endswith(";"):  # `cst_mark C; fi`: the command ends there
+                        break
+                skip = _COMPONENT_CALLS[word]
+                args = rest if skip is None else rest[skip : skip + 1]
+            found += [(number, a.strip("\"'")) for a in args if "$" not in a]
+    return found
+
+
+class ShellComponentWordsTest(unittest.TestCase):
+    """Every component a shell setup script names (cst_install --component C, cst_mark C,
+    cst_install_text DEST MODE OWNER C, ...) is a word of Component: a misspelt one would be a usage
+    error at run time, or a record line under a component no command refreshes."""
+
+    def test_every_component_word_of_the_shell_files_is_a_component(self) -> None:
+        words = {str(c) for c in Component}
+        seen: set[str] = set()
+        for rel in shell_files():
+            if is_test_file(rel):
+                continue
+            text = Path(REPO, rel).read_text(encoding="utf-8", errors="replace")
+            for number, word in shell_component_words(text):
+                seen.add(word)
+                with self.subTest(file=rel, line=number):
+                    self.assertIn(word, words)
+        # The gate reads the calls it is meant for: the scripts name these components.
+        self.assertLessEqual(
+            {"btrfs:core", "btrfs:alerts", "btrfs:degraded-boot", "btrfs:report-launcher", "btrfs:snapshots"}, seen
+        )
+
+    def test_the_words_are_found_where_the_calls_take_them(self) -> None:
+        text = (
+            "cst_install --component btrfs:core\n"
+            'cst_install_text "${f}" 0644 root btrfs:degraded-boot <"${x}"\n'
+            'cst_install_text "${SNAP_CONF}" 0644 <"${tmp}" || rc=$?\n'
+            'cst_mark_as "${user}" btrfs:report-launcher\n'
+            "check_component_syntax btrfs:alerts btrfs:cor\n"
+            "# cst_mark btrfs:nope (a comment)\n"
+            'cst_mark "$1"\n'
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [
+                (1, "btrfs:core"),
+                (2, "btrfs:degraded-boot"),
+                (4, "btrfs:report-launcher"),
+                (5, "btrfs:alerts"),
+                (5, "btrfs:cor"),
+            ],
+        )
+        # A planted misspelt word is reported by the gate's check.
+        self.assertNotIn("btrfs:cor", {str(c) for c in Component})
 
 
 if __name__ == "__main__":
