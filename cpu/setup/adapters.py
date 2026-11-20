@@ -524,15 +524,7 @@ class CpuSetup:
         action = first_arg(args, "list")
         name = args[1] if len(args) > 1 else ""
         if action == "list":
-            for exp, (file, value) in self.paths.experiments.items():
-                try:
-                    with open(file, encoding="utf-8", errors="replace") as fh:
-                        now = fh.read().replace("\n", "")
-                except OSError as e:
-                    self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-                    now = ""
-                self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
-            return 0
+            return self._experiment_list()
         if action not in ("on", "off"):
             raise Halt(2, "experiment: list|on NAME|off NAME")
         if not name:
@@ -543,15 +535,35 @@ class CpuSetup:
         file, value = spec
         saved = self.paths.saved(name)
         if action == "on":
-            _make_run_dir(self.paths.run)
-            if not os.path.exists(saved):
-                self._save_choice(file, saved)
-            if not self._echo_to(file, value):
-                raise Halt(1)
-            self.say(
-                f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
-            )
-            return 0
+            return self._experiment_on(name, file, value, saved)
+        return self._experiment_off(name, file, saved)
+
+    def _experiment_list(self) -> int:
+        """experiment list: each knob, its value now, and whether it is on."""
+        for exp, (file, value) in self.paths.experiments.items():
+            try:
+                with open(file, encoding="utf-8", errors="replace") as fh:
+                    now = fh.read().replace("\n", "")
+            except OSError as e:
+                self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
+                now = ""
+            self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
+        return 0
+
+    def _experiment_on(self, name: str, file: str, value: str, saved: str) -> int:
+        """experiment on NAME: the value it replaces saved (the first time), then VALUE into FILE."""
+        _make_run_dir(self.paths.run)
+        if not os.path.exists(saved):
+            self._save_choice(file, saved)
+        if not self._echo_to(file, value):
+            raise Halt(1)
+        self.say(
+            f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
+        )
+        return 0
+
+    def _experiment_off(self, name: str, file: str, saved: str) -> int:
+        """experiment off NAME: the saved value back into FILE."""
         if not os.path.exists(saved):
             self.say(f"{name}: not on")
             return 0
