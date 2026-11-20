@@ -10,6 +10,8 @@ those modules can switch to it without changing a byte.
 from collections.abc import Callable, Sequence
 import contextlib
 from enum import StrEnum
+import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -27,6 +29,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import types
 from typing import override
 import unittest
 from unittest import mock
@@ -52,6 +55,7 @@ from cst_core.adapters import notify as core_notify
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
 from cst_core.adapters.sd_notify import ServiceNotifier
+from cst_core.adapters import locks as core_locks
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters import terminal as core_terminal
 from cst_core.adapters.terminal import confirm
@@ -451,23 +455,41 @@ class AdaptersTest(unittest.TestCase):
 
     def test_a_lock_that_fails_closes_its_fd_and_raises(self) -> None:
         # fchmod of a new lock file, flock itself, or the wait between tries (Ctrl-C): the error
-        # reaches the caller, and the fd that was opened for the lock is closed.
-        def open_fds() -> int:
-            return len(os.listdir("/proc/self/fd"))
-
+        # reaches the caller, and the fd that was opened for the lock is closed. The failure is
+        # planted in the locks module's own os, fcntl and time (stand-ins with one function
+        # replaced), not in those modules, and the check is on the fd the module opened: another
+        # thread's sleep, flock or fds play no part.
         cases: tuple[tuple[str, str, BaseException, float | None], ...] = (
-            ("fchmod", "cst_core.adapters.locks.os.fchmod", PermissionError(1, "fchmod refused"), None),
-            ("flock", "cst_core.adapters.locks.fcntl.flock", OSError(37, "no locks available"), None),
-            ("sleep", "cst_core.adapters.locks.time.sleep", KeyboardInterrupt(), 5.0),
+            ("os", "fchmod", PermissionError(1, "fchmod refused"), None),
+            ("fcntl", "flock", OSError(37, "no locks available"), None),
+            ("time", "sleep", KeyboardInterrupt(), 5.0),
         )
-        for name, target, error, timeout in cases:
+        for module, name, error, timeout in cases:
             with self.subTest(name=name):
                 lock = self.path(f"{name}.lock")
                 held = take_lock(lock, wait=False) if name == "sleep" else None
-                before = open_fds()
-                with mock.patch(target, side_effect=error), self.assertRaises(type(error)):
-                    take_lock(lock, wait=True, timeout=timeout)
-                self.assertEqual(open_fds(), before, "the lock's fd was left open")
+                opened: list[int] = []
+
+                def recording_open(path: str, flags: int, mode: int = 0o777, *, into: list[int] = opened) -> int:
+                    fd = os.open(path, flags, mode)
+                    into.append(fd)
+                    return fd
+
+                views: dict[str, dict[str, object]] = {
+                    "os": {**vars(os), "open": recording_open},
+                    "fcntl": dict(vars(fcntl)),
+                    "time": dict(vars(time)),
+                }
+                views[module][name] = mock.Mock(side_effect=error)
+                with contextlib.ExitStack() as patches:
+                    for attr, members in views.items():
+                        patches.enter_context(mock.patch.object(core_locks, attr, types.SimpleNamespace(**members)))
+                    with self.assertRaises(type(error)):
+                        take_lock(lock, wait=True, timeout=timeout)
+                self.assertEqual(len(opened), 1, "take_lock opens the lock file once")
+                with self.assertRaises(OSError, msg="the lock's fd was left open") as closed:
+                    os.fstat(opened[0])
+                self.assertEqual(closed.exception.errno, errno.EBADF)
                 if held is not None:
                     os.close(held)
 
