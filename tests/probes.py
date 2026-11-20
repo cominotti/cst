@@ -18,7 +18,7 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from unittest import mock
 
-from cst_core.ports import CommandResult, UnitName
+from cst_core.ports import CommandResult, OutputMode, UnitName
 
 
 @contextmanager
@@ -62,17 +62,22 @@ class NoUnitQueries:
     """The SystemdPort calls a fake of a module that never makes them (vm's timer use cases, swap):
     systemctl's queries and daemon-reload's result; each one fails the test."""
 
-    def daemon_reload_result(self) -> CommandResult:
+    def daemon_reload_result(self, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError("not asked here: daemon-reload's result")
 
-    def is_active(self, unit: UnitName) -> CommandResult:
+    def is_active(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(f"not asked here: is-active {unit}")
 
-    def is_enabled(self, unit: UnitName) -> CommandResult:
+    def is_enabled(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(f"not asked here: is-enabled {unit}")
 
-    def show_environment(self) -> CommandResult:
+    def show_environment(self, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError("not asked here: show-environment")
 
-    def show_value(self, unit: UnitName, prop: str) -> CommandResult:
+    def show_value(self, unit: UnitName, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(f"not asked here: show -p {prop} --value {unit}")

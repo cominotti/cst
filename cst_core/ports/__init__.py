@@ -318,48 +318,48 @@ class SystemdPort(Protocol):
 
     def daemon_reload(self) -> None: ...
 
-    def daemon_reload_result(self) -> CommandResult:
+    def daemon_reload_result(self, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl daemon-reload`: its exit status and output (a fault with its cause), never raised."""
         ...
 
-    def is_active(self, unit: UnitName) -> CommandResult:
+    def is_active(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl is-active unit`: the state on stdout; exit 3 for a unit that is not active, 4 for one
         the manager does not know."""
         ...
 
-    def is_enabled(self, unit: UnitName) -> CommandResult:
+    def is_enabled(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl is-enabled unit`: its exit status and output."""
         ...
 
-    def show_environment(self) -> CommandResult:
+    def show_environment(self, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl show-environment`: the manager's environment, one KEY=VALUE per line."""
         ...
 
-    def show_value(self, unit: UnitName, prop: str) -> CommandResult:
+    def show_value(self, unit: UnitName, prop: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl show -p PROP --value unit`: one property's value as systemctl prints it."""
         ...
 
-    def start(self, unit: UnitName) -> CommandResult:
+    def start(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl start unit`: its exit status and what it printed."""
         ...
 
-    def stop(self, unit: UnitName) -> CommandResult:
+    def stop(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl stop unit`: its exit status and what it printed."""
         ...
 
-    def restart(self, unit: UnitName) -> CommandResult:
+    def restart(self, unit: UnitName, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl restart unit`: its exit status and what it printed."""
         ...
 
-    def enable(self, unit: UnitName, *, now: bool = False) -> CommandResult:
+    def enable(self, unit: UnitName, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl enable [--now] unit`: its exit status and what it printed."""
         ...
 
-    def disable(self, unit: UnitName, *, now: bool = False) -> CommandResult:
+    def disable(self, unit: UnitName, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl disable [--now] unit`: its exit status and what it printed."""
         ...
 
-    def clean(self, unit: UnitName, *, what: str) -> CommandResult:
+    def clean(self, unit: UnitName, *, what: str, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
         """`systemctl clean --what=WHAT unit` (what="state": a timer's Persistent= stamp)."""
         ...
 

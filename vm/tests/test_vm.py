@@ -2474,14 +2474,16 @@ class FakeSystemd(NoUnitQueries):
             raise CommandFailed(["systemctl", "daemon-reload"], 1, "", "Access denied\n")
         self.timers.done.append("reload")
 
-    def enable(self, unit: str, *, now: bool = False) -> CommandResult:
+    def enable(self, unit: str, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del now, output
         if self.fail == "on":
             return CommandResult(1, "", "failed\n")
         self.timers.done.append(f"on {unit}")
         self.timers.on.append(unit)
         return CommandResult(0, "", "")
 
-    def disable(self, unit: str, *, now: bool = False) -> CommandResult:
+    def disable(self, unit: str, *, now: bool = False, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del now, output
         if self.fail == "off":
             return CommandResult(1, "", "denied\n")
         self.timers.done.append(f"off {unit}")
@@ -2489,7 +2491,8 @@ class FakeSystemd(NoUnitQueries):
             self.timers.on.remove(unit)
         return CommandResult(0, "", "")
 
-    def clean(self, unit: str, *, what: str) -> CommandResult:
+    def clean(self, unit: str, *, what: str, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del what, output
         self.timers.done.append(f"clean {unit}")
         return CommandResult(0, "", "")
 
@@ -2498,13 +2501,16 @@ class FakeSystemd(NoUnitQueries):
             raise AssertionError(f"the timer's status reads the local systemd: {unit}")
         return {p: {"NextElapseUSecRealtime": "Sat", "Result": "success"}[p] for p in props}
 
-    def start(self, unit: str) -> CommandResult:
+    def start(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(unit)
 
-    def stop(self, unit: str) -> CommandResult:
+    def stop(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(unit)
 
-    def restart(self, unit: str) -> CommandResult:
+    def restart(self, unit: str, *, output: OutputMode = OutputMode.CAPTURE) -> CommandResult:
+        del output
         raise AssertionError(unit)
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:

@@ -54,7 +54,7 @@ from cst_core.domain.values import (
     format_bytes_human,
 )
 from cst_core.domain.units import ActiveState
-from cst_core.ports import CommandFailed, CommandFault, CommandResult, SystemctlHost, UnitName
+from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -588,6 +588,76 @@ class AdaptersTest(unittest.TestCase):
         res = gone.daemon_reload_result()
         self.assertEqual((res.returncode, res.fault), (127, CommandFault.MISSING))
         self.assertIsInstance(res.cause, FileNotFoundError)
+
+    def test_systemctl_adapter_per_call_output_mode(self) -> None:
+        unit = UnitName("cst-bt-ldac48.service")
+
+        def run_all(sysd: SystemctlAdapter, **kw: OutputMode) -> None:
+            sysd.daemon_reload_result(**kw)
+            sysd.is_active(unit, **kw)
+            sysd.is_enabled(unit, **kw)
+            sysd.show_environment(**kw)
+            sysd.show_value(unit, "MainPID", **kw)
+            sysd.start(unit, **kw)
+            sysd.stop(unit, **kw)
+            sysd.restart(unit, **kw)
+            sysd.enable(unit, now=True, **kw)
+            sysd.disable(unit, now=True, **kw)
+            sysd.clean(unit, what="state", **kw)
+
+        default_runner = FakeRunner()
+        run_all(SystemctlAdapter(default_runner))
+        run_all(SystemctlAdapter(default_runner), output=OutputMode.CAPTURE)
+        self.assertTrue(all("output" not in opts for opts in default_runner.options))
+
+        for mode in (OutputMode.INHERIT, OutputMode.STDOUT):
+            fake = FakeRunner()
+            run_all(SystemctlAdapter(fake, user=True), output=mode)
+            self.assertEqual([o.get("output") for o in fake.options], [mode] * 11, mode)
+
+    def test_systemctl_adapter_per_call_output_over_real_runner(self) -> None:
+        tmp = tempfile.mkdtemp(prefix="cst-systemctl-out-")
+        self.addCleanup(shutil.rmtree, tmp)
+        stub = os.path.join(tmp, "systemctl")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\necho "OUT $*"\necho "ERR $*" >&2\n')
+        os.chmod(stub, 0o755)
+        sysd = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=stub, base_env={"PATH": "/usr/bin:/bin"})
+        unit = UnitName("a.service")
+        cap = sysd.restart(unit)
+        self.assertEqual(
+            (cap.returncode, cap.stdout, cap.stderr),
+            (0, "OUT --user restart a.service\n", "ERR --user restart a.service\n"),
+        )
+        stdout_only = sysd.restart(unit, output=OutputMode.STDOUT)
+        self.assertEqual(
+            (stdout_only.returncode, stdout_only.stdout, stdout_only.stderr), (0, "OUT --user restart a.service\n", "")
+        )
+
+        recorded = os.path.join(tmp, "inherit.json")
+        probe = (
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from cst_core.adapters import SystemctlAdapter\n"
+            "from cst_core.adapters.runner import SubprocessCommandRunner\n"
+            "from cst_core.ports import OutputMode, UnitName\n"
+            "sysd = SystemctlAdapter(SubprocessCommandRunner(), user=True, program=sys.argv[2])\n"
+            "res = sysd.restart(UnitName('a.service'), output=OutputMode.INHERIT)\n"
+            "with open(sys.argv[3], 'w', encoding='utf-8') as fh:\n"
+            "    json.dump([res.returncode, res.stdout, res.stderr], fh)\n"
+        )
+        child = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", probe, REPO_ROOT, stub, recorded],
+            check=False,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(child.stdout, "OUT --user restart a.service\n")
+        self.assertEqual(child.stderr, "ERR --user restart a.service\n")
+        with open(recorded, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), [0, "", ""])
 
     def test_host_execution_context_and_clock(self) -> None:
         host = HostExecutionContext(exists=lambda _p: False, euid=lambda: 1000)
