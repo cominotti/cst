@@ -466,7 +466,7 @@ def scrub_settings(host: DoctorHostPort) -> ShellAssignments:
 
 def scrub_lines(host: DoctorHostPort) -> ScrubLimitLines:
     """The SCRUB_LIMIT problem lines, as `cst btrfs install` reads them and as CST's Python programs do."""
-    return scrub_limit_lines_both(snapshots_conf_text(host) or "", scrub_settings(host), settings_of(host, SNAP_CONF))
+    return scrub_limit_lines_both(scrub_settings(host), settings_of(host, SNAP_CONF))
 
 
 @check(CHECKS, "btrfs")

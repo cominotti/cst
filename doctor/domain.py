@@ -601,48 +601,33 @@ def parse_args(argv: Sequence[str]) -> tuple[DoctorCommand, bool]:
     return DoctorCommand.RUN, brief
 
 
-def universal_newlines(text: str) -> str:
-    """text as Python's text mode reads a file: each "\r\n" and each lone "\r" a "\n"."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
 def scrub_limit_lines(settings: ShellAssignments) -> tuple[SettingsProblem, ...]:
     """The problem lines of the btrfs settings file that set SCRUB_LIMIT: each one makes
     `cst btrfs install` refuse to run."""
     return tuple(p for p in settings.problems if _SCRUB_LIMIT_LINE.match(p.text))
 
 
-def bash_line_numbers(text: str) -> list[int]:
-    """For each line of text as text mode reads it (universal_newlines), the number of the line bash
-    reads it in: only a "\n" ends a line there, a lone "\r" stays in it."""
-    numbers, line = [1], 1
-    for end in re.finditer(r"\r\n|\r|\n", text):
-        line += end.group() != "\r"
-        numbers.append(line)
-    return numbers
-
-
 @dataclass(frozen=True, slots=True)
 class ScrubLimitLines:
-    """The SCRUB_LIMIT problem lines of snapshots.conf, read both ways. bash: as `cst btrfs install`
-    reads them (bash's line ends). taken: the SCRUB_LIMIT problems CST's Python programs find (text
-    mode) on those same lines; the scrub row warns about them, so the settings row skips them.
-    python_too: the bash line numbers of taken."""
+    """The SCRUB_LIMIT problem lines of snapshots.conf. bash: as `cst btrfs install` reads them. taken:
+    the SCRUB_LIMIT problems CST's Python programs find (btrfs-snapshot and btrfs-health-check read the
+    file with its line ends too, and also take the printf %q lines an older CST wrote) on those same
+    lines; the scrub row warns about them, so the settings row skips them. python_too: their line
+    numbers."""
 
     bash: tuple[SettingsProblem, ...]
     taken: tuple[SettingsProblem, ...]
     python_too: frozenset[int]
 
 
-def scrub_limit_lines_both(text: str, bash: ShellAssignments, python: ShellAssignments | None) -> ScrubLimitLines:
-    """ScrubLimitLines of snapshots.conf's text (line ends as they are), read by bash as bash and by
-    CST's Python programs as python (None: not readable). A Python problem is matched to a bash line by
-    where it is in the file, not by its text or line number, which the line ends can change."""
+def scrub_limit_lines_both(bash: ShellAssignments, python: ShellAssignments | None) -> ScrubLimitLines:
+    """ScrubLimitLines of snapshots.conf read by bash as bash and by CST's Python programs as python
+    (None: not readable); both read the same lines (only a newline ends one), so a problem is matched
+    by its line number."""
     lines = scrub_limit_lines(bash)
-    where = bash_line_numbers(text)
     numbers = {p.line for p in lines}
-    taken = tuple(p for p in (scrub_limit_lines(python) if python else ()) if where[p.line - 1] in numbers)
-    return ScrubLimitLines(lines, taken, frozenset(where[p.line - 1] for p in taken))
+    taken = tuple(p for p in (scrub_limit_lines(python) if python else ()) if p.line in numbers)
+    return ScrubLimitLines(lines, taken, frozenset(p.line for p in taken))
 
 
 def scrub_limit_setting(settings: ShellAssignments) -> tuple[str, str]:

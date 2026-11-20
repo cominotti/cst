@@ -884,12 +884,13 @@ class BtrfsTest(Scratch):
         ):
             self.assertIn(words, named[0])
 
-    def test_a_scrub_limit_line_only_bash_refuses_names_only_the_install(self) -> None:
-        # Text mode takes the CR as the line end: CST's Python programs read the value.
+    def test_a_scrub_limit_line_ending_in_a_cr_is_ignored_by_the_python_programs_too(self) -> None:
+        # btrfs-snapshot and btrfs-health-check read the file with its line ends, as bash does: the CR is
+        # part of the line, which sets nothing for them either (before, doctor read it in text mode).
         out = self.scrub(conf="SCRUB_LIMIT=1G\r\n", dropin="1G")
         named = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=1G")
         self.assertEqual(len(named), 1, out)
-        self.assertNotIn("CST's Python programs", named[0])
+        self.assertIn("CST's Python programs take nothing from the line", named[0])
 
     def assert_one_scrub_limit_warning(self, conf: str, line: str) -> None:
         """One WARN names the bad SCRUB_LIMIT line of conf, at bash's line number, with both effects."""
@@ -911,14 +912,23 @@ class BtrfsTest(Scratch):
     def test_a_bad_scrub_limit_line_after_a_lone_cr_gets_one_warning(self) -> None:
         self.assert_one_scrub_limit_warning("A=1\rB=2\nSCRUB_LIMIT=$X\n", "line 2")
 
-    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_still_warned(self) -> None:
-        # bash reads one line, text mode two: A=$Y is a line of its own for CST's Python programs.
+    def test_a_line_behind_a_cr_of_a_scrub_limit_line_is_part_of_it(self) -> None:
+        # A lone CR ends no line for bash nor for btrfs-snapshot: A=$Y is part of the SCRUB_LIMIT line,
+        # which gets one warning (both effects), and no line 2 is named.
         out = self.scrub(conf="SCRUB_LIMIT=$X\rA=$Y\n", dropin="1G")
         scrub = self.scrub_warnings(out, "line 1: SCRUB_LIMIT=$X")
         self.assertEqual(len(scrub), 1, out)
-        other = self.scrub_warnings(out, "line 2: A=$Y")
-        self.assertEqual(len(other), 1, out)
-        self.assertIn("CST's Python programs take nothing from the line", other[0])
+        self.assertIn("CST's Python programs take nothing from the line", out)  # after the CR on that line
+        self.assertEqual(self.scrub_warnings(out, "line 2:"), [], out)
+
+    def test_a_setting_ending_in_a_cr_is_named_as_btrfs_snapshot_ignores_it(self) -> None:
+        # NAS_ENABLED=1 with a Windows line end: btrfs-snapshot (which reads the file with its line ends)
+        # takes nothing from the line; doctor names it (before, it read the value in text mode and said
+        # nothing).
+        out = self.scrub(conf="NAS_ENABLED=1\r\n", dropin="1G")
+        named = self.scrub_warnings(out, "line 1: NAS_ENABLED=1")
+        self.assertEqual(len(named), 1, out)
+        self.assertIn("carriage return", named[0])
 
     def test_a_bad_scrub_limit_line_warns_once(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=fast\n", dropin="1G")
