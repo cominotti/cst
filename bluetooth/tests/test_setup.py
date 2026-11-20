@@ -20,7 +20,9 @@ import stat
 from typing import Final
 import unittest
 
+from bluetooth.setup.domain import watcher_prog_state
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
+from cst_core.domain.files import OwnedState
 from bluetooth.tests.test_bluetooth import JOURNAL, OLD_WP, VENDOR
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from tests.test_module_routing import userns_root
@@ -1380,6 +1382,19 @@ class MainConfTest(SetupCase):
         r = m.run("revert", "--check")
         self.assertEqual(r.returncode, 0, r.text)
         self.assertIn(f"WARNING: no backup {m.main_conf}.bak-* found; main.conf not changed\n", r.stderr)
+
+
+class WatcherProgStateTest(unittest.TestCase):
+    """The watcher's program is judged by the plan line that names its path, wherever plan prints it."""
+
+    def test_the_line_of_the_watchers_path_decides(self) -> None:
+        prog = "/h/.local/lib/cst/bt-ldac-watch"
+        settings = "would write: /h/.config/cst/x.conf (from /h/old, before it is replaced)\n"
+        self.assertEqual(watcher_prog_state(f"{settings}would record: {prog}\n", prog, lambda: True), OwnedState.ADOPT)
+        self.assertEqual(watcher_prog_state(f"unchanged: {prog}\n", prog, lambda: False), OwnedState.OK)
+        self.assertEqual(watcher_prog_state(f"would write: {prog}\n", prog, lambda: True), OwnedState.CHANGE)
+        self.assertEqual(watcher_prog_state(f"would write: {prog}\n", prog, lambda: False), OwnedState.CONFLICT)
+        self.assertEqual(watcher_prog_state("", prog, lambda: True), OwnedState.CHANGE)  # a plan that failed
 
 
 class WatcherTest(SetupCase):

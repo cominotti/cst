@@ -514,8 +514,8 @@ class Survey:
         r = self.installer(
             "plan", "--home", self.p.home, "bluetooth/bt-ldac-watch", output=OutputMode.STDOUT_SHOW_STDERR
         )
-        said = r.stdout if r.returncode == 0 else ""
-        return watcher_prog_state(said, lambda: self.m.files.contains(self.p.lw_prog, MARKER, quiet=False))
+        said, prog = (r.stdout if r.returncode == 0 else ""), self.p.lw_prog
+        return watcher_prog_state(said, prog, lambda: self.m.files.contains(prog, MARKER, quiet=False))
 
     def lw_off_why(self) -> str:
         """Why apply keeps the watcher off: LDAC_RATE is empty, or no headset is set for it."""
