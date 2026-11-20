@@ -92,7 +92,7 @@ class _Arith:
     (BAD_NUMBER)."""
 
     def __init__(self, text: str) -> None:
-        self.tokens = [group(m, 1) for m in re.finditer(r"\s*(\*\*|[0-9A-Za-z_#@]+|[-+*/%()]|\S)", text)]
+        self.tokens = [group(m, 1) for m in re.finditer(r"\s*(\*\*|[0-9A-Za-z_#@]+|\S)", text)]
         self.pos = 0
 
     def peek(self) -> str:
