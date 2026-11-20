@@ -504,6 +504,19 @@ class HealthCheckTest(unittest.TestCase):
         self.assert_healthy(self.run_check())
         self.assertEqual(self.read(f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-metadata"), "keep 1\n")
 
+    def test_reclaim_errors_missing_or_beyond_bash_arithmetic(self) -> None:
+        alloc = f"sys/fs/btrfs/{UUID}/allocation"
+        state = f"var/lib/btrfs-health-check/reclaim-errors-{UUID}-metadata"
+        # No reclaim_errors file: counted as 0, and the state file says so.
+        os.unlink(self.path(f"{alloc}/metadata/reclaim_errors"))
+        self.assert_healthy(self.run_check())
+        self.assertEqual(self.read(state), f"{BOOT} 0\n")
+        # 08 is digits, but not a number to bash's arithmetic (octal): no comparison, the count kept.
+        self.write(state, f"{BOOT} 1\n")
+        self.write(f"{alloc}/metadata/reclaim_errors", "08\n")
+        self.assert_healthy(self.run_check())
+        self.assertEqual(self.read(state), f"{BOOT} 08\n")
+
     def test_reclaim_not_configured_is_not_checked(self) -> None:
         os.unlink(self.path("etc/tmpfiles.d/btrfs-automatic-reclaim.conf"))
         self.write(f"sys/fs/btrfs/{UUID}/allocation/data/dynamic_reclaim", "0\n")
@@ -880,6 +893,12 @@ class HealthCheckTest(unittest.TestCase):
         self.assert_healthy(self.run_check())
         self.write("etc/btrfs-setup/snapshots.conf", "NAS_ENABLED=0\n")
         self.write("var/lib/btrfs-snapshot/nas-enabled-at", "0\n")
+        self.assert_healthy(self.run_check())
+
+    def test_nas_backup_of_unknown_age_logs_nothing(self) -> None:
+        # Turned on, but neither a success nor the time it was turned on is known: no age to judge.
+        self.snapshots(self.now - 600)
+        self.write("etc/btrfs-setup/snapshots.conf", "NAS_ENABLED=1\nNAS_PATH='/srv/x'\n")
         self.assert_healthy(self.run_check())
 
     # ---- md RAID and the NVMe health log ------------------------------------------------------------------------
