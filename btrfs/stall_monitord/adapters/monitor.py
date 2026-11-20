@@ -299,9 +299,6 @@ class Monitor:
         counts = wait_counts(d_tasks)
         load1 = float((read_text("/proc/loadavg") or "0").split()[0])
 
-        fs: dict[str, FsSampleOut] = {uuid: self._fs_sample(uuid, info) for uuid, info in self.topo.fs.items()}
-        disks = self._disk_sample()
-        cg = self._cgroup_sample()
         return {
             "t": StallRecordTag.SAMPLE,
             "ts": ts,
@@ -316,9 +313,9 @@ class Monitor:
             "d_maint": counts.d_maint,
             "d_mem": counts.d_mem,
             "load1": load1,
-            "fs": fs,
-            "disk": disks,
-            "cg": cg,
+            "fs": {uuid: self._fs_sample(uuid, info) for uuid, info in self.topo.fs.items()},
+            "disk": self._disk_sample(),
+            "cg": self._cgroup_sample(),
         }
 
     def _fs_sample(self, uuid: str, info: FsTopo) -> FsSampleOut:
