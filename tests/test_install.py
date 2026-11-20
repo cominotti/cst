@@ -34,7 +34,9 @@ from cst_core.adapters.runtime import (
 from cst_core.adapters.zipapp import build_python_zipapp, entry_payload, import_closure
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService
 from cst_core.domain.dispatch import step_down_argv
+from cst_core.domain import install as install_domain
 from cst_core.domain.install import (
+    COMPONENTS,
     INSTALL_MANIFEST,
     ArtifactKind,
     Component,
@@ -973,6 +975,15 @@ def shell_component_words(text: str) -> list[tuple[int, str]]:
                 args = rest if skip is None else rest[skip : skip + 1]
             found += [(number, a.strip("\"'")) for a in args if "$" not in a]
     return found
+
+
+class ComponentTableTest(unittest.TestCase):
+    """Component and the word table of the commands that install each component (_COMMANDS) name the
+    same components: COMPONENTS is built from Component, and a row with another word would be ignored."""
+
+    def test_every_member_has_one_command_row_and_no_row_is_extra(self) -> None:
+        self.assertEqual(sorted(install_domain._COMMANDS), sorted(str(c) for c in Component))
+        self.assertEqual(list(COMPONENTS), list(Component))
 
 
 class ShellComponentWordsTest(unittest.TestCase):

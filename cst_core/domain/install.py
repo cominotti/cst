@@ -203,7 +203,9 @@ _COMMANDS: Final = {
     "toolchains:sccache": "cst toolchains config apply",
     "vm:backup-timer": "cst vm backup-timer on",
 }
-COMPONENTS: Final[Mapping[Component, str]] = {Component(word): command for word, command in _COMMANDS.items()}
+# One row of _COMMANDS per member (a member without one is a KeyError at import; tests/test_install.py
+# checks that no row names a word Component does not have).
+COMPONENTS: Final[Mapping[Component, str]] = {c: _COMMANDS[c] for c in Component}
 
 
 # The components whose files are all generated text (cst_install_text DEST MODE OWNER COMPONENT), so

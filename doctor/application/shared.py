@@ -192,5 +192,5 @@ def refresh(host: DoctorHostPort, component: str) -> str:
     """The command that installs component's files again, as the hints name cst ("" for a word that names
     no Component: a record line of a newer CST)."""
     known = enum_member(Component, component)
-    cmd = "" if known is None else COMPONENTS[known]
+    cmd = "" if known is None else COMPONENTS.get(known, "")
     return f"{host.cst} {cmd.removeprefix('cst ')}" if cmd else ""
