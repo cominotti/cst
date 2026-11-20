@@ -19,6 +19,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 from __future__ import annotations
 
 import contextlib
+import copy
 import gzip
 import io
 import json
@@ -688,6 +689,193 @@ class FrameListsTest(unittest.TestCase):
         self.assertEqual(dict(report.STACK_RULES)["reclaim"].pattern, daemon.SWAP_FRAME.pattern)
         reclaim = next(rx for k, rx, _ in report.CATEGORIES if k == "reclaim")
         self.assertTrue(reclaim.endswith("|" + daemon.MMAP_LOCK_FRAME.pattern), reclaim)
+
+
+class VerdictLinesTest(unittest.TestCase):
+    """verdict()'s lines for each way a window can go, on a quiet window's result with fields changed."""
+
+    m: _StallReportModule
+
+    @override
+    def setUp(self) -> None:
+        self.m = load()
+        recs = old_run()
+        self.res, self.meta = self.m.analyse(recs, T0, max(r["ts"] for r in recs), with_below=False, verbose=False)
+
+    def verdict(
+        self,
+        top: Mapping[str, object] | None = None,
+        meta: Mapping[str, object] | None = None,
+        **parts: Mapping[str, object],
+    ) -> list[str]:
+        """The verdict with the top-level keys TOP set, each part's keys updated, and META's keys set."""
+        res, meta_ = copy.deepcopy(self.res), {**self.meta, **(meta or {})}
+        res.update(top or {})
+        for key, changes in parts.items():
+            res[key].update(changes)
+        return self.m.verdict(res, meta_)
+
+    @staticmethod
+    def at(offset: float) -> str:
+        return time.strftime("%H:%M:%S", time.localtime(T0 + offset))
+
+    def test_no_data_and_a_quiet_window(self) -> None:
+        self.assertEqual(
+            self.verdict({"samples": 1}, coverage={"skipped": 2}),
+            [
+                (
+                    "NO DATA for this window. Is btrfs-stall-monitor.service running? (`systemctl status "
+                    "btrfs-stall-monitor`; inside toolbox prefix with flatpak-spawn --host)"
+                ),
+                "INCOMPLETE DATA: 2 damaged record(s) in this window were left out (re-running does not help)",
+            ],
+        )
+        self.assertEqual(
+            self.verdict(),
+            [
+                (
+                    "Storage was NOT a bottleneck: IO pressure 0.0%, at most 0 task(s) waiting on storage, longest "
+                    "btrfs commit 0 ms (written 0 MiB)."
+                ),
+                "Little activity recorded: check that the window really covers the workload.",
+            ],
+        )
+
+    def test_a_quiet_window_with_problems(self) -> None:
+        got = self.verdict(
+            {
+                "events": [{"t": "ev", "ts": T0 + 3, "kind": "hung", "severe": True, "msg": "x"}],
+                "fs": {"/": {"new_device_errors": 1, "max_commit_ms": 200, "max_at": T0 + 10}},
+            },
+            coverage={"complete": False, "covered_s": 30, "last_sample": T0 + 30, "skipped": 1},
+            pressure={"cpu_some_pct": 25.0, "mem_some_pct": 6.0},
+        )
+        self.assertEqual(
+            got,
+            [
+                (
+                    f"INCOMPLETE DATA: 30 s of the 45 s window recorded, last sample {self.at(30)}. Data is written "
+                    "every ~10 s; re-run shortly, or narrow the window."
+                ),
+                "INCOMPLETE DATA: 1 damaged record(s) in this window were left out (re-running does not help)",
+                "KERNEL/FS PROBLEMS: 1 severe event(s) (hung task, btrfs or device error); see 'events'.",
+                "btrfs device error counters INCREASED in this window.",
+                (
+                    "Storage was NOT a bottleneck: IO pressure 0.0%, at most 0 task(s) waiting on storage, longest "
+                    "btrfs commit 200 ms (written 0 MiB)."
+                ),
+                "CPU contention: runnable tasks waited for a CPU 25% of the time.",
+                "Memory pressure 6.0%: see the memory line.",
+            ],
+        )
+
+    def test_a_storage_stall(self) -> None:
+        cats = [
+            {
+                "category": "zstd-workspace",
+                "description": "waiting for a btrfs zstd compression workspace",
+                "share": 0.6,
+            },
+            {"category": "commit", "description": "btrfs transaction commit", "share": 0.3},
+            {"category": "flush", "description": "disk cache flushes", "share": 0.06},
+            {"category": "wbt", "description": "block-layer writeback throttling (WBT)", "share": 0.04},
+        ]
+        top = {
+            "episodes": [
+                {"start": T0 + 5, "end": T0 + 25, "max_d": 4, "peak": {"commit_ms": 2500}, "sigs": [], "cats": {}}
+            ],
+            "open_episode": {"since": T0 + 30, "last": T0 + 40, "d_tasks": 3},
+            "fs": {"/": {"new_device_errors": 0, "max_commit_ms": 2500, "max_at": T0 + 12}},
+            "categories": cats,
+        }
+        parts = {
+            "pressure": {"io_some_pct": 5.0, "io_full_pct": 1.0},
+            "peak": {"io_some_avg10": 20.0},
+            "vm": {"swap_out_bytes": 300 * 2**20},
+        }
+        head = [
+            "IO wait: tasks waited on IO 5.0% of the time (every non-idle task at once 1.0%), peak 10 s average 20%.",
+            (
+                "Blocked tasks: up to 4 tasks waiting on storage in D state (btrfs commit/log/lock waits block tasks "
+                "without showing up as IO pressure)."
+            ),
+            (
+                f"Episode still open: since {self.at(30)} the monitor samples every second and up to 3 tasks wait on "
+                "storage. Its record (stacks, categories) is written when it ends; run the report again after that "
+                "for the details."
+            ),
+            f"Slow btrfs commits: longest 2.5 s at {self.at(12)}.",
+            (
+                "Where blocked tasks waited (share of sampled D-state tasks): waiting for a btrfs zstd compression "
+                "workspace 60%, btrfs transaction commit 30%, disk cache flushes 6%."
+            ),
+        ]
+        tail = [
+            f"Worst episode: {self.at(5)}-{self.at(25)} (20 s, 4 D tasks, commit 2500 ms).",
+            "Swap-out of 300 MiB: memory pressure also loaded the swap disk.",
+        ]
+        self.assertEqual(
+            self.verdict(top, {"kernel": "7.1.0", "stacks": False}, **parts),
+            [
+                *head,
+                "Matches the btrfs zstd lost-wakeup bug fixed in 7.2.6; a kernel update fixes it.",
+                "Caveat: the daemon could not read kernel stacks, so attribution is coarse (wchan only).",
+                *tail,
+            ],
+        )
+        self.assertEqual(
+            self.verdict(top, {"kernel": "7.2.6"}, **parts),
+            [
+                *head,
+                (
+                    "zstd workspace waits on a kernel that already has the 7.2.6 lost-wakeup fix; may be plain "
+                    "compression contention."
+                ),
+                *tail,
+            ],
+        )
+        self.assertEqual(
+            self.verdict(
+                {"fs": {"/": {"new_device_errors": 0, "max_commit_ms": 1500, "max_at": 0}}, "categories": cats[1:]}
+            ),
+            [
+                "Slow btrfs commits: longest 1.5 s.",
+                (
+                    "Where blocked tasks waited (share of sampled D-state tasks): btrfs transaction commit 30%, disk "
+                    "cache flushes 6%, block-layer writeback throttling (WBT) 4%."
+                ),
+                rp_categories.HINTS["commit"],
+            ],
+        )
+        self.assertEqual(
+            self.verdict({"sample_d_tasks": 5, "categories": cats[3:]}),
+            [
+                (
+                    "Blocked tasks: up to 5 tasks waiting on storage in D state (btrfs commit/log/lock waits block tasks "
+                    "without showing up as IO pressure)."
+                ),
+                "Where blocked tasks waited (share of sampled D-state tasks): block-layer writeback throttling (WBT) 4%.",
+                rp_categories.HINTS["wbt"],
+            ],
+        )
+
+    def test_memory_lines_in_a_stall(self) -> None:
+        ev = {"events": [{"t": "ev", "ts": T0 + 3, "kind": "hung-memory", "msg": "m"}]}
+        memory = (
+            "Memory, not storage, blocked up to 9 tasks (memory reclaim, swap-in or zswap; 1 task(s) stuck 30+ s, "
+            "see 'events'). See the memory line; `cst swap status` shows which cgroup swaps."
+        )
+        self.assertEqual(
+            self.verdict(ev, pressure={"io_some_pct": 5.0, "io_full_pct": 1.0}, peak={"mem_tasks": 9}),
+            [
+                "IO wait: tasks waited on IO 5.0% of the time (every non-idle task at once 1.0%), peak 10 s average 0%.",
+                memory,
+            ],
+        )
+        self.assertEqual(
+            self.verdict({**ev, "sample_d_tasks": 3}, peak={"mem_tasks": 9}),
+            [memory, "Blocked tasks: also up to 3 tasks waiting on storage in D state."],
+        )
 
 
 class ClassifyBranchesTest(unittest.TestCase):
