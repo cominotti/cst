@@ -137,18 +137,7 @@ def parse_alert(text: str) -> Alert | None:
     lines = file_lines(text.replace("\0", ""))  # bash's read dropped every NUL byte
     if not lines or lines[0] not in _HEADERS:
         return None
-    head: dict[str, str] = {}
-    body: list[str] = []
-    in_head = True
-    for line in lines[1:]:
-        if in_head:
-            if not line:
-                in_head = False
-                continue
-            key, sep, val = line.partition("=")
-            head[key] = val if sep else line
-        else:
-            body.append(line)
+    head, body = _head_and_body(lines[1:])
     word, app, title = head.get("urgency", ""), head.get("app", ""), head.get("title", "")
     first, last, count = head.get("first", "0"), head.get("last", "0"), head.get("count", "1")
     urgency = Urgency(word) if word in SPOOL_URGENCIES else None
@@ -165,6 +154,18 @@ def parse_alert(text: str) -> Alert | None:
         int(last),
         int(count),
     )
+
+
+def _head_and_body(lines: Sequence[str]) -> tuple[dict[str, str], list[str]]:
+    """A pending file's lines after its first: the KEY=VALUE header up to the first empty line (a
+    line without "=" is its own key and value; the last of a key wins), and the body after it."""
+    head: dict[str, str] = {}
+    for i, line in enumerate(lines):
+        if not line:
+            return head, list(lines[i + 1 :])
+        key, sep, val = line.partition("=")
+        head[key] = val if sep else line
+    return head, []
 
 
 @dataclass(frozen=True, slots=True)

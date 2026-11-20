@@ -395,9 +395,12 @@ space comes back gradually. After an update of the repository,
 again. So it gets no snapshots and no NAS backup.** If you lose something in
 `~/Bulk`, you download it again. Put nothing there that you cannot get back.
 
-`~/Bulk` is one nested subvolume, owned by you, in your home. It is normal
-btrfs: compressed and with checksums (only the `emulators` folder inside is
-different, see [below](#why-copy-on-write-stays-on-except-for-the-emulator-disks)).
+`~/Bulk` is one nested subvolume, owned by you, in your home, with mode 0755:
+you write, others only read. When bulk runs as root, its steps in your home
+run as you with umask 022, as a login session does, so what they create gets
+the usual modes (files 0644, folders 0755). It is normal btrfs: compressed and
+with checksums (only the `emulators` folder inside is different, see
+[below](#why-copy-on-write-stays-on-except-for-the-emulator-disks)).
 
 The programs keep using their usual paths. Each usual path becomes a
 **symlink** (a shortcut that points to another path) into `~/Bulk`:

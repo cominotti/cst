@@ -166,32 +166,54 @@ def classify(sig: str, examples: Sequence[Sequence[str]], comms: Sequence[str] =
         return "reclaim"
     if FUSE_RE.match(sig):
         return "fuse"
+    if (rule := _stack_rule(examples)) is not None:
+        return rule
+    if sig == "no-stack" or sig.startswith("wchan:"):
+        return _no_stack_category(sig, comms)
+    if (cat := _first_category(sig)) is not None:
+        return cat
+    if kind != WaitKind.STORAGE and IDLE_SIG.match(sig):
+        return "idle"
+    return _frame_category(examples)
+
+
+def _stack_rule(examples: Sequence[Sequence[str]]) -> str | None:
+    """The first STACK_RULES rule that matches a frame of an example, example by example."""
     for frames in examples:
         for k, rx in STACK_RULES:
             if any(rx.match(f) for f in frames):
                 return k
-    if sig == "no-stack" or sig.startswith("wchan:"):
-        name = sig[6:] if sig.startswith("wchan:") else ""
-        # A wchan such as submit_bio_wait does not tell trim from a workload read: trust the comm.
-        if any("btrfs-discard" in c or c == "fstrim" for c in comms):
-            return "maintenance"
-        for k, rx in CAT_RE:
-            if name and rx.search(name):
-                return k
-        for c in comms:
-            if "btrfs-transaction" in c:
-                return "commit"
-            if c.startswith(("kcryptd", "dmcrypt_write")):
-                return "device"
-        return "no-stack"
+    return None
+
+
+def _first_category(text: str) -> str | None:
+    """The first category whose pattern TEXT contains (CAT_RE order), or None."""
     for k, rx in CAT_RE:
-        if rx.search(sig):
+        if rx.search(text):
             return k
-    if kind != WaitKind.STORAGE and IDLE_SIG.match(sig):
-        return "idle"
+    return None
+
+
+def _no_stack_category(sig: str, comms: Sequence[str]) -> str:
+    """classify of a wait without a stack ("no-stack", or "wchan:NAME"): the comms and the wchan."""
+    name = sig[6:] if sig.startswith("wchan:") else ""
+    # A wchan such as submit_bio_wait does not tell trim from a workload read: trust the comm.
+    if any("btrfs-discard" in c or c == "fstrim" for c in comms):
+        return "maintenance"
+    if name and (cat := _first_category(name)) is not None:
+        return cat
+    for c in comms:
+        if "btrfs-transaction" in c:
+            return "commit"
+        if c.startswith(("kcryptd", "dmcrypt_write")):
+            return "device"
+    return "no-stack"
+
+
+def _frame_category(examples: Sequence[Sequence[str]]) -> str:
+    """The category of the first frame, example by example, that a category's pattern finds; else "other"."""
     for frames in examples:
         for f in frames:
-            for k, rx in CAT_RE:
-                if rx.search(f):
-                    return k
+            if (cat := _first_category(f)) is not None:
+                return cat
     return "other"

@@ -730,7 +730,8 @@ class RecordTest(unittest.TestCase):
         for iid in (sha("b"), sha("c"), sha("9")):
             self.assertTrue(start <= images[iid] <= end, (iid, images[iid]))
         since, beat = st["since"], st["heartbeat"]
-        assert isinstance(since, float) and isinstance(beat, float)
+        assert isinstance(since, float)
+        assert isinstance(beat, float)
         self.assertTrue(start <= since <= beat <= end, st)
 
     def test_events_ending_by_themselves_exit_1_after_saving(self) -> None:

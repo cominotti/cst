@@ -1493,8 +1493,8 @@ class DockerRunningTest(PostponeBase):
     def test_an_empty_reason_still_postpones(self) -> None:
         # A reason is any text, "" too: it must not hand over to dockerd_busy() and migrate.
         with (
-            mock.patch.object(nocow_adapters.DockerDaemons, "service_busy", lambda _self: ""),
-            mock.patch.object(nocow_adapters.DockerDaemons, "dockerd_busy", lambda _self: None),
+            mock.patch.object(nocow_adapters.DockerDaemons, "service_busy", autospec=True, return_value=""),
+            mock.patch.object(nocow_adapters.DockerDaemons, "dockerd_busy", autospec=True, return_value=None),
         ):
             rc, out = self.call(self.cli.migrate)
         self.assertEqual(rc, 0)

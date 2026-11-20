@@ -241,6 +241,13 @@ def allocation_problems(m: Probe, mnt: str, uuid: str, alloc: str, least: int | 
         for knob in KNOBS
         if f"/sys/fs/btrfs/{uuid}/allocation/data/{knob}" in conf and m.cat(f"{alloc}/data/{knob}") != "1"
     )
+    problems.extend(_reclaim_error_problems(m, mnt, uuid, alloc))
+    return problems
+
+
+def _reclaim_error_problems(m: Probe, mnt: str, uuid: str, alloc: str) -> list[str]:
+    """The automatic reclaim's new errors since the last check, per kind; writes the state file."""
+    problems: list[str] = []
     # reclaim_errors counts since mount (it resets on reboot). The state file remembers boot id and
     # count, so errors right after a reboot are still compared against 0, and a damaged file just
     # restarts at 0.
@@ -273,6 +280,8 @@ def scrub_problems(m: Probe, mnt: str) -> list[str]:
     if not scrub.started:
         problems.append(f"btrfs {mnt}: no scrub has ever completed")
     elif scrub.status == "running":
+        # A scrub in progress is no problem: this arm keeps it out of the
+        # "did not finish" and age checks below.
         pass
     elif scrub.status != "finished":
         problems.append(
@@ -492,23 +501,29 @@ def snapshot_problems(m: Probe) -> list[str]:
     last_n = bash_int(last)
     if not quiet and last_n is not None and now() - last_n > SNAPSHOT_MAX_AGE and now() - awake > SNAPSHOT_GRACE:
         problems.append("snapshots: no successful hourly run for over 3 hours - check 'journalctl -u btrfs-snapshot'")
+    _log_stale_nas(m, snap)
+    return problems
+
+
+def _log_stale_nas(m: Probe, snap: str) -> None:
+    """A journal line when the NAS backup is on and had no success for NAS_MAX_AGE_DAYS; no problem
+    of its own: btrfs-snapshot already notifies once a day about a stale NAS backup."""
     conf = m.path(SNAPSHOTS_CONF)
     settings = parse_snapshots_conf(m.text(conf) or "").values if os.access(conf, os.R_OK) else {}
-    if settings.get("NAS_ENABLED", "0") == "1":
-        # The last success, or when the backup was turned on if later (as btrfs-snapshot).
-        nas_last = 0
-        for name in ("nas-last-ok", "nas-enabled-at"):
-            v = bash_int(m.cat(f"{snap}/{name}") or "")
-            if v is not None and v > nas_last:
-                nas_last = v
-        # Journal only: btrfs-snapshot already notifies once a day about a stale NAS backup.
-        if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * DAY:
-            log(
-                4,
-                f"no successful NAS backup (restic) for over {NAS_MAX_AGE_DAYS} days (journalctl -u btrfs-snapshot-nas)",
-                tag=TAG,
-            )
-    return problems
+    if settings.get("NAS_ENABLED", "0") != "1":
+        return
+    # The last success, or when the backup was turned on if later (as btrfs-snapshot).
+    nas_last = 0
+    for name in ("nas-last-ok", "nas-enabled-at"):
+        v = bash_int(m.cat(f"{snap}/{name}") or "")
+        if v is not None and v > nas_last:
+            nas_last = v
+    if nas_last > 0 and now() - nas_last > NAS_MAX_AGE_DAYS * DAY:
+        log(
+            4,
+            f"no successful NAS backup (restic) for over {NAS_MAX_AGE_DAYS} days (journalctl -u btrfs-snapshot-nas)",
+            tag=TAG,
+        )
 
 
 def md_problems(m: Probe) -> list[str]:

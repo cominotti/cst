@@ -151,7 +151,9 @@ class Primitives:
 
     def subvol_create(self, path: str) -> None:
         """Create PATH as a subvolume, as the calling (unprivileged) user: btrfs
-        allows that wherever the user may create a folder."""
+        allows that wherever the user may create a folder. PATH then gets mode
+        0755, what mkdir gives a folder under umask 022: the user writes,
+        others only read and enter."""
         parent, name = os.path.split(path)
         fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:

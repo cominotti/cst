@@ -292,6 +292,22 @@ class BelowSection(TypedDict):
     error: str | None
 
 
+class WindowPeak(TypedDict):
+    """AnalyseResult's "peak": the highest PSI 10 s averages (%), the most tasks at once (in iowait, in
+    D state on storage, on memory, in btrfs maintenance) and the most dirty and writeback bytes."""
+
+    io_some_avg10: float
+    io_full_avg10: float
+    mem_some_avg10: float
+    cpu_some_avg10: float
+    iowait_tasks: float
+    d_tasks: float
+    mem_tasks: float
+    maint_tasks: float
+    dirty_bytes: float
+    writeback_bytes: float
+
+
 class AnalyseResult(TypedDict):
     """What summarise() returns (analyse() adds "below"). The keys after
     "coverage" are only there when the window has 2+ samples; main() pops
@@ -305,7 +321,7 @@ class AnalyseResult(TypedDict):
     alerts: list[Notice]
     coverage: NotRequired[Coverage]
     pressure: NotRequired[dict[str, float]]  # "<psi key>_pct"
-    peak: NotRequired[dict[str, float]]
+    peak: NotRequired[WindowPeak]
     maintenance_samples: NotRequired[int]
     vm: NotRequired[VmTotals]
     fs: NotRequired[dict[str, FsTotals]]

@@ -402,6 +402,20 @@ class PendingAlertsTest(unittest.TestCase):
             [f"{when(0)}  normal   a: defaults{NOT_SHOWN}", f"{when(20)}  normal   a: zeros (3 times){NOT_SHOWN}"],
         )
 
+    def test_how_it_reads_the_header(self) -> None:
+        # A header line without "=" is its own key and value, the last line of a key wins, and a
+        # file with no empty line after the header has no body.
+        self.alert(1, text="cst-alert 1\nurgency=critical\napp=a\ntitle\n\nbody\n", age=30)
+        self.alert(2, text="cst-alert 1\nurgency=critical\napp=a\ntitle=A\ntitle=B\n\nbody\n", age=20)
+        self.alert(3, text="cst-alert 1\nurgency=critical\napp=a\ntitle=no body", age=10)
+        r = self.run_prog()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        at = f"Happened {when(0)}, while no desktop session could show it."
+        self.assertEqual(
+            [n[-2:] for n in self.notifications()],
+            [["title", f"{at}\n\nbody"], ["B", f"{at}\n\nbody"], ["no body", at]],
+        )
+
     def test_list_into_a_closed_pipe_stops_quietly(self) -> None:
         for n in range(5):
             self.alert(n + 1, age=100 + n)
@@ -536,6 +550,19 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         self.assertEqual(len(self.notifications()), 1)
         self.assertFalse(os.path.exists(os.path.dirname(self.record)))
+
+    def test_an_alert_that_turns_invalid_before_it_is_shown_is_skipped(self) -> None:
+        # Each alert is read again right before it is shown: one rewritten while the program waited
+        # for the desktop (here by busctl) is skipped, and nothing is recorded.
+        a = self.alert(1)
+        self.stub("busctl", f'printf "junk\\n" >"{self.path(a)}"\necho "b true"')
+        r = self.run_prog()
+        self.assertEqual(
+            (r.returncode, r.stdout, r.stderr),
+            (0, "", f"<4>cst-pending-alerts: {a}: not a valid pending alert; skipped\n"),
+        )
+        self.assertEqual(self.notifications(), [])
+        self.assertFalse(os.path.exists(self.record))
 
     def test_nothing_to_show_asks_no_notification_server(self) -> None:
         self.stub("busctl", 'echo called >>"$NOTIFY_LOG.busctl"; echo "b true"')

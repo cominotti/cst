@@ -75,6 +75,23 @@ class _InspectResult(TypedDict):
 
 
 # ---- reading the flags file ---------------------------------------------------------------
+def parse_chrome_args(args: Sequence[str]) -> tuple[ChromeCacheCommand, str | None] | None:
+    """The command (status when ARGS is empty) and the --home folder (None without --home) of
+    chrome-cache's arguments; None for a usage error: an unknown command, --home without a folder,
+    or any other argument after the command (--home=DIR too: a word not understood must not turn
+    into the caller's own home)."""
+    cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
+    if cmd is None:
+        return None
+    match args[1:]:
+        case []:
+            return cmd, None
+        case ["--home", home] if home:
+            return cmd, home
+        case _:
+            return None
+
+
 def marked(s: str, rest: str) -> bool:
     """Whether the stripped line S starts with one of the MARKS followed by REST."""
     return any(s.startswith(m + rest) for m in MARKS)
@@ -152,12 +169,19 @@ def decide(text: str) -> tuple[DecidedState, str | None, str]:
             add_after(text, FLAG_DIR, FLAG_SIZE),
             "the 512 MiB cap line is missing under the marker: add it back",
         )
-    note = ""
-    if ours_d and s not in (None, "") and s.isdigit() and int(s) > CACHE_SIZE:
-        note = "; WARNING: that cache lives in RAM, keep it small"
-    elif ours_d and (s is None or s in ("", "0")):
-        note = "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
-    return ChromeFlagsState.USER, None, f"set by you ({fmt(d, s)}): left as it is{note}"
+    return ChromeFlagsState.USER, None, f"set by you ({fmt(d, s)}): left as it is{_ram_note(d, s)}"
+
+
+def _ram_note(d: str | None, s: str | None) -> str:
+    """The warning decide adds to flags of the user's own that put the cache in our RAM folder D
+    with a size S above the cap or no cap at all; "" for any other flags."""
+    if d != CACHE_DIR:
+        return ""
+    if s is not None and s.isdecimal() and int(s) > CACHE_SIZE:  # isdecimal: the digits int() reads
+        return "; WARNING: that cache lives in RAM, keep it small"
+    if s in (None, "", "0"):
+        return "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
+    return ""
 
 
 def fmt(d: str | None, s: str | None) -> str:
