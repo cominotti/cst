@@ -1650,12 +1650,11 @@ class ShapesTest(unittest.TestCase):
         # interpreter's stack and recursion limit (the CI container differs from a workstation).
         # parse_json raises whatever json.loads raises here, in this process.
         deep = "[" * 100000
-        try:
+        with self.assertRaises(
+            (RecursionError, json.JSONDecodeError), msg="json.loads accepted unbalanced brackets"
+        ) as caught:
             json.loads(deep)
-        except (RecursionError, json.JSONDecodeError) as e:
-            expected: type[BaseException] = type(e)
-        else:
-            self.fail("json.loads accepted unbalanced brackets")
+        expected: type[BaseException] = type(caught.exception)
         with self.assertRaises(expected):
             parse_json(deep)
 
