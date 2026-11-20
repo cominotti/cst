@@ -35,7 +35,7 @@ from toolchains.domain.prune import SPECS
 CLEAN_LEFT: Final = "which `systemctl --user clean` left"
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from cst_core.domain.files import UnitFileState
     from toolchains.application.prune import Target
@@ -104,10 +104,44 @@ class AutoTimer:
         enabled = [tid for tid in SPECS if settings.enabled[tid]]
         if not enabled:
             raise Refused(f"no target is enabled in the settings ({settings.source}): the timer would do nothing")
-        # Checked as the timer will run: programs are looked for in the PATH of
-        # the user manager (the service's PATH), not in this command's (run by
-        # snapshots setup through runuser, it is root's). If no target would run,
-        # no timer.
+        mpath, refused = self._check_targets(settings, enabled)
+        self._note_refused(refused, mpath)
+        st = self.files.auto_states()
+        masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
+        if (why := masked_refusal(masked, user=True)) is not None:
+            raise Refused(why + "; nothing was written")
+        conflicts = [k for k, v in st.items() if v == OwnedState.CONFLICT]
+        if conflicts:
+            raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
+        if self._write_auto_files():
+            self.units.reload()
+        self.units.enable_now(TIMER)
+        self.out.say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
+        self.files.auto_done()
+        if self.files.turned_off():
+            self.files.remove(os.path.join(self.home, OFF_REL))
+            self.out.say(f"removed:   ~/{OFF_REL} (snapshots setup keeps it enabled again)")
+        self.old_conf_note()
+        return rc
+
+    def _write_auto_files(self) -> bool:
+        """Write the copies and the units of auto on (each said written or unchanged);
+        True when a unit was written."""
+        changed = False
+        for rel, data in self.files.auto_copies().items():
+            self.out.say(f"{'written:  ' if self.files.put_auto_copy(rel, data) else 'unchanged:'} ~/{rel}")
+        for name, render in AUTO_UNITS.items():
+            put = self.files.put_auto_unit(name, render())
+            self.out.say(f"{'written:  ' if put else 'unchanged:'} {label(name)}")
+            changed = changed or put
+        return changed
+
+    def _check_targets(self, settings: Settings, enabled: Sequence[str]) -> tuple[str | None, list[str]]:
+        """(the user manager's PATH or None, [why a target refuses]) of the
+        ENABLED targets; Refused when every one refuses (no target would run:
+        no timer). Checked as the timer will run: programs are looked for in
+        the PATH of the user manager (the service's PATH, asked once), not in
+        this command's (run by snapshots setup through runuser, it is root's)."""
         mpath: str | None = None
         asked = False
         refused: list[str] = []
@@ -123,6 +157,10 @@ class AutoTimer:
                 refused.append(f"{tid}: {e}")
         if len(refused) == len(enabled):
             raise Refused("; ".join(refused))
+        return mpath, refused
+
+    def _note_refused(self, refused: Sequence[str], mpath: str | None) -> None:
+        """A note for each REFUSED target (MPATH: the PATH it was looked for in, None: this command's)."""
         where = (
             "in the PATH of your user manager, which the timer uses"
             if mpath is not None
@@ -136,30 +174,6 @@ class AutoTimer:
                 4,
                 err=True,
             )
-        st = self.files.auto_states()
-        masked = [os.path.join(self.home, UNIT_DIR_REL, k) for k in AUTO_UNITS if st[k] == OwnedState.MASKED]
-        if (why := masked_refusal(masked, user=True)) is not None:
-            raise Refused(why + "; nothing was written")
-        conflicts = [k for k, v in st.items() if v == OwnedState.CONFLICT]
-        if conflicts:
-            raise Refused("not written by CST, left alone: " + ", ".join(label(k) for k in conflicts))
-        changed = False
-        for rel, data in self.files.auto_copies().items():
-            self.out.say(f"{'written:  ' if self.files.put_auto_copy(rel, data) else 'unchanged:'} ~/{rel}")
-        for name, render in AUTO_UNITS.items():
-            put = self.files.put_auto_unit(name, render())
-            self.out.say(f"{'written:  ' if put else 'unchanged:'} {label(name)}")
-            changed = changed or put
-        if changed:
-            self.units.reload()
-        self.units.enable_now(TIMER)
-        self.out.say(f"enabled:   {TIMER} (hourly; logs: journalctl --user -u {SERVICE})")
-        self.files.auto_done()
-        if self.files.turned_off():
-            self.files.remove(os.path.join(self.home, OFF_REL))
-            self.out.say(f"removed:   ~/{OFF_REL} (snapshots setup keeps it enabled again)")
-        self.old_conf_note()
-        return rc
 
     def stop_orphan_timer(self, name: str = TIMER) -> None:
         """The file of timer NAME is gone, but the user manager may still run

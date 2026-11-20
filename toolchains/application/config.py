@@ -77,6 +77,11 @@ def wrapper_values(settings: Settings | None) -> WrapperValues:
     )
 
 
+def _foreign_wrapper_text(st: SccacheState) -> str:
+    """What the sccache lines say of a rustc-wrapper in cargo's config (ST) that is not CST's."""
+    return f"rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is"
+
+
 @dataclasses.dataclass(frozen=True)
 class ToolConfig:
     """config plan and apply in HOME (PROG: how hints name the program); SETTINGS(): the
@@ -238,33 +243,10 @@ class ToolConfig:
         off = f"sccache: off (opt-in; RUST_SCCACHE=yes in ~/{CONF_REL}, or config apply --sccache); {SCCACHE_REBUILD}"
         if st["error"]:
             return [(ConfigMark.UNKNOWN, shown, f"sccache: the file {st['error']}")]
-        foreign = st["value"] is not None and not st["ours"]
-        yours = f"rustc-wrapper = {json.dumps(st['value'])} is yours: left as it is"
         if flag is False:
-            if st["ours"]:
-                if st["remove"]:
-                    return [
-                        (
-                            ConfigMark.REMOVE,
-                            shown,
-                            (
-                                f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
-                                f"~/{WRAPPER_REL} stays (unused, harmless)"
-                            ),
-                        )
-                    ]
-                return [
-                    (
-                        ConfigMark.BY_HAND,
-                        shown,
-                        f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
-                    )
-                ]
-            return (
-                [(ConfigMark.KEEP, shown, f"sccache ({why}): {yours}")]
-                if foreign
-                else [(ConfigMark.OFF, shown, "sccache: off")]
-            )
+            return self._sccache_off_lines(st, shown, why)
+        foreign = st["value"] is not None and not st["ours"]
+        yours = _foreign_wrapper_text(st)
         text = self.files.wrapper_text(values)
         if not want:
             if st["ours"]:
@@ -306,6 +288,32 @@ class ToolConfig:
                 )
             )
         return out
+
+    def _sccache_off_lines(self, st: SccacheState, shown: str, why: str) -> list[ConfigLine]:
+        """The lines of --no-sccache (WHY: what turns it off) for cargo's config SHOWN in state ST."""
+        foreign = st["value"] is not None and not st["ours"]
+        if foreign:
+            return [(ConfigMark.KEEP, shown, f"sccache ({why}): {_foreign_wrapper_text(st)}")]
+        if not st["ours"]:
+            return [(ConfigMark.OFF, shown, "sccache: off")]
+        if st["remove"]:
+            return [
+                (
+                    ConfigMark.REMOVE,
+                    shown,
+                    (
+                        f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
+                        f"~/{WRAPPER_REL} stays (unused, harmless)"
+                    ),
+                )
+            ]
+        return [
+            (
+                ConfigMark.BY_HAND,
+                shown,
+                f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
+            )
+        ]
 
     def install_wrapper(self, values: WrapperValues) -> int:
         """0 when the wrapper is in place (written or unchanged), else 1."""
@@ -402,60 +410,56 @@ class ToolConfig:
         out: list[ConfigLine] = []
         for name, path, st, _ in self.items():
             shown = tilde(path, home)
-            if name == ConfigTool.CARGO:
-                match st:
-                    case ToolSettingState.SET:
-                        if self.files.build_dir_is_csts():
-                            out.append((ConfigMark.OK, shown, "build-dir = CST's line (rust:build prunes that folder)"))
-                        else:
-                            out.append(
-                                (
-                                    ConfigMark.KEEP,
-                                    shown,
-                                    "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
-                                )
-                            )
-                    case ToolSettingState.BY_HAND:
-                        out.append(
-                            (
-                                ConfigMark.BY_HAND,
-                                shown,
-                                f'has a [build] table: add build-dir = "{home}/{ROOT_REL}/{HASH_VAR}" there yourself',
-                            )
-                        )
-                    case ToolSettingState.WRITE:
-                        out.append(
-                            (
-                                ConfigMark.WRITE,
-                                shown,
-                                f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
-                                + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
-                            )
-                        )
-                    case _:
-                        out.append((ConfigMark.UNKNOWN, shown, CANNOT_READ))
-            else:
-                match st:
-                    case ToolSettingState.SET:
-                        out.append((ConfigMark.OK, shown, "link-mode already set"))
-                    case ToolSettingState.BY_HAND:
-                        out.append(
-                            (ConfigMark.BY_HAND, shown, 'has tables: add link-mode = "clone" at its top yourself')
-                        )
-                    case ToolSettingState.WRITE:
-                        out.append(
-                            (
-                                ConfigMark.WRITE,
-                                shown,
-                                'link-mode = "clone" (hardlinks cannot cross subvolumes)'
-                                + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
-                            )
-                        )
-                    case _:
-                        out.append((ConfigMark.UNKNOWN, shown, CANNOT_READ))
+            out.append(
+                self._cargo_line(st, shown, verb) if name == ConfigTool.CARGO else self._uv_line(st, shown, verb)
+            )
         out += self.lean_lines(verb, settings, lean)
         out += self.sccache_lines(verb, settings, sccache)
         return out
+
+    def _cargo_line(self, st: ToolSettingState, shown: str, verb: ConfigView) -> ConfigLine:
+        """The line of cargo's build-dir in its config SHOWN, in state ST."""
+        match st:
+            case ToolSettingState.SET:
+                if self.files.build_dir_is_csts():
+                    return (ConfigMark.OK, shown, "build-dir = CST's line (rust:build prunes that folder)")
+                return (
+                    ConfigMark.KEEP,
+                    shown,
+                    "build-dir set to your own value: left as it is (rust:build then prunes nothing)",
+                )
+            case ToolSettingState.BY_HAND:
+                return (
+                    ConfigMark.BY_HAND,
+                    shown,
+                    f'has a [build] table: add build-dir = "{self.home}/{ROOT_REL}/{HASH_VAR}" there yourself',
+                )
+            case ToolSettingState.WRITE:
+                return (
+                    ConfigMark.WRITE,
+                    shown,
+                    f'[build] build-dir = "~/{ROOT_REL}/{HASH_VAR}"'
+                    + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
+                )
+            case _:
+                return (ConfigMark.UNKNOWN, shown, CANNOT_READ)
+
+    def _uv_line(self, st: ToolSettingState, shown: str, verb: ConfigView) -> ConfigLine:
+        """The line of uv's link-mode in its config SHOWN, in state ST."""
+        match st:
+            case ToolSettingState.SET:
+                return (ConfigMark.OK, shown, "link-mode already set")
+            case ToolSettingState.BY_HAND:
+                return (ConfigMark.BY_HAND, shown, 'has tables: add link-mode = "clone" at its top yourself')
+            case ToolSettingState.WRITE:
+                return (
+                    ConfigMark.WRITE,
+                    shown,
+                    'link-mode = "clone" (hardlinks cannot cross subvolumes)'
+                    + ("" if verb == ConfigView.PLAN else f" (missing: {self.prog} config apply)"),
+                )
+            case _:
+                return (ConfigMark.UNKNOWN, shown, CANNOT_READ)
 
     def run(self, action: ToolchainsAction, lean: bool | None = None, sccache: bool | None = None) -> int:
         home = self.home

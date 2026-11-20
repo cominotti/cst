@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 from cst_core.domain.install import manifest_by_src
-from cst_core.domain.shapes import json_object, parse_json, parse_toml
+from cst_core.domain.shapes import json_object, object_of, parse_json, parse_toml
 from cst_core.domain.text import cgroup_v2_path
 from toolchains.domain.build import HASH_VAR, ROOT_REL
 from toolchains.domain.common import parses_as, plain
@@ -182,24 +182,29 @@ def lean_state(path: str, text: str | None) -> LeanState:
         else:
             st["add"].append((label_, block))
     if st["add"]:
-        extra = LEAN_HEAD + "\n".join(b for _, b in st["add"])
-        new = text + ("" if not text or text.endswith("\n") else "\n") + extra
-        # Appended tables must not clash with the file's (TOML forbids a
-        # table twice): parse the result and compare.
-        try:
-            nd = parse_toml(new)
-        except tomllib.TOMLDecodeError:
-            nd = None
-        expect = parse_json(json.dumps(data))
-        for label_, tpath, want, _ in LEAN_KEYS:
-            if any(label_ == a for a, _ in st["add"]):
-                d = expect
-                for k in tpath:
-                    d = _table(d, k)
-                _set_item(d, "debug", want)
-        if nd is not None and parse_json(json.dumps(nd)) == expect:
-            st["append"] = extra
+        st["append"] = _lean_append(text, data, st["add"])
     return st
+
+
+def _lean_append(text: str, data: object, add: Sequence[tuple[str, str]]) -> str:
+    """The text to append to TEXT (DATA: it parsed) for the blocks of ADD, or ''
+    when appending them is not safe."""
+    extra = LEAN_HEAD + "\n".join(b for _, b in add)
+    new = text + ("" if not text or text.endswith("\n") else "\n") + extra
+    # Appended tables must not clash with the file's (TOML forbids a
+    # table twice): parse the result and compare.
+    try:
+        nd = parse_toml(new)
+    except tomllib.TOMLDecodeError:
+        nd = None
+    expect = parse_json(json.dumps(data))
+    for label_, tpath, want, _ in LEAN_KEYS:
+        if any(label_ == a for a, _ in add):
+            d = expect
+            for k in tpath:
+                d = _table(d, k)
+            _set_item(d, "debug", want)
+    return extra if nd is not None and parse_json(json.dumps(nd)) == expect else ""
 
 
 # The opt-in sccache item. Off unless RUST_SCCACHE=yes (or config apply
@@ -341,61 +346,89 @@ def sccache_state(path: str, text: str | None, want: str) -> SccacheState:
         return st  # build = 1: no add, no remove
     value = (build or {}).get("rustc-wrapper")
     st["value"], st["ours"] = value, value == want
-    keyline = f"rustc-wrapper = {json.dumps(want)}"
     if value is None:
-        expect = plain(data)
-        table = expect.setdefault("build", {})
-        if isinstance(table, dict):  # always: build is a table or absent here
-            table["rustc-wrapper"] = want
-        headers = list(BUILD_HEADER.finditer(text))
-        cands: list[str] = []
-        if len(headers) == 1:
-            h = headers[0]
-            nxt = ANY_HEADER.search(text, h.end())
-            section_end = nxt.start() if nxt else len(text)
-            keys = list(KEY_LINE.finditer(text, h.end(), section_end))
-            # After the table's last key (the build-dir line CST writes),
-            # else right after the header.
-            spots = ([text.find("\n", keys[-1].start())] if keys else []) + [h.end()]
-            for spot in spots:
-                pos = len(text) if spot < 0 else spot
-                rest = text[pos:]
-                cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest or "\n"))
-        elif not headers:
-            sep = "" if not text or text.endswith("\n") else "\n"
-            cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
-        st["add"] = next((c for c in cands if parses_as(c, expect)), "")
+        st["add"] = _wrapper_added(text, data, want)
     elif st["ours"]:
-        lines = text.splitlines(keepends=True)
-        pat = re.compile(rf"{WS}*rustc-wrapper{WS}*={WS}*{re.escape(json.dumps(want))}{WS}*(?:#.*)?\n?\Z")
-        idx = [i for i, ln in enumerate(lines) if pat.match(ln)]
-        if len(idx) == 1:
-            i = idx[0]
-            drop = {i}
-            if i > 0 and lines[i - 1].startswith(SCCACHE_HEAD[:48]):
-                drop.add(i - 1)
-            # CST's own appended block (a [build] header whose own section
-            # holds only this key; [build.x] subtables may follow): all of it.
-            after: list[str] = []
-            for ln in lines[i + 1 :]:
-                if ANY_HEADER.match(ln):
-                    break
-                after.append(ln)
-            if (
-                i > 1
-                and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))
-                and lines[i - 2].startswith(SCCACHE_HEAD[:48])
-                and not any(KEY_LINE.match(ln) for ln in after)
-            ):
-                drop |= {i - 1, i - 2}
-                if i > 2 and not lines[i - 3].strip():
-                    drop.add(i - 3)
-            new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
-            expect = plain(data)
-            table = expect["build"]
-            if isinstance(table, dict):  # always: the line CST wrote is in [build]
-                del table["rustc-wrapper"]
-            alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
-            if parses_as(new, expect) or parses_as(new, alt):
-                st["remove"] = new
+        st["remove"] = _wrapper_removed(text, data, want)
     return st
+
+
+def _wrapper_added(text: str, data: object, want: str) -> str:
+    """TEXT (DATA: it parsed, with no rustc-wrapper) with build.rustc-wrapper =
+    WANT added, or '' when no place for the key gives the file with only that
+    key added."""
+    keyline = f"rustc-wrapper = {json.dumps(want)}"
+    expect = plain(object_of(data))
+    table = expect.setdefault("build", {})
+    if isinstance(table, dict):  # always: build is a table or absent here
+        table["rustc-wrapper"] = want
+    headers = list(BUILD_HEADER.finditer(text))
+    cands: list[str] = []
+    if len(headers) == 1:
+        cands = _after_build_header(text, headers[0], keyline)
+    elif not headers:
+        sep = "" if not text or text.endswith("\n") else "\n"
+        cands.append(text + sep + ("\n" if text else "") + SCCACHE_HEAD + "\n[build]\n" + keyline + "\n")
+    return next((c for c in cands if parses_as(c, expect)), "")
+
+
+def _after_build_header(text: str, h: re.Match[str], keyline: str) -> list[str]:
+    """TEXT with KEYLINE (and CST's comment) put into the [build] table whose
+    header is H: after the table's last key (the build-dir line CST writes),
+    else right after the header."""
+    nxt = ANY_HEADER.search(text, h.end())
+    section_end = nxt.start() if nxt else len(text)
+    keys = list(KEY_LINE.finditer(text, h.end(), section_end))
+    spots = ([text.find("\n", keys[-1].start())] if keys else []) + [h.end()]
+    cands: list[str] = []
+    for spot in spots:
+        pos = len(text) if spot < 0 else spot
+        rest = text[pos:]
+        cands.append(text[:pos] + "\n" + SCCACHE_HEAD + "\n" + keyline + (rest or "\n"))
+    return cands
+
+
+def _csts_build_block(lines: Sequence[str], i: int) -> set[int]:
+    """The other lines of CST's own appended block around the key at LINES[i]
+    (a [build] header whose own section holds only this key; [build.x]
+    subtables may follow): its header, its comment and the blank line before
+    them; none when the key is not in such a block."""
+    after: list[str] = []
+    for ln in lines[i + 1 :]:
+        if ANY_HEADER.match(ln):
+            break
+        after.append(ln)
+    if not (
+        i > 1
+        and BUILD_HEADER.match(lines[i - 1].rstrip("\r\n"))
+        and lines[i - 2].startswith(SCCACHE_HEAD[:48])
+        and not any(KEY_LINE.match(ln) for ln in after)
+    ):
+        return set()
+    drop = {i - 1, i - 2}
+    if i > 2 and not lines[i - 3].strip():
+        drop.add(i - 3)
+    return drop
+
+
+def _wrapper_removed(text: str, data: object, want: str) -> str:
+    """TEXT (DATA: it parsed) without CST's rustc-wrapper = WANT line (and its
+    comment, and the [build] block CST appended for it), or '' when that is not
+    one line or the result is not the file with only that key removed."""
+    lines = text.splitlines(keepends=True)
+    pat = re.compile(rf"{WS}*rustc-wrapper{WS}*={WS}*{re.escape(json.dumps(want))}{WS}*(?:#.*)?\n?\Z")
+    idx = [i for i, ln in enumerate(lines) if pat.match(ln)]
+    if len(idx) != 1:
+        return ""
+    i = idx[0]
+    drop = {i}
+    if i > 0 and lines[i - 1].startswith(SCCACHE_HEAD[:48]):
+        drop.add(i - 1)
+    drop |= _csts_build_block(lines, i)
+    new = "".join(ln for n, ln in enumerate(lines) if n not in drop)
+    expect = plain(object_of(data))
+    table = expect["build"]
+    if isinstance(table, dict):  # always: the line CST wrote is in [build]
+        del table["rustc-wrapper"]
+    alt = {k: v for k, v in expect.items() if not (k == "build" and v == {})}
+    return new if parses_as(new, expect) or parses_as(new, alt) else ""

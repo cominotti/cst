@@ -291,21 +291,25 @@ def select_targets(names: Sequence[str], enabled: Mapping[str, bool]) -> list[tu
         return [(tid, False) for tid in SPECS if enabled[tid]]
     out: list[tuple[str, bool]] = []
     for name in names:
-        if ":" in name:
-            if name in SPECS:
-                found = [name]
-            elif name in PLANNED:
-                raise Usage(f"target {name} is not implemented yet (implemented: {', '.join(SPECS)})")
-            else:
-                raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
-        else:
-            found = [tid for tid in SPECS if tid.split(":")[0] == name]
-            if not found:
-                planned = [t for t in PLANNED if t.split(":")[0] == name]
-                if planned:
-                    raise Usage(f"no target of {name} is implemented yet (planned: {', '.join(planned)})")
-                raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
-        for tid in found:
+        for tid in _targets_named(name):
             if all(tid != c for c, _ in out):
                 out.append((tid, True))
     return out
+
+
+def _targets_named(name: str) -> list[str]:
+    """The target ids NAME (LANG:CACHE or LANG) names; raises Usage for an
+    unknown or a planned target."""
+    if ":" in name:
+        if name in SPECS:
+            return [name]
+        if name in PLANNED:
+            raise Usage(f"target {name} is not implemented yet (implemented: {', '.join(SPECS)})")
+        raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
+    found = [tid for tid in SPECS if tid.split(":")[0] == name]
+    if not found:
+        planned = [t for t in PLANNED if t.split(":")[0] == name]
+        if planned:
+            raise Usage(f"no target of {name} is implemented yet (planned: {', '.join(planned)})")
+        raise Usage(f"unknown target '{name}' (implemented: {', '.join(SPECS)})")
+    return found
