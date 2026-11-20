@@ -30,6 +30,7 @@ from btrfs.stall_report.domain.window import summarise
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.text import group
 from cst_core.domain.values import DAY, MINUTE
 from cst_core.ports import CommandResult, CommandRunnerPort
 
@@ -277,7 +278,7 @@ def _rate_number(v: object) -> float:
     if isinstance(v, (int, float)):
         return float(v)
     m = re.match(r"\s*([\d.]+)", str(v or ""))
-    return float(m.group(1)) if m else 0.0
+    return float(group(m, 1)) if m else 0.0
 
 
 def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[list[BelowItem] | None, str | None]:
