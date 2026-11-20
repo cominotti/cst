@@ -434,7 +434,7 @@ class Change(Checks):
         (its `written:` lines), not what plan saw, decides the daemon-reload and the restart: a file
         that changed after plan (a git pull meanwhile) is still taken up."""
         p, unit = self.p, LDAC_UNIT
-        if self.lw_prog_st != OwnedState.OK:
+        if self.lw_prog_st not in (OwnedState.OK, OwnedState.ADOPT):
             self.must(["python3", "-I", "-c", "import ast, sys; ast.parse(open(sys.argv[1]).read())", p.lw_src])
         r = self.installer("install", "--home", p.home, "bluetooth/bt-ldac-watch", output=OutputMode.CAPTURE)
         self.out(r.stdout)  # its lines, then its error, as it printed them
@@ -485,7 +485,7 @@ class Change(Checks):
             self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
             self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
             self.must(["systemctl", "--user", "daemon-reload"])
-        if self.lw_prog_st in (OwnedState.OK, OwnedState.CHANGE):
+        if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))
             self.out(f"removed:   {p.lw_prog}\n")

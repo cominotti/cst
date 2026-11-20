@@ -1463,12 +1463,18 @@ class WatcherTest(SetupCase):
         with open(m.record, "w", encoding="utf-8") as f:
             json.dump(rec, f)
         stats = {path: (os.stat(path).st_ino, os.stat(path).st_mtime_ns) for path in (m.lw_prog, m.lw_unit)}
-        # installer check counts a current copy its record does not list as not current: plan says apply
-        # installs it (and the install adopts it, writing nothing).
+        # plan reads the installer's plan: a current copy its record does not list is "adopt" (apply adds it
+        # to the record, writing nothing), and the service needs no restart for it.
+        r = m.run("plan")
         self.assertIn(
-            row("update", "~/.local/lib/cst/bt-ldac-watch", "older copy (apply installs the one in CST)"),
-            m.run("plan").stdout,
+            row(
+                "adopt",
+                "~/.local/lib/cst/bt-ldac-watch",
+                "same as bt-ldac-watch in CST; apply adds it to the install record",
+            ),
+            r.stdout,
         )
+        self.assertIn(row("ok", f"{LW} (your session)", "enabled, active"), r.stdout)
         r = m.run("apply", "--no-restart")
         self.assertIn(
             f"unchanged: {m.lw_prog}\nunchanged: {m.lw_unit} (LDAC to 48000 Hz)\nunchanged: {LW} enabled and active\n",

@@ -575,14 +575,14 @@ rec = json.load(open(sys.argv[1]))
 for dest in sys.argv[2:]:
     del rec["files"][dest]
 json.dump(rec, open(sys.argv[1], "w"))' "$record" "$watch" "$unit"
-# installer check counts the current but unrecorded copy as not current (exit 1), so plan says apply
-# installs it; the install then adopts it and check exits 0.
+# installer check counts the current but unrecorded copy as not current (exit 1); plan (through the
+# installer's plan) says apply adopts it; the install then adds it to the record and check exits 0.
 inst() { /usr/bin/python3 -I /opt/cst-rw/cst_core/installer.py "$@"; }
 rc=0; inst check --home "$H" bluetooth/bt-ldac-watch || rc=$?
 [[ "$rc" == 1 ]] || { echo "test_80: check took the unrecorded watcher for current (exit $rc)" >&2; false; }
 rc=0; out="$(bt plan 2>&1)" || rc=$?
 show "plan over an unrecorded watcher" "$out"
-grep -qE '^  update +~/\.local/lib/cst/bt-ldac-watch +older copy \(apply installs the one in CST\)$' <<<"$out"
+grep -qE '^  adopt +~/\.local/lib/cst/bt-ldac-watch +same as bt-ldac-watch in CST; apply adds it to the install record$' <<<"$out"
 lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
 step "apply over an unrecorded watcher" apply --yes
 no_writes "apply over an unrecorded watcher" "$out"
@@ -4089,7 +4089,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         `apply` changes nothing: the same inode, mtime and content of each
         file, no new main.conf backup, no restart of WirePlumber. With the watcher's program and unit
         taken out of the install record, `installer.py check` counts the program as not current (exit 1)
-        and `plan` says apply installs it; the next `apply` adds them back, writes nothing and restarts
+        and `plan` says apply adopts it; the next `apply` adds them back, writes nothing and restarts
         neither the watcher nor WirePlumber, and check then exits 0. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
