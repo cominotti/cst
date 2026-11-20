@@ -158,16 +158,7 @@ def _value(raw: str, *, bash_sourced: bool, exported: bool = False) -> tuple[str
     """
     blanks = _BLANKS if bash_sourced else " \t\f\v\r"
     if raw[:1] in ("'", '"'):
-        quote = raw[0]
-        end = raw.find(quote, 1)
-        if end < 0:
-            return None, f"no closing {quote}"
-        inner, rest = raw[1:end], raw[end + 1 :]
-        if quote == '"' and not _EXPANDING.isdisjoint(inner):
-            return None, "$, ` or \\ inside double quotes: bash would expand it (use single quotes)"
-        if not _rest_is_comment(rest, blanks):
-            return None, "text after the closing quote (only a # comment may follow)"
-        return inner, ""
+        return _quoted_value(raw, blanks)
     if bash_sourced:
         cut = next((i for i, ch in enumerate(raw) if ch in _BLANKS), len(raw))
         word, after = raw[:cut], raw[cut:]
@@ -176,18 +167,40 @@ def _value(raw: str, *, bash_sourced: bool, exported: bool = False) -> tuple[str
             return None, "a blank in an unquoted value: bash runs the rest as a command (quote the value)"
     else:
         word = split(r"\s+#", raw, maxsplit=1)[0].strip()
+    why = _unquoted_problem(word, bash_sourced=bash_sourced, exported=exported)
+    return (None, why) if why else (word, "")
+
+
+def _quoted_value(raw: str, blanks: str) -> tuple[str | None, str]:
+    """_value for a value in single or double quotes (raw starts with the quote); blanks: what may
+    stand before a # comment after the closing quote."""
+    quote = raw[0]
+    end = raw.find(quote, 1)
+    if end < 0:
+        return None, f"no closing {quote}"
+    inner, rest = raw[1:end], raw[end + 1 :]
+    if quote == '"' and not _EXPANDING.isdisjoint(inner):
+        return None, "$, ` or \\ inside double quotes: bash would expand it (use single quotes)"
+    if not _rest_is_comment(rest, blanks):
+        return None, "text after the closing quote (only a # comment may follow)"
+    return inner, ""
+
+
+def _unquoted_problem(word: str, *, bash_sourced: bool, exported: bool) -> str:
+    """Why an unquoted value is a problem, "" when it is none; the first check that fails names it.
+    The last three are bash's own: a file only Python reads keeps those characters."""
     if not _EXPANDING.isdisjoint(word):
-        return None, "$, ` or \\ outside single quotes: bash would expand it (use single quotes)"
+        return "$, ` or \\ outside single quotes: bash would expand it (use single quotes)"
     if "'" in word or '"' in word:
-        return None, "a quote inside an unquoted value (quote the whole value)"
+        return "a quote inside an unquoted value (quote the whole value)"
     if bash_sourced:
         if not _SHELL_SYNTAX.isdisjoint(word):
-            return None, "shell syntax (; & | < > ( )) in an unquoted value (quote the value)"
+            return "shell syntax (; & | < > ( )) in an unquoted value (quote the value)"
         if word.startswith("~") or ":~" in word:
-            return None, "an unquoted ~ that bash would expand to a home folder (quote the value)"
+            return "an unquoted ~ that bash would expand to a home folder (quote the value)"
         if exported and "{" in word:
-            return None, "a { in an unquoted value after export: bash brace-expands it (quote the value)"
-    return word, ""
+            return "a { in an unquoted value after export: bash brace-expands it (quote the value)"
+    return ""
 
 
 def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | None:
@@ -197,29 +210,44 @@ def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | Non
         return None
     if "\r" in line and bash_sourced:
         return "a carriage return (Windows line end): bash keeps it in the value"
-    exported = s.startswith("export") and s[6:7] != "" and s[6] in _BLANKS
-    if exported:
-        s = s[6:].lstrip(_BLANKS)
+    s, exported = _strip_export(s)
     m = _KEY.match(s)
     if not m:
         return _NOT_AN_ASSIGNMENT
     key, rest = m.group(0), s[m.end() :]
     if bash_sourced:
-        if not rest.startswith("="):
-            if rest.lstrip(_BLANKS).startswith("="):
-                return "blanks around =: bash runs it as a command and sets nothing"
-            return _NOT_AN_ASSIGNMENT
-        raw = rest[1:]
-        if raw[:1] in _BLANKS:
-            if _rest_is_comment(raw, _BLANKS):
-                return key, ""
+        return _bash_assignment(key, rest, exported=exported)
+    return _plain_assignment(key, rest, exported=exported)
+
+
+def _strip_export(s: str) -> tuple[str, bool]:
+    """s without a leading `export` and the blanks after it, and whether it had one."""
+    if s.startswith("export") and s[6:7] != "" and s[6] in _BLANKS:
+        return s[6:].lstrip(_BLANKS), True
+    return s, False
+
+
+def _bash_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str] | str:
+    """_assignment of a line bash also sources, after its key (rest): no blank around the = sign."""
+    if not rest.startswith("="):
+        if rest.lstrip(_BLANKS).startswith("="):
             return "blanks around =: bash runs it as a command and sets nothing"
-    else:
-        rest = rest.lstrip()
-        if not rest.startswith("="):
-            return _NOT_AN_ASSIGNMENT
-        raw = rest[1:].strip()
-    value, why = _value(raw, bash_sourced=bash_sourced, exported=exported)
+        return _NOT_AN_ASSIGNMENT
+    raw = rest[1:]
+    if raw[:1] in _BLANKS:
+        if _rest_is_comment(raw, _BLANKS):
+            return key, ""
+        return "blanks around =: bash runs it as a command and sets nothing"
+    value, why = _value(raw, bash_sourced=True, exported=exported)
+    return why if value is None else (key, value)
+
+
+def _plain_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str] | str:
+    """_assignment of a line only Python reads, after its key (rest): blanks around = are fine."""
+    rest = rest.lstrip()
+    if not rest.startswith("="):
+        return _NOT_AN_ASSIGNMENT
+    value, why = _value(rest[1:].strip(), bash_sourced=False, exported=exported)
     return why if value is None else (key, value)
 
 
@@ -343,17 +371,29 @@ def printf_q(value: str) -> str:
     if value == "":
         return "''"
     if not all(_q_printable(ch) for ch in value):
-        out: list[str] = []
-        for ch in value:
-            code = ord(ch)
-            if code in _Q_ANSI_C_NAMES:
-                out.append("\\" + _Q_ANSI_C_NAMES[code])
-            elif _q_printable(ch):
-                out.append(ch)
-            else:
-                out.extend(f"\\{b:03o}" for b in ch.encode("utf-8", "surrogateescape"))
-        return "$'" + "".join(out) + "'"
-    out = []
+        return _ansi_c_quoted(value)
+    return _backslashed(value)
+
+
+def _ansi_c_quoted(value: str) -> str:
+    """value in printf %q's $'...' form: bash's name for a control character that has one (\\t,
+    \\n, ...), a printable character as it is, any other as the octal escapes of its UTF-8 bytes."""
+    out: list[str] = []
+    for ch in value:
+        code = ord(ch)
+        if code in _Q_ANSI_C_NAMES:
+            out.append("\\" + _Q_ANSI_C_NAMES[code])
+        elif _q_printable(ch):
+            out.append(ch)
+        else:
+            out.extend(f"\\{b:03o}" for b in ch.encode("utf-8", "surrogateescape"))
+    return "$'" + "".join(out) + "'"
+
+
+def _backslashed(value: str) -> str:
+    """value (all printable) as printf %q writes it: a backslash before each character the shell
+    reads as syntax, before a # or ~ that starts it, and before a ~ after : or =."""
+    out: list[str] = []
     for i, ch in enumerate(value):
         tilde = ch == "~" and (i == 0 or value[i - 1] in ":=")
         if ch in _Q_BACKSLASHED or tilde or (ch == "#" and i == 0):
