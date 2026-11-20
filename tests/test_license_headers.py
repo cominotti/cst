@@ -237,7 +237,7 @@ class FixerTest(unittest.TestCase):
 
     def test_an_empty_problem_is_still_reported(self) -> None:
         # A problem is any text, "" too: the file must not pass the gate unseen.
-        with mock.patch.object(license_headers, "header_problem", lambda _rel, _text: ""):
+        with mock.patch.object(license_headers, "header_problem", return_value=""):
             self.assertEqual(problems(self.repo, ["a.py"]), [""])
 
     def run_main(self, *argv: str, files: list[str] | None = None, repo: str = "") -> tuple[int, str, str]:
