@@ -337,7 +337,6 @@ def _unallocated_exact(host: DoctorHostPort, fs: _Fs, each: int, levels: _Levels
     fs_bytes = btrfs_device_bytes(host, fs.mnt, fs.profiles)
     block_bytes = sum(size for _, _, size in fs.devs)
     exact = fs_bytes is not None and abs(block_bytes - fs_bytes) <= RESIZE_SLACK
-    unknown = _size_unknown(fs, fs_bytes, block_bytes)
     free = [(label, size - each) for _, label, size in fs.devs]
     low = min(b for _, b in free)
     listed = ", ".join(f"{label} {format_bytes_gib_mib(b)}" for label, b in free)
@@ -367,7 +366,7 @@ def _unallocated_exact(host: DoctorHostPort, fs: _Fs, each: int, levels: _Levels
             "each btrfs device fills its block device)",
         )
     else:
-        yield Result(INFO, f"{fs.name}: {fs.needs_root}; not estimated: {unknown}")
+        yield Result(INFO, f"{fs.name}: {fs.needs_root}; not estimated: {_size_unknown(fs, fs_bytes, block_bytes)}")
     if meta_free is not None and meta_free < 2 * rsv and low < 2 * GIB:
         yield Result(
             ERROR,
