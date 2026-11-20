@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters.host import read_settings, user_id, user_name
+from cpu.game.adapters.host import read_settings, read_snapshot, user_id, user_name
 from cpu.game.adapters.profile import GameProfile, load_profile
 from cst_core.adapters import files as cst_files
 from cst_core.adapters.files import read_text
@@ -800,9 +800,8 @@ class StateSnapshotTest(GameProfileCase):
         real = cst_files.read_text
         seen: list[str] = []
 
-        def then_off(path: str, *args: object, **kwargs: object) -> str | None:
-            self.assertEqual((args, kwargs), ((), {}), "a read_text call this fake does not forward")
-            text = real(path)
+        def then_off(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
             if path in (self.state, self.intended):
                 seen.append(path)
                 with contextlib.suppress(FileNotFoundError):
@@ -837,22 +836,60 @@ class StateSnapshotTest(GameProfileCase):
         self.assertEqual(asked, [self.manual])
 
     def test_a_game_state_there_but_unreadable_is_still_on(self) -> None:
-        # read_text gives None for a file it cannot open, as for one that is not there; os.path.exists said
-        # ON before the snapshot, and still does: an unreadable game.state is on, with no records.
+        # A game.state there that cannot be read (a folder here) is on, as os.path.exists said before the
+        # snapshot, with no records.
         self.run_profile("on")
-        real = cst_files.read_text
-
-        def unreadable(path: str, *args: object, **kwargs: object) -> str | None:
-            self.assertEqual((args, kwargs), ((), {}), "a read_text call this fake does not forward")
-            return None if path in (self.state, self.intended) else real(path)
-
-        with (
-            unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=unreadable),
-            unittest.mock.patch("cpu.game.adapters.profile.read_text", side_effect=unreadable),
-        ):
-            out, _ = self.run_profile("state")
+        for path in (self.state, self.intended):
+            os.unlink(path)
+            os.mkdir(path)
+        out, _ = self.run_profile("state")
         self.assertIn("game profile: ON\n", out)  # before the fix: "game profile: off"
         self.assertIn("  drift: none", out)  # an unreadable game.intended holds no record, as before the snapshot
+
+
+class ReadSnapshotTest(unittest.TestCase):
+    """read_snapshot looks once: None for a file that is not there, "" for one there that it cannot read
+    (still on), else its text. What changes after that look does not change its answer."""
+
+    @override
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "game.state")
+
+    def test_not_there_unreadable_and_read(self) -> None:
+        self.assertIsNone(read_snapshot(self.path))
+        os.mkdir(self.path)
+        self.assertEqual(read_snapshot(self.path), "")
+        os.rmdir(self.path)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        self.assertEqual(read_snapshot(self.path), "x\n")
+
+    def test_a_file_there_that_goes_after_the_look_was_there(self) -> None:
+        # 'off' ended right after the read: the unreadable file it saw still counts as there.
+        os.mkdir(self.path)
+        real = cst_files.read_text
+
+        def then_gone(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
+            os.rmdir(path)
+            return text
+
+        with unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_gone):
+            self.assertEqual(read_snapshot(self.path), "")  # before the fix: None (off)
+
+    def test_a_file_that_comes_after_the_look_was_not_there(self) -> None:
+        # 'on' began right after the read: the file it did not see is still not there.
+        real = cst_files.read_text
+
+        def then_made(path: str, *, unreadable: str | None = None) -> str | None:
+            text = real(path, unreadable=unreadable)
+            os.mkdir(path)
+            return text
+
+        with unittest.mock.patch("cpu.game.adapters.host.read_text", side_effect=then_made):
+            self.assertIsNone(read_snapshot(self.path))  # before the fix: "" (on)
 
 
 class UnreadableRecordTest(GameProfileCase):

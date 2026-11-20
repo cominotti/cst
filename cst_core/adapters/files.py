@@ -33,15 +33,26 @@ from cst_core.domain.units import MASK_TARGET
 
 
 @overload
-def read_text(path: str, *, keep_line_ends: bool = False) -> str | None: ...
+def read_text(path: str, *, keep_line_ends: bool = False, unreadable: str | None = None) -> str | None: ...
 
 
 @overload
 def read_text(path: str, default: str, *, limit: int = -1, keep_line_ends: bool = False) -> str: ...
 
 
-def read_text(path: str, default: str | None = None, *, limit: int = -1, keep_line_ends: bool = False) -> str | None:
+def read_text(
+    path: str,
+    default: str | None = None,
+    *,
+    limit: int = -1,
+    keep_line_ends: bool = False,
+    unreadable: str | None = None,
+) -> str | None:
     """The file as UTF-8 text, at most limit characters; default on OSError.
+
+    With unreadable, default only for a file that is not there (no such file, or a path through a
+    file) and unreadable for one there that cannot be read (any other OSError): one open tells the
+    two apart, with no second look that could see another file.
 
     The lenient decode policy (see the module docstring): a byte that is not
     UTF-8 becomes U+FFFD. Not for a file that is written back.
@@ -53,8 +64,10 @@ def read_text(path: str, default: str | None = None, *, limit: int = -1, keep_li
     try:
         with open(path, encoding="utf-8", errors="replace", newline="" if keep_line_ends else None) as fh:
             return fh.read(limit)
-    except OSError:
+    except FileNotFoundError, NotADirectoryError:
         return default
+    except OSError:
+        return default if unreadable is None else unreadable
 
 
 def read_bytes(path: str, *, limit: int = -1) -> bytes | None:
