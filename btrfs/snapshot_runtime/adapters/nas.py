@@ -484,24 +484,24 @@ class Nas:
             write_atomic(f"{m.state}/nas-summary", text, mode="umask", durable=False, relabel=False)
 
     # ---- the run -------------------------------------------------------------------------------
-    def run(self) -> int:
+    def run(self) -> None:
         m, s = self.m, self.m.settings
         if s["NAS_ENABLED"] != "1":
             m.log(6, "NAS backup not enabled")
-            return 0
+            return
         if shutil.which("restic") is None:
             m.log(5, "NAS: restic is not installed yet (rpm-ostree: active after the next reboot); skipped")
-            return 0
+            return
         if not s["NAS_PATH"] or not m.non_empty(m.restic_password):
             m.log(
                 4,
                 f"NAS: not configured completely (NAS_PATH, {m.restic_password}); re-run 'cst btrfs snapshots nas setup'",
             )
             self.stale_alert("The NAS backup is not configured completely.")
-            return 0
+            return
         if m.lock(m.nas_lock, wait=False) is None:
             m.log(5, "another NAS run is active; skipped")
-            return 0
+            return
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, m.trap_stop)
         # Always unmount and unpin at the end, also when the run is stopped (bash's EXIT trap),
@@ -517,7 +517,6 @@ class Nas:
                 self.unmount()
         if leftovers:
             self.stale_alert(f"A snapshot of an earlier run is still mounted under {m.nas_mnt}.")
-        return 0
 
     def backups(self) -> None:
         m, s = self.m, self.m.settings
@@ -570,8 +569,9 @@ def nas(m: SnapshotRun, args: Sequence[str]) -> int:
     """The daily NAS backup (btrfs-snapshot-nas.service)."""
     del args
     try:
-        return Nas(m).run()
+        Nas(m).run()
     except Stopped:
         return EXIT_STOPPED
     except RunStopped:
         return 1
+    return 0
