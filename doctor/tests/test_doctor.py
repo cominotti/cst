@@ -2144,6 +2144,12 @@ class GameProfileTest(Scratch):
         self.profile_on()
         self.assertEqual(self.results(), [Result(doc_domain.INFO, "game profile: ON, no recorded setting to compare")])
 
+    def test_a_cgroup_record_without_a_shown_value_is_not_compared(self) -> None:
+        # The file is there and holds another value, but the record names nothing to compare with.
+        self.intended += "cgw /sys/fs/cgroup/inner/cpuset.cpus 1-2 ''\n"
+        self.profile_on()
+        self.assertEqual(self.results(), [Result(doc_domain.OK, "game profile: ON, the 8 settings it made still hold")])
+
 
 class UserManagerBoxesTest(Scratch):
     """The cpu check of the user manager's cgroup tree: top-level slices CST
@@ -3605,6 +3611,9 @@ class InstallAreaTest(Scratch):
         self.put("/etc/polkit-1/rules.d/50-cpu-setup-game.rules", b"changed\n")
         self.put("~/.local/libexec/cst/rustc-wrapper", b"changed\n")
         self.assertEqual(self.results(), [])
+        # Not only because this checkout cannot judge them: with an answer for every source, still nothing.
+        with mock.patch.object(self.files, "desired_sha256", return_value="0" * 64):
+            self.assertEqual(self.results(), [])
         self.put("/etc/sysctl.d/99-swap-tuning.conf", b"vm.swappiness = 60\n")
         self.assertEqual(
             list(doc_install._without_record(self.host, self.files, Owner.ROOT, frozenset({"swap:core"}))), []
@@ -3613,8 +3622,8 @@ class InstallAreaTest(Scratch):
         self.assertEqual(len(list(doc_install._without_record(self.host, self.files, Owner.ROOT))), 1)
 
     def test_without_a_record_only_the_files_this_checkout_can_judge_count(self) -> None:
-        # One file as this checkout builds it, one that differs, one this checkout cannot say about, one
-        # missing: 1 of 2 differs.
+        # One file as this checkout builds it, one that differs, and one this checkout cannot say about:
+        # 1 of 2 differs.
         entries = {e.src: e for e in INSTALL_MANIFEST if e.component == "swap:core"}
         same = entries["swap/tmpfiles/zswap.conf"]
         self.put(same.dest, entry_payload(REPO, same))
