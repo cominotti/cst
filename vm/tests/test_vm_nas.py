@@ -2179,6 +2179,33 @@ class TimerTest(Nas):
         r = self.run_tool("backup-timer", "status", "win")
         self.assertIn("vm.conf line 1: VM_TUNE_NIC=a\\ b", r.stderr)
 
+    def test_snapshots_conf_keeps_line_ends_while_vm_conf_strips_crlf(self) -> None:
+        # snapshots.conf keeps line ends as btrfs-snapshot and cst doctor read it: a CR or CRLF stays
+        # part of its line instead of silently changing values or shifting line numbers.
+        with open(self.conf, "w", newline="") as f:
+            f.write("NAS_ENABLED=1\r\nNAS_PATH=/volume1/restic\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 1: NAS_ENABLED=1: a carriage return (Windows line end)", r.stderr)
+        open(self.log, "w").close()
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn(f"{self.conf} line 1: NAS_ENABLED=1: a carriage return (Windows line end)", r.stderr)
+        self.assertIn("nothing was changed", r.stderr)
+        self.assertEqual(self.calls(), [], "the backup ran commands")
+
+        # Lone CR stays part of line 2 (not split into two lines); vm.conf still accepts CRLF cleanly.
+        with open(self.conf, "w", newline="") as f:
+            f.write("NAS_ENABLED=1\nNAS_PATH=/volume1/restic\rNAS_RESTIC_HOST=sophia\nNAS_BAD=$X\n")
+        with open(self.env["CST_VM_CONF"], "w", newline="") as f:
+            f.write("VM_NOCOW = no\r\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"{self.conf} line 2:", r.stderr)
+        self.assertIn("a carriage return (Windows line end)", r.stderr)
+        self.assertIn(f"{self.conf} line 3: NAS_BAD=$X", r.stderr)
+        self.assertNotIn("vm.conf", r.stderr)
+
     def test_on_refuses_without_nas_and_foreign_files(self) -> None:
         with open(self.conf, "w") as f:
             f.write("NAS_ENABLED=0\n")
