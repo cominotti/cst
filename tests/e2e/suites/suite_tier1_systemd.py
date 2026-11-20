@@ -4623,7 +4623,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             fi
             [[ -S /run/user/1000/systemd/private ]]
             out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
-                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs' 2>&1)"
             sed 's/^/test_81: /' <<<"$out" >&2
             if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
             grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"
