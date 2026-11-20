@@ -35,6 +35,10 @@ from swap.domain import (
 )
 
 
+# swap0's marked lines, as apply checks and writes them: (file, line, the mode a new file gets).
+type _SwapLines = tuple[tuple[str, MarkedLineSpec, int], ...]
+
+
 class _EventLog(list[ApplyEvent]):
     """apply's events in order; each also goes to emit as it happens, so the CLI prints every
     step before the next one runs (as swap-setup.sh's echo lines did)."""
@@ -237,15 +241,13 @@ class SwapApplicationService(SwapReports):
             note = self._settings_item(res, "plan").note
             events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{env.prog}: ERROR: {env.settings_path}: {note}."))
             return self._stopped(1, events)
-        tmpfiles_text = self._check_before_writing(spec, events)
+        lines = self._swap_lines(spec)
+        tmpfiles_text = self._check_before_writing(spec, lines, events)
         if tmpfiles_text is None:
             return self._stopped(1, events)
         if res.state == SwapSpecState.WRITE:
             self._write_settings(spec, events)
-        line_changed = self._write_swap_lines(spec, events)
-        if line_changed is None:
-            return self._stopped(1, events)
-        rc = self._activate_swap(spec, events, line_changed=line_changed)
+        rc = self._apply_swap0(spec, lines, events)
         if rc != 0:
             return self._stopped(rc, events)
         self._apply_zswap(tmpfiles_text, events)
@@ -257,45 +259,47 @@ class SwapApplicationService(SwapReports):
         self._apply_slice(events)
         return self._verified(spec, events)
 
-    def _check_before_writing(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> str | None:
+    def _swap_lines(self, spec: SwapHardwareSpec) -> _SwapLines:
+        """swap0's marked lines, in the order apply checks and writes them: (file, line, the mode a
+        new file gets). Built once, so the refusals before the first write check the lines written."""
+        env = self._env
+        return ((env.crypttab, spec.crypttab_spec(), 0o600), (env.fstab, spec.fstab_spec(), 0o644))
+
+    def _check_before_writing(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> str | None:
         """Every refusal, before the first write (the settings file too): the preconditions, and an
-        unmarked swap line in crypttab or fstab. The desired tmpfiles text, or None when apply stops."""
+        unmarked swap line among lines. The desired tmpfiles text, or None when apply stops."""
         env = self._env
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return None
-        checks = ((env.crypttab, spec.crypttab_spec(), spec.name), (env.fstab, spec.fstab_spec(), spec.mapper_path))
-        for path, line_spec, entry in checks:
+        for path, line_spec, _mode in lines:
             if self._inspect_marked(path, line_spec) == OwnedState.CONFLICT:
                 events.append(
                     ApplyEvent(
                         "err",
                         ApplyEventKind.ERROR,
-                        f"{env.prog}: ERROR: {path} has an unmarked entry for {entry}: "
+                        f"{env.prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
                         "remove it by hand, then run apply again.",
                     )
                 )
                 return None
         return tmpfiles_text
 
-    def _write_swap_lines(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> bool | None:
-        """The "crypttab and fstab" section: both marked lines, then a daemon-reload when one was
-        written. Whether a line changed, or None when one was refused (apply stops)."""
-        env = self._env
+    def _apply_swap0(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> int:
+        """The "crypttab and fstab" section: each marked line of lines (a daemon-reload when one was
+        written), then swap0's activation. The status apply stops with: 1 when a line was refused,
+        else _activate_swap's (0: go on)."""
         events.append(ApplyEvent("out", ApplyEventKind.SECTION, f"== {spec.name}: crypttab and fstab"))
-        ok_c, changed_c, written_c = self._apply_marked_line(
-            env.crypttab, spec.crypttab_spec(), 0o600, events, name=spec.name
-        )
-        if not ok_c:
-            return None
-        ok_f, changed_f, written_f = self._apply_marked_line(
-            env.fstab, spec.fstab_spec(), 0o644, events, name=spec.name
-        )
-        if not ok_f:
-            return None
-        if written_c or written_f:
+        changed = written = False
+        for path, line_spec, mode in lines:
+            ok, line_changed, line_written = self._apply_marked_line(path, line_spec, mode, events, name=spec.name)
+            if not ok:
+                return 1
+            changed = changed or line_changed
+            written = written or line_written
+        if written:
             self._systemd.daemon_reload()
-        return changed_c or changed_f
+        return self._activate_swap(spec, events, line_changed=changed)
 
     def _activate_swap(self, spec: SwapHardwareSpec, events: list[ApplyEvent], *, line_changed: bool) -> int:
         """swap0 on: started when it is not active; started again when its line changed and it is
