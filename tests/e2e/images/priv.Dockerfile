@@ -16,9 +16,8 @@ RUN dnf -y install \
     libvirt-daemon-driver-qemu \
     && dnf clean all
 
-COPY tests/e2e/scripts/setup-loop-btrfs.sh /usr/local/sbin/e2e-setup-loop-btrfs.sh
-COPY tests/e2e/scripts/setup-dind.sh /usr/local/sbin/e2e-setup-dind.sh
-RUN chmod 0755 /usr/local/sbin/e2e-setup-loop-btrfs.sh /usr/local/sbin/e2e-setup-dind.sh
+COPY --chmod=0755 tests/e2e/scripts/setup-loop-btrfs.sh /usr/local/sbin/e2e-setup-loop-btrfs.sh
+COPY --chmod=0755 tests/e2e/scripts/setup-dind.sh /usr/local/sbin/e2e-setup-dind.sh
 
 # Systemd service inside privileged E2E container to start isolated inner dockerd on loop btrfs
 RUN cat >/etc/systemd/system/e2e-dind.service <<'EOF'
