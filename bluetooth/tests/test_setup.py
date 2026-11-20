@@ -1405,7 +1405,7 @@ class WatcherTest(SetupCase):
         self.assertIn(f"written:   {m.lw_unit} (LDAC to 48000 Hz)\n", r.stdout)
         rec = json.loads(self.text(m.record))
         self.assertEqual(sorted(rec["files"]), sorted([m.lw_prog, m.lw_unit]))
-        self.assertEqual(rec["files"][m.lw_unit]["src"], None)
+        self.assertIsNone(rec["files"][m.lw_unit]["src"])
         self.assertEqual(rec["files"][m.lw_prog]["src"], "bluetooth/bt-ldac-watch")
         self.assertEqual(rec["components"], {"bluetooth:ldac": "done"})
         r = m.run("plan")
