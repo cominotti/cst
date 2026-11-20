@@ -30,6 +30,7 @@ from cst_core.application.install import InstallService, Placement
 from cst_core.domain.files import MarkedLineSpec
 from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.ports import CommandFailed, CommandResult, UnitName
+from tests.probes import NoUnitQueries
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
@@ -759,7 +760,7 @@ class _TextUnreadable(_FakeTempFileSystem):
         return default if path in self._unread else super().read_text(path, default)
 
 
-class _FakeSystemd:
+class _FakeSystemd(NoUnitQueries):
     """In-memory SystemdPort updating simulated /proc/swaps on start/stop."""
 
     def __init__(

@@ -34,13 +34,12 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
-from cst_core.adapters import SystemClockAdapter
+from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused
-from cst_core.ports import CommandResult
+from cst_core.ports import CommandResult, SystemctlHost
 from toolchains import cli as tc_cli, wiring as tc_wiring
 from toolchains.application import rust_build as tca_rust_build
-from toolchains.ports import RunOutputPort
 from toolchains.domain import build as tcd_build
 from toolchains.domain import common as tcd_common
 from toolchains.domain import prune as tcd_prune
@@ -63,17 +62,24 @@ H = 3600
 NOW = 2_000_000_000.0  # fixed "now" (2033); every mtime is set relative to it
 
 
-class FakeUnits(tc_units.UserUnits):
-    """The user manager of a test: FAKE answers every systemctl call."""
+class FakeManagerRunner:
+    """The runner of a test's user manager: cst_core's SystemctlAdapter (the user scope, as
+    user_systemctl builds it, but local) runs systemctl --user ARGS through it, and FAKE answers each
+    command line (("enable", "--now", UNIT), ...); every answer is a success with what it returned as
+    output. Nothing reaches a real systemctl."""
 
-    def __init__(self, out: RunOutputPort, fake: Callable[..., str]) -> None:
-        # Never the real user manager, also if a call misses the fake.
-        super().__init__(out, "/nonexistent/systemctl")
+    def __init__(self, fake: Callable[..., str]) -> None:
         self.fake = fake
 
-    @override
-    def systemctl(self, *args: str, check: bool = False, ok: Sequence[int] = (0,)) -> str:
-        return self.fake(*args, check=check, ok=ok)
+    def run(self, argv: Sequence[str], **_: object) -> CommandResult:
+        if tuple(argv[:2]) != ("systemctl", "--user"):
+            raise AssertionError(f"not a call of the user manager: {argv}")
+        return CommandResult(0, self.fake(*argv[2:]), "")
+
+
+def fake_manager(fake: Callable[..., str]) -> SystemctlAdapter:
+    """The user manager of a test (a SystemdPort): the real adapter over FakeManagerRunner."""
+    return SystemctlAdapter(FakeManagerRunner(fake), user=True, on_host=SystemctlHost.LOCAL)
 
 
 def quiet_signals(test: unittest.TestCase) -> None:
@@ -187,7 +193,7 @@ class Base(unittest.TestCase):
         tree = self.tree_for_main
         return tc_wiring.Parts(
             limits=self.limits,
-            units=lambda out: FakeUnits(out, self.fake_systemctl),
+            units=lambda out: tc_units.UserUnits(out, fake_manager(self.fake_systemctl)),
             procs=lambda: list(self.cargo_running),
             tree=tree,
             journal=False,

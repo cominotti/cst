@@ -318,6 +318,27 @@ class SystemdPort(Protocol):
 
     def daemon_reload(self) -> None: ...
 
+    def daemon_reload_result(self) -> CommandResult:
+        """`systemctl daemon-reload`: its exit status and output (a fault with its cause), never raised."""
+        ...
+
+    def is_active(self, unit: UnitName) -> CommandResult:
+        """`systemctl is-active unit`: the state on stdout; exit 3 for a unit that is not active, 4 for one
+        the manager does not know."""
+        ...
+
+    def is_enabled(self, unit: UnitName) -> CommandResult:
+        """`systemctl is-enabled unit`: its exit status and output."""
+        ...
+
+    def show_environment(self) -> CommandResult:
+        """`systemctl show-environment`: the manager's environment, one KEY=VALUE per line."""
+        ...
+
+    def show_value(self, unit: UnitName, prop: str) -> CommandResult:
+        """`systemctl show -p PROP --value unit`: one property's value as systemctl prints it."""
+        ...
+
     def start(self, unit: UnitName) -> CommandResult:
         """`systemctl start unit`: its exit status and what it printed."""
         ...
