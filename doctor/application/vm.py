@@ -449,13 +449,12 @@ def check_vm_overlays(host: DoctorHostPort, *, domains_fn: DomainsFn | None = No
                 )
                 continue
             if state in VM_LIVE_STATES:
-                kind = (
-                    VmOverlayKind.LIVE
-                    if dev in live
-                    else VmOverlayKind.DEFINITION
-                    if sources is not None and sources.get(dev) == base
-                    else VmOverlayKind.UNKNOWN
-                )
+                if dev in live:
+                    kind = VmOverlayKind.LIVE
+                elif sources is not None and sources.get(dev) == base:
+                    kind = VmOverlayKind.DEFINITION
+                else:
+                    kind = VmOverlayKind.UNKNOWN
             elif state in ("shut off", "crashed"):
                 kind = (
                     VmOverlayKind.OFFLINE

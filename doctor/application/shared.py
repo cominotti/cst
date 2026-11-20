@@ -160,11 +160,12 @@ def settings_file_warnings(
     (another check warns about them). note: what the warning adds after "take nothing from the line" (by
     default, for a file bash sources, that bash reads the line its own way)."""
     parsed = settings_of(host, path, bash_sourced=bash_sourced)
-    bash = (
-        (" (bash, which also sources this file, reads it its own way)" if bash_sourced else "")
-        if note is None
-        else note
-    )
+    if note is not None:
+        bash = note
+    elif bash_sourced:
+        bash = " (bash, which also sources this file, reads it its own way)"
+    else:
+        bash = ""
     for p in parsed.problems if parsed else ():
         if p in skip:
             continue
