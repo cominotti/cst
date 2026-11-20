@@ -3,9 +3,9 @@
 
 import itertools
 import math
-from typing import TypedDict
+from typing import Final, TypedDict
 
-from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, MAINT_FRAME as MAINT_RE, WaitKind
+from btrfs.stall_monitord.domain import FUSE_FRAME as FUSE_RE, HUNG_TASK, MAINT_FRAME as MAINT_RE, WaitKind
 from btrfs.stall_report.domain.categories import CAT_DESC, MAINT_TEXT, NON_STORAGE, V2_HUNG_SIG, classify
 from btrfs.stall_report.domain.records import (
     DI,
@@ -480,6 +480,12 @@ def _estimate_v2(ep: Episode, sigs: list[Sig]) -> None:
     ep["estimated"] = True
 
 
+# How far before a hung-task episode of daemons v3-v7 its cap reaches: such an episode opened
+# HUNG_SECONDS (30 s in those versions) after the wait began. Those daemons are fixed, so this does
+# not follow today's HUNG_SECONDS.
+_V3_V7_HUNG_LEAD: Final = 35
+
+
 def _estimate_v3_v7(ep: Episode, sigs: list[Sig]) -> tuple[float, float, int] | None:
     """An episode of daemons v3-v7, which counted in max_d every wait they tagged "storage": memory
     reclaim / swap, and before v5 btrfs maintenance (fstrim, scrub), too. The same estimate, applied
@@ -495,8 +501,7 @@ def _estimate_v3_v7(ep: Episode, sigs: list[Sig]) -> tuple[float, float, int] | 
     ep["max_d"] = math.ceil(counted_d * storage_n / counted_n)
     ep["max_d_mem"] = math.ceil(counted_d * mem_n / counted_n)
     ep["estimated"] = True
-    # A "hung task" episode opens HUNG_SECONDS (30 s) after the wait began.
-    lead = 35 if ep.get("reason") == "hung task" else 0
+    lead = _V3_V7_HUNG_LEAD if ep.get("reason") == HUNG_TASK else 0
     return (ep["start"] - lead, ep["end"], ep["max_d"])
 
 
