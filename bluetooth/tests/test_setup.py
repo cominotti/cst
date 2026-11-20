@@ -1562,6 +1562,14 @@ class WatcherTest(SetupCase):
         self.assertIn(f"WARNING: {m.lw_unit} was not written by CST: left alone\n", r.stderr)
         self.assertFalse([c for c in r.calls if "disable" in c])
 
+    def test_a_foreign_program_with_the_watcher_off(self) -> None:
+        # The watcher off (no LDAC_RATE): a program at its place that CST did not write is left alone.
+        m = self.machine(DONE)
+        m.put(m.lw_prog, "#!/bin/sh\necho not ours\n", mode=0o755)
+        r = m.run("plan")
+        self.assertIn(row("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)"), r.stdout)
+        self.assertIn(row("CONFLICT", "~/.local/lib/cst/bt-ldac-watch", "not written by CST: left alone"), r.stdout)
+
     def test_revert_removes_it_and_check_changes_nothing(self) -> None:
         m = self.machine(DONE, "LDAC_RATE=48000\n")
         m.put("bt-journal", BAP_REGISTERED)
@@ -1699,6 +1707,38 @@ class StatusTest(SetupCase):
             hosted,
         )
         self.assertNotIn("pactl", " ".join(r.calls))  # only apply's A2DP restore asks pactl
+
+    def test_the_ldac_rate_row_with_the_watcher_on(self) -> None:
+        # LDAC_RATE=48000 and LDAC above it: the row says what the watcher does, running or not;
+        # at 48000 Hz there is no row.
+        m = self.machine(DONE, "LDAC_RATE=48000\n")
+        m.adapter()
+        m.flag("iso-socket")
+        m.put("wp-roles", CLASSIC)
+        m.put("pw-dump.json", json.dumps(pw_dump(rate=96000)))
+        r = m.run("status", container=True)
+        self.assertIn(
+            row(
+                "warn",
+                "LDAC sample rate",
+                "96000 Hz, set up by the headset; the watcher (LDAC_RATE=48000) is not running",
+            ),
+            r.stdout,
+        )
+        m.unit("user", "cst-bt-ldac48")
+        r = m.run("status", container=True)
+        self.assertIn(
+            row(
+                "warn",
+                "LDAC sample rate",
+                f"96000 Hz: the watcher switches it to 48000 within seconds, unless it gave up (journalctl --user -u {LW})",
+            ),
+            r.stdout,
+        )
+        m.put("pw-dump.json", json.dumps(pw_dump(rate=48000)))
+        r = m.run("status", container=True)
+        self.assertIn("rate 48000 Hz", r.stdout)
+        self.assertNotIn("LDAC sample rate", r.stdout)
 
     def test_status_after_problems(self) -> None:
         m = self.machine(DONE)
