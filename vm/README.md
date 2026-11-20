@@ -1122,8 +1122,11 @@ The Python code inside `vm/` (standard library only at run time):
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
   `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too). `backup.py`: the
   records of the backups (an index entry, the manifests, restic's summary, a
-  fingerprint) and the lines `status` and `backup-timer status` print about them
-  (`package_change_lines`, `timer_status_lines`).
+  fingerprint, the state of one NAS backup run: `NasRun`), the NAS backup's pure
+  parts (`snapshot_args`, `nas_manifest`, `nas_index_entry`, `nas_index`,
+  `nas_done_lines`, `restic_failure_why`), and the lines `status` and
+  `backup-timer status` print about them (`package_change_lines`,
+  `timer_status_lines`).
 - `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`
   (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
