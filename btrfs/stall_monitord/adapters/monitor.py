@@ -37,6 +37,7 @@ from btrfs.stall_monitord.domain import (
     VMSTAT_KEYS,
     DTask,
     DTaskSince,
+    FsTopo,
     Episode,
     FsSampleOut,
     MetaOut,
@@ -298,39 +299,65 @@ class Monitor:
         counts = wait_counts(d_tasks)
         load1 = float((read_text("/proc/loadavg") or "0").split()[0])
 
-        fs: dict[str, FsSampleOut] = {}
-        for uuid, info in self.topo.fs.items():
-            base = f"/sys/fs/btrfs/{uuid}"
-            cs = read_kv(f"{base}/commit_stats")
-            errs = {devid: sum(read_kv(f"{base}/devinfo/{devid}/error_stats").values()) for devid in info["devids"]}
-            space = {
-                kind: [read_int(f"{base}/allocation/{kind}/{k}") for k in SPACE_KEYS] for kind in ("data", "metadata")
-            }
-            space["global_rsv"] = [
-                read_int(f"{base}/allocation/global_rsv_size"),
-                read_int(f"{base}/allocation/global_rsv_reserved"),
-            ]
-            disc = [read_int(f"{base}/discard/discardable_bytes"), read_int(f"{base}/discard/discardable_extents")]
-            fs[uuid] = {
-                "c": [
-                    cs.get("commits", 0),
-                    cs.get("total_commit_ms", 0),
-                    cs.get("cur_commit_ms", 0),
-                    cs.get("last_commit_ms", 0),
-                    cs.get("max_commit_ms", 0),
-                    max(self.cmax.pop(uuid, 0), cs.get("cur_commit_ms", 0)),
-                ],
-                "err": errs,
-                "space": space,
-                "discard": disc,
-            }
+        fs: dict[str, FsSampleOut] = {uuid: self._fs_sample(uuid, info) for uuid, info in self.topo.fs.items()}
+        disks = self._disk_sample()
+        cg = self._cgroup_sample()
+        return {
+            "t": StallRecordTag.SAMPLE,
+            "ts": ts,
+            "mono": mono,
+            "psi": psi,
+            "vm": [vm.get(k, 0) for k in VMSTAT_KEYS],
+            # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
+            "procs": [st.get("procs_running", 0), st.get("procs_blocked", 0)],
+            "d": counts.d,
+            "d_all": counts.d_all,
+            "d_fuse": counts.d_fuse,
+            "d_maint": counts.d_maint,
+            "d_mem": counts.d_mem,
+            "load1": load1,
+            "fs": fs,
+            "disk": disks,
+            "cg": cg,
+        }
 
+    def _fs_sample(self, uuid: str, info: FsTopo) -> FsSampleOut:
+        """One btrfs filesystem's figures: commit stats (with the longest commit seen since the last
+        sample, taken from cmax), device errors, space and discard."""
+        base = f"/sys/fs/btrfs/{uuid}"
+        cs = read_kv(f"{base}/commit_stats")
+        errs = {devid: sum(read_kv(f"{base}/devinfo/{devid}/error_stats").values()) for devid in info["devids"]}
+        space = {kind: [read_int(f"{base}/allocation/{kind}/{k}") for k in SPACE_KEYS] for kind in ("data", "metadata")}
+        space["global_rsv"] = [
+            read_int(f"{base}/allocation/global_rsv_size"),
+            read_int(f"{base}/allocation/global_rsv_reserved"),
+        ]
+        disc = [read_int(f"{base}/discard/discardable_bytes"), read_int(f"{base}/discard/discardable_extents")]
+        return {
+            "c": [
+                cs.get("commits", 0),
+                cs.get("total_commit_ms", 0),
+                cs.get("cur_commit_ms", 0),
+                cs.get("last_commit_ms", 0),
+                cs.get("max_commit_ms", 0),
+                max(self.cmax.pop(uuid, 0), cs.get("cur_commit_ms", 0)),
+            ],
+            "err": errs,
+            "space": space,
+            "discard": disc,
+        }
+
+    def _disk_sample(self) -> dict[str, list[int]]:
+        """/proc/diskstats' counters of the topology's disks."""
         disks = {}
         for line in (read_text("/proc/diskstats") or "").splitlines():
             f = line.split()
             if len(f) >= 14 and f[2] in self.topo.disks:
                 disks[f[2]] = [int(x) for x in f[3:]]
+        return disks
 
+    def _cgroup_sample(self) -> dict[str, list[float | int]]:
+        """IO and memory pressure and IO bytes of the slices, then IO pressure and bytes of the containers."""
         cg: dict[str, list[float | int]] = {}
         for sl in SLICES:
             path = f"{CGROUP_ROOT}/{sl}"
@@ -350,24 +377,7 @@ class Monitor:
             p = parse_psi(f"{path}/io.pressure")
             if p is not None:
                 cg[name] = [p[1], p[3], 0, 0, *(parse_io_stat(f"{path}/io.stat", self.topo.top_devs) or [0, 0])]
-        return {
-            "t": StallRecordTag.SAMPLE,
-            "ts": ts,
-            "mono": mono,
-            "psi": psi,
-            "vm": [vm.get(k, 0) for k in VMSTAT_KEYS],
-            # procs_blocked counts tasks in iowait only; "d" counts every D-state task.
-            "procs": [st.get("procs_running", 0), st.get("procs_blocked", 0)],
-            "d": counts.d,
-            "d_all": counts.d_all,
-            "d_fuse": counts.d_fuse,
-            "d_maint": counts.d_maint,
-            "d_mem": counts.d_mem,
-            "load1": load1,
-            "fs": fs,
-            "disk": disks,
-            "cg": cg,
-        }
+        return cg
 
     def interval_io_some_pct(self, rec: SampleOut) -> float:
         return io_some_pct(self.prev, rec)
@@ -425,41 +435,46 @@ class Monitor:
             info[tid] = (frames, wchan, kind)
         self.d_since = current
         for tid, t in current.items():
-            frames, wchan, kind = info[tid]
-            comm, pid = t["comm"], t["pid"]
-            if kind == WaitKind.IDLE:
-                continue
-            first = hung_start(kind, t, now)
-            if now - first < HUNG_SECONDS:
-                if kind == WaitKind.STORAGE and now - t["busy"] >= HUNG_SECONDS:
-                    self.report_io_busy(t, tid, frames, wchan, now)
-                continue
-            key = hung_key(kind, t, now)
-            # One report per process and kind of wait (bfs/find run many
-            # threads), so a FUSE wait never hides a disk hang in the same process.
-            if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
-                continue
-            self.hung_reported[pid, key] = now
-            at = wait_at(frames, wchan)
-            rep = hung_report(key, self.where(pid, tid, comm), now - first, at)
-            self.emit(
-                {
-                    "t": StallRecordTag.EVENT,
-                    "ts": round(time.time(), 3),
-                    "msg": rep.msg,
-                    "severe": rep.severe,
-                    "ours": rep.ours,
-                    "kind": rep.kind,
-                    "stack": frames[:16],
-                }
-            )
-            if rep.alert is not None:
-                self.alert(*rep.alert, rep.msg)
-            if rep.opens_episode and self.episode is None:
-                self.start_episode(time.time(), HUNG_TASK)
+            self._check_hung(tid, t, info[tid], now)
         # Forget processes that are gone.
         live = {v["pid"] for v in current.values()}
         self.hung_reported = {k: t for k, t in self.hung_reported.items() if k[0] in live or now - t < HUNG_REPEAT}
+
+    def _check_hung(self, tid: str, t: DTaskSince, seen: tuple[list[str], str | None, str], now: float) -> None:
+        """track_hung for one task (seen: its frames, wchan and kind): a busy wait, or a hung task reported
+        once per HUNG_REPEAT, with its alert and the episode it opens."""
+        frames, wchan, kind = seen
+        comm, pid = t["comm"], t["pid"]
+        if kind == WaitKind.IDLE:
+            return
+        first = hung_start(kind, t, now)
+        if now - first < HUNG_SECONDS:
+            if kind == WaitKind.STORAGE and now - t["busy"] >= HUNG_SECONDS:
+                self.report_io_busy(t, tid, frames, wchan, now)
+            return
+        key = hung_key(kind, t, now)
+        # One report per process and kind of wait (bfs/find run many
+        # threads), so a FUSE wait never hides a disk hang in the same process.
+        if now - self.hung_reported.get((pid, key), -1e9) < HUNG_REPEAT:
+            return
+        self.hung_reported[pid, key] = now
+        at = wait_at(frames, wchan)
+        rep = hung_report(key, self.where(pid, tid, comm), now - first, at)
+        self.emit(
+            {
+                "t": StallRecordTag.EVENT,
+                "ts": round(time.time(), 3),
+                "msg": rep.msg,
+                "severe": rep.severe,
+                "ours": rep.ours,
+                "kind": rep.kind,
+                "stack": frames[:16],
+            }
+        )
+        if rep.alert is not None:
+            self.alert(*rep.alert, rep.msg)
+        if rep.opens_episode and self.episode is None:
+            self.start_episode(time.time(), HUNG_TASK)
 
     def where(self, pid: str, tid: str, comm: str) -> str:
         """The task as a report names it: comm:tid, its command line (read now, waiting at most CMDLINE_WAIT) and its cgroup."""
@@ -610,12 +625,7 @@ class Monitor:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         self.emit(self.meta_record())
-        log(
-            f"started: kernel {self.kernel}, fs {[v['label'] or k[:8] for k, v in self.topo.fs.items()]}, "
-            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd is not None else 'no'}, "
-            f"kmsg={'yes' if self.kmsg_fd is not None else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
-            f"dir={self.log_dir}"
-        )
+        log(self._started_text())
         # The PSI trigger and /dev/kmsg are open and SIGTERM is handled: the unit becomes active now.
         # A READY=1 that could not be sent (systemd's queue full) is sent again at the next passes.
         self.ready_sent = self.notifier.ready()
@@ -627,43 +637,16 @@ class Monitor:
             now = time.monotonic()
             if self.duration is not None and now - t0 >= self.duration:
                 break
-            try:
-                events = self.poller.poll(max(0.0, (min(next_sample, next_probe) - now) * 1000))
-            except InterruptedError:
-                events = []
-            triggered = False
-            for fd, ev in events:
-                if fd == self.psi_fd:
-                    if ev & select.POLLERR:
-                        self.poller.unregister(fd)
-                        os.close(fd)
-                        self.psi_fd = None
-                        log("PSI trigger closed by kernel; re-arming", 4)
-                        self.open_psi_trigger()
-                    else:
-                        triggered = True
-                elif fd == self.kmsg_fd:
-                    self.drain_kmsg()
+            events = self._poll(max(0.0, (min(next_sample, next_probe) - now) * 1000))
+            triggered = self._handle_events(events)
             now = time.monotonic()
             if now >= next_probe:
                 self.probe_commits()
                 next_probe = now + PROBE_INTERVAL
-            if self.episode is None and (triggered or self.want_episode is not None):
-                if triggered and self.want_episode is None:
-                    self.want_episode = "psi trigger"
+            if self._wants_sample_now(triggered=triggered):
                 next_sample = now
             if now >= next_sample:
-                d_tasks = self.describe_all(scan_d_tasks())
-                rec = self.sample(d_tasks)
-                self.emit(rec)
-                self.update_episode(rec, d_tasks)
-                self.track_hung(d_tasks, time.time())
-                self.prev = rec
-                next_sample = now + (EPISODE_INTERVAL if self.episode else BASE_INTERVAL)
-                today = time.strftime("%Y-%m-%d")
-                if today != day:
-                    day = today
-                    self.emit(self.meta_record())
+                next_sample, day = self._take_sample(now, day)
             if time.monotonic() - self.last_flush >= FLUSH_EVERY:
                 self.flush()
         if self.episode is not None:
@@ -672,6 +655,65 @@ class Monitor:
         self.writer.q.put(None)
         self.writer.join(timeout=10)
         log("stopped")
+
+    def _started_text(self) -> str:
+        """The journal line of the start: kernel, filesystems, disks, what could be opened, the log folder."""
+        return (
+            f"started: kernel {self.kernel}, fs {[v['label'] or k[:8] for k, v in self.topo.fs.items()]}, "
+            f"disks {self.topo.disks}, psi_trigger={'yes' if self.psi_fd is not None else 'no'}, "
+            f"kmsg={'yes' if self.kmsg_fd is not None else 'no'}, stacks={'yes' if self.stack_ok else 'no (wchan only)'}, "
+            f"dir={self.log_dir}"
+        )
+
+    def _poll(self, timeout_ms: float) -> list[tuple[int, int]]:
+        """poll's events within timeout_ms; none when a signal interrupted it."""
+        try:
+            return self.poller.poll(timeout_ms)
+        except InterruptedError:
+            return []
+
+    def _handle_events(self, events: Sequence[tuple[int, int]]) -> bool:
+        """poll's events: a PSI trigger the kernel closed (POLLERR) is opened again, /dev/kmsg drained.
+        True when the PSI trigger fired."""
+        triggered = False
+        for fd, ev in events:
+            if fd == self.psi_fd:
+                if ev & select.POLLERR:
+                    self.poller.unregister(fd)
+                    os.close(fd)
+                    self.psi_fd = None
+                    log("PSI trigger closed by kernel; re-arming", 4)
+                    self.open_psi_trigger()
+                else:
+                    triggered = True
+            elif fd == self.kmsg_fd:
+                self.drain_kmsg()
+        return triggered
+
+    def _wants_sample_now(self, *, triggered: bool) -> bool:
+        """Whether a sample is due at once: no episode yet, and the PSI trigger fired or something asked for
+        one (a long commit); a fired trigger names the episode's reason."""
+        if self.episode is None and (triggered or self.want_episode is not None):
+            if triggered and self.want_episode is None:
+                self.want_episode = "psi trigger"
+            return True
+        return False
+
+    def _take_sample(self, now: float, day: str) -> tuple[float, str]:
+        """One sample: the D-state tasks, the record, the episode and hung-task checks; the meta record
+        again on a new day. Returns when the next sample is due, and the day."""
+        d_tasks = self.describe_all(scan_d_tasks())
+        rec = self.sample(d_tasks)
+        self.emit(rec)
+        self.update_episode(rec, d_tasks)
+        self.track_hung(d_tasks, time.time())
+        self.prev = rec
+        next_sample = now + (EPISODE_INTERVAL if self.episode else BASE_INTERVAL)
+        today = time.strftime("%Y-%m-%d")
+        if today != day:
+            day = today
+            self.emit(self.meta_record())
+        return next_sample, day
 
     def signs_of_life(self) -> None:
         """WATCHDOG=1 for this pass of the loop, after the READY=1 when it could not be sent before.
