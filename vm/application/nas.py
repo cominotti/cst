@@ -120,8 +120,7 @@ def domain_state_or_none(commands: VmCommandsPort, vm: str) -> str | None:
 
 def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
     """Refused unless the repository opens (NAS reachable, password right):
-    checked before any snapshot, so an unreachable NAS never leaves the VM
-    on an overlay."""
+    checked before any snapshot, so an unreachable NAS never leaves the VM on an overlay."""
     # --no-lock: it only proves the repository opens, also while the /home
     # NAS job holds the lock (its prune), which the backup waits for.
     rc, _, err = restic.run(nas["env"], ["cat", "config", "--no-lock"], RESTIC_CHECK_TIMEOUT)
