@@ -1117,6 +1117,19 @@ class NasPreflightAndSourcesTest(Nas):
         backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
         self.assertEqual(backup["args"][-2:], [self.disk, os.path.join(self.stage, "win")])
 
+    def test_a_disk_the_definition_names_twice_is_read_once(self) -> None:
+        # Two targets on one file (or a link to it): restic reads it once and the manifest lists it once,
+        # as a local copy copies it once; before, the NAS backup listed it twice.
+        link = os.path.join(self.images, "again.qcow2")
+        os.symlink(self.disk, link)
+        both = [{"target": "sda", "device": "disk"}, {"target": "sdb", "device": "disk"}]
+        self.vm(state="shut off", disks=both, live={}, persistent={"sda": self.disk, "sdb": link})
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
+        self.assertEqual(backup["args"].count(self.disk), 1, backup["args"])
+        self.assertEqual(r.stdout.count(f"  reading {self.disk} (disk,"), 1, r.stdout)
+
     def test_uefi_variables_through_a_link_are_noted_as_a_local_copy_notes_them(self) -> None:
         # restic reads (and a restore writes) the file the link points to; before, only a linked disk had a note.
         link = os.path.join(self.images, "link_VARS.fd")

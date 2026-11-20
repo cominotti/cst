@@ -328,7 +328,7 @@ def _nas_live_specs(
             base,
             os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
         )
-    if sorted(b for b, _ in specs.values()) != sorted(src for src, k in sources if k == "disk"):
+    if sorted({b for b, _ in specs.values()}) != sorted(src for src, k in sources if k == "disk"):
         raise Refused(
             f"{vm}: the running VM's disks differ from its definition (changed since it started): "
             "restart it, then back up"

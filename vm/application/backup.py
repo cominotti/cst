@@ -184,8 +184,8 @@ def backup_local(cfg: VmSettings, vm: str, p: LocalBackup, *, full: bool) -> Non
 
 @dataclass(frozen=True, slots=True)
 class BackupSources:
-    """What a backup of a VM reads (backup_sources): its disks, in the order of its definition (each once
-    for a local copy), the files its UEFI variables and TPM state are read from (None: not read), and the
+    """What a backup of a VM reads (backup_sources): its disks, in the order of its definition (each file
+    once), the files its UEFI variables and TPM state are read from (None: not read), and the
     TPM folder a local copy records (its real path when read; the folder named for its uuid when not
     there; "" without a TPM)."""
 
@@ -232,7 +232,7 @@ def backup_sources(
     disks: list[str] = []
     for disk in parts.disks:
         path = _disk_source(cfg, store, vm, disk, notes, nas=nas)
-        if nas or path not in disks:
+        if path not in disks:  # a file the definition names twice (or two links to it) is read once
             disks.append(path)
     nvram = None
     if parts.nvram and store.is_file(parts.nvram):
