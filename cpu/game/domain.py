@@ -361,12 +361,6 @@ def state_uid(recs: Sequence[Record]) -> str | None:
     return None
 
 
-def has_record_part(text: str, part: str) -> bool:
-    """A whole line of the file holds part (bash: grep -F on the file); a last line cut short (no
-    newline at its end) holds none: its change was never made (records())."""
-    return any(part in line for line in _whole_lines(text))
-
-
 def escaped_unit(name: str) -> str | None:
     """The unit of a cgroup folder of the user manager next to the game, or None for one with a
     rule of its own. systemd puts a '_' before a cgroup name that could clash with a controller
@@ -513,6 +507,14 @@ def _state_keys(state_recs: Sequence[Record]) -> set[Record]:
             case _:
                 pass
     return keys
+
+
+def has_prop_record(text: str, mgr: Manager, unit: str, prop: str) -> bool:
+    """game.state (its text) holds a record of unit's prop under manager mgr that 'off' can undo: the
+    fields of each record are compared, as 'off' reads them (records(), state_undo), so a line bash
+    cannot read (an unclosed quote) or a last line cut short holds none, and a unit name is matched
+    as it is, whatever printf %q made of it in the file (a backslash of systemd's \\x2d)."""
+    return (GameRecordKind.PROP, mgr, unit, prop) in _state_keys(records(text))
 
 
 def _drift_key(d: Drift) -> Record:

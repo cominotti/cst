@@ -20,7 +20,7 @@ from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_ato
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
-from cst_core.domain.text import SettingsProblem, describe_problems, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
 from cpu.game.domain import (
@@ -50,7 +50,7 @@ from cpu.game.domain import (
     escapes_in_state,
     expand_cpus,
     first_cpu,
-    has_record_part,
+    has_prop_record,
     intended_header,
     intended_props,
     intended_records,
@@ -325,14 +325,14 @@ class GameProfile:
     def protect_steam(self) -> None:
         """MemoryLow for each Steam scope not handled yet (a game started after 'on')."""
         for s in self.steam_scopes():
-            if has_record_part(self._state_text(), f" {s} MemoryLow "):
+            if has_prop_record(self._state_text(), "usr", s, "MemoryLow"):
                 continue
             self.setp("usr", s, f"MemoryLow={self.s.game_memory_low}")
 
     def pin_docker(self) -> None:
         """The game's CPUs off for each Docker container not handled yet."""
         for s in self.loose_docker_scopes():
-            if has_record_part(self._state_text(), f" {s} AllowedCPUs "):
+            if has_prop_record(self._state_text(), "sys", s, "AllowedCPUs"):
                 continue
             self.setp("sys", s, f"AllowedCPUs={self.s.build_cpus}")
 
@@ -359,7 +359,7 @@ class GameProfile:
         records them one after the other before it sets any, so a box whose last record was cut short
         (or never written) is not handled yet, even when its first record is whole."""
         text = self._state_text()
-        return all(has_record_part(text, f"prop usr {printf_q(unit)} {kv.split('=', 1)[0]} ") for kv in settings)
+        return all(has_prop_record(text, "usr", unit, kv.split("=", 1)[0]) for kv in settings)
 
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of

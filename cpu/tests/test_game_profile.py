@@ -41,8 +41,9 @@ from cpu.game.domain import (
     drifted,
     escapes_in_state,
     expand_cpus,
-    has_record_part,
+    has_prop_record,
     intended_records,
+    record_line,
     records,
     game_settings,
     unheld,
@@ -291,13 +292,21 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
 
-    def test_a_record_part_of_a_last_line_cut_short_is_none(self) -> None:
-        part = " S MemoryLow "
-        self.assertFalse(has_record_part("prop usr S MemoryLow existed 1", part))
-        self.assertTrue(has_record_part("prop usr S MemoryLow existed 1\n", part))
-        self.assertTrue(has_record_part("prop usr S MemoryLow new -\nepp 0 x", part))  # a whole line before it
-        self.assertFalse(has_record_part("prop usr S MemoryLow new -\nprop usr T MemoryLow", " T MemoryLow "))
-        self.assertFalse(has_record_part("", part))
+    def test_a_prop_record_is_matched_by_its_fields(self) -> None:
+        self.assertFalse(has_prop_record("prop usr S MemoryLow existed 1", "usr", "S", "MemoryLow"))  # cut short
+        self.assertTrue(has_prop_record("prop usr S MemoryLow existed 1\n", "usr", "S", "MemoryLow"))
+        self.assertTrue(has_prop_record("prop usr S MemoryLow new -\nepp 0 x", "usr", "S", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr S MemoryLow new -\nprop usr T MemoryLow", "usr", "T", "MemoryLow"))
+        self.assertFalse(has_prop_record("", "usr", "S", "MemoryLow"))
+        # A line bash cannot read (an unclosed quote) is no record 'off' can undo, so it holds none.
+        self.assertFalse(has_prop_record("prop usr S MemoryLow existed 'x\n", "usr", "S", "MemoryLow"))
+        # The unit as it is, whatever printf %q made of it; another manager, unit or property is none.
+        quoted = record_line("prop", "usr", "a\\x2db.scope", "MemoryLow", "new", "-")
+        self.assertIn("\\\\x2d", quoted)
+        self.assertTrue(has_prop_record(quoted, "usr", "a\\x2db.scope", "MemoryLow"))
+        self.assertFalse(has_prop_record(quoted, "sys", "a\\x2db.scope", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr Steam.scope MemoryLow new -\n", "usr", "S", "MemoryLow"))
+        self.assertFalse(has_prop_record("prop usr S IOWeight new -\n", "usr", "S", "MemoryLow"))
 
     def test_intended_records(self) -> None:
         text = (
@@ -940,6 +949,37 @@ class UnreadableRecordTest(GameProfileCase):
         self.run_profile("on")
         self.systemd.units["sys"] = [scope]  # started after 'on', outside builds.slice
         self.tick_after_a_cut_record(f"prop sys {scope} AllowedCPUs new -", "sys", scope, "AllowedCPUs=12-23")
+
+    def test_a_steam_scope_whose_record_bash_cannot_read_is_protected(self) -> None:
+        # A record of the scope with an unclosed quote: 'off' cannot read it, so the scope is not
+        # handled; the tick sets MemoryLow again and writes a record 'off' can undo.
+        steam = "app-flatpak-com.valvesoftware.Steam-7.scope"
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [steam]
+        with open(self.state, "a") as f:
+            f.write(f"prop usr {steam} MemoryLow existed 'x\n")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime {steam} MemoryLow=16G", actions)
+        self.assertTrue(self.read(self.state).endswith(f"\nprop usr {steam} MemoryLow new -\n"))
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(self.ctrl("usr", steam, "MemoryLow")))
+
+    def test_a_steam_scope_whose_name_printf_quotes_is_handled_once(self) -> None:
+        # systemd escapes a dash of a name part as \x2d; printf %q writes that backslash quoted, and
+        # the scope is still the same one at the next tick: set once, not at every tick.
+        steam = "app-flatpak-com.valvesoftware.Steam-a\\x2db.scope"
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.systemd.units["usr"] = [steam]
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime {steam} MemoryLow=16G", actions)
+        _, actions = self.run_profile("tick")
+        self.assertEqual([a for a in self.sets(actions) if steam in a], [])
+        self.assertEqual(
+            [r for r in records(self.read(self.state)) if r[2:4] == (steam, "MemoryLow")],
+            [("prop", "usr", steam, "MemoryLow", "new", "-")],
+        )
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")
