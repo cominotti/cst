@@ -53,9 +53,17 @@ TAG: Final = "game-profile"
 # The MemoryLow drop-ins 'on' writes into the system manager's runtime folder: zz- sorts after
 # every other drop-in (uresourced's 50-MemoryLow.conf included), so it wins at a daemon-reload.
 GAME_DROPIN: Final = "zz-cst-game.conf"
+# The slices the profile and `cst cpu` act on by name: Docker's builds.slice (cpu docker-slice) in the
+# system manager, the user manager's app.slice (the desktop apps and the game), and user.slice, which both
+# managers have (the system's holds each user's session, the user manager's the toolboxes).
+BUILDS_SLICE: Final = "builds.slice"
+APP_SLICE: Final = "app.slice"
+USER_SLICE: Final = "user.slice"
+# The weight 'on' gives the boxes that run beside the game: the idle class.
+IDLE_WEIGHT: Final = "CPUWeight=idle"
 # Top-level slices of the user manager that have rules of their own: the game and the desktop
 # apps (app.slice), gnome-shell (session.slice), the toolboxes (user.slice).
-KNOWN_SLICES: Final = frozenset({"app.slice", "session.slice", "user.slice"})
+KNOWN_SLICES: Final = frozenset({APP_SLICE, "session.slice", USER_SLICE})
 STEAM_SCOPES: Final = "app-flatpak-com.valvesoftware.Steam-*"
 DOCKER_SCOPES: Final = "docker-*.scope"
 USAGE: Final = "usage: game-profile on|off|tick|state"
@@ -549,11 +557,7 @@ def escapes_in_state(recs: Sequence[Record]) -> str:
     out = [
         r[2]
         for r in recs
-        if len(r) >= 4
-        and r[0] == GameRecordKind.PROP
-        and r[1] == "usr"
-        and r[3] == "CPUWeight"
-        and r[2] != "user.slice"
+        if len(r) >= 4 and r[0] == GameRecordKind.PROP and r[1] == "usr" and r[3] == "CPUWeight" and r[2] != USER_SLICE
     ]
     return " ".join(out) if out else "none"
 

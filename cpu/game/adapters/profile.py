@@ -24,16 +24,20 @@ from cst_core.domain.text import SettingsProblem, describe_problems, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
 from cpu.game.domain import (
+    APP_SLICE,
+    BUILDS_SLICE,
     DOCKER_SCOPES,
     GAME_DROPIN,
     STEAM_SCOPES,
     TAG,
+    USER_SLICE,
     CgroupUndo,
     Drift,
     EppUndo,
     GameRecordKind,
     GamePaths,
     GameSettings,
+    IDLE_WEIGHT,
     Manager,
     Record,
     cpuset_in,
@@ -260,12 +264,12 @@ class GameProfile:
         return [
             s
             for s in self._units("sys", DOCKER_SCOPES)
-            if shown(self.ask("sys", "show", "-P", "Slice", s, keep_stderr=True).stdout) != "builds.slice"
+            if shown(self.ask("sys", "show", "-P", "Slice", s, keep_stderr=True).stdout) != BUILDS_SLICE
         ]
 
     def uses_builds_slice(self) -> bool:
         """builds.slice is active (cpu docker-slice)."""
-        return self.ask("sys", "-q", "is-active", "builds.slice").returncode == 0
+        return self.ask("sys", "-q", "is-active", BUILDS_SLICE).returncode == 0
 
     def gamemode_client(self) -> bool:
         """A process has GameMode's client library loaded (gamemoderun / libgamemodeauto)."""
@@ -354,7 +358,7 @@ class GameProfile:
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of
         escaped_cgroups not handled yet; a box that holds a GameMode client is the game itself."""
-        settings = ["CPUWeight=idle"]
+        settings = [IDLE_WEIGHT]
         if self.cpuset_delegated():
             settings.append(f"AllowedCPUs={self.s.build_cpus}")
         for d in self.escaped_cgroups():
@@ -370,7 +374,7 @@ class GameProfile:
     def game_dropin_units(self) -> list[str]:
         """The memory chain on the system side."""
         uid = self.uid()
-        return ["user.slice", f"user-{uid}.slice", f"user@{uid}.service"]
+        return [USER_SLICE, f"user-{uid}.slice", f"user@{uid}.service"]
 
     def write_game_dropins(self) -> None:
         """The memory chain as drop-ins too, which hold across a daemon-reload (no reload now:
@@ -455,19 +459,19 @@ class GameProfile:
             f"IOWeight={vm_io_weight(s.vm_weight)}",
         )
         if self.uses_builds_slice():
-            self.setp("sys", "builds.slice", f"AllowedCPUs={s.build_cpus}", "CPUWeight=idle")
+            self.setp("sys", BUILDS_SLICE, f"AllowedCPUs={s.build_cpus}", IDLE_WEIGHT)
         self.pin_docker()
-        self.setp("usr", "user.slice", "CPUWeight=idle")
+        self.setp("usr", USER_SLICE, IDLE_WEIGHT)
         if self.cpuset_delegated():
-            self.setp("usr", "user.slice", f"AllowedCPUs={s.build_cpus}")
+            self.setp("usr", USER_SLICE, f"AllowedCPUs={s.build_cpus}")
             self.setp("usr", "flatpak-session-helper.service", f"AllowedCPUs={s.build_cpus}")
-            self.cpus_fallback("user.slice")
+            self.cpus_fallback(USER_SLICE)
             self.cpus_fallback("flatpak-session-helper.service")
         self.demote_escapes()
-        self.setp("usr", "app.slice", f"MemoryLow={s.game_memory_low}")
+        self.setp("usr", APP_SLICE, f"MemoryLow={s.game_memory_low}")
         self.protect_steam()
-        if s.game_zswap_writeback == "no" and self.prop("usr", "app.slice", "MemoryZSwapWriteback"):
-            self.setp("usr", "app.slice", "MemoryZSwapWriteback=no")
+        if s.game_zswap_writeback == "no" and self.prop("usr", APP_SLICE, "MemoryZSwapWriteback"):
+            self.setp("usr", APP_SLICE, "MemoryZSwapWriteback=no")
         for cpu in expand_cpus(s.p_cores):
             f = p.epp(cpu)
             if not os.access(f, os.W_OK):
@@ -731,11 +735,11 @@ class GameProfile:
             self.say(f"  settings: {why} ('on' refuses until it is fixed)")
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
-            self._slice_line("builds.slice")
+            self._slice_line(BUILDS_SLICE)
         if self._target_refusal() is None:  # a user manager to ask (the user 'on' acted for, with the profile on)
-            self.say(f"  toolboxes       weight={self.prop('usr', 'user.slice', 'CPUWeight')}")
-            self.say(f"  app.slice       zswap writeback={self.prop('usr', 'app.slice', 'MemoryZSwapWriteback')}")
-            cg = self.ask("usr", "show", "-P", "ControlGroup", "user.slice").stdout.rstrip("\n")
+            self.say(f"  toolboxes       weight={self.prop('usr', USER_SLICE, 'CPUWeight')}")
+            self.say(f"  app.slice       zswap writeback={self.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
+            cg = self.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
             effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
             self.say(f"  toolboxes       cpus effective={effective}")
             if on:
