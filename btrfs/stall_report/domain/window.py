@@ -28,6 +28,7 @@ from btrfs.stall_report.domain.records import (
     SampleRecord,
     Sig,
     VmTotals,
+    WindowPeak,
 )
 
 
@@ -164,7 +165,7 @@ class _PairTotals(TypedDict):
     covered: float
     gaps: int
     psi: dict[str, float]
-    peak: dict[str, float]
+    peak: WindowPeak
     vmd: dict[str, int]
     fs: dict[str, FsTotals]
     disks: dict[str, DiskTotals]
@@ -506,7 +507,7 @@ def _estimate_v3_v7(ep: Episode, sigs: list[Sig]) -> tuple[float, float, int] | 
 
 
 def _cap_old_samples(
-    peak: dict[str, float], old_d: list[tuple[float, int, bool]], cap_eps: list[tuple[float, float, int]], sample_d: int
+    peak: WindowPeak, old_d: list[tuple[float, int, bool]], cap_eps: list[tuple[float, float, int]], sample_d: int
 ) -> int:
     """v3-v7 samples during an episode with memory or maintenance waits: capped at the episode's
     estimate (their "d" counted those waits as storage), into the peak; the v5+ ones also into
