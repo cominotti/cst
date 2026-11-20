@@ -939,7 +939,7 @@ class LeanDebugInfoTest(RulesBase):
             'snap_home() { echo "$H"; }\n'
             "snap_chrome() { :; }\n"
             "snap_toolchains_config_preview\n"
-            'snap_user_configs "$H"\n'
+            "snap_user_configs\n"
         )
         env = dict(os.environ, CST_TOOLCHAINS_SYSTEMCTL=os.path.join(self.bin, "systemctl"))
         self.exe(env["CST_TOOLCHAINS_SYSTEMCTL"], "#!/bin/sh\nexit 0\n")

@@ -446,7 +446,7 @@ class SnapshotsSetupTest(Scratch):
             'cst_as_user() { shift; env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS "$@"; }\n'
             'snap_home() { echo "$H"; }\n'
             'snap_chrome() { echo "chrome $1"; }\n'
-            'snap_user_configs "$H"\n'
+            "snap_user_configs\n"
         )
         return subprocess.run(
             ["bash", "-c", script, "_", BTRFS, self.home, prog],
