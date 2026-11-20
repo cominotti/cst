@@ -416,10 +416,14 @@ class NasMergeBack(NamedTuple):
     how: dict[str, VmOverlayKind]
 
 
+def nas_tags(vm: str, keep: str | None) -> list[str]:
+    """restic's tags of a NAS backup of vm: every VM backup's, the VM's, and cst-keep with keep (--keep-tag)."""
+    return [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep is not None and keep != "" else [])
+
+
 def nas_manifest(run: NasRun, files: list[CopiedFile], consistency: str, keep: str | None) -> Manifest:
-    """The manifest a NAS backup stages for restic (files: the sources with their sizes); its tags are
-    restic's: every VM backup's, the VM's, and cst-keep with keep (--keep-tag)."""
-    tags = [TAG, f"vm:{run.vm}"] + ([KEEP_TAG, keep] if keep is not None and keep != "" else [])
+    """The manifest a NAS backup stages for restic (files: the sources with their sizes), with
+    restic's tags (nas_tags)."""
     return {
         "vm": run.vm,
         "uuid": run.parts.uuid,
@@ -428,7 +432,7 @@ def nas_manifest(run: NasRun, files: list[CopiedFile], consistency: str, keep: s
         "mode": "nas",
         "consistency": consistency,
         "keep": keep,
-        "tags": tags,
+        "tags": nas_tags(run.vm, keep),
         "files": files,
         "versions": run.versions,
         "deployment": run.deployment,

@@ -62,6 +62,7 @@ from vm.domain.backup import (
     nas_index,
     nas_index_entry,
     nas_manifest,
+    nas_tags,
     not_indexed_text,
     restic_failure_why,
     snapshot_args,
@@ -388,16 +389,16 @@ def _nas_read(
         {"source": src, "kind": k, "allocated": store.sizes(src)[0], "apparent": store.sizes(src)[1]}
         for src, k in run.sources
     ]
-    snap, summary = _nas_restic_backup(cfg, p, run, nas, nas_manifest(run, files, consistency, keep))
+    snap, summary = _nas_restic_backup(cfg, p, run, nas, nas_manifest(run, files, consistency, keep), keep=keep)
     _nas_check_after_read(cfg, p, run, nas, snap)
     return consistency, snap, summary
 
 
 def _nas_restic_backup(
-    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest
+    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest, *, keep: str | None
 ) -> tuple[str, ResticSummary]:
-    """restic backup of the sources and the staged definition and manifest, with the manifest's
-    tags: (its snapshot, its summary); Refused (an incomplete snapshot forgotten) when it is no backup."""
+    """restic backup of the sources and the staged definition and manifest, tagged nas_tags(vm, keep):
+    (its snapshot, its summary); Refused (an incomplete snapshot forgotten) when it is no backup."""
     store, out = p.store, p.out
     stage = store.stage(run.vm, run.xml_text, manifest_text(manifest))
     paths = [src for src, _ in run.sources] + [stage]
@@ -407,7 +408,7 @@ def _nas_restic_backup(
         out.say(
             f"  reading {src} ({k}, {format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)"
         )
-    tags = ",".join(manifest.get("tags", []))
+    tags = ",".join(nas_tags(run.vm, keep))
     try:
         rc, summary = p.restic.backup(
             nas["env"],
@@ -488,16 +489,15 @@ def _nas_not_merged_back(
 ) -> Refused:
     """A disk left on an overlay: the alert, and the refusal with the commands that put each disk
     back (and the backup's own failure, unless it was the snapshot's unclear outcome)."""
-    vm = run.vm
     body = (
-        f"{vm}: a disk was not merged back after the NAS backup, or may not be: "
+        f"{run.vm}: a disk was not merged back after the NAS backup, or may not be: "
         + "; ".join(merge.problems)
         + f". Check what the VM runs on; see `{cfg.cst} doctor`."
     )
     p.alert("VM backup: disk left on a snapshot overlay", body)
     if not run.overlaid:  # nothing known: the files this run could have made
         _add_overlay_files(p, run)
-    lines = overlay_recovery(vm, run.overlaid.items(), merge.how)
+    lines = overlay_recovery(run.vm, run.overlaid.items(), merge.how)
     msg = (
         "DISK NOT MERGED BACK:\n  "
         + "\n  ".join(merge.problems)
