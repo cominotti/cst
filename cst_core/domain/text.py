@@ -220,9 +220,15 @@ def _assignment(line: str, *, bash_sourced: bool) -> tuple[str, str] | str | Non
     return _plain_assignment(key, rest, exported=exported)
 
 
+def _starts_with_blank(s: str) -> bool:
+    """Whether s starts with a blank. Not `s[:1] in _BLANKS`: "" is in every string, so that is
+    also True for an empty s."""
+    return s != "" and s[0] in _BLANKS
+
+
 def _strip_export(s: str) -> tuple[str, bool]:
     """s without a leading `export` and the blanks after it, and whether it had one."""
-    if s.startswith("export") and s[6:7] != "" and s[6] in _BLANKS:
+    if s.startswith("export") and _starts_with_blank(s[6:]):
         return s[6:].lstrip(_BLANKS), True
     return s, False
 
@@ -233,8 +239,8 @@ def _bash_assignment(key: str, rest: str, *, exported: bool) -> tuple[str, str] 
         if rest.lstrip(_BLANKS).startswith("="):
             return "blanks around =: bash runs it as a command and sets nothing"
         return _NOT_AN_ASSIGNMENT
-    raw = rest[1:]
-    if raw[:1] in _BLANKS:
+    raw = rest[1:]  # "" for `K=`: _value gives its empty value
+    if _starts_with_blank(raw):
         if _rest_is_comment(raw, _BLANKS):
             return key, ""
         return "blanks around =: bash runs it as a command and sets nothing"
