@@ -177,7 +177,7 @@ def _ram_note(d: str | None, s: str | None) -> str:
     with a size S above the cap or no cap at all; "" for any other flags."""
     if d != CACHE_DIR:
         return ""
-    if s is not None and s.isdigit() and int(s) > CACHE_SIZE:
+    if s is not None and s.isdecimal() and int(s) > CACHE_SIZE:  # isdecimal: the digits int() reads
         return "; WARNING: that cache lives in RAM, keep it small"
     if s in (None, "", "0"):
         return "; WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
