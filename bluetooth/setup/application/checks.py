@@ -20,7 +20,6 @@ from cst_core.domain.units import ActiveState
 from cst_core.ports import OutputMode
 
 LE_AUDIO_LABEL: Final = "LE Audio"  # the section and the row of le_audio_check
-LDAC_RATE_LABEL: Final = "LDAC sample rate"  # headset_check's row about the node's rate
 
 
 class Checks(Survey):
@@ -227,20 +226,12 @@ class Checks(Survey):
     def _rate_warning(self, node_rate: str, rate: str, unit: str) -> None:
         """LDAC runs above 48 kHz: what the watcher does about it, or that it is off."""
         if self.lw_want and self.lw_active == ActiveState.ACTIVE:
-            self.check_warn(
-                LDAC_RATE_LABEL,
-                f"{node_rate} Hz: the watcher switches it to {rate} within seconds, unless it gave up (journalctl --user -u {unit})",
-            )
+            msg = f"{node_rate} Hz: the watcher switches it to {rate} within seconds, unless it gave up (journalctl --user -u {unit})"
         elif self.lw_want:
-            self.check_warn(
-                LDAC_RATE_LABEL,
-                f"{node_rate} Hz, set up by the headset; the watcher (LDAC_RATE={rate}) is not running",
-            )
+            msg = f"{node_rate} Hz, set up by the headset; the watcher (LDAC_RATE={rate}) is not running"
         else:
-            self.check_warn(
-                LDAC_RATE_LABEL,
-                f"{node_rate} Hz, set up by the headset: fewer bits per sample at the same bitrate; LDAC_RATE=48000 turns on the watcher (see bluetooth/README.md)",
-            )
+            msg = f"{node_rate} Hz, set up by the headset: fewer bits per sample at the same bitrate; LDAC_RATE=48000 turns on the watcher (see bluetooth/README.md)"
+        self.check_warn("LDAC sample rate", msg)
 
     def bearer_check(self, info: str) -> None:
         if self.c.le_audio != "off" or preferred_bearer(info) != "le":
