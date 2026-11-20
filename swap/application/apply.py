@@ -264,26 +264,18 @@ class SwapApplicationService(SwapReports):
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return None
-        if self._inspect_marked(env.crypttab, spec.crypttab_spec()) == OwnedState.CONFLICT:
-            events.append(
-                ApplyEvent(
-                    "err",
-                    ApplyEventKind.ERROR,
-                    f"{env.prog}: ERROR: {env.crypttab} has an unmarked entry for {spec.name}: "
-                    "remove it by hand, then run apply again.",
+        checks = ((env.crypttab, spec.crypttab_spec(), spec.name), (env.fstab, spec.fstab_spec(), spec.mapper_path))
+        for path, line_spec, entry in checks:
+            if self._inspect_marked(path, line_spec) == OwnedState.CONFLICT:
+                events.append(
+                    ApplyEvent(
+                        "err",
+                        ApplyEventKind.ERROR,
+                        f"{env.prog}: ERROR: {path} has an unmarked entry for {entry}: "
+                        "remove it by hand, then run apply again.",
+                    )
                 )
-            )
-            return None
-        if self._inspect_marked(env.fstab, spec.fstab_spec()) == OwnedState.CONFLICT:
-            events.append(
-                ApplyEvent(
-                    "err",
-                    ApplyEventKind.ERROR,
-                    f"{env.prog}: ERROR: {env.fstab} has an unmarked entry for {spec.mapper_path}: "
-                    "remove it by hand, then run apply again.",
-                )
-            )
-            return None
+                return None
         return tmpfiles_text
 
     def _write_swap_lines(self, spec: SwapHardwareSpec, events: list[ApplyEvent]) -> bool | None:
