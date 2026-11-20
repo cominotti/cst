@@ -5,7 +5,7 @@ boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
-from cpu.game.domain import Record, intended_records, newer_intended
+from cpu.game.domain import GameRecordKind, Record, intended_records, newer_intended
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -135,7 +135,7 @@ def _current_props(host: DoctorHostPort, records: list[Record]) -> tuple[dict[tu
     managers["usr"] = user_manager(host)
     wanted: dict[tuple[str, str], list[str]] = {}
     for r in records:
-        if r[0] == "prop" and r[5]:
+        if r[0] == GameRecordKind.PROP and r[5]:
             wanted.setdefault((r[1], r[2]), []).append(r[3])
     current: dict[tuple[str, str, str], str] = {}
     unknown: list[str] = []
@@ -153,7 +153,7 @@ def _current_props(host: DoctorHostPort, records: list[Record]) -> tuple[dict[tu
 def _record_drift(host: DoctorHostPort, r: Record, current: dict[tuple[str, str, str], str]) -> tuple[bool, str]:
     """(whether the record could be compared, what no longer holds: "" when it holds). A property is
     compared when systemd showed it; a cgroup file when it can still be read."""
-    if r[0] == "prop":
+    if r[0] == GameRecordKind.PROP:
         key = (r[1], r[2], r[3])
         if not r[5] or key not in current:
             return False, ""
