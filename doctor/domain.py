@@ -153,11 +153,10 @@ GAME_PROFILE_HOST = _BY_SRC["cpu/game-profile"].dest
 # The top-level slices of the user manager that CST knows: app.slice (desktop
 # apps and the game), session.slice (gnome-shell), background.slice (GNOME's
 # background tasks: the file indexer), user.slice (the toolboxes) and
-# sccache.slice (kept for the host's shared sccache server: the first step of
-# moving it out of app.slice; the rustc wrapper does not use it yet, and the game
-# profile would make it idle during games like any other top-level slice). Any
-# other one is a sibling of app.slice that no rule covers outside games. (The game
-# profile's own list differs: it makes background.slice idle too.)
+# sccache.slice (the host's shared sccache server, which the game profile
+# demotes during games like any other top-level slice). Any other one is a
+# sibling of app.slice that no rule covers outside games. (The game profile's
+# own list differs: it makes background.slice and sccache.slice idle too.)
 USER_KNOWN_SLICES = ("app.slice", "session.slice", "background.slice", "user.slice", "sccache.slice")
 LIST_MAX = 5  # names shown per line, then "and N more"
 

@@ -350,10 +350,13 @@ What the wrapper does for each compiler call (`rustc-wrapper <compiler>
   compile:
   - inside a toolbox the scope goes into the inner `user.slice` of the user
     manager, next to the toolboxes, so it gets their CPUs and weight (and
-    the game profile's idle class); on the host it goes into `app.slice`,
-    where host compiles from a terminal or a desktop IDE run (normal weight,
-    all CPUs; the game profile leaves it alone, as it leaves a host terminal,
-    see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    the game profile's idle class); on the host it goes into `sccache.slice`,
+    a sibling slice of `app.slice` and `user.slice` that runs at normal
+    weight outside games and is demoted by the game profile during games
+    (see [cpu/README.md, section 10](../cpu/README.md#10-what-is-covered-and-what-is-not)).
+    If a server started by an older wrapper is still running in
+    `app.slice/cst-sccache-host.scope`, compiles keep reusing it until it
+    stops, then start the next one in `sccache.slice`.
     A host build that you start in a box of its own (`flatpak-spawn --host`
     from a toolbox, `systemd-run --user --slice=user-NAME.slice`, a
     `run-*` job) no longer keeps its compiles through sccache in that box:
@@ -506,7 +509,7 @@ Things to know:
   requests, hits, misses, cache size. For each running server (with or
   without sccache on the host's PATH) it also shows where the server runs:
   `sccache server <env>: in its own scope (user.slice/cst-sccache-<env>.scope)`
-  (`app.slice/cst-sccache-host.scope` for the host's server), or a `WARN` line
+  (`sccache.slice/cst-sccache-host.scope` for the host's server), or a `WARN` line
   with its cgroup when it runs anywhere else (started by an older wrapper, or
   by the client inside a compile's capped scope), with the command that stops
   it (run it where sccache is installed: in the toolbox for a toolbox's
