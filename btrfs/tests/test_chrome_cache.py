@@ -254,6 +254,51 @@ class ChromeCacheTest(unittest.TestCase):
                 self.assertTrue(self.m.plan_line(self.home).startswith("nothing to do"))
                 self.assertEqual(self.read(), text)
 
+    def test_what_decide_says_of_flags_it_leaves_alone(self) -> None:
+        # The messages of every branch that writes nothing: an off marker (with flags or not), a
+        # marker without the dir flag, and the RAM notes on flags of the user's own.
+        ram = "WARNING: that cache lives in RAM, keep it small"
+        no_cap = "WARNING: no size cap on a cache that lives in RAM (add --disk-cache-size=536870912)"
+        ours = "--disk-cache-dir=/tmp/chrome-cache"
+        for text, state, msg in (
+            (f"{self.m.OFF_LINE}\n", "off", "off by your choice (marker without the flags): nothing added"),
+            (
+                f"{self.m.OFF_LINE}\n--disk-cache-dir=/elsewhere\n",
+                "user",
+                "off by your choice; your own cache flags there: --disk-cache-dir=/elsewhere",
+            ),
+            (
+                f"{self.m.ON_LINE}\n--disk-cache-size=104857600\n",
+                "user",
+                "off by your choice; your own cache flags there: --disk-cache-size=104857600",
+            ),
+            (
+                f"{ours} --disk-cache-size=4294967296\n",
+                "user",
+                f"set by you ({ours} --disk-cache-size=4294967296): left as it is; {ram}",
+            ),
+            (
+                f"{ours} --disk-cache-size=0\n",
+                "user",
+                f"set by you ({ours} --disk-cache-size=0): left as it is; {no_cap}",
+            ),
+            (
+                f"{ours} --disk-cache-size=\n",
+                "user",
+                f"set by you ({ours} --disk-cache-size=): left as it is; {no_cap}",
+            ),
+            (f"{ours}\n", "user", f"set by you ({ours}): left as it is; {no_cap}"),
+            (f"{ours} --disk-cache-size=big\n", "user", f"set by you ({ours} --disk-cache-size=big): left as it is"),
+            (f"{ours} --disk-cache-size=100\n", "user", f"set by you ({ours} --disk-cache-size=100): left as it is"),
+            (
+                "--disk-cache-dir=/elsewhere --disk-cache-size=0\n",
+                "user",
+                "set by you (--disk-cache-dir=/elsewhere --disk-cache-size=0): left as it is",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.m.decide(text), (state, None, msg))
+
     def test_symlinked_file_refused(self) -> None:
         self.install()
         os.makedirs(self.cfg)
@@ -439,6 +484,61 @@ class ChromeCacheTest(unittest.TestCase):
             self.assertEqual(self.m.main(["chrome-cache", "apply", "--home"]), 2)
             if os.getuid() != 0 and os.path.isdir("/") and os.stat("/").st_uid != os.getuid():
                 self.assertEqual(self.m.main(["chrome-cache", "apply", "--home", "/"]), 2)
+
+    def main_out(self, *args: str) -> tuple[int, str, str]:
+        """main's exit status, stdout and stderr for chrome-cache ARGS, the home shown as HOME."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.m.main(["chrome-cache", *args])
+        return rc, out.getvalue().replace(self.home, "HOME"), err.getvalue().replace(self.home, "HOME")
+
+    def test_main_refusals_say_why_on_stderr(self) -> None:
+        usage = "usage: chrome-cache status|plan|apply|off [--home DIR]\n"
+        for args in (("bogus",), ("apply", "--home"), ("apply", "--home", "")):
+            with self.subTest(args=args):
+                self.assertEqual(self.main_out(*args), (2, "", usage))
+        with mock.patch.object(chrome_cli.HostExecutionContext, "is_root", return_value=True):
+            self.assertEqual(
+                self.main_out("apply", "--home", self.home),
+                (2, "", "chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)\n"),
+            )
+        with mock.patch.object(chrome_cli.HostExecutionContext, "is_root", return_value=False):
+            with mock.patch.object(chrome_cli, "owned_by_caller", return_value=False):
+                self.assertEqual(
+                    self.main_out("apply", "--home", self.home), (2, "", "chrome-cache: HOME is not yours\n")
+                )
+            with mock.patch.object(chrome_cli, "owned_by_caller", side_effect=OSError("boom")):
+                self.assertEqual(self.main_out("apply", "--home", self.home), (2, "", "chrome-cache: HOME: boom\n"))
+
+    @unittest.skipIf(os.geteuid() == 0, "chrome-cache refuses root (CI runs the unit tests as the user ci)")
+    def test_main_apply_and_off_say_what_they_did(self) -> None:
+        flags = "~/.var/app/com.google.Chrome/config/chrome-flags.conf"
+        self.assertEqual(
+            self.main_out("apply", "--home", self.home),
+            (0, "kept:      Chrome Flatpak not installed: nothing to do\n", ""),
+        )
+        self.install()
+        for args, out in (
+            (
+                ("apply",),
+                (
+                    f"written:   {flags}: add the cache flags (sandbox /tmp, at most 512 MiB)\n"
+                    "           Takes effect when Chrome starts again (quit all its windows first).\n"
+                ),
+            ),
+            (("apply",), f"kept:      {flags}: flags present (managed by CST)\n"),
+            (
+                ("off",),
+                (
+                    f"written:   {flags}: off: our flag lines removed (your other lines kept); setup will not add them again\n"
+                    "           Takes effect when Chrome starts again.\n"
+                ),
+            ),
+            (("off",), f"kept:      {flags}: already off: nothing changed\n"),
+            (("undo",), f"kept:      {flags}: already off: nothing changed\n"),
+        ):
+            with self.subTest(args=args, out=out):
+                self.assertEqual(self.main_out(*args, "--home", self.home), (0, out, ""))
 
     @unittest.skipIf(os.geteuid() == 0, "chrome-cache refuses root (CI runs the unit tests as the user ci)")
     def test_only_status_and_plan_get_sigpipe_back(self) -> None:
