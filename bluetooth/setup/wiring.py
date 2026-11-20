@@ -24,7 +24,7 @@ from bluetooth.setup.adapters import (
 )
 from bluetooth.setup.application.change import Change, ReRun
 from bluetooth.setup.application.survey import SetupMachine
-from bluetooth.setup.domain import Config, Exit, Options, Paths
+from bluetooth.setup.domain import SETUP_SCRIPT, Config, Exit, Options, Paths
 from cst_core.adapters import SystemClockAdapter, SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, undo_python_start
@@ -49,7 +49,7 @@ def take_handover() -> Mapping[str, str]:
 def prog(env: Mapping[str, str]) -> str:
     """The name in the help and the hints: CST_PROG (cst sets it), else the name the script was run as."""
     argv0 = os.environ.pop("CST_ARG0", None)
-    return env.get("CST_PROG") or argv0 or "bluetooth-setup.sh"
+    return env.get("CST_PROG") or argv0 or SETUP_SCRIPT
 
 
 def cst_folder(entry: str) -> str:
@@ -62,9 +62,7 @@ def cst_folder(entry: str) -> str:
 
 def usage(entry: str, prog_name: str) -> str:
     """The help: bluetooth-setup.sh's header comment, then the usage line."""
-    return script_help(
-        read_text(os.path.join(cst_folder(entry), "bluetooth-setup.sh"), ""), prog_name, words="[options]"
-    )
+    return script_help(read_text(os.path.join(cst_folder(entry), SETUP_SCRIPT), ""), prog_name, words="[options]")
 
 
 def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str) -> Exit | None:
@@ -82,7 +80,7 @@ def step_down(env: Mapping[str, str], entry: str, opts: Options, prog_name: str)
         return Exit(1, err=f"id: '{user}': no such user\n")
     uid, home = found
     handed = [f"CST_PROG={env['CST_PROG']}"] if env.get("CST_PROG", "") else []
-    self_script = os.path.join(cst_folder(entry), "bluetooth-setup.sh")
+    self_script = os.path.join(cst_folder(entry), SETUP_SCRIPT)
     argv = step_down_argv(
         user,
         uid,

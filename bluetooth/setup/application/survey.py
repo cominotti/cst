@@ -41,10 +41,12 @@ from bluetooth.setup.domain import (
     BluetoothCommand,
     Config,
     Exit,
+    LDAC_WATCHER_LABEL,
     LeState,
     Options,
     Paths,
     OLD_WP_MARKER,
+    REFUSED_CONFLICT_NOTE,
     WpState,
     bap_state,
     bearer_matches,
@@ -594,7 +596,7 @@ class Survey:
                 "differs (apply rewrites it: LE Audio off; restarts WirePlumber)",
             ),
             ("off", LeState.MISSING): ("write", label, f"LE Audio off ({frm}): PipeWire will offer only A2DP and HFP"),
-            ("off", LeState.CONFLICT): ("CONFLICT", label, "not written by CST: apply refuses; move it away by hand"),
+            ("off", LeState.CONFLICT): ("CONFLICT", label, REFUSED_CONFLICT_NOTE),
             ("on", LeState.ABSENT): ("ok", "LE Audio", f"on ({frm}): PipeWire offers the bap-* profiles too"),
             ("on", LeState.REMOVE): (
                 "remove",
@@ -637,11 +639,11 @@ class Survey:
         if not self.lw_want:
             why = self.lw_off_why()
             if self.lw_ours_present():
-                self.item("remove", "LDAC rate watcher", f"{why}: apply stops and removes {LDAC_UNIT} and its program")
+                self.item("remove", LDAC_WATCHER_LABEL, f"{why}: apply stops and removes {LDAC_UNIT} and its program")
             elif rate:
-                self.item("skip", "LDAC rate watcher", f"off: {why}")
+                self.item("skip", LDAC_WATCHER_LABEL, f"off: {why}")
             else:
-                self.item("ok", "LDAC rate watcher", "off (LDAC_RATE empty; 48000 turns it on)")
+                self.item("ok", LDAC_WATCHER_LABEL, "off (LDAC_RATE empty; 48000 turns it on)")
             if self.lw_unit_st == OwnedState.CONFLICT:
                 self.item("CONFLICT", self.lw_unit_label(), "not written by CST: left alone")
             if self.lw_prog_st == OwnedState.CONFLICT:
@@ -650,7 +652,7 @@ class Survey:
         if self.user_sets("LDAC_RATE"):
             self.item(
                 "note",
-                "LDAC rate watcher",
+                LDAC_WATCHER_LABEL,
                 f"on because {self.tilde(self.p.user_settings)} sets LDAC_RATE={rate} (CST default: off)",
             )
             self.item(
@@ -659,18 +661,18 @@ class Survey:
                 f"CST keeps it off until it is checked again on PipeWire 1.6.11; to turn it off: remove LDAC_RATE from that file, then {self.c.prog} apply",
             )
         if self.o.cmd == BluetoothCommand.PLAN and self.lw_last_failure():
-            self.item("warn", "LDAC rate watcher", self.lw_failure_text())
+            self.item("warn", LDAC_WATCHER_LABEL, self.lw_failure_text())
         unit_rows = {
             OwnedState.OK: ("ok", f"up to date (LDAC to {rate} Hz)"),
             OwnedState.CHANGE: ("update", "differs (apply rewrites it)"),
             OwnedState.MISSING: ("write", f"the LDAC rate watcher (LDAC_RATE={rate})"),
-            OwnedState.CONFLICT: ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
+            OwnedState.CONFLICT: ("CONFLICT", REFUSED_CONFLICT_NOTE),
         }
         prog_rows = {
             OwnedState.OK: ("ok", "same as bt-ldac-watch in CST"),
             OwnedState.CHANGE: ("update", "older copy (apply installs the one in CST)"),
             OwnedState.MISSING: ("write", "copy of bluetooth/bt-ldac-watch"),
-            OwnedState.CONFLICT: ("CONFLICT", "not written by CST: apply refuses; move it away by hand"),
+            OwnedState.CONFLICT: ("CONFLICT", REFUSED_CONFLICT_NOTE),
         }
         for rows, state, label in (
             (unit_rows, self.lw_unit_st, self.lw_unit_label()),

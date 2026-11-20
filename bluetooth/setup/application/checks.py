@@ -2,6 +2,8 @@
 """The live checks of `cst bluetooth status` (and the end of apply): the services, LE Audio,
 the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
+from typing import Final
+
 from bluetooth.domain import (
     BLUETOOTH_UNIT,
     ISO_UUID,
@@ -12,10 +14,13 @@ from bluetooth.domain import (
     pw_state,
 )
 from bluetooth.setup.application.survey import Survey
-from bluetooth.setup.domain import BapState, LeState, WpState, is_running, preferred_bearer
+from bluetooth.setup.domain import LDAC_WATCHER_LABEL, BapState, LeState, WpState, is_running, preferred_bearer
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import ActiveState
 from cst_core.ports import OutputMode
+
+LE_AUDIO_LABEL: Final = "LE Audio"  # the section and the row of le_audio_check
+LDAC_RATE_LABEL: Final = "LDAC sample rate"  # headset_check's row about the node's rate
 
 
 class Checks(Survey):
@@ -109,17 +114,17 @@ class Checks(Survey):
 
     def le_audio_check(self) -> None:
         prog, frm = self.c.prog, self.c.le_from
-        self.section("LE Audio")
+        self.section(LE_AUDIO_LABEL)
         if self.c.le_audio == "off":
             if self.le_state in (LeState.OK, LeState.ADOPT):
-                self.check_ok("LE Audio", f"off ({frm}; PipeWire offers only classic profiles)")
+                self.check_ok(LE_AUDIO_LABEL, f"off ({frm}; PipeWire offers only classic profiles)")
             else:
                 self.check_warn(
-                    "LE Audio", f"off in the settings ({frm}), but its drop-in is not in place yet: {prog} apply"
+                    LE_AUDIO_LABEL, f"off in the settings ({frm}), but its drop-in is not in place yet: {prog} apply"
                 )
             self.item("", "", f"turn on with: {self.le_on_hint}")
         else:
-            self.check_ok("LE Audio", f"on ({frm})")
+            self.check_ok(LE_AUDIO_LABEL, f"on ({frm})")
             self.item("", "", f"turn off with: {self.le_off_hint}")
         self.le_roles_check()
 
@@ -219,17 +224,17 @@ class Checks(Survey):
         if codec == "ldac" and node_rate.isascii() and node_rate.isdigit() and int(node_rate) > 48000:
             if self.lw_want and self.lw_active == ActiveState.ACTIVE:
                 self.check_warn(
-                    "LDAC sample rate",
+                    LDAC_RATE_LABEL,
                     f"{node_rate} Hz: the watcher switches it to {rate} within seconds, unless it gave up (journalctl --user -u {unit})",
                 )
             elif self.lw_want:
                 self.check_warn(
-                    "LDAC sample rate",
+                    LDAC_RATE_LABEL,
                     f"{node_rate} Hz, set up by the headset; the watcher (LDAC_RATE={rate}) is not running",
                 )
             else:
                 self.check_warn(
-                    "LDAC sample rate",
+                    LDAC_RATE_LABEL,
                     f"{node_rate} Hz, set up by the headset: fewer bits per sample at the same bitrate; LDAC_RATE=48000 turns on the watcher (see bluetooth/README.md)",
                 )
 
@@ -244,7 +249,7 @@ class Checks(Survey):
     def lw_failure_check(self) -> None:
         if not self.lw_last_failure():
             return
-        self.check_warn("LDAC rate watcher", self.lw_failure_text())
+        self.check_warn(LDAC_WATCHER_LABEL, self.lw_failure_text())
         if self.user_sets("LDAC_RATE"):
             self.item(
                 "",

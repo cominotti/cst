@@ -15,6 +15,7 @@ import re
 from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.text import HELP_WORDS, enum_member, group
 from cst_core.domain.units import ActiveState
 
@@ -27,6 +28,10 @@ BEARERS: Final = ("", "le", "bredr", "last-used")
 VALUED: Final = ("--device", "--ldac-quality", "--bearer", "--le-audio")
 MAC_RE: Final = re.compile(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 TIMEOUT_RE: Final = re.compile(r"[0-9]{1,9}")
+SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst runs, at the top of the CST folder
+# The note of a file CST did not write and apply refuses to replace (plan's CONFLICT rows).
+REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
+LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
 # Which command takes which option (bluetooth-setup.sh's allowed()).
 _ALLOWED: Final = frozenset(
     {
@@ -271,7 +276,7 @@ class Paths:
 
     @property
     def self_script(self) -> str:
-        return f"{self.checkout}/bluetooth-setup.sh"
+        return f"{self.checkout}/{SETUP_SCRIPT}"
 
     @property
     def wp_dir(self) -> str:
