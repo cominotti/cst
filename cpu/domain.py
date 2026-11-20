@@ -568,7 +568,7 @@ def _quiet_test_line(t: QuietTest) -> str:
     """One test's line of quiet's result: its value, its limit and its verdict."""
     unit = f" {t['unit']}" if t["unit"] else ""
     err = t["error"]
-    unreadable = err is not None and err != ""
+    unreadable = bool(err)
     if unreadable:
         value = "unreadable"
     elif isinstance(t["value"], float):
