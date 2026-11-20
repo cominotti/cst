@@ -1381,7 +1381,7 @@ class EmptyProblemTests(CliTestCase):
     def test_an_empty_pin_file_problem_blocks_deletions(self) -> None:
         h = self.history()
         before = h.snapshots()
-        with mock.patch.object(snap_adapters.PinFile, "read", lambda _self: (set(), "")):
+        with mock.patch.object(snap_adapters.PinFile, "read", return_value=(set(), "")):
             self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4, self.out)
         self.assertEqual(h.snapshots(), before)
         self.assertIn("deletion(s) blocked", self.out)
@@ -1406,14 +1406,14 @@ class EmptyProblemTests(CliTestCase):
     def test_an_empty_ntp_problem_blocks_deletions(self) -> None:
         h = self.history()
         before = h.snapshots()
-        with mock.patch.object(snap_app.Run, "ntp_problem", lambda _self: ""):
+        with mock.patch.object(snap_app.Run, "ntp_problem", return_value=""):
             self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h"), 4, self.out)
         self.assertEqual(h.snapshots(), before)
         self.assertIn("deletion(s) blocked", self.out)
 
     def test_an_empty_ntp_problem_keeps_the_run_out_of_the_record(self) -> None:
         h = self.host("2026-10-13 14:07")
-        with mock.patch.object(snap_app.Run, "ntp_problem", lambda _self: ""):
+        with mock.patch.object(snap_app.Run, "ntp_problem", return_value=""):
             self.assertEqual(self.cli(h, "snapshot"), 0, self.out)
         self.assertEqual(h.snapshots(), ["home.20261013T1407"])
         self.assertFalse(self.recorded())
@@ -1421,7 +1421,7 @@ class EmptyProblemTests(CliTestCase):
 
     def test_an_empty_last_run_problem_refuses_creation(self) -> None:
         h = self.host("2026-10-13 14:07")
-        with mock.patch.object(snap_app.Run, "last_run", lambda _self: (None, "")):
+        with mock.patch.object(snap_app.Run, "last_run", return_value=(None, "")):
             self.assertEqual(self.cli(h, "snapshot", clock_ok=True), 4, self.out)
         self.assertEqual(h.snapshots(), [])
         self.assertIn("not creating a snapshot", self.out)
@@ -1430,14 +1430,14 @@ class EmptyProblemTests(CliTestCase):
     def test_an_empty_last_run_problem_keeps_the_run_out_of_the_record(self) -> None:
         h = self.host("2026-10-13 14:07", gen=10)
         h.add_snapshot("home.20261013T1300", "/top/home", 50)  # nothing to create, nothing due
-        with mock.patch.object(snap_app.Run, "last_run", lambda _self: (None, "")):
+        with mock.patch.object(snap_app.Run, "last_run", return_value=(None, "")):
             self.assertEqual(self.cli(h, "prune", clock_ok=True), 0, self.out)
         self.assertFalse(self.recorded())
         self.assertIn("not recording this run", self.out)
 
     def test_an_empty_keep_reason_still_keeps(self) -> None:
         snaps = [snap("2026-10-13 12:00"), snap("2026-10-13 13:00")]
-        with mock.patch.object(snap_domain, "_level_reason", lambda *_args: ""):
+        with mock.patch.object(snap_domain, "_level_reason", return_value=""):
             rows = core.plan(snaps, at("2026-10-13 14:07", BERLIN), core.parse_policy("72h"), BERLIN)
         self.assertEqual([r.action for r in rows], ["keep", "keep"])
 
@@ -1458,7 +1458,7 @@ class EmptyProblemTests(CliTestCase):
 
     def test_an_empty_problem_after_creating_keeps_the_cache_folders(self) -> None:
         h = self.host("2026-10-13 14:07")
-        with mock.patch.object(snap_app, "ours_writable", lambda *_args: ("", False)):
+        with mock.patch.object(snap_app, "ours_writable", return_value=("", False)):
             self.cli(h, "snapshot", "--exclude-caches")
         self.assertEqual([c for c in h.calls if c[0] == "walk" and c[3] == "drop"], [])
         self.assertIn("cannot check /top/snapshots/home.20261013T1407 after creating it", self.out)
@@ -1467,7 +1467,7 @@ class EmptyProblemTests(CliTestCase):
     def test_an_empty_other_parent_is_not_ours(self) -> None:
         h = self.host("2026-10-13 14:07", gen=10)
         h.add_snapshot("home.20261013T1300", "/top/home", 50)
-        with mock.patch.object(snap_app, "other_parent", lambda *_args: ""):
+        with mock.patch.object(snap_app, "other_parent", return_value=""):
             self.assertEqual(self.cli(h, "list", "--json"), 0, self.out)
         self.assertEqual(json.loads(self.out)["sources"][0]["snapshots"], [])
 
