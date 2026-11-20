@@ -5,7 +5,6 @@ RUN dnf -y install \
     openssh-server \
     restic \
     && dnf clean all \
-    && ssh-keygen -A \
     && mkdir -p /var/run/sshd /srv/backup /etc/ssh/sshd_config.d \
     && chmod 0755 /srv/backup \
     && sed -i 's/^root:[^:]*:/root:*:/' /etc/shadow \
@@ -19,4 +18,7 @@ RUN dnf -y install \
     && chmod 0600 /etc/ssh/sshd_config.d/00-e2e.conf
 
 EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D", "-e"]
+# The SSH host keys are made when the container starts, not baked into the image: each
+# container has keys of its own, and the published image holds no private key. exec keeps
+# sshd as PID 1. No client of the tests checks the host key.
+CMD ["/bin/sh", "-c", "ssh-keygen -A && exec /usr/sbin/sshd -D -e"]

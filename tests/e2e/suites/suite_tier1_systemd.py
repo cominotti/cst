@@ -4505,6 +4505,41 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_155_nas_image_holds_no_ssh_host_keys(self) -> None:
+        """The NAS image holds no SSH host key: the container makes its own when it starts
+        (ssh-keygen -A, then sshd as PID 1). The image of the running NAS container has no
+        /etc/ssh/ssh_host_* file; the running container has its ed25519 host key and PID 1 is sshd.
+        The SFTP login over it is test_06's."""
+        image = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Image}}", self.NAS_CONTAINER],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout.strip()
+        self.assertTrue(image, "no image for the NAS container")
+        in_image = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "/bin/sh",
+                image,
+                "-c",
+                "ls /etc/ssh/ssh_host_* 2>/dev/null || true",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+        self.assertEqual(in_image, "", "SSH host keys are baked into the NAS image")
+        live = exec_bash(self.NAS_CONTAINER, "test -s /etc/ssh/ssh_host_ed25519_key && cat /proc/1/comm").stdout
+        self.assertEqual(live.strip(), "sshd")
+
     def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
         """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
         requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
