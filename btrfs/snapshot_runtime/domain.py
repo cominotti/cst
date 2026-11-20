@@ -312,16 +312,23 @@ def cache_args(src: Sources, exclude: str, skip_text: str) -> CacheArgs:
     # read -r -a: the first line only, words at blanks (space, tab).
     first = skip_text.split("\n", 1)[0]
     for word in [w for w in re.split(r"[ \t]+", first) if w]:
-        rel = word.removeprefix("./").removesuffix("/")
-        if not rel or rel.startswith("/") or "/../" in f"/{rel}/" or "/./" in f"/{rel}/":
-            warnings.append(f"SNAPSHOT_CACHES_SKIP: '{rel}' is not a path inside your home; ignored")
-            continue
-        if "Workspace" in src.names and (rel == "Workspace" or rel.startswith("Workspace/")):
-            rel = "Workspace/." if rel == "Workspace" else rel
-            skips += ["--caches-skip", f"Workspace={rel.removeprefix('Workspace/')}"]
-        else:
-            skips += ["--caches-skip", f"home={src.home_rel + '/' if src.home_rel else ''}{rel}"]
+        pair, warning = _skip_args(word, src)
+        skips += pair
+        if warning is not None:
+            warnings.append(warning)
     return CacheArgs((*args, *skips), tuple(skips), tuple(warnings))
+
+
+def _skip_args(word: str, src: Sources) -> tuple[list[str], str | None]:
+    """One SNAPSHOT_CACHES_SKIP word: its --caches-skip pair, given to the source that holds it
+    (Workspace when there is one and the path is in it, else home), or no pair and the warning."""
+    rel = word.removeprefix("./").removesuffix("/")
+    if not rel or rel.startswith("/") or "/../" in f"/{rel}/" or "/./" in f"/{rel}/":
+        return [], f"SNAPSHOT_CACHES_SKIP: '{rel}' is not a path inside your home; ignored"
+    if "Workspace" in src.names and (rel == "Workspace" or rel.startswith("Workspace/")):
+        rel = "Workspace/." if rel == "Workspace" else rel
+        return ["--caches-skip", f"Workspace={rel.removeprefix('Workspace/')}"], None
+    return ["--caches-skip", f"home={src.home_rel + '/' if src.home_rel else ''}{rel}"], None
 
 
 def core_reason(lines: Sequence[str]) -> str:
