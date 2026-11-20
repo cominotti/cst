@@ -291,31 +291,29 @@ class ToolConfig:
 
     def _sccache_off_lines(self, st: SccacheState, shown: str, why: str) -> list[ConfigLine]:
         """The lines of --no-sccache (WHY: what turns it off) for cargo's config SHOWN in state ST."""
-        if st["ours"]:
-            if st["remove"]:
-                return [
-                    (
-                        ConfigMark.REMOVE,
-                        shown,
-                        (
-                            f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
-                            f"~/{WRAPPER_REL} stays (unused, harmless)"
-                        ),
-                    )
-                ]
+        foreign = st["value"] is not None and not st["ours"]
+        if foreign:
+            return [(ConfigMark.KEEP, shown, f"sccache ({why}): {_foreign_wrapper_text(st)}")]
+        if not st["ours"]:
+            return [(ConfigMark.OFF, shown, "sccache: off")]
+        if st["remove"]:
             return [
                 (
-                    ConfigMark.BY_HAND,
+                    ConfigMark.REMOVE,
                     shown,
-                    f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
+                    (
+                        f"sccache: CST's rustc-wrapper line ({why}); {SCCACHE_REBUILD}; "
+                        f"~/{WRAPPER_REL} stays (unused, harmless)"
+                    ),
                 )
             ]
-        foreign = st["value"] is not None
-        return (
-            [(ConfigMark.KEEP, shown, f"sccache ({why}): {_foreign_wrapper_text(st)}")]
-            if foreign
-            else [(ConfigMark.OFF, shown, "sccache: off")]
-        )
+        return [
+            (
+                ConfigMark.BY_HAND,
+                shown,
+                f"sccache ({why}): CST cannot remove its rustc-wrapper line safely: delete it yourself",
+            )
+        ]
 
     def install_wrapper(self, values: WrapperValues) -> int:
         """0 when the wrapper is in place (written or unchanged), else 1."""
