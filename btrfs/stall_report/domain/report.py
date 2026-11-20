@@ -5,7 +5,7 @@ btrfs, disks, memory, cgroups, below, episodes, events and alerts)."""
 from collections.abc import Callable, Mapping
 import time
 
-from btrfs.stall_report.domain.records import AnalyseResult, MetaRecord
+from btrfs.stall_report.domain.records import AnalyseResult, Episode, MetaRecord
 from btrfs.stall_report.domain.verdict import fmt_bytes, fmt_counts, fmt_ts, verdict, zswap_text
 
 
@@ -14,36 +14,64 @@ def report_lines(
 ) -> list[str]:
     """The text report's lines, in order ("" for an empty line). container_names() gives the containers'
     names by cgroup; it is asked only when a cgroup is a container's."""
-    out: list[str] = []
-    w = res["window"]
-    out.append(
-        f"window   {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(w['since']))} -> {fmt_ts(w['until'])}"
-        f"  kernel {res.get('kernel') or '?'}"
+    out = _window_lines(res)
+    out.append("")
+    out.extend(f"verdict  {line}" for line in verdict(res, meta))
+    if res["samples"] < 2:
+        return out
+    out.append("")
+    return (
+        out
+        + _pressure_lines(res)
+        + _fs_lines(res, meta)
+        + _disk_lines(res, verbose=verbose)
+        + _memory_and_cgroup_lines(res, container_names)
+        + _below_lines(res)
+        + _episode_lines(res, verbose=verbose)
+        + _event_lines(res, verbose=verbose)
     )
+
+
+def _window_lines(res: AnalyseResult) -> list[str]:
+    """The window and kernel, and what of it was recorded."""
+    w = res["window"]
+    out = [
+        (
+            f"window   {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(w['since']))} -> {fmt_ts(w['until'])}"
+            f"  kernel {res.get('kernel') or '?'}"
+        )
+    ]
     cov = res["coverage"]
     if (first := cov.get("first_sample")) is not None and first != 0:
         out.append(
             f"recorded {fmt_ts(first)} -> {fmt_ts(cov['last_sample'])} "
             f"({cov['covered_s']} s of {cov['window_s']} s{', ' + str(cov.get('gaps')) + ' gap(s)' if cov.get('gaps', 0) else ''})"
         )
-    out.append("")
-    out.extend(f"verdict  {line}" for line in verdict(res, meta))
-    if res["samples"] < 2:
-        return out
-    out.append("")
+    return out
+
+
+def _pressure_lines(res: AnalyseResult) -> list[str]:
+    """The pressure shares and the peaks."""
     pct, peak, vm = res["pressure"], res["peak"], res["vm"]
-    out.append(
-        f"pressure io some/full {pct['io_some_pct']:.1f}% / {pct['io_full_pct']:.1f}%   memory some/full "
-        f"{pct['mem_some_pct']:.1f}% / {pct['mem_full_pct']:.1f}%   cpu some {pct['cpu_some_pct']:.1f}%   "
-        f"(% of recorded time)"
-    )
-    out.append(
-        f"peaks    io 10s-avg some/full {peak['io_some_avg10']:.0f}%/{peak['io_full_avg10']:.0f}%  "
-        f"tasks waiting on storage {peak['d_tasks']}  on memory {peak['mem_tasks']}  "
-        f"iowait tasks {peak['iowait_tasks']}  "
-        f"dirty {fmt_bytes(peak['dirty_bytes'])} (limit {fmt_bytes(vm['dirty_limit_bytes'])})  "
-        f"writeback {fmt_bytes(peak['writeback_bytes'])}"
-    )
+    return [
+        (
+            f"pressure io some/full {pct['io_some_pct']:.1f}% / {pct['io_full_pct']:.1f}%   memory some/full "
+            f"{pct['mem_some_pct']:.1f}% / {pct['mem_full_pct']:.1f}%   cpu some {pct['cpu_some_pct']:.1f}%   "
+            f"(% of recorded time)"
+        ),
+        (
+            f"peaks    io 10s-avg some/full {peak['io_some_avg10']:.0f}%/{peak['io_full_avg10']:.0f}%  "
+            f"tasks waiting on storage {peak['d_tasks']}  on memory {peak['mem_tasks']}  "
+            f"iowait tasks {peak['iowait_tasks']}  "
+            f"dirty {fmt_bytes(peak['dirty_bytes'])} (limit {fmt_bytes(vm['dirty_limit_bytes'])})  "
+            f"writeback {fmt_bytes(peak['writeback_bytes'])}"
+        ),
+    ]
+
+
+def _fs_lines(res: AnalyseResult, meta: MetaRecord) -> list[str]:
+    """One line per btrfs filesystem: its commits, metadata room and new device errors."""
+    out = []
     for uuid, f in res["fs"].items():
         label = (meta.get("fs") or {}).get(uuid, {}).get("label") or uuid[:8]
         at = f" @{fmt_ts(f['max_at'])}" if f["max_at"] is not None and f["max_at"] != 0 and f["max_commit_ms"] else ""
@@ -54,7 +82,12 @@ def report_lines(
             f"{f['max_commit_ms']} ms{at}; metadata {mu:.0f}% of allocated chunks; new device errors "
             f"{f['new_device_errors']}"
         )
-    out.append("disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it")
+    return out
+
+
+def _disk_lines(res: AnalyseResult, *, verbose: bool) -> list[str]:
+    """The disks: the member disks, then the dm-crypt layer (only when verbose, swap always)."""
+    out = ["disks    per device; each RAID1 member carries a full copy, dm-N is the dm-crypt layer above it"]
     for name, d in sorted(res["disks"].items(), key=lambda kv: (kv[0].startswith("dm-"), kv[0])):
         if name.startswith("dm-") and not verbose and not d["role"].startswith("swap"):
             continue
@@ -64,16 +97,25 @@ def report_lines(
             f"({d['fl_ios']} flushes)  queue {d['queue_depth']:4.1f}  read {fmt_bytes(d['read_bytes'])}  "
             f"write {fmt_bytes(d['write_bytes'])}"
         )
-    out.append(
-        f"memory   {zswap_text(vm)}   direct reclaim scanned "
-        f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}"
-    )
+    return out
+
+
+def _memory_and_cgroup_lines(res: AnalyseResult, container_names: Callable[[], Mapping[str, str]]) -> list[str]:
+    """The memory line, then the cgroups: the slices, and at most 6 others that waited or wrote (with
+    the names of the containers among them)."""
+    vm = res["vm"]
     names = container_names() if any(k.startswith(("docker-", "libpod-")) for k in res["cgroups"]) else {}
-    out.append(
-        "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "
-        "dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare "
-        "cgroups with each other, not with disk totals)"
-    )
+    out = [
+        (
+            f"memory   {zswap_text(vm)}   direct reclaim scanned "
+            f"{vm['direct_reclaim_scanned_pages']:,} pages  allocstalls {vm['allocstalls']:,}"
+        ),
+        (
+            "cgroups  IO pressure = time tasks in the cgroup waited on IO; bytes = writes charged to it at the "
+            "dm-crypt layer (RAID1 mirror copies are charged unevenly, often to kernel threads: compare "
+            "cgroups with each other, not with disk totals)"
+        ),
+    ]
     shown = 0
     for name, c in sorted(
         res["cgroups"].items(),
@@ -88,27 +130,41 @@ def report_lines(
             f"  {label:<44} io some/full {c['io_some_pct']:5.1f}% / {c['io_full_pct']:5.1f}%  "
             f"read {fmt_bytes(c['read_bytes'])}  write {fmt_bytes(c['write_bytes'])}"
         )
+    return out
+
+
+def _below_lines(res: AnalyseResult) -> list[str]:
+    """below's error, and its top writers and readers."""
     b = res.get("below")
-    if b:
-        if (err := b.get("error")) is not None and err != "":
-            out.append(f"below    {err}")
-        for title, key in (("writers", "top_writers"), ("readers", "top_readers")):
-            items = b.get(key) or []
-            if items:
-                out.append(
-                    f"below    top {title}: "
-                    + ", ".join(
-                        f"{i['comm']}[{i['cgroup']}] {fmt_bytes(i['bytes'])}"
-                        if i["cgroup"]
-                        else f"{i['comm']} {fmt_bytes(i['bytes'])}"
-                        for i in items[:6]
-                    )
+    if not b:
+        return []
+    out = []
+    if (err := b.get("error")) is not None and err != "":
+        out.append(f"below    {err}")
+    for title, key in (("writers", "top_writers"), ("readers", "top_readers")):
+        items = b.get(key) or []
+        if items:
+            out.append(
+                f"below    top {title}: "
+                + ", ".join(
+                    f"{i['comm']}[{i['cgroup']}] {fmt_bytes(i['bytes'])}"
+                    if i["cgroup"]
+                    else f"{i['comm']} {fmt_bytes(i['bytes'])}"
+                    for i in items[:6]
                 )
+            )
+    return out
+
+
+def _episode_lines(res: AnalyseResult, *, verbose: bool) -> list[str]:
+    """The episodes, worst first, with their main signatures (more of both, and a stack, when verbose)."""
     eps = res["episodes"]
     limit = 50 if verbose else 6
-    out.append("")
     showing = f", showing {limit}" if len(eps) > limit else ""
-    out.append(f"episodes {len(eps)}" + (f" (worst first{showing})" if eps else " (no stall episode recorded)"))
+    out: list[str] = [
+        "",
+        f"episodes {len(eps)}" + (f" (worst first{showing})" if eps else " (no stall episode recorded)"),
+    ]
     for ep in eps[:limit]:
         pk = ep["peak"]
         out.append(
@@ -116,16 +172,29 @@ def report_lines(
             f"peak io full {pk.get('io_full_avg10', 0):.0f}%, commit {pk.get('commit_ms', 0)} ms, "
             f"D tasks max {ep['max_d']}"
         )
-        for s in ep["sigs"][: (8 if verbose else 3)]:
-            via = f" via {s['ctx']}" if s["ctx"] else ""
-            out.append(
-                f"    {s['n']:5d} task-samples [{s['cat']}] {s['sig']}{via}  "
-                f"comms: {fmt_counts(s['comms'])}  cgroups: {', '.join(list(s['cgroups'])[:3])}"
-            )
-            if verbose:
-                out.extend("          stack: " + " <- ".join(frames[:10]) for frames in s.get("examples", [])[:1])
+        out.extend(_signature_lines(ep, verbose=verbose))
     if eps:
         out.append("         (task-samples: one task seen in D state in one 1 s sample, roughly task-seconds)")
+    return out
+
+
+def _signature_lines(ep: Episode, *, verbose: bool) -> list[str]:
+    """An episode's main wait signatures (8 when verbose, else 3), with one example stack when verbose."""
+    out = []
+    for s in ep["sigs"][: (8 if verbose else 3)]:
+        via = f" via {s['ctx']}" if s["ctx"] else ""
+        out.append(
+            f"    {s['n']:5d} task-samples [{s['cat']}] {s['sig']}{via}  "
+            f"comms: {fmt_counts(s['comms'])}  cgroups: {', '.join(list(s['cgroups'])[:3])}"
+        )
+        if verbose:
+            out.extend("          stack: " + " <- ".join(frames[:10]) for frames in s.get("examples", [])[:1])
+    return out
+
+
+def _event_lines(res: AnalyseResult, *, verbose: bool) -> list[str]:
+    """The last events (more when verbose) and the alerts."""
+    out = []
     if res["events"]:
         out.append("")
         out.append(f"events   {len(res['events'])} kernel/daemon event(s) ('!' = severe, on this host's disks):")
