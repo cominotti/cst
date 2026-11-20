@@ -10,6 +10,8 @@ those modules can switch to it without changing a byte.
 from collections.abc import Callable, Sequence
 import contextlib
 from enum import StrEnum
+import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -27,6 +29,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import types
 from typing import override
 import unittest
 from unittest import mock
@@ -52,6 +55,7 @@ from cst_core.adapters import notify as core_notify
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
 from cst_core.adapters.sd_notify import ServiceNotifier
+from cst_core.adapters import locks as core_locks
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters import terminal as core_terminal
 from cst_core.adapters.terminal import confirm
@@ -448,6 +452,46 @@ class AdaptersTest(unittest.TestCase):
         assert fd is not None
         os.close(fd)
         self.assertTrue(os.path.exists(self.path("lock-target")))
+
+    def test_a_lock_that_fails_closes_its_fd_and_raises(self) -> None:
+        # fchmod of a new lock file, flock itself, or the wait between tries (Ctrl-C): the error
+        # reaches the caller, and the fd that was opened for the lock is closed. The failure is
+        # planted in the locks module's own os, fcntl and time (stand-ins with one function
+        # replaced), not in those modules, and the check is on the fd the module opened: another
+        # thread's sleep, flock or fds play no part.
+        cases: tuple[tuple[str, str, BaseException, float | None], ...] = (
+            ("os", "fchmod", PermissionError(1, "fchmod refused"), None),
+            ("fcntl", "flock", OSError(37, "no locks available"), None),
+            ("time", "sleep", KeyboardInterrupt(), 5.0),
+        )
+        for module, name, error, timeout in cases:
+            with self.subTest(name=name):
+                lock = self.path(f"{name}.lock")
+                held = take_lock(lock, wait=False) if name == "sleep" else None
+                opened: list[int] = []
+
+                def recording_open(path: str, flags: int, mode: int = 0o777, *, into: list[int] = opened) -> int:
+                    fd = os.open(path, flags, mode)
+                    into.append(fd)
+                    return fd
+
+                views: dict[str, dict[str, object]] = {
+                    "os": {**vars(os), "open": recording_open},
+                    "fcntl": dict(vars(fcntl)),
+                    "time": dict(vars(time)),
+                }
+                views[module][name] = mock.Mock(side_effect=error)
+                with contextlib.ExitStack() as patches:
+                    for attr, members in views.items():
+                        patches.enter_context(mock.patch.object(core_locks, attr, types.SimpleNamespace(**members)))
+                    with self.assertRaises(type(error)):
+                        take_lock(lock, wait=True, timeout=timeout)
+                self.assertEqual(len(opened), 1, "take_lock opens the lock file once")
+                with self.assertRaises(OSError, msg="the lock's fd was left open") as closed:
+                    os.fstat(opened[0])
+                self.assertEqual(closed.exception.errno, errno.EBADF)
+                if held is not None:
+                    os.close(held)
 
     def test_nocow_sets_and_clears_only_its_bit(self) -> None:
         p = self.path("img", b"")
@@ -1502,6 +1546,23 @@ class ShellAssignmentsTest(unittest.TestCase):
             with self.subTest(sep=repr(sep)):
                 self.assertEqual(dict(parse_shell_assignments(f"A=1{sep}B=2\n").values), {"A": f"1{sep}B=2"})
 
+    def test_lines_that_are_no_assignment(self) -> None:
+        # No key at the start, or (in a file only Python reads) a key with no = after it.
+        for line, bash_sourced in (
+            ("1K=v", True),
+            ("=v", True),
+            ("export =v", True),
+            ("1K=v", False),
+            ("=v", False),
+            ("K v", False),
+            ("K", False),
+            ("K v", True),
+        ):
+            with self.subTest(line=line, bash_sourced=bash_sourced):
+                got = parse_shell_assignments(line + "\n", bash_sourced=bash_sourced)
+                self.assertEqual(dict(got.values), {})
+                self.assertEqual([(p.line, p.reason) for p in got.problems], [(1, "not a KEY=VALUE line")])
+
     def test_python_only_files_keep_what_their_readers_accepted(self) -> None:
         # vm.conf, toolchains.conf, bluetooth.conf: blanks around = (VM_NOCOW = 0 has always worked in vm.conf),
         # several words, a Windows line end; still no $, backtick or backslash.
@@ -1650,12 +1711,11 @@ class ShapesTest(unittest.TestCase):
         # interpreter's stack and recursion limit (the CI container differs from a workstation).
         # parse_json raises whatever json.loads raises here, in this process.
         deep = "[" * 100000
-        try:
+        with self.assertRaises(
+            (RecursionError, json.JSONDecodeError), msg="json.loads accepted unbalanced brackets"
+        ) as caught:
             json.loads(deep)
-        except (RecursionError, json.JSONDecodeError) as e:
-            expected: type[BaseException] = type(e)
-        else:
-            self.fail("json.loads accepted unbalanced brackets")
+        expected: type[BaseException] = type(caught.exception)
         with self.assertRaises(expected):
             parse_json(deep)
 

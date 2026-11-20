@@ -24,6 +24,7 @@ import fnmatch
 import json
 import os
 import queue
+import select
 import shutil
 import signal
 import socket
@@ -469,6 +470,162 @@ class ShortCgroupTest(unittest.TestCase):
         self.assertEqual(self.short("\n"), "/")  # only blanks: no 0:: line (it raised IndexError before)
 
 
+class TopologyTest(unittest.TestCase):
+    """Topology's btrfs filesystems and swap devices, on a fake /sys and /proc."""
+
+    def test_filesystems_and_swap(self) -> None:
+        a, b = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbbbb-1-2-3-4"
+        dirs = {
+            f"/sys/fs/btrfs/{a}/devices": ["dm-1", "dm-0"],
+            f"/sys/fs/btrfs/{a}/devinfo": ["2", "1"],
+            f"/sys/fs/btrfs/{b}/devices": ["nvme0n1p3"],
+        }
+        files = {
+            f"/sys/fs/btrfs/{a}/label": "data\n",
+            "/sys/class/block/dm-0/dev": "253:0\n",
+            "/sys/class/block/dm-1/dev": "253:1\n",
+            "/sys/class/block/dm-2/dev": "253:2\n",
+            "/sys/class/block/zram0/dev": "251:0\n",
+            "/proc/swaps": "Filename Type Size Used Priority\n/dev/dm-0 partition 8 0 -2\n/dev/zram0 partition 8 0 100\n"
+            "/swapfile file 8 0 -3\n\n/dev/mapper/swap partition 8 0 -4\n",
+        }
+        parents = {"dm-0": ["nvme0n1"], "dm-1": ["sda"], "dm-2": ["sdb"], "nvme0n1p3": ["nvme0n1"], "zram0": []}
+        real_isdir, real_listdir, real_realpath = os.path.isdir, os.listdir, os.path.realpath
+
+        def isdir(p: str) -> bool:
+            return p in dirs or (not p.startswith("/sys/fs/btrfs/") and real_isdir(p))
+
+        def listdir(p: str) -> list[str]:
+            return list(dirs[p]) if p in dirs else real_listdir(p)
+
+        def realpath(p: str) -> str:
+            return "/dev/dm-2" if p == "/dev/mapper/swap" else p if p.startswith("/dev/") else real_realpath(p)
+
+        with (
+            mock.patch.object(md_proc.glob, "glob", return_value=[f"/sys/fs/btrfs/{a}", f"/sys/fs/btrfs/{b}"]),
+            mock.patch.object(md_proc.os.path, "isdir", isdir),
+            mock.patch.object(md_proc.os, "listdir", listdir),
+            mock.patch.object(md_proc.os.path, "realpath", realpath),
+            mock.patch.object(md_proc, "read_text", files.get),
+            mock.patch.object(md_proc, "block_parents", lambda name: list(parents[name])),
+        ):
+            topo = md_proc.Topology()
+        self.assertEqual(
+            topo.fs,
+            {
+                a: {"label": "data", "devs": ["dm-0", "dm-1"], "disks": ["nvme0n1", "sda"], "devids": ["1", "2"]},
+                b: {"label": "", "devs": ["nvme0n1p3"], "disks": ["nvme0n1"], "devids": []},
+            },
+        )
+        # A device keeps its first role (btrfs before swap); a btrfs member without a dev file adds "".
+        self.assertEqual(
+            list(topo.disks.items()),
+            [
+                ("dm-0", "btrfs:data"),
+                ("dm-1", "btrfs:data"),
+                ("nvme0n1", "btrfs:data"),
+                ("sda", "btrfs:data"),
+                ("nvme0n1p3", "btrfs:bbbbbbbb"),
+                ("zram0", "swap"),
+                ("dm-2", "swap"),
+                ("sdb", "swap"),
+            ],
+        )
+        self.assertEqual(topo.top_devs, {"253:0", "253:1", "", "251:0", "253:2"})
+
+
+class SampleRecordTest(unittest.TestCase):
+    """sample(): one sample's record from every source, on fake /proc, /sys and cgroupfs readers."""
+
+    def test_every_source(self) -> None:
+        mon = monitor(load())
+        uuid = "u-1"
+        base = f"/sys/fs/btrfs/{uuid}"
+        cg = md_proc.CGROUP_ROOT
+        mon.topo.fs = {uuid: {"label": "", "devs": ["dm-0"], "disks": ["nvme0n1"], "devids": ["1", "2"]}}
+        mon.topo.disks = {"nvme0n1": "btrfs:u-1", "dm-0": "btrfs:u-1"}
+        mon.topo.top_devs = {"253:0"}
+        mon.topo.containers = {"docker-abc": "/cg/docker-abc", "libpod-def": "/cg/libpod-def"}
+        mon.cmax = {uuid: 900, "gone": 5}
+        kv = {
+            "/proc/vmstat": {"nr_dirty": 5, "pswpout": 7, "zswpwb": 2},
+            "/proc/stat": {"procs_running": 3, "procs_blocked": 1},
+            f"{base}/commit_stats": {"commits": 10, "total_commit_ms": 100, "cur_commit_ms": 300, "last_commit_ms": 20},
+            f"{base}/devinfo/1/error_stats": {"write_errs": 1, "read_errs": 2},
+        }
+        texts = {
+            "/proc/loadavg": "1.5 1.0 0.5 2/300 99\n",
+            "/proc/diskstats": (
+                " 259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n"
+                " 253 0 dm-0 1 2 3 4 5 6 7 8 9 10 11\n"
+                "   8 0 sda 1 2 3 4 5 6 7 8 9 10 11 12 13 14\n"
+                " 1 2 short\n"
+            ),
+        }
+        psi = {
+            "/proc/pressure/io": [1.5, 20, 0.5, 10],
+            "/proc/pressure/memory": [0.0, 3, 0.0, 1],
+            "/proc/pressure/cpu": [2.0, 40, 0.0, 0],
+            f"{cg}/system.slice/io.pressure": [0.0, 7, 0.0, 6],
+            f"{cg}/system.slice/memory.pressure": [0.0, 5, 0.0, 4],
+            f"{cg}/user.slice/io.pressure": [0.0, 9, 0.0, 8],
+            "/cg/docker-abc/io.pressure": [0.0, 30, 0.0, 20],
+        }
+        io_stat = {f"{cg}/system.slice/io.stat": [100, 200], "/cg/docker-abc/io.stat": [1, 2]}
+
+        def read_int(path: str) -> int:
+            return len(path)  # each file of its own value
+
+        with (
+            mock.patch.object(md_monitor, "read_kv", lambda path: kv.get(path, {})),
+            mock.patch.object(md_monitor, "read_int", read_int),
+            mock.patch.object(md_monitor, "read_text", texts.get),
+            mock.patch.object(md_monitor, "parse_psi", psi.get),
+            mock.patch.object(
+                md_monitor, "parse_io_stat", lambda path, devs: io_stat.get(path) if devs == {"253:0"} else None
+            ),
+        ):
+            rec = dict(mon.sample([]))
+        del rec["ts"], rec["mono"]
+        self.assertEqual(
+            rec,
+            {
+                "t": "s",
+                "psi": {"io": [1.5, 20, 0.5, 10], "memory": [0.0, 3, 0.0, 1], "cpu": [2.0, 40, 0.0, 0]},
+                "vm": [5, 0, 0, 0, 0, 0, 0, 7, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "procs": [3, 1],
+                "d": 0,
+                "d_all": 0,
+                "d_fuse": 0,
+                "d_maint": 0,
+                "d_mem": 0,
+                "load1": 1.5,
+                # The highest commit time since the last sample (cmax) is taken once.
+                "fs": {
+                    uuid: {
+                        "c": [10, 100, 300, 20, 0, 900],
+                        "err": {"1": 3, "2": 0},
+                        "space": {
+                            "data": [44, 45, 47, 46, 48],
+                            "metadata": [48, 49, 51, 50, 52],
+                            "global_rsv": [44, 48],
+                        },
+                        "discard": [43, 45],
+                    }
+                },
+                # Only the topology's disks, and lines with all the fields.
+                "disk": {"nvme0n1": list(range(1, 18)), "dm-0": list(range(1, 12))},
+                # A slice without io.pressure is left out; a container has no memory figures.
+                "cg": {
+                    "system.slice": [7, 6, 5, 4, 100, 200],
+                    "user.slice": [9, 8, 0, 0, 0, 0],
+                    "docker-abc": [30, 20, 0, 0, 1, 2],
+                },
+            },
+        )
+        self.assertEqual(mon.cmax, {"gone": 5})
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
@@ -509,6 +666,30 @@ class WaitKindTest(unittest.TestCase):
         self.assertEqual(self.m.wait_kind([], "zswap_decompress"), "memory")
         self.assertEqual(self.m.wait_kind([], "btrfs_sync_log"), "storage")
         self.assertEqual(self.m.wait_kind([], None), "storage")
+
+    def test_wchan_only_every_kind(self) -> None:
+        for wchan, kind in (
+            ("fuse_simple_request", "fuse"),
+            ("request_wait_answer", "fuse"),
+            ("btrfs_ioctl_fitrim", "maintenance"),
+            ("swap_read_folio", "memory"),
+            ("lock_mm_and_find_vma", "memory"),
+            ("futex_wait_queue", "idle"),
+            ("ep_poll", "idle"),
+            ("io_destroy", "storage"),
+            ("", "storage"),
+        ):
+            with self.subTest(wchan=wchan):
+                self.assertEqual(self.m.wait_kind([], wchan), kind)
+
+    def test_a_stack_decides_and_its_wchan_is_not_read(self) -> None:
+        self.assertEqual(self.m.wait_kind(STACKS["sync_log"], "fuse_simple_request"), "storage")
+        self.assertEqual(self.m.wait_kind(STACKS["futex"], "btrfs_sync_log"), "idle")
+        # Meaningful frames that name no subsystem: storage, the conservative answer.
+        self.assertEqual(self.m.wait_kind(["__schedule", "schedule", "io_destroy", "do_syscall_64"], None), "storage")
+        # A fresh kthread waits in kthread() until its first wakeup: only those frames, idle.
+        self.assertEqual(self.m.wait_kind(["kthread", "ret_from_fork"], None), "idle")
+        self.assertEqual(self.m.wait_kind(["__schedule", "kthread", "ret_from_fork"], None), "storage")
 
     def test_mmap_lock_only(self) -> None:
         self.assertTrue(self.m.mmap_lock_only(STACKS["mmap_lock"], None))
@@ -743,6 +924,40 @@ class HungKindTest(unittest.TestCase):
             {"META": "meta", "SAMPLE": "s", "EPISODE": "ep", "EVENT": "ev", "ALERT": "al"},
         )
 
+    def test_each_kind_once_per_repeat_window(self) -> None:
+        # A third look, right after the report: no second report (HUNG_REPEAT). An idle wait is never
+        # one; a maintenance wait is an event without an alert; a FUSE wait opens no episode.
+        maint, fuse = "maintenance-wait", "fuse-wait"
+        for name, events, alerts in (
+            ("futex", [], []),
+            ("fstrim", [maint], []),
+            ("fuse", [fuse], [("fuse", "Program waiting on a FUSE filesystem (network share / portal)")]),
+        ):
+            with self.subTest(name=name):
+                self.mon = monitor(self.m)
+                self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS[name])})
+                d_tasks = [("10", "100", "java", STACKS[name], None, self.m.wait_kind(STACKS[name], None))]
+                with self.mon.fake:
+                    for now in (1000.0, 1000.0 + self.m.HUNG_SECONDS + 1, 1000.0 + self.m.HUNG_SECONDS + 2):
+                        self.mon.track_hung(d_tasks, now)
+                self.assertEqual([json.loads(line)["kind"] for _, line in self.mon.buffer], events)
+                self.assertEqual(self.mon.alerts, alerts)
+                self.assertIsNone(self.mon.episode)
+
+    def test_a_storage_wait_that_keeps_running_is_a_busy_wait(self) -> None:
+        # Scheduled between the samples (its run count grows): not stuck, but in D at every sample.
+        self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["fsync"])})
+        d_tasks = [("10", "100", "java", STACKS["fsync"], None, "storage")]
+        runs = iter(range(100))
+        with self.mon.fake, mock.patch.object(self.m, "run_slices", lambda _pid, _tid: next(runs)):
+            for now in (1000.0, 1000.0 + self.m.HUNG_SECONDS + 1, 1000.0 + self.m.HUNG_SECONDS + 2):
+                self.mon.track_hung(d_tasks, now)
+        events = [json.loads(line) for _, line in self.mon.buffer]
+        self.assertEqual([(e["kind"], e["severe"]) for e in events], [("io-busy", False)])
+        self.assertIn("waited on storage at every sample for 31s while still being scheduled", events[0]["msg"])
+        self.assertEqual(self.mon.alerts, [])
+        self.assertIsNone(self.mon.episode)
+
     def test_storage_hung_task_unchanged(self) -> None:
         events = self.stuck("sync_log")
         self.assertEqual(events[0]["kind"], "hung")
@@ -799,7 +1014,7 @@ class TimedReaderTest(unittest.TestCase):
             return self.read(path)
 
         reader = md_proc.TimedReader(5.0, broken)
-        with mock.patch.object(threading, "excepthook", lambda _args: None):  # the thread's traceback
+        with mock.patch.object(threading, "excepthook", return_value=None):  # the thread's traceback
             self.assertIsNone(reader.read("bad"))
         self.assertEqual(reader.read("b"), "text of b")
 
@@ -953,7 +1168,7 @@ class CmdlineReadTest(unittest.TestCase):
 
     def test_a_readable_cmdline_is_in_the_report(self) -> None:
         self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["sync_log"])})
-        with self.mon.fake, mock.patch.object(self.m, "read_text", lambda _path: "java\0-jar\0app.jar\0"):
+        with self.mon.fake, mock.patch.object(self.m, "read_text", autospec=True, return_value="java\0-jar\0app.jar\0"):
             self.hung()
         [(_, msg)] = self.events()
         self.assertIn("java:100 (java -jar app.jar; cgroup app.slice)", msg)
@@ -1135,7 +1350,7 @@ class NotifyLoopTest(unittest.TestCase):
         def run() -> None:
             with (
                 mock.patch.object(md_monitor, "BASE_INTERVAL", 0.0),  # a sample (and a report) at every pass
-                mock.patch.object(md_monitor, "short_cgroup", lambda _pid: "app.slice"),
+                mock.patch.object(md_monitor, "short_cgroup", autospec=True, return_value="app.slice"),
             ):
                 mon.run()
             done.set()
@@ -1186,6 +1401,93 @@ class NotifyLoopTest(unittest.TestCase):
         self.assertTrue(_eventually(lambda: len(started) == 1))
         self.assertEqual(started, [["systemctl", "--no-block", "start", "btrfs-stall-alert.service"]])
 
+    def test_what_the_loop_does_with_poll_events(self) -> None:
+        """A PSI trigger the kernel closed (POLLERR) is opened again; one that fired asks for a sample now and
+        names the episode's reason; /dev/kmsg is drained; a new day writes the meta record again; at the end an
+        open episode is ended and the log flushed."""
+        record = self.events.append
+        mon = self.monitor(_FakeNotifier(self.events, pings=4))
+        fds: list[int] = []
+        current: dict[str, int] = {}
+
+        def pipe_fd(name: str) -> int:
+            r, w = os.pipe()
+            os.close(w)
+            fds.append(r)
+            current[name] = r
+            return r
+
+        def open_psi() -> None:
+            mon.psi_fd = pipe_fd("psi")
+            record("psi")
+
+        def open_kmsg() -> None:
+            mon.kmsg_fd = pipe_fd("kmsg")
+            record("kmsg")
+
+        def update_episode(_rec: object, _tasks: object) -> None:
+            record(f"episode reason {mon.want_episode}")
+            if mon.want_episode is not None:
+                mon.episode = md_domain.Episode(0.0, mon.want_episode)
+
+        script: list[Callable[[], list[tuple[int, int]]]] = [
+            lambda: [(current["psi"], select.POLLERR)],
+            lambda: [(current["psi"], select.POLLPRI)],
+            lambda: [(current["kmsg"], select.POLLIN)],
+            list,
+        ]
+
+        class Poller:
+            def poll(self, _timeout: float) -> list[tuple[int, int]]:
+                record("poll")
+                return script.pop(0)()
+
+            def unregister(self, fd: int) -> None:
+                record(f"unregister {fds.index(fd)}")
+
+        days = iter(["day 1", "day 1", "day 2"])
+        clock = types.SimpleNamespace(
+            time=time.time, monotonic=time.monotonic, strftime=lambda _fmt, *_t: next(days, "day 2")
+        )
+        for name, value in (
+            ("poller", Poller()),
+            ("open_psi_trigger", open_psi),
+            ("open_kmsg", open_kmsg),
+            ("drain_kmsg", lambda: record("drain")),
+            ("probe_commits", lambda: record("probe")),
+            ("sample", lambda _tasks: (record("sample"), {"t": "s", "ts": 0.0})[1]),
+            ("update_episode", update_episode),
+            ("meta_record", lambda: (record("meta"), {"t": "meta", "ts": 0.0})[1]),
+            ("end_episode", lambda: record("end episode")),
+            ("flush", lambda: record("flush")),
+        ):
+            setattr(mon, name, value)
+        with (
+            mock.patch.object(md_monitor, "time", clock),
+            mock.patch.object(md_monitor, "FLUSH_EVERY", 0),  # a flush at the end of every pass
+            mock.patch.object(md_monitor, "BASE_INTERVAL", 3600),
+            mock.patch.object(md_monitor, "EPISODE_INTERVAL", 3600),
+            mock.patch.object(md_monitor, "PROBE_INTERVAL", 3600),
+        ):
+            mon.run()
+        for fd in fds[1:]:  # the first one the loop closed itself
+            os.close(fd)
+        term, intr = f"signal:{int(md_monitor.signal.SIGTERM)}", f"signal:{int(md_monitor.signal.SIGINT)}"
+        self.assertEqual(
+            self.events,
+            [
+                *("psi", "kmsg", term, intr, "meta", "log:started", "READY=1"),
+                # POLLERR: the trigger is closed and opened again; the first pass probes and samples.
+                *("WATCHDOG=1", "poll", "unregister 0", "log:PSI trigger closed by kernel; re-arming", "psi"),
+                *("probe", "sample", "episode reason None", "flush"),
+                # The trigger fired: a sample now, its reason for the episode; a new day: the meta record.
+                *("WATCHDOG=1", "poll", "sample", "episode reason psi trigger", "meta", "flush"),
+                *("WATCHDOG=1", "poll", "drain", "flush"),
+                *("WATCHDOG=1", "poll", "flush"),
+                *("end episode", "flush", "log:stopped"),
+            ],
+        )
+
     def test_without_a_notifier_the_loop_sends_nothing(self) -> None:
         mon = self.monitor(None)
         mon.duration = 0.01  # the default sends nothing: no socket is even opened
@@ -1215,7 +1517,7 @@ class NotifyLoopTest(unittest.TestCase):
 
         with (
             mock.patch.object(md_cli, "Monitor", _Monitor),
-            mock.patch.object(md_cli, "prepare_log_dir", lambda _d: None),
+            mock.patch.object(md_cli, "prepare_log_dir", autospec=True, return_value=None),
             mock.patch.dict(os.environ, {"NOTIFY_SOCKET": path, "LOGS_DIRECTORY": tmp}),
         ):
             self.assertEqual(md_cli.main([]), 0)

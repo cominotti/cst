@@ -274,8 +274,8 @@ class ParsedArgs(TypedDict):
     sccache: bool | None
 
 
-def parse_args(argv: Sequence[str]) -> ParsedArgs:
-    """{cmd, action, targets, brief, unless_off, home}; raises Usage."""
+def _split_home_option(argv: Sequence[str]) -> tuple[list[str], str | None]:
+    """(ARGV without --home and its folder, that folder or None); raises Usage."""
     args: list[str] = []
     home: str | None = None
     it = iter(argv)
@@ -290,6 +290,57 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
                 raise Usage("--home needs a folder")
         else:
             args.append(a)
+    return args, home
+
+
+def _status_argv(rest: Sequence[str], out: ParsedArgs) -> None:
+    """The arguments after `status`, into OUT; raises Usage."""
+    for a in rest:
+        if a != "--brief":
+            raise Usage(f"status: unknown argument '{a}' (only --brief)")
+        out["brief"] = True
+
+
+def _prune_argv(rest: Sequence[str], out: ParsedArgs) -> None:
+    """The arguments after `prune`, into OUT; raises Usage."""
+    out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
+    if out["action"] is None:
+        raise Usage("prune: plan or apply, then the targets (none: every enabled one)")
+    for a in rest[1:]:
+        if a.startswith("-"):
+            raise Usage(f"prune: unknown option '{a}'")
+        out["targets"].append(a)
+
+
+def _auto_argv(rest: Sequence[str], out: ParsedArgs) -> None:
+    """The arguments after `auto`, into OUT; raises Usage."""
+    out["action"] = _action(rest, ToolchainsAction.ON, ToolchainsAction.OFF)
+    if out["action"] is None:
+        raise Usage("auto: on or off")
+    for a in rest[1:]:
+        if a == "--unless-off" and out["action"] == ToolchainsAction.ON:
+            out["unless_off"] = True
+        else:
+            raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
+
+
+def _config_argv(rest: Sequence[str], out: ParsedArgs) -> None:
+    """The arguments after `config`, into OUT; raises Usage."""
+    out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
+    if out["action"] is None:
+        raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
+    for a in rest[1:]:
+        if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
+            out["lean"] = a == "--lean-debuginfo"
+        elif a in ("--sccache", "--no-sccache") and out["sccache"] is None:
+            out["sccache"] = a == "--sccache"
+        else:
+            raise Usage(f"config {rest[0]}: unknown argument '{a}'")
+
+
+def parse_args(argv: Sequence[str]) -> ParsedArgs:
+    """{cmd, action, targets, brief, unless_off, home}; raises Usage."""
+    args, home = _split_home_option(argv)
     out: ParsedArgs = {
         "cmd": ToolchainsCommand.HELP,
         "action": None,
@@ -306,38 +357,13 @@ def parse_args(argv: Sequence[str]) -> ParsedArgs:
     command = enum_member(ToolchainsCommand, cmd)
     match command:
         case ToolchainsCommand.STATUS:
-            for a in rest:
-                if a != "--brief":
-                    raise Usage(f"status: unknown argument '{a}' (only --brief)")
-                out["brief"] = True
+            _status_argv(rest, out)
         case ToolchainsCommand.PRUNE:
-            out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
-            if out["action"] is None:
-                raise Usage("prune: plan or apply, then the targets (none: every enabled one)")
-            for a in rest[1:]:
-                if a.startswith("-"):
-                    raise Usage(f"prune: unknown option '{a}'")
-                out["targets"].append(a)
+            _prune_argv(rest, out)
         case ToolchainsCommand.AUTO:
-            out["action"] = _action(rest, ToolchainsAction.ON, ToolchainsAction.OFF)
-            if out["action"] is None:
-                raise Usage("auto: on or off")
-            for a in rest[1:]:
-                if a == "--unless-off" and out["action"] == ToolchainsAction.ON:
-                    out["unless_off"] = True
-                else:
-                    raise Usage(f"auto {rest[0]}: unknown argument '{a}'")
+            _auto_argv(rest, out)
         case ToolchainsCommand.CONFIG:
-            out["action"] = _action(rest, ToolchainsAction.PLAN, ToolchainsAction.APPLY)
-            if out["action"] is None:
-                raise Usage("config: plan or apply [--lean-debuginfo | --no-lean-debuginfo] [--sccache | --no-sccache]")
-            for a in rest[1:]:
-                if a in ("--lean-debuginfo", "--no-lean-debuginfo") and out["lean"] is None:
-                    out["lean"] = a == "--lean-debuginfo"
-                elif a in ("--sccache", "--no-sccache") and out["sccache"] is None:
-                    out["sccache"] = a == "--sccache"
-                else:
-                    raise Usage(f"config {rest[0]}: unknown argument '{a}'")
+            _config_argv(rest, out)
         case _:
             raise Usage(f"unknown command '{cmd}'")
     out["cmd"] = command

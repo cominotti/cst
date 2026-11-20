@@ -218,35 +218,51 @@ def wait_kind(frames: Sequence[str], wchan: str | None) -> WaitKind:
     Conservative: anything not positively idle or memory counts as storage,
     e.g. io_destroy waiting for in-flight AIO, whose frames are all generic."""
     if frames:
-        if any(FUSE_FRAME.match(f) for f in frames):
-            return WaitKind.FUSE
-        if any(MAINT_FRAME.match(f) for f in frames):
-            return WaitKind.MAINTENANCE
-        if any(SWAP_FRAME.match(f) for f in frames):
-            return WaitKind.MEMORY
-        meaningful = [f for f in frames if not GENERIC_FRAME.match(f)]
-        if not meaningful:
-            # A freshly created kthread waits in D inside kthread() until its first wakeup.
-            return WaitKind.IDLE if set(frames) <= NEW_KTHREAD else WaitKind.STORAGE
-        if IDLE_FRAME.match(meaningful[0]):
-            return WaitKind.IDLE
-        if MMAP_LOCK_FRAME.match(meaningful[0]):
-            return WaitKind.MEMORY
-        for f in meaningful:
-            if MEM_FRAME.match(f):
-                return WaitKind.MEMORY
-            if LOCAL_IO_FRAME.match(f):
-                return WaitKind.STORAGE
-        return WaitKind.STORAGE
+        return _frames_kind(frames)
     if wchan is not None and wchan != "":
-        if FUSE_FRAME.match(wchan):
-            return WaitKind.FUSE
-        if MAINT_FRAME.match(wchan):
-            return WaitKind.MAINTENANCE
-        if SWAP_FRAME.match(wchan) or MEM_FRAME.match(wchan) or MMAP_LOCK_FRAME.match(wchan):
-            return WaitKind.MEMORY
-        return WaitKind.IDLE if IDLE_FRAME.match(wchan) else WaitKind.STORAGE
+        return _wchan_kind(wchan)
     return WaitKind.STORAGE
+
+
+def _frames_kind(frames: Sequence[str]) -> WaitKind:
+    """wait_kind of a stack: FUSE, maintenance or the swap path anywhere, then its meaningful frames."""
+    if any(FUSE_FRAME.match(f) for f in frames):
+        return WaitKind.FUSE
+    if any(MAINT_FRAME.match(f) for f in frames):
+        return WaitKind.MAINTENANCE
+    if any(SWAP_FRAME.match(f) for f in frames):
+        return WaitKind.MEMORY
+    meaningful = [f for f in frames if not GENERIC_FRAME.match(f)]
+    if not meaningful:
+        # A freshly created kthread waits in D inside kthread() until its first wakeup.
+        return WaitKind.IDLE if set(frames) <= NEW_KTHREAD else WaitKind.STORAGE
+    return _innermost_kind(meaningful)
+
+
+def _innermost_kind(meaningful: Sequence[str]) -> WaitKind:
+    """wait_kind of a stack's meaningful frames: the innermost one idle-ish or a memory map lock, then
+    the innermost that names a subsystem (memory reclaim or btrfs and the block layer); else storage."""
+    if IDLE_FRAME.match(meaningful[0]):
+        return WaitKind.IDLE
+    if MMAP_LOCK_FRAME.match(meaningful[0]):
+        return WaitKind.MEMORY
+    for f in meaningful:
+        if MEM_FRAME.match(f):
+            return WaitKind.MEMORY
+        if LOCAL_IO_FRAME.match(f):
+            return WaitKind.STORAGE
+    return WaitKind.STORAGE
+
+
+def _wchan_kind(wchan: str) -> WaitKind:
+    """wait_kind of a task without a stack, from its wchan alone."""
+    if FUSE_FRAME.match(wchan):
+        return WaitKind.FUSE
+    if MAINT_FRAME.match(wchan):
+        return WaitKind.MAINTENANCE
+    if SWAP_FRAME.match(wchan) or MEM_FRAME.match(wchan) or MMAP_LOCK_FRAME.match(wchan):
+        return WaitKind.MEMORY
+    return WaitKind.IDLE if IDLE_FRAME.match(wchan) else WaitKind.STORAGE
 
 
 def mmap_lock_only(frames: Sequence[str], wchan: str | None) -> bool:

@@ -19,9 +19,12 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
 import datetime
+import errno
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import stat
@@ -167,6 +170,9 @@ for a in "$@"; do
   case "$a" in --reflink=*|--sparse=*) ;; *) set -- "$@" "$a" ;; esac
   shift
 done
+if [ -n "$FIX_CP_REMOVES" ]; then
+  case " $* " in *"$FIX_CP_REMOVE_WHEN"*) /usr/bin/cp "$@" || exit; rm -rf "$FIX_CP_REMOVES"; exit 0 ;; esac
+fi
 exec /usr/bin/cp "$@"
 """
 RPM = """#!/bin/sh
@@ -365,6 +371,53 @@ class PartsTest(unittest.TestCase):
         ):
             with self.assertRaises(Usage):
                 vm_domain.parse_args(bad)
+
+    def test_a_non_file_disk_without_a_source_and_a_path_given_twice(self) -> None:
+        xml = """<domain><devices>
+          <disk type='block' device='disk'><target dev='vda'/></disk>
+          <disk type='file' device='disk'><source file='/a.qcow2'/><target dev='vdb'/></disk>
+          <disk type='file' device='disk'><source file='/a.qcow2'/><target dev='vdc'/></disk></devices></domain>"""
+        p = vm_domain.domain_parts(xml)
+        self.assertEqual(p.problems, ["vda: a block disk: only file disks can be copied; back it up by hand"])
+        self.assertEqual((p.disks, p.skipped), (["/a.qcow2"], []))
+
+    def test_the_nvram_path_from_its_text_or_its_source(self) -> None:
+        for nvram, want in (
+            ("<nvram> /n/text.fd </nvram>", "/n/text.fd"),
+            ("<nvram>/n/text.fd<source file='/n/src.fd'/></nvram>", "/n/text.fd"),
+            ("<nvram>  <source file='/n/src.fd'/></nvram>", "/n/src.fd"),
+            ("<nvram><source dev='/dev/x'/></nvram>", ""),
+            ("<nvram/>", ""),
+            ("", ""),
+        ):
+            with self.subTest(nvram=nvram):
+                xml = f"<domain><os>{nvram}</os><devices/></domain>"
+                self.assertEqual(vm_domain.domain_parts(xml).nvram, want)
+
+    def test_parse_args_help_keep_tag_and_the_order_of_its_refusals(self) -> None:
+        with self.assertRaisesRegex(Usage, "^help takes no arguments$"):
+            vm_domain.parse_args(["help", "x"])
+        for argv, want in (
+            (["backup", "w", "--nas", "--keep-tag", "pre-f46"], ("w", "pre-f46", True, False)),
+            (["backup", "--keep-tag=a.b", "--nas", "w", "--no-quiesce"], ("w", "a.b", True, True)),
+        ):
+            with self.subTest(argv=argv):
+                a = vm_domain.parse_args(argv)
+                self.assertEqual((a.vm, a.keep, a.nas, a.no_quiesce), want)
+        for argv, words in (
+            (["backup", "w", "--nas", "--keep-tag"], "--keep-tag '': a name of letters"),
+            (["backup", "--keep-tag=", "--nas"], "--keep-tag '': a name of letters"),
+            (["backup", "w", "--nas", "--keep-tag=cst-x"], "--keep-tag 'cst-x': a name of letters"),
+            (["backup", "--keep-tag", "k", "--keep-tag", "k2", "--nas"], "backup: unexpected argument '--keep-tag'"),
+            (["status", "--keep-tag", "k"], "status: unexpected argument '--keep-tag'"),
+            (["backup", "a", "b", "--full", "--nas"], "backup: unexpected argument 'b'"),
+            (["backup", "--full", "--nas", "--keep-tag", "k"], "backup: --full is for the local copy"),
+            (["backup", "--keep-tag", "k", "--full"], "backup: --keep-tag and --no-quiesce go with --nas"),
+            (["backup", "w", "--no-quiesce"], "backup: --keep-tag and --no-quiesce go with --nas"),
+            (["tune"], "tune: plan or apply"),
+        ):
+            with self.subTest(argv=argv), self.assertRaisesRegex(Usage, "^" + re.escape(words)):
+                vm_domain.parse_args(argv)
 
     def test_version_changes(self) -> None:
         self.assertEqual(
@@ -788,6 +841,84 @@ class BackupTest(Scratch):
             man = json.load(f)
         self.assertEqual(man["files"][0]["source"], real)
 
+    def test_a_disk_that_is_not_there_is_refused_before_any_copy(self) -> None:
+        gone = os.path.join(self.images, "gone.qcow2")
+        self.domain(
+            self.domain_xml(f"<disk type='file' device='disk'><source file='{gone}'/><target dev='sdc'/></disk>")
+        )
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"cst vm: win: disk {gone} not found\n", r.stderr)
+        self.assertFalse(os.path.exists(self.backups))
+        self.assertFalse([c for c in self.calls() if c.startswith("cp ")])
+
+    def test_two_disks_through_one_file_are_copied_once(self) -> None:
+        link = os.path.join(self.images, "link.qcow2")
+        os.symlink(self.disk, link)
+        self.domain(
+            self.domain_xml(f"<disk type='file' device='disk'><source file='{link}'/><target dev='sdc'/></disk>")
+        )
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
+        self.assertEqual(
+            [(e["source"], e["kind"]) for e in man["files"]],
+            [(self.disk, "disk"), (self.nvram, "nvram"), (os.path.join(self.swtpm, UUID), "tpm")],
+        )
+        self.assertEqual(
+            man["notes"],
+            [
+                "sdb (cdrom, not copied)",
+                f"disk {link} is a symbolic link: copied (and restored) through it: {self.disk}",
+            ],
+        )
+        self.assertIn("Done: 3 item(s), definition and manifest in", r.stdout)
+
+    def test_a_definition_without_uefi_variables_or_tpm(self) -> None:
+        xml = self.domain_xml()
+        xml = xml.replace(f"<nvram template='/usr/share/x.qcow2' format='qcow2'>{self.nvram}</nvram>", "")
+        xml = xml.replace("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>", "")
+        self.domain(xml)
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
+        self.assertEqual([e["source"] for e in man["files"]], [self.disk])
+        self.assertEqual(man["notes"], ["sdb (cdrom, not copied)"])
+        self.assertIn("Done: 1 item(s), definition and manifest in", r.stdout)
+
+    def test_uefi_variables_not_there_yet_are_a_note(self) -> None:
+        os.unlink(self.nvram)
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f"  note: UEFI variables {self.nvram} not there yet (the VM never started?): not copied\n", r.stdout
+        )
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            self.assertEqual([e["kind"] for e in json.load(f)["files"]], ["disk", "tpm"])
+
+    def test_a_source_removed_during_the_copy_is_a_change(self) -> None:
+        self.env.update(FIX_CP_REMOVES=self.disk, FIX_CP_REMOVE_WHEN=os.path.join(self.swtpm, UUID))
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "cst vm: changed during the copy (the VM was started?), the copy is not consistent: "
+            f"{self.disk}. Shut the VM off and run the backup again\n",
+            r.stderr,
+        )
+        self.assertIn(f"  incomplete backup removed: {self.dest()}", r.stderr)
+        self.assertFalse(os.path.exists(self.dest()))
+        self.assertFalse(os.path.exists(self.index))
+
+    def test_a_backup_folder_of_the_same_second_is_refused(self) -> None:
+        os.makedirs(self.dest())
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"cst vm: {self.dest()} already exists: wait a second and run it again\n", r.stderr)
+        self.assertEqual(os.listdir(self.dest()), [])
+        self.assertFalse([c for c in self.calls() if c.startswith("cp ")])
+
     def test_missing_tpm_state_is_a_note(self) -> None:
         shutil.rmtree(os.path.join(self.swtpm, UUID))
         r = self.run_tool("backup", "win")
@@ -885,6 +1016,105 @@ class ListStatusTest(Scratch):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("virsh not found", r.stdout)
+
+    def status_head(self) -> list[str]:
+        """The lines of status win before the image folders (those depend on the machine's folders)."""
+        self.env.update(CST_VM_CONF=os.path.join(self.tmp, "vm.conf"), CST_VM_UNIT_DIR=os.path.join(self.tmp, "units"))
+        r = self.run_tool("status", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.replace(self.tmp, "TMP").splitlines()
+        return lines[: lines.index("VM image folders (NOCOW):")]
+
+    def virsh_stub(self, body: str) -> None:
+        p = os.path.join(self.bin, "virsh")
+        with open(p, "w") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+
+    def test_status_when_the_state_is_not_readable(self) -> None:
+        self.virsh_stub(
+            '#!/bin/sh\necho "virsh $*" >>"$STUB_LOG"\n'
+            'case " $* " in *" domstate "*) echo "error: failed to get domain win" >&2; exit 1 ;; esac\nexit 1\n'
+        )
+        self.assertEqual(
+            self.status_head(),
+            [
+                "win: state not readable (error: failed to get domain win)",
+                (
+                    "  last backup: none (to the NAS, also while it runs: cst vm backup --nas; a local copy with the VM "
+                    "shut off: cst vm backup)"
+                ),
+                "  weekly NAS backup timer: off (cst vm backup-timer status win)",
+            ],
+        )
+        self.assertFalse([c for c in self.calls() if " dumpxml " in c])
+
+    def test_status_when_the_definition_cannot_be_read_or_parsed(self) -> None:
+        tail = [
+            (
+                "  last backup: none (to the NAS, also while it runs: cst vm backup --nas; a local copy with the VM "
+                "shut off: cst vm backup)"
+            ),
+            "  weekly NAS backup timer: off (cst vm backup-timer status win)",
+        ]
+        self.domain("not xml")
+        self.assertEqual(
+            self.status_head(),
+            [
+                "win: shut off",
+                "  cpu: no <cpu> element (or not readable)",
+                "  hardware: definition not readable",
+                *tail,
+            ],
+        )
+        self.virsh_stub(VIRSH.replace('exec cat "$FIX/domain.xml"', 'echo "error: no" >&2; exit 1'))
+        self.assertEqual(self.status_head(), ["win: shut off", "  cpu: no <cpu> element (or not readable)", *tail])
+
+    def test_status_with_packages_unchanged_and_an_older_nas_backup(self) -> None:
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        head = [
+            "win: shut off",
+            (
+                "  cpu mode host-passthrough: NOT disabled: cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet "
+                "(Windows may bootloop under QEMU 11; fix: cst cpu vm-pin plan)"
+            ),
+            "  hardware: 4 difference(s) from tune (Windows: virtio drivers first, the plan shows how): cst vm tune plan",
+            (
+                "  last backup: win              20261108T010640Z  reflink  deployment 45.1  qemu-kvm-11.1.3-1.fc45.x86_64  "
+                "TMP/cst-backups/win/20261108T010640Z"
+            ),
+            "  virtualization packages: unchanged since the last backup",
+        ]
+        timer = "  weekly NAS backup timer: off (cst vm backup-timer status win)"
+        self.assertEqual(self.status_head(), [*head, timer])
+        with open(self.index) as f:
+            data = json.load(f)
+        data["backups"].insert(
+            0,
+            {
+                "vm": "win",
+                "timestamp": "20261108T000640Z",
+                "epoch": NOW - 3600,
+                "mode": "nas",
+                "snapshot": "a1b2c3d4" + "e" * 56,
+                "repository": "sftp:nas:/r",
+                "host": "nas-host",
+                "consistency": "quiesced",
+                "keep": None,
+                "versions": {},
+                "deployment": None,
+            },
+        )
+        with open(self.index, "w") as f:
+            json.dump(data, f)
+        self.assertEqual(
+            self.status_head(),
+            [
+                *head,
+                "  last NAS backup: win              20261108T000640Z  nas      deployment ?  ?  restic a1b2c3d4 (quiesced)",
+                timer,
+            ],
+        )
 
     def test_usage(self) -> None:
         r = self.run_tool("bogus")
@@ -1186,6 +1416,48 @@ class TuneEdgeCaseTest(unittest.TestCase):
         devs = "<interface type='vhostuser'><mac address='52:54:00:00:00:02'/><model type='virtio'/></interface>"
         self.assertEqual(self.tune(with_devices(devs))[1], [])
 
+    def test_no_devices_and_the_memballoon_notes(self) -> None:
+        self.assertEqual(
+            self.tune("<domain type='kvm'><name>t</name></domain>\n"),
+            (None, [], [], ["no <devices> in the definition"]),
+        )
+        _, changes, held, notes = self.tune(
+            "<domain type='kvm'><name>t</name><devices><memballoon model='none'/></devices></domain>\n"
+        )
+        self.assertEqual((changes, held, notes), ([], [], ["memballoon model='none': left as it is"]))
+
+    def test_a_driver_other_than_qemu_is_left_as_it_is(self) -> None:
+        devs = "<disk type='file' device='disk'><driver name='tap'/><source file='/a'/><target dev='vda' bus='virtio'/></disk>"
+        after, changes, held, notes = self.tune(with_devices(devs))
+        assert after is not None
+        self.assertEqual((changes, held, notes), ([], [], ["disk vda: driver tap: left as it is"]))
+        self.assertIn('<driver name="tap" />', after)
+
+    def test_without_any_controller_the_new_one_goes_after_the_last_disk(self) -> None:
+        devs = (
+            "<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/></disk>"
+            "<disk type='file' device='cdrom'><target dev='sdb' bus='sata'/></disk>"
+            "<interface type='network'><model type='virtio'/></interface>"
+        )
+        after, changes, held, notes = self.tune(with_devices(devs))
+        assert after is not None
+        self.assertEqual(
+            changes,
+            [
+                "disk sda: cache (default) -> none",
+                "disk sda: io (default) -> native",
+                "disk sda: discard (default) -> unmap",
+                "disk sda: detect_zeroes (default) -> unmap",
+                "add a virtio-scsi controller (index 0)",
+                "disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)",
+            ],
+        )
+        self.assertEqual((held, notes), ([], []))
+        self.assertEqual(
+            [c.tag for c in _child(ET.fromstring(after), "devices")],
+            ["disk", "disk", "controller", "interface", "memballoon"],
+        )
+
 
 class TuneCommandTest(unittest.TestCase):
     """cmd_tune with a fake virsh (in-process: apply asks on a terminal)."""
@@ -1325,6 +1597,45 @@ class TuneCommandTest(unittest.TestCase):
         self.assertIn("win11-devbox: disks and network card already as cst vm tune recommends.", out)
         self.assertNotIn("held back", out)
 
+    def test_plan_of_a_linux_guest_with_a_knob_off_and_a_note(self) -> None:
+        x = old_domain().replace("http://microsoft.com/win/11", "http://fedoraproject.org/fedora/43")
+        self.xml = self.secret = x.replace("<memballoon model='virtio'", "<memballoon model='none'")
+
+        def _knobs(paths: object) -> dict[str, bool]:
+            return {**ALL_ON, "VM_TUNE_NIC": False}
+
+        with patch_vm("knobs", _knobs):
+            rc, out = self.run_cmd(apply=False, flag=False)
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual(
+            lines[: lines.index("--- current")],
+            [
+                "win11-devbox: shut off; guest: Linux (libosinfo http://fedoraproject.org/fedora/43)",
+                f"  skipped by {self.cfg.paths.vm_conf}: VM_TUNE_NIC=no",
+                "  change: disk sda: cache (default) -> none",
+                "  change: disk sda: io (default) -> native",
+                "  change: disk sda: discard (default) -> unmap",
+                "  change: disk sda: detect_zeroes (default) -> unmap",
+                "  change: add a virtio-scsi controller (index 0)",
+                "  change: disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)",
+                "  note: memballoon model='none': left as it is",
+                (
+                    "  CPU (owned by cst cpu vm-pin, not by tune): CET/MBEC disabled; vCPUs pinned to 12-23; check: cst cpu "
+                    "vm-pin plan"
+                ),
+                (
+                    "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed drivers "
+                    "(hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first."
+                ),
+                "",
+            ],
+        )
+        self.assertEqual(
+            lines[-2:],
+            ["", "Plan only. Apply with: cst vm tune apply win11-devbox   (effective at the VM's next start)"],
+        )
+
     def test_apply_needs_root(self) -> None:
         def _uid() -> int:
             return 1000
@@ -1411,6 +1722,130 @@ class NocowTest(unittest.TestCase):
         self.assertIn(f"Set the mark with: cst-vm nocow apply   (folders: {self.boxes})", out)
         self.assertIn("not present", out)
         self.assertNotIn("virtio-win.iso", out)
+
+    def test_nocow_lines_of_an_unlistable_folder_and_of_cow_images_without_the_hints(self) -> None:
+        system = vm_domain.ImageProbe("system", "/s", "sys", present=True, btrfs=True, nocow=None, listed=False)
+        self.assertEqual(
+            vm_domain.nocow_lines(system, "cst vm"),
+            ["/s  [sys]", "  NOCOW mark (+C): not readable as your user (root-only folder): cst vm nocow plan --root"],
+        )
+        user = vm_domain.ImageProbe("user", "/u", "usr", present=True, btrfs=True, nocow=False, listed=False)
+        self.assertEqual(
+            vm_domain.nocow_lines(user, "cst vm"),
+            [
+                "/u  [usr]",
+                "  NOCOW mark (+C): no: cst vm nocow apply sets it (only files created later get it)",
+                "  images: folder not listable as your user",
+            ],
+        )
+        empty = vm_domain.ImageProbe("user", "/e", "e", present=True, btrfs=None, nocow=True, listed=True)
+        self.assertEqual(vm_domain.nocow_lines(empty, "p"), ["/e  [e]", "  NOCOW mark (+C): yes", "  images: none"])
+        images = [
+            vm_domain.ImageInfo("a.qcow2", "/i/a.qcow2", 3 * 2**30, 5 * 2**30, nocow=False),
+            vm_domain.ImageInfo("b.raw", "/i/b.raw", 0, 0, None),
+            vm_domain.ImageInfo("c.qcow2", "/i/c.qcow2", 0, 0, nocow=True),
+            vm_domain.ImageInfo("d.qcow2", "/i/d.qcow2", 2**20, 2**21, nocow=False),
+        ]
+        folder = vm_domain.ImageProbe(
+            "system",
+            "/i",
+            "img",
+            present=True,
+            btrfs=True,
+            nocow=True,
+            listed=True,
+            images=images,
+            leftovers=["x.cow-old"],
+        )
+        self.assertEqual(
+            vm_domain.nocow_lines(folder, "p", verbose=False),
+            [
+                "/i  [img]",
+                "  NOCOW mark (+C): yes",
+                "  NOCOW images: c.qcow2",
+                "  images whose mark is not readable as your user: b.raw (p nocow plan --root)",
+                "  still copy-on-write: a.qcow2  3.0 GiB allocated, 5.0 GiB apparent",
+                "  still copy-on-write: d.qcow2  1.0 MiB allocated, 2.0 MiB apparent",
+                "  leftover of a conversion: x.cow-old (remove it once the VM booted well from the new file)",
+            ],
+        )
+        verbose = vm_domain.nocow_lines(folder, "p")
+        self.assertEqual(verbose[5], "    to convert (every VM using it shut off; needs about 3.0 GiB free):")
+        self.assertEqual(verbose[6:12], [f"      {ln}" for ln in vm_domain.convert_lines(images[0], system=True)])
+        self.assertEqual(verbose[12], "  still copy-on-write: d.qcow2  1.0 MiB allocated, 2.0 MiB apparent")
+        self.assertEqual(len(verbose), 21)
+
+    def test_mark_system_dir_as_root(self) -> None:
+        path = os.path.join(self.tmp, "var", "lib", "libvirt", "new-images")
+        ran: list[list[str]] = []
+
+        def fake_run(cmd: Sequence[str], timeout: int = 120) -> tuple[int, str, str]:
+            ran.append(list(cmd))
+            return 0, "", ""
+
+        def _root() -> int:
+            return 0
+
+        def mark(p: str) -> None:
+            self.flags[p] = inode_attrs.FS_NOCOW_FL
+
+        def no_mark(p: str) -> None:
+            pass
+
+        def refused(p: str) -> None:
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        absent = vm_domain.ImageProbe("system", path, "x")
+        present = vm_domain.ImageProbe("system", path, "x", present=True)
+        with mock.patch.object(os, "geteuid", _root), patch_vm("run", fake_run):
+            with patch_vm("mark_folder_nocow", mark):
+                self.assertEqual(vm_adapters_images.mark_system_dir(absent, print), "")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o711)
+            self.assertEqual(ran, [["restorecon", path]])
+            self.flags[path] = 0
+            with patch_vm("mark_folder_nocow", no_mark):
+                self.assertEqual(vm_adapters_images.mark_system_dir(present, print), f"{path}: the mark did not stick")
+            with patch_vm("mark_folder_nocow", refused):
+                self.assertEqual(vm_adapters_images.mark_system_dir(present, print), f"{path}: Operation not permitted")
+            orphan = vm_domain.ImageProbe("system", os.path.join(self.tmp, "no", "such", "images"), "x")
+            with patch_vm("mark_folder_nocow", mark):
+                self.assertEqual(
+                    vm_adapters_images.mark_system_dir(orphan, print), f"{orphan.path}: No such file or directory"
+                )
+        self.assertEqual(ran, [["restorecon", path]])
+
+    def test_mark_system_dir_through_sudo_stops_at_the_failed_step(self) -> None:
+        new = self.system + " new"
+        ran: list[list[str]] = []
+        said: list[str] = []
+
+        def on_terminal(cmd: Sequence[str]) -> int:
+            ran.append(list(cmd))
+            return 1 if cmd[2] == "install" else 0
+
+        def fake_run(cmd: Sequence[str], timeout: int = 120) -> tuple[int, str, str]:
+            ran.append(list(cmd))
+            return 1, "", ""
+
+        def _user() -> int:
+            return 1000
+
+        with (
+            mock.patch.object(os, "geteuid", _user),
+            patch_vm("run_on_terminal", on_terminal),
+            patch_vm("run", fake_run),
+        ):
+            err = vm_adapters_images.mark_system_dir(vm_domain.ImageProbe("system", new, "x"), said.append)
+            self.assertEqual(err, f"sudo install {shlex.quote(new)}: exit 1")
+            self.assertEqual(ran, [["sudo", "--", "install", "-d", "-o", "root", "-g", "root", "-m", "0711", new]])
+            self.assertEqual(said, [f"  sudo install -d -o root -g root -m 0711 {shlex.quote(new)}"])
+            ran.clear()
+            present = vm_domain.ImageProbe("system", self.system, "x", present=True)
+            err = vm_adapters_images.mark_system_dir(present, said.append)
+        self.assertEqual(err, f"{self.system}: the mark could not be confirmed (sudo lsattr -d {self.system})")
+        self.assertEqual(
+            ran, [["sudo", "--", "chattr", "+C", self.system], ["sudo", "--", "lsattr", "-d", self.system]]
+        )
 
     def test_convert_lines_order(self) -> None:
         img = vm_domain.ImageInfo("w b.qcow2", "/i/w b.qcow2", 0, 0, False)
@@ -2107,7 +2542,7 @@ class TimerUseCaseTest(unittest.TestCase):
         # A refusal is any text, "" too: on must not go on and install the files.
         timers = FakeTimers({"/p": OwnedState.MISSING}, [])
         with (
-            mock.patch.object(vm_application, "masked_refusal", lambda *_args, **_kwargs: ""),
+            mock.patch.object(vm_application, "masked_refusal", return_value=""),
             self.assertRaisesRegex(Refused, "nothing was changed"),
         ):
             vm_application.timer_on(timers, FakeSystemd(timers), "win", lambda: None, lambda s: None)

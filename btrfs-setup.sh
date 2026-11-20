@@ -222,6 +222,7 @@ case "${cmd}" in
     --test-alert) cmd=test-alert ;;
     --no-below) cmd=install; set -- --no-below "$@" ;;
     -h|--help) cmd=help ;;
+    *) ;;  # any other word: checked by the dispatch below
 esac
 
 case "${cmd}" in
@@ -330,10 +331,11 @@ remove_old_units() {
 
 # check_syntax FILE: bash -n or a Python parse, by shebang; fails on errors.
 check_syntax() {
-    if head -n1 "$1" | grep -q python; then
-        python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$1"
+    local file="$1"
+    if head -n1 "${file}" | grep -q python; then
+        python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${file}"
     else
-        bash -n "$1"
+        bash -n "${file}"
     fi
 }
 
@@ -526,7 +528,7 @@ status_pending_alerts() {
         cst_as_user "${target_user}" python3 -I -B "${SRC}/cst-pending-alerts" --list
     else
         python3 -I -B "${SRC}/cst-pending-alerts" --list
-    fi 2>&1 | sed 's/^/  /'
+    fi 2>&1 | cst_indent
 }
 
 shim_content() {
@@ -640,22 +642,22 @@ status() (
     uuid="$(root_fs_uuid)"
     echo "kernel $(uname -r), root btrfs ${uuid:-?}"
     section "services and timers"
-    systemctl --no-pager list-timers "${TIMERS[@]}" fstrim.timer 2>/dev/null | sed -n '1,4p' | sed 's/^/  /'
+    systemctl --no-pager list-timers "${TIMERS[@]}" fstrim.timer 2>/dev/null | sed -n '1,4p' | cst_indent
     for u in btrfs-stall-monitor.service below.service; do
         printf '  %-28s %s\n' "${u}" "$(systemctl is-active "${u}" 2>/dev/null || true)"
     done
     section "last health check"
     journalctl -u btrfs-health-check.service -o cat --no-pager 2>/dev/null |
-        grep -E 'btrfs-health-check:' | tail -n 3 | sed 's/^/  /'
+        grep -E 'btrfs-health-check:' | tail -n 3 | cst_indent
     section "last scrub"
-    btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | sed 's/^/  /'
+    btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | cst_indent
     section "weekly scrub speed limit (per device)"
     status_scrub_limit "${uuid}"
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
-        grep -E 'trimmed|Failed|failed' | tail -n 4 | sed 's/^/  /'
+        grep -E 'trimmed|Failed|failed' | tail -n 4 | cst_indent
     section "docker volumes (NOCOW)"
-    python3 -I -B "${SRC}/docker-volumes-nocow" status 2>&1 | sed 's/^/  /'
+    python3 -I -B "${SRC}/docker-volumes-nocow" status 2>&1 | cst_indent
     section "docker-gc"
     if systemctl -q is-enabled docker-gc.timer 2>/dev/null; then
         journalctl -u docker-gc.service -o cat --no-pager 2>/dev/null | grep -E '^<[0-9]>docker-gc: removed|docker-gc: removed' |
@@ -678,21 +680,21 @@ status() (
     (
         # shellcheck source=btrfs/setup-snapshots.bash
         . "${SRC}/setup-snapshots.bash"
-        snap_status 2>&1 | sed 's/^/  /'
+        snap_status 2>&1 | cst_indent
     )
     section "Bulk (re-downloadable data: no snapshots, no NAS backup)"
     if [[ -n "${target_user}" && "${target_user}" != root ]]; then
         (
             # shellcheck source=btrfs/setup-snapshots.bash
             . "${SRC}/setup-snapshots.bash"
-            bulk_status 2>&1 | sed 's/^/  /'
+            bulk_status 2>&1 | cst_indent
         )
     else
         echo "  run through sudo from your user account to see your ~/Bulk"
     fi
     section "stalls, last hour (report --since '1 hour ago' --no-below)"
     python3 -I -B "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
-        sed 's/^/  /'
+        cst_indent
     data="$(du -sh "${DATA_DIR}" 2>/dev/null | cut -f1)"
     echo
     echo "data: stall log ${data:-?}, below store $(du -sh /var/log/below/store 2>/dev/null | cut -f1)"
@@ -717,8 +719,10 @@ crypt_active_flags() {
     dmsetup table "$1" | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^(allow_discards|same_cpu_crypt|submit_from_crypt_cpus|no_read_workqueue|no_write_workqueue|high_priority)$/) print $i}'
 }
 
+# crypt_header_flags BACKING: the persistent flags in the LUKS2 header of the backing device.
 crypt_header_flags() {
-    cryptsetup luksDump "$1" 2>/dev/null | awk -F: '/^Flags:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}'
+    local backing="$1"
+    cryptsetup luksDump "${backing}" 2>/dev/null | awk -F: '/^Flags:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}'
 }
 
 crypt_perf() {
@@ -758,6 +762,7 @@ crypt_perf() {
                 same_cpu_crypt) opts+=(--perf-same_cpu_crypt) ;;
                 submit_from_crypt_cpus) opts+=(--perf-submit_from_crypt_cpus) ;;
                 high_priority) opts+=(--perf-high_priority) ;;
+                *) ;;  # no_read/no_write_workqueue: set or dropped by the action below, never carried over
             esac
         done
         if [[ "${action}" == enable ]]; then
@@ -859,6 +864,7 @@ docker_gc() {
             case "${timer}" in
                 "") timer=off ;;
                 not-found) timer="not installed" ;;
+                *) ;;  # systemd's other words (enabled, disabled, static, masked...) are shown as they are
             esac
             printf 'timer %s, recorder %s\n' "${timer}" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"

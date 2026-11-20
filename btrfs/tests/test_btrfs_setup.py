@@ -1689,7 +1689,7 @@ class UserStepsTest(unittest.TestCase):
                 )
 
     def user_configs(self, fake_rc: int) -> subprocess.CompletedProcess[str]:
-        r = self.run_bash('snap_user_configs "$T/home"', fake_rc=fake_rc)
+        r = self.run_bash("snap_user_configs", fake_rc=fake_rc)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(
             [s["argv"][:2] for s in self.seen()], [["config", "apply"], ["auto", "on"], ["apply", "--home"]]

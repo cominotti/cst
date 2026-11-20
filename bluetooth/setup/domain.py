@@ -15,6 +15,7 @@ import re
 from typing import Final, Literal
 
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
+from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.text import HELP_WORDS, enum_member, group
 from cst_core.domain.units import ActiveState
 
@@ -27,6 +28,11 @@ BEARERS: Final = ("", "le", "bredr", "last-used")
 VALUED: Final = ("--device", "--ldac-quality", "--bearer", "--le-audio")
 MAC_RE: Final = re.compile(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 TIMEOUT_RE: Final = re.compile(r"[0-9]{1,9}")
+SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst runs, at the top of the CST folder
+# The note of a file CST did not write and apply refuses to replace (plan's CONFLICT rows).
+REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
+LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
+LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and status's section)
 # Which command takes which option (bluetooth-setup.sh's allowed()).
 _ALLOWED: Final = frozenset(
     {
@@ -143,21 +149,9 @@ def allowed(cmd: BluetoothCommand, opt: str) -> bool:
     return (cmd, opt) in _ALLOWED
 
 
-def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | Exit:
-    """The options, or the help (usage: its text) or a usage error, as bluetooth-setup.sh read them."""
-    word0 = argv[0] if argv and argv[0] else "help"  # ${1:-help}: an empty word is help too
-    rest = list(argv[1:])
-    words = (word0, *rest)
-    if word0 in HELP_WORDS:
-        return Exit(0, out=usage)
-    cmd = enum_member(BluetoothCommand, word0)
-    if cmd is None:
-        return Exit(2, err=f"Unknown command: {word0}\n{usage}")
-    le_set = ""
-    if cmd == BluetoothCommand.LE_AUDIO and rest and not rest[0].startswith("--"):
-        le_set = rest.pop(0)
-        if le_set not in ("on", "off"):
-            return Exit(2, err=f"{prog} le-audio: say on or off (got '{le_set}')\n")
+def _read_options(cmd: BluetoothCommand, rest: list[str], prog: str) -> tuple[dict[str, str], set[str]] | Exit:
+    """The options after the command: ({valued option: its value}, {flags}), or the usage error.
+    Takes the words out of REST as it reads them."""
     values: dict[str, str] = {}
     flags: set[str] = set()
     while rest:
@@ -179,6 +173,28 @@ def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | 
         else:
             flags.add(opt)
         rest.pop(0)
+    return values, flags
+
+
+def parse_command_line(argv: Sequence[str], prog: str, usage: str) -> Options | Exit:
+    """The options, or the help (usage: its text) or a usage error, as bluetooth-setup.sh read them."""
+    word0 = argv[0] if argv and argv[0] else "help"  # ${1:-help}: an empty word is help too
+    rest = list(argv[1:])
+    words = (word0, *rest)
+    if word0 in HELP_WORDS:
+        return Exit(0, out=usage)
+    cmd = enum_member(BluetoothCommand, word0)
+    if cmd is None:
+        return Exit(2, err=f"Unknown command: {word0}\n{usage}")
+    le_set = ""
+    if cmd == BluetoothCommand.LE_AUDIO and rest and not rest[0].startswith("--"):
+        le_set = rest.pop(0)
+        if le_set not in ("on", "off"):
+            return Exit(2, err=f"{prog} le-audio: say on or off (got '{le_set}')\n")
+    read = _read_options(cmd, rest, prog)
+    if isinstance(read, Exit):
+        return read
+    values, flags = read
     return Options(
         cmd=cmd,
         args=words,
@@ -271,7 +287,7 @@ class Paths:
 
     @property
     def self_script(self) -> str:
-        return f"{self.checkout}/bluetooth-setup.sh"
+        return f"{self.checkout}/{SETUP_SCRIPT}"
 
     @property
     def wp_dir(self) -> str:
@@ -332,14 +348,9 @@ class Config:
         return self.device.replace(":", "_")
 
 
-def resolve(
-    opts: Options, settings: dict[str, str], user_keys: Sequence[str], paths: Paths, prog: str
-) -> Config | Exit:
-    """The settings of the run, or the usage error that stops it (exit 2)."""
-    device = opts.device or settings.get("DEVICE", "")
-    quality = opts.quality or settings.get("LDAC_QUALITY", "") or "auto"
-    bearer = opts.bearer if opts.bearer_given else settings.get("BEARER", "")
-    rate = settings.get("LDAC_RATE", "")
+def _le_audio(opts: Options, settings: dict[str, str], user_keys: Sequence[str], paths: Paths) -> tuple[str, str]:
+    """(LE Audio on or off, where that came from): --le-audio, else the user's settings, else CST's;
+    le-audio's on or off wins over all (its where stays the settings')."""
     le = opts.le or settings.get("LE_AUDIO", "") or "off"
     le_from = "the CST default"
     if "LE_AUDIO" in user_keys:
@@ -348,6 +359,18 @@ def resolve(
         le_from = "--le-audio, this run only"
     if opts.le_set:
         le = opts.le_set
+    return le, le_from
+
+
+def resolve(
+    opts: Options, settings: dict[str, str], user_keys: Sequence[str], paths: Paths, prog: str
+) -> Config | Exit:
+    """The settings of the run, or the usage error that stops it (exit 2)."""
+    device = opts.device or settings.get("DEVICE", "")
+    quality = opts.quality or settings.get("LDAC_QUALITY", "") or "auto"
+    bearer = opts.bearer if opts.bearer_given else settings.get("BEARER", "")
+    rate = settings.get("LDAC_RATE", "")
+    le, le_from = _le_audio(opts, settings, user_keys, paths)
 
     def bad(msg: str) -> Exit:
         return Exit(2, err=f"{prog} {opts.cmd}: {msg}\n")
@@ -365,10 +388,16 @@ def resolve(
         return bad(
             f"the device must be a MAC address like AA:BB:CC:DD:EE:FF (got '{device}'; set DEVICE in {paths.user_settings} or use --device)"
         )
+    if not device:
+        device_from = "no DEVICE set"
+    elif opts.device:
+        device_from = "--device"
+    else:
+        device_from = "settings"
     return Config(
         prog=prog,
         device=device.upper(),
-        device_from=("--device" if opts.device else "settings") if device else "no DEVICE set",
+        device_from=device_from,
         quality=quality,
         bearer=bearer,
         ldac_rate=rate,

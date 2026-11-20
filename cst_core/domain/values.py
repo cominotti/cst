@@ -84,7 +84,10 @@ def format_bytes_decimal(n: float) -> str:
     val = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if val < 1000 or unit == "TB":
-            return f"{val:.1f} {unit}" if unit != "B" else f"{int(val) if val.is_integer() else val} B"
+            if unit == "B":
+                shown = int(val) if val.is_integer() else val
+                return f"{shown} B"
+            return f"{val:.1f} {unit}"
         val /= 1000
     return f"{val} B"
 
@@ -198,13 +201,7 @@ class CpuSet:
             if not token:
                 raise DomainValidationError(f"invalid empty range element in {spec!r}")
             if "-" in token:
-                start_s, sep, end_s = token.partition("-")
-                if not sep or "-" in end_s or not _is_index(start_s) or not _is_index(end_s):
-                    raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
-                start, end = int(start_s), int(end_s)
-                if start > end:
-                    raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
-                selected.update(range(start, end + 1))
+                selected.update(_parse_range(token, spec))
             else:
                 if not _is_index(token):
                     raise DomainValidationError(f"invalid CPU index {token!r} in {spec!r}")
@@ -219,6 +216,18 @@ class CpuSet:
 def _is_index(text: str) -> bool:
     """A CPU index as the kernel writes one: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
     return text.isascii() and text.isdigit()
+
+
+def _parse_range(token: str, spec: str) -> range:
+    """The CPUs of one "a-b" element (token) of the list spec; DomainValidationError when token is
+    not two indices around one dash, or when the range descends."""
+    start_s, sep, end_s = token.partition("-")
+    if not sep or "-" in end_s or not _is_index(start_s) or not _is_index(end_s):
+        raise DomainValidationError(f"invalid CPU range {token!r} in {spec!r}")
+    start, end = int(start_s), int(end_s)
+    if start > end:
+        raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
+    return range(start, end + 1)
 
 
 @dataclass(frozen=True, slots=True)

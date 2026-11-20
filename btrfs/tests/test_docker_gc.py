@@ -751,6 +751,17 @@ class SettingsDomainTest(unittest.TestCase):
         self.assertIsNone(gc_domain.builtin_protected(["def broken(:\n", "x = 1\n"]))
         self.assertIsNone(gc_domain.builtin_protected([]))
 
+    def test_a_gc_settings_class_without_a_readable_default_leaves_the_older_default(self) -> None:
+        # Only a protected default that is a tuple of strings counts; another GcSettings (no
+        # protected, a name, a tuple with a number) does not stop the search for the older .get.
+        for body in ("x: int = 1", "protected: tuple[str, ...] = REGS", 'protected: tuple[object, ...] = ("a", 1)'):
+            source = f"import os\nclass GcSettings:\n    {body}\n{OLD_PROTECTED_LINE}"
+            with self.subTest(body=body):
+                self.assertEqual(gc_domain.builtin_protected([source]), ("old.example:5000",))
+        # The class default wins over a .get default found before it, also when it is empty.
+        empty = "class GcSettings:\n    protected: tuple[str, ...] = ()\n"
+        self.assertEqual(gc_domain.builtin_protected(["import os\n" + OLD_PROTECTED_LINE, empty]), ())
+
     def test_a_source_it_cannot_evaluate_shows_no_list(self) -> None:
         # literal_eval raises TypeError on an unhashable set item, the parser MemoryError on a nesting
         # too deep: no list (so a refusal, exit 78), never a traceback; the other sources still count.

@@ -61,7 +61,9 @@ def as_user[**P, R: Json](
     (pw None: already the user, run here). Returns its result, which crosses
     back as JSON (R: a Json value) and must pass CHECK (a result of another
     shape is no result of fn: RuntimeError); an exception there is raised here
-    again."""
+    again. The child takes umask 022, as a login session does, so what fn
+    creates in the home gets the usual modes: files 0644, folders 0755 (the
+    user writes, others only read)."""
     if pw is None:
         return fn(*args, **kwargs)
     sys.stdout.flush()

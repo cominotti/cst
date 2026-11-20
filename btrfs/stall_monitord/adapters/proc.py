@@ -88,7 +88,7 @@ def parse_psi(path: str) -> list[float | int] | None:
         fields = line.split()
         if not fields or fields[0] not in ("some", "full"):
             continue
-        vals = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
+        vals = {k: v for k, _, v in (f.partition("=") for f in fields[1:] if "=" in f)}
         idx = 0 if fields[0] == "some" else 2
         res[idx] = float(vals.get("avg10", 0))
         res[idx + 1] = int(vals.get("total", 0))
@@ -146,6 +146,11 @@ class Topology:
         self.refresh_fs()
 
     def refresh_fs(self) -> None:
+        self._refresh_btrfs()
+        self._refresh_swaps()
+
+    def _refresh_btrfs(self) -> None:
+        """Each btrfs filesystem: its devices and disks, label and devids; their roles and dev numbers."""
         for d in glob.glob("/sys/fs/btrfs/*-*-*-*-*"):
             uuid = os.path.basename(d)
             devs = sorted(os.listdir(f"{d}/devices")) if os.path.isdir(f"{d}/devices") else []
@@ -157,6 +162,9 @@ class Topology:
                 self.disks.setdefault(name, f"btrfs:{label or uuid[:8]}")
             for name in devs:
                 self.top_devs.add((read_text(f"/sys/class/block/{name}/dev") or "").strip())
+
+    def _refresh_swaps(self) -> None:
+        """The swap devices of /proc/swaps and their disks: role "swap" unless they have one."""
         for line in (read_text("/proc/swaps") or "").splitlines()[1:]:
             dev = line.split()[0] if line.split() else ""
             if dev.startswith("/dev/"):

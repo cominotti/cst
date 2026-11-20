@@ -24,14 +24,20 @@ from cst_core.adapters.runtime import SYSTEM_PYTHON, lc_ctype_handover
 from cst_core.adapters.terminal import stderr, stdout
 from cst_core.domain.errors import shell_exit_status
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, select_entries
+from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import holds, read_stripped
-from cpu.game.domain import GAME_DROPIN, cpuset_in
+from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
 from cpu.setup.domain import (
+    CORE_COMPONENT,
+    DOCKER_SLICE_COMPONENT,
+    GAMEMODE_COMPONENT,
+    GAMEMODE_GROUP,
     MANAGED_MARK,
     TOOLBOX_COMPONENT,
+    WATCHDOG_TIMER,
     DROPIN_NAME,
     OLD_DROPIN_NAME,
     CpuRootCommand,
@@ -103,7 +109,9 @@ def _make_run_dir(path: str) -> None:
 
 
 def _touch(path: str) -> None:
+    """touch PATH: created when it is not there, its times set to now."""
     with open(path, "a", encoding="utf-8"):
+        # Opening it is the whole point: append mode creates the file and leaves its bytes alone.
         pass
     os.utime(path)
 
@@ -278,7 +286,7 @@ class CpuSetup:
     def in_gamemode_group(self) -> bool:
         """The target user is in the 'gamemode' group (id -nG)."""
         res = self.run(["id", "-nG", self.user], check=False, capture=True)
-        return "gamemode" in res.stdout.split()
+        return GAMEMODE_GROUP in res.stdout.split()
 
     def user_cg(self) -> str:
         """The user manager's cgroup folder (the uid asked twice, as the bash script's path did)."""
@@ -306,7 +314,7 @@ class CpuSetup:
         srcs = [
             e.src
             for kind in (ArtifactKind.PYTHON_ENTRY, ArtifactKind.SHELL)
-            for e in select_entries(INSTALL_MANIFEST, component="cpu:core", kind=kind)
+            for e in select_entries(INSTALL_MANIFEST, component=CORE_COMPONENT, kind=kind)
         ]
         for f in srcs:
             if not self.check_syntax(os.path.join(self.root, f)):
@@ -314,9 +322,9 @@ class CpuSetup:
         _make_run_dir(os.path.dirname(p.conf))
         if not os.path.exists(p.conf):
             self.install_text(p.conf, conf_lines(user))
-        self.installer("install", "--set", f"USER={user}", "--component", "cpu:core")
+        self.installer("install", "--set", f"USER={user}", "--component", CORE_COMPONENT)
         if os.access(p.hwp_boost, os.W_OK):
-            self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost), component="cpu:core")
+            self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost), component=CORE_COMPONENT)
             if self._echo_to(p.hwp_boost, "1"):
                 self.say(f"set:       {p.hwp_boost} = 1")
         else:
@@ -336,12 +344,12 @@ class CpuSetup:
         self._gamemode_group()
         self.run(["systemctl", "daemon-reload"])
         self.usys("daemon-reload")
-        self.run(["systemctl", "enable", "--now", "cpu-game-watchdog.timer"])
-        self.installer("mark", "--component", "cpu:core", "done")
+        self.run(["systemctl", "enable", "--now", WATCHDOG_TIMER])
+        self.installer("mark", "--component", CORE_COMPONENT, ComponentState.DONE)
         home = self.required_home(user, "cst-install.bash")
-        self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, "done", as_user=user)
+        self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, ComponentState.DONE, as_user=user)
         if gamemode:
-            self.installer("mark", "--home", home, "--component", "cpu:gamemode", "done", as_user=user)
+            self.installer("mark", "--home", home, "--component", GAMEMODE_COMPONENT, ComponentState.DONE, as_user=user)
         for line in install_done_lines(self.prog):
             self.say(line)
         return 0
@@ -363,18 +371,19 @@ class CpuSetup:
             self.warn(f"NOTE: {ini} is your own: add [custom] start/end from {self.src}/gamemode.ini by hand")
             return False
         home = self.required_home(self.user, "cst_install_as")
-        self.installer("install", "--home", home, "--component", "cpu:gamemode", as_user=self.user)
+        self.installer("install", "--home", home, "--component", GAMEMODE_COMPONENT, as_user=self.user)
         return True
 
     def _gamemode_group(self) -> None:
         """The user in the 'gamemode' group. Silverblue: system groups live in /usr/lib/group, and
         usermod needs them in /etc/group."""
         p = self.paths
-        if not self._has_group("gamemode"):
+        if not self._has_group(GAMEMODE_GROUP):
             self.warn("no 'gamemode' group on this system (is the gamemode package installed?)")
             return
-        if not _line_starts(p.etc_group, "gamemode:"):
-            found = [line for line in (read_text(p.lib_group) or "").split("\n") if line.startswith("gamemode:")]
+        entry = f"{GAMEMODE_GROUP}:"
+        if not _line_starts(p.etc_group, entry):
+            found = [line for line in (read_text(p.lib_group) or "").split("\n") if line.startswith(entry)]
             if not found:
                 raise Halt(
                     1,
@@ -382,10 +391,10 @@ class CpuSetup:
                     "add its line to /etc/group by hand, then run install again",
                 )
             _append(p.etc_group, "\n".join(found) + "\n")
-            if not _line_starts(p.etc_gshadow, "gamemode:"):
-                _append(p.etc_gshadow, "gamemode:!::\n")
+            if not _line_starts(p.etc_gshadow, entry):
+                _append(p.etc_gshadow, f"{entry}!::\n")
         if not self.in_gamemode_group():
-            self.run(["usermod", "-aG", "gamemode", self.user])
+            self.run(["usermod", "-aG", GAMEMODE_GROUP, self.user])
             self.say(f"added {self.user} to the 'gamemode' group (effective at the next login)")
 
     # ---- uninstall ---------------------------------------------------------------------------------
@@ -394,11 +403,11 @@ class CpuSetup:
         p = self.paths
         # The watchdog first: a tick between the two would start the profile again, just before its
         # unit and its off program are deleted.
-        self.run(["systemctl", "disable", "--now", "cpu-game-watchdog.timer"], check=False, quiet=True)
+        self.run(["systemctl", "disable", "--now", WATCHDOG_TIMER], check=False, quiet=True)
         self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
         # Without the watchdog nothing would remove one left behind (the reload below then drops its MemoryLow).
         self.remove_game_dropins()
-        self.installer("remove", "--component", "cpu:core")
+        self.installer("remove", "--component", CORE_COMPONENT)
         self.remove_old_dropins()
         had_hwp = os.path.isfile(p.hwp_tmpfiles)
         # Also when it is gone already: its install record line goes too.
@@ -421,7 +430,7 @@ class CpuSetup:
             self.rmdir(os.path.dirname(self.toolbox_dropin()), os.path.dirname(self.helper_dropin()))
             if holds(gamemode_ini(self._home_of(self.user)), MANAGED_MARK):
                 home = self.required_home(self.user, "cst-install.bash")
-                self.installer("remove", "--home", home, "--component", "cpu:gamemode", as_user=self.user)
+                self.installer("remove", "--home", home, "--component", GAMEMODE_COMPONENT, as_user=self.user)
             self.usys("daemon-reload")
         self.run(["systemctl", "daemon-reload"])
         for line in uninstall_kept_lines(self.prog, p.conf):
@@ -435,16 +444,16 @@ class CpuSetup:
             case DockerSliceAction.INSTALL:
                 ecores = self.e_cores()
                 allowed = f"AllowedCPUs={ecores}" if ecores else ""
-                self.installer("install", "--set", f"ALLOWED={allowed}", "--component", "cpu:docker-slice")
+                self.installer("install", "--set", f"ALLOWED={allowed}", "--component", DOCKER_SLICE_COMPONENT)
                 self.run(["systemctl", "daemon-reload"])
-                self.run(["systemctl", "start", "builds.slice"])
-                self.installer("mark", "--component", "cpu:docker-slice", "done")
+                self.run(["systemctl", "start", BUILDS_SLICE])
+                self.installer("mark", "--component", DOCKER_SLICE_COMPONENT, ComponentState.DONE)
                 self._set_builds_parent()
                 self.say("Restart Docker when convenient (stops running containers): sudo systemctl restart docker")
                 return 0
             case DockerSliceAction.UNINSTALL:
                 self._drop_builds_parent()
-                self.installer("remove", "--component", "cpu:docker-slice")
+                self.installer("remove", "--component", DOCKER_SLICE_COMPONENT)
                 self.run(["systemctl", "daemon-reload"])
                 self.say("Restart Docker when convenient for new containers to leave builds.slice.")
                 return 0
@@ -484,7 +493,7 @@ class CpuSetup:
         if not os.path.exists(path):
             return
         current = self._daemon_json(missing_ok=False)
-        if current.get("cgroup-parent") != "builds.slice":
+        if current.get("cgroup-parent") != BUILDS_SLICE:
             return
         del current["cgroup-parent"]
         if current:
@@ -496,7 +505,7 @@ class CpuSetup:
 
     def docker_slice_status(self) -> str:
         """builds.slice's state, daemon.json's cgroup-parent and the containers in builds.slice."""
-        active = self.run(["systemctl", "is-active", "builds.slice"], check=False, quiet=True, capture=True)
+        active = self.run(["systemctl", "is-active", BUILDS_SLICE], check=False, quiet=True, capture=True)
         try:
             with open(self.paths.daemon_json, encoding="utf-8") as fh:
                 parent = cgroup_parent_shown(parse_json(fh.read()))
@@ -515,15 +524,7 @@ class CpuSetup:
         action = first_arg(args, "list")
         name = args[1] if len(args) > 1 else ""
         if action == "list":
-            for exp, (file, value) in self.paths.experiments.items():
-                try:
-                    with open(file, encoding="utf-8", errors="replace") as fh:
-                        now = fh.read().replace("\n", "")
-                except OSError as e:
-                    self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
-                    now = ""
-                self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
-            return 0
+            return self._experiment_list()
         if action not in ("on", "off"):
             raise Halt(2, "experiment: list|on NAME|off NAME")
         if not name:
@@ -534,15 +535,35 @@ class CpuSetup:
         file, value = spec
         saved = self.paths.saved(name)
         if action == "on":
-            _make_run_dir(self.paths.run)
-            if not os.path.exists(saved):
-                self._save_choice(file, saved)
-            if not self._echo_to(file, value):
-                raise Halt(1)
-            self.say(
-                f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
-            )
-            return 0
+            return self._experiment_on(name, file, value, saved)
+        return self._experiment_off(name, file, saved)
+
+    def _experiment_list(self) -> int:
+        """experiment list: each knob, its value now, and whether it is on."""
+        for exp, (file, value) in self.paths.experiments.items():
+            try:
+                with open(file, encoding="utf-8", errors="replace") as fh:
+                    now = fh.read().replace("\n", "")
+            except OSError as e:
+                self.warn(f"cpu-setup.sh: {file}: {e.strerror}")
+                now = ""
+            self.say(experiment_line(exp, file, value, now, on=os.path.exists(self.paths.saved(exp))))
+        return 0
+
+    def _experiment_on(self, name: str, file: str, value: str, saved: str) -> int:
+        """experiment on NAME: the value it replaces saved (the first time), then VALUE into FILE."""
+        _make_run_dir(self.paths.run)
+        if not os.path.exists(saved):
+            self._save_choice(file, saved)
+        if not self._echo_to(file, value):
+            raise Halt(1)
+        self.say(
+            f"{name}: on ({file} = {value}; runtime only, reverted by '{self.prog} experiment off {name}' or a reboot)"
+        )
+        return 0
+
+    def _experiment_off(self, name: str, file: str, saved: str) -> int:
+        """experiment off NAME: the saved value back into FILE."""
         if not os.path.exists(saved):
             self.say(f"{name}: not on")
             return 0
@@ -604,7 +625,7 @@ class CpuSetup:
         self.write(
             indented(self.run(self._checkout_program("game-profile", "state"), check=False, capture=True).stdout)
         )
-        timer = self.run(["systemctl", "is-active", "cpu-game-watchdog.timer"], check=False, quiet=True, capture=True)
+        timer = self.run(["systemctl", "is-active", WATCHDOG_TIMER], check=False, quiet=True, capture=True)
         self.say(f"  watchdog timer: {timer.stdout.rstrip('\n')}")
         self.section("GameMode")
         if user:
@@ -619,7 +640,7 @@ class CpuSetup:
         machine = self.run(["systemctl", "show", "-P", "CPUWeight", "machine.slice"], check=False, capture=True)
         weights = [
             self.usys("show", "-P", "CPUWeight", u, capture=True).stdout.rstrip("\n")
-            for u in ("user.slice", "app.slice", "background.slice")
+            for u in (USER_SLICE, APP_SLICE, "background.slice")
         ]
         self.say(
             f"  machine.slice {machine.stdout.rstrip('\n')}, toolboxes {weights[0]}, app.slice {weights[1]}, background.slice {weights[2]}"
@@ -651,14 +672,14 @@ class CpuSetup:
 
     def _ecores_status(self) -> None:
         delegated = "yes" if self.cpuset_delegated() else "no (next login)"
-        toolboxes = self.usys("show", "-P", "AllowedCPUs", "user.slice", capture=True).stdout.rstrip("\n")
+        toolboxes = self.usys("show", "-P", "AllowedCPUs", USER_SLICE, capture=True).stdout.rstrip("\n")
         helper = self.usys("show", "-P", "AllowedCPUs", "flatpak-session-helper.service", capture=True).stdout.rstrip(
             "\n"
         )
         self.say(
             f"  cpuset delegated: {delegated}; toolboxes AllowedCPUs={toolboxes}; flatpak-spawn --host AllowedCPUs={helper}"
         )
-        effective = read_stripped(os.path.join(self.user_cg(), "user.slice", "cpuset.cpus.effective")) or ""
+        effective = read_stripped(os.path.join(self.user_cg(), USER_SLICE, "cpuset.cpus.effective")) or ""
         self.say(f"  effective (cgroup): toolboxes [{effective}]")
 
     # ---- dispatch -------------------------------------------------------------------------------------

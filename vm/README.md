@@ -1114,13 +1114,19 @@ The Python code inside `vm/` (standard library only at run time):
   `backup-timer on`).
 - `vm/domain/`: the rules, no I/O. `tune.py`: the hardware `tune` recommends
   (`tune_domain`, `guest_kind`) and the lines that report it (`tune_line`,
-  `cpu_status_line`, `cpu_owner_line`). `__init__.py`: what a domain definition is
+  `cpu_status_line`, `cpu_owner_line`, and the plan's, `tune_plan_lines`). `__init__.py`: what a domain definition is
   made of (`domain_parts`), the lines that describe an image folder
   (`nocow_lines`), the NAS backup's names and retention (`valid_keep`,
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
   `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
-  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
+  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too). `backup.py`: the
+  records of the backups (an index entry, the manifests, restic's summary, a
+  fingerprint, the state of one NAS backup run: `NasRun`), the NAS backup's pure
+  parts (`snapshot_args`, `nas_manifest`, `nas_index_entry`, `nas_index`,
+  `nas_done_lines`, `restic_failure_why`), and the lines `status` and
+  `backup-timer status` print about them (`package_change_lines`,
+  `timer_status_lines`).
 - `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`
   (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
@@ -1154,7 +1160,7 @@ The Python code inside `vm/` (standard library only at run time):
   `ProgressPort` (the lines it prints as it goes). `nas.py`: the NAS backup
   (`backup_nas`: the snapshot, restic, the merge back, the torn snapshots of
   earlier runs, the retention), moved
-  from the cli as it was, over the same ports plus `SettingsPort` (vm.conf and
+  from the cli, over the same ports plus `SettingsPort` (vm.conf and
   the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
   the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,
   held during the snapshot call, ignored during the merge back), the per-VM
@@ -1169,8 +1175,8 @@ The Python code inside `vm/` (standard library only at run time):
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
   `__init__.py`. They parse, take their ports from `vm/wiring.py`, run a use
-  case (or read the ports, for list, status and nocow) and print: no I/O of
-  their own.
+  case (or read the ports, for list, status and nocow) and print lines that
+  are mostly built in `vm/domain`: no I/O of their own.
 
 `cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`,
 `vm.adapters` (knobs) and `vm.adapters.images` (the image folder probe) from

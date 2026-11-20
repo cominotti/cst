@@ -107,6 +107,15 @@ def _stream_kwargs(
     return kw
 
 
+def _check_on_line(timeout: float | None, input_text: str | None, output: OutputMode) -> None:
+    """ValueError for an option that cannot go with on_line, which reads the captured stdout as it
+    comes."""
+    if timeout is not None or input_text is not None or output in (OutputMode.INHERIT, OutputMode.CAPTURE):
+        # capture: a command that fills the stderr pipe while stdout is read to its end would
+        # never end; merge or stdout-show-stderr instead.
+        raise ValueError("on_line reads the captured stdout as it comes: no timeout, input_text, inherit or capture")
+
+
 # The exit status a fault gives (plain ints, as before).
 _FAULT_STATUS: Final[Mapping[CommandFault, int]] = {
     CommandFault.MISSING: int(ExitStatus.NOT_FOUND),
@@ -226,12 +235,7 @@ class SubprocessCommandRunner:
         if self._keep_signals:
             kw["restore_signals"] = False
         if on_line is not None:
-            if timeout is not None or input_text is not None or output in (OutputMode.INHERIT, OutputMode.CAPTURE):
-                # capture: a command that fills the stderr pipe while stdout is read to its end would
-                # never end; merge or stdout-show-stderr instead.
-                raise ValueError(
-                    "on_line reads the captured stdout as it comes: no timeout, input_text, inherit or capture"
-                )
+            _check_on_line(timeout, input_text, output)
             res = self._stream(cmd, kw, on_line)
         else:
             res = self._spawn(cmd, kw, timeout)

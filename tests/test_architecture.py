@@ -153,19 +153,19 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
-    "btrfs/pending_alerts/cli.py": 80,
+    "btrfs/pending_alerts/cli.py": 74,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/snapshot_runtime/cli.py": 13,
     "btrfs/stall_monitord/cli.py": 11,
-    "btrfs/stall_report/cli.py": 152,
+    "btrfs/stall_report/cli.py": 34,
     "cpu/cli.py": 146,
     "cpu/game/cli.py": 13,
     "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 7,
     "doctor/cli.py": 24,
-    "swap/cli.py": 95,
+    "swap/cli.py": 87,
     "toolchains/cli/": 79,
-    "vm/cli/": 280,
+    "vm/cli/": 267,
 }
 
 

@@ -81,12 +81,27 @@ class MarkedLineSpec:
             return OwnedState.UNREADABLE
         if not exists or content is None:
             return OwnedState.MISSING
+        scan = self._scan(content)
+        if scan is None:
+            return OwnedState.CONFLICT
+        count, first, all_same_payload = scan
+        if count == 0:
+            return OwnedState.MISSING
+        if count > 1:
+            return OwnedState.DUPLICATE if all_same_payload else OwnedState.CHANGE
+        if first == self.desired_line:
+            return OwnedState.OK
+        if all_same_payload:
+            return OwnedState.ADOPT
+        return OwnedState.CHANGE
 
+    def _scan(self, content: str) -> tuple[int, str, bool] | None:
+        """(how many lines carry a marker, the first of them, whether all of them hold the desired
+        line's payload); None at the first unmarked line for the same key (a conflict)."""
         want_payload = self.payload(self.desired_line)
         count = 0
         first = ""
         all_same_payload = True
-
         for line in file_lines(content):
             if self.is_marked(line):
                 count += 1
@@ -97,17 +112,8 @@ class MarkedLineSpec:
             else:
                 match = _UNMARKED_KEY_RE.match(line)
                 if match and match.group(1) == self.key:
-                    return OwnedState.CONFLICT
-
-        if count == 0:
-            return OwnedState.MISSING
-        if count > 1:
-            return OwnedState.DUPLICATE if all_same_payload else OwnedState.CHANGE
-        if first == self.desired_line:
-            return OwnedState.OK
-        if all_same_payload:
-            return OwnedState.ADOPT
-        return OwnedState.CHANGE
+                    return None
+        return count, first, all_same_payload
 
     def render_updated(self, existing_content: str) -> str:
         """Return updated file content with the first marked line replaced and duplicates dropped."""

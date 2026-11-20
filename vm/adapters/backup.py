@@ -31,6 +31,7 @@ from vm.domain.backup import (
     NO_BACKUPS_LIST,
     NO_TORN_LIST,
     TORN_LOCK_TIMEOUT,
+    BackupMode,
     Fingerprint,
     IndexEntry,
     IndexRefused,
@@ -257,8 +258,8 @@ def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
     the mode; the small parts (UEFI variables, TPM state) are plain copies."""
     os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
     if not big:
-        flags = ["--reflink=never"] if mode == "full" else []
-    elif mode == "reflink":
+        flags = ["--reflink=never"] if mode == BackupMode.FULL else []
+    elif mode == BackupMode.REFLINK:
         flags = ["--reflink=always"]  # cp allows --reflink only with --sparse=auto
         if os.path.isfile(src) and nocow(src):
             precreate_nocow(dest)
@@ -275,7 +276,7 @@ def copy(cfg: VmSettings, src: str, dest: str, mode: str, big: bool) -> None:
             + (
                 f"\nReflink copies need the backup folder on the same btrfs filesystem as the "
                 f"disks. Use real copies instead: {cfg.prog} backup VM --full"
-                if big and mode == "reflink"
+                if big and mode == BackupMode.REFLINK
                 else ""
             )
         )
@@ -524,7 +525,7 @@ def describe_entry(e: IndexEntry) -> str:
         ),
         "?",
     )
-    if e.get("mode") == "nas":
+    if e.get("mode") == BackupMode.NAS:
         keep = f", kept: {kept}" if (kept := e.get("keep")) is not None and kept != "" else ""
         return (
             f"{e['vm']:<16} {e.get('timestamp') or '?'}  nas      deployment {dep.get('version') or '?'}"

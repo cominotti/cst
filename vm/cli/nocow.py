@@ -3,7 +3,7 @@
 
 from cst_core.domain.errors import Refused
 from vm import wiring
-from vm.domain import VmSettings, nocow_lines, todo_note
+from vm.domain import ImageProbe, VmSettings, nocow_lines, todo_note
 
 
 def cmd_nocow_plan(cfg: VmSettings, as_root: bool = False) -> int:
@@ -46,11 +46,7 @@ def cmd_nocow_apply(cfg: VmSettings) -> int:
             + (" (symbolic links are not managed)." if any(d.link for d in dirs) else ".")
         )
         return 0
-    sudo = "" if wiring.running_as_root() else " (sudo)"
-    for d in todo:
-        what = "mark" if (seen := d.present) else "create (root:root 0711) and mark"
-        unknown = " (its mark is not readable as your user: set again, harmless)" if seen and d.nocow is None else ""
-        print(f"  {what} +C: {d.path}{sudo if d.scope == 'system' else ''}{unknown}")
+    _print_todo(todo)
     print(
         "Only files created there later get the mark; existing images stay as they are "
         f"({cfg.prog} nocow plan shows how to convert them)."
@@ -67,3 +63,12 @@ def cmd_nocow_apply(cfg: VmSettings) -> int:
     if errors:
         raise Refused("not done:\n  " + "\n  ".join(errors))
     return 0
+
+
+def _print_todo(todo: list[ImageProbe]) -> None:
+    """nocow apply's line for each folder it would mark: create and mark or mark, sudo for the system one."""
+    sudo = "" if wiring.running_as_root() else " (sudo)"
+    for d in todo:
+        what = "mark" if (seen := d.present) else "create (root:root 0711) and mark"
+        unknown = " (its mark is not readable as your user: set again, harmless)" if seen and d.nocow is None else ""
+        print(f"  {what} +C: {d.path}{sudo if d.scope == 'system' else ''}{unknown}")

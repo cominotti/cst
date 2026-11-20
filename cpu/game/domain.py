@@ -53,9 +53,17 @@ TAG: Final = "game-profile"
 # The MemoryLow drop-ins 'on' writes into the system manager's runtime folder: zz- sorts after
 # every other drop-in (uresourced's 50-MemoryLow.conf included), so it wins at a daemon-reload.
 GAME_DROPIN: Final = "zz-cst-game.conf"
+# The slices the profile and `cst cpu` act on by name: Docker's builds.slice (cpu docker-slice) in the
+# system manager, the user manager's app.slice (the desktop apps and the game), and user.slice, which both
+# managers have (the system's holds each user's session, the user manager's the toolboxes).
+BUILDS_SLICE: Final = "builds.slice"
+APP_SLICE: Final = "app.slice"
+USER_SLICE: Final = "user.slice"
+# The weight 'on' gives the boxes that run beside the game: the idle class.
+IDLE_WEIGHT: Final = "CPUWeight=idle"
 # Top-level slices of the user manager that have rules of their own: the game and the desktop
 # apps (app.slice), gnome-shell (session.slice), the toolboxes (user.slice).
-KNOWN_SLICES: Final = frozenset({"app.slice", "session.slice", "user.slice"})
+KNOWN_SLICES: Final = frozenset({APP_SLICE, "session.slice", USER_SLICE})
 STEAM_SCOPES: Final = "app-flatpak-com.valvesoftware.Steam-*"
 DOCKER_SCOPES: Final = "docker-*.scope"
 USAGE: Final = "usage: game-profile on|off|tick|state"
@@ -188,7 +196,12 @@ def transient_unit(unit: str) -> bool:
 def ctl_file(paths: GamePaths, mgr: Manager, unit: str, prop: str, uid: str) -> str:
     """The file `systemctl set-property --runtime UNIT PROP=...` writes (uid: the user's, for usr)."""
     base = paths.run_systemd if mgr == "sys" else posixpath.join(paths.run_user, uid, "systemd")
-    folder = "transient" if transient_unit(unit) else ("system.control" if mgr == "sys" else "user.control")
+    if transient_unit(unit):
+        folder = "transient"
+    elif mgr == "sys":
+        folder = "system.control"
+    else:
+        folder = "user.control"
     return f"{base}/{folder}/{unit}.d/50-{prop}.conf"
 
 
@@ -302,6 +315,19 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     return out
 
 
+def unreadable_report(paths: GamePaths, state_text: str, intended_text: str, *, judged: bool) -> list[str]:
+    """The lines of 'state' that name each line of game.state, and of game.intended when it is judged (not
+    a newer format's: its lines may mean something else), that holds no record (unreadable_lines)."""
+    files = [(paths.state, state_text, False)]
+    if judged:
+        files.append((paths.intended, intended_text, True))
+    return [
+        f"  unreadable: {path} line {number} (skipped): {line}"
+        for path, text, intended in files
+        for number, line in unreadable_lines(text, intended=intended)
+    ]
+
+
 # The fields of a drift record of game.intended: "prop MGR UNIT PROP VALUE SHOWN", "cgw FILE VALUE SHOWN".
 INTENDED_PROP_FIELDS: Final = 6
 INTENDED_CGW_FIELDS: Final = 4
@@ -389,21 +415,37 @@ def drifted(
     """
     out: list[Drift] = []
     for r in recs:
-        if r[:1] == (GameRecordKind.PROP,) and len(r) >= 6:
-            vals = now.get((r[1], r[2]))
-            if not r[5] or vals is None:
+        match _kind(r):
+            case GameRecordKind.PROP:
+                found = _prop_drift(r, now)
+            case GameRecordKind.CGW:
+                found = _cgw_drift(r, read_file)
+            case _:
                 continue
-            value = vals.get(r[3], "")
-            if value != r[5]:
-                out.append(Drift(r[:6], value))
-        elif r[:1] == (GameRecordKind.CGW,) and len(r) >= 4:
-            if not r[3]:
-                continue
-            value = read_file(r[1])
-            if value is None or value == r[3]:
-                continue
-            out.append(Drift(r[:4], value))
+        if found is not None:
+            out.append(found)
     return out
+
+
+def _prop_drift(r: Record, now: Mapping[tuple[str, str], Mapping[str, str]]) -> Drift | None:
+    """A prop record's drift (drifted): what systemd shows now, None when it holds or cannot be compared."""
+    if len(r) < INTENDED_PROP_FIELDS:
+        return None
+    vals = now.get((r[1], r[2]))
+    if not r[5] or vals is None:
+        return None
+    value = vals.get(r[3], "")
+    return Drift(r[:INTENDED_PROP_FIELDS], value) if value != r[5] else None
+
+
+def _cgw_drift(r: Record, read_file: Callable[[str], str | None]) -> Drift | None:
+    """A cgw record's drift (drifted): the cgroup file's text now, None when it holds or is gone."""
+    if len(r) < INTENDED_CGW_FIELDS or not r[3]:
+        return None
+    value = read_file(r[1])
+    if value is None or value == r[3]:
+        return None
+    return Drift(r[:INTENDED_CGW_FIELDS], value)
 
 
 # The fields of a game.state record 'off' undoes: "prop MGR UNIT PROP MODE OLD", "cgw FILE OLD" and
@@ -549,11 +591,7 @@ def escapes_in_state(recs: Sequence[Record]) -> str:
     out = [
         r[2]
         for r in recs
-        if len(r) >= 4
-        and r[0] == GameRecordKind.PROP
-        and r[1] == "usr"
-        and r[3] == "CPUWeight"
-        and r[2] != "user.slice"
+        if len(r) >= 4 and r[0] == GameRecordKind.PROP and r[1] == "usr" and r[3] == "CPUWeight" and r[2] != USER_SLICE
     ]
     return " ".join(out) if out else "none"
 

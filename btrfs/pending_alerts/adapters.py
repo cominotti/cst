@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """cst-pending-alerts' I/O: the pending files (trusted only), the record, the desktop's notifications."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import io
 import locale
@@ -24,6 +24,7 @@ from btrfs.pending_alerts.domain import (
     find_mtime,
     parse_alert,
     parse_delivered,
+    seen_as,
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.domain.contracts import Urgency
@@ -87,6 +88,23 @@ def read_pending(s: PendingPaths, name: str) -> Alert | None:
         return None
     data = read_bytes(path, limit=MAX_FILE)
     return None if data is None else parse_alert(data.decode("utf-8", "surrogateescape"))
+
+
+def unseen_alerts(
+    s: PendingPaths, rec: Mapping[str, Seen], skipped: Callable[[str], None]
+) -> list[tuple[str, str, Alert]]:
+    """The pending alerts the record REC has not seen, oldest first: (mtime, name, alert as first
+    read). A seen file is not read; for one that is not a valid alert, skipped(name)."""
+    todo: list[tuple[str, str, Alert]] = []
+    for mtime, name in pending_files(s):
+        if seen_as(rec, name, mtime) is not None:
+            continue
+        alert = read_pending(s, name)
+        if alert is None:
+            skipped(name)
+            continue
+        todo.append((mtime, name, alert))
+    return todo
 
 
 def pending_exists(s: PendingPaths, name: str) -> bool:

@@ -129,6 +129,34 @@ def _record_results(
         yield Result(OK, f"{out.fine} file(s) as CST installed them ({where})")
 
 
+def _listed_without_record(e: InstallEntry, owner: Owner, recorded: frozenset[str]) -> bool:
+    """An entry of owner's whose component the record does not list, and that this checkout can compare
+    without the install's values: no template, not the rustc wrapper toolchains writes itself."""
+    return (
+        e.owner == owner and e.component not in recorded and not e.is_template and e.src != "toolchains/rustc-wrapper"
+    )
+
+
+def _differing(host: DoctorHostPort, files: InstalledFilesPort, entries: list[InstallEntry]) -> tuple[int, list[str]]:
+    """(how many of the entries' files are installed and judged by this checkout, [the installed paths of
+    those that differ from it])."""
+    found = 0
+    differ: list[str] = []
+    for e in entries:
+        dest = expand_dest(e.dest, host.home)
+        try:
+            sha = files.file_sha256(host.path(HostPath(dest)))
+        except OSError:
+            continue
+        want = files.desired_sha256(e.src, None)
+        if want is None:
+            continue  # this checkout cannot say (no checkout, a source that does not build)
+        found += 1
+        if sha != want:
+            differ.append(dest)
+    return found, differ
+
+
 def _without_record(
     host: DoctorHostPort, files: InstalledFilesPort, owner: Owner, recorded: frozenset[str] = frozenset()
 ) -> Iterator[Result]:
@@ -136,27 +164,10 @@ def _without_record(
     installed files against this checkout, as INFO."""
     by_component: dict[str, list[InstallEntry]] = {}
     for e in INSTALL_MANIFEST:
-        if (
-            e.owner == owner
-            and e.component not in recorded
-            and not e.is_template
-            and e.src != "toolchains/rustc-wrapper"
-        ):
+        if _listed_without_record(e, owner, recorded):
             by_component.setdefault(e.component, []).append(e)
     for component, entries in by_component.items():
-        found, differ = 0, []
-        for e in entries:
-            dest = expand_dest(e.dest, host.home)
-            try:
-                sha = files.file_sha256(host.path(HostPath(dest)))
-            except OSError:
-                continue
-            want = files.desired_sha256(e.src, None)
-            if want is None:
-                continue  # this checkout cannot say (no checkout, a source that does not build)
-            found += 1
-            if sha != want:
-                differ.append(dest)
+        found, differ = _differing(host, files, entries)
         if differ:
             yield Result(
                 INFO,

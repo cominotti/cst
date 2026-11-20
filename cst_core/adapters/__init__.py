@@ -155,4 +155,4 @@ class SystemctlAdapter:
         res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
         if res.returncode != 0:
             return {}
-        return dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line)
+        return {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}

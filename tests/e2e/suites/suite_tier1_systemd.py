@@ -4505,6 +4505,47 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_155_nas_image_holds_no_ssh_host_keys(self) -> None:
+        """The NAS image holds no SSH host key: the container makes its own when it starts
+        (ssh-keygen of the ed25519 key only, then sshd as PID 1). The image of the running NAS
+        container has no /etc/ssh/ssh_host_* file; the running container has only the ed25519 key
+        pair and PID 1 is sshd. The SFTP login over it is test_06's."""
+        image = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Image}}", self.NAS_CONTAINER],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout.strip()
+        self.assertTrue(image, "no image for the NAS container")
+        in_image = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "/bin/sh",
+                image,
+                "-c",
+                "ls /etc/ssh/ssh_host_* 2>/dev/null || true",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+        # run.py reuses an existing cst-e2e-nas:local unless --rebuild is given, and CI tags the
+        # published cache image so: an image built before nas.Dockerfile made the keys at start fails
+        # here although the Dockerfile is right. The message says how to get the current image.
+        stale = "an image older than tests/e2e/images/nas.Dockerfile? run tier 1 with --rebuild"
+        self.assertEqual(in_image, "", f"SSH host keys are baked into the NAS image ({stale})")
+        live = exec_bash(self.NAS_CONTAINER, "test -s /etc/ssh/ssh_host_ed25519_key && cat /proc/1/comm").stdout
+        self.assertEqual(live.strip(), "sshd")
+        keys = exec_bash(self.NAS_CONTAINER, "ls /etc/ssh/ssh_host_*").stdout.split()
+        self.assertEqual(keys, ["/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_ed25519_key.pub"], stale)
+
     def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
         """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
         requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
@@ -4588,7 +4629,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             fi
             [[ -S /run/user/1000/systemd/private ]]
             out="$(SRC=/opt/cst-rw/btrfs PROG="cst btrfs" target_user=tester bash -euo pipefail -c '
-                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs /home/tester' 2>&1)"
+                . /opt/cst-rw/cst-install.bash; . "$SRC/setup-snapshots.bash"; snap_user_configs' 2>&1)"
             sed 's/^/test_81: /' <<<"$out" >&2
             if grep -qF NOTE: <<<"$out"; then echo "setup's user steps reported a problem" >&2; exit 1; fi
             grep -qF "enabled:   cst-toolchains-prune.timer" <<<"$out"

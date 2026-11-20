@@ -9,6 +9,7 @@ the fake of setup_fakes.py; nothing real is touched.
 from collections.abc import Sequence
 import json
 import os
+import shutil
 import time
 import unittest
 from unittest import mock
@@ -19,6 +20,7 @@ from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.setup.application.change import Change
 from bluetooth.setup.application.survey import SetupMachine
 from bluetooth.setup.domain import (
+    A2DP_SINK_UUID,
     BapState,
     Exit,
     Options,
@@ -28,8 +30,8 @@ from bluetooth.setup.domain import (
     parse_command_line,
     resolve,
 )
-from bluetooth.tests.setup_fakes import ISO, MAC, REPO, Machine
-from bluetooth.tests.test_ldac_watch import pw_dump
+from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine
+from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from cst_core.domain.files import OwnedState
 from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
@@ -76,11 +78,16 @@ class Clock:
 
 
 def change(
-    m: Machine, *args: str, settings: dict[str, str] | None = None, show_timeout: float | None = None
+    m: Machine,
+    *args: str,
+    settings: dict[str, str] | None = None,
+    show_timeout: float | None = None,
+    container: bool = True,
 ) -> tuple[Change, Console, Clock]:
     """The use cases over the fake machine, as inside a toolbox for the host commands (so the
     kernel ISO probe is the fake's), whatever the command; show_timeout: systemctl show's limit
-    (cst_core's 20 s when None)."""
+    (cst_core's 20 s when None); container=False: the program believes it runs on the host (its
+    commands still go to the fake)."""
     paths = Paths(
         home=m.home, config=f"{m.home}/.config", etc=f"{m.root}/etc", usr_share=f"{m.root}/usr/share", checkout=REPO
     )
@@ -98,7 +105,7 @@ def change(
         console=console,
         files=LocalSetupFiles(),
         host=LocalBluetoothHostAdapter(),
-        container=True,
+        container=container,
         bt_timeout=5,
         lc_ctype="",
         python="/usr/bin/python3",
@@ -329,6 +336,121 @@ class WaitTest(unittest.TestCase):
         run, console, clock = change(m, "apply", "--yes", settings={"LE_AUDIO": "on"})
         self.assertTrue(run.restart_wireplumber())
         self.assertEqual(clock.slept, [1])
+
+
+class BearerUnknownTest(unittest.TestCase):
+    """plan on the host without bluetoothctl: the preferred bearer cannot be read."""
+
+    def test_bluetoothctl_not_found(self) -> None:
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        self.enterContext(
+            mock.patch.object(
+                LocalSetupFiles,
+                "which",
+                new=lambda _self, name: name != "bluetoothctl" and shutil.which(name) is not None,
+            )
+        )
+        run, console, _ = change(m, "plan", settings={"BEARER": "bredr"}, container=False)
+        self.assertEqual(run.plan(), 10, console.stdout + console.stderr)
+        self.assertEqual(run.bearer_state, "unknown")
+        self.assertIn(f"  {'?':<9} {'preferred bearer':<52} bluetoothctl not found\n", console.stdout)
+        self.assertNotIn("bluetoothctl", m.read("log"))
+
+
+class RestoreA2dpTest(unittest.TestCase):
+    """After the WirePlumber restart, a headset without its Audio Sink is connected again and
+    switched back to A2DP: up to 20 looks, half a second apart."""
+
+    def machine(self, *, connected: str | None, delay: int = 0) -> Machine:
+        """The headset on HFP without A2DP; after bluetoothctl connect, its card is CONNECTED
+        (an active profile, with A2DP offered) from the look after DELAY looks (None: never)."""
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        m.put("bt-info", "\tPaired: yes\n\tBREDR.Connected: yes\n\tLE.Connected: no\n")
+        hfp = json.loads(json.dumps(cards(active="headset-head-unit")))
+        hfp[1]["profiles"]["a2dp-sink"]["available"] = False
+        m.put("pactl-cards", json.dumps(hfp))
+        if connected is not None:
+            m.put("pactl-cards-connected", json.dumps(cards(active=connected)))
+            m.put("a2dp-delay", f"{delay}\n")
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        return m
+
+    def calls(self, m: Machine) -> list[str]:
+        return [
+            c for c in m.read("log").splitlines() if c.startswith(("bluetoothctl connect", "pactl set-card-profile"))
+        ]
+
+    def test_a2dp_comes_back_after_the_connect(self) -> None:
+        m = self.machine(connected="headset-head-unit", delay=2)
+        run, console, clock = change(m, "apply", "--yes")
+        run.restore_a2dp()
+        self.assertEqual(
+            console.stdout,
+            "reconnect: the headset's A2DP profile (Audio Sink)\nrestored:  the headset is back on A2DP\n",
+        )
+        self.assertEqual(console.stderr, "")
+        self.assertEqual(
+            self.calls(m),
+            [f"bluetoothctl connect {MAC} {A2DP_SINK_UUID}", f"pactl set-card-profile bluez_card.{DEV} a2dp-sink"],
+        )
+        self.assertEqual(clock.slept, [0.5, 0.5])
+
+    def test_a2dp_that_never_comes(self) -> None:
+        m = self.machine(connected=None)
+        run, console, clock = change(m, "apply", "--yes")
+        run.restore_a2dp()
+        self.assertEqual(console.stdout, "reconnect: the headset's A2DP profile (Audio Sink)\n")
+        self.assertEqual(console.stderr, "WARNING: A2DP did not come back; switch the headset off and on\n")
+        self.assertEqual(self.calls(m), [f"bluetoothctl connect {MAC} {A2DP_SINK_UUID}"])
+        self.assertEqual(clock.slept, [0.5] * 20)
+
+    def test_already_on_a2dp_when_it_comes(self) -> None:
+        # The look that sees A2DP also sees the card on it: no switch.
+        m = self.machine(connected="a2dp-sink")
+        run, console, clock = change(m, "apply", "--yes")
+        run.restore_a2dp()
+        self.assertEqual(
+            console.stdout,
+            "reconnect: the headset's A2DP profile (Audio Sink)\nrestored:  the headset is back on A2DP\n",
+        )
+        self.assertEqual(self.calls(m), [f"bluetoothctl connect {MAC} {A2DP_SINK_UUID}"])
+        self.assertEqual(clock.slept, [])
+
+
+class AdapterTargetTest(unittest.TestCase):
+    """After the bluetoothd restart, the adapter waited for: busctl's, else /org/bluez/hci0
+    (bluetooth-setup.sh's $(adapter_path || echo /org/bluez/hci0))."""
+
+    def powered(self, objects: object, *, fail: bool = False) -> list[str]:
+        m = Machine(self)
+        m.put(m.main_conf, DONE)
+        m.services()
+        m.put("objects.json", json.dumps(objects))
+        if fail:
+            m.flag("fail-objects")
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        run, _, _ = change(m, "apply", "--yes")
+        self.assertTrue(run.restart_bluetooth())
+        calls = m.read("log").splitlines()
+        first = next(i for i, c in enumerate(calls) if c.startswith("busctl get-property "))
+        return calls[first:]
+
+    def test_no_adapter_in_the_answer(self) -> None:
+        log = self.powered({"type": "a{oa{sa{sv}}}", "data": [{"/org/bluez": {}}]})
+        self.assertEqual(log, ["busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered"])
+
+    def test_busctl_failed_after_naming_one(self) -> None:
+        # Its path, a newline, then the fallback: the one word bash's $(...) gave.
+        objects = {"type": "a{oa{sa{sv}}}", "data": [{"/org/bluez/hci1": {"org.bluez.Adapter1": {}}}]}
+        log = self.powered(objects, fail=True)
+        self.assertEqual(
+            log, ["busctl get-property org.bluez /org/bluez/hci1", "/org/bluez/hci0 org.bluez.Adapter1 Powered"]
+        )
 
 
 class StepDownTest(unittest.TestCase):

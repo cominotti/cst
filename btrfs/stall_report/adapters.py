@@ -30,6 +30,7 @@ from btrfs.stall_report.domain.window import summarise
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.text import group
 from cst_core.domain.values import DAY, MINUTE
 from cst_core.ports import CommandResult, CommandRunnerPort
 
@@ -246,6 +247,40 @@ def container_names() -> dict[str, str]:
     return names
 
 
+def _below_rows(stdout: str) -> object:
+    """below's JSON output: one document, or else each part that starts a list or an object on a new
+    line (a part that does not parse dropped, the lists' items taken in)."""
+    try:
+        return parse_json(stdout or "[]")
+    except ValueError:
+        rows = []
+        for chunk in re.split(r"\n(?=[\[{])", stdout.strip()):
+            try:
+                v = parse_json(chunk)
+            except ValueError:
+                continue
+            rows += v if isinstance(v, list) else [v]
+        return rows
+
+
+def _pick(row: dict[str, object], *cands: str) -> object:
+    """The value of a row's first column whose name, lower case without blanks, _ and ., contains
+    one of CANDS; None without one."""
+    for k, v in row.items():
+        lk = k.lower().replace(" ", "").replace("_", "").replace(".", "")
+        if any(c in lk for c in cands):
+            return v
+    return None
+
+
+def _rate_number(v: object) -> float:
+    """A rate of below's: a number, or the number a text starts with ("300.5 B/s"); else 0."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.match(r"\s*([\d.]+)", str(v or ""))
+    return float(group(m, 1)) if m else 0.0
+
+
 def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[list[BelowItem] | None, str | None]:
     """below's per-process IO for the window: ([{comm, cgroup, bytes}], error)."""
     cmd = [
@@ -277,18 +312,8 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         return None, f"below dump failed: {out.cause}"
     if out.returncode != 0:
         return None, f"below dump failed: {(out.stderr or out.stdout).strip()[:200]}"
-    try:
-        rows = parse_json(out.stdout or "[]")
-    except ValueError:
-        rows = []
-        for chunk in re.split(r"\n(?=[\[{])", out.stdout.strip()):
-            try:
-                v = parse_json(chunk)
-            except ValueError:
-                continue
-            rows += v if isinstance(v, list) else [v]
     # below 0.9 prints one list per sample: [[{row}, ...], [{row}, ...], ...]
-    flat, stack = [], [rows]
+    flat, stack = [], [_below_rows(out.stdout)]
     while stack:
         item = stack.pop()
         if isinstance(item, list):
@@ -296,26 +321,12 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         elif isinstance(item, dict):
             flat.append(item)
     rows = flat
-
-    def pick(row: dict[str, object], *cands: str) -> object:
-        for k, v in row.items():
-            lk = k.lower().replace(" ", "").replace("_", "").replace(".", "")
-            if any(c in lk for c in cands):
-                return v
-        return None
-
-    def num(v: object) -> float:
-        if isinstance(v, (int, float)):
-            return float(v)
-        m = re.match(r"\s*([\d.]+)", str(v or ""))
-        return float(m.group(1)) if m else 0.0
-
     agg = {}
     want_write = field.endswith("wbytes_per_sec")
     for row in rows:
-        comm = str(pick(row, "comm", "name") or "?")
-        cg = str(pick(row, "cgroup") or "").rstrip("/").rsplit("/", 1)[-1][:40]
-        rate = num(pick(row, "wbytes", "write") if want_write else pick(row, "rbytes", "read"))
+        comm = str(_pick(row, "comm", "name") or "?")
+        cg = str(_pick(row, "cgroup") or "").rstrip("/").rsplit("/", 1)[-1][:40]
+        rate = _rate_number(_pick(row, "wbytes", "write") if want_write else _pick(row, "rbytes", "read"))
         agg[comm, cg] = agg.get((comm, cg), 0.0) + rate * 5.0  # below samples every 5 s
     items: list[BelowItem] = [{"comm": c, "cgroup": g, "bytes": int(v)} for (c, g), v in agg.items() if v > 0]
     return sorted(items, key=lambda x: -x["bytes"]), None

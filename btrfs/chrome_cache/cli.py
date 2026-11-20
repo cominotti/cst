@@ -27,8 +27,8 @@ from btrfs.chrome_cache.domain import (
     OLD_CACHE_REL,
     ChromeCacheCommand,
     ChromeFlagsState,
-    chrome_command,
     decide,
+    parse_chrome_args,
     size_text,
 )
 from cst_core.adapters.runner import HostExecutionContext
@@ -75,16 +75,29 @@ def status(home: str) -> int:
     return rc
 
 
+def _run_apply(home: str) -> int:
+    state, msg, changed = apply(home)
+    where = f"~/{FLAGS_REL}: " if state != ChromeFlagsState.NO_APP else ""
+    print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
+    if changed:
+        print("           Takes effect when Chrome starts again (quit all its windows first).")
+    return 0
+
+
+def _run_off(home: str) -> int:
+    msg, changed, still_set = off(home)
+    print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
+    if changed and not still_set:
+        print("           Takes effect when Chrome starts again.")
+    return 0
+
+
 def main(argv: Sequence[str]) -> int:
-    args = argv[1:]
-    cmd = chrome_command(args[0]) if args else ChromeCacheCommand.STATUS
-    home = None
-    if "--home" in args:
-        i = args.index("--home")
-        home = args[i + 1] if i + 1 < len(args) else None
-    if cmd is None or (("--home" in args) and (home is None or home == "")):
+    parsed = parse_chrome_args(argv[1:])
+    if parsed is None:
         print("usage: chrome-cache status|plan|apply|off [--home DIR]", file=sys.stderr)
         return 2
+    cmd, home = parsed
     if HostExecutionContext().is_root():
         print("chrome-cache: runs as the user, not root (btrfs-setup.sh calls it through runuser)", file=sys.stderr)
         return 2
@@ -106,18 +119,9 @@ def main(argv: Sequence[str]) -> int:
                 print(plan_line(home))
                 return 0
             case ChromeCacheCommand.APPLY:
-                state, msg, changed = apply(home)
-                where = f"~/{FLAGS_REL}: " if state != ChromeFlagsState.NO_APP else ""
-                print(f"{'written:' if changed else 'kept:':<10} {where}{msg}")
-                if changed:
-                    print("           Takes effect when Chrome starts again (quit all its windows first).")
-                return 0
+                return _run_apply(home)
             case ChromeCacheCommand.OFF | ChromeCacheCommand.UNDO:
-                msg, changed, still_set = off(home)
-                print(f"{'written:' if changed else 'kept:':<10} ~/{FLAGS_REL}: {msg}")
-                if changed and not still_set:
-                    print("           Takes effect when Chrome starts again.")
-                return 0
+                return _run_off(home)
             case _:
                 assert_never(cmd)
     except (Refused, OSError, ValueError) as e:

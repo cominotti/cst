@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst vm backup [VM] --nas`: the NAS backup with restic, through a live snapshot that is
-merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli/nas.py as it was;
-it reaches the machine through the ports of vm/ports.py (NasBackup)."""
+merged back (blockcommit) whatever happens, and its retention. Moved from vm/cli/nas.py; it
+reaches the machine through the ports of vm/ports.py (NasBackup)."""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,7 +14,13 @@ from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR, MINUTE, format_bytes_gib_mib
 from cst_core.ports import ClockPort
 from vm.application import domain_state
-from vm.application.backup import check_backup_start, check_shut_off, backup_time
+from vm.application.backup import (
+    backup_time,
+    check_backup_start,
+    check_shut_off,
+    fingerprint_or_none,
+    read_backup_definition,
+)
 from vm.domain import (
     KEEP_TAG,
     LIVE_STATES,
@@ -24,6 +30,7 @@ from vm.domain import (
     RESTIC_FORGET_TIMEOUT,
     RETRY_LOCK,
     SHUT_OFF,
+    STOPPED_STATES,
     TAG,
     VIRSH_COMMIT_MARGIN,
     DomainParts,
@@ -32,7 +39,6 @@ from vm.domain import (
     VmSettings,
     agent_state,
     disk_label,
-    domain_parts,
     forget_args,
     live_disks,
     overlay_kind,
@@ -40,9 +46,12 @@ from vm.domain import (
     quiesce_skipped,
 )
 from vm.domain.backup import (
-    Fingerprint,
+    IndexEntry,
     IndexRefused,
     Manifest,
+    NasMergeBack,
+    NasRun,
+    CopiedFile,
     ResticSnapshot,
     ResticSummary,
     Stop,
@@ -50,7 +59,15 @@ from vm.domain.backup import (
     Uncertain,
     is_restic_snapshot,
     manifest_text,
+    nas_done_lines,
+    nas_index,
+    nas_index_entry,
+    nas_manifest,
+    nas_tags,
     not_indexed_text,
+    restic_failure_why,
+    snapshot_args,
+    torn_entry,
 )
 from vm.ports import (
     BackupStorePort,
@@ -103,8 +120,7 @@ def domain_state_or_none(commands: VmCommandsPort, vm: str) -> str | None:
 
 def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
     """Refused unless the repository opens (NAS reachable, password right):
-    checked before any snapshot, so an unreachable NAS never leaves the VM
-    on an overlay."""
+    checked before any snapshot, so an unreachable NAS never leaves the VM on an overlay."""
     # --no-lock: it only proves the repository opens, also while the /home
     # NAS job holds the lock (its prune), which the backup waits for.
     rc, _, err = restic.run(nas["env"], ["cat", "config", "--no-lock"], RESTIC_CHECK_TIMEOUT)
@@ -133,7 +149,7 @@ def commit_back(
     if state not in LIVE_STATES:
         problems.append(
             f"{vm} stopped during the backup: its disks still point to the overlay files"
-            if state in (SHUT_OFF, "crashed")
+            if state in STOPPED_STATES
             else f"the state of {vm} could not be read ({state or 'virsh domstate failed'}): nothing merged"
         )
         for t, (base, _overlay) in overlaid.items():
@@ -198,24 +214,7 @@ def nas_sources(
     cfg: VmSettings, store: BackupStorePort, vm: str, parts: DomainParts, notes: list[str]
 ) -> list[tuple[str, str]]:
     """[(path, kind)] restic reads: the disks, the UEFI variables, the TPM folder."""
-    out: list[tuple[str, str]] = []
-    for p in parts.disks:
-        if not store.is_file(p):
-            raise Refused(f"{vm}: disk {p} not found")
-        if OVERLAY_MARK in p:
-            raise Refused(
-                f"{vm}: disk {p} is an overlay a NAS backup left behind (its blockcommit did not "
-                f"finish). Put the disk back first; `{cfg.cst} doctor` shows the commands"
-            )
-        r = store.realpath(p)
-        if r != p:
-            notes.append(f"disk {p} is a symbolic link: read through it: {r}")
-        if store.has_backing_file(r):
-            raise Refused(
-                f"{vm}: {r} is a qcow2 overlay with a backing file: back up the chain by hand "
-                "(qemu-img info --backing-chain)"
-            )
-        out.append((r, "disk"))
+    out: list[tuple[str, str]] = [(_nas_disk_source(cfg, store, vm, p, notes), "disk") for p in parts.disks]
     if parts.nvram:
         if store.is_file(parts.nvram):
             out.append((store.realpath(parts.nvram), "nvram"))
@@ -231,6 +230,27 @@ def nas_sources(
                 "recovery key after a restore)"
             )
     return out
+
+
+def _nas_disk_source(cfg: VmSettings, store: BackupStorePort, vm: str, p: str, notes: list[str]) -> str:
+    """The file restic reads for the disk p (through a symbolic link, noted); Refused when it is not
+    there, is an overlay a NAS backup left behind, or has a backing file."""
+    if not store.is_file(p):
+        raise Refused(f"{vm}: disk {p} not found")
+    if OVERLAY_MARK in p:
+        raise Refused(
+            f"{vm}: disk {p} is an overlay a NAS backup left behind (its blockcommit did not "
+            f"finish). Put the disk back first; `{cfg.cst} doctor` shows the commands"
+        )
+    r = store.realpath(p)
+    if r != p:
+        notes.append(f"disk {p} is a symbolic link: read through it: {r}")
+    if store.has_backing_file(r):
+        raise Refused(
+            f"{vm}: {r} is a qcow2 overlay with a backing file: back up the chain by hand "
+            "(qemu-img info --backing-chain)"
+        )
+    return r
 
 
 def backup_nas(cfg: VmSettings, vm: str, keep: str | None, p: NasBackup, *, quiesce: bool) -> None:
@@ -256,349 +276,346 @@ def backup_nas(cfg: VmSettings, vm: str, keep: str | None, p: NasBackup, *, quie
 def nas_run(
     cfg: VmSettings, p: NasBackup, vm: str, keep: str | None, nas: NasRepo, *, quiesce: bool, live: bool
 ) -> None:
-    store, out = p.store, p.out
-    rc, xml_text, err = p.commands.virsh(("dumpxml", "--inactive", "--security-info", vm), 60, detach=None)
-    if rc != 0:
-        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
-    parts = domain_parts(xml_text)
-    if parts.problems:
-        raise Refused(f"{vm}: nothing backed up:\n  " + "\n  ".join(parts.problems))
-    if not parts.disks:
-        raise Refused(f"{vm}: no file disk in its definition: nothing to back up")
-    notes = list(parts.skipped)
-    sources = nas_sources(cfg, store, vm, parts, notes)
-    epoch, stamp = backup_time(cfg, p.clock)
-    specs: dict[str, tuple[str, str]] = {}
-    others: list[str] = []  # target -> (image, overlay); targets left out of the snapshot
-    agent = "none"
-    if live:
-        rc, live_xml, err = p.commands.virsh(("dumpxml", vm), 60, detach=None)
-        if rc != 0:
-            raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
-        disks = live_disks(live_xml)
-        for d in disks:
-            if d.device != "disk" or d.kind != "file":
-                others.append(d.target)
-                continue
-            if OVERLAY_MARK in d.source or d.backing:
-                raise Refused(
-                    f"{vm}: {disk_label(d.target, word='disk ')} runs on {d.source} with a backing chain (an overlay "
-                    f"left by an earlier backup?). Put it back first; `{cfg.cst} doctor` shows the commands"
-                )
-            base = store.realpath(d.source)
-            specs[d.target] = (
-                base,
-                os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
-            )
-        if sorted(b for b, _ in specs.values()) != sorted(src for src, k in sources if k == "disk"):
-            raise Refused(
-                f"{vm}: the running VM's disks differ from its definition (changed since it started): "
-                "restart it, then back up"
-            )
-        for _, overlay in specs.values():
-            if store.lexists(overlay):
-                raise Refused(f"{overlay} already exists: wait a second and run it again")
-        agent = agent_state(live_xml)
-    versions, deployment = p.commands.package_versions(), p.commands.booted_deployment()
+    run = _nas_preflight(cfg, p, vm, live=live, quiesce=quiesce)
     restic_ready(cfg, p.restic, nas)
-    out.say(f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True)
-    overlaid: dict[str, tuple[str, str]] = {}
-    consistency = "shut-off"
+    p.out.say(
+        f"{vm}: backup to the NAS ({nas['repo']}), {'running: live snapshot' if live else 'shut off'}", flush=True
+    )
     failure: BaseException | None = None
-    before: dict[str, Fingerprint] = {}
-    snap = ""
-    summary: ResticSummary = {}
+    consistency, snap, summary = "shut-off", "", ResticSummary()
     try:
-        if live:
-            # The UEFI variables and the TPM state have no snapshot: read live, checked after.
-            before = {src: store.fingerprint(src) for src, k in sources if k != "disk"}
-            consistency = take_snapshot(cfg, p, vm, stamp, specs, others, quiesce, agent, overlaid, notes)
-        else:
-            before = {src: store.fingerprint(src) for src, _ in sources}
-        tags = [TAG, f"vm:{vm}"] + ([KEEP_TAG, keep] if keep is not None and keep != "" else [])
-        manifest: Manifest = {
-            "vm": vm,
-            "uuid": parts.uuid,
-            "timestamp": stamp,
-            "epoch": int(epoch),
-            "mode": "nas",
-            "consistency": consistency,
-            "keep": keep,
-            "tags": tags,
-            "files": [
-                {"source": src, "kind": k, "allocated": store.sizes(src)[0], "apparent": store.sizes(src)[1]}
-                for src, k in sources
-            ],
-            "versions": versions,
-            "deployment": deployment,
-            "notes": notes,
-        }
-        stage = store.stage(vm, xml_text, manifest_text(manifest))
-        paths = [src for src, _ in sources] + [stage]
-        timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
-        for src, k in sources:
-            a, s = store.sizes(src)
-            out.say(
-                f"  reading {src} ({k}, {format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)"
-            )
-        try:
-            rc, summary = p.restic.backup(
-                nas["env"],
-                [
-                    "backup",
-                    "--json",
-                    "--host",
-                    nas["host"],
-                    "--tag",
-                    ",".join(tags),
-                    "--retry-lock",
-                    RETRY_LOCK,
-                    *paths,
-                ],
-                timeout,
-                out,
-            )
-        finally:
-            store.unstage(stage)
-        snap = str(summary.get("snapshot_id") or "")
-        if rc != 0 or not snap:
-            # incomplete (rc 3): not a backup
-            left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "incomplete")) if snap else None
-            why = {
-                ResticExit.INCOMPLETE: "some files could not be read",
-                ExitStatus.TIMED_OUT: "stopped at the time limit (VM_NAS_TIMEOUT_HOURS)",
-                ExitStatus.NOT_FOUND: "restic not found",
-                ResticExit.LOCKED: "the repository stayed locked",
-            }.get(rc, f"restic exit {rc}")
-            raise Refused(f"restic backup failed: {why}; no backup recorded{'' if left is None else f'; {left}'}")
-        if live:
-            for src in before:
-                try:
-                    same = store.fingerprint(src) == before[src]
-                except OSError:
-                    same = False
-                if not same:
-                    notes.append(
-                        f"{src} changed while restic read it (the VM wrote it): that copy may be torn; "
-                        "the next backup reads it again"
-                    )
-        if not live:
-            try:
-                check_shut_off(p.commands, vm)
-            except Refused as e:
-                left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "state changed"))
-                raise Refused(
-                    f"the VM's state changed during the backup, the copy is not consistent "
-                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
-                ) from None
-
-            def now_fp(path: str) -> Fingerprint | None:
-                try:
-                    return store.fingerprint(path)
-                except OSError:
-                    return None
-
-            changed = [src for src, _ in sources if now_fp(src) != before[src]]
-            if changed:
-                left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, stamp, "changed during the read"))
-                raise Refused(
-                    "changed during the backup (the VM was started?), the copy is not consistent "
-                    f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"
-                )
+        consistency, snap, summary = _nas_read(cfg, p, run, nas, keep)
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
         failure = e
     # From here on no signal may cut the cleanup short, and no child may get one.
     with p.signals.ignored():
-        problems: list[str] = []
-        how: dict[str, VmOverlayKind] = {}
-        with p.commands.detached():
-            if live:
-                # What the VM really runs on, not only what take_snapshot saw.
-                try:
-                    overlaid.update(find_overlays(p, vm, specs))
-                # The merge back still runs for what is known.
-                except Exception as e:  # noqa: BLE001
-                    problems.append(f"the disks could not be listed: {e!r}")
-            if overlaid:
-                try:
-                    more, how = commit_back(cfg, p, vm, overlaid)
-                    problems += more
-                except Exception as e:  # noqa: BLE001 - reported loudly below
-                    problems.append(f"the merge back failed: {e!r}")
-    if isinstance(failure, Uncertain) and not problems:
-        problems.append(str(failure))
-        overlaid.update({t: spec for t, spec in specs.items() if store.lexists(spec[1])})
-    if problems:
-        body = (
-            f"{vm}: a disk was not merged back after the NAS backup, or may not be: "
-            + "; ".join(problems)
-            + f". Check what the VM runs on; see `{cfg.cst} doctor`."
-        )
-        p.alert("VM backup: disk left on a snapshot overlay", body)
-        if not overlaid:  # nothing known: the files this run could have made
-            overlaid.update({t: spec for t, spec in specs.items() if store.lexists(spec[1])})
-        lines = overlay_recovery(vm, overlaid.items(), how)
-        msg = (
-            "DISK NOT MERGED BACK:\n  "
-            + "\n  ".join(problems)
-            + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
-            + "\n  ".join(lines)
-        )
-        if failure is not None and not isinstance(failure, Uncertain):
-            msg += f"\n(the backup itself: {failure})"
-        raise Refused(msg)
+        merge = _nas_merge_back(cfg, p, run)
+    if isinstance(failure, Uncertain) and not merge.problems:
+        merge.problems.append(str(failure))
+        _add_overlay_files(p, run)
+    if merge.problems:
+        raise _nas_not_merged_back(cfg, p, run, merge, failure)
     if failure is not None:
         raise failure
-    out.say(
+    p.out.say(
         f"  restic snapshot {snap[:8]}: {format_bytes_gib_mib(summary.get('total_bytes_processed') or 0, mib_decimals=1)} read, "
         f"{format_bytes_gib_mib(summary.get('data_added') or 0, mib_decimals=1)} new on the NAS ({consistency})"
     )
     retention_after_torn(cfg, p, vm, nas)
+    refused = _index_nas_backup(p, vm, nas, nas_index_entry(run, nas, snap, consistency, keep))
+    for line in nas_done_lines(run.notes, snap, vm, consistency, keep):
+        p.out.say(line)
+    if refused is not None:
+        raise refused
+
+
+def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesce: bool) -> NasRun:
+    """What a NAS backup reads and checks before restic is asked anything: Refused, with nothing
+    changed, for a definition, a disk or a running VM it cannot back up."""
+    xml_text, parts = read_backup_definition(p.commands, vm, "nothing backed up")
+    notes = list(parts.skipped)
+    sources = nas_sources(cfg, p.store, vm, parts, notes)
+    epoch, stamp = backup_time(cfg, p.clock)
+    specs, others, agent = _nas_live_specs(cfg, p, vm, stamp, sources) if live else ({}, [], "none")
+    return NasRun(
+        vm=vm,
+        live=live,
+        quiesce=quiesce,
+        xml_text=xml_text,
+        parts=parts,
+        versions=p.commands.package_versions(),
+        deployment=p.commands.booted_deployment(),
+        notes=notes,
+        sources=sources,
+        epoch=epoch,
+        stamp=stamp,
+        specs=specs,
+        others=others,
+        agent=agent,
+    )
+
+
+def _nas_live_specs(
+    cfg: VmSettings, p: NasBackup, vm: str, stamp: str, sources: Sequence[tuple[str, str]]
+) -> tuple[dict[str, tuple[str, str]], list[str], str]:
+    """(specs, others, the guest agent's state) of a running VM's snapshot; Refused when its running
+    definition cannot be read, runs on a backing chain, differs from the inactive one, or an overlay
+    of this stamp is there already."""
+    rc, live_xml, err = p.commands.virsh(("dumpxml", vm), 60, detach=None)
+    if rc != 0:
+        raise Refused(f"virsh dumpxml {vm}: {first_line(err) or f'exit {rc}'}")
+    specs: dict[str, tuple[str, str]] = {}
+    others: list[str] = []
+    for d in live_disks(live_xml):
+        if d.device != "disk" or d.kind != "file":
+            others.append(d.target)
+            continue
+        if OVERLAY_MARK in d.source or d.backing:
+            raise Refused(
+                f"{vm}: {disk_label(d.target, word='disk ')} runs on {d.source} with a backing chain (an overlay "
+                f"left by an earlier backup?). Put it back first; `{cfg.cst} doctor` shows the commands"
+            )
+        base = p.store.realpath(d.source)
+        specs[d.target] = (
+            base,
+            os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
+        )
+    if sorted(b for b, _ in specs.values()) != sorted(src for src, k in sources if k == "disk"):
+        raise Refused(
+            f"{vm}: the running VM's disks differ from its definition (changed since it started): "
+            "restart it, then back up"
+        )
+    for _, overlay in specs.values():
+        if p.store.lexists(overlay):
+            raise Refused(f"{overlay} already exists: wait a second and run it again")
+    return specs, others, agent_state(live_xml)
+
+
+def _nas_read(
+    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, keep: str | None
+) -> tuple[str, str, ResticSummary]:
+    """The snapshot of a running VM, restic's read and the checks after it: (consistency, restic's
+    snapshot, its summary). Refused, the overlays left to the merge back, when the read is no backup."""
+    store = p.store
+    consistency = "shut-off"
+    if run.live:
+        # The UEFI variables and the TPM state have no snapshot: read live, checked after.
+        run.before.update({src: store.fingerprint(src) for src, k in run.sources if k != "disk"})
+        consistency = take_snapshot(cfg, p, run)
+    else:
+        run.before.update({src: store.fingerprint(src) for src, _ in run.sources})
+    files: list[CopiedFile] = [
+        {"source": src, "kind": k, "allocated": store.sizes(src)[0], "apparent": store.sizes(src)[1]}
+        for src, k in run.sources
+    ]
+    snap, summary = _nas_restic_backup(cfg, p, run, nas, nas_manifest(run, files, consistency, keep), keep=keep)
+    _nas_check_after_read(cfg, p, run, nas, snap)
+    return consistency, snap, summary
+
+
+def _nas_restic_backup(
+    cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, manifest: Manifest, *, keep: str | None
+) -> tuple[str, ResticSummary]:
+    """restic backup of the sources and the staged definition and manifest, tagged nas_tags(vm, keep):
+    (its snapshot, its summary); Refused (an incomplete snapshot forgotten) when it is no backup."""
+    store, out = p.store, p.out
+    stage = store.stage(run.vm, run.xml_text, manifest_text(manifest))
+    paths = [src for src, _ in run.sources] + [stage]
+    timeout = p.settings.number("VM_NAS_TIMEOUT_HOURS") * HOUR or NAS_DEFAULTS["VM_NAS_TIMEOUT_HOURS"] * HOUR
+    for src, k in run.sources:
+        a, s = store.sizes(src)
+        out.say(
+            f"  reading {src} ({k}, {format_bytes_gib_mib(a, mib_decimals=1)} allocated, {format_bytes_gib_mib(s, mib_decimals=1)} apparent)"
+        )
+    tags = ",".join(nas_tags(run.vm, keep))
+    try:
+        rc, summary = p.restic.backup(
+            nas["env"],
+            ["backup", "--json", "--host", nas["host"], "--tag", tags, "--retry-lock", RETRY_LOCK, *paths],
+            timeout,
+            out,
+        )
+    finally:
+        store.unstage(stage)
+    snap = str(summary.get("snapshot_id") or "")
+    if rc != 0 or not snap:
+        # incomplete (rc 3): not a backup
+        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, run.vm, run.stamp, "incomplete")) if snap else None
+        raise Refused(
+            f"restic backup failed: {restic_failure_why(rc)}; no backup recorded{'' if left is None else f'; {left}'}"
+        )
+    return snap, summary
+
+
+def _nas_check_after_read(cfg: VmSettings, p: NasBackup, run: NasRun, nas: NasRepo, snap: str) -> None:
+    """After restic's read: a note for each file read live that changed meanwhile; for a shut-off VM,
+    Refused (its snapshot forgotten) when the VM was started or a source changed meanwhile."""
+    if run.live:
+        _nas_note_changed(p.store, run)
+        return
+    vm = run.vm
+    try:
+        check_shut_off(p.commands, vm)
+    except Refused as e:
+        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, run.stamp, "state changed"))
+        raise Refused(
+            f"the VM's state changed during the backup, the copy is not consistent "
+            f"({left or f'restic snapshot {snap[:8]} forgotten'}): {e}"
+        ) from None
+    changed = [src for src, _ in run.sources if fingerprint_or_none(p.store, src) != run.before[src]]
+    if changed:
+        left = forget_torn(cfg, p, nas, torn_entry(nas, snap, vm, run.stamp, "changed during the read"))
+        raise Refused(
+            "changed during the backup (the VM was started?), the copy is not consistent "
+            f"({left or f'restic snapshot {snap[:8]} forgotten'}): {', '.join(changed)}"
+        )
+
+
+def _nas_note_changed(store: BackupStorePort, run: NasRun) -> None:
+    """A note for each file read live (the UEFI variables, the TPM state) that changed meanwhile."""
+    for src in run.before:
+        if fingerprint_or_none(store, src) != run.before[src]:
+            run.notes.append(
+                f"{src} changed while restic read it (the VM wrote it): that copy may be torn; "
+                "the next backup reads it again"
+            )
+
+
+def _nas_merge_back(cfg: VmSettings, p: NasBackup, run: NasRun) -> NasMergeBack:
+    """The merge back of every overlay this run made, whatever happened before (with the signals
+    ignored by the caller): what it could not do."""
+    problems: list[str] = []
+    how: dict[str, VmOverlayKind] = {}
+    with p.commands.detached():
+        if run.live:
+            # What the VM really runs on, not only what take_snapshot saw.
+            try:
+                run.overlaid.update(find_overlays(p, run.vm, run.specs))
+            # The merge back still runs for what is known.
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"the disks could not be listed: {e!r}")
+        if run.overlaid:
+            try:
+                more, how = commit_back(cfg, p, run.vm, run.overlaid)
+                problems += more
+            except Exception as e:  # noqa: BLE001 - reported loudly below
+                problems.append(f"the merge back failed: {e!r}")
+    return NasMergeBack(problems, how)
+
+
+def _nas_not_merged_back(
+    cfg: VmSettings, p: NasBackup, run: NasRun, merge: NasMergeBack, failure: BaseException | None
+) -> Refused:
+    """A disk left on an overlay: the alert, and the refusal with the commands that put each disk
+    back (and the backup's own failure, unless it was the snapshot's unclear outcome)."""
+    body = (
+        f"{run.vm}: a disk was not merged back after the NAS backup, or may not be: "
+        + "; ".join(merge.problems)
+        + f". Check what the VM runs on; see `{cfg.cst} doctor`."
+    )
+    p.alert("VM backup: disk left on a snapshot overlay", body)
+    if not run.overlaid:  # nothing known: the files this run could have made
+        _add_overlay_files(p, run)
+    lines = overlay_recovery(run.vm, run.overlaid.items(), merge.how)
+    msg = (
+        "DISK NOT MERGED BACK:\n  "
+        + "\n  ".join(merge.problems)
+        + "\nNothing was undone or removed. Put each disk back by hand (read each line first):\n  "
+        + "\n  ".join(lines)
+    )
+    if failure is not None and not isinstance(failure, Uncertain):
+        msg += f"\n(the backup itself: {failure})"
+    return Refused(msg)
+
+
+def _add_overlay_files(p: NasBackup, run: NasRun) -> None:
+    """run.overlaid gets each overlay of run.specs whose file is there."""
+    run.overlaid.update({t: spec for t, spec in run.specs.items() if p.store.lexists(spec[1])})
+
+
+def _index_nas_backup(p: NasBackup, vm: str, nas: NasRepo, entry: IndexEntry) -> Refused | None:
+    """The index with the new NAS backup (and without the VM's NAS entries whose snapshot restic no
+    longer lists); the refusal to raise after the notes when the index is not this cst vm's."""
     # The index was read before the snapshot too, but a newer cst vm (or a damage) can have changed it
     # since: the snapshot stays, and its notes and restore line are printed before the refusal.
-    refused: Refused | None = None
+    snap = entry["snapshot"]
     try:
-        entries = [e for e in store.read_index() if not (e.get("mode") == "nas" and e.get("snapshot") == snap)]
-        entries.append(
-            {
-                "vm": vm,
-                "timestamp": stamp,
-                "epoch": int(epoch),
-                "mode": "nas",
-                "snapshot": snap,
-                "repository": nas["repo"],
-                "host": nas["host"],
-                "consistency": consistency,
-                "keep": keep,
-                "versions": versions,
-                "deployment": deployment,
-            }
-        )
-        alive = nas_snapshot_ids(p.restic, vm, nas)
-        if alive is not None:
-            alive.add(snap)
-            entries = [
-                e
-                for e in entries
-                if not (
-                    e["vm"] == vm
-                    and e.get("mode") == "nas"
-                    and e.get("repository") == nas["repo"]
-                    and not any(a.startswith(e["snapshot"]) or e["snapshot"].startswith(a) for a in alive)
-                )
-            ]
-        entries.sort(key=lambda e: (e["vm"], e.get("epoch") or 0))
-        store.write_index(entries)
+        entries = p.store.read_index()
+        p.store.write_index(nas_index(entries, entry, nas_snapshot_ids(p.restic, vm, nas)))
     except IndexRefused as e:
         kept = (
             "the snapshot stays in the repository, where the retention sees it as any VM backup of its tags "
             '(restore it by its ID: vm/README.md, section "Restore from the NAS")'
         )
-        refused = Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e))
-    for n in notes:
-        out.say(f"  note: {n}")
-    out.say(
-        f"Done: restic snapshot {snap[:8]} of {vm} ({consistency}"
-        f"{f'; kept until removed by hand: tags {KEEP_TAG},{keep}' if keep is not None and keep != '' else ''})."
-    )
-    out.say(
-        'Restore: vm/README.md in CST, section "Restore from the NAS" (restic restore '
-        f"{snap[:8]} --sparse --target <a NOCOW folder>)."
-    )
-    if refused is not None:
-        raise refused
+        return Refused(not_indexed_text(f"the restic snapshot {snap[:8]} of {vm}", kept, e))
+    return None
 
 
-def take_snapshot(
-    cfg: VmSettings,
-    p: NasBackup,
-    vm: str,
-    stamp: str,
-    specs: Mapping[str, tuple[str, str]],
-    others: Sequence[str],
-    quiesce: bool,
-    agent: str,
-    overlaid: dict[str, tuple[str, str]],
-    notes: list[str],
-) -> str:
-    """The external disk-only snapshot; fills overlaid {target: (image,
+def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
+    """The external disk-only snapshot; fills run.overlaid {target: (image,
     overlay)} from what domblklist shows, also after a failure. Returns the
     consistency: quiesced or crash-consistent. Raises Uncertain when virsh
     did not answer and libvirt's result stayed unclear."""
-
-    def attempt(with_quiesce: bool) -> tuple[int, str, bool]:
-        args = ["snapshot-create-as", vm, "--name", f"cst-nas-{stamp}", "--disk-only", "--atomic", "--no-metadata"]
-        if with_quiesce:
-            args.append("--quiesce")
-        for t, (_, overlay) in specs.items():
-            args += ["--diskspec", f"{t},snapshot=external,file={overlay.replace(',', ',,')}"]
-        for t in others:
-            args += ["--diskspec", f"{t},snapshot=no"]
-        # Signals wait until the outcome is known (virsh is never killed by a stop);
-        # its own session keeps a Ctrl-C or a closed terminal away from it.
-        with p.signals.held():
-            rc, so, err = p.commands.virsh(args, cfg.snapshot_timeout, detach=True)
-            settled = rc != ExitStatus.TIMED_OUT and rc >= 0  # not a timeout, and virsh not killed by a signal
-            deadline = p.clock.monotonic() + (0 if settled else cfg.snapshot_settle)
-            while True:
-                # The truth is what the VM runs on, also when virsh failed or timed out.
-                cur, _ = blklist(p.commands, vm)
-                overlaid.update(
-                    {
-                        t: (base, overlay)
-                        for t, (base, overlay) in specs.items()
-                        if ((cur.get(t) == overlay) if cur is not None else p.store.exists(overlay))
-                    }
-                )
-                if settled or len(overlaid) == len(specs) or p.clock.monotonic() >= deadline:
-                    break
-                p.clock.sleep(5)
-        if not settled and len(overlaid) != len(specs):
-            if with_quiesce:
-                p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
-            kept = ", ".join(o for t, (_, o) in specs.items() if t not in overlaid and p.store.lexists(o))
-            raise Uncertain(
-                f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
-                f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
-                f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
-            )
-        if not settled and with_quiesce:
-            p.commands.virsh(("domfsthaw", vm), 60, detach=None)
-            notes.append(
-                "virsh did not answer in time; the snapshot is in place, but whether the guest was frozen is unknown"
-            )
-            return 0, "", True
-        return rc, first_line(err) or first_line(so) or f"exit {rc}", False
-
-    def drop_strays() -> None:
-        # Only after a definite error from libvirt: those files are not in use.
-        for t, (_, overlay) in specs.items():
-            if t not in overlaid:
-                p.store.drop(overlay)
-
-    why = quiesce_skipped(agent, quiesce=quiesce)
+    why = quiesce_skipped(run.agent, quiesce=run.quiesce)
     if not why:
-        rc, err, unsure = attempt(True)
-        if overlaid:
+        rc, err, unsure = _snapshot_attempt(cfg, p, run, quiesce=True)
+        if run.overlaid:
             if rc != 0 or unsure:
                 if rc != 0:
-                    notes.append(f"virsh reported an error but the snapshot is in place: {err}")
-                    p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
+                    run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
+                    # best effort: never leave the guest frozen
+                    p.commands.virsh(("domfsthaw", run.vm), 60, detach=None)
                 return "crash-consistent"
             p.out.say("  snapshot taken with the guest's file systems frozen (quiesced, QEMU guest agent)")
             return "quiesced"
-        drop_strays()
+        _drop_stray_overlays(p, run)
         why = f"quiesce failed: {err}"
     p.out.say(f"  crash-consistent snapshot ({why})", flush=True)
-    rc, err, _ = attempt(False)
-    if not overlaid:
-        drop_strays()
-        raise Refused(f"virsh snapshot-create-as {vm}: {err} (nothing changed)")
+    rc, err, _ = _snapshot_attempt(cfg, p, run, quiesce=False)
+    if not run.overlaid:
+        _drop_stray_overlays(p, run)
+        raise Refused(f"virsh snapshot-create-as {run.vm}: {err} (nothing changed)")
     if rc != 0:
-        notes.append(f"virsh reported an error but the snapshot is in place: {err}")
-    notes.append(f"crash-consistent: {why}")
+        run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
+    run.notes.append(f"crash-consistent: {why}")
     return "crash-consistent"
+
+
+def _snapshot_attempt(cfg: VmSettings, p: NasBackup, run: NasRun, *, quiesce: bool) -> tuple[int, str, bool]:
+    """One virsh snapshot-create-as: (its exit status, its error, True when it did not answer in
+    time but the snapshot is in place). Raises Uncertain when the VM's disks still do not all show
+    their overlay once snapshot_settle is over."""
+    vm, specs = run.vm, run.specs
+    args = snapshot_args(vm, run.stamp, specs, run.others, quiesce=quiesce)
+    # Signals wait until the outcome is known (virsh is never killed by a stop);
+    # its own session keeps a Ctrl-C or a closed terminal away from it.
+    with p.signals.held():
+        rc, so, err = p.commands.virsh(args, cfg.snapshot_timeout, detach=True)
+        settled = rc != ExitStatus.TIMED_OUT and rc >= 0  # not a timeout, and virsh not killed by a signal
+        deadline = p.clock.monotonic() + (0 if settled else cfg.snapshot_settle)
+        _poll_overlays(p, run, deadline, settled=settled)
+    if not settled and len(run.overlaid) != len(specs):
+        if quiesce:
+            p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
+        kept = ", ".join(o for t, (_, o) in specs.items() if t not in run.overlaid and p.store.lexists(o))
+        raise Uncertain(
+            f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
+            f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
+            f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
+        )
+    if not settled and quiesce:
+        p.commands.virsh(("domfsthaw", vm), 60, detach=None)
+        run.notes.append(
+            "virsh did not answer in time; the snapshot is in place, but whether the guest was frozen is unknown"
+        )
+        return 0, "", True
+    return rc, first_line(err) or first_line(so) or f"exit {rc}", False
+
+
+def _poll_overlays(p: NasBackup, run: NasRun, deadline: float, *, settled: bool) -> None:
+    """run.overlaid from what the VM runs on, also when virsh failed or timed out (the truth); again
+    every 5 s until every disk shows its overlay or deadline passes, unless virsh settled it."""
+    while True:
+        cur, _ = blklist(p.commands, run.vm)
+        run.overlaid.update(
+            {
+                t: (base, overlay)
+                for t, (base, overlay) in run.specs.items()
+                if ((cur.get(t) == overlay) if cur is not None else p.store.exists(overlay))
+            }
+        )
+        if settled or len(run.overlaid) == len(run.specs) or p.clock.monotonic() >= deadline:
+            break
+        p.clock.sleep(5)
+
+
+def _drop_stray_overlays(p: NasBackup, run: NasRun) -> None:
+    """The overlay files of the disks that did not switch to them: only after a definite error from
+    libvirt, so not in use."""
+    for t, (_, overlay) in run.specs.items():
+        if t not in run.overlaid:
+            p.store.drop(overlay)
 
 
 def nas_snapshot_ids(restic: ResticPort, vm: str, nas: NasRepo) -> set[str] | None:
@@ -632,11 +649,6 @@ def nas_snapshots(restic: ResticPort, vm: str, nas: NasRepo, host: str | None = 
     # All or nothing: an answer of another shape is no list of the live snapshots, and reading it
     # as one would drop the index entries of every snapshot it does not name.
     return data if list_of(data, is_restic_snapshot) else None
-
-
-def torn_entry(nas: NasRepo, snap: str, vm: str, stamp: str, why: str) -> TornEntry:
-    """The record of snap, a torn snapshot of vm's run at stamp (why: what tore it)."""
-    return {"snapshot": snap, "vm": vm, "repository": nas["repo"], "host": nas["host"], "timestamp": stamp, "why": why}
 
 
 def forget_torn(cfg: VmSettings, p: NasBackup, nas: NasRepo, entry: TornEntry) -> str | None:
