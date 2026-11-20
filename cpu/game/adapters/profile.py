@@ -725,8 +725,8 @@ class GameProfile:
         if on:
             self._user_from_state(records(self._state_text()), say=False)
         p, s = self.paths, self.s
-        manual = os.path.exists(p.manual)
-        self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
+        by_hand = " (by hand)" if os.path.exists(p.manual) else ""
+        self.say(f"game profile: ON{by_hand}" if on else "game profile: off")
         for line in self._problem_lines():
             self.say(
                 f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"

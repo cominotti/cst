@@ -196,7 +196,12 @@ def transient_unit(unit: str) -> bool:
 def ctl_file(paths: GamePaths, mgr: Manager, unit: str, prop: str, uid: str) -> str:
     """The file `systemctl set-property --runtime UNIT PROP=...` writes (uid: the user's, for usr)."""
     base = paths.run_systemd if mgr == "sys" else posixpath.join(paths.run_user, uid, "systemd")
-    folder = "transient" if transient_unit(unit) else ("system.control" if mgr == "sys" else "user.control")
+    if transient_unit(unit):
+        folder = "transient"
+    elif mgr == "sys":
+        folder = "system.control"
+    else:
+        folder = "user.control"
     return f"{base}/{folder}/{unit}.d/50-{prop}.conf"
 
 
