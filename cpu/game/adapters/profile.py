@@ -7,7 +7,7 @@ the command runner, the user's uid) across the steps of on, off, tick and
 state; cpu.game.domain decides what the records and the answers say.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import dataclasses
 import glob
@@ -62,6 +62,7 @@ from cpu.game.domain import (
     records,
     repaired_text,
     unreadable_lines,
+    unreadable_report,
     show_values,
     state_uid,
     state_undo,
@@ -127,6 +128,11 @@ class GameProfile:
     def say(self, text: str) -> None:
         """A line of 'state'."""
         print(text, file=self._stream(), flush=True)
+
+    def say_lines(self, lines: Iterable[str]) -> None:
+        """Lines of 'state', one say each."""
+        for line in lines:
+            self.say(line)
 
     def _relay(self, res: CommandResult) -> None:
         """What a command printed, on our streams (as if it had written there itself)."""
@@ -472,16 +478,20 @@ class GameProfile:
         self.protect_steam()
         if s.game_zswap_writeback == "no" and self.prop("usr", APP_SLICE, "MemoryZSwapWriteback"):
             self.setp("usr", APP_SLICE, "MemoryZSwapWriteback=no")
-        for cpu in expand_cpus(s.p_cores):
-            f = p.epp(cpu)
+        self.boost_p_cores()
+        self.log(5, on_text(s))
+        return 0
+
+    def boost_p_cores(self) -> None:
+        """EPP performance on each P-core whose preference can be written, its old value recorded first."""
+        for cpu in expand_cpus(self.s.p_cores):
+            f = self.paths.epp(cpu)
             if not os.access(f, os.W_OK):
                 continue
-            if not self._append(p.state, GameRecordKind.EPP, cpu, read_stripped(f) or ""):
+            if not self._append(self.paths.state, GameRecordKind.EPP, cpu, read_stripped(f) or ""):
                 self._unrecorded(f"cpu{cpu}: EPP performance")
                 continue
             _write_line(f, "performance")
-        self.log(5, on_text(s))
-        return 0
 
     def _target_refusal(self) -> str | None:
         """Why 'on' refuses for TARGET_USER: unset, or a name with no account (it would act for user@.service
@@ -727,10 +737,10 @@ class GameProfile:
         p, s = self.paths, self.s
         by_hand = " (by hand)" if os.path.exists(p.manual) else ""
         self.say(f"game profile: ON{by_hand}" if on else "game profile: off")
-        for line in self._problem_lines():
-            self.say(
-                f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
-            )
+        self.say_lines(
+            f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+            for line in self._problem_lines()
+        )
         if why is not None:
             self.say(f"  settings: {why} ('on' refuses until it is fixed)")
         self._slice_line("machine.slice")
@@ -746,17 +756,11 @@ class GameProfile:
                 self.say(f"  other boxes     idle: {escapes_in_state(records(self._state_text()))}")
         if on:
             intended_text, newer = self._intended()
-            files = [(p.state, self._state_text(), False)]
-            if newer is None:  # a newer format's lines are not judged
-                files.append((p.intended, intended_text, True))
-            for path, text, intended in files:
-                for number, line in unreadable_lines(text, intended=intended):
-                    self.say(f"  unreadable: {path} line {number} (skipped): {line}")
+            self.say_lines(unreadable_report(p, self._state_text(), intended_text, judged=newer is None))
         first = first_cpu(s.build_cpus)
         self.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
         if on:
-            for line in self.drift_report():
-                self.say(line)
+            self.say_lines(self.drift_report())
         return 0
 
     def drift_report(self) -> list[str]:
