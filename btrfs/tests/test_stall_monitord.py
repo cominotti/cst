@@ -510,6 +510,30 @@ class WaitKindTest(unittest.TestCase):
         self.assertEqual(self.m.wait_kind([], "btrfs_sync_log"), "storage")
         self.assertEqual(self.m.wait_kind([], None), "storage")
 
+    def test_wchan_only_every_kind(self) -> None:
+        for wchan, kind in (
+            ("fuse_simple_request", "fuse"),
+            ("request_wait_answer", "fuse"),
+            ("btrfs_ioctl_fitrim", "maintenance"),
+            ("swap_read_folio", "memory"),
+            ("lock_mm_and_find_vma", "memory"),
+            ("futex_wait_queue", "idle"),
+            ("ep_poll", "idle"),
+            ("io_destroy", "storage"),
+            ("", "storage"),
+        ):
+            with self.subTest(wchan=wchan):
+                self.assertEqual(self.m.wait_kind([], wchan), kind)
+
+    def test_a_stack_decides_and_its_wchan_is_not_read(self) -> None:
+        self.assertEqual(self.m.wait_kind(STACKS["sync_log"], "fuse_simple_request"), "storage")
+        self.assertEqual(self.m.wait_kind(STACKS["futex"], "btrfs_sync_log"), "idle")
+        # Meaningful frames that name no subsystem: storage, the conservative answer.
+        self.assertEqual(self.m.wait_kind(["__schedule", "schedule", "io_destroy", "do_syscall_64"], None), "storage")
+        # A fresh kthread waits in kthread() until its first wakeup: only those frames, idle.
+        self.assertEqual(self.m.wait_kind(["kthread", "ret_from_fork"], None), "idle")
+        self.assertEqual(self.m.wait_kind(["__schedule", "kthread", "ret_from_fork"], None), "storage")
+
     def test_mmap_lock_only(self) -> None:
         self.assertTrue(self.m.mmap_lock_only(STACKS["mmap_lock"], None))
         self.assertTrue(self.m.mmap_lock_only(STACKS["vma_write"], None))
