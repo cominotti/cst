@@ -846,6 +846,28 @@ class StateSnapshotTest(GameProfileCase):
         self.assertIn("game profile: ON\n", out)  # before the fix: "game profile: off"
         self.assertIn("  drift: none", out)  # an unreadable game.intended holds no record, as before the snapshot
 
+    def test_without_game_intended_only_game_state_is_judged_and_drift_is_not_checked(self) -> None:
+        # Switched on by an older version (no game.intended), not by hand: game.state's unreadable lines are
+        # named, game.intended has none, and the drift line says how to switch the profile on again.
+        self.run_profile("on")
+        os.unlink(self.intended)
+        with open(self.state, "a") as f:
+            f.write("epp 3\n")
+        number = len(self.read(self.state).split("\n")) - 1
+        out, _ = self.run_profile("state")
+        self.assertIn("game profile: ON\n", out)
+        self.assertEqual(
+            [x for x in out.split("\n") if "unreadable:" in x],
+            [f"  unreadable: {self.state} line {number} (skipped): epp 3"],
+        )
+        self.assertTrue(
+            out.endswith(
+                "  drift: not checked (switched on by an older version, which kept no record of its values;\n"
+                "         sudo systemctl restart cpu-game.service switches it off and on again with one)\n"
+            ),
+            out,
+        )
+
 
 class ReadSnapshotTest(unittest.TestCase):
     """read_snapshot looks once: None for a file that is not there, "" for one there that it cannot read
