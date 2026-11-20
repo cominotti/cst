@@ -80,17 +80,16 @@ def _device_part(snap: Snapshot, props: object, profile: object) -> None:
         snap["profile"] = name if isinstance(name, str) else None
 
 
-def _node_part(snap: Snapshot, props: object, info: object, ids: tuple[str, str]) -> None:
-    """A Node object into SNAP: the headset's output (serial, codec, rate) or one of its inputs.
+def _node_part(snap: Snapshot, props: object, info: object, dev: str) -> None:
+    """A Node object into SNAP: headset DEV's output (serial, codec, rate) or one of its inputs.
     PROPS and INFO are JSON objects (snapshot checked them)."""
     p, node = object_of(props), object_of(info)
-    dev, mac = ids
     name = str(p.get("node.name", ""))
     if name.startswith("bluez_output." + dev) and (codec := p.get(CODEC_KEY, "")):
         snap["out"] = serial(p)
         snap["codec"] = str(codec)
         snap["rate"] = _rate(node)
-    elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + mac)):
+    elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + dev.replace("_", ":"))):
         snap["inputs"].append(serial(p))
         if node.get("state") == "running":
             snap["mic"] = True
@@ -103,15 +102,13 @@ def snapshot(dev: str, objs: object) -> Snapshot:
     node is running). Missing parts are None. An object whose info, props or
     params is of another shape is skipped (as one that is not an object), so
     nothing it holds can lead to an action."""
-    mac = dev.replace("_", ":")
-    inputs: list[int | None] = []
     snap: Snapshot = {
         "card": None,
         "profile": None,
         "out": None,
         "codec": None,
         "rate": None,
-        "inputs": inputs,
+        "inputs": [],
         "mic": False,
     }
     for o in objs if isinstance(objs, list) else []:
@@ -126,7 +123,7 @@ def snapshot(dev: str, objs: object) -> Snapshot:
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             _device_part(snap, p, params.get("Profile"))
         if kind.endswith("Node"):
-            _node_part(snap, p, info, (dev, mac))
+            _node_part(snap, p, info, dev)
     return snap
 
 
@@ -316,9 +313,8 @@ def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | No
         return None, None, None
     available = {str(n): p for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
     by_codec = _by_codec(available)
-    have = set(available)
-    ldac = by_codec.get("LDAC") or ("a2dp-sink" if "a2dp-sink" in have else None)
-    alt = by_codec.get("SBC") or ("a2dp-sink-sbc" if "a2dp-sink-sbc" in have else None)
+    ldac = by_codec.get("LDAC") or ("a2dp-sink" if "a2dp-sink" in available else None)
+    alt = by_codec.get("SBC") or ("a2dp-sink-sbc" if "a2dp-sink-sbc" in available else None)
     if alt is None:
         others = sorted(n for c, n in by_codec.items() if c != "LDAC" and n != ldac)
         alt = others[0] if others else None
