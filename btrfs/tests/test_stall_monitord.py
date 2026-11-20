@@ -1168,7 +1168,7 @@ class CmdlineReadTest(unittest.TestCase):
 
     def test_a_readable_cmdline_is_in_the_report(self) -> None:
         self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["sync_log"])})
-        with self.mon.fake, mock.patch.object(self.m, "read_text", return_value="java\0-jar\0app.jar\0"):
+        with self.mon.fake, mock.patch.object(self.m, "read_text", autospec=True, return_value="java\0-jar\0app.jar\0"):
             self.hung()
         [(_, msg)] = self.events()
         self.assertIn("java:100 (java -jar app.jar; cgroup app.slice)", msg)
@@ -1350,7 +1350,7 @@ class NotifyLoopTest(unittest.TestCase):
         def run() -> None:
             with (
                 mock.patch.object(md_monitor, "BASE_INTERVAL", 0.0),  # a sample (and a report) at every pass
-                mock.patch.object(md_monitor, "short_cgroup", return_value="app.slice"),
+                mock.patch.object(md_monitor, "short_cgroup", autospec=True, return_value="app.slice"),
             ):
                 mon.run()
             done.set()
@@ -1517,7 +1517,7 @@ class NotifyLoopTest(unittest.TestCase):
 
         with (
             mock.patch.object(md_cli, "Monitor", _Monitor),
-            mock.patch.object(md_cli, "prepare_log_dir", return_value=None),
+            mock.patch.object(md_cli, "prepare_log_dir", autospec=True, return_value=None),
             mock.patch.dict(os.environ, {"NOTIFY_SOCKET": path, "LOGS_DIRECTORY": tmp}),
         ):
             self.assertEqual(md_cli.main([]), 0)
