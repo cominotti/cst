@@ -71,6 +71,9 @@ OLD_DROPIN_ENTRY: InstallEntry = replace(
 )
 # The row of machine.slice's live floor in status.
 _MEMORY_LOW_ROW: Final = f"{MACHINE_SLICE} memory.low"
+# Where the manifest's paths start: a dest under /etc, a src in the swap module's folder.
+_ETC_PREFIX: Final = "/etc/"
+_SWAP_SRC_PREFIX: Final = "swap/"
 
 
 def _under(base: str, manifest_path: str, prefix: str) -> str:
@@ -122,11 +125,11 @@ class SwapEnvironment:
 
     @property
     def tmpfiles_conf(self) -> str:
-        return _under(self.etc_dir, TMPFILES_ENTRY.dest, "/etc/")
+        return _under(self.etc_dir, TMPFILES_ENTRY.dest, _ETC_PREFIX)
 
     @property
     def sysctl_conf(self) -> str:
-        return _under(self.etc_dir, SYSCTL_ENTRY.dest, "/etc/")
+        return _under(self.etc_dir, SYSCTL_ENTRY.dest, _ETC_PREFIX)
 
     @property
     def old_sysctl_conf(self) -> str:
@@ -134,11 +137,11 @@ class SwapEnvironment:
 
     @property
     def slice_dropin(self) -> str:
-        return _under(self.etc_dir, DROPIN_ENTRY.dest, "/etc/")
+        return _under(self.etc_dir, DROPIN_ENTRY.dest, _ETC_PREFIX)
 
     @property
     def old_slice_dropin(self) -> str:
-        return _under(self.etc_dir, OLD_DROPIN_ENTRY.dest, "/etc/")
+        return _under(self.etc_dir, OLD_DROPIN_ENTRY.dest, _ETC_PREFIX)
 
     @property
     def zram_conf(self) -> str:
@@ -146,15 +149,15 @@ class SwapEnvironment:
 
     @property
     def src_tmpfiles(self) -> str:
-        return _under(self.src_dir, TMPFILES_ENTRY.src, "swap/")
+        return _under(self.src_dir, TMPFILES_ENTRY.src, _SWAP_SRC_PREFIX)
 
     @property
     def src_sysctl(self) -> str:
-        return _under(self.src_dir, SYSCTL_ENTRY.src, "swap/")
+        return _under(self.src_dir, SYSCTL_ENTRY.src, _SWAP_SRC_PREFIX)
 
     @property
     def src_dropin(self) -> str:
-        return _under(self.src_dir, DROPIN_ENTRY.src, "swap/")
+        return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
 
 
 def _short_etc_path(etc_dir: str, path: str) -> str:
