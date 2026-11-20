@@ -461,11 +461,11 @@ class _OverlayDisk(NamedTuple):
     state: str | None
 
 
-def _live_sources(host: DoctorHostPort, vm: str) -> tuple[dict[str, str] | None, dict[str, str]]:
-    """({target: source} of the running VM's disks, None when domblklist did not answer; {target: overlay})."""
+def _live_sources(host: DoctorHostPort, vm: str) -> tuple[dict[str, str], dict[str, str] | None]:
+    """({target: overlay}; {target: source} of the running VM's disks, None when domblklist did not answer)."""
     rc, out, _ = virsh(host, "domblklist", vm, "--details")
     if rc != 0:
-        return None, {}
+        return {}, None
     sources: dict[str, str] = {}
     live: dict[str, str] = {}
     for ln in out.splitlines():
@@ -474,7 +474,7 @@ def _live_sources(host: DoctorHostPort, vm: str) -> tuple[dict[str, str] | None,
             sources[parts[2]] = parts[3].strip()
             if VM_OVERLAY_MARK in parts[3]:
                 live.setdefault(parts[2], parts[3].strip())
-    return sources, live
+    return live, sources
 
 
 def _defined_overlays(host: DoctorHostPort, vm: str) -> dict[str, str]:
@@ -496,8 +496,8 @@ def _defined_overlays(host: DoctorHostPort, vm: str) -> dict[str, str]:
 
 def _overlay_disks(host: DoctorHostPort, vm: str) -> _OverlayDisks:
     """vm's disks on an overlay, from domblklist, then from the definition."""
-    sources, live = _live_sources(host, vm)
-    return _OverlayDisks(live, _defined_overlays(host, vm), sources)
+    live, sources = _live_sources(host, vm)
+    return _OverlayDisks(live=live, defined=_defined_overlays(host, vm), sources=sources)
 
 
 def _vm_state(host: DoctorHostPort, vm: str) -> str | None:
