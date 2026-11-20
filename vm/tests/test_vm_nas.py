@@ -1110,12 +1110,27 @@ class NasPreflightAndSourcesTest(Nas):
             notes,
             [
                 "  note: sdb (cdrom, not copied)",
-                f"  note: disk {link} is a symbolic link: read through it: {self.disk}",
-                f"  note: UEFI variables {missing} not there yet: not backed up",
+                f"  note: disk {link} is a symbolic link: read (and restored) through it: {self.disk}",
+                f"  note: UEFI variables {missing} not there yet (the VM never started?): not backed up",
             ],
         )
         backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
         self.assertEqual(backup["args"][-2:], [self.disk, os.path.join(self.stage, "win")])
+
+    def test_uefi_variables_through_a_link_are_noted_as_a_local_copy_notes_them(self) -> None:
+        # restic reads (and a restore writes) the file the link points to; before, only a linked disk had a note.
+        link = os.path.join(self.images, "link_VARS.fd")
+        os.symlink(self.nvram, link)
+        self.vm(nvram=link, tpm=False)
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f"  note: UEFI variables {link} is a symbolic link: read (and restored) through it: {self.nvram}\n",
+            r.stdout,
+        )
+        backup = next(c for c in self.restic_calls() if c["args"][0] == "backup")
+        self.assertIn(self.nvram, backup["args"])
+        self.assertNotIn(link, backup["args"])
 
     def test_uefi_variables_removed_while_restic_reads_them(self) -> None:
         self.vm(fail=["remove-nvram"])

@@ -197,12 +197,10 @@ class BackupSources:
 
 def _through(store: BackupStorePort, notes: list[str], path: str, what: str, *, nas: bool) -> str:
     """The file path is or points to: the backup reads (cp -a would copy a link as a link, no data) and
-    restores the file it points to instead; a local copy notes it for each file, a NAS backup for a disk."""
+    restores the file it points to instead, which a note says for each file."""
     r = store.realpath(path)
-    if r != path and not nas:
-        notes.append(f"{what} {path} is a symbolic link: copied (and restored) through it: {r}")
-    elif r != path and what == "disk":
-        notes.append(f"disk {path} is a symbolic link: read through it: {r}")
+    if r != path:
+        notes.append(f"{what} {path} is a symbolic link: {'read' if nas else 'copied'} (and restored) through it: {r}")
     return r
 
 
@@ -240,8 +238,9 @@ def backup_sources(
     if parts.nvram and store.is_file(parts.nvram):
         nvram = _through(store, notes, parts.nvram, "UEFI variables", nas=nas)
     elif parts.nvram:
-        why = "not there yet: not backed up" if nas else "not there yet (the VM never started?): not copied"
-        notes.append(f"UEFI variables {parts.nvram} {why}")
+        notes.append(
+            f"UEFI variables {parts.nvram} not there yet (the VM never started?): not {'backed up' if nas else 'copied'}"
+        )
     tpm, tpm_dir = None, ""
     if parts.tpm:
         tpm_dir = os.path.join(cfg.paths.swtpm_dir, parts.uuid)

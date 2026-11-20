@@ -119,7 +119,9 @@ with its source path when it has one.
 
 A disk, UEFI variables file or TPM folder that is a symbolic link is copied
 through the link: the backup holds the data of the file it points to, under
-that file's own path, and the restore commands write back to that file.
+that file's own path, and the restore commands write back to that file. A
+note says so for each such file, in a local copy and in a NAS backup alike
+(`--nas` reads them through the link the same way).
 
 Where: `/var/lib/libvirt/cst-backups/VM/YYYYmmddTHHMMSSZ/` (UTC time; the
 folders are mode 0700, owned by root). Each source keeps its full path under
