@@ -17,6 +17,7 @@ from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
+from cpu.game.domain import BUILDS_SLICE
 
 
 class CpuRoute(StrEnum):
@@ -63,6 +64,14 @@ OLD_DROPIN_NAME: Final = "50-cpu-setup.conf"  # until 2026-11; install and unins
 MANAGED_MARK: Final = "Managed by cpu-setup.sh"
 # The install record's component of the toolbox drop-ins (a key of COMPONENTS in cst_core/domain/install.py).
 TOOLBOX_COMPONENT: Final = "cpu:toolbox"
+# The other components of the install record cst cpu installs, marks and removes (keys of the same COMPONENTS).
+CORE_COMPONENT: Final = "cpu:core"
+GAMEMODE_COMPONENT: Final = "cpu:gamemode"
+DOCKER_SLICE_COMPONENT: Final = "cpu:docker-slice"
+# The timer that runs the game profile's watchdog (cpu-game-profile tick).
+WATCHDOG_TIMER: Final = "cpu-game-watchdog.timer"
+# GameMode's group: its members may ask gamemoded for the game profile.
+GAMEMODE_GROUP: Final = "gamemode"
 
 # Runtime-only memory experiments, in the order `experiment list` shows them: name -> (file, value).
 EXPERIMENTS: Final[Mapping[str, tuple[str, str]]] = {
@@ -267,11 +276,11 @@ class JsonEdit:
 def with_builds_parent(path: str, current: DaemonJson) -> JsonEdit:
     """daemon.json with "cgroup-parent": "builds.slice" (another parent already set is left alone)."""
     parent = current.get("cgroup-parent")
-    if parent == "builds.slice":
+    if parent == BUILDS_SLICE:
         return JsonEdit(None, f"unchanged: {path}")
     if parent is not None and parent:
         return JsonEdit(None, f"{path} already sets cgroup-parent={parent!r}: left alone", error=True)
-    return JsonEdit({**current, "cgroup-parent": "builds.slice"}, f"written:   {path} (cgroup-parent: builds.slice)")
+    return JsonEdit({**current, "cgroup-parent": BUILDS_SLICE}, f"written:   {path} (cgroup-parent: {BUILDS_SLICE})")
 
 
 def json_text(content: DaemonJson, *, newline: bool) -> str:

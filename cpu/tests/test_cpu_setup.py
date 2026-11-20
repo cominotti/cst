@@ -871,6 +871,41 @@ class ExperimentTest(CpuSetupCase):
         self.assertEqual(self.command("experiment", "off", "thp-defer"), (0, "thp-defer: not on\n", ""))
         self.assertEqual(os.listdir(knob), [])
 
+    def test_list_names_a_knob_that_cannot_be_read(self) -> None:
+        knob = f"{self.tmp}/sys/defrag"
+        os.remove(knob)
+        os.makedirs(knob)
+        rc, out, err = self.command("experiment", "list")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            out,
+            f"  minfree-256m   {self.tmp}/proc/min_free_kbytes -> 262144   now: 67584\n"
+            f"  thp-defer      {knob} -> defer    now: \n",
+        )
+        self.assertEqual(err, f"cpu-setup.sh: {knob}: Is a directory\n")
+
+    def test_a_knob_that_cannot_be_written(self) -> None:
+        # on, then the knob becomes a folder (open fails for any user, root too): a second on keeps the
+        # saved value and fails, and off keeps it too, so a later off can still put it back.
+        knob = f"{self.tmp}/sys/defrag"
+        self.assertEqual(self.command("experiment", "on", "thp-defer")[0], 0)
+        os.remove(knob)
+        os.makedirs(knob)
+        self.assertEqual(
+            self.command("experiment", "on", "thp-defer"), (1, "", f"cpu-setup.sh: {knob}: Is a directory\n")
+        )
+        self.assertEqual(self.read(self.paths.saved("thp-defer")), "madvise\n")
+        self.assertEqual(
+            self.command("experiment", "off", "thp-defer"),
+            (
+                1,
+                "",
+                f"cpu-setup.sh: {knob}: Is a directory\nthp-defer: could not restore madvise into {knob}\n",
+            ),
+        )
+        self.assertEqual(self.read(self.paths.saved("thp-defer")), "madvise\n")
+        self.assertEqual(os.listdir(knob), [])
+
     def test_usage_and_unknown_names(self) -> None:
         self.assertEqual(self.command("experiment", "bogus"), (2, "", "experiment: list|on NAME|off NAME\n"))
         self.assertEqual(
