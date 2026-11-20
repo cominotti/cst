@@ -32,6 +32,7 @@ SETUP_SCRIPT: Final = MODULE_BY_NAME["bluetooth"].script  # the shell front cst 
 # The note of a file CST did not write and apply refuses to replace (plan's CONFLICT rows).
 REFUSED_CONFLICT_NOTE: Final = "not written by CST: apply refuses; move it away by hand"
 LDAC_WATCHER_LABEL: Final = "LDAC rate watcher"  # the watcher's row in plan and status
+LE_AUDIO_LABEL: Final = "LE Audio"  # LE Audio's row in plan and status (and status's section)
 # Which command takes which option (bluetooth-setup.sh's allowed()).
 _ALLOWED: Final = frozenset(
     {

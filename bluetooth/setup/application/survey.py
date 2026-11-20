@@ -42,6 +42,7 @@ from bluetooth.setup.domain import (
     Config,
     Exit,
     LDAC_WATCHER_LABEL,
+    LE_AUDIO_LABEL,
     LeState,
     Options,
     Paths,
@@ -597,7 +598,7 @@ class Survey:
             ),
             ("off", LeState.MISSING): ("write", label, f"LE Audio off ({frm}): PipeWire will offer only A2DP and HFP"),
             ("off", LeState.CONFLICT): ("CONFLICT", label, REFUSED_CONFLICT_NOTE),
-            ("on", LeState.ABSENT): ("ok", "LE Audio", f"on ({frm}): PipeWire offers the bap-* profiles too"),
+            ("on", LeState.ABSENT): ("ok", LE_AUDIO_LABEL, f"on ({frm}): PipeWire offers the bap-* profiles too"),
             ("on", LeState.REMOVE): (
                 "remove",
                 label,

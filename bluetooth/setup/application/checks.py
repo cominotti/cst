@@ -2,8 +2,6 @@
 """The live checks of `cst bluetooth status` (and the end of apply): the services, LE Audio,
 the adapter, PipeWire's BAP endpoint, the bearer and the headset in PipeWire."""
 
-from typing import Final
-
 from bluetooth.domain import (
     BLUETOOTH_UNIT,
     ISO_UUID,
@@ -14,12 +12,18 @@ from bluetooth.domain import (
     pw_state,
 )
 from bluetooth.setup.application.survey import Survey
-from bluetooth.setup.domain import LDAC_WATCHER_LABEL, BapState, LeState, WpState, is_running, preferred_bearer
+from bluetooth.setup.domain import (
+    LDAC_WATCHER_LABEL,
+    LE_AUDIO_LABEL,
+    BapState,
+    LeState,
+    WpState,
+    is_running,
+    preferred_bearer,
+)
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.units import ActiveState
 from cst_core.ports import OutputMode
-
-LE_AUDIO_LABEL: Final = "LE Audio"  # the section and the row of le_audio_check
 
 
 class Checks(Survey):
