@@ -1396,6 +1396,20 @@ class WatcherProgStateTest(unittest.TestCase):
         self.assertEqual(watcher_prog_state(f"would write: {prog}\n", prog, lambda: False), OwnedState.CONFLICT)
         self.assertEqual(watcher_prog_state("", prog, lambda: True), OwnedState.CHANGE)  # a plan that failed
 
+    def test_a_home_with_a_trailing_slash_is_the_same_path(self) -> None:
+        # HOME=/h/: the program's path is /h//.local/...; installer.py plan prints home.rstrip("/") + ...
+        prog, printed = "/h//.local/lib/cst/bt-ldac-watch", "/h/.local/lib/cst/bt-ldac-watch"
+        self.assertEqual(watcher_prog_state(f"unchanged: {printed}\n", prog, lambda: True), OwnedState.OK)
+        self.assertEqual(watcher_prog_state(f"would record: {printed}\n", prog, lambda: True), OwnedState.ADOPT)
+
+    def test_a_plan_with_no_line_of_that_path_is_judged_by_its_last_line(self) -> None:
+        prog = "/h/.local/lib/cst/bt-ldac-watch"
+        settings = "would write: /h/.config/cst/x.conf (from /o/bt-ldac-watch, before it is replaced)\n"
+        self.assertEqual(watcher_prog_state("unchanged: /o/bt-ldac-watch\n", prog, lambda: False), OwnedState.OK)
+        self.assertEqual(
+            watcher_prog_state(f"{settings}would record: /o/bt-ldac-watch\n", prog, lambda: False), OwnedState.ADOPT
+        )
+
 
 class WatcherTest(SetupCase):
     """The LDAC rate watcher (LDAC_RATE=48000): installed through the installer, enabled, started; removed."""

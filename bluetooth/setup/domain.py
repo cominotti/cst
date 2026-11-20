@@ -471,11 +471,16 @@ def wp_word(state: WpState | Literal[""]) -> str:
 
 def watcher_prog_state(plan_out: str, prog: str, marked: Callable[[], bool]) -> OwnedState:
     """The LDAC watcher's program (its path prog) by the line installer.py plan prints for it, found by
-    that path among the plan's lines (plan_out: "" when that plan failed: a record of a newer CST):
-    unchanged: ok; would record: adopt (current, but its install record does not list it as install
-    would: apply adds it there and writes nothing); else it is to be written: change for a copy with
-    CST's marker (an older one; marked() reads the file), conflict for any other file."""
-    plan_line = next((line for line in plan_out.splitlines() if line.endswith(f" {prog}")), "")
+    that path among the plan's lines, both paths normalised (a HOME with a trailing slash: plan prints
+    it without), else the plan's last line, its file's line (plan_out: "" when that plan failed: a
+    record of a newer CST): unchanged: ok; would record: adopt (current, but its install record does
+    not list it as install would: apply adds it there and writes nothing); else it is to be written:
+    change for a copy with CST's marker (an older one; marked() reads the file), conflict for any
+    other file."""
+    lines, path = plan_out.splitlines(), os.path.normpath(prog)
+    plan_line = next(
+        (line for line in lines if os.path.normpath(line.partition(": ")[2]) == path), lines[-1] if lines else ""
+    )
     if plan_line.startswith("unchanged:"):
         return OwnedState.OK
     if plan_line.startswith("would record:"):
