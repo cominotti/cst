@@ -1615,6 +1615,23 @@ class TimerTest(Nas):
             ],
         )
 
+    def test_status_says_when_the_nas_backup_is_not_set_up(self) -> None:
+        with open(self.conf, "w") as f:
+            f.write("NAS_ENABLED=0\n")
+        r = self.run_tool("backup-timer", "status", "win")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            r.stdout.replace(self.tmp, "TMP").splitlines(),
+            [
+                "weekly NAS backup of win: off (cst-vm-backup@win.timer; Sat *-*-* 04:30:00, up to 30 min later)",
+                "  TMP/sbin/cst-vm: not installed",
+                "  TMP/units/cst-vm-backup@.service: not installed",
+                "  TMP/units/cst-vm-backup@.timer: not installed",
+                "  last NAS backup: none",
+                "  the NAS backup is not set up: cst btrfs snapshots nas setup",
+            ],
+        )
+
     def test_on_status_off(self) -> None:
         r = self.run_tool("backup-timer", "status", "win")
         self.assertEqual(r.returncode, 0, r.stderr)

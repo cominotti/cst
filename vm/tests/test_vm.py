@@ -22,6 +22,7 @@ import datetime
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -365,6 +366,53 @@ class PartsTest(unittest.TestCase):
         ):
             with self.assertRaises(Usage):
                 vm_domain.parse_args(bad)
+
+    def test_a_non_file_disk_without_a_source_and_a_path_given_twice(self) -> None:
+        xml = """<domain><devices>
+          <disk type='block' device='disk'><target dev='vda'/></disk>
+          <disk type='file' device='disk'><source file='/a.qcow2'/><target dev='vdb'/></disk>
+          <disk type='file' device='disk'><source file='/a.qcow2'/><target dev='vdc'/></disk></devices></domain>"""
+        p = vm_domain.domain_parts(xml)
+        self.assertEqual(p.problems, ["vda: a block disk: only file disks can be copied; back it up by hand"])
+        self.assertEqual((p.disks, p.skipped), (["/a.qcow2"], []))
+
+    def test_the_nvram_path_from_its_text_or_its_source(self) -> None:
+        for nvram, want in (
+            ("<nvram> /n/text.fd </nvram>", "/n/text.fd"),
+            ("<nvram>/n/text.fd<source file='/n/src.fd'/></nvram>", "/n/text.fd"),
+            ("<nvram>  <source file='/n/src.fd'/></nvram>", "/n/src.fd"),
+            ("<nvram><source dev='/dev/x'/></nvram>", ""),
+            ("<nvram/>", ""),
+            ("", ""),
+        ):
+            with self.subTest(nvram=nvram):
+                xml = f"<domain><os>{nvram}</os><devices/></domain>"
+                self.assertEqual(vm_domain.domain_parts(xml).nvram, want)
+
+    def test_parse_args_help_keep_tag_and_the_order_of_its_refusals(self) -> None:
+        with self.assertRaisesRegex(Usage, "^help takes no arguments$"):
+            vm_domain.parse_args(["help", "x"])
+        for argv, want in (
+            (["backup", "w", "--nas", "--keep-tag", "pre-f46"], ("w", "pre-f46", True, False)),
+            (["backup", "--keep-tag=a.b", "--nas", "w", "--no-quiesce"], ("w", "a.b", True, True)),
+        ):
+            with self.subTest(argv=argv):
+                a = vm_domain.parse_args(argv)
+                self.assertEqual((a.vm, a.keep, a.nas, a.no_quiesce), want)
+        for argv, words in (
+            (["backup", "w", "--nas", "--keep-tag"], "--keep-tag '': a name of letters"),
+            (["backup", "--keep-tag=", "--nas"], "--keep-tag '': a name of letters"),
+            (["backup", "w", "--nas", "--keep-tag=cst-x"], "--keep-tag 'cst-x': a name of letters"),
+            (["backup", "--keep-tag", "k", "--keep-tag", "k2", "--nas"], "backup: unexpected argument '--keep-tag'"),
+            (["status", "--keep-tag", "k"], "status: unexpected argument '--keep-tag'"),
+            (["backup", "a", "b", "--full", "--nas"], "backup: unexpected argument 'b'"),
+            (["backup", "--full", "--nas", "--keep-tag", "k"], "backup: --full is for the local copy"),
+            (["backup", "--keep-tag", "k", "--full"], "backup: --keep-tag and --no-quiesce go with --nas"),
+            (["backup", "w", "--no-quiesce"], "backup: --keep-tag and --no-quiesce go with --nas"),
+            (["tune"], "tune: plan or apply"),
+        ):
+            with self.subTest(argv=argv), self.assertRaisesRegex(Usage, "^" + re.escape(words)):
+                vm_domain.parse_args(argv)
 
     def test_version_changes(self) -> None:
         self.assertEqual(
@@ -886,6 +934,104 @@ class ListStatusTest(Scratch):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("virsh not found", r.stdout)
 
+    def status_head(self) -> list[str]:
+        """The lines of status win before the image folders (those depend on the machine's folders)."""
+        r = self.run_tool("status", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.replace(self.tmp, "TMP").splitlines()
+        return lines[: lines.index("VM image folders (NOCOW):")]
+
+    def virsh_stub(self, body: str) -> None:
+        p = os.path.join(self.bin, "virsh")
+        with open(p, "w") as f:
+            f.write(body)
+        os.chmod(p, 0o755)
+
+    def test_status_when_the_state_is_not_readable(self) -> None:
+        self.virsh_stub(
+            '#!/bin/sh\necho "virsh $*" >>"$STUB_LOG"\n'
+            'case " $* " in *" domstate "*) echo "error: failed to get domain win" >&2; exit 1 ;; esac\nexit 1\n'
+        )
+        self.assertEqual(
+            self.status_head(),
+            [
+                "win: state not readable (error: failed to get domain win)",
+                (
+                    "  last backup: none (to the NAS, also while it runs: cst vm backup --nas; a local copy with the VM "
+                    "shut off: cst vm backup)"
+                ),
+                "  weekly NAS backup timer: off (cst vm backup-timer status win)",
+            ],
+        )
+        self.assertFalse([c for c in self.calls() if " dumpxml " in c])
+
+    def test_status_when_the_definition_cannot_be_read_or_parsed(self) -> None:
+        tail = [
+            (
+                "  last backup: none (to the NAS, also while it runs: cst vm backup --nas; a local copy with the VM "
+                "shut off: cst vm backup)"
+            ),
+            "  weekly NAS backup timer: off (cst vm backup-timer status win)",
+        ]
+        self.domain("not xml")
+        self.assertEqual(
+            self.status_head(),
+            [
+                "win: shut off",
+                "  cpu: no <cpu> element (or not readable)",
+                "  hardware: definition not readable",
+                *tail,
+            ],
+        )
+        self.virsh_stub(VIRSH.replace('exec cat "$FIX/domain.xml"', 'echo "error: no" >&2; exit 1'))
+        self.assertEqual(self.status_head(), ["win: shut off", "  cpu: no <cpu> element (or not readable)", *tail])
+
+    def test_status_with_packages_unchanged_and_an_older_nas_backup(self) -> None:
+        self.assertEqual(self.run_tool("backup", "win").returncode, 0)
+        head = [
+            "win: shut off",
+            (
+                "  cpu mode host-passthrough: NOT disabled: cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet "
+                "(Windows may bootloop under QEMU 11; fix: cst cpu vm-pin plan)"
+            ),
+            "  hardware: 4 difference(s) from tune (Windows: virtio drivers first, the plan shows how): cst vm tune plan",
+            (
+                "  last backup: win              20261108T010640Z  reflink  deployment 45.1  qemu-kvm-11.1.3-1.fc45.x86_64  "
+                "TMP/cst-backups/win/20261108T010640Z"
+            ),
+            "  virtualization packages: unchanged since the last backup",
+        ]
+        timer = "  weekly NAS backup timer: off (cst vm backup-timer status win)"
+        self.assertEqual(self.status_head(), [*head, timer])
+        with open(self.index) as f:
+            data = json.load(f)
+        data["backups"].insert(
+            0,
+            {
+                "vm": "win",
+                "timestamp": "20261108T000640Z",
+                "epoch": NOW - 3600,
+                "mode": "nas",
+                "snapshot": "a1b2c3d4" + "e" * 56,
+                "repository": "sftp:nas:/r",
+                "host": "sophia",
+                "consistency": "quiesced",
+                "keep": None,
+                "versions": {},
+                "deployment": None,
+            },
+        )
+        with open(self.index, "w") as f:
+            json.dump(data, f)
+        self.assertEqual(
+            self.status_head(),
+            [
+                *head,
+                "  last NAS backup: win              20261108T000640Z  nas      deployment ?  ?  restic a1b2c3d4 (quiesced)",
+                timer,
+            ],
+        )
+
     def test_usage(self) -> None:
         r = self.run_tool("bogus")
         self.assertEqual(r.returncode, 2)
@@ -1186,6 +1332,48 @@ class TuneEdgeCaseTest(unittest.TestCase):
         devs = "<interface type='vhostuser'><mac address='52:54:00:00:00:02'/><model type='virtio'/></interface>"
         self.assertEqual(self.tune(with_devices(devs))[1], [])
 
+    def test_no_devices_and_the_memballoon_notes(self) -> None:
+        self.assertEqual(
+            self.tune("<domain type='kvm'><name>t</name></domain>\n"),
+            (None, [], [], ["no <devices> in the definition"]),
+        )
+        _, changes, held, notes = self.tune(
+            "<domain type='kvm'><name>t</name><devices><memballoon model='none'/></devices></domain>\n"
+        )
+        self.assertEqual((changes, held, notes), ([], [], ["memballoon model='none': left as it is"]))
+
+    def test_a_driver_other_than_qemu_is_left_as_it_is(self) -> None:
+        devs = "<disk type='file' device='disk'><driver name='tap'/><source file='/a'/><target dev='vda' bus='virtio'/></disk>"
+        after, changes, held, notes = self.tune(with_devices(devs))
+        assert after is not None
+        self.assertEqual((changes, held, notes), ([], [], ["disk vda: driver tap: left as it is"]))
+        self.assertIn('<driver name="tap" />', after)
+
+    def test_without_any_controller_the_new_one_goes_after_the_last_disk(self) -> None:
+        devs = (
+            "<disk type='file' device='disk'><source file='/a'/><target dev='sda' bus='sata'/></disk>"
+            "<disk type='file' device='cdrom'><target dev='sdb' bus='sata'/></disk>"
+            "<interface type='network'><model type='virtio'/></interface>"
+        )
+        after, changes, held, notes = self.tune(with_devices(devs))
+        assert after is not None
+        self.assertEqual(
+            changes,
+            [
+                "disk sda: cache (default) -> none",
+                "disk sda: io (default) -> native",
+                "disk sda: discard (default) -> unmap",
+                "disk sda: detect_zeroes (default) -> unmap",
+                "add a virtio-scsi controller (index 0)",
+                "disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)",
+            ],
+        )
+        self.assertEqual((held, notes), ([], []))
+        self.assertEqual(
+            [c.tag for c in _child(ET.fromstring(after), "devices")],
+            ["disk", "disk", "controller", "interface", "memballoon"],
+        )
+
 
 class TuneCommandTest(unittest.TestCase):
     """cmd_tune with a fake virsh (in-process: apply asks on a terminal)."""
@@ -1325,6 +1513,45 @@ class TuneCommandTest(unittest.TestCase):
         self.assertIn("win11-devbox: disks and network card already as cst vm tune recommends.", out)
         self.assertNotIn("held back", out)
 
+    def test_plan_of_a_linux_guest_with_a_knob_off_and_a_note(self) -> None:
+        x = old_domain().replace("http://microsoft.com/win/11", "http://fedoraproject.org/fedora/43")
+        self.xml = self.secret = x.replace("<memballoon model='virtio'", "<memballoon model='none'")
+
+        def _knobs(paths: object) -> dict[str, bool]:
+            return {**ALL_ON, "VM_TUNE_NIC": False}
+
+        with patch_vm("knobs", _knobs):
+            rc, out = self.run_cmd(apply=False, flag=False)
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual(
+            lines[: lines.index("--- current")],
+            [
+                "win11-devbox: shut off; guest: Linux (libosinfo http://fedoraproject.org/fedora/43)",
+                f"  skipped by {self.cfg.paths.vm_conf}: VM_TUNE_NIC=no",
+                "  change: disk sda: cache (default) -> none",
+                "  change: disk sda: io (default) -> native",
+                "  change: disk sda: discard (default) -> unmap",
+                "  change: disk sda: detect_zeroes (default) -> unmap",
+                "  change: add a virtio-scsi controller (index 0)",
+                "  change: disk sda: bus sata -> scsi (virtio-scsi controller 0, unit 0)",
+                "  note: memballoon model='none': left as it is",
+                (
+                    "  CPU (owned by cst cpu vm-pin, not by tune): CET/MBEC disabled; vCPUs pinned to 12-23; check: cst cpu "
+                    "vm-pin plan"
+                ),
+                (
+                    "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed drivers "
+                    "(hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first."
+                ),
+                "",
+            ],
+        )
+        self.assertEqual(
+            lines[-2:],
+            ["", "Plan only. Apply with: cst vm tune apply win11-devbox   (effective at the VM's next start)"],
+        )
+
     def test_apply_needs_root(self) -> None:
         def _uid() -> int:
             return 1000
@@ -1411,6 +1638,58 @@ class NocowTest(unittest.TestCase):
         self.assertIn(f"Set the mark with: cst-vm nocow apply   (folders: {self.boxes})", out)
         self.assertIn("not present", out)
         self.assertNotIn("virtio-win.iso", out)
+
+    def test_nocow_lines_of_an_unlistable_folder_and_of_cow_images_without_the_hints(self) -> None:
+        system = vm_domain.ImageProbe("system", "/s", "sys", present=True, btrfs=True, nocow=None, listed=False)
+        self.assertEqual(
+            vm_domain.nocow_lines(system, "cst vm"),
+            ["/s  [sys]", "  NOCOW mark (+C): not readable as your user (root-only folder): cst vm nocow plan --root"],
+        )
+        user = vm_domain.ImageProbe("user", "/u", "usr", present=True, btrfs=True, nocow=False, listed=False)
+        self.assertEqual(
+            vm_domain.nocow_lines(user, "cst vm"),
+            [
+                "/u  [usr]",
+                "  NOCOW mark (+C): no: cst vm nocow apply sets it (only files created later get it)",
+                "  images: folder not listable as your user",
+            ],
+        )
+        empty = vm_domain.ImageProbe("user", "/e", "e", present=True, btrfs=None, nocow=True, listed=True)
+        self.assertEqual(vm_domain.nocow_lines(empty, "p"), ["/e  [e]", "  NOCOW mark (+C): yes", "  images: none"])
+        images = [
+            vm_domain.ImageInfo("a.qcow2", "/i/a.qcow2", 3 * 2**30, 5 * 2**30, nocow=False),
+            vm_domain.ImageInfo("b.raw", "/i/b.raw", 0, 0, None),
+            vm_domain.ImageInfo("c.qcow2", "/i/c.qcow2", 0, 0, nocow=True),
+            vm_domain.ImageInfo("d.qcow2", "/i/d.qcow2", 2**20, 2**21, nocow=False),
+        ]
+        folder = vm_domain.ImageProbe(
+            "system",
+            "/i",
+            "img",
+            present=True,
+            btrfs=True,
+            nocow=True,
+            listed=True,
+            images=images,
+            leftovers=["x.cow-old"],
+        )
+        self.assertEqual(
+            vm_domain.nocow_lines(folder, "p", verbose=False),
+            [
+                "/i  [img]",
+                "  NOCOW mark (+C): yes",
+                "  NOCOW images: c.qcow2",
+                "  images whose mark is not readable as your user: b.raw (p nocow plan --root)",
+                "  still copy-on-write: a.qcow2  3.0 GiB allocated, 5.0 GiB apparent",
+                "  still copy-on-write: d.qcow2  1.0 MiB allocated, 2.0 MiB apparent",
+                "  leftover of a conversion: x.cow-old (remove it once the VM booted well from the new file)",
+            ],
+        )
+        verbose = vm_domain.nocow_lines(folder, "p")
+        self.assertEqual(verbose[5], "    to convert (every VM using it shut off; needs about 3.0 GiB free):")
+        self.assertEqual(verbose[6:12], [f"      {ln}" for ln in vm_domain.convert_lines(images[0], system=True)])
+        self.assertEqual(verbose[12], "  still copy-on-write: d.qcow2  1.0 MiB allocated, 2.0 MiB apparent")
+        self.assertEqual(len(verbose), 21)
 
     def test_convert_lines_order(self) -> None:
         img = vm_domain.ImageInfo("w b.qcow2", "/i/w b.qcow2", 0, 0, False)
