@@ -38,6 +38,7 @@ from doctor.domain import (
     VM_LIVE_STATES,
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
+    VM_STOPPED_STATES,
     VM_TIMER_WANTS,
     VM_TORN,
     VM_TORN_FORMAT,
@@ -346,17 +347,13 @@ def _backup_warning(host: DoctorHostPort, what: str, built: float, backup: float
     else:
         last = "never"
     if nas_configured(host):
-        return Result(
-            WARN,
-            f"{what}. No VM backup since the booted deployment was built ({when}; last "
-            f"backup: {last}). The NAS backup works with the VM running",
-            f"{host.cst} vm backup --nas",
-        )
+        advice, fix = "The NAS backup works with the VM running", f"{host.cst} vm backup --nas"
+    else:
+        advice, fix = "Shut the VM down first", f"{host.cst} vm backup"
     return Result(
         WARN,
-        f"{what}. No VM backup since the booted deployment was built ({when}; last "
-        f"backup: {last}). Shut the VM down first",
-        f"{host.cst} vm backup",
+        f"{what}. No VM backup since the booted deployment was built ({when}; last backup: {last}). {advice}",
+        fix,
     )
 
 
@@ -520,7 +517,7 @@ def _overlay_kind(host: DoctorHostPort, disk: _OverlayDisk, disks: _OverlayDisks
         if disks.sources is not None and disks.sources.get(disk.dev) == disk.base:
             return VmOverlayKind.DEFINITION
         return VmOverlayKind.UNKNOWN
-    if disk.state in ("shut off", "crashed"):
+    if disk.state in VM_STOPPED_STATES:
         return (
             VmOverlayKind.OFFLINE
             if file_newer(host, HostPath(disk.path), HostPath(disk.base)) is True
@@ -565,7 +562,7 @@ def _overlay_result(host: DoctorHostPort, disk: _OverlayDisk, kind: VmOverlayKin
                 f"--inactive`, and remove the overlay file {OVERLAY_GUIDE}",
                 f"sudo qemu-img commit -p {q(path)}",
             )
-        case _ if state in ("shut off", "crashed"):
+        case _ if state in VM_STOPPED_STATES:
             return Result(
                 WARN,
                 f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
@@ -583,7 +580,7 @@ def _overlay_result(host: DoctorHostPort, disk: _OverlayDisk, kind: VmOverlayKin
                 f"({state or 'unreadable'}) or its disk listing does not tell how to put it back. "
                 f"Do not remove or commit anything yet: look with `virsh domstate {vm}` and "
                 f"`virsh domblklist {vm} --details` (and --inactive) {OVERLAY_GUIDE}",
-                f"sudo virsh -c {VIRSH_URI} domblklist {q(vm)} --details",
+                f"{v} domblklist {q(vm)} --details",
             )
 
 

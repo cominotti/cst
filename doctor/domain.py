@@ -170,6 +170,7 @@ VM_TORN = HostPath(VM_TORN_FORMAT.path)
 VM_CONF = HostPath("/etc/cst/vm.conf")
 VM_OVERLAY_MARK = ".cst-overlay-"  # as OVERLAY_MARK in vm/cst-vm
 VM_LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU alive: a block job works
+VM_STOPPED_STATES = ("shut off", "crashed")  # QEMU gone: the overlay can be merged offline
 VM_RUN_DIR = HostPath("/run/cst-vm")  # nas-<vm>.lock: the pid of a NAS backup in progress
 VM_TIMER_WANTS = HostPath("/etc/systemd/system/timers.target.wants")
 # Packages that make up the guest's virtual hardware: name prefixes.
