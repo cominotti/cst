@@ -369,7 +369,7 @@ snap_setup() {
     } | cst_install_text "${SNAP_PLAN}" 0644
     snap_conf_set HOME_DIR="${home}" HOME_SUBVOL="${subvol}"
     snap_install_runtime
-    snap_user_configs "${home}"
+    snap_user_configs
     # 2. ~/Bulk first (a subvolume as you, then each item moved in and linked;
     # busy items at the next boot): what moves there is never cloned below.
     echo
@@ -423,8 +423,8 @@ snap_start_anyway() {   # yes
 }
 
 # User-owned configs, written as the user; existing settings are never changed.
-snap_user_configs() {   # home
-    local home="$1" tc run why=""
+snap_user_configs() {
+    local tc run why=""
     tc="$(snap_toolchains_prog)"
     # cargo build-dir and uv link-mode (the toolchains module writes them).
     # --no-lean-debuginfo: setup never turns on the opt-in lean debug info
