@@ -260,8 +260,9 @@ class PureRulesTest(unittest.TestCase):
         )
 
     def test_drifted_skips_what_it_cannot_compare(self) -> None:
-        # A record cut short, a cgw record with an empty SHOWN and a record of another kind never drift,
-        # and the cgroup file is read only for a whole cgw record that has a SHOWN.
+        # A record cut short, a record with an empty SHOWN, a prop record of a unit systemd showed nothing
+        # for and a record of another kind never drift, and the cgroup file is read only for a whole cgw
+        # record that has a SHOWN.
         read: list[str] = []
 
         def read_file(path: str) -> str | None:
@@ -273,12 +274,15 @@ class PureRulesTest(unittest.TestCase):
             ("cgw", "/cg/a/cpuset.cpus", "12-23", ""),
             ("cgw", "/cg/b/cpuset.cpus", "12-23"),
             ("prop", "sys", "machine.slice", "CPUWeight", "10"),
+            ("prop", "sys", "machine.slice", "CPUWeight", "10", ""),
+            ("prop", "usr", "app.slice", "MemoryLow", "16G", "16G"),
             ("epp", "0", "performance"),
         ]
         self.assertEqual(drifted(skipped, now, read_file), [])
         self.assertEqual(read, [])
         whole = ("cgw", "/cg/c/cpuset.cpus", "12-23", "12-23")
-        self.assertEqual(drifted([*skipped, whole], now, read_file), [Drift(whole, "0-23")])
+        prop = ("prop", "sys", "machine.slice", "CPUWeight", "10", "10")
+        self.assertEqual(drifted([*skipped, whole, prop], now, read_file), [Drift(whole, "0-23"), Drift(prop, "50")])
         self.assertEqual(read, ["/cg/c/cpuset.cpus"])
 
     def test_a_last_line_cut_short(self) -> None:
