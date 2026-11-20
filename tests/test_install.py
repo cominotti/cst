@@ -1175,6 +1175,34 @@ class ShellComponentWordsTest(unittest.TestCase):
             ],
         )
 
+    def test_a_comment_after_a_shell_delimiter_continues_no_line(self) -> None:
+        # bash starts a comment at a # right after ; | & ( ) as after a blank, and a backslash ending
+        # that comment continues nothing: the next line is a command of its own.
+        text = (
+            "echo a;# note \\\n"
+            "cst_mark btrfs:core\n"
+            "echo b|# note \\\n"
+            "cst_mark btrfs:alerts\n"
+            "(true)# note \\\n"
+            "cst_mark btrfs:snapshot\n"
+            "true&# note \\\n"
+            "cst_mark btrfs:z\n"
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [(2, "btrfs:core"), (4, "btrfs:alerts"), (6, "btrfs:snapshot"), (8, "btrfs:z")],
+        )
+
+    def test_only_an_odd_run_of_trailing_backslashes_continues_the_line(self) -> None:
+        # bash: \\ at the end of a line is one literal backslash, so the line ends there; \\\ is a
+        # literal backslash and then a continuation.
+        text = "echo foo \\\\\ncst_mark btrfs:core\necho foo \\\\\\\ncst_mark btrfs:alerts\n"
+        self.assertEqual(
+            _logical_lines(text),
+            [(1, "echo foo \\\\"), (2, "cst_mark btrfs:core"), (3, "echo foo \\\\ cst_mark btrfs:alerts")],
+        )
+        self.assertEqual(shell_component_words(text), [(2, "btrfs:core"), (3, "btrfs:alerts")])
+
 
 if __name__ == "__main__":
     unittest.main()
