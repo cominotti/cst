@@ -3127,7 +3127,7 @@ class VmHardwareTest(VmTest):
         # The probe lives in vm.adapters.images (VmTools calls it there).
         with (
             mock.patch.dict(os.environ, {"HOME": self.tmp}),
-            mock.patch.object(vm_images, "is_btrfs", lambda p: btrfs),
+            mock.patch.object(vm_images, "is_btrfs", return_value=btrfs),
             mock.patch.object(vm_images, "readable_inode_flags", lambda p: flags.get(p, 0)),
             mock.patch.object(os, "scandir", scandir),
         ):
