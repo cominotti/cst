@@ -80,16 +80,17 @@ def _device_part(snap: Snapshot, props: object, profile: object) -> None:
         snap["profile"] = name if isinstance(name, str) else None
 
 
-def _node_part(snap: Snapshot, props: object, info: object, dev: str) -> None:
-    """A Node object into SNAP: headset DEV's output (serial, codec, rate) or one of its inputs.
+def _node_part(snap: Snapshot, props: object, info: object, output: str, inputs: tuple[str, str]) -> None:
+    """A Node object into SNAP: the headset's output (serial, codec, rate) or one of its inputs.
+    OUTPUT and INPUTS: the name prefixes of the headset's nodes (snapshot builds them once).
     PROPS and INFO are JSON objects (snapshot checked them)."""
     p, node = object_of(props), object_of(info)
     name = str(p.get("node.name", ""))
-    if name.startswith("bluez_output." + dev) and (codec := p.get(CODEC_KEY, "")):
+    if name.startswith(output) and (codec := p.get(CODEC_KEY, "")):
         snap["out"] = serial(p)
         snap["codec"] = str(codec)
         snap["rate"] = _rate(node)
-    elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + dev.replace("_", ":"))):
+    elif name.startswith(inputs):
         snap["inputs"].append(serial(p))
         if node.get("state") == "running":
             snap["mic"] = True
@@ -111,6 +112,7 @@ def snapshot(dev: str, objs: object) -> Snapshot:
         "inputs": [],
         "mic": False,
     }
+    output, inputs = "bluez_output." + dev, (INPUT_PREFIX + dev, INPUT_PREFIX + dev.replace("_", ":"))
     for o in objs if isinstance(objs, list) else []:
         if not json_object(o):
             continue
@@ -123,7 +125,7 @@ def snapshot(dev: str, objs: object) -> Snapshot:
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             _device_part(snap, p, params.get("Profile"))
         if kind.endswith("Node"):
-            _node_part(snap, p, info, dev)
+            _node_part(snap, p, info, output, inputs)
     return snap
 
 
