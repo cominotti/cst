@@ -1391,7 +1391,8 @@ There is an optional daily backup to the NAS with **restic** (a backup program).
 Commands: `snapshots setup [--yes]`, `status`, `list [--json]`,
 `caches [--json]`, `prune [--confirm]`, `clean-targets [--apply]`, `disable [--purge]`,
 `nas setup --path DIR ...`, `nas status|disable|run`,
-`chrome-cache [status|apply|off]`.
+`chrome-cache [status|apply|off]` (`btrfs/chrome-cache` itself takes only
+`--home DIR` after the action and refuses any other argument, exit 2).
 
 **All details, and how to restore files: [SNAPSHOTS.md](SNAPSHOTS.md).**
 
