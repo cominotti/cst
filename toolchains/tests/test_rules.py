@@ -58,6 +58,7 @@ from toolchains import wiring as tc_wiring
 from toolchains.adapters import home_files as tc_home_files
 from toolchains.adapters import processes as tc_processes
 from cst_core.ports import CommandResult
+from toolchains.application import prune as tca_prune
 from toolchains.application import python_uv as tca_python_uv
 from toolchains.adapters import rustup as tc_rustup
 from toolchains.tests.test_prune_rust_build import NOW, TOOL, Base, H
@@ -2235,3 +2236,165 @@ class RustcWrapperTest(unittest.TestCase):
         if shutil.which("shellcheck") is not None:
             r = subprocess.run(["shellcheck", "-S", "warning", WRAPPER], check=False, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout)
+
+
+class ToolchainReportEdgeTest(RulesBase):
+    """The rows and closing notes of the toolchains report in the cases the others do not reach."""
+
+    HOST = "x86_64-unknown-linux-gnu"
+
+    def toolchains(self, *names: str, settings: str = "") -> None:
+        rh = os.path.join(self.tmp, "rustup")
+        os.environ["RUSTUP_HOME"] = rh
+        for n in names:
+            os.makedirs(os.path.join(rh, "toolchains", f"{n}-{self.HOST}", "bin"))
+        with open(os.path.join(rh, "settings.toml"), "w") as f:
+            f.write(f'default_toolchain = "stable-{self.HOST}"\n' + settings)
+
+    def report(self, limits: tcd_prune.Limits | None = None) -> str:
+        return "\n".join(tc_rustup.toolchain_lines(self.home, limits or self.limits))
+
+    def test_a_pin_file_without_a_channel_pins_nothing(self) -> None:
+        self.toolchains("stable", "1.95.0")
+        a = self.repo("a")
+        with open(os.path.join(a, "rust-toolchain.toml"), "w") as f:
+            f.write('[toolchain]\ncomponents = ["clippy"]\n')
+        lines = self.report()
+        self.assertRegex(lines, r"1\.95\.0 +not pinned or named under ~/Workspace")
+        self.assertNotIn("pinned but not installed", lines)
+
+    def test_a_rustup_override_pins_its_toolchain(self) -> None:
+        self.toolchains("stable", "1.95.0", settings=f'[overrides]\n"/srv/a" = "1.95.0-{self.HOST}"\n')
+        self.repo("a")
+        lines = self.report()
+        self.assertRegex(lines, r"1\.95\.0 +pinned by rustup override for /srv/a")
+        self.assertNotIn("rustup toolchain uninstall", lines)
+
+    def test_more_build_files_than_the_limit_offers_no_command(self) -> None:
+        self.toolchains("stable", "1.95.0")
+        a = self.repo("a")
+        for n in ("a.sh", "b.sh"):
+            with open(os.path.join(a, n), "w") as f:
+                f.write("true\n")
+        lines = self.report(tcd_prune.Limits(tool_files_max=1))
+        self.assertIn(
+            "not pinned, not the default and not named in the files read: 1.95.0; no removal command, "
+            "because the search was incomplete",
+            lines,
+        )
+        self.assertNotIn("rustup toolchain uninstall", lines)
+        self.assertNotIn("the search for rust-toolchain files was incomplete", lines)
+
+    def test_nothing_unused_gives_no_removal_lines(self) -> None:
+        self.toolchains("stable", "1.95.0")
+        a = self.repo("a")
+        with open(os.path.join(a, "rust-toolchain"), "w") as f:
+            f.write("1.95.0\n")
+        lines = self.report()
+        self.assertRegex(lines, r"1\.95\.0 +pinned by ~/Workspace/a/rust-toolchain")
+        self.assertTrue(lines.endswith("rustup overrides)"), lines)
+
+
+class ConfigStateEdgeTest(unittest.TestCase):
+    """lean_state and sccache_state of a file that cannot be read or parsed, and the edits they refuse."""
+
+    WANT = "/h/.local/libexec/cst/rustc-wrapper"
+
+    def test_lean_state_of_an_unreadable_or_invalid_file(self) -> None:
+        st = tcd_config.lean_state("/h/c.toml", None)
+        self.assertEqual((st["error"], st["add"], st["append"]), ("cannot be read", [], ""))
+        st = tcd_config.lean_state("/h/c.toml", "[build\n")
+        self.assertTrue(st["error"].startswith("is not valid TOML ("), st["error"])
+        self.assertEqual((st["add"], st["append"]), ([], ""))
+
+    def test_sccache_state_of_an_unreadable_invalid_or_odd_file(self) -> None:
+        empty = {"value": None, "ours": False, "add": "", "remove": ""}
+        st = tcd_config.sccache_state("/h/c.toml", None, self.WANT)
+        self.assertEqual(st, {"path": "/h/c.toml", "error": "cannot be read", **empty})
+        st = tcd_config.sccache_state("/h/c.toml", "[build\n", self.WANT)
+        self.assertTrue(st["error"].startswith("is not valid TOML ("), st["error"])
+        self.assertEqual((st["value"], st["ours"], st["add"], st["remove"]), (None, False, "", ""))
+        st = tcd_config.sccache_state("/h/c.toml", "build = 1\n", self.WANT)
+        self.assertEqual(st, {"path": "/h/c.toml", "error": "", **empty})
+
+    def test_two_build_header_lines_give_no_safe_add(self) -> None:
+        text = 's = """\n[build]\n"""\n[build]\njobs = 1\n'
+        st = tcd_config.sccache_state("/h/c.toml", text, self.WANT)
+        self.assertEqual((st["error"], st["value"], st["add"]), ("", None, ""))
+
+    def test_csts_block_after_a_line_that_is_not_blank(self) -> None:
+        text = f'[alias]\nb = "build"\n{tcd_config.SCCACHE_HEAD}\n[build]\nrustc-wrapper = "{self.WANT}"\n'
+        st = tcd_config.sccache_state("/h/c.toml", text, self.WANT)
+        self.assertTrue(st["ours"])
+        self.assertEqual(st["remove"], '[alias]\nb = "build"\n')
+
+    def test_a_remove_that_would_change_another_value_is_refused(self) -> None:
+        text = f'build.rustc-wrapper = "{self.WANT}"\nnote = """\nrustc-wrapper = "{self.WANT}"\n"""\n'
+        st = tcd_config.sccache_state("/h/c.toml", text, self.WANT)
+        self.assertTrue(st["ours"])
+        self.assertEqual(st["remove"], "")
+
+
+class ConfigLinesEdgeTest(RulesBase):
+    def test_configs_that_cannot_be_read(self) -> None:
+        cargo = os.path.join(self.home, ".cargo/config.toml")
+        uv = os.path.join(self.home, ".config/uv/uv.toml")
+        os.remove(cargo)
+        os.makedirs(cargo)
+        os.makedirs(uv)
+        lines = tc_wiring.tool_config(self.session()).lines(tcd_config.ConfigView.PLAN)
+        self.assertIn((tcd_config.ConfigMark.UNKNOWN, "~/.cargo/config.toml", "cannot be read"), lines)
+        self.assertIn((tcd_config.ConfigMark.UNKNOWN, "~/.config/uv/uv.toml", "cannot be read"), lines)
+        self.assertIn(
+            (tcd_config.ConfigMark.UNKNOWN, "~/.cargo/config.toml", "sccache: the file cannot be read"), lines
+        )
+
+    def test_no_sccache_when_csts_line_cannot_be_removed_safely(self) -> None:
+        want = tcd_config.wrapper_path(self.home)
+        self.write_cargo_config(f'build.rustc-wrapper = "{want}"\nnote = """\nrustc-wrapper = "{want}"\n"""\n')
+        rc, out = self.run_main("config", "plan", "--no-sccache")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CST cannot remove its rustc-wrapper line safely: delete it yourself", out)
+
+    def test_no_sccache_keeps_a_wrapper_that_is_not_csts(self) -> None:
+        self.write_cargo_config('[build]\nrustc-wrapper = "/usr/bin/sccache"\n')
+        lines = tc_wiring.tool_config(self.session()).lines(tcd_config.ConfigView.PLAN, sccache=False)
+        keep = [n for m, _, n in lines if m == tcd_config.ConfigMark.KEEP and n.startswith("sccache (")]
+        self.assertEqual(len(keep), 1, lines)
+        self.assertTrue(keep[0].endswith('): rustc-wrapper = "/usr/bin/sccache" is yours: left as it is'), keep)
+
+
+class TrimStepTest(RulesBase):
+    build_folder = IncrementalTest.build_folder
+
+    def test_a_failed_trim_fails_the_run(self) -> None:
+        self.build_folder("aa/0123456789abcd", 10)
+        tree = self.tree()
+        self.tree_for_main = tree
+        with mock.patch.object(tree, "trim", return_value=("failed", "boom")) as trim:
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(trim.call_count, 1)
+        self.assertIn("rust:build: could not delete the incremental folders of aa/0123456789abcd: boom", out)
+
+
+class ManagerPathOnceTest(RulesBase):
+    def test_the_managers_path_is_asked_once_even_when_unreadable(self) -> None:
+        s = self.session()
+
+        def target(settings: tcd_prune.Settings, tid: str) -> tca_prune.Target:
+            t = tc_wiring.target(s, settings, tid)
+            t.SPEC = dataclasses.replace(t.SPEC, uses_path=True)  # every target looks for a program
+            return t
+
+        timer = dataclasses.replace(tc_wiring.auto_timer(s), target=target)
+        self.manager_env = ""  # the user manager's PATH cannot be read: None
+        out = io.StringIO()
+        with (
+            mock.patch.object(s.units, "manager_path", wraps=s.units.manager_path) as manager_path,
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(out),
+        ):
+            rc = timer.on()
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(manager_path.call_count, 1)

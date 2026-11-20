@@ -25,8 +25,8 @@ import sys
 import tempfile
 import time
 import unittest
-from collections.abc import Callable, Iterator, Sequence
-from typing import Protocol, override
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Protocol, Self, override
 from unittest import mock
 
 # Run directly (python3 -I -B toolchains/tests/test_prune_rust_build.py): the checkout root holds the tests package.
@@ -37,6 +37,7 @@ if _CHECKOUT not in sys.path:
 from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.errors import Refused
+from cst_core.ports import CommandResult
 from toolchains import cli as tc_cli, wiring as tc_wiring
 from toolchains.application import rust_build as tca_rust_build
 from toolchains.ports import RunOutputPort
@@ -1040,6 +1041,370 @@ class TurnedOffTest(Base):
     def test_flag_only_for_auto_on(self) -> None:
         rc, _out = self.run_main("prune", "apply", "--unless-off")
         self.assertEqual(rc, 2)
+
+
+class _RaisingEntry:
+    """A directory entry whose stat and is_dir raise ERROR (os.DirEntry cannot be built)."""
+
+    def __init__(self, folder: str, name: str, error: OSError) -> None:
+        self.name = name
+        self.path = os.path.join(folder, name)
+        self.error = error
+
+    def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+        raise self.error
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        raise self.error
+
+
+class _Listing:
+    """What a patched os.scandir hands out: the entries, in a with block or not."""
+
+    def __init__(self, entries: Sequence[object]) -> None:
+        self.entries = list(entries)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self.entries)
+
+
+def patched_scandir(
+    fail: Mapping[str, OSError] | None = None, extra: Mapping[str, Sequence[object]] | None = None
+) -> contextlib.AbstractContextManager[object]:
+    """os.scandir that raises FAIL[path] for those paths and lists EXTRA[path] after the real entries."""
+    real = os.scandir
+    failing = dict[str, OSError]() if fail is None else fail
+    added = dict[str, Sequence[object]]() if extra is None else extra
+
+    def scandir(path: str = ".") -> _Listing:
+        if path in failing:
+            raise failing[path]
+        with real(path) as it:
+            entries: list[object] = list(it)
+        return _Listing([*entries, *added.get(path, ())])
+
+    return mock.patch.object(os, "scandir", scandir)
+
+
+def denied(path: str) -> PermissionError:
+    return PermissionError(13, "Permission denied", path)
+
+
+def vanished(path: str) -> FileNotFoundError:
+    return FileNotFoundError(2, "No such file or directory", path)
+
+
+class MeasureEdgeTest(Base):
+    """measure and scan on the paths a race or an odd entry takes: each is skipped or reported."""
+
+    def dev(self) -> int:
+        return os.lstat(self.root).st_dev
+
+    def test_a_folder_gone_before_measure_is_reported(self) -> None:
+        f = tc_build_tree.measure(tcd_build.Folder(self.root, "zz", "00000000000000"), self.dev(), NOW)
+        self.assertEqual(f.problem, "cannot read: No such file or directory")
+        self.assertEqual((f.size, f.entries), (0, 0))
+
+    def test_the_folders_own_future_mtime_is_not_its_activity(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100)
+        os.utime(path, (NOW + 10 * H, NOW + 10 * H))
+        f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual(f.activity, NOW - 100 * H)
+        self.assertEqual(f.future, 0)
+
+    def test_a_sub_folder_gone_is_skipped_and_an_unreadable_one_reported(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100)
+        deps = os.path.join(path, "debug", "deps")
+        fp = os.path.join(path, "debug", ".fingerprint")
+        with patched_scandir(fail={deps: vanished(deps)}):
+            f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual(f.problem, "")
+        with patched_scandir(fail={fp: denied(fp)}):
+            f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual(f.problem, f"cannot read {fp}: Permission denied")
+
+    def test_an_entry_whose_stat_fails_is_skipped_or_reported(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100)
+        whole = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        gone = _RaisingEntry(path, "gone", vanished(os.path.join(path, "gone")))
+        with patched_scandir(extra={path: [gone]}):
+            f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual((f.problem, f.entries, f.size), ("", whole.entries, whole.size))
+        locked = _RaisingEntry(path, "locked", denied(os.path.join(path, "locked")))
+        with patched_scandir(extra={path: [locked]}):
+            f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual(f.problem, f"cannot read {locked.path}: Permission denied")
+        self.assertEqual(f.entries, whole.entries)
+
+    def test_entries_on_another_filesystem_are_counted_and_reported(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        f = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev() + 1, NOW)
+        self.assertEqual(f.foreign, 2)  # CACHEDIR.TAG and debug/, which is not entered
+        self.assertEqual(f.problem, f"{f.foreign} entr(y/ies) on another filesystem")
+
+    def test_a_hardlinked_file_is_counted_once(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100, kib=64)
+        before = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        rlib = os.path.join(path, "debug", "deps", "libfoo-0123.rlib")
+        os.link(rlib, os.path.join(path, "debug", "deps", "libfoo-copy.rlib"))
+        self.age(path, 100)
+        after = tc_build_tree.measure(tcd_build.Folder(self.root, "aa", "0123456789abcd"), self.dev(), NOW)
+        self.assertEqual(after.entries, before.entries + 1)
+        self.assertLess(after.size - before.size, 64 * 1024)
+
+    def test_scan_of_a_root_gone_meanwhile_is_empty(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        with patched_scandir(fail={self.root: vanished(self.root)}):
+            self.assertEqual(tc_build_tree.scan(self.root, NOW), ([], [], []))
+
+    def test_scan_leaves_out_a_top_or_a_leaf_whose_stat_fails(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        aa = os.path.join(self.root, "aa")
+        top = _RaisingEntry(self.root, "bb", denied(os.path.join(self.root, "bb")))
+        leaf = _RaisingEntry(aa, "00000000000000", vanished(os.path.join(aa, "00000000000000")))
+        with patched_scandir(extra={self.root: [top], aa: [leaf]}):
+            folders, trash, others = tc_build_tree.scan(self.root, NOW)
+        self.assertEqual([f.key for f in folders], ["aa/0123456789abcd"])
+        self.assertEqual((trash, others), ([], []))
+
+    def test_a_trash_name_that_is_a_file_is_left_alone(self) -> None:
+        name = tcd_build.TRASH_PREFIX + "0123456789abcdef-1"
+        with open(os.path.join(self.root, name), "w") as f:
+            f.write("x")
+        folders, trash, others = tc_build_tree.scan(self.root, NOW)
+        self.assertEqual((folders, trash), ([], []))
+        self.assertEqual(others, [(name, "not a folder on this filesystem")])
+
+
+class WalkDirsEdgeTest(Base):
+    def test_a_deadline_already_past_is_incomplete(self) -> None:
+        with self.assertRaisesRegex(tcd_build.Incomplete, "the search of workspaces took longer than"):
+            list(tc_cargo.walk_dirs(self.home, 3, time.monotonic() - 1))
+
+    def test_an_unreadable_folder_is_skipped(self) -> None:
+        for rel in ("a/x", "b/y"):
+            os.makedirs(os.path.join(self.tmp, "w", rel))
+        top = os.path.join(self.tmp, "w")
+        a = os.path.join(top, "a")
+        with patched_scandir(fail={a: denied(a)}):
+            got = [os.path.relpath(d, top) for d, _ in tc_cargo.walk_dirs(top, 3, time.monotonic() + 60)]
+        self.assertEqual(got, [".", "b", "b/y"])
+
+    def test_depth_and_stop_end_the_descent_but_the_folder_is_still_yielded(self) -> None:
+        top = os.path.join(self.tmp, "w")
+        os.makedirs(os.path.join(top, "a", "x"))
+        self.assertEqual([d for d, _ in tc_cargo.walk_dirs(top, 0, time.monotonic() + 60)], [top])
+        got = [d for d, _ in tc_cargo.walk_dirs(top, 3, time.monotonic() + 60, stop=lambda d, _n: d != top)]
+        self.assertEqual(got, [top, os.path.join(top, "a")])
+
+    def test_an_entry_whose_type_cannot_be_read_is_not_entered(self) -> None:
+        top = os.path.join(self.tmp, "w")
+        os.makedirs(os.path.join(top, "a"))
+        odd = _RaisingEntry(top, "odd", denied(os.path.join(top, "odd")))
+        with patched_scandir(extra={top: [odd]}):
+            got = [(d, sorted(n)) for d, n in tc_cargo.walk_dirs(top, 3, time.monotonic() + 60)]
+        self.assertEqual(got, [(top, ["a", "odd"]), (os.path.join(top, "a"), [])])
+
+
+class CargoAnswersTest(Base):
+    """What cargo_users and claimed_folders make of cargo's answers."""
+
+    def test_the_same_process_twice_is_listed_once(self) -> None:
+        bd = os.path.join(self.root, "aa", "0123456789abcd")
+        q = tcd_build.CargoQuery(((), self.tmp, ()), ("cargo", "metadata"), {}, self.tmp)
+        procs = [tcd_build.CargoProc("4242", "cargo", self.tmp), tcd_build.CargoProc("4242", "cargo", self.tmp)]
+        with (
+            mock.patch.object(tc_cargo, "cargo_query", return_value=q),
+            mock.patch.object(tc_cargo, "ask_cargo", return_value=(bd, None)) as ask,
+        ):
+            found, unknown = tc_cargo.cargo_users(self.root, self.home, {}, procs)
+        self.assertEqual(found, {"aa/0123456789abcd": [("4242", "cargo")]})
+        self.assertEqual(unknown, [])
+        self.assertEqual(ask.call_count, 1)  # the second answer came from the cache
+
+    def test_no_cargo_program_makes_the_search_incomplete(self) -> None:
+        with (
+            mock.patch.object(tc_cargo, "find_worktrees", return_value=[self.tmp]),
+            mock.patch.object(tc_cargo, "user_cargo", return_value=""),
+        ):
+            ws = tc_cargo.claimed_folders(self.root, self.home, self.limits)
+        self.assertEqual(ws.incomplete, "no cargo program found to ask")
+        self.assertEqual(ws.claimed, {})
+
+    def test_claims_of_scripted_metadata(self) -> None:
+        wt = os.path.join(self.tmp, "wt")
+        top, a, b = (os.path.join(wt, *p, "Cargo.toml") for p in ((), ("a",), ("b",)))
+        bd = os.path.join(self.root, "aa", "0123456789abcd", "x")
+        answers: dict[str, tc_cargo.CargoMetadata] = {
+            # A package without a manifest_path covers nothing more: a/ is asked too.
+            top: {"packages": [{"name": "x"}, 5], "workspace_root": wt, "build_directory": bd},
+            # The same workspace again: shown once.
+            a: {"packages": [], "workspace_root": wt, "build_directory": bd},
+            # A build folder outside the root claims nothing.
+            b: {"build_directory": "/elsewhere/aa/0123456789abcd"},
+        }
+        asked: list[str] = []
+
+        def metadata(
+            cargo: str, m: str, env: Mapping[str, str], deadline: float, cmd_timeout: float
+        ) -> tuple[tc_cargo.CargoMetadata | None, str | None]:
+            asked.append(m)
+            return answers[m], None
+
+        with (
+            mock.patch.object(tc_cargo, "find_worktrees", return_value=[wt]),
+            mock.patch.object(tc_cargo, "find_manifests", return_value=([b, a, top], [], [])),
+            mock.patch.object(tc_cargo, "user_cargo", return_value="/nonexistent/cargo"),
+            mock.patch.object(tc_cargo, "workspace_metadata", metadata),
+        ):
+            ws = tc_cargo.claimed_folders(self.root, self.home, self.limits)
+        self.assertEqual(ws.incomplete, "")
+        self.assertEqual(asked, [top, a, b])
+        self.assertEqual((ws.asked, ws.manifests, ws.failures), (3, 3, []))
+        self.assertEqual(ws.claimed, {"aa/0123456789abcd": [wt]})
+
+    def test_output_that_is_not_cargo_metadata(self) -> None:
+        for stdout in ("not json", "[1]"):
+            with (
+                self.subTest(stdout=stdout),
+                mock.patch.object(tc_cargo.RUNNER, "run", return_value=CommandResult(0, stdout, "")),
+            ):
+                self.assertEqual(
+                    tc_cargo.ask_cargo(["cargo"], {}, self.tmp), (None, "cargo metadata: unexpected output")
+                )
+            answer = subprocess.CompletedProcess(["cargo"], 0, stdout, "")
+            with self.subTest(stdout=stdout), mock.patch.object(tc_cargo, "run_idle", return_value=answer):
+                self.assertEqual(
+                    tc_cargo.workspace_metadata(
+                        "cargo", os.path.join(self.tmp, "Cargo.toml"), {}, time.monotonic() + 60, 5
+                    ),
+                    (None, "cargo metadata: unexpected output"),
+                )
+
+
+class ProcUsersEdgeTest(Base):
+    """proc_users over a /proc of the test's own."""
+
+    def fake_proc(self, pid: str, comm: str, links: Mapping[str, str]) -> str:
+        base = os.path.join(self.tmp, "proc", pid)
+        os.makedirs(os.path.join(base, "fd"))
+        with open(os.path.join(base, "comm"), "w") as f:
+            f.write(comm + "\n")
+        for rel, target in links.items():
+            os.symlink(target, os.path.join(base, rel))
+        return base
+
+    def proc_users(self) -> tuple[dict[str, list[tuple[str, str]]], int]:
+        with mock.patch.object(tc_processes, "PROC", os.path.join(self.tmp, "proc")):
+            return tc_processes.proc_users(self.root)
+
+    def test_a_process_seen_twice_in_one_folder_is_listed_once(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100)
+        self.fake_proc("999991", "sleep", {"cwd": os.path.join(path, "debug"), "fd/3": os.path.join(path, "x")})
+        self.assertEqual(self.proc_users(), ({"aa/0123456789abcd": [("999991", "sleep")]}, 0))
+
+    def test_an_unreadable_rust_tool_is_counted_and_skipped(self) -> None:
+        path = self.folder("aa/0123456789abcd", 100)
+        rustc = self.fake_proc("999991", "rustc", {"cwd": path, "exe": os.path.join(path, "x")})
+        other = self.fake_proc("999992", "sleep", {"cwd": path, "exe": os.path.join(path, "x")})
+        locked = {os.path.join(rustc, "cwd"), os.path.join(other, "cwd")}
+        real = os.readlink
+
+        def readlink(path: str) -> str:
+            if path in locked:
+                raise denied(path)
+            return real(path)
+
+        with mock.patch.object(os, "readlink", readlink):
+            self.assertEqual(self.proc_users(), ({}, 1))
+
+
+class ApplyStepsTest(Base):
+    """prune apply over a build tree whose steps answer as a test says."""
+
+    def use_tree(self) -> tc_build_tree.CargoBuildTree:
+        tree = self.tree()
+        self.tree_for_main = tree
+        return tree
+
+    def test_unreadable_processes_are_noted(self) -> None:
+        tree = self.use_tree()
+        with mock.patch.object(tree, "open_by", return_value=({}, 1)):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "rust:build: 1 Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", out
+        )
+
+    def test_a_leftover_in_use_is_kept(self) -> None:
+        name = tcd_build.TRASH_PREFIX + "aa0123456789abcd-1"
+        os.makedirs(os.path.join(self.root, name, "debug"))
+        tree = self.use_tree()
+        with mock.patch.object(tree, "open_by", return_value=({name: [("77", "sleep")]}, 0)):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"rust:build: leftover {name} in use (sleep (pid 77)): kept for now", out)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, name)))
+
+    def test_a_folder_that_keeps_changing_is_left_busy(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        tree = self.use_tree()
+        with mock.patch.object(tree, "delete", return_value=("changed", "measured again: x")) as delete:
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(delete.call_count, 3)
+        self.assertEqual(out.count("rust:build: not deleted: aa/0123456789abcd: measured again: x"), 3)
+        self.assertIn("rust:build: skipped aa/0123456789abcd: measured again: x", out)
+        self.assertIn("deleted 0 folder(s)", out)
+        self.assertIn("; 1 busy", out)
+        self.assertTrue(self.present("aa/0123456789abcd"))
+
+    def test_a_delete_with_a_detail_notes_it(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        tree = self.use_tree()
+        real = tree.delete
+        with mock.patch.object(tree, "delete", side_effect=lambda *args: (real(*args)[0], "a detail")):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("rust:build: deleted aa/0123456789abcd", out)
+        self.assertIn("rust:build: note: aa/0123456789abcd: a detail", out)
+
+    def test_a_failed_delete_fails_the_run(self) -> None:
+        self.folder("aa/0123456789abcd", 100)
+        tree = self.use_tree()
+        with mock.patch.object(tree, "delete", return_value=("failed", "boom")) as delete:
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(delete.call_count, 1)
+        self.assertIn("rust:build: could not delete aa/0123456789abcd: boom", out)
+        self.assertTrue(self.present("aa/0123456789abcd"))
+
+    def test_a_failed_delete_whose_folder_is_gone_leaves_the_plan(self) -> None:
+        for key, age in (("a1/00000000000001", 20), ("a2/00000000000002", 10)):
+            self.folder(key, age, kib=96)
+        sizes = {f.key: f.size for f in tc_build_tree.scan(self.root, NOW)[0]}
+        # Room for a2 alone: once a1 is gone the cap needs nothing more. Were a1 still
+        # counted (kept as busy), the cap would take a2 too.
+        self.write_conf(f"MAX_TOTAL={(sizes['a2/00000000000002'] + 1024) // 1024}K\nINCREMENTAL_IDLE=off\n")
+        tree = self.use_tree()
+        tried: list[str] = []
+
+        def delete(root: str, f: tcd_build.Folder, *args: object) -> tuple[str, str]:
+            tried.append(f.key)
+            shutil.rmtree(f.path)
+            return "failed", "boom"
+
+        with mock.patch.object(tree, "delete", delete):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(tried, ["a1/00000000000001"])
+        self.assertTrue(self.present("a2/00000000000002"))
 
 
 if __name__ == "__main__":
