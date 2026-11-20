@@ -249,16 +249,39 @@ def wait_until[T](test: Callable[[], T], seconds: float, step: float = 0.5) -> T
         time.sleep(step)
 
 
+def _on_profile(live: LiveAudioPort, prof: str) -> bool:
+    """The card is on PROF now."""
+    c = live.cards()
+    return c is not None and profiles(live.dev, c)[0] == prof
+
+
+def _ldac_back(live: LiveAudioPort) -> Snapshot | None:
+    """The snapshot once the output is LDAC again with a rate, else None."""
+    s = live.snap()
+    return s if s and s["codec"] == "ldac" and s["rate"] is not None and s["rate"] != 0 else None
+
+
+def _interrupted(
+    snap: Snapshot | None, *, gone: bool, now: str | None, switch: tuple[str, str], hint: str
+) -> str | None:
+    """Why the bounce stops after the hold (the headset left, its microphone opened, another profile
+    was chosen), or None to switch back to LDAC."""
+    ldac, alt = switch
+    if gone:
+        return "the headset went away during the switch"
+    if snap is not None and snap["mic"]:
+        return f"the headset's microphone came into use during the switch: left on {now or alt} ({hint})"
+    if now is not None and now not in (alt, ldac):
+        return f"the card went to {now} during the switch (WirePlumber or the user): left there ({hint})"
+    return None
+
+
 def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, str, Snapshot | None]:
     """LDAC -> ALT -> LDAC. (ok, message, last snapshot)."""
     if not live.set_profile(alt):
         return False, f"pactl could not switch to {alt}", live.snap()
 
-    def on_alt() -> bool:
-        c = live.cards()
-        return c is not None and profiles(live.dev, c)[0] == alt
-
-    if wait_until(on_alt, SBC_WAIT) is None:
+    if wait_until(lambda: _on_profile(live, alt), SBC_WAIT) is None:
         log(4, f"{alt} did not become active within {SBC_WAIT:.0f} s")
     time.sleep(SBC_HOLD)
     # Look again before forcing LDAC back: in the meantime WirePlumber (its
@@ -268,12 +291,9 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
     c = live.cards()
     now = profiles(live.dev, c)[0] if c is not None else None
     hint = f"back to LDAC by hand: pactl set-card-profile bluez_card.{live.dev} {ldac}"
-    if c is not None and now is None:
-        return False, "the headset went away during the switch", snap
-    if snap is not None and snap["mic"]:
-        return False, f"the headset's microphone came into use during the switch: left on {now or alt} ({hint})", snap
-    if now is not None and now not in (alt, ldac):
-        return False, f"the card went to {now} during the switch (WirePlumber or the user): left there ({hint})", snap
+    why = _interrupted(snap, gone=c is not None and now is None, now=now, switch=(ldac, alt), hint=hint)
+    if why is not None:
+        return False, why, snap
     if not live.set_profile(ldac):
         time.sleep(1)
         if not live.set_profile(ldac):
@@ -286,11 +306,7 @@ def bounce(live: LiveAudioPort, ldac: str, alt: str, rate: int) -> tuple[bool, s
                 live.snap(),
             )
 
-    def ldac_back() -> Snapshot | None:
-        s = live.snap()
-        return s if s and s["codec"] == "ldac" and s["rate"] is not None and s["rate"] != 0 else None
-
-    snap = wait_until(ldac_back, LDAC_WAIT, step=1.0)
+    snap = wait_until(lambda: _ldac_back(live), LDAC_WAIT, step=1.0)
     if snap is None:
         return False, f"LDAC did not come back within {LDAC_WAIT:.0f} s", live.snap()
     if snap["rate"] != rate:

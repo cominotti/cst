@@ -4,13 +4,13 @@ headset in pw-dump, the pactl events and card profiles that matter, and the
 one-attempt-per-connection rule (Tracker). No I/O.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 import re
 from typing import Final, TypedDict, TypeIs
 
-from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, node_rate
-from cst_core.domain.shapes import KeyTypes, ShapeError, has_shape, json_object, object_or_empty
+from bluetooth.domain import CARD_PREFIX, CODEC_KEY, INPUT_PREFIX, PactlCard, PactlProfile, node_rate
+from cst_core.domain.shapes import KeyTypes, ShapeError, has_shape, json_object, object_of, object_or_empty
 
 
 # Seconds. SETTLE: how long the wrong rate must last before acting (the
@@ -71,6 +71,31 @@ def _rate(info: object) -> int | None:
         return None
 
 
+def _device_part(snap: Snapshot, props: object, profile: object) -> None:
+    """The headset's card (its Device object) into SNAP: its serial and active profile."""
+    snap["card"] = serial(props)
+    prof = profile or []
+    if isinstance(prof, list) and prof and json_object(first := prof[0]):
+        name = first.get("name")
+        snap["profile"] = name if isinstance(name, str) else None
+
+
+def _node_part(snap: Snapshot, props: object, info: object, ids: tuple[str, str]) -> None:
+    """A Node object into SNAP: the headset's output (serial, codec, rate) or one of its inputs.
+    PROPS and INFO are JSON objects (snapshot checked them)."""
+    p, node = object_of(props), object_of(info)
+    dev, mac = ids
+    name = str(p.get("node.name", ""))
+    if name.startswith("bluez_output." + dev) and (codec := p.get(CODEC_KEY, "")):
+        snap["out"] = serial(p)
+        snap["codec"] = str(codec)
+        snap["rate"] = _rate(node)
+    elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + mac)):
+        snap["inputs"].append(serial(p))
+        if node.get("state") == "running":
+            snap["mic"] = True
+
+
 def snapshot(dev: str, objs: object) -> Snapshot:
     """What matters of headset DEV (MAC with "_") in pw-dump's objects, as a
     dict: card (object serial, None = not in PipeWire), profile (active card
@@ -99,22 +124,9 @@ def snapshot(dev: str, objs: object) -> Snapshot:
             continue
         kind = str(o.get("type", ""))
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
-            snap["card"] = serial(p)
-            prof = params.get("Profile") or []
-            if isinstance(prof, list) and prof and json_object(first := prof[0]):
-                name = first.get("name")
-                snap["profile"] = name if isinstance(name, str) else None
-        if not kind.endswith("Node"):
-            continue
-        name = str(p.get("node.name", ""))
-        if name.startswith("bluez_output." + dev) and (codec := p.get(CODEC_KEY, "")):
-            snap["out"] = serial(p)
-            snap["codec"] = str(codec)
-            snap["rate"] = _rate(info)
-        elif name.startswith((INPUT_PREFIX + dev, INPUT_PREFIX + mac)):
-            inputs.append(serial(p))
-            if info.get("state") == "running":
-                snap["mic"] = True
+            _device_part(snap, p, params.get("Profile"))
+        if kind.endswith("Node"):
+            _node_part(snap, p, info, (dev, mac))
     return snap
 
 
@@ -283,6 +295,16 @@ def is_pactl_card(value: object) -> TypeIs[PactlCard]:
     return json_object(profs) and all(has_shape(p, {}, _PROFILE_KEYS) for p in profs.values())
 
 
+def _by_codec(available: Mapping[str, PactlProfile]) -> dict[str, str]:
+    """{codec in upper case: profile} of the A2DP profiles among AVAILABLE, by their description."""
+    by_codec: dict[str, str] = {}
+    for name, p in available.items():
+        m = A2DP_DESC.search(str(p.get("description", "")))
+        if m:
+            by_codec[m.group(1).strip().upper()] = name
+    return by_codec
+
+
 def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | None, str | None]:
     """(card's active profile, LDAC profile, profile to bounce through) from
     `pactl -f json list cards`. Found by the codec in each profile's
@@ -292,14 +314,9 @@ def profiles(dev: str, cards: Sequence[PactlCard]) -> tuple[str | None, str | No
     card = next((c for c in cards if c.get("name") == CARD_PREFIX + dev), None)
     if card is None:
         return None, None, None
-    by_codec: dict[str, str] = {}
-    for name, p in (card.get("profiles") or {}).items():
-        if not p.get("available", False):
-            continue
-        m = A2DP_DESC.search(str(p.get("description", "")))
-        if m:
-            by_codec[m.group(1).strip().upper()] = str(name)
-    have = {str(n) for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
+    available = {str(n): p for n, p in (card.get("profiles") or {}).items() if p.get("available", False)}
+    by_codec = _by_codec(available)
+    have = set(available)
     ldac = by_codec.get("LDAC") or ("a2dp-sink" if "a2dp-sink" in have else None)
     alt = by_codec.get("SBC") or ("a2dp-sink-sbc" if "a2dp-sink-sbc" in have else None)
     if alt is None:
