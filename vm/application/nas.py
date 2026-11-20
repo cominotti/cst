@@ -24,6 +24,7 @@ from vm.domain import (
     RESTIC_FORGET_TIMEOUT,
     RETRY_LOCK,
     SHUT_OFF,
+    STOPPED_STATES,
     TAG,
     VIRSH_COMMIT_MARGIN,
     DomainParts,
@@ -133,7 +134,7 @@ def commit_back(
     if state not in LIVE_STATES:
         problems.append(
             f"{vm} stopped during the backup: its disks still point to the overlay files"
-            if state in (SHUT_OFF, "crashed")
+            if state in STOPPED_STATES
             else f"the state of {vm} could not be read ({state or 'virsh domstate failed'}): nothing merged"
         )
         for t, (base, _overlay) in overlaid.items():

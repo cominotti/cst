@@ -64,6 +64,7 @@ SNAPSHOT_TIMEOUT_DEFAULT: Final = 10 * MINUTE  # CST_VM_SNAPSHOT_TIMEOUT and CST
 SHUT_OFF = "shut off"  # virsh domstate of a VM that is not running (in the C locale)
 
 LIVE_STATES = ("running", "paused", "pmsuspended")  # QEMU is alive: a block job works
+STOPPED_STATES = (SHUT_OFF, "crashed")  # QEMU is gone: the overlay can only be merged offline
 
 SERVICE = "cst-vm-backup@.service"
 
@@ -416,7 +417,7 @@ def overlay_kind(state: str | None, live_src: str | None, base: str) -> VmOverla
     unknown: the state could not be read."""
     if state in LIVE_STATES:
         return VmOverlayKind.DEFINITION if live_src == base else VmOverlayKind.LIVE
-    if state in (SHUT_OFF, "crashed"):
+    if state in STOPPED_STATES:
         return VmOverlayKind.OFFLINE
     return VmOverlayKind.UNKNOWN
 

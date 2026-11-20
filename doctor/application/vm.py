@@ -35,10 +35,8 @@ from doctor.domain import (
     VM_CONF,
     VM_INDEX,
     VM_INDEX_FORMAT,
-    VM_LIVE_STATES,
     VM_OVERLAY_MARK,
     VM_RUN_DIR,
-    VM_STOPPED_STATES,
     VM_TIMER_WANTS,
     VM_TORN,
     VM_TORN_FORMAT,
@@ -53,7 +51,7 @@ from doctor.domain import (
     host_join,
 )
 from doctor.ports import CheckFn, DoctorHostPort, VmToolsPort
-from vm.domain import ImageProbe, VmOverlayKind
+from vm.domain import LIVE_STATES, STOPPED_STATES, ImageProbe, VmOverlayKind
 from vm.domain.backup import NO_BACKUPS_LIST, NO_TORN_LIST, is_index_entry, is_torn_entry, stored_list, stored_torn
 from vm.domain.tune import GuestKind, guest_kind, tune_domain
 
@@ -511,13 +509,13 @@ def _vm_state(host: DoctorHostPort, vm: str) -> str | None:
 def _overlay_kind(host: DoctorHostPort, disk: _OverlayDisk, disks: _OverlayDisks) -> VmOverlayKind:
     """How the disk can be put back on its image: the VM's state and where it runs; for a VM that is shut
     off or crashed, whether the overlay is newer than the image."""
-    if disk.state in VM_LIVE_STATES:
+    if disk.state in LIVE_STATES:
         if disk.dev in disks.live:
             return VmOverlayKind.LIVE
         if disks.sources is not None and disks.sources.get(disk.dev) == disk.base:
             return VmOverlayKind.DEFINITION
         return VmOverlayKind.UNKNOWN
-    if disk.state in VM_STOPPED_STATES:
+    if disk.state in STOPPED_STATES:
         return (
             VmOverlayKind.OFFLINE
             if file_newer(host, HostPath(disk.path), HostPath(disk.base)) is True
@@ -562,7 +560,7 @@ def _overlay_result(host: DoctorHostPort, disk: _OverlayDisk, kind: VmOverlayKin
                 f"--inactive`, and remove the overlay file {OVERLAY_GUIDE}",
                 f"sudo qemu-img commit -p {q(path)}",
             )
-        case _ if state in VM_STOPPED_STATES:
+        case _ if state in STOPPED_STATES:
             return Result(
                 WARN,
                 f"VM {vm}: disk {dev} is on {path}, {left}. The VM is {state}, and the doctor "
