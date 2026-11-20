@@ -108,7 +108,7 @@ from cst_core.domain.install import (
     expand_dest,
     select_entries,
 )
-from cst_core.domain.values import DomainValidationError, OctalMode
+from cst_core.domain.values import OctalMode
 from cst_core.ports import WriteFailed
 
 NAME = "cst installer"
@@ -383,7 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if service is None:
             raise _UsageError("runs from a CST checkout only")
         return _command(service, a)
-    except (_UsageError, DomainValidationError, ValueError) as e:
+    except (_UsageError, ValueError) as e:  # ValueError: the domain's DomainValidationError too
         print(f"{NAME}: {e}", file=sys.stderr)
         return 2
     except (InstallRefused, WriteFailed) as e:
