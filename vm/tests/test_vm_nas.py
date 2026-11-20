@@ -1130,6 +1130,16 @@ class NasPreflightAndSourcesTest(Nas):
         self.assertEqual(backup["args"].count(self.disk), 1, backup["args"])
         self.assertEqual(r.stdout.count(f"  reading {self.disk} (disk,"), 1, r.stdout)
 
+    def test_a_running_vm_with_one_file_on_two_disks_is_refused(self) -> None:
+        # Two targets of the running VM on one file would get one overlay path: refused before anything
+        # changes (before, the deduplicated sources and the set of live files matched, and the snapshot ran).
+        both = [{"target": "sda", "device": "disk"}, {"target": "sdb", "device": "disk"}]
+        self.vm(disks=both, live={"sda": self.disk, "sdb": self.disk}, persistent={"sda": self.disk, "sdb": self.disk})
+        self.refused(
+            f"win: two disks of the running VM are one file ({self.disk}): a live snapshot cannot give each "
+            "its own overlay; shut the VM down and back it up then"
+        )
+
     def test_uefi_variables_through_a_link_are_noted_as_a_local_copy_notes_them(self) -> None:
         # restic reads (and a restore writes) the file the link points to; before, only a linked disk had a note.
         link = os.path.join(self.images, "link_VARS.fd")

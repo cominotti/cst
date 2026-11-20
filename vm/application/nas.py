@@ -328,7 +328,13 @@ def _nas_live_specs(
             base,
             os.path.join(os.path.dirname(base), f"{os.path.basename(base)}{OVERLAY_MARK}{stamp}"),
         )
-    if sorted({b for b, _ in specs.values()}) != sorted(src for src, k in sources if k == "disk"):
+    bases = sorted(b for b, _ in specs.values())
+    if len(set(bases)) != len(bases):  # two targets on one file would share one overlay
+        raise Refused(
+            f"{vm}: two disks of the running VM are one file ({', '.join(sorted({b for b in bases if bases.count(b) > 1}))}): "
+            "a live snapshot cannot give each its own overlay; shut the VM down and back it up then"
+        )
+    if bases != sorted(src for src, k in sources if k == "disk"):
         raise Refused(
             f"{vm}: the running VM's disks differ from its definition (changed since it started): "
             "restart it, then back up"
