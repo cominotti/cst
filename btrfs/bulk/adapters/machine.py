@@ -40,7 +40,7 @@ from btrfs.bulk.domain import (
 )
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.ports import CommandResult, CommandRunnerPort, DecodeErrors
+from cst_core.ports import CommandResult, CommandRunnerPort
 
 
 def log(msg: str) -> None:
@@ -117,10 +117,13 @@ class Primitives:
     def __init__(self, runner: CommandRunnerPort | None = None) -> None:
         self.runner: CommandRunnerPort = SubprocessCommandRunner() if runner is None else runner
 
-    def run(self, argv: Sequence[str], decode_errors: DecodeErrors = "strict") -> CommandResult:
+    def run(self, argv: Sequence[str]) -> CommandResult:
         """argv with its output captured, as subprocess.run(argv, capture_output=True,
-        text=True) ran it: stdin inherited, strict decoding, an OSError when it cannot start."""
-        return self.runner.run(argv, stdin="inherit", decode_errors=decode_errors).raise_cause()
+        text=True) ran it: stdin inherited, an OSError when it cannot start; bytes that are
+        not UTF-8 become U+FFFD (the runner's default). A message is shown with U+FFFD, and
+        the parsed answers (stat -f, du, flatpak override --show) fall back on what is not
+        a number or a line they know; du echoes the path, and stderr is never parsed."""
+        return self.runner.run(argv, stdin="inherit").raise_cause()
 
     def is_nocow(self, path: str) -> bool:
         return bool(inode_flags(path) & FS_NOCOW_FL)

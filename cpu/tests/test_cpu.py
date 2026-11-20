@@ -977,6 +977,27 @@ class VmPinCliTest(unittest.TestCase):
                 )
             )
 
+    def test_define_leaves_no_temporary_file_when_writing_it_fails(self) -> None:
+        # The definition holds --security-info secrets: a failed write (here a text the
+        # encoding refuses) must not leave a copy of it in the temporary folder.
+        calls: list[tuple[str, ...]] = []
+
+        def adapter_virsh(*args: str, check: bool = True) -> str:
+            calls.append(args)
+            return ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_tempdir = tempfile.tempdir
+            tempfile.tempdir = tmp
+            self.addCleanup(setattr, tempfile, "tempdir", old_tempdir)
+            with (
+                unittest.mock.patch.object(cpu_adapters, "virsh", adapter_virsh),
+                self.assertRaises(UnicodeEncodeError),
+            ):
+                cpu_adapters.define_domain("<domain>\udc80</domain>\n")
+            self.assertEqual(calls, [], "virsh is not called with a file that was not written")
+            self.assertEqual(os.listdir(tmp), [], "the temporary file is removed")
+
     def test_ctrl_d_at_the_question_changes_nothing(self) -> None:
         # The real confirm and input(): Ctrl-D (an empty terminal) is a no, after a newline.
         with tempfile.TemporaryDirectory() as tmp:

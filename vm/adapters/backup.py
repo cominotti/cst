@@ -2,7 +2,7 @@
 """The backups' files and the run of a backup: the index, the fingerprints and sizes of what
 is copied, the qcow2 check, the stop signals and the terminal of a NAS backup, its lock and alert."""
 
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 import json
 import os
@@ -11,10 +11,10 @@ import signal
 import struct
 import sys
 from types import FrameType
-from typing import Self, TextIO
+from typing import Final, Self, TextIO
 
 from cst_core.adapters import nocow as inode_attrs
-from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, create_private, ensure_dir, write_atomic
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.notify import Notifier
 from cst_core.domain.contracts import Urgency
@@ -22,19 +22,25 @@ from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import first_line
 from cst_core.domain.values import HOUR
-from vm.adapters import INDEX_FORMAT, NAME, RUNNER, run
+from vm.adapters import INDEX_FORMAT, NAME, RUNNER, TORN_FORMAT, run
 from vm.adapters.images import nocow
 from vm.domain import NOT_INSTALLED, VmSettings
 from vm.domain.backup import (
     DOMAIN_XML,
     MANIFEST_JSON,
     NO_BACKUPS_LIST,
+    NO_TORN_LIST,
+    TORN_LOCK_TIMEOUT,
     Fingerprint,
     IndexEntry,
     IndexRefused,
     Stop,
+    TornEntry,
+    TornRefused,
     is_index_entry,
+    is_torn_entry,
     stored_list,
+    stored_torn,
 )
 
 
@@ -97,18 +103,9 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     cfg.paths.index."""
     path = cfg.paths.index
     try:
-        with open(path) as f:
-            text = f.read()
+        data = load_json_file(path, _unreadable)
     except FileNotFoundError:
         return []
-    except OSError as e:
-        raise _unreadable(path, e.strerror or str(e)) from None
-    except UnicodeDecodeError:  # a ValueError, not an OSError: bytes that are not text are not JSON
-        raise _unreadable(path, "not JSON") from None
-    try:
-        data = parse_json(text)
-    except ValueError, RecursionError:
-        raise _unreadable(path, "not JSON") from None
     if (found := INDEX_FORMAT.newer(data, "version")) is not None:
         raise IndexRefused(
             INDEX_FORMAT.newer_text(path, found),
@@ -118,6 +115,25 @@ def stored_backups(cfg: VmSettings) -> list[object]:
     if backups is None:
         raise _unreadable(path, NO_BACKUPS_LIST)
     return backups
+
+
+def load_json_file(path: str, unreadable: Callable[[str, str], Refused]) -> object:
+    """The JSON a state file of cst vm holds, parsed. FileNotFoundError when there is none; unreadable(path,
+    why) raised when it is there but cannot be read (why: the error) or is not JSON (bytes that are not
+    UTF-8 included)."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise unreadable(path, e.strerror or str(e)) from None
+    except UnicodeDecodeError:  # a ValueError, not an OSError: bytes that are not text are not JSON
+        raise unreadable(path, "not JSON") from None
+    try:
+        return parse_json(text)
+    except ValueError, RecursionError:
+        raise unreadable(path, "not JSON") from None
 
 
 def _unreadable(path: str, why: str) -> IndexRefused:
@@ -145,10 +161,93 @@ def write_index(entries: Sequence[IndexEntry], path: str, carried: Sequence[obje
     write_atomic(path, text, mode=0o644, relabel=False)
 
 
+# The lock of the torn record, in RUN_DIR: the record is shared by every VM, and the NAS backups of two
+# VMs (two timers) can run at once; the per-VM lock does not cover that. Outside the nas-<vm>.lock names
+# of VmLock, so a VM's own lock (a VM named "torn" included) is never this one.
+TORN_LOCK: Final = "torn-record.lock"
+
+
+def _torn_unreadable(path: str, why: str) -> TornRefused:
+    return TornRefused(
+        f"{path} cannot be read as cst vm's record of torn NAS snapshots ({why}): left as it is, and no NAS "
+        "backup runs with it (its retention could count a torn snapshot as a backup); forget the snapshots "
+        f"it names by hand (restic forget ID), then move it aside (mv {path} {path}.bad)"
+    )
+
+
+def stored_torn_entries(cfg: VmSettings) -> list[object]:
+    """The "torn" list of the record (cfg.paths.torn) as stored; [] when there is none. TornRefused,
+    naming the file, when it is there but cannot be read as the record, or a newer cst vm wrote it:
+    reading it as empty would let the retention count a torn snapshot."""
+    path = cfg.paths.torn
+    try:
+        data = load_json_file(path, _torn_unreadable)
+    except FileNotFoundError:
+        return []
+    if (found := TORN_FORMAT.newer(data, "version")) is not None:
+        raise TornRefused(
+            f"{TORN_FORMAT.newer_text(path, found)}: left as it is, and no NAS backup runs with it; use the "
+            f"cst vm of that CST (in that checkout: {cfg.cst} vm backup-timer on installs it)"
+        )
+    torn = stored_torn(data)
+    if torn is None:
+        raise _torn_unreadable(path, NO_TORN_LIST)
+    return torn
+
+
+def read_torn(cfg: VmSettings) -> list[TornEntry]:
+    """The torn snapshots in the record that this cst vm understands; refused as stored_torn_entries."""
+    return [e for e in stored_torn_entries(cfg) if is_torn_entry(e)]
+
+
+def _same_torn(a: TornEntry, b: TornEntry) -> bool:
+    return (a["snapshot"], a["vm"], a["repository"]) == (b["snapshot"], b["vm"], b["repository"])
+
+
+def change_torn(
+    cfg: VmSettings, change: Callable[[list[object]], list[object]], *, lock_timeout: float = TORN_LOCK_TIMEOUT
+) -> None:
+    """Read the record, change its entries, write it back: under the record's lock (RUN_DIR/TORN_LOCK),
+    so two VMs' backups never lose each other's entry; atomically and durably, 0644 (cst doctor reads
+    it as the user), folder 0755. TornRefused when the lock stays taken lock_timeout seconds, or as
+    stored_torn_entries; OSError when it cannot be written."""
+    ensure_dir(cfg.paths.run_dir, 0o755)
+    lock = os.path.join(cfg.paths.run_dir, TORN_LOCK)
+    fd = take_lock(lock, wait=True, mode=0o644, timeout=lock_timeout)
+    if fd is None:
+        raise TornRefused(f"{lock} stayed taken for {lock_timeout:g} s (another NAS backup)")
+    try:
+        entries = change(stored_torn_entries(cfg))
+        ensure_dir(os.path.dirname(cfg.paths.torn), 0o755)
+        doc = {"version": TORN_FORMAT.version, "torn": entries}
+        write_atomic(cfg.paths.torn, json.dumps(doc, indent=2, sort_keys=True) + "\n", mode=0o644, relabel=False)
+    finally:
+        os.close(fd)
+
+
+def record_torn(cfg: VmSettings, entry: TornEntry, *, lock_timeout: float = TORN_LOCK_TIMEOUT) -> None:
+    """entry added to the record (once: the same snapshot of the same VM and repository is there once)."""
+    change_torn(
+        cfg,
+        lambda stored: stored if any(is_torn_entry(e) and _same_torn(e, entry) for e in stored) else [*stored, entry],
+        lock_timeout=lock_timeout,
+    )
+
+
+def drop_torn(cfg: VmSettings, entries: Sequence[TornEntry], *, lock_timeout: float = TORN_LOCK_TIMEOUT) -> None:
+    """entries taken out of the record (matched by snapshot, VM and repository); the others are kept as
+    they are, those this cst vm does not understand included."""
+    change_torn(
+        cfg,
+        lambda stored: [e for e in stored if not (is_torn_entry(e) and any(_same_torn(e, d) for d in entries))],
+        lock_timeout=lock_timeout,
+    )
+
+
 def precreate_nocow(dest: str) -> None:
     """btrfs clones only between files with the same NOCOW flag: an empty
     destination with the flag set, which cp then fills. Best effort."""
-    os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    create_private(dest, "")
     with suppress(OSError):
         inode_attrs.set_nocow(dest)
 
@@ -189,12 +288,6 @@ def private_dirs(*folders: str) -> None:
         os.chmod(d, 0o700)
 
 
-def write_private(path: str, text: str) -> None:
-    """A new file (an existing one: FileExistsError), 0600 from the start: it may hold secrets."""
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-        f.write(text)
-
-
 class BackupFiles(LocalFileSystemAdapter):
     """BackupStorePort on this machine: the paths of cfg, the functions of this module (and the
     path tests of cst_core's LocalFileSystemAdapter: os.path.isfile, isdir, exists, lexists)."""
@@ -229,7 +322,7 @@ class BackupFiles(LocalFileSystemAdapter):
         copy(self.cfg, src, dest, mode, big)
 
     def write_private(self, path: str, text: str) -> None:
-        write_private(path, text)
+        create_private(path, text)
 
     def remove_tree(self, path: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
@@ -243,7 +336,7 @@ class BackupFiles(LocalFileSystemAdapter):
             path = os.path.join(d, name)
             with suppress(FileNotFoundError):
                 os.unlink(path)
-            write_private(path, text)
+            create_private(path, text)
         return d
 
     def unstage(self, folder: str) -> None:
@@ -269,6 +362,15 @@ class BackupFiles(LocalFileSystemAdapter):
 
     def read_index(self) -> list[IndexEntry]:
         return read_index(self.cfg)
+
+    def read_torn(self) -> list[TornEntry]:
+        return read_torn(self.cfg)
+
+    def record_torn(self, entry: TornEntry) -> None:
+        record_torn(self.cfg, entry)
+
+    def drop_torn(self, entries: Sequence[TornEntry]) -> None:
+        drop_torn(self.cfg, entries)
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
         # Read again (the caller holds the VM's lock, as when it read): the entries this cst vm does
@@ -453,5 +555,5 @@ class DefinitionFiles:
         keep = os.path.join(self.backup_dir, vm, "definitions")
         private_dirs(self.backup_dir, os.path.join(self.backup_dir, vm), keep)
         saved = os.path.join(keep, f"{stamp}.before-tune.xml")
-        write_private(saved, text)
+        create_private(saved, text)
         return saved

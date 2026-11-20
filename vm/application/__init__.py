@@ -37,7 +37,7 @@ def _reload(systemd: SystemdPort) -> str:
 
 def _shown(systemd: SystemdPort, unit: str, prop: str) -> str:
     """One property of unit, from the systemd cst-vm runs under; "" when it cannot answer."""
-    return systemd.show(UnitName(unit), (prop,), on_host=False).get(prop, "").strip()
+    return systemd.show(UnitName(unit), (prop,)).get(prop, "").strip()
 
 
 def timer_status(timers: TimerFilesPort, systemd: SystemdPort, vm: str) -> TimerStatus:

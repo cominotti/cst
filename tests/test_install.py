@@ -48,6 +48,7 @@ from cst_core.domain.install import (
     select_entries,
     template_keys,
 )
+from cst_core.domain.record import parse_record
 from cst_core.domain.values import DomainValidationError, OctalMode
 from cst_core.installer import main as installer_main
 from cst_core.ports import WriteFailed
@@ -803,6 +804,22 @@ class BashLibraryTest(unittest.TestCase):
             r.stdout.decode().split(),
             ["/usr/local/sbin/cpu-vm-pin", "/usr/local/bin/cpu-watch", "/usr/local/sbin/cpu-game-profile"],
         )
+
+    def test_cst_forget_text_drops_the_line_and_leaves_the_file(self) -> None:
+        # Root's generated files in a setup script; here the installer runs as this account, so the
+        # record is this account's, staged. No runuser: it runs as the caller.
+        dest = "/etc/gen.rules"
+        r = self.bash(
+            f'cst_installer text {dest} 0644 --component btrfs:degraded-boot --root "{self.stage}"', stdin=b"x\n"
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        [record] = Path(self.stage).rglob("installed.json")
+        self.assertIn(dest, parse_record(record.read_text()).files)
+        r = self.bash(f'cst_forget_text {dest} --root "{self.stage}"')
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
+        self.assertNotIn(dest, parse_record(record.read_text()).files)
+        self.assertEqual(Path(self.stage + dest).read_bytes(), b"x\n")
+        self.assertFalse(os.path.exists(self.log), "ran through runuser")
 
     def test_user_files_are_written_through_runuser_with_the_users_home(self) -> None:
         r = self.bash(f'cst_install_as alice --root "{self.stage}" cpu/gamemode.ini')

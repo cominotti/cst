@@ -53,7 +53,7 @@ def idle_priority(machine: Primitives) -> None:
     with contextlib.suppress(OSError):
         os.nice(19)
     if shutil.which("ionice") is not None:
-        machine.run(["ionice", "-c3", "-p", str(os.getpid())], decode_errors="replace")
+        machine.run(["ionice", "-c3", "-p", str(os.getpid())])
 
 
 def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
@@ -289,7 +289,7 @@ class UserFiles:
         created in it would inherit that: give it the policy's label (as the
         user; ~/Bulk only, not recursive). Best effort: no SELinux, no error."""
         with contextlib.suppress(OSError):
-            self.machine.run(["restorecon", path], decode_errors="replace")
+            self.machine.run(["restorecon", path])
         return True
 
     def relabel(self, path: str) -> bool:

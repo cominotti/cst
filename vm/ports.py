@@ -7,7 +7,7 @@ from typing import Protocol
 
 from cst_core.domain.files import UnitFileState
 from vm.domain import NasRepo, TimerStep
-from vm.domain.backup import BootedDeployment, Fingerprint, IndexEntry, ResticSummary
+from vm.domain.backup import BootedDeployment, Fingerprint, IndexEntry, ResticSummary, TornEntry
 
 # One NAS backup per VM at a time: the lock of the VM named, held while the block runs (Refused
 # when another backup holds it).
@@ -170,6 +170,20 @@ class BackupStorePort(Protocol):
 
     def write_index(self, entries: Sequence[IndexEntry]) -> None:
         """Replace the index, durably; IndexRefused as read_index (it reads the index again)."""
+        ...
+
+    def read_torn(self) -> list[TornEntry]:
+        """The torn restic snapshots a NAS backup failed to forget ([] when there is no record);
+        TornRefused for a record of a newer cst vm or one that cannot be read as the record."""
+        ...
+
+    def record_torn(self, entry: TornEntry) -> None:
+        """entry added to the torn record, durably, under its lock (once per snapshot, VM and
+        repository); TornRefused or OSError when it cannot be."""
+        ...
+
+    def drop_torn(self, entries: Sequence[TornEntry]) -> None:
+        """entries taken out of the torn record, durably; TornRefused or OSError when they cannot be."""
         ...
 
 

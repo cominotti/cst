@@ -15,7 +15,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Literal, TextIO
 
@@ -37,8 +36,8 @@ from cpu.domain import (
     watch_row,
 )
 from cst_core.adapters.runner import SubprocessCommandRunner
-from cst_core.adapters.virsh import SubprocessVirshAdapter
-from cst_core.adapters.files import read_text
+from cst_core.adapters.virsh import SubprocessVirshAdapter, define_from_text
+from cst_core.adapters.files import create_private, read_text
 from cst_core.adapters.runtime import restore_default_signals
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import parse_json
@@ -124,19 +123,14 @@ def save_definition_once(etc: str, name: str, xml_text: str) -> str:
     os.makedirs(etc, exist_ok=True)
     if not os.path.exists(backup):
         # Holds --security-info secrets (graphics passwords): 0600 from the start.
-        with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-            f.write(xml_text)
+        create_private(backup, xml_text)
     return backup
 
 
 def define_domain(xml_text: str) -> None:
-    """`virsh define` a domain from its XML text (a temporary file, removed after)."""
-    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
-        f.write(xml_text)
-    try:
-        virsh("define", f.name)
-    finally:
-        os.unlink(f.name)
+    """`virsh define` a domain from its XML text (a temporary file, removed after, also when writing it
+    fails: the definition holds --security-info secrets)."""
+    define_from_text(lambda path: virsh("define", path), xml_text)
 
 
 def cpus_of(kind: Literal["cpu_core", "cpu_atom"]) -> list[int]:

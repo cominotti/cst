@@ -10,7 +10,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -I -B -m unittest cpu.tests.test_game_profile -v
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import contextlib
 import errno
 import fnmatch
@@ -30,7 +30,8 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
-from cpu.game.adapters import GameProfile, load_profile, read_settings, user_id, user_name
+from cpu.game.adapters.host import read_settings, user_id, user_name
+from cpu.game.adapters.profile import GameProfile, load_profile
 from cpu.game.domain import (
     GamePaths,
     GameSettings,
@@ -39,6 +40,7 @@ from cpu.game.domain import (
     cut_tail,
     escapes_in_state,
     expand_cpus,
+    has_record_part,
     intended_records,
     records,
     game_settings,
@@ -262,6 +264,14 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(cut_tail(b"cut"), (0, b"cut"))
         self.assertEqual(cut_tail(b"a\nb"), (2, b"b"))
 
+    def test_a_record_part_of_a_last_line_cut_short_is_none(self) -> None:
+        part = " S MemoryLow "
+        self.assertFalse(has_record_part("prop usr S MemoryLow existed 1", part))
+        self.assertTrue(has_record_part("prop usr S MemoryLow existed 1\n", part))
+        self.assertTrue(has_record_part("prop usr S MemoryLow new -\nepp 0 x", part))  # a whole line before it
+        self.assertFalse(has_record_part("prop usr S MemoryLow new -\nprop usr T MemoryLow", " T MemoryLow "))
+        self.assertFalse(has_record_part("", part))
+
     def test_intended_records(self) -> None:
         text = (
             "cst-game-intended 1\n"
@@ -449,7 +459,7 @@ class GameProfileOnOffTest(GameProfileCase):
         fd = take_lock(self.paths.lock, wait=False)
         assert fd is not None
         try:
-            with unittest.mock.patch("cpu.game.adapters.take_lock", return_value=None) as held:
+            with unittest.mock.patch("cpu.game.adapters.profile.take_lock", return_value=None) as held:
                 self.assertEqual(p.locked("off"), 1)
             self.assertEqual(held.call_args.kwargs["timeout"], 60)
         finally:
@@ -823,7 +833,7 @@ class UnreadableRecordTest(GameProfileCase):
         err = io.StringIO()
         with (
             unittest.mock.patch(
-                "cpu.game.adapters.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
+                "cpu.game.adapters.profile.os.truncate", side_effect=OSError(errno.EROFS, "Read-only file system")
             ),
             contextlib.redirect_stderr(err),
         ):
@@ -832,6 +842,77 @@ class UnreadableRecordTest(GameProfileCase):
         self.assertIn(f"e2e.slice: CPUWeight=idle: not done, its record could not be written to {self.state}\n", out)
         self.assertEqual([a for a in self.sets(actions) if "e2e.slice" in a], [])
         self.assertTrue(self.read(self.state).endswith(f"\n{self.CUT}"))
+
+    def tick_after_a_cut_record(self, record: str, mgr: str, unit: str, setting: str) -> None:
+        """After 'on': record cut short at the end of game.state (on died while it wrote it, before it
+        set the box). The tick sets the box (the cut line is no record of a box handled), removes the
+        cut line first and writes the whole record; 'off' undoes it."""
+        self.write(self.manual, "")
+        with open(self.state, "a") as f:
+            f.write(record)
+        n = len(self.read(self.state).split("\n"))
+        out, actions = self.run_profile("tick")
+        prefix = USR if mgr == "usr" else SYS
+        self.assertIn(f"{prefix} set-property --runtime {unit} {setting}", actions)
+        self.assertIn(f"{self.state} line {n}: a record cut short (its change was never made)", out)
+        state = self.read(self.state)
+        self.assertTrue(state.endswith(f"\n{record}\n"), state)
+        self.assertEqual(state.count(record), 1)
+        override = self.ctrl(mgr, unit, setting.partition("=")[0])
+        self.assertTrue(os.path.exists(override))
+        _, actions = self.run_profile("tick")  # handled now: nothing more
+        self.assertEqual([a for a in self.sets(actions) if f" {unit} " in a], [])
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(override))
+
+    def test_a_box_next_to_the_game_whose_record_was_cut_short_is_set(self) -> None:
+        self.run_profile("on")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        self.tick_after_a_cut_record("prop usr e2e.slice CPUWeight new -", "usr", "e2e.slice", "CPUWeight=idle")
+
+    def second_record_cut(self, *, steam: bool) -> None:
+        """cpuset delegated: a box next to the game gets two settings, which setp records one after the
+        other before it sets either. 'on' (or a tick) died while it wrote the second record (AllowedCPUs):
+        the first (CPUWeight) is a whole line, but neither change was made. The next tick sets the box
+        (steam: a new Steam scope is recorded first in that tick, which removes the cut line before the
+        box is looked at); a second tick sets nothing more, and 'off' removes both overrides."""
+        self.write(os.path.join(self.ucg, "cgroup.subtree_control"), "cpuset cpu memory pids\n")
+        self.run_profile("on")
+        self.write(self.manual, "")
+        os.makedirs(os.path.join(self.ucg, "e2e.slice"))
+        if steam:
+            self.systemd.units["usr"] = ["app-flatpak-com.valvesoftware.Steam-7.scope"]
+        with open(self.state, "a") as f:
+            f.write("prop usr e2e.slice CPUWeight new -\nprop usr e2e.slice AllowedCPUs new")
+        _, actions = self.run_profile("tick")
+        self.assertIn(f"{USR} set-property --runtime e2e.slice CPUWeight=idle AllowedCPUs=12-23", actions)
+        overrides = [self.ctrl("usr", "e2e.slice", prop) for prop in ("CPUWeight", "AllowedCPUs")]
+        for path in overrides:
+            self.assertTrue(os.path.exists(path), path)
+        self.assertTrue(self.read(self.state).endswith("\nprop usr e2e.slice AllowedCPUs new -\n"))
+        _, actions = self.run_profile("tick")  # handled now: nothing more
+        self.assertEqual([a for a in self.sets(actions) if " e2e.slice " in a], [])
+        self.run_profile("off")
+        for path in overrides:
+            self.assertFalse(os.path.exists(path), path)
+
+    def test_a_box_whose_second_record_was_cut_short_is_set(self) -> None:
+        self.second_record_cut(steam=False)
+
+    def test_a_box_whose_second_record_was_cut_short_is_set_after_a_new_steam_scope(self) -> None:
+        self.second_record_cut(steam=True)
+
+    def test_a_steam_scope_whose_record_was_cut_short_is_protected(self) -> None:
+        steam = "app-flatpak-com.valvesoftware.Steam-7.scope"
+        self.run_profile("on")
+        self.systemd.units["usr"] = [steam]  # started after 'on'
+        self.tick_after_a_cut_record(f"prop usr {steam} MemoryLow new -", "usr", steam, "MemoryLow=16G")
+
+    def test_a_docker_container_whose_record_was_cut_short_is_pinned(self) -> None:
+        scope = "docker-abc.scope"
+        self.run_profile("on")
+        self.systemd.units["sys"] = [scope]  # started after 'on', outside builds.slice
+        self.tick_after_a_cut_record(f"prop sys {scope} AllowedCPUs new -", "sys", scope, "AllowedCPUs=12-23")
 
     def test_state_names_such_lines_of_both_files(self) -> None:
         self.run_profile("on")
@@ -1034,6 +1115,71 @@ class OffWithoutTargetUserTest(GameProfileCase):
             self.assertEqual(p.off(), 0)
         self.assertEqual(err.getvalue(), f"id: '{nobody}': no such user\n")
 
+    STEAM = "app-flatpak-com.valvesoftware.Steam-7.scope"
+
+    def quiet_ticks(self, target: str) -> None:
+        """Two ticks for target with the real uid lookup and no account for the recorded uid: each ends
+        in success and prints nothing on stderr. Neither changes the user manager of a user with no
+        account (a Steam scope started after 'on' gets no setting and no record); the journal says why,
+        once per boot."""
+        self.systemd.units["usr"] = [self.STEAM]
+        said: list[str] = []
+        for _ in range(2):
+            out, err = io.StringIO(), io.StringIO()
+            p = GameProfile(
+                self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=out
+            )
+            self.systemd.actions = []
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.tick(), 0)
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual([a for a in self.sets(self.systemd.actions) if "--user" in a], [])
+            said.append(out.getvalue())
+        self.assertNotIn(f" {self.STEAM} ", self.read(self.state))
+        self.assertIn("<4>game-profile: profile on, its user manager's side not handled: TARGET_USER ", said[0])
+        self.assertNotIn("not handled", said[1])  # said once per boot
+
+    def off_err(self, target: str) -> str:
+        """'off' for target with the real uid lookup and no account for the recorded uid: its stderr."""
+        err = io.StringIO()
+        p = GameProfile(
+            self.paths, GameSettings(target_user=target), self.systemd, name_of=lambda _uid: "", out=io.StringIO()
+        )
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.off(), 0)
+        self.assertFalse(os.path.exists(self.state))
+        return err.getvalue()
+
+    def test_tick_says_nothing_when_the_account_of_the_recorded_uid_is_gone(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.quiet_ticks("cst-test-no-such-user")
+
+    def test_tick_says_nothing_with_target_user_empty_and_the_account_gone(self) -> None:
+        self.run_profile("on")
+        self.write(self.manual, "")
+        self.quiet_ticks("")
+
+    def test_off_says_no_such_user_once(self) -> None:
+        self.run_profile("on")
+        self.assertGreater(self.read(self.state).count("\nprop usr "), 1)  # each one asks for the uid
+        self.assertEqual(self.off_err("cst-test-no-such-user"), "id: 'cst-test-no-such-user': no such user\n")
+
+    def test_tick_and_off_after_an_older_on_for_a_name_without_account(self) -> None:
+        # An 'on' of an older version switched on for a TARGET_USER that names no account: its records
+        # name user@.service (no uid), and its user manager's ones need the uid of that name.
+        self.write(
+            self.state,
+            "prop sys user@.service MemoryLow new -\n"
+            "prop sys user-.slice MemoryLow new -\n"
+            "prop sys user.slice MemoryLow new -\n"
+            "prop usr user.slice CPUWeight new -\n"
+            "prop usr app.slice MemoryLow new -\n",
+        )
+        self.write(self.manual, "")
+        self.quiet_ticks("cst-test-no-such-user")
+        self.assertEqual(self.off_err("cst-test-no-such-user"), "id: 'cst-test-no-such-user': no such user\n")
+
     def test_on_records_the_user_first(self) -> None:
         self.run_profile("on")
         self.assertTrue(self.read(self.state).startswith(f"prop sys user@{UID}.service MemoryLow new -\n"))
@@ -1082,6 +1228,167 @@ class OffWithoutTargetUserTest(GameProfileCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("TARGET_USER not set", out)
         self.assertFalse(os.path.exists(self.state))
+
+
+class OnTargetUserWithoutAccountTest(GameProfileCase):
+    """'on' with a TARGET_USER that names no account: refused before it changes anything (it would set
+    user@.service and user-.slice, and the user manager of no one)."""
+
+    NOBODY = "cst-test-no-such-user"
+
+    def test_on_refuses_and_changes_nothing(self) -> None:
+        self.write(self.manual, "")  # 'cst cpu game on' makes it, then starts cpu-game.service
+        out, err = io.StringIO(), io.StringIO()
+        p = GameProfile(self.paths, GameSettings(target_user=self.NOBODY), self.systemd, uid_of=user_id, out=out)
+        self.systemd.actions = []
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.on(), 1)
+            self.assertEqual(p.locked("on"), 1)  # what the unit's ExecStart gets
+        line = f"<3>game-profile: TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})\n"
+        self.assertEqual(out.getvalue(), line * 2)
+        self.assertEqual(err.getvalue(), "")  # no "id: ...: no such user" line on top of it
+        self.assertEqual(self.systemd.actions, [])
+        for path in (self.state, self.intended, self.manual):
+            self.assertFalse(os.path.exists(path), path)
+        self.assertFalse(os.path.exists(self.unit_runtime) and os.listdir(self.unit_runtime))
+        # Nothing to undo: 'state' says off, and 'off' works.
+        out, _ = self.run_profile("state")
+        self.assertTrue(out.startswith("game profile: off\n"), out)
+        self.run_profile("off")
+
+    def test_state_says_why_on_refuses(self) -> None:
+        # 'state' names the reason (as it names a problem line) and asks no user manager of no one.
+        for name, why in (
+            (self.NOBODY, f"TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})"),
+            ("", f"TARGET_USER not set in {self.paths.conf}"),
+        ):
+            out, err = io.StringIO(), io.StringIO()
+            p = GameProfile(self.paths, GameSettings(target_user=name), self.systemd, uid_of=user_id, out=out)
+            self.systemd.actions = []
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(p.state(), 0)
+            text = out.getvalue()
+            self.assertTrue(
+                text.startswith(f"game profile: off\n  settings: {why} ('on' refuses until it is fixed)\n"), text
+            )
+            self.assertNotIn("toolboxes", text)
+            self.assertEqual([a for a in self.systemd.actions if "--user" in a], [])
+            self.assertEqual(err.getvalue(), "")
+
+    def test_the_same_name_with_an_account_switches_on(self) -> None:
+        # The check reads the lookup, not the name.
+        out, _ = self.run_profile("on", GameSettings(target_user=self.NOBODY))
+        self.assertIn("<5>game-profile: on: ", out)
+        self.assertTrue(os.path.exists(self.state))
+
+
+class TickTargetUserWithoutAccountTest(GameProfileCase):
+    """The watchdog, with the profile off and a GameMode client running, does not start cpu-game.service
+    for a TARGET_USER 'on' refuses (unset, or a name with no account): it would fail again every 30 s.
+    It says why once per boot; once the name has an account it starts the unit again."""
+
+    NOBODY = "cst-test-no-such-user"
+
+    def tick(self, name: str, uid_of: Callable[[str], str] = user_id) -> tuple[str, str, list[str]]:
+        """One tick for TARGET_USER name: (its journal lines, its stderr, the systemctl calls)."""
+        out, err = io.StringIO(), io.StringIO()
+        p = GameProfile(self.paths, GameSettings(target_user=name), self.systemd, uid_of=uid_of, out=out)
+        self.systemd.actions = []
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(p.locked("tick"), 0)  # the watchdog's unit does not fail
+        return out.getvalue(), err.getvalue(), self.systemd.actions
+
+    def said(self, why: str) -> str:
+        return f"GameMode client running, profile not switched on: {why} (fix it; said once per boot)"
+
+    def test_no_start_for_a_name_without_account_said_once(self) -> None:
+        why = f"TARGET_USER names no account: {self.NOBODY} (in {self.paths.conf})"
+        self.assertEqual(self.tick(self.NOBODY), (f"<4>game-profile: {self.said(why)}\n", "", []))
+        self.assertEqual(self.read(self.paths.settings_warned), self.said(why))
+        self.assertEqual(self.tick(self.NOBODY), ("", "", []))  # said already this boot
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_no_start_for_an_unset_name_said_once(self) -> None:
+        why = f"TARGET_USER not set in {self.paths.conf}"
+        self.assertEqual(self.tick(""), (f"<4>game-profile: {self.said(why)}\n", "", []))
+        self.assertEqual(self.tick(""), ("", "", []))
+
+    def test_fixed_it_starts_the_unit_and_a_name_that_breaks_again_is_said_again(self) -> None:
+        self.tick(self.NOBODY)
+        out, err, actions = self.tick(self.NOBODY, lambda _u: UID)  # the account exists now
+        self.assertEqual(out, "<5>game-profile: GameMode client running but profile off: switching on\n")
+        self.assertEqual((err, actions), ("", [f"{SYS} start --no-block cpu-game.service"]))
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+        out, _, actions = self.tick(self.NOBODY)
+        self.assertIn("TARGET_USER names no account", out)
+        self.assertEqual(actions, [])
+
+    def test_a_name_fixed_while_the_profile_is_on_is_forgotten_too(self) -> None:
+        self.tick(self.NOBODY)
+        self.assertTrue(os.path.exists(self.paths.settings_warned))
+        self.run_profile("on")  # started by GameMode's hook, for a name with an account
+        self.tick(self.NOBODY, lambda _u: UID)
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+
+    def test_a_settings_line_and_the_name_share_the_mark_each_said_when_it_comes(self) -> None:
+        self.write(self.paths.conf, "TARGET_USER='cst-test-no-such-user'\nBUILD_CPUS=$(nproc)\n")
+        settings, problems = read_settings(self.paths.conf)
+        out = io.StringIO()
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=user_id, problems=problems, out=out)
+        self.assertEqual(p.tick(), 0)
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", out.getvalue())  # the line first: 'on' refuses for it
+        self.assertNotIn("names no account", out.getvalue())
+        # The line fixed, the name still without an account: the line's word is forgotten, the name is said.
+        out, err, actions = self.tick(self.NOBODY)
+        self.assertEqual((out.count("TARGET_USER names no account"), err, actions), (1, "", []))
+
+    def test_a_fixed_line_is_forgotten_while_the_name_still_has_no_account(self) -> None:
+        # The tick forgets its word on a settings line once the line is fixed, also while TARGET_USER still
+        # names no account: the same line broken again is said again (and not hidden by the old mark).
+        def tick_with(conf: str) -> str:
+            self.write(self.paths.conf, conf)
+            settings, problems = read_settings(self.paths.conf)
+            out = io.StringIO()
+            p = GameProfile(self.paths, settings, self.systemd, uid_of=user_id, problems=problems, out=out)
+            self.assertEqual(p.tick(), 0)
+            return out.getvalue()
+
+        broken = f"TARGET_USER='{self.NOBODY}'\nBUILD_CPUS=$(nproc)\n"
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", tick_with(broken))
+        self.no_game()
+        self.assertEqual(tick_with(f"TARGET_USER='{self.NOBODY}'\n"), "")  # fixed, and no game runs
+        self.assertFalse(os.path.exists(self.paths.settings_warned))
+        self.gamemode_pid("1")
+        self.assertIn("line 2: BUILD_CPUS=$(nproc)", tick_with(broken))
+
+    def test_a_tick_looks_up_the_name_only_when_it_needs_it(self) -> None:
+        # No GameMode client, or the profile switched off by hand during this game: the tick has nothing to
+        # start, so no lookup (NSS, sssd or LDAP every 30 s for nothing).
+        names: list[str] = []
+
+        def uid_of(user: str) -> str:
+            names.append(user)
+            return user_id(user)
+
+        self.no_game()
+        self.assertEqual(self.tick(self.NOBODY, uid_of), ("", "", []))
+        self.gamemode_pid("1")
+        self.write(self.paths.suppress, "")
+        self.assertEqual(self.tick(self.NOBODY, uid_of), ("", "", []))
+        self.assertEqual(names, [])
+        os.remove(self.paths.suppress)  # a client runs and the profile is off: 'on' would need the name
+        self.assertIn("TARGET_USER names no account", self.tick(self.NOBODY, uid_of)[0])
+        self.assertEqual(names, [self.NOBODY])
+
+    def test_a_link_at_the_mark_is_replaced_and_never_followed(self) -> None:
+        victim = os.path.join(self.tmp, "victim")
+        self.write(victim, "keep\n")
+        os.symlink(victim, self.paths.settings_warned)
+        out, _, _ = self.tick(self.NOBODY)
+        self.assertIn("TARGET_USER names no account", out)
+        self.assertEqual(self.read(victim), "keep\n")
+        self.assertFalse(os.path.islink(self.paths.settings_warned))
+        self.assertEqual(os.stat(self.paths.settings_warned).st_mode & 0o7777, 0o644)
 
 
 class SettingsProblemTest(GameProfileCase):
@@ -1176,9 +1483,10 @@ class SettingsProblemTest(GameProfileCase):
         p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems, out=out)
         self.assertEqual(p.tick(), 0)
         self.assertIn("line 2: P_CORES=`nproc`", out.getvalue())
-        # Fixed: the watchdog switches the profile on again.
+        # Fixed: the watchdog switches the profile on again (for a TARGET_USER with an account).
         self.write(self.paths.conf, "TARGET_USER='testuser'\n")
-        p = load_profile(self.paths, self.systemd)
+        settings, problems = read_settings(self.paths.conf)
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems)
         self.systemd.actions = []
         self.assertEqual(p.tick(), 0)
         self.assertEqual(self.systemd.actions, [f"{SYS} start --no-block cpu-game.service"])
@@ -1190,7 +1498,9 @@ class SettingsProblemTest(GameProfileCase):
         # Fixed (no game now), then broken again the same way: said again.
         self.no_game()
         self.write(self.paths.conf, "TARGET_USER='testuser'\n")
-        self.assertEqual(load_profile(self.paths, self.systemd).tick(), 0)
+        settings, problems = read_settings(self.paths.conf)  # for a TARGET_USER with an account
+        p = GameProfile(self.paths, settings, self.systemd, uid_of=lambda _u: UID, problems=problems)
+        self.assertEqual(p.tick(), 0)
         self.assertFalse(os.path.exists(self.paths.settings_warned))
         self.gamemode_pid("1")
         p, out = self.problem_profile()
@@ -1577,7 +1887,7 @@ class FullRunFolderTest(GameProfileCase):
                     raise OSError(errno.ENOSPC, "No space left on device", path)
             return real(path, flags, encoding=encoding, errors=errors)
 
-        return unittest.mock.patch("cpu.game.adapters.open", fake_open, create=True)
+        return unittest.mock.patch("cpu.game.adapters.profile.open", fake_open, create=True)
 
     def test_on_skips_what_it_cannot_record_and_still_succeeds_then_off_undoes_the_rest(self) -> None:
         self.systemd.actions = []

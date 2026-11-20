@@ -116,7 +116,8 @@ class GamePaths:
 
     @property
     def settings_warned(self) -> str:
-        """What the watchdog last said about the settings file's problem lines (once per boot)."""
+        """What the watchdog last said about settings 'on' refuses (once per boot): the settings file's
+        problem lines, or a TARGET_USER that is unset or names no account."""
         return _in(self.run, "settings-warned")
 
     @property
@@ -252,14 +253,18 @@ def cut_tail(data: bytes) -> tuple[int, bytes] | None:
     return keep, data[keep:]
 
 
+def _whole_lines(text: str) -> list[str]:
+    """The lines of game.state or game.intended that can hold a record: every line but a last one cut
+    short (no newline at its end, ends_cut_short)."""
+    lines = file_lines(text)
+    return lines[:-1] if ends_cut_short(text) else lines
+
+
 def records(text: str) -> list[Record]:
     """The records of game.state or game.intended in file order; a line bash could not read as
     plain words, and a last line cut short (no newline at its end), are left out."""
     out: list[Record] = []
-    lines = file_lines(text)
-    for number, line in enumerate(lines, 1):
-        if _cut_short(text, lines, number):
-            continue
+    for line in _whole_lines(text):
         words = printf_q_words(line)
         if words is not None:
             out.append(tuple(words))
@@ -331,8 +336,9 @@ def state_uid(recs: Sequence[Record]) -> str | None:
 
 
 def has_record_part(text: str, part: str) -> bool:
-    """A line of the file holds part (bash: grep -F on the file)."""
-    return any(part in line for line in file_lines(text))
+    """A whole line of the file holds part (bash: grep -F on the file); a last line cut short (no
+    newline at its end) holds none: its change was never made (records())."""
+    return any(part in line for line in _whole_lines(text))
 
 
 def escaped_unit(name: str) -> str | None:

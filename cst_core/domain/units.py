@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""systemd unit files as CST writes them: header comment lines, then sections.
+"""systemd units: their files as CST writes them (header comment lines, then sections), and
+systemd's ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -8,6 +9,7 @@ allowed), sections separated by one blank line, ending in a newline.
 """
 
 from collections.abc import Sequence
+from enum import StrEnum
 import posixpath
 
 # `systemctl mask NAME` leaves a link to this file where the unit file goes.
@@ -50,3 +52,21 @@ def masked_refusal(paths: Sequence[str], *, user: bool) -> str | None:
         f"{name} is masked (systemctl mask); unmask it first: {unmask} {name}"
         for name in (posixpath.basename(p) for p in paths)
     )
+
+
+class ActiveState(StrEnum):
+    """A unit's ActiveState as `systemctl show` prints it: systemd's eight words.
+
+    Each module keeps its own subset of what counts as running or stopped for it, a frozenset of
+    these members, since they do not agree (reloading, refreshing, maintenance). The text from
+    systemctl stays a plain str and is compared with members (==, in a frozenset of them); it is
+    never parsed with ActiveState(text), which would raise on a word a newer systemd adds."""
+
+    ACTIVE = "active"
+    RELOADING = "reloading"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    ACTIVATING = "activating"
+    DEACTIVATING = "deactivating"
+    MAINTENANCE = "maintenance"
+    REFRESHING = "refreshing"

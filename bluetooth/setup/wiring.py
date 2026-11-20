@@ -31,6 +31,7 @@ from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_han
 from cst_core.adapters.files import read_text
 from cst_core.domain.dispatch import script_help, step_down_argv
 from cst_core.domain.values import ROOT_ACCOUNT
+from cst_core.ports import SystemctlHost
 
 
 def take_handover() -> Mapping[str, str]:
@@ -135,7 +136,7 @@ def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeo
         where,
         SetupMachine(
             runner=runner,
-            systemd=SystemctlAdapter(runner),
+            systemd=SystemctlAdapter(runner, on_host=SystemctlHost.SHOW_ONLY),
             clock=SystemClockAdapter(),
             console=SetupTerminal(),
             files=LocalSetupFiles(),

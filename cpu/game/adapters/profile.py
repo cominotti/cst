@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """The game profile on the machine: systemctl for both managers, the cgroup tree, /proc, sysfs, its state files.
 
-GameProfile carries what every step needs (where things are, the settings,
+The lookups and reads it shares with cst cpu (the settings, the accounts, a file's text) are in
+cpu.game.adapters.host. GameProfile carries what every step needs (where things are, the settings,
 the command runner, the user's uid) across the steps of on, off, tick and
 state; cpu.game.domain decides what the records and the answers say.
 """
@@ -10,19 +11,18 @@ from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 import glob
-import io
 import locale
 import os
-import pwd
 import sys
-from typing import TextIO
+from typing import Final, TextIO
 
 from cst_core.adapters.files import ensure_dir, read_bytes, read_text, write_atomic
 from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
-from cst_core.domain.text import SettingsProblem, describe_problems, parse_shell_assignments, printf_q
+from cst_core.domain.text import SettingsProblem, describe_problems, printf_q
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
+from cpu.game.adapters.host import holds, read_settings, read_stripped, user_id, user_name
 from cpu.game.domain import (
     DOCKER_SCOPES,
     GAME_DROPIN,
@@ -58,7 +58,6 @@ from cpu.game.domain import (
     records,
     repaired_text,
     unreadable_lines,
-    game_settings,
     show_values,
     state_uid,
     state_undo,
@@ -70,51 +69,14 @@ from cpu.game.domain import (
 )
 
 
-def collate_as_bash() -> None:
-    """Sort names as bash's globs do: by the collation of the caller's locale (LC_ALL, LC_COLLATE,
-    LANG), C when it has none or an unknown one. The order the boxes next to the game are handled
-    in, and listed by 'state', is then the bash version's."""
-    with contextlib.suppress(locale.Error):
-        locale.setlocale(locale.LC_COLLATE, "")
-
-
-def read_settings(conf: str) -> tuple[GameSettings, tuple[SettingsProblem, ...]]:
-    """cpu-setup.conf's settings over the defaults (a file that cannot be read: the defaults), and its
-    problem lines: lines bash would not read as plain assignments, which set nothing."""
-    text = read_text(conf)
-    if text is None:
-        return game_settings({}), ()
-    parsed = parse_shell_assignments(text)
-    return game_settings(parsed.values), parsed.problems
+# How the watchdog's words on the settings end: it says them once per boot (GameProfile._say_once).
+_ONCE: Final = " (fix it; said once per boot)"
 
 
 def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
     """The game profile over paths.conf's settings (and its problem lines)."""
     settings, problems = read_settings(paths.conf)
     return GameProfile(paths, settings, runner, problems=problems)
-
-
-def user_id(user: str) -> str:
-    """The user's uid as `id -u USER` prints it ("" and id's message on stderr for an unknown user)."""
-    try:
-        return str(pwd.getpwnam(user).pw_uid)
-    except KeyError:
-        print(f"id: '{user}': no such user", file=sys.stderr, flush=True)
-        return ""
-
-
-def user_name(uid: str) -> str:
-    """The name of the user with that uid, "" for none."""
-    try:
-        return pwd.getpwuid(int(uid)).pw_name
-    except KeyError, ValueError, OverflowError:
-        return ""
-
-
-def read_stripped(path: str) -> str | None:
-    """A file's text without its last newlines (a shell's $(cat FILE)), None when it cannot be read."""
-    text = read_text(path)
-    return None if text is None else text.rstrip("\n")
 
 
 def _write_line(path: str, value: str) -> bool:
@@ -125,12 +87,6 @@ def _write_line(path: str, value: str) -> bool:
     except OSError:
         return False
     return True
-
-
-def holds(path: str, needle: str) -> bool:
-    """The file holds needle (grep -qsF): False when it cannot be read."""
-    data = read_bytes(path)
-    return data is not None and needle.encode() in data
 
 
 class GameProfile:
@@ -154,6 +110,7 @@ class GameProfile:
         self._uid_of = uid_of
         self._name_of = name_of
         self._out = out
+        self._uids: dict[str, str] = {}
 
     # ---- output ----------------------------------------------------------------------
     def _stream(self) -> TextIO:
@@ -177,9 +134,20 @@ class GameProfile:
             sys.stderr.flush()
 
     # ---- systemd -------------------------------------------------------------------------
-    def uid(self) -> str:
-        """The target user's uid."""
-        return self._uid_of(self.s.target_user)
+    def uid(self, *, say: bool = False) -> str:
+        """The target user's uid (say: see _lookup_uid)."""
+        return self._lookup_uid(self.s.target_user, say=say)
+
+    def _lookup_uid(self, user: str, *, say: bool) -> str:
+        """The uid of user ("" for none), looked up once per run. With say ('off' only), the first lookup
+        of a user with no account prints id's "no such user" line on stderr, once; on, tick and state
+        never print it."""
+        if user not in self._uids:
+            found = self._uid_of(user)
+            if say and not found:
+                print(f"id: '{user}': no such user", file=sys.stderr, flush=True)
+            self._uids[user] = found
+        return self._uids[user]
 
     def _argv(self, mgr: Manager, args: Sequence[str]) -> list[str]:
         if mgr == "usr":
@@ -209,9 +177,9 @@ class GameProfile:
         """The property as `systemctl show -P` shows it ("" for [not set] and on an error)."""
         return shown(self.ask(mgr, "show", "-P", name, unit).stdout)
 
-    def ctl_file(self, mgr: Manager, unit: str, prop: str) -> str:
-        """Where `set-property --runtime` writes PROP of UNIT."""
-        return ctl_file(self.paths, mgr, unit, prop, self.uid() if mgr == "usr" else "")
+    def ctl_file(self, mgr: Manager, unit: str, prop: str, *, say: bool = False) -> str:
+        """Where `set-property --runtime` writes PROP of UNIT (say: see _lookup_uid)."""
+        return ctl_file(self.paths, mgr, unit, prop, self.uid(say=say) if mgr == "usr" else "")
 
     def _units(self, mgr: Manager, pattern: str) -> list[str]:
         """The running scopes matching pattern (list-units, first column)."""
@@ -376,6 +344,13 @@ class GameProfile:
         else:
             self.log(4, f"{unit}: could not write {f}")
 
+    def _recorded(self, unit: str, settings: Sequence[str]) -> bool:
+        """game.state holds a whole record of each of settings for unit, a box of the user manager: setp
+        records them one after the other before it sets any, so a box whose last record was cut short
+        (or never written) is not handled yet, even when its first record is whole."""
+        text = self._state_text()
+        return all(has_record_part(text, f"prop usr {printf_q(unit)} {kv.split('=', 1)[0]} ") for kv in settings)
+
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of
         escaped_cgroups not handled yet; a box that holds a GameMode client is the game itself."""
@@ -384,7 +359,7 @@ class GameProfile:
             settings.append(f"AllowedCPUs={self.s.build_cpus}")
         for d in self.escaped_cgroups():
             unit = os.path.basename(d).removeprefix("_")
-            if has_record_part(self._state_text(), f"prop usr {printf_q(unit)} CPUWeight "):
+            if self._recorded(unit, settings):
                 continue
             if self.gamemode_in(d):
                 continue
@@ -442,7 +417,8 @@ class GameProfile:
         if os.path.exists(p.state):
             self.log(6, "already on")
             return 0
-        if self.problems or not s.target_user:
+        why = None if self.problems else self._target_refusal()
+        if self.problems or why is not None:
             # Not switched on: a by-hand mark ('cst cpu game on' makes it first) would keep a profile a
             # later game switches on from being switched off when that game ends.
             with contextlib.suppress(FileNotFoundError):
@@ -450,8 +426,8 @@ class GameProfile:
         if self.problems:
             self.refuse("not switched on")
             return 1
-        if not s.target_user:
-            self.log(3, f"TARGET_USER not set in {p.conf}")
+        if why is not None:
+            self.log(3, why)
             return 1
         try:
             with open(p.state, "w", encoding="utf-8"):
@@ -503,6 +479,16 @@ class GameProfile:
         self.log(5, on_text(s))
         return 0
 
+    def _target_refusal(self) -> str | None:
+        """Why 'on' refuses for TARGET_USER: unset, or a name with no account (it would act for user@.service
+        and user-.slice); None for an account. The lookup is quiet: the caller's line names the user."""
+        name, conf = self.s.target_user, self.paths.conf
+        if not name:
+            return f"TARGET_USER not set in {conf}"
+        if not self._lookup_uid(name, say=False):
+            return f"TARGET_USER names no account: {name} (in {conf})"
+        return None
+
     def off(self) -> int:
         """Exact revert: the overrides 'on' created go (then daemon-reload), the ones that existed
         before get their old value back; the MemoryLow drop-ins go also without a game.state."""
@@ -534,18 +520,15 @@ class GameProfile:
     def _user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
         also with no TARGET_USER (its line sets nothing, or is gone) or one that names another user now.
-        The tick and 'state' act for that user too (say False: quietly, also about a TARGET_USER that
-        names no account: the tick runs every 30 s), so what the tick sets in the user manager is what
-        'off' undoes."""
+        The tick and 'state' act for that user too, quietly (say False: neither the line below nor id's
+        "no such user" line, which 'off' says once: _lookup_uid), so what the tick sets in the user
+        manager is what 'off' undoes."""
         uid = state_uid(recs)
         if uid is None:
             return
         target = self.s.target_user
-        if target:
-            with contextlib.nullcontext() if say else contextlib.redirect_stderr(io.StringIO()):
-                same = self._uid_of(target) == uid
-            if same:
-                return
+        if target and self._lookup_uid(target, say=say) == uid:
+            return
         name = self._name_of(uid)
         if name:
             if say:
@@ -563,7 +546,7 @@ class GameProfile:
                 _write_line(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
-                    f = self.ctl_file(mgr, unit, prop)
+                    f = self.ctl_file(mgr, unit, prop, say=True)
                     with contextlib.suppress(OSError):
                         os.unlink(f)
                     with contextlib.suppress(OSError):
@@ -637,20 +620,10 @@ class GameProfile:
     def tick(self) -> int:
         """The watchdog (every 30 s); see the program's help."""
         p = self.paths
-        if not self.problems:  # fixed: a line that breaks again is said again
-            with contextlib.suppress(OSError):
-                os.unlink(p.settings_warned)
+        if not self.problems:  # fixed: a line or a name that breaks again is said again
+            self._forget_fixed_settings()
         if not os.path.exists(p.state):
-            self.remove_leftover_dropins()
-            if not self.gamemode_client():
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(p.suppress)
-            elif not os.path.exists(p.suppress):
-                if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
-                    self.warn_once("GameMode client running, profile not switched on")
-                    return 0
-                self.log(5, "GameMode client running but profile off: switching on")
-                self.ctl("sys", "start", "--no-block", "cpu-game.service")
+            self._tick_while_off()
             return 0
         if not os.path.exists(p.manual) and not self.gamemode_client():
             self.log(5, "no GameMode client left: switching off")
@@ -661,10 +634,52 @@ class GameProfile:
             return 0
         self._user_from_state(records(self._state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
-        self.protect_steam()  # the game's own scope, started after 'on'
-        self.demote_escapes()  # boxes next to the game that appeared after 'on'
+        why = self._target_refusal()  # no account for the user acted for: no user manager to change
+        if why is None:
+            self.protect_steam()  # the game's own scope, started after 'on'
+            self.demote_escapes()  # boxes next to the game that appeared after 'on'
+        else:
+            self._say_refusal("profile on, its user manager's side not handled", why)
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
+
+    def _tick_while_off(self) -> None:
+        """The tick with the profile off: leftover drop-ins go, and a GameMode client switches the profile on,
+        unless it was switched off by hand while that client runs (suppress) or 'on' would refuse."""
+        p = self.paths
+        self.remove_leftover_dropins()
+        if not self.gamemode_client():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(p.suppress)
+        elif not os.path.exists(p.suppress):
+            if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
+                self.warn_once("GameMode client running, profile not switched on")
+                return
+            why = self._target_refusal()  # the same for TARGET_USER, with the same mark
+            if why is not None:
+                self._say_refusal("GameMode client running, profile not switched on", why)
+            else:
+                self.log(5, "GameMode client running but profile off: switching on")
+                self.ctl("sys", "start", "--no-block", "cpu-game.service")
+
+    def _say_refusal(self, what: str, why: str) -> None:
+        """The watchdog's word on a TARGET_USER 'on' refuses (_target_refusal's why), once per boot, in the
+        mark of the settings file's problem lines (_forget_fixed_settings)."""
+        said = f"{what}: {why}{_ONCE}"
+        self._say_once(self.paths.settings_warned, said, lambda: self.log(4, said))
+
+    def _forget_fixed_settings(self) -> None:
+        """With no problem line: forget what the watchdog said about the settings (a line or a name that
+        breaks again is then said again), unless it is about a TARGET_USER 'on' still refuses for. The
+        name is looked up only when there is such a mark."""
+        mark = self.paths.settings_warned
+        said = read_text(mark)
+        if said is not None:
+            why = self._target_refusal()
+            if why is not None and said.endswith(f": {why}{_ONCE}"):
+                return
+        with contextlib.suppress(OSError):
+            os.unlink(mark)
 
     def _problem_lines(self) -> list[str]:
         """The settings file's problem lines, one message each (none when it has none)."""
@@ -702,6 +717,7 @@ class GameProfile:
         """What is applied now, and which settings drifted from what 'on' set (with the profile on, in the
         user manager of the user 'on' acted for)."""
         on = os.path.exists(self.paths.state)
+        why = None if self.problems else self._target_refusal()  # as 'on' reads TARGET_USER
         if on:
             self._user_from_state(records(self._state_text()), say=False)
         p, s = self.paths, self.s
@@ -711,10 +727,12 @@ class GameProfile:
             self.say(
                 f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
             )
+        if why is not None:
+            self.say(f"  settings: {why} ('on' refuses until it is fixed)")
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line("builds.slice")
-        if s.target_user:
+        if self._target_refusal() is None:  # a user manager to ask (the user 'on' acted for, with the profile on)
             self.say(f"  toolboxes       weight={self.prop('usr', 'user.slice', 'CPUWeight')}")
             self.say(f"  app.slice       zswap writeback={self.prop('usr', 'app.slice', 'MemoryZSwapWriteback')}")
             cg = self.ask("usr", "show", "-P", "ControlGroup", "user.slice").stdout.rstrip("\n")

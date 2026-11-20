@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Pure domain model, parsing, and calculations for the swap module."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import contextlib
@@ -14,6 +14,8 @@ from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
+from cst_core.domain.units import ActiveState
+from swap.ports import SwapSettingsFacts
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
 SWAP_OLD_MARKERS: Final[tuple[str, ...]] = (
@@ -242,6 +244,88 @@ class SpecResolution:
     spec: SwapHardwareSpec | None
     state: SwapSpecState
     note: str = ""
+    # "bad" from the settings file's own lines: each problem (note is their "; " join).
+    problems: tuple[str, ...] = ()
+
+
+# sysfs gives a block device's size in sectors of this many bytes, whatever the device's own sector size.
+SYSFS_SECTOR_BYTES: Final = 512
+
+
+def sysfs_partition(
+    device_path: str,
+    *,
+    resolve: Callable[[str], str | None],
+    is_block: Callable[[str], bool],
+    first_line: Callable[[str], str | None],
+    sys_dir: str,
+) -> tuple[str, int] | None:
+    """The block device a path leads to and its size in bytes, from sysfs's size of it
+    (sys_dir/class/block/NAME/size); None when the path leads to no block device or sysfs gives no
+    number. resolve: the path with every link followed (None: it leads nowhere); is_block: a block
+    device is there; first_line: a file's first line, stripped (None: it cannot be read). cst swap
+    and cst doctor both size the partition with it."""
+    dev = resolve(device_path)
+    if dev is None or not is_block(dev):
+        return None
+    sectors = first_line(posixpath.join(sys_dir, "class", "block", posixpath.basename(dev), "size"))
+    if sectors is None or not sectors.isdigit():
+        return None
+    return dev, int(sectors) * SYSFS_SECTOR_BYTES
+
+
+def resolve_settings(facts: SwapSettingsFacts, *, as_root: bool) -> SpecResolution:
+    """The partition from /etc/cst/swap.conf; when that file is not there, the one an older CST set
+    up (its marked crypttab line, the partition's size now: apply writes the file from them). A file
+    that is there but cannot be read is never taken as missing. cst swap and cst doctor both read the
+    file through this (as_root: the reader runs as root)."""
+    text = facts.settings_text()
+    if text is not None:
+        settings = parse_swap_settings(text)
+        if settings.problems:
+            return SpecResolution(None, SwapSpecState.BAD, "; ".join(settings.problems), settings.problems)
+        return SpecResolution(settings.spec, SwapSpecState.UNSET if settings.spec is None else SwapSpecState.OK)
+    if facts.settings_seen():
+        return _settings_not_read(facts, seen=True, as_root=as_root)
+    if facts.settings_folder_closed():
+        return _settings_not_read(facts, seen=False, as_root=as_root)
+    return _spec_from_older_install(facts)
+
+
+def _settings_not_read(facts: SwapSettingsFacts, *, seen: bool, as_root: bool) -> SpecResolution:
+    """/etc/cst/swap.conf is there (seen), or may be in a folder this user may not search, and could
+    not be read: never taken as missing (the migration would write over it). A user who may not read
+    it is asked for --root; anything else stops apply."""
+    if seen and not facts.settings_is_file():
+        return SpecResolution(None, SwapSpecState.BAD, "not a regular file")
+    if not as_root and not (seen and facts.settings_readable()):
+        return SpecResolution(None, SwapSpecState.UNREADABLE)
+    # Root, which --root would not help (a security policy, a root-squashed mount), or a failed read.
+    return SpecResolution(None, SwapSpecState.BAD, "cannot be read")
+
+
+def _spec_from_older_install(facts: SwapSettingsFacts) -> SpecResolution:
+    """No /etc/cst/swap.conf: the partition an older CST set up (its marked crypttab line, the
+    partition's size now), from which apply writes the file."""
+    if facts.crypttab_closed():
+        name = marked_fstab_name(facts.fstab_text())
+        return (
+            SpecResolution(None, SwapSpecState.UNSET)
+            if name is None
+            else SpecResolution(None, SwapSpecState.UNKNOWN, name)
+        )
+    entry = marked_crypttab_entry(facts.crypttab_text())
+    if entry is None:
+        return SpecResolution(None, SwapSpecState.UNSET)
+    name, partuuid = entry
+    size = facts.partition_size(partuuid_path(partuuid))
+    if size is None:
+        return SpecResolution(
+            None,
+            SwapSpecState.UNSET,
+            f"the {name} line in crypttab names {partuuid_path(partuuid)}, which is not here",
+        )
+    return SpecResolution(SwapHardwareSpec(partuuid, name, size), SwapSpecState.WRITE, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,23 +638,14 @@ class SettingState(StrEnum):
     LATER = "later"
 
 
-class SliceActiveState(StrEnum):
-    """machine.slice's ActiveState as `systemctl show` prints it (systemd's words)."""
-
-    ACTIVE = "active"
-    RELOADING = "reloading"
-    INACTIVE = "inactive"
-    FAILED = "failed"
-    ACTIVATING = "activating"
-    DEACTIVATING = "deactivating"
-    MAINTENANCE = "maintenance"
-    REFRESHING = "refreshing"
+# The ActiveStates in which swap reads machine.slice as active (systemd's words: cst_core's ActiveState).
+SLICE_ACTIVE_STATES: Final = frozenset({ActiveState.ACTIVE})
 
 
 def slice_not_active(active_state: str) -> bool:
     """systemd says the slice is not active: an ActiveState other than "active" (any word, known or not).
     "" (systemd gave no answer) is False: not known, so the cgroup is read as before."""
-    return active_state not in ("", SliceActiveState.ACTIVE)
+    return active_state != "" and active_state not in SLICE_ACTIVE_STATES
 
 
 # The width of the state column of the settings rows and of apply's verification notes under them:

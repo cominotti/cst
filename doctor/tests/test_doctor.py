@@ -19,6 +19,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+import errno
 import hashlib
 import importlib
 import io
@@ -27,10 +28,11 @@ import os
 import pwd
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
-from typing import Protocol, Self, override
+from typing import Protocol, Self, TextIO, override
 import types
 import unittest
 from unittest import mock
@@ -65,14 +67,15 @@ from doctor.application import (
     registry as doc_registry,
     services as doc_services,
     shared as doc_shared,
+    swap as doc_swap,
     vm as doc_vm,
 )
 from btrfs.health_check import domain as hc_domain
 from cst_core.adapters import nocow as inode_attrs
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
-from cst_core.application.install import InstallRequest, InstallService
-from cst_core.domain.install import INSTALL_MANIFEST
+from cst_core.application.install import InstallRequest, InstallService, Placement
+from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner
 from cst_core.domain.record import InstallRecord
 from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
@@ -1240,6 +1243,25 @@ class ZswapParamsTest(Scratch):
         )
 
 
+# What an older CST's apply left in /etc/fstab and /etc/crypttab (swap's marker), and doctor's rows.
+SWAP_PU = "612551b1-ca02-4514-86ad-7d8902e612dc"
+SWAP_FSTAB = (
+    "UUID=x / btrfs defaults 0 0\n"
+    "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n"
+)
+SWAP_CRYPTTAB = (
+    f"swap0 /dev/disk/by-partuuid/{SWAP_PU} /dev/urandom"
+    " swap,cipher=aes-xts-plain64,size=512,sector-size=4096,discard # managed-by: swap-setup.sh (CST)\n"
+)
+NOT_CONFIGURED = (
+    "  WARN   swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf): cst swap apply"
+    " refuses (swap/README.md, section 2.3)"
+)
+UNREADABLE = (
+    "  info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it"
+)
+
+
 class SwapSettingsDoctorTest(Scratch):
     """check_swap_settings: the partition /etc/cst/swap.conf names (cst swap apply refuses without
     one), or that an older CST set swap up and apply writes the file."""
@@ -1252,6 +1274,18 @@ class SwapSettingsDoctorTest(Scratch):
 
     def lines(self, out: str) -> list[str]:
         return [ln for ln in out.splitlines() if "swap partition" in ln]
+
+    def close(self, rel: str) -> None:
+        """Mode 000 on a file or folder of the scratch root (put back at the end, so it can be removed)."""
+        p = os.path.join(self.root, rel)
+        mode = stat.S_IMODE(os.lstat(p).st_mode)
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, mode)
+
+    def not_as_root(self) -> None:
+        # Root opens a file of mode 000 and enters a folder of mode 000: the user's view needs a user.
+        if os.geteuid() == 0:
+            self.skipTest("not as root")
 
     def test_nothing_where_swap_is_not_set_up(self) -> None:
         self.assertEqual(self.lines(self.run_tool().stdout), [])
@@ -1279,11 +1313,11 @@ class SwapSettingsDoctorTest(Scratch):
         )
 
     def test_an_older_cst_set_it_up(self) -> None:
-        self.write(
-            "etc/fstab",
-            "UUID=x / btrfs defaults 0 0\n"
-            "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)\n",
-        )
+        # As the user: /etc/crypttab (root's, 0600) cannot be read, and the marked fstab line tells.
+        self.not_as_root()
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.close("etc/crypttab")
         r = self.run_tool()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertEqual(
@@ -1297,6 +1331,173 @@ class SwapSettingsDoctorTest(Scratch):
         )
         self.assertIn("swap apply", r.stdout.split("swap partition:", 1)[1])
         self.assert_read_only()
+
+    def test_a_marked_fstab_line_without_a_crypttab_is_not_configured(self) -> None:
+        # cst swap apply refuses there (nothing to write the file from): no "apply writes it" row.
+        self.write("etc/fstab", SWAP_FSTAB)
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.lines(r.stdout), [NOT_CONFIGURED])
+
+    def test_a_readable_crypttab_without_its_line_is_not_configured(self) -> None:
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", "luks-x UUID=x none luks\n")
+        self.assertEqual(self.lines(self.run_tool().stdout), [NOT_CONFIGURED])
+
+    def test_a_crypttab_line_whose_partition_is_not_here_is_not_configured(self) -> None:
+        # The by-partuuid link leads to a regular file, not a block device.
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.write("dev/nvme0n1p5", "")
+        os.makedirs(os.path.join(self.root, "dev/disk/by-partuuid"))
+        os.symlink("../../nvme0n1p5", os.path.join(self.root, "dev/disk/by-partuuid", SWAP_PU))
+        self.assertEqual(
+            self.lines(self.run_tool().stdout),
+            [
+                NOT_CONFIGURED.replace(
+                    "swap.conf)",
+                    f"swap.conf; the swap0 line in crypttab names /dev/disk/by-partuuid/{SWAP_PU}, which is not here)",
+                )
+            ],
+        )
+
+    def partition_here(self) -> doc_adapters.Host:
+        """An older CST's marked lines, and the by-partuuid link of its crypttab line leading to a block
+        device of 4 GiB (sysfs: 8388608 sectors): a Host whose stat says so (a test cannot make a block
+        device)."""
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.write("etc/crypttab", SWAP_CRYPTTAB)
+        self.write("dev/nvme0n1p5", "")
+        self.write("sys/class/block/nvme0n1p5/size", "8388608\n")
+        os.makedirs(os.path.join(self.root, "dev/disk/by-partuuid"))
+        os.symlink("../../nvme0n1p5", os.path.join(self.root, "dev/disk/by-partuuid", SWAP_PU))
+        host = doc_adapters.Host(dict(self.env))
+        device = os.path.join(self.root, "dev/nvme0n1p5")
+
+        def stat_of(path: str) -> os.stat_result:
+            st = os.stat(path)
+            return os.stat_result((stat.S_IFBLK | 0o660, *tuple(st)[1:])) if path == device else st
+
+        patcher = mock.patch.object(host, "stat", stat_of)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return host
+
+    def test_a_crypttab_line_whose_partition_is_here_is_written_by_apply(self) -> None:
+        # cst swap plan shows "write" there: apply writes swap.conf from the line and the size.
+        host = self.partition_here()
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf not written yet; an older CST set up swap0, and"
+                    " `cst swap apply` writes it from /etc/crypttab",
+                    "cst swap apply",
+                )
+            ],
+        )
+
+    def test_a_crypttab_line_whose_partition_sysfs_does_not_size_is_not_configured(self) -> None:
+        host = self.partition_here()
+        self.write("sys/class/block/nvme0n1p5/size", "\n")
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: not configured (no SWAP_PARTUUID in /etc/cst/swap.conf; the swap0 line in"
+                    f" crypttab names /dev/disk/by-partuuid/{SWAP_PU}, which is not here): cst swap apply refuses"
+                    " (swap/README.md, section 2.3)",
+                )
+            ],
+        )
+
+    def test_a_swap_conf_this_user_cannot_read(self) -> None:
+        # cst swap plan shows "?" and asks for --root: not "not configured".
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.write("etc/tmpfiles.d/zswap.conf", "")
+        self.close("etc/cst/swap.conf")
+        self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
+
+    def test_only_the_first_64_kib_of_swap_conf_are_read(self) -> None:
+        # As every settings file doctor reads: a swap.conf that never ends (a link to /dev/zero) must not
+        # fill the memory. Here the partition's lines come after 64 KiB of comments, so doctor sees none.
+        self.write("etc/cst/swap.conf", "# padding\n" * 7000 + "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.assertEqual(self.lines(self.run_tool().stdout), [NOT_CONFIGURED])
+
+    def test_root_in_a_toolbox_who_cannot_read_swap_conf_is_asked_to_read_it_on_the_host(self) -> None:
+        # sudo cst doctor in a toolbox: root of the user namespace may not read a host root's 0600 file.
+        # cst swap status --root on the host reads it: the info row, not "cannot be read" (apply refuses).
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.close("etc/cst/swap.conf")
+        host = doc_adapters.Host(dict(self.env, CST_DOCTOR_CONTAINER="1"))
+        host.uid = 0
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [Result("info", UNREADABLE.removeprefix("  info   "))],
+        )
+        # Root on the host itself is never sent to --root: a file it cannot read stops apply.
+        host = doc_adapters.Host(dict(self.env))
+        host.uid = 0
+        self.assertEqual(
+            list(doc_swap.check_swap_settings(host)),
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf cannot be read: cst swap apply refuses until it is fixed",
+                )
+            ],
+        )
+
+    def test_a_swap_conf_whose_read_fails_otherwise_stops_apply(self) -> None:
+        # A file this user may read whose read fails (EIO): cst swap plan says "cannot be read" and
+        # apply refuses; --root would not help, so no "cst swap status --root reads it" row.
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        host = doc_adapters.Host(dict(self.env))
+        conf = os.path.join(self.root, "etc/cst/swap.conf")
+        opened = host.open_text
+
+        def open_text(path: str) -> TextIO:
+            if path == conf:
+                raise OSError(errno.EIO, "Input/output error", path)
+            return opened(doc_domain.ViewPath(path))
+
+        with mock.patch.object(host, "open_text", open_text):
+            rows = list(doc_swap.check_swap_settings(host))
+        self.assertEqual(
+            rows,
+            [
+                Result(
+                    "WARN",
+                    "swap partition: /etc/cst/swap.conf cannot be read: cst swap apply refuses until it is fixed",
+                )
+            ],
+        )
+
+    def test_a_swap_conf_in_a_folder_this_user_may_not_enter(self) -> None:
+        # Not taken as missing: no "an older CST set up swap0" row from the marked fstab line.
+        self.not_as_root()
+        self.write("etc/cst/swap.conf", "SWAP_PARTUUID=0a1b2c3d-02\nSWAP_SIZE_BYTES=4096\n")
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.close("etc/cst")
+        self.assertEqual(self.lines(self.run_tool().stdout), [UNREADABLE])
+
+    def test_a_folder_or_a_dangling_link_at_swap_conf_is_not_a_regular_file(self) -> None:
+        folder = os.path.join(self.root, "etc/cst/swap.conf")
+        os.makedirs(folder)
+        not_a_file = (
+            "  WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed"
+        )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.lines(r.stdout), [not_a_file])
+        os.rmdir(folder)
+        os.symlink("nowhere", folder)
+        self.write("etc/fstab", SWAP_FSTAB)
+        self.assertEqual(self.lines(self.run_tool().stdout), [not_a_file])
 
     def test_installed_but_not_configured(self) -> None:
         self.write("etc/tmpfiles.d/zswap.conf", "")
@@ -2082,6 +2283,93 @@ class VmTest(Scratch):
                 self.assertNotIn("Traceback", r.stdout + r.stderr)
                 self.assert_read_only()
 
+    def write_torn(self, raw: bytes) -> str:
+        path = os.path.join(self.root, "var", "lib", "cst", "vm-nas-torn.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(raw)
+        return path
+
+    def torn_lines(self, r: subprocess.CompletedProcess[str]) -> list[str]:
+        lines = self.vm_lines(r)
+        after = [ln.strip().startswith("fix") and i > 0 and "vm-nas-torn" in lines[i - 1] for i, ln in enumerate(lines)]
+        return [ln.strip() for ln, fix in zip(lines, after, strict=True) if "vm-nas-torn" in ln or fix]
+
+    def test_no_row_without_torn_snapshots(self) -> None:
+        r = self.run_tool()
+        self.assertEqual(self.torn_lines(r), [])
+        self.write_torn(json.dumps({"version": 1, "torn": []}).encode())
+        r = self.run_tool()
+        self.assertEqual(self.torn_lines(r), [], r.stdout)
+        self.assert_read_only()
+
+    def test_torn_snapshots_a_nas_backup_could_not_forget_warn(self) -> None:
+        def entry(vm: str, snapshot: str, stamp: str) -> dict[str, str]:
+            return {
+                "snapshot": snapshot,
+                "vm": vm,
+                "repository": "sftp:nas:/r",
+                "host": "h",
+                "timestamp": stamp,
+                "why": "x",
+            }
+
+        torn: list[object] = [
+            entry("win", "a1b2c3d4" + "e" * 56, "20261108T010640Z"),
+            entry("lab", "f00dbabe" + "1" * 56, "20261101T010000Z"),
+            {"snapshot": "c0ffee", "note": "an entry of a newer cst vm: not counted"},
+        ]
+        self.write_torn(json.dumps({"version": 1, "torn": torn}).encode())
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(
+            self.torn_lines(r),
+            [
+                (
+                    "WARN   2 restic snapshot(s) recorded as torn (no backup) by a failed NAS backup, in "
+                    "/var/lib/cst/vm-nas-torn.json: win a1b2c3d4 (20261108T010640Z), lab f00dbabe (20261101T010000Z); "
+                    "the next `cst vm backup VM --nas` to the same repository forgets them (or drops those already "
+                    "forgotten) before its retention, and skips the retention until then"
+                ),
+                (
+                    "fix: or by hand: restic forget ID, with the repository's variables of vm/README.md, section "
+                    "10.9; for a VM or repository with no more NAS backups, and for an older cst-vm the weekly "
+                    "timer runs (`cst vm backup-timer on VM`), see section 10.6"
+                ),
+            ],
+        )
+        self.assertFalse([c for c in self.calls() if c.startswith("restic")], "no restic call")
+        self.assert_read_only()
+
+    def test_a_torn_record_cst_vm_cannot_use_warns(self) -> None:
+        for raw, said in (
+            (
+                json.dumps({"version": 2, "torn": []}).encode(),
+                (
+                    "/var/lib/cst/vm-nas-torn.json is format 2 of the vm-nas-torn (this CST reads format 1 and older): "
+                    "written by a newer CST: cst vm backup --nas refuses to run with it; use the cst vm of that CST"
+                ),
+            ),
+            (b"{", "(not JSON)"),
+            (b'{"torn": ["\xff"]}', "(not JSON)"),
+            (b'{"version": 1}', '(no "torn" list)'),
+        ):
+            with self.subTest(raw=raw):
+                self.write_torn(raw)
+                r = self.run_tool()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                lines = self.torn_lines(r)
+                self.assertEqual(len(lines), 1, r.stdout)
+                self.assertIn(said, lines[0])
+                if b"version" not in raw[:12]:
+                    self.assertEqual(
+                        lines[0],
+                        f"WARN   /var/lib/cst/vm-nas-torn.json cannot be read as cst vm's record of torn NAS snapshots "
+                        f"{said}: cst vm backup --nas refuses to run with it; forget the snapshots it names by hand, "
+                        "then move it aside",
+                    )
+                self.assert_read_only()
+
     def test_an_index_of_a_newer_cst_vm_warns_and_is_not_read(self) -> None:
         # After going back to an older CST: a newer index is neither taken for "never backed up"
         # nor read as if this checkout knew its format.
@@ -2331,6 +2619,46 @@ class VmNasBackupTest(VmTest):
             line,
         )
         self.assertNotIn("bash, which also sources", line)
+
+    def test_a_target_user_with_no_account_warns_that_the_game_profile_does_not_switch_on(self) -> None:
+        # 'on' refuses such a name and the watchdog does not start the profile; the doctor names it. Asked of
+        # the host's accounts (getent passwd, on the host also from a toolbox).
+        me = pwd.getpwuid(os.getuid()).pw_name
+        os.makedirs(os.path.join(self.root, "etc", "cpu-setup"))
+        conf = os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf")
+        warning = "/etc/cpu-setup/cpu-setup.conf: TARGET_USER names no account: no-such-user-here. The game profile"
+        for container in ("0", "1"):
+            self.env["CST_DOCTOR_CONTAINER"] = container
+            with open(conf, "w") as f:
+                f.write("TARGET_USER='no-such-user-here'\n")
+            host = doc_adapters.Host(self.env, repo=REPO)
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                res = list(doc_cpu.check_cpu_settings(host))
+            self.assertEqual([r.status for r in res], [doc_domain.WARN], res)
+            self.assertTrue(res[0].message.startswith(warning), res[0].message)
+            self.assertIn("Set TARGET_USER to your user (id -un)", res[0].message)
+            for text in (f"TARGET_USER='{me}'\n", "TARGET_USER=''\n", "BUILD_CPUS='12-23'\n"):
+                with open(conf, "w") as f:
+                    f.write(text)
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    self.assertEqual(list(doc_cpu.check_cpu_settings(host)), [], text)
+        self.assertIn("flatpak-spawn --host getent -- passwd no-such-user-here", self.calls())
+        self.assert_read_only()
+        # The whole run: the warning in the cpu area.
+        self.deployments(rollback_pinned=True)
+        self.env["CST_DOCTOR_CONTAINER"] = "0"
+        with open(conf, "w") as f:
+            f.write("TARGET_USER='no-such-user-here'\n")
+        r = self.run_tool()
+        line = next((x for x in r.stdout.split("\n") if "TARGET_USER names no account" in x), "")
+        self.assertIn("WARN", line)
+
+    def test_getent_that_cannot_answer_is_no_warning(self) -> None:
+        host = doc_adapters.Host(self.env, repo=REPO)
+        with mock.patch.object(host, "run", return_value=(127, "", "getent: not found")):
+            self.assertFalse(doc_cpu.names_no_account(host, "no-such-user-here"))
+        with mock.patch.object(host, "run", return_value=(0, "x:x:1:1::/:/bin/sh\n", "")):
+            self.assertFalse(doc_cpu.names_no_account(host, "x"))
 
     def test_snapshots_conf_lines_an_older_cst_wrote_with_printf_q_do_not_warn(self) -> None:
         # The old snap_conf_set wrote values with printf %q (a\ b); bash reads "a b", and so does doctor.
@@ -2657,7 +2985,7 @@ class InstallAreaTest(Scratch):
         msgs = sorted(r.message for r in self.warns())
         self.assertEqual(len(msgs), 2, msgs)
         self.assertIn("/etc/systemd/system/docker-gc.service: missing (CST installed it, btrfs:docker-gc)", msgs[0])
-        self.assertIn("/etc/systemd/system/docker-gc.timer: changed since CST installed it", msgs[1])
+        self.assertIn("/etc/systemd/system/docker-gc.timer: differs from its install record", msgs[1])
         self.assertTrue(all(r.fix == "cst btrfs docker-gc enable" for r in self.warns()))
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
@@ -2769,6 +3097,50 @@ class InstallAreaTest(Scratch):
         list(self.svc.install(entries, InstallRequest(root=self.root, home=home)))
         self.svc.mark(self.root + home + "/.local/state/cst/installed.json", "bluetooth:ldac")
         self.assertEqual([r.status for r in self.results()], [doc_domain.OK])
+
+    def launcher(self) -> tuple[str, str]:
+        """The stall-report launcher's destination in the fixture home, and the user's record (both staged)."""
+        home = self.env["HOME"]
+        return home + "/.local/bin/btrfs-stall-report", self.root + home + "/.local/state/cst/installed.json"
+
+    def test_a_file_that_differs_from_its_record_is_not_called_a_hand_edit(self) -> None:
+        # An install wrote the launcher again (new text) and could not update its record line (its folder
+        # not writable, a full disk): the line still has the older sha. Two causes fit; the WARN names both.
+        dest, record = self.launcher()
+        place = Placement(
+            path=self.root + dest,
+            dest=dest,
+            record=record,
+            component="btrfs:report-launcher",
+            src=None,
+            kind=GeneratedKind.TEXT,
+            owner=Owner.USER,
+            mode=0o755,
+        )
+        self.svc.put(place, b"#!/bin/sh\n# older\n", as_root=False)
+        self.svc.mark(record, "btrfs:report-launcher")
+        with open(self.root + dest, "wb") as f:
+            f.write(b"#!/bin/sh\n# newer\n")
+        want = (
+            f"{dest}: differs from its install record (btrfs:report-launcher): changed by hand, or written "
+            "by an install that could not update the record"
+        )
+        self.assertEqual([(r.message, r.fix) for r in self.warns()], [(want, "cst btrfs install")])
+
+    def test_a_launcher_without_a_record_line_is_neither_warned_about_nor_counted_ok(self) -> None:
+        # The first install wrote the launcher and could not record it: no line, so doctor makes no claim.
+        home = self.env["HOME"]
+        dest, record = self.launcher()
+        entries = [e for e in INSTALL_MANIFEST if e.component == "bluetooth:ldac"]
+        list(self.svc.install(entries, InstallRequest(root=self.root, home=home)))
+        self.svc.mark(record, "bluetooth:ldac")
+        os.makedirs(os.path.dirname(self.root + dest))
+        with open(self.root + dest, "wb") as f:
+            f.write(b"#!/bin/sh\n")
+        res = self.results()
+        self.assertEqual([r.status for r in res], [doc_domain.OK], res)
+        self.assertNotIn(dest, "\n".join(r.message for r in res))
+        self.assertIn(f"{len(entries)} file(s) as CST installed them", res[0].message)
 
     def test_a_vm_backup_timer_without_btrfs_notify_warns(self) -> None:
         wants = os.path.join(self.root, "etc/systemd/system/timers.target.wants")

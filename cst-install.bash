@@ -66,6 +66,13 @@ cst_forget() {
     cst_installer forget "$@"
 }
 
+# cst_forget_text DEST...: generated files (cst_install_text with a
+# component) dropped from the install record, the files left as they are;
+# prints nothing. The root counterpart of cst_forget_text_as.
+cst_forget_text() {
+    cst_installer forget-text "$@"
+}
+
 # cst_install_as USER [--set KEY=VALUE]... SRC...: files of USER's
 # home (dest `~/...`), written by a process running as
 # USER: no root-owned folders in the home, no link followed with root rights.
@@ -129,8 +136,10 @@ cst_install_text() {
     _cst_installer_text text "$@"
 }
 
-# cst_install_text_plan DEST MODE [OWNER] < content: what cst_install_text
-# would do, changing nothing: `unchanged: DEST` or `would write: DEST`.
+# cst_install_text_plan DEST MODE [OWNER [COMPONENT]] < content: what
+# cst_install_text would do, changing nothing: `unchanged: DEST` or
+# `would write: DEST`; with COMPONENT also `would record: DEST` for a
+# current file its record line does not list so (cst_install_text records it).
 cst_install_text_plan() {
     _cst_installer_text text-plan "$@"
 }

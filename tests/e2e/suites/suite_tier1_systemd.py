@@ -858,6 +858,48 @@ echo E2E-OK
 )
 
 
+# test_151: helpers for its bash steps, and cst vm's torn-snapshot steps (vm/application/nas.py) over the
+# real restic; argv[1] the step. "summary" and "ids" read restic's JSON on stdin; "record" and "entries"
+# write and read the torn record; "retry" (the torn snapshots of earlier runs, then the retention) and
+# "forget" (forget_torn of a snapshot, as a torn run does) run cst vm's code, with the settings, the record
+# and its lock the CST_VM_* variables name.
+VM_TORN_DRIVER = r"""
+import json, os, sys
+step = sys.argv[1]
+if step == "summary":  # restic backup --json: the snapshot's full ID
+    print([m for m in map(json.loads, sys.stdin) if m.get("message_type") == "summary"][0]["snapshot_id"])
+elif step == "ids":  # restic snapshots --json: the full IDs, sorted
+    print(" ".join(sorted(s["id"] for s in json.load(sys.stdin))))
+elif step == "record":  # argv: the record, the repository, then VM=ID per torn snapshot
+    path, repo = sys.argv[2], sys.argv[3]
+    torn = [
+        {"snapshot": snap, "vm": vm, "repository": repo, "host": "e2ehost", "timestamp": "20261101T000000Z",
+         "why": "incomplete"}
+        for vm, snap in (a.split("=", 1) for a in sys.argv[4:])
+    ]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"version": 1, "torn": torn}, f)
+elif step == "entries":  # the record at argv[2]: its version, then VM=ID per entry
+    with open(sys.argv[2]) as f:
+        doc = json.load(f)
+    print(doc["version"], *(f"{e['vm']}={e['snapshot']}" for e in doc["torn"]))
+else:
+    sys.path.insert(0, "/opt/cst-rw")
+    from vm import wiring
+    from vm.application import nas
+    vm = sys.argv[2]
+    cfg = wiring.vm_settings(os.environ)
+    p = wiring.nas_backup(cfg)
+    repo = p.settings.nas_repo()
+    if step == "retry":
+        nas.retention_after_torn(cfg, p, vm, repo)
+    else:
+        left = nas.forget_torn(cfg, p, repo, nas.torn_entry(repo, sys.argv[3], vm, "20261119T000000Z", "incomplete"))
+        print(f"forget_torn: {left}")
+"""
+
+
 # test_83, test_133, for a test that has set $w and $st: scc_setup writes the fake sccache
 # ($w/bin/sccache, its records in $SCCACHE_E2E_STATE) and a crate with six path dependencies
 # ($w/crate); build N [JOBS] builds that crate in a capped scope; starts lists the server starts;
@@ -1587,7 +1629,7 @@ echo E2E-OK
         /etc/cst/swap.conf from the crypttab line and the partition, removes the old
         drop-in and its record line; a runtime MemoryLow then wins; a second apply changes
         nothing; doctor is ok; a swap.conf the user cannot read, or a folder in its place, is
-        never taken as missing."""
+        never taken as missing, by plan, apply or cst doctor."""
         r = exec_bash(
             self.SYSTEMD_CONTAINER,
             SWAP_E2E_LIB
@@ -1749,7 +1791,11 @@ grep -qF "  ?         cst/swap.conf                          cannot be read as t
 [[ "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan would write swap.conf"; }
 swap_run plan
 grep -qF "  ok        cst/swap.conf                          partition $PU, $SIZE bytes" <<<"$out" || fail "root plan, swap.conf 0600"
-[[ "$(snap)" == "$s_unread" ]] || fail "plan with swap.conf 0600 changed something"
+# cst doctor as the user reads it as cst swap does: info, not "not configured".
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it" <<<"$doc" || { out="$doc"; fail "doctor, swap.conf 0600"; }
+[[ "$doc" != *"swap partition: not configured"* ]] || { out="$doc"; fail "doctor took swap.conf 0600 as not configured"; }
+[[ "$(snap)" == "$s_unread" ]] || fail "plan or doctor with swap.conf 0600 changed something"
 chmod 0644 /etc/cst/swap.conf
 # A folder above it the user may not enter (lexists cannot see the file there): the same "?" row, and
 # swap.conf is not taken as missing (no migration from crypttab).
@@ -1759,7 +1805,10 @@ s_closed="$(snap)"
 user_plan="$(as_user "$CST" swap plan)"
 grep -qF "  ?         cst/swap.conf                          cannot be read as this user: on the host, " <<<"$user_plan" || { out="$user_plan"; fail "user plan, /etc/cst 0700"; }
 [[ "$user_plan" != *"not written yet"* && "$user_plan" != *"  write     cst/swap.conf"* ]] || { out="$user_plan"; fail "user plan took swap.conf as missing"; }
-[[ "$(snap)" == "$s_closed" ]] || fail "plan with /etc/cst 0700 changed something"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "info   swap partition: cannot read /etc/cst/swap.conf as this user: on the host, cst swap status --root reads it" <<<"$doc" || { out="$doc"; fail "doctor, /etc/cst 0700"; }
+[[ "$doc" != *"not written yet"* ]] || { out="$doc"; fail "doctor took swap.conf as missing"; }
+[[ "$(snap)" == "$s_closed" ]] || fail "plan or doctor with /etc/cst 0700 changed something"
 chmod "$cst_mode" /etc/cst
 mv /etc/cst/swap.conf "$W/swap.conf.aside"
 mkdir /etc/cst/swap.conf
@@ -1768,6 +1817,8 @@ swap_run apply
 [[ $rc == 1 ]] || fail "apply with a folder at /etc/cst/swap.conf"
 grep -qF "ERROR: /etc/cst/swap.conf: not a regular file: apply stops." <<<"$err" || fail "apply message, a folder at swap.conf"
 [[ "$out" != *"written:"* && "$(snap)" == "$s_dir" ]] || fail "apply with a folder at swap.conf changed something"
+doc="$(as_user "$CST" doctor 2>&1 || true)"
+grep -qF "WARN   swap partition: /etc/cst/swap.conf not a regular file: cst swap apply refuses until it is fixed" <<<"$doc" || { out="$doc"; fail "doctor, a folder at swap.conf"; }
 rmdir /etc/cst/swap.conf
 mv "$W/swap.conf.aside" /etc/cst/swap.conf
 
@@ -2368,7 +2419,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             [[ "$rc" == 1 ]] || {{ echo "check did not see the edited file (exit $rc)" >&2; exit 1; }}
             # cst doctor, pointed at the stage, names it (its install area reads the stage's record).
             doc="$(CST_DOCTOR_ROOT={stage} CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
-            grep -qF "/usr/local/sbin/docker-gc: changed since CST installed it (btrfs:docker-gc)" <<<"$doc" ||
+            grep -qF "/usr/local/sbin/docker-gc: differs from its install record (btrfs:docker-gc)" <<<"$doc" ||
                 {{ echo "doctor did not report the edited file: $doc" >&2; exit 1; }}
             # Captured first: under pipefail, `install | grep -q` fails when grep stops reading at the
             # match and the installer, still printing, ends on SIGPIPE (141).
@@ -4370,6 +4421,90 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
+        """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
+        naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
+        the retention would keep in place of the good backup) and one of another VM; the retry lists
+        them with restic's own `snapshots --json` under the recorded host and both tags, forgets both by
+        their listed IDs, and the retention then keeps the good backup; the other VM's entry and
+        snapshot stay; the record and its lock are 0644. Then forget_torn of a fresh snapshot (a torn
+        run whose forget works) forgets it and leaves the record as it was. A whole NAS backup needs
+        libvirt with a running guest, which no tier has: the steps run through vm.application.nas."""
+        w = "/var/tmp/e2e-vm-torn"
+        nas_dir = "/srv/backup/e2e-vm-torn"
+        self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, f"rm -rf {w}", check=False)
+        self.addCleanup(exec_bash, self.NAS_CONTAINER, f"rm -rf {nas_dir}", check=False)
+        pub = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+            [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519
+            cat /root/.ssh/id_ed25519.pub
+            """,
+        ).stdout.strip()
+        exec_bash(
+            self.NAS_CONTAINER,
+            f"""
+            mkdir -p /root/.ssh {nas_dir} && chmod 0700 /root/.ssh
+            grep -qxF {shlex.quote(pub)} /root/.ssh/authorized_keys 2>/dev/null ||
+                printf '%s\\n' {shlex.quote(pub)} >>/root/.ssh/authorized_keys
+            chmod 0600 /root/.ssh/authorized_keys
+            """,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            set -E
+            trap 'echo "test_151 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w={w}
+            rm -rf "$w" && mkdir -p "$w/payload"
+            if ! grep -qx 'Host btrfs-setup-nas' /root/.ssh/config 2>/dev/null; then
+                printf '%s\\n' 'Host btrfs-setup-nas' '    HostName {self.NAS_CONTAINER}' '    User root' \\
+                    '    IdentityFile /root/.ssh/id_ed25519' '    StrictHostKeyChecking no' \\
+                    '    UserKnownHostsFile /dev/null' '    BatchMode yes' >>/root/.ssh/config
+                chmod 0600 /root/.ssh/config
+            fi
+            printf 'NAS_ENABLED=1\\nNAS_PATH={nas_dir}\\nNAS_RESTIC_HOST=e2ehost\\n' >"$w/nas.conf"
+            printf 'e2e-vm-torn-pass' >"$w/pw" && chmod 0600 "$w/pw"
+            export CST_PROG="cst vm" CST_VM_NAS_CONF="$w/nas.conf" CST_VM_RESTIC_PASSWORD="$w/pw" \\
+                CST_VM_RESTIC_CACHE="$w/cache" CST_VM_TORN="$w/lib/vm-nas-torn.json" CST_VM_RUN_DIR="$w/run" \\
+                CST_VM_INDEX="$w/lib/vm-backups.json" CST_VM_CONF="$w/vm.conf"
+            export RESTIC_REPOSITORY="sftp:btrfs-setup-nas:{nas_dir}" RESTIC_PASSWORD_FILE="$w/pw" \\
+                RESTIC_CACHE_DIR="$w/cache"
+            restic init -q
+            d() {{ python3 -I -B -c "$DRIVER" "$@"; }}
+            snap() {{  # a snapshot of the payload with the tags $1: its full ID (the summary's snapshot_id)
+                date +%s%N >"$w/payload/stamp"
+                restic backup --json --host e2ehost --tag "$1" "$w/payload" | d summary
+            }}
+            listed() {{ restic snapshots --json --no-lock | d ids; }}
+            good="$(snap cst-vm,vm:e2evm)"
+            torn_short="$(snap cst-vm,vm:e2evm)"
+            other="$(snap cst-vm,vm:e2eother)"
+            torn="$(snap cst-vm,vm:e2evm)"  # the newest: the retention alone would keep it, not $good
+            d record "$CST_VM_TORN" "$RESTIC_REPOSITORY" "e2evm=$torn" "e2evm=${{torn_short:0:8}}" "e2eother=$other"
+            d retry e2evm >"$w/retry.out"
+            cat "$w/retry.out" >&2
+            grep -qF "torn restic snapshot ${{torn:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "torn restic snapshot ${{torn_short:0:8}} of an earlier run forgotten" "$w/retry.out"
+            grep -qF "  retention: 4 weekly + 3 monthly kept" "$w/retry.out"
+            if grep -qF "retention skipped" "$w/retry.out"; then exit 1; fi
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            [[ "$(stat -c %a "$CST_VM_TORN")" == 644 && "$(stat -c %a "$w/run/torn-record.lock")" == 644 ]]
+            fresh="$(snap cst-vm,vm:e2evm)"
+            d forget e2evm "$fresh" >"$w/forget.out"
+            cat "$w/forget.out" >&2
+            grep -qx "forget_torn: None" "$w/forget.out"
+            [[ "$(listed)" == "$(printf '%s\\n' "$good" "$other" | sort | xargs)" ]]
+            [[ "$(d entries "$CST_VM_TORN")" == "1 e2eother=$other" ]]
+            echo E2E-OK
+            """,
+            env={"DRIVER": VM_TORN_DRIVER},
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
         """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
         requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
@@ -5520,6 +5655,170 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    def test_153_cpu_game_profile_on_refuses_a_target_user_without_an_account(self) -> None:
+        """With a TARGET_USER that names no account, the real game profile does not switch on: exit 1,
+        its output names the user and holds no "id: ...: no such user" line, no game.state, no
+        MemoryLow drop-in (none for user@.service or user-.slice either), machine.slice's weights as they
+        were, and the by-hand mark there before is removed; 'state' says off and 'off' works. The
+        watchdog's tick, run as a unit with a GameMode client running (a process that maps a file named
+        libgamemode), does not start cpu-game.service (a stub that records its starts) for that name: its
+        unit ends in success, the user is named once, a second tick says nothing. With
+        TARGET_USER='tester' the tick starts the stub, and 'on' and 'off' work."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            kill "$(cat /tmp/e2e-153-client.pid 2>/dev/null)" 2>/dev/null || true
+            systemctl stop cpu-game.service 2>/dev/null || true
+            rm -f /run/systemd/system/cpu-game.service
+            rm -f /tmp/e2e-153-client.pid /tmp/e2e-153-ready /tmp/e2e-153-starts /tmp/e2e-153-libgamemode.so
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-153-conf.bak ]]; then mv /tmp/e2e-153-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-153-conf.bak
+            install -d /etc/cpu-setup
+            install -d -m 0755 /run/cpu-setup
+            printf '%s\n' "TARGET_USER='e2e153-nobody'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            if id -u e2e153-nobody >/dev/null 2>&1; then echo "e2e153-nobody has an account" >&2; exit 1; fi
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            cpu=$(systemctl show -P CPUWeight machine.slice)
+            io=$(systemctl show -P IOWeight machine.slice)
+            touch /run/cpu-setup/manual
+            rc=0; got=$(gp on 2>&1) || rc=$?
+            [[ $rc == 1 ]] || { echo "on for no account: exit $rc: $got" >&2; exit 1; }
+            grep -qF 'TARGET_USER names no account: e2e153-nobody (in /etc/cpu-setup/cpu-setup.conf)' <<<"$got" \
+                || { echo "on: $got" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$got"; then echo "on printed id's line: $got" >&2; exit 1; fi
+            test ! -e /run/cpu-setup/game.state
+            test ! -e /run/cpu-setup/manual || { echo "the refused on kept the by-hand mark" >&2; exit 1; }
+            if compgen -G '/run/systemd/system/*.d/zz-cst-game.conf' >/dev/null; then
+                echo "a MemoryLow drop-in was written" >&2; exit 1
+            fi
+            test ! -e /run/systemd/system/user@.service.d
+            test ! -e /run/systemd/system/user-.slice.d
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            [[ "$(systemctl show -P IOWeight machine.slice)" == "$io" ]]
+            grep -q '^game profile: off$' <<<"$(gp state)"
+            gp off
+            # The watchdog, a game running, the profile off: cpu-game.service is not started.
+            stub=/run/systemd/system/cpu-game.service
+            printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c "echo started >>/tmp/e2e-153-starts"\n' >"$stub"
+            systemctl daemon-reload
+            [[ "$(systemctl show -P FragmentPath cpu-game.service)" == "$stub" ]]
+            python3 -I -c 'import mmap, sys, time; f = open(sys.argv[1], "w+b"); f.write(bytes(4096)); f.flush(); m = mmap.mmap(f.fileno(), 4096); open(sys.argv[2], "w").close(); time.sleep(300)' \
+                /tmp/e2e-153-libgamemode.so /tmp/e2e-153-ready </dev/null >/dev/null 2>&1 &
+            echo $! >/tmp/e2e-153-client.pid
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-ready ]] && break; sleep 0.1; done
+            grep -q libgamemode "/proc/$(cat /tmp/e2e-153-client.pid)/maps"
+            tick() { systemd-run --wait --pipe --quiet --collect --unit="e2e-153-tick-$1" python3 -I -B /opt/cst-rw/cpu/game-profile tick 2>&1; }
+            first=$(tick 1)   # exit 0: the unit does not fail
+            grep -qF 'GameMode client running, profile not switched on: TARGET_USER names no account: e2e153-nobody' <<<"$first" \
+                || { echo "first tick: $first" >&2; exit 1; }
+            if grep -q 'no such user' <<<"$first"; then echo "first tick printed id's line: $first" >&2; exit 1; fi
+            second=$(tick 2)
+            [[ -z "$second" ]] || { echo "second tick: $second" >&2; exit 1; }
+            sleep 1
+            test ! -e /tmp/e2e-153-starts
+            [[ "$(systemctl show -P ActiveState cpu-game.service)" == inactive ]]
+            test ! -e /run/cpu-setup/game.state
+            # The same steps for an account: the tick starts the unit, and on and off work.
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            third=$(tick 3)
+            grep -q 'switching on' <<<"$third" || { echo "third tick: $third" >&2; exit 1; }
+            for _ in $(seq 50); do [[ -e /tmp/e2e-153-starts ]] && break; sleep 0.1; done
+            test -e /tmp/e2e-153-starts
+            test ! -e /run/cpu-setup/settings-warned
+            kill "$(cat /tmp/e2e-153-client.pid)"
+            systemctl stop cpu-game.service
+            rm -f "$stub"
+            systemctl daemon-reload
+            gp on
+            test -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == 10 ]]
+            gp off
+            test ! -e /run/cpu-setup/game.state
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$cpu" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_154_cpu_game_profile_tick_sets_a_box_whose_record_was_cut_short(self) -> None:
+        """The real game profile, on for tester, then a box next to the game (a slice of the user
+        manager's own, made by systemd-run --user) whose record is the last line of game.state, cut
+        short (no newline: 'on' died while it wrote it, before it set the box). The tick sets the box
+        (CPUWeight idle in the real user manager, its override written): the cut line is no record of a
+        box handled. It removes the cut line first and names it, the record is then a whole line, a
+        second tick adds nothing, and 'off' gives the box its own CPUWeight back."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e154-box.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-154-conf.bak ]]; then mv /tmp/e2e-154-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-154-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            touch /run/cpu-setup/manual
+            gp on
+            systemd-run --user -M tester@ --quiet --slice=e2e154.slice --unit=e2e154-box sleep 300
+            box=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/e2e154.slice
+            for _ in $(seq 50); do [[ -d "$box" ]] && break; sleep 0.1; done
+            test -d "$box"
+            own=$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)
+            [[ "$own" != idle ]]
+            rec='prop usr e2e154.slice CPUWeight new -'
+            printf '%s' "$rec" >>"$st"   # cut short: no newline
+            n=$(( $(wc -l <"$st") + 1 ))
+            got=$(gp tick)
+            grep -qF "$st line $n: a record cut short (its change was never made), removed before the next record: $rec" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)" == idle ]] \
+                || { echo "the tick did not set the box: $got" >&2; cat "$st" >&2; exit 1; }
+            override=/run/user/$uid/systemd/user.control/e2e154.slice.d/50-CPUWeight.conf
+            test -e "$override"
+            [[ "$(grep -cxF "$rec" "$st")" == 1 ]] || { echo "the record is not one whole line" >&2; cat "$st" >&2; exit 1; }
+            [[ -z "$(tail -c 1 "$st")" ]] || { echo "game.state does not end in a newline" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            gp tick >/dev/null
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a second tick added a record" >&2; cat "$st" >&2; exit 1; }
+            gp off
+            test ! -e "$override" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(systemctl --user -M tester@ show -P CPUWeight e2e154.slice)" == "$own" ]] \
+                || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e154-box.service
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
@@ -6351,3 +6650,177 @@ echo E2E-OK
                 f"'/opt/cst/cst vm {subcmd}' must run on the host, not inside a toolbox/container.\n"
                 f"In a host terminal: /opt/cst/cst vm {subcmd}\n",
             )
+
+    def test_149_installer_generated_components_refused_and_plan_names_unrecorded_files(self) -> None:
+        """installer.py on the container's real / and its real install records. remove --component and
+        forget --component of each component of GENERATED_COMPONENTS (root's as root, the user's as
+        tester through the real runuser) exit 2 with one line naming the DEST form, print nothing on
+        stdout, and change nothing: both records keep their bytes, and the files a record lists under
+        that component (another test's) stay as they are. Then cpu:gamemode (tester's ~/.config/gamemode.ini,
+        through the real runuser, so tester's record is the one read; no test before this one leaves it,
+        and its being there fails the test) installed as an older CST left it (installed, its lines
+        taken out): plan prints "would record:" for it and changes nothing, check exits 0, install writes
+        nothing and lists it, plan then says "unchanged:", and a second install changes nothing."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        script = (
+            'import sys; sys.path.insert(0, "/opt/cst-rw"); '
+            "from cst_core.domain.install import GENERATED_COMPONENTS; "
+            'print(" ".join(f"{c}={o}" for c, o in GENERATED_COMPONENTS.items()))'
+        )
+        generated = exec_bash(c, f"/usr/bin/python3 -I -c {shlex.quote(script)}").stdout.split()
+        self.assertIn("btrfs:degraded-boot=root", generated)
+        self.assertIn("cpu:toolbox=user", generated)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        for pair in generated:
+            comp, owner = pair.split("=")
+            user = owner == "user"
+            run = "runuser -u tester -- " if user else ""
+            home = "--home /home/tester " if user else ""
+            record = "/home/tester/.local/state/cst/installed.json" if user else "/var/lib/cst/installed.json"
+            as_user = " --home DIR, as the user" if user else ""
+            with self.subTest(component=comp):
+                out = exec_bash(
+                    c,
+                    rf"""
+                    set -E
+                    trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+                    set -e
+                    state() {{
+                        sha256sum /var/lib/cst/installed.json /home/tester/.local/state/cst/installed.json 2>/dev/null || true
+                        listed="$({lines} {record} {comp})"
+                        for f in ${{listed% *}}; do [[ "$f" == - || ! -e "$f" ]] || sha256sum "$f"; done
+                    }}
+                    before="$(state)"
+                    err="$(mktemp)"
+                    for command in remove forget; do
+                        rc=0
+                        out="$({run}{installer} "$command" {home}--component {comp} 2>"$err")" || rc=$?
+                        [[ "$rc" == 2 && -z "$out" ]] || {{ echo "$command: exit $rc: $out $(cat "$err")" >&2; exit 1; }}
+                        want="cst installer: $command --component {comp}: its files are generated text, not manifest files; name them: $command-text DEST...{as_user}"
+                        [[ "$(cat "$err")" == "$want" ]] || {{ echo "$command said: $(cat "$err")" >&2; exit 1; }}
+                        [[ "$(state)" == "$before" ]] || {{ echo "$command changed something" >&2; exit 1; }}
+                    done
+                    rm -f "$err"
+                    echo E2E-OK
+                    """,
+                ).stdout
+                self.assertIn("E2E-OK", out)
+
+        ini = "/home/tester/.config/gamemode.ini"
+        there = exec_bash(c, f"[[ ! -e {ini} ]] || echo there").stdout.strip()
+        if there:
+            self.fail(f"{ini} is there already (another test's): this part needs cpu:gamemode absent")
+        user_installer = f"runuser -u tester -- {installer}"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"{user_installer} remove --home /home/tester --component cpu:gamemode >/dev/null",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_149 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U=/home/tester/.local/state/cst/installed.json
+            sel=(--home /home/tester --component cpu:gamemode)
+            {user_installer} install "${{sel[@]}}" >/dev/null
+            {user_installer} forget "${{sel[@]}}"
+            [[ "$({lines} "$U" cpu:gamemode)" == "- -" ]]
+            before="$(sha256sum "$U")"
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "would record: {ini}" ]] || {{ echo "plan said: $plan" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "plan changed the record" >&2; exit 1; }}
+            {user_installer} check "${{sel[@]}}" || {{ echo "check: exit $?" >&2; exit 1; }}
+            out="$({user_installer} install "${{sel[@]}}")"
+            [[ "$out" == "unchanged: {ini}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
+            [[ "$({lines} "$U" cpu:gamemode)" == "{ini} pending" ]]
+            plan="$({user_installer} plan "${{sel[@]}}")"
+            [[ "$plan" == "unchanged: {ini}" ]] || {{ echo "plan after install said: $plan" >&2; exit 1; }}
+            before="$(sha256sum "$U" {ini})"
+            again="$({user_installer} install "${{sel[@]}}")"
+            [[ "$again" == "unchanged: {ini}" && "$(sha256sum "$U" {ini})" == "$before" ]] ||
+                {{ echo "a second install changed something: $again" >&2; exit 1; }}
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_150_stall_report_launcher_written_while_its_record_cannot_be_written(self) -> None:
+        """btrfs-setup.sh's install_report_launcher as root on the container's /, the launcher written for
+        tester through the real runuser. Installed and marked once, then replaced by an older text that
+        tester's record lists (done). With tester's record folder not writable by tester (0555: tester is
+        not root, so the real permission check applies), install_report_launcher writes the new launcher,
+        prints the warning that it may not have been installed and its record was not updated, does not
+        mark it, and the record keeps its bytes; tester's cst doctor then names the launcher in a WARN
+        (it differs from its install record: changed by hand, or written by an install that could not
+        update the record). With the folder writable again, install records the launcher and doctor has no
+        WARN about it. The cleanup makes the folder writable first, then removes the launcher and its line."""
+        c = self.SYSTEMD_CONTAINER
+        shim = "/home/tester/.local/bin/btrfs-stall-report"
+        state = "/home/tester/.local/state/cst"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"[[ ! -e {shim} ]] || echo there").stdout.strip():
+            self.fail(f"{shim} is there already (another test's): this test needs it absent")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {shim}; runuser -u tester -- {installer} forget-text --home /home/tester {shim}",
+            check=False,
+        )
+        self.addCleanup(exec_bash, c, f"[[ ! -d {state} ]] || chmod 0755 {state}", check=False)
+        lines = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)}"
+        out = exec_bash(
+            c,
+            rf"""
+            set -E
+            trap 'echo "test_150 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            set -e
+            U={state}/installed.json
+            . /opt/cst-rw/cst-install.bash
+            for f in shim_content install_report_launcher mark_report_launcher; do
+                eval "$(sed -n "/^$f() {{/,/^}}/p" /opt/cst-rw/btrfs-setup.sh)"
+            done
+            declare -F shim_content install_report_launcher mark_report_launcher >/dev/null
+            target_user=tester
+            shim={shim}
+            launcher_lines() {{ runuser -u tester -- {lines} "$U" btrfs:report-launcher; }}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            # The launcher as an older version wrote it, recorded and marked.
+            printf '#!/bin/sh\n# Installed by btrfs-setup.sh (CST), an older version.\nexec /usr/local/bin/btrfs-stall-report "$@"\n' |
+                cst_install_text "$shim" 0755 tester btrfs:report-launcher >/dev/null
+            cst_mark_as tester btrfs:report-launcher
+            before="$(sha256sum "$U")"
+            chmod 0555 {state}
+            err="$(mktemp)"
+            install_report_launcher >/dev/null 2>"$err"
+            (( ! report_launcher_written )) || {{ echo "the launcher counts as written" >&2; exit 1; }}
+            mark_report_launcher
+            grep -qxF "WARNING: {shim} may not have been installed or updated, and the install record of tester was not updated for it (see above)" "$err" ||
+                {{ echo "install said: $(cat "$err")" >&2; exit 1; }}
+            cmp -s "$shim" <(shim_content) || {{ echo "the launcher was not written" >&2; exit 1; }}
+            [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "the record changed" >&2; exit 1; }}
+            # tester's cst doctor names the launcher: it differs from its record line, for one of two causes.
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            grep -E '^ *WARN' <<<"$inst" | grep -qF "{shim}: differs from its install record (btrfs:report-launcher): changed by hand, or written by an install that could not update the record" ||
+                {{ echo "doctor did not name the launcher: $inst" >&2; exit 1; }}
+            chmod 0755 {state}
+            install_report_launcher >/dev/null
+            mark_report_launcher
+            [[ "$(launcher_lines)" == "{shim} done" ]]
+            grep -qF "\"$(sha256sum <"$shim" | cut -d' ' -f1)\"" "$U" || {{ echo "the record lacks the new launcher" >&2; exit 1; }}
+            doc="$(runuser -u tester -- env HOME=/home/tester CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true)"
+            inst="$(sed -n '/^== install/,/^== /p' <<<"$doc")"
+            if grep -E '^ *WARN' <<<"$inst" | grep -F -e btrfs:report-launcher -e {shim}; then
+                echo "doctor still warns about the launcher" >&2; exit 1
+            fi
+            rm -f "$err"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

@@ -11,8 +11,11 @@ process running as that user, with --home naming the home folder.
 
 Usage:
   installer.py install [OPTIONS] SRC...   unchanged:/written: per file, as it goes
-  installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file; changes nothing
-  installer.py check [OPTIONS] SRC...     exit 0 when every file is current, else 1; prints nothing
+  installer.py plan [OPTIONS] SRC...      unchanged:/would write: per file (would record: for a
+                                          current file the install record does not list yet,
+                                          or lists otherwise); changes nothing
+  installer.py check [OPTIONS] SRC...     exit 0 when every file is current (also one only the
+                                          record lacks), else 1; prints nothing
   installer.py text DEST MODE [--root DIR] [--component C]
                                           generated content (stdin) to DEST, same rules; with
                                           --component, listed in the install record under C
@@ -20,15 +23,18 @@ Usage:
                                           removed: per file that was there
   installer.py remove-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files (--home: run as a user,
-                                          the record in that home)
+                                          the record in that home; as root, refused for a home
+                                          not root's own, as for text, text-plan, forget-text)
   installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
                                           are (a file a setup script keeps); prints nothing
   installer.py forget-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
                                           component stays "pending" from a write until then)
-  installer.py text-plan DEST MODE [--root DIR]
-                                          unchanged:/would write: for that content; changes nothing
+  installer.py text-plan DEST MODE [--root DIR] [--component C]
+                                          unchanged:/would write: for that content (with --component,
+                                          would record: for a current file the record does not
+                                          list so, as text would); changes nothing
   installer.py payload SRC                the bytes install writes for SRC, to stdout
   installer.py dests [--home DIR] [--module M] [--kind K] [--component C]
                                           the destination of each matching entry, one per line
@@ -37,7 +43,10 @@ Usage:
 OPTIONS: --home DIR, --root DIR (a staging folder, an absolute path),
          --set KEY=VALUE (templates), --module M / --kind K / --owner root|user /
          --component C (select entries instead of naming them; C as in
-         COMPONENTS, e.g. btrfs:core: every file one command installs)
+         COMPONENTS, e.g. btrfs:core: every file one command installs;
+         remove, forget, install, plan and check refuse a C of
+         GENERATED_COMPONENTS, whose files are generated text: name them,
+         remove-text or forget-text DEST...; its setup command writes them)
 SRC is a path relative to the CST folder, as in the manifest (btrfs/docker-gc).
 Every file install writes or finds current is listed in the install record
 (/var/lib/cst/installed.json for root's files, ~/.local/state/cst/installed.json
@@ -74,10 +83,10 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
     _cst_sys.path.insert(0, _cst_root)
 
 import argparse
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
 import sys
-from typing import NoReturn, override
+from typing import Final, NoReturn, override
 
 from cst_core import wiring
 from cst_core.application.install import (
@@ -196,9 +205,24 @@ def _own() -> tuple[Owner, str, bool]:
     return (Owner.ROOT if as_root else Owner.USER), home, as_root
 
 
+# How a user's generated files are handled as that user, by text command.
+_AS_THE_USER: Final[Mapping[str, str]] = {
+    InstallerCommand.TEXT: "cst_install_text DEST MODE USER",
+    InstallerCommand.TEXT_PLAN: "cst_install_text_plan DEST MODE USER",
+    InstallerCommand.REMOVE_TEXT: "cst_remove_text_as USER",
+    InstallerCommand.FORGET_TEXT: "cst_forget_text_as USER",
+}
+
+
 def _text_place(dest: str, mode: int, component: str | None, a: argparse.Namespace, *, recorded: bool) -> Placement:
-    """Where generated text goes (staged under --root), and its record (when recorded)."""
-    owner, home, _ = _own()
+    """Where generated text goes (staged under --root), and its record (when recorded). As root on the real
+    root, the owner is root and so is the record: a --home of another account is refused, not ignored."""
+    owner, home, as_root = _own()
+    if as_root and a.home and not a.root and a.home.rstrip("/") != home.rstrip("/"):
+        raise InstallRefused(
+            f"--home {a.home}: a user's generated files are handled as that user "
+            f"({_AS_THE_USER[a.command]}), not as root: as root {a.command} keeps root's record"
+        )
     return Placement(
         path=staged(a.root, dest),
         dest=dest,
@@ -225,8 +249,7 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     if a.command == InstallerCommand.TEXT:
         written = service.put(place, data, as_root=as_root)
         return f"{'written:  ' if written else 'unchanged:'} {place.path}"
-    current = service.is_current(place.path, data, mode, place.owner, as_root=as_root)
-    return f"unchanged: {place.path}" if current else f"would write: {place.path}"
+    return service.plan_put(place, data, as_root=as_root)
 
 
 def _component_owner(component: str) -> Owner:
@@ -296,6 +319,33 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
     return 0 if todo == 0 else 1
 
 
+# The commands that act on the files they select (dests, srcs and payload only list them).
+_ACTING: Final = (
+    InstallerCommand.REMOVE,
+    InstallerCommand.FORGET,
+    InstallerCommand.INSTALL,
+    InstallerCommand.PLAN,
+    InstallerCommand.CHECK,
+)
+
+
+def _refuse_generated(a: argparse.Namespace) -> None:
+    """remove, forget, install, plan or check --component C of a component whose files are all generated text
+    (GENERATED_COMPONENTS): no manifest file names them, so the call would select nothing and say nothing
+    (check: a false "current"); a usage error that names the DEST form (the paths its setup script
+    generates; never paths read from a record a user can edit)."""
+    if a.command not in _ACTING or a.component not in GENERATED_COMPONENTS:
+        return
+    head = f"{a.command} --component {a.component}: its files are generated text, not manifest files"
+    if a.command not in (InstallerCommand.REMOVE, InstallerCommand.FORGET):
+        raise _UsageError(
+            f"{head}; {COMPONENTS[a.component]} writes them (text or text-plan DEST MODE --component {a.component})"
+        )
+    text = InstallerCommand.REMOVE_TEXT if a.command == InstallerCommand.REMOVE else InstallerCommand.FORGET_TEXT
+    as_user = " --home DIR, as the user" if GENERATED_COMPONENTS[a.component] == Owner.USER else ""
+    raise _UsageError(f"{head}; name them: {text} DEST...{as_user}")
+
+
 def _command(service: InstallService, a: argparse.Namespace) -> int:
     """One command of the parsed command line; its exit status."""
     if a.command in (InstallerCommand.TEXT, InstallerCommand.TEXT_PLAN):
@@ -308,6 +358,7 @@ def _command(service: InstallService, a: argparse.Namespace) -> int:
             raise _UsageError(f"{a.command} DEST...")
         return _remove_or_forget(service, a.command, [_text_place(d, 0, None, a, recorded=True) for d in a.args])
     entries = _entries(a.args, a.module, a.kind, a.owner, a.component)
+    _refuse_generated(a)  # after _entries: a call that is a usage error for another reason says that one
     if a.command in (InstallerCommand.DESTS, InstallerCommand.SRCS):
         return _listing(a.command, entries, a.home)
     if a.command == InstallerCommand.PAYLOAD:

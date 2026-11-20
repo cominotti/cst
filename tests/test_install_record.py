@@ -13,6 +13,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
+import dataclasses
 import hashlib
 import io
 import json
@@ -31,7 +32,14 @@ from cst_core import installer
 from cst_core.adapters.install import JsonInstallRecord, SystemdUnitVerifier
 from cst_core.adapters.runtime import checkout_commit
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement, record_file
-from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, GeneratedKind, Owner
+from cst_core.domain.install import (
+    COMPONENTS,
+    GENERATED_COMPONENTS,
+    INSTALL_MANIFEST,
+    ArtifactKind,
+    GeneratedKind,
+    Owner,
+)
 from cst_core.domain.record import (
     EMPTY_RECORD,
     ComponentState,
@@ -187,6 +195,104 @@ class InstallServiceRecordTest(unittest.TestCase):
     def test_plan_and_check_record_nothing(self) -> None:
         self.svc.plan([self.a], InstallRequest())
         self.assertEqual(self.record.texts, {})
+
+    def test_plan_names_a_current_file_the_record_does_not_list_and_counts_no_write_for_it(self) -> None:
+        # An install from before the record: the file is right, no line lists it. plan says install would
+        # record it (it adopts it); it is no file to write, so check stays 0. plan writes no record.
+        req = InstallRequest(values={"UUID": "u-1"})
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would record: /usr/local/sbin/a", "would write: /etc/t"], 1)
+        )
+        self.assertEqual(self.record.texts, {})
+        self.assertEqual(list(self.svc.install([self.a], InstallRequest())), ["unchanged: /usr/local/sbin/a"])
+        self.assertEqual(self.target.writes, [])
+        self.assertIn("/usr/local/sbin/a", self.record.doc().files)
+        self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["unchanged: /usr/local/sbin/a"], 0))
+
+    def test_plan_reads_which_files_the_record_lists(self) -> None:
+        req = InstallRequest(values={"UUID": "u-1"})
+        list(self.svc.install([self.t], req))
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would record: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
+        )
+        # A file to write is "would write:" alone, listed or not.
+        self.target.files["/usr/local/sbin/a"] = (b"old\n", 0o755)
+        self.target.files["/etc/t"] = (b"edited\n", 0o644)
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["would write: /usr/local/sbin/a", "would write: /etc/t"], 2)
+        )
+
+    def test_plan_names_a_current_file_whose_record_line_install_would_change(self) -> None:
+        # The file is right, but its line in the record is not what install writes (a write whose record
+        # could not be saved): plan says install would record it again, and counts no write for it.
+        req = InstallRequest(values={"UUID": "u-1"})
+        list(self.svc.install([self.a, self.t], req))
+        self.svc.mark(self.ROOT, "m:t")
+        good = self.record.texts[self.ROOT]
+        stale: dict[str, Callable[[RecordedFile], RecordedFile]] = {
+            "sha256": lambda f: dataclasses.replace(f, sha256="0" * 64),
+            "mode": lambda f: dataclasses.replace(f, mode=0o600),
+            "component": lambda f: dataclasses.replace(f, component="m:other"),
+            "src": lambda f: dataclasses.replace(f, src="m/old"),
+            "values": lambda f: dataclasses.replace(f, values={"UUID": "u-0"}),
+        }
+        for what, change in stale.items():
+            with self.subTest(stale=what):
+                rec = parse_record(good)
+                files = {**rec.files, "/etc/t": change(rec.files["/etc/t"])}
+                self.record.texts[self.ROOT] = text = render_record(InstallRecord(files, rec.components))
+                self.assertEqual(
+                    self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "would record: /etc/t"], 0)
+                )
+                self.assertEqual(self.record.texts[self.ROOT], text, "plan changed the record")
+                # install does rewrite that line (its component pending again); plan then says unchanged.
+                self.assertEqual(
+                    list(self.svc.install([self.a, self.t], req)), ["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"]
+                )
+                self.assertEqual(self.record.doc().files["/etc/t"], parse_record(good).files["/etc/t"])
+                self.assertEqual(self.record.doc().components["m:t"], "pending")
+                self.assertEqual(
+                    self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
+                )
+                self.svc.mark(self.ROOT, "m:t")
+        # Only the checkout's stamp differs (another commit installed it): install keeps the state, plan
+        # says unchanged.
+        rec = parse_record(good)
+        files = {d: dataclasses.replace(f, commit="older", tree="t0") for d, f in rec.files.items()}
+        self.record.texts[self.ROOT] = render_record(InstallRecord(files, rec.components))
+        self.assertEqual(
+            self.svc.plan([self.a, self.t], req), (["unchanged: /usr/local/sbin/a", "unchanged: /etc/t"], 0)
+        )
+
+    def test_plan_takes_a_record_that_is_no_record_as_none_and_says_unchanged_when_it_cannot_read_it(self) -> None:
+        # Not JSON, or JSON of the wrong shape: install starts such a record again, so the file would be recorded.
+        self.target.files["/usr/local/sbin/a"] = (b"A\n", 0o755)
+        for text in ("not json\n", '{"format": 1, "files": []}\n'):
+            with self.subTest(text=text):
+                self.record.texts[self.ROOT] = text
+                self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["would record: /usr/local/sbin/a"], 0))
+                self.assertEqual(self.record.texts[self.ROOT], text)
+
+        class _Unreadable(_MemoryRecord):
+            @override
+            def read(self, path: str) -> InstallRecord | None:
+                raise PermissionError(13, "Permission denied", path)
+
+        svc = InstallService(self.target, lambda e: self.payloads[e.src], record=_Unreadable())
+        self.assertEqual(svc.plan([self.a], InstallRequest()), (["unchanged: /usr/local/sbin/a"], 0))
+
+    def test_plan_of_the_users_files_reads_the_users_record(self) -> None:
+        req = InstallRequest(home="/home/tester")
+        self.target.files["/home/tester/.config/u"] = (b"U\n", 0o644)
+        self.assertEqual(self.svc.plan([self.u], req), (["would record: /home/tester/.config/u"], 0))
+        list(self.svc.install([self.u], req))
+        self.assertEqual(list(self.record.texts), ["/home/tester/.local/state/cst/installed.json"])
+        self.assertEqual(self.svc.plan([self.u], req), (["unchanged: /home/tester/.config/u"], 0))
+        # The same file listed in root's record only: the user's record decides.
+        self.record.texts = {self.ROOT: self.record.texts.pop("/home/tester/.local/state/cst/installed.json")}
+        self.assertEqual(self.svc.plan([self.u], req), (["would record: /home/tester/.config/u"], 0))
 
     def test_user_files_go_to_the_record_in_the_home_and_staging_moves_both(self) -> None:
         list(self.svc.install([self.u], InstallRequest(home="/home/tester", root="/stage")))
@@ -602,6 +708,84 @@ class InstallerRecordCliTest(unittest.TestCase):
         want = [e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc"]
         self.assertTrue(all(os.path.isfile(self.stage + d) for d in want))
 
+    def test_plan_names_the_files_an_older_install_left_unrecorded_and_check_stays_current(self) -> None:
+        # An install from before the record (its lines taken out): plan says "would record:" for each file
+        # and changes nothing; check still exits 0 (its exit code is a later decision); install writes
+        # nothing and lists them; plan then says only "unchanged:".
+        sel = ("--component", "btrfs:docker-gc")
+        want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        self.assertEqual(self.cli("forget", *sel).returncode, 0)
+        before = Path(self.record).read_bytes()
+        plan = self.cli("plan", *sel)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(sorted(plan.stdout.decode().splitlines()), [f"would record: {self.stage}{d}" for d in want])
+        self.assertEqual(Path(self.record).read_bytes(), before)
+        check = self.cli("check", *sel)
+        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        r = self.cli("install", *sel)
+        self.assertEqual(sorted(r.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+        self.assertEqual(sorted(self.doc().files), want)
+        again = self.cli("plan", *sel)
+        self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+
+    def test_plan_names_a_file_whose_record_line_is_stale_and_check_stays_current(self) -> None:
+        # The file was written, the record kept an older line (its sha256): plan says "would record:" for
+        # that file alone and changes nothing; check exits 0; install puts the line right; plan is then
+        # "unchanged:" for every file.
+        sel = ("--component", "btrfs:docker-gc")
+        want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        rec = self.doc()
+        stale = "/usr/local/sbin/docker-gc"
+        files = {**rec.files, stale: dataclasses.replace(rec.files[stale], sha256="0" * 64)}
+        Path(self.record).write_text(render_record(InstallRecord(files, rec.components)))
+        before = Path(self.record).read_bytes()
+        plan = self.cli("plan", *sel)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertEqual(
+            sorted(plan.stdout.decode().splitlines()),
+            sorted(f"{'would record' if d == stale else 'unchanged'}: {self.stage}{d}" for d in want),
+        )
+        self.assertEqual(Path(self.record).read_bytes(), before)
+        check = self.cli("check", *sel)
+        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        self.assertEqual(self.doc().files[stale].sha256, rec.files[stale].sha256)
+        again = self.cli("plan", *sel)
+        self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+
+    def test_text_plan_with_a_component_names_a_current_file_its_record_does_not_list_so(self) -> None:
+        # text-plan --component says what text --component would do to the record too: "would record:" for
+        # a current file with no line or a stale one, "unchanged:" once text recorded it; without
+        # --component it reads no record. A record of a newer CST refuses, as text does.
+        dest, data = "/etc/x.conf", b"x\n"
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        sel = (dest, "0644", "--component", "btrfs:degraded-boot")
+        self.assertEqual(self.cli("text-plan", *sel, stdin=data).stdout, f"would write: {self.stage}{dest}\n".encode())
+        Path(self.stage + "/etc").mkdir()
+        Path(self.stage + dest).write_bytes(data)
+        os.chmod(self.stage + dest, 0o644)
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"would record: {self.stage}{dest}\n".encode(), b""))
+        self.assertFalse(user_record.exists(), "text-plan wrote a record")
+        plain = self.cli("text-plan", dest, "0644", stdin=data)
+        self.assertEqual(plain.stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        self.assertEqual(self.cli("text", *sel, stdin=data).stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        self.assertEqual(self.cli("text-plan", *sel, stdin=data).stdout, f"unchanged: {self.stage}{dest}\n".encode())
+        rec = parse_record(user_record.read_text())
+        files = {dest: dataclasses.replace(rec.files[dest], sha256="0" * 64)}
+        user_record.write_text(render_record(InstallRecord(files, rec.components)))
+        before = user_record.read_bytes()
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual(r.stdout, f"would record: {self.stage}{dest}\n".encode())
+        self.assertEqual(user_record.read_bytes(), before)
+        user_record.write_text('{"format": 7}')
+        r = self.cli("text-plan", *sel, stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (1, b""))
+        self.assertIn(b"newer CST", r.stderr)
+        self.assertEqual(self.cli("text-plan", dest, "0644", stdin=data).returncode, 0)
+
     def test_forget_without_a_record_writes_none(self) -> None:
         r = self.cli("forget", "btrfs/docker-gc")
         self.assertEqual((r.returncode, r.stderr), (0, b""))
@@ -629,6 +813,91 @@ class InstallerRecordCliTest(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, r.stderr)
         self.assertFalse(os.path.exists(self.record))
 
+    def test_remove_and_forget_refuse_a_component_of_generated_files_only(self) -> None:
+        # No manifest entry names its files (generated text): --component would select nothing and say
+        # nothing. Refused (exit 2), naming the DEST form; nothing is changed: a file the record lists
+        # under it and a file with no record line stay, and so do the record's bytes.
+        listed, loose = "/etc/x-listed.conf", Path(self.stage + "/etc/x-loose.conf")
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        for component, owner in GENERATED_COMPONENTS.items():
+            r = self.cli("text", listed, "0644", "--component", component, stdin=b"x\n")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            loose.write_bytes(b"y\n")
+            before = user_record.read_bytes()
+            self.assertIn(listed, parse_record(before.decode()).files)
+            for command in ("remove", "forget"):
+                with self.subTest(component=component, command=command):
+                    r = self.cli(command, "--component", component)
+                    self.assertEqual(r.returncode, 2, r.stderr)
+                    self.assertEqual(r.stdout, b"")
+                    as_user = " --home DIR, as the user" if owner == "user" else ""
+                    self.assertEqual(
+                        r.stderr.decode(),
+                        f"cst installer: {command} --component {component}: its files are generated text, not "
+                        f"manifest files; name them: {command}-text DEST...{as_user}\n",
+                    )
+                    self.assertEqual(user_record.read_bytes(), before)
+                    self.assertEqual(Path(self.stage + listed).read_bytes(), b"x\n")
+                    self.assertEqual(loose.read_bytes(), b"y\n")
+            # install, plan and check select nothing either (check would say "current"): refused too,
+            # naming the setup command that writes them.
+            for command in ("install", "plan", "check"):
+                with self.subTest(component=component, command=command):
+                    r = self.cli(command, "--component", component)
+                    self.assertEqual((r.returncode, r.stdout), (2, b""), r.stderr)
+                    self.assertEqual(
+                        r.stderr.decode(),
+                        f"cst installer: {command} --component {component}: its files are generated text, not "
+                        f"manifest files; {COMPONENTS[component]} writes them (text or text-plan DEST MODE "
+                        f"--component {component})\n",
+                    )
+                    self.assertEqual(user_record.read_bytes(), before)
+                    self.assertEqual(Path(self.stage + listed).read_bytes(), b"x\n")
+            # dests and srcs still answer: such a component has no manifest file.
+            for command in ("dests", "srcs"):
+                r = self.cli(command, "--component", component)
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""), command)
+        self.assertFalse(os.path.exists(self.record), "root's record was written")
+
+    def test_another_usage_error_wins_over_the_generated_files_refusal(self) -> None:
+        # Files named and a component selected: that usage error is the one said, not the refusal.
+        for command in ("remove", "forget", "install", "check"):
+            with self.subTest(command=command):
+                r = self.cli(command, "--component", "btrfs:degraded-boot", "btrfs/docker-gc")
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(
+                    r.stderr.decode(),
+                    "cst installer: name the files (SRC...) or select them (--module/--kind/--owner/--component), "
+                    "not both\n",
+                )
+        self.assertFalse(os.path.exists(self.record), "root's record was written")
+
+    def test_a_new_component_of_generated_files_only_is_refused_too(self) -> None:
+        # The refusal follows GENERATED_COMPONENTS: a component added to it is refused without a change here.
+        service = mock.Mock(spec=InstallService)
+        with (
+            mock.patch.dict("cst_core.domain.install.COMPONENTS", {"m:gen": "cst m install"}),
+            mock.patch.dict("cst_core.domain.install.GENERATED_COMPONENTS", {"m:gen": Owner.ROOT}),
+            mock.patch("cst_core.wiring.start_installer"),
+            mock.patch("cst_core.wiring.installer_identity", return_value=(False, "/home/u")),
+            mock.patch("cst_core.wiring.install_service", return_value=service),
+        ):
+            for command in ("remove", "forget", "install", "plan", "check"):
+                err = io.StringIO()
+                with self.subTest(command=command), contextlib.redirect_stderr(err):
+                    self.assertEqual(installer.main([command, "--component", "m:gen", "--root", self.stage]), 2)
+                    how = (
+                        f"name them: {command}-text DEST..."
+                        if command in ("remove", "forget")
+                        else "cst m install writes them (text or text-plan DEST MODE --component m:gen)"
+                    )
+                    self.assertEqual(
+                        err.getvalue(),
+                        f"cst installer: {command} --component m:gen: its files are generated text, not manifest "
+                        f"files; {how}\n",
+                    )
+        self.assertEqual(service.method_calls, [])
+
     def test_files_of_the_user_are_not_forgotten_as_root(self) -> None:
         # As root on the real root (no --root), a user's file is forgotten as that user, not here.
         err = io.StringIO()
@@ -642,6 +911,57 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("files of the user are forgotten as the user, not as root", err.getvalue())
         service.return_value.forget.assert_not_called()
+
+    def test_generated_text_commands_as_root_refuse_another_accounts_home(self) -> None:
+        # As root on the real root, text commands keep root's record whatever --home says: a --home of
+        # another account is refused (exit 1), not ignored; root's own home and a staged call go on.
+        service = mock.Mock(spec=InstallService)
+        service.plan_put.return_value = "unchanged: /etc/x"
+        service.put.return_value = False
+        dest = "/home/u/.local/bin/btrfs-stall-report"
+        hint = {
+            "text": "cst_install_text DEST MODE USER",
+            "text-plan": "cst_install_text_plan DEST MODE USER",
+            "remove-text": "cst_remove_text_as USER",
+            "forget-text": "cst_forget_text_as USER",
+        }
+        args = {"text": [dest, "0755"], "text-plan": [dest, "0755"], "remove-text": [dest], "forget-text": [dest]}
+        with (
+            mock.patch("cst_core.wiring.start_installer"),
+            mock.patch("cst_core.wiring.installer_identity", return_value=(True, "/root")),
+            mock.patch("cst_core.wiring.install_service", return_value=service),
+        ):
+            for command, how in hint.items():
+                err = io.StringIO()
+                # text reads stdin after the place: a closed-off stdin keeps a regression from waiting on ours.
+                stdin = io.TextIOWrapper(io.BytesIO(b"x\n"))
+                self.addCleanup(stdin.close)
+                with (
+                    self.subTest(command=command),
+                    mock.patch("sys.stdin", stdin),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(err),
+                ):
+                    rc = installer.main([command, "--home", "/home/u", *args[command]])
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(
+                        err.getvalue(),
+                        f"cst installer: --home /home/u: a user's generated files are handled as that user ({how}), "
+                        f"not as root: as root {command} keeps root's record\n",
+                    )
+            self.assertEqual(service.method_calls, [])
+            for extra in (["--home", "/root/"], ["--home", "/home/u", "--root", self.stage]):
+                stdin = io.TextIOWrapper(io.BytesIO(b"x\n"))
+                self.addCleanup(stdin.close)
+                with (
+                    self.subTest(extra=extra),
+                    mock.patch("sys.stdin", stdin),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(installer.main(["forget-text", dest, *extra]), 0)
+                    self.assertEqual(installer.main(["text-plan", "/etc/x", "0644", *extra]), 0)
+        self.assertEqual(service.forget.call_args_list[0].args[0], "/var/lib/cst/installed.json")
+        self.assertEqual(len(service.plan_put.call_args_list), 2)
 
     def test_mark_of_a_component_of_generated_files_only(self) -> None:
         # btrfs:degraded-boot has no manifest file: its owner (root) comes from GENERATED_COMPONENTS.

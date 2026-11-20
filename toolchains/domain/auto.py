@@ -7,24 +7,23 @@ from __future__ import annotations
 import dataclasses
 from enum import StrEnum
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-from cst_core.domain.units import render_timer as unit_timer, render_unit_file
+from cst_core.domain.units import ActiveState, render_timer as unit_timer, render_unit_file
 from toolchains.domain.common import DEFAULTS_REL, MARKER, PROG_REL, SERVICE, TIMER, UNIT_DIR_REL
 
 
 UNIT_HEADER = f"{MARKER}: installed by `cst toolchains auto on` (or snapshots setup); not edited by hand."
 
 
-class UnitActiveState(StrEnum):
-    """The words of systemctl is-active (a unit's ActiveState) that the timer's code tells apart."""
-
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    FAILED = "failed"
+# The words of systemctl is-active (cst_core's ActiveState) that the timer's code tells apart: the
+# timer runs (status shows its next run; auto off stops it), and a unit that needs no stop before its
+# files are removed.
+TIMER_RUNNING_STATES: Final = frozenset({ActiveState.ACTIVE})
+UNIT_STOPPED_STATES: Final = frozenset({ActiveState.INACTIVE, ActiveState.FAILED})
 
 
 class UserManagerVerb(StrEnum):

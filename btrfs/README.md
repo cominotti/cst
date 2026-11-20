@@ -214,9 +214,12 @@ reads this from `sudo`). If you run `install` directly as root (not through
 `sudo`), neither is created. The launcher is listed in that user's install
 record (`~/.local/state/cst/installed.json`, component
 `btrfs:report-launcher`), so `cst doctor` run as that user reports it
-missing or changed. When the installer cannot write that record (a record of
-a newer CST, a folder the user cannot write), `install` prints a warning,
-leaves the launcher as it is and goes on: the services are still enabled.
+missing or differing from its record. When the installer fails, `install`
+prints a warning and goes on (the services are still enabled), and the
+launcher is not marked done. The launcher may then have been written (only
+its record failed: a record folder the user cannot write, a full disk) or
+not (a record of a newer CST, a `~/.local/bin` the user cannot write);
+`cst doctor` names it when its record line is stale.
 
 At the end, `install` runs the health check once and prints its result, checks
 that the stall monitor is running (it stops with `ERROR:` if not), and prints
@@ -1252,8 +1255,10 @@ own checks:
 - Then it runs a self-test: every disk must show as ready, and `lsblk` must
   list as many disks of the root filesystem as btrfs counts (none may go
   unchecked). If the self-test fails, a **newly written** rule is removed
-  again (also when the installer cannot drop its record line) and the
-  initramfs is **not** changed. The other helper files stay in
+  again with its install record line (when the installer fails before it
+  removes the rule, the script removes it and tries once more to drop the
+  line; a rule it cannot remove either keeps its line, and the cleanup still
+  reloads udev) and the initramfs is **not** changed. The other helper files stay in
   `/etc`; without the rule they do nothing.
 - When the initramfs content must change, install and uninstall create a new
   **deployment** (a new version of the system image, used from the next boot).
@@ -1263,7 +1268,9 @@ own checks:
 
 `plan` runs the refusals above and the same checks of the files
 (`udevadm verify`, `bash -n`, `systemd-analyze verify`), and prints
-`would write:` or `unchanged:` for each file and `would run: ...` for each
+`would write:` or `unchanged:` for each file (`would record:` for one that
+is right but whose install record line is missing or stale: install records
+it again) and `would run: ...` for each
 change install would make (`rpm-ostree initramfs-etc`, `systemctl enable`
 when the record unit is not enabled, the removal of files an older version
 left). It writes no file, reloads nothing and creates no deployment. The

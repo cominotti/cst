@@ -195,7 +195,18 @@ LOCAL_IO_FRAME = re.compile(
 )
 
 
-def wait_kind(frames: Sequence[str], wchan: str | None) -> str:
+class WaitKind(StrEnum):
+    """What a task in D state waits on (wait_kind): the kind the daemon writes for each D-state
+    signature of an episode, which stall-report reads back."""
+
+    STORAGE = "storage"
+    FUSE = "fuse"
+    MAINTENANCE = "maintenance"
+    MEMORY = "memory"
+    IDLE = "idle"
+
+
+def wait_kind(frames: Sequence[str], wchan: str | None) -> WaitKind:
     """ "fuse", "maintenance", "memory", "idle" or "storage" for a task in D state.
 
     Precedence: FUSE (the wait is on a userspace daemon even if btrfs is
@@ -208,34 +219,34 @@ def wait_kind(frames: Sequence[str], wchan: str | None) -> str:
     e.g. io_destroy waiting for in-flight AIO, whose frames are all generic."""
     if frames:
         if any(FUSE_FRAME.match(f) for f in frames):
-            return "fuse"
+            return WaitKind.FUSE
         if any(MAINT_FRAME.match(f) for f in frames):
-            return "maintenance"
+            return WaitKind.MAINTENANCE
         if any(SWAP_FRAME.match(f) for f in frames):
-            return "memory"
+            return WaitKind.MEMORY
         meaningful = [f for f in frames if not GENERIC_FRAME.match(f)]
         if not meaningful:
             # A freshly created kthread waits in D inside kthread() until its first wakeup.
-            return "idle" if set(frames) <= NEW_KTHREAD else "storage"
+            return WaitKind.IDLE if set(frames) <= NEW_KTHREAD else WaitKind.STORAGE
         if IDLE_FRAME.match(meaningful[0]):
-            return "idle"
+            return WaitKind.IDLE
         if MMAP_LOCK_FRAME.match(meaningful[0]):
-            return "memory"
+            return WaitKind.MEMORY
         for f in meaningful:
             if MEM_FRAME.match(f):
-                return "memory"
+                return WaitKind.MEMORY
             if LOCAL_IO_FRAME.match(f):
-                return "storage"
-        return "storage"
+                return WaitKind.STORAGE
+        return WaitKind.STORAGE
     if wchan is not None and wchan != "":
         if FUSE_FRAME.match(wchan):
-            return "fuse"
+            return WaitKind.FUSE
         if MAINT_FRAME.match(wchan):
-            return "maintenance"
+            return WaitKind.MAINTENANCE
         if SWAP_FRAME.match(wchan) or MEM_FRAME.match(wchan) or MMAP_LOCK_FRAME.match(wchan):
-            return "memory"
-        return "idle" if IDLE_FRAME.match(wchan) else "storage"
-    return "storage"
+            return WaitKind.MEMORY
+        return WaitKind.IDLE if IDLE_FRAME.match(wchan) else WaitKind.STORAGE
+    return WaitKind.STORAGE
 
 
 def mmap_lock_only(frames: Sequence[str], wchan: str | None) -> bool:
@@ -476,7 +487,7 @@ class Episode:
                     "sig": sig,
                     "ctx": ctx,
                     "n": v["n"],
-                    "kind": v.get("kind", "storage"),
+                    "kind": v.get("kind", WaitKind.STORAGE),
                     "comms": dict(sorted(v["comms"].items(), key=lambda kv: -kv[1])[:6]),
                     "cgroups": dict(sorted(v["cgroups"].items(), key=lambda kv: -kv[1])[:6]),
                     "examples": self.examples.get(key, []),
@@ -522,23 +533,23 @@ def settle_kinds(tasks: list[DTask]) -> list[DTask]:
     there, memory otherwise.
     """
     out = list(tasks)
-    fuse_pids = {t[0] for t in out if t[5] == "fuse"}
+    fuse_pids = {t[0] for t in out if t[5] == WaitKind.FUSE}
     for i, t in enumerate(out):
-        if t[5] == "storage" and t[0] in fuse_pids and not any(LOCAL_IO_FRAME.match(f) for f in t[3]):
-            out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
-    lock_only = [i for i, t in enumerate(out) if t[5] == "memory" and mmap_lock_only(t[3], t[4])]
+        if t[5] == WaitKind.STORAGE and t[0] in fuse_pids and not any(LOCAL_IO_FRAME.match(f) for f in t[3]):
+            out[i] = (t[0], t[1], t[2], t[3], t[4], WaitKind.FUSE)
+    lock_only = [i for i, t in enumerate(out) if t[5] == WaitKind.MEMORY and mmap_lock_only(t[3], t[4])]
     lock_tids = {out[i][1] for i in lock_only}
-    mem_pids = {t[0] for t in out if t[5] == "memory" and t[1] not in lock_tids}
-    storage_pids = {t[0] for t in out if t[5] == "storage"}
-    fuse_pids = {t[0] for t in out if t[5] == "fuse"}
+    mem_pids = {t[0] for t in out if t[5] == WaitKind.MEMORY and t[1] not in lock_tids}
+    storage_pids = {t[0] for t in out if t[5] == WaitKind.STORAGE}
+    fuse_pids = {t[0] for t in out if t[5] == WaitKind.FUSE}
     for i in lock_only:
         t = out[i]
         if t[0] in mem_pids:
             continue
         if t[0] in storage_pids:
-            out[i] = (t[0], t[1], t[2], t[3], t[4], "storage")
+            out[i] = (t[0], t[1], t[2], t[3], t[4], WaitKind.STORAGE)
         elif t[0] in fuse_pids:
-            out[i] = (t[0], t[1], t[2], t[3], t[4], "fuse")
+            out[i] = (t[0], t[1], t[2], t[3], t[4], WaitKind.FUSE)
     return out
 
 
@@ -556,11 +567,11 @@ class WaitCounts(NamedTuple):
 def wait_counts(d_tasks: Sequence[DTask]) -> WaitCounts:
     """The storage, all, FUSE, maintenance and memory waits of one sample."""
     return WaitCounts(
-        d=sum(1 for t in d_tasks if t[5] == "storage"),
+        d=sum(1 for t in d_tasks if t[5] == WaitKind.STORAGE),
         d_all=len(d_tasks),
-        d_fuse=sum(1 for t in d_tasks if t[5] == "fuse"),
-        d_maint=sum(1 for t in d_tasks if t[5] == "maintenance"),
-        d_mem=sum(1 for t in d_tasks if t[5] == "memory"),
+        d_fuse=sum(1 for t in d_tasks if t[5] == WaitKind.FUSE),
+        d_maint=sum(1 for t in d_tasks if t[5] == WaitKind.MAINTENANCE),
+        d_mem=sum(1 for t in d_tasks if t[5] == WaitKind.MEMORY),
     )
 
 
@@ -642,8 +653,8 @@ def hung_start(kind: str, t: DTaskSince, now: float) -> float:
     """Since when a task counts as waiting: FUSE waits and the maintenance note
     keep the old meaning (time in D, progressing or not: a slow network walk
     does progress); the stuck alerts need time in D without progress."""
-    first = t["busy"] if kind == "fuse" else t["first"]
-    if kind == "maintenance" and now - t["first"] < MAINT_HUNG_SECONDS:
+    first = t["busy"] if kind == WaitKind.FUSE else t["first"]
+    if kind == WaitKind.MAINTENANCE and now - t["first"] < MAINT_HUNG_SECONDS:
         first = t["busy"]
     return first
 
@@ -653,7 +664,7 @@ def hung_key(kind: str, t: DTaskSince, now: float) -> str:
     HUNG_SECONDS and an alert only after MAINT_HUNG_SECONDS without any
     progress (keyed apart, so the HUNG_REPEAT dedupe of the event does not
     delay the alert); workload tasks queued behind it are "storage"."""
-    if kind == "maintenance" and now - t["first"] >= MAINT_HUNG_SECONDS:
+    if kind == WaitKind.MAINTENANCE and now - t["first"] >= MAINT_HUNG_SECONDS:
         return "maintenance-hung"
     return kind
 
@@ -687,7 +698,7 @@ class HungReport:
 
 def hung_report(key: str, where: str, waited: float, at: str) -> HungReport:
     """The report of a task in D for HUNG_SECONDS or more (key: hung_key())."""
-    if key == "maintenance":
+    if key == WaitKind.MAINTENANCE:
         msg = (
             f"{where} in btrfs maintenance (trim/discard/scrub/balance) for {waited:.0f}s at {at}: not a workload stall"
         )
@@ -696,7 +707,7 @@ def hung_report(key: str, where: str, waited: float, at: str) -> HungReport:
         msg = f"{where} in btrfs maintenance, D state for {waited:.0f}s at {at}"
         alert = ("maintenance-hung", "warning", "btrfs maintenance (fstrim/scrub) stuck for 15 min")
         return HungReport("maintenance-hung", msg, severe=True, ours=True, alert=alert, opens_episode=True)
-    if key == "fuse":
+    if key == WaitKind.FUSE:
         msg = (
             f"{where} waited {waited:.0f}s on a FUSE filesystem (gvfs share or document "
             f"portal): usually the network or the FUSE daemon, not the local disks (check the "
@@ -704,7 +715,7 @@ def hung_report(key: str, where: str, waited: float, at: str) -> HungReport:
         )
         alert = ("fuse", "normal", "Program waiting on a FUSE filesystem (network share / portal)")
         return HungReport("fuse-wait", msg, severe=False, ours=False, alert=alert, opens_episode=False)
-    if key == "memory":
+    if key == WaitKind.MEMORY:
         # Not a disk or filesystem problem, so not severe and no storage
         # episode; the report shows it with the memory waits.
         msg = (

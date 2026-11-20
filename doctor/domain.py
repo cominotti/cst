@@ -133,10 +133,11 @@ _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a 
 # swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
-# The partition swap manages (swap/domain.py, SETTINGS_REL), and the file an older CST marked a line in.
+# The partition swap manages (swap/domain.py, SETTINGS_REL), and the files an older CST marked a line in.
 SWAP_CONF = HostPath("/etc/" + SETTINGS_REL)
 SWAP_DROPIN = HostPath(_BY_SRC["swap/units/machine.slice.d-10-swap-memory-low.conf"].dest)
 FSTAB = HostPath("/etc/fstab")
+CRYPTTAB = HostPath("/etc/crypttab")
 NOCOW_WARN_BOOTS = 2  # one boot can be chance; two in a row are a pattern
 
 GAME_RUN = HostPath(state_format(StateFormatKey.GAME_STATE).folder)
@@ -160,6 +161,8 @@ CPU_CONF = HostPath(CPU_SETTINGS)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)
+VM_TORN_FORMAT = state_format(StateFormatKey.VM_NAS_TORN)
+VM_TORN = HostPath(VM_TORN_FORMAT.path)
 
 
 VM_CONF = HostPath("/etc/cst/vm.conf")
@@ -229,8 +232,19 @@ def is_deployment(d: object) -> TypeIs[Deployment]:
 type OstreeAnswer = tuple[Deployment | None, Deployment | None, str]
 # (name, epoch, version, release, arch) of a package, from parse_nevra.
 type Nevra = tuple[str, str, str, str, str]
+
+
+class PinHow(StrEnum):
+    """How classify_requests sees one requested layered package (its docstring says what each means)."""
+
+    NAME = "name"
+    PINNED = "pinned"
+    PINNED_FORM = "pinned-form"
+    INACTIVE = "inactive"
+
+
 # (request, spec, how) of one requested package, from classify_requests.
-type Request = tuple[str, str, str]
+type Request = tuple[str, str, PinHow]
 
 
 def parse_nevra(s: str) -> Nevra | None:
@@ -305,7 +319,7 @@ def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, n
     out: list[Request] = []
     for r in requests:
         if r in names:
-            out.append((r, r, "name"))
+            out.append((r, r, PinHow.NAME))
         elif r in versioned:
             hits = versioned[r]
             name, _, named = hits[0]
@@ -313,17 +327,17 @@ def classify_requests(requests: Iterable[str], packages: Iterable[str] | None, n
             # Without an arch in the request and several installed (multilib),
             # the bare name is what installed the native one.
             arch = "" if (not named and (native in arches or "noarch" in arches)) else arches[0]
-            out.append((r, install_spec(name, arch, named, native), "pinned"))
+            out.append((r, install_spec(name, arch, named, native), PinHow.PINNED))
         else:
             m = NVR_FORM.match(r)
             if not m:
-                out.append((r, r, "name"))  # a name, a provide (vim), a path...
+                out.append((r, r, PinHow.NAME))  # a name, a provide (vim), a path...
             elif packages is None:
                 last = m.group("rel").rsplit(".", 1)[-1]
                 arch = last if last in ARCHES else ""
-                out.append((r, install_spec(m.group("name"), arch, bool(arch), native), "pinned-form"))
+                out.append((r, install_spec(m.group("name"), arch, bool(arch), native), PinHow.PINNED_FORM))
             else:
-                out.append((r, "", "inactive"))
+                out.append((r, "", PinHow.INACTIVE))
     return out
 
 
@@ -331,10 +345,10 @@ def unpin_command(classified: Iterable[Request]) -> str:
     """One command that swaps every pinned request for its bare name (a name
     already requested on its own is not requested twice). Inactive pins are
     only dropped: nothing installed matches them, so nothing is asked back."""
-    pinned = [(r, n) for r, n, how in classified if how != "name"]
+    pinned = [(r, n) for r, n, how in classified if how != PinHow.NAME]
     if not pinned:
         return ""
-    by_name = {r for r, _, how in classified if how == "name"}
+    by_name = {r for r, _, how in classified if how == PinHow.NAME}
     install: list[str] = []
     for _, n in pinned:
         if n and n not in by_name and n not in install:

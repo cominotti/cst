@@ -23,7 +23,7 @@ from cst_core.adapters.runtime import (
     undo_python_start,
 )
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort
+from cst_core.ports import CommandRunnerPort, ExecutionContextPort, FileSystemPort, SystemctlHost
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import SwapEnvironment
@@ -76,7 +76,8 @@ def build_service(
     environment, for kernel_dirs)."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     file_sys = LocalFileSystemAdapter() if fs is None else fs
-    systemd = SystemctlAdapter(cmd_runner)
+    # show (plan and status) reads the host's systemd from a toolbox; apply refuses to run in one.
+    systemd = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.SHOW_ONLY)
     swap_system = LinuxSwapSystemAdapter(cmd_runner, file_sys)
     paths = desired_paths(prog, ctx, fallback_root=fallback_root, env=env)
     # swap's files are written through the installer and listed in the install record.

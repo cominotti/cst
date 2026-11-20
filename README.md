@@ -376,7 +376,7 @@ swap and memory, with counters since boot.
 | Pruning of old cargo build folders | `cst toolchains auto off` (the cargo and uv settings: by hand) | [toolchains/README.md, section 11](toolchains/README.md#11-how-to-undo) |
 | VM hardware (`cst vm tune apply`) | `sudo virsh -c qemu:///system define` the saved `/var/lib/libvirt/cst-backups/VM/definitions/*.before-tune.xml` (for Windows, before uninstalling the virtio drivers) | [vm/README.md, section 8](vm/README.md#8-cst-vm-tune-the-recommended-virtual-hardware) |
 | NOCOW image folders (`cst vm nocow apply`) | `chattr -C FOLDER` (`sudo` for `/var/lib/libvirt/images`); affects only files created later, like `+C` | [vm/README.md, section 9](vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write) |
-| VM backups | Local: nothing runs by itself; delete old backups by hand (`sudo rm -r /var/lib/libvirt/cst-backups/VM/TIMESTAMP`). NAS: `cst vm backup-timer off VM` stops the weekly run; the restic snapshots stay (tags `cst-vm`, `vm:VM`) | [vm/README.md, sections 6 and 10](vm/README.md#10-the-nas-backup-the-default) |
+| VM backups | Local: nothing runs by itself; delete old backups by hand (`sudo rm -r /var/lib/libvirt/cst-backups/VM/TIMESTAMP`). NAS: `cst vm backup-timer off VM` stops the weekly run; the restic snapshots stay (tags `cst-vm`, `vm:VM`), and so do the entries of that VM in the record of torn NAS snapshots `/var/lib/cst/vm-nas-torn.json`, which only its next NAS backup takes out (by hand: vm/README.md, section 10.6) | [vm/README.md, sections 6 and 10](vm/README.md#10-the-nas-backup-the-default) |
 | CPU tools | `cst cpu uninstall` (and `docker-slice uninstall`, `experiment off NAME`) | [cpu/README.md, section 13](cpu/README.md#13-how-to-undo-everything) |
 | Swap and memory | No command: a few steps by hand (switching swap off needs free RAM) | [swap/README.md, section 8](swap/README.md#8-how-to-undo) |
 | Bluetooth audio | `cst bluetooth revert` (`--check` first shows what it would do) | [bluetooth/README.md, section 8](bluetooth/README.md#8-how-to-undo) |
@@ -414,7 +414,9 @@ everything with `plan`, `status` or `doctor` before changing anything:
   when it changed, and the output says `unchanged:` or `written:` per file;
   `cst_core/installer.py plan SRC...` (or `--module btrfs`, or
   `--component btrfs:core`) shows what an install would write, without
-  writing. Each file belongs to a **component**, the part of a module that
+  writing, and names with `would record:` the files already right that the
+  install record does not list yet, or lists otherwise (a record not saved
+  after a write). Each file belongs to a **component**, the part of a module that
   one command installs as a whole (`btrfs:core` by `cst btrfs install`,
   `btrfs:docker-gc` by `cst btrfs docker-gc enable`, ...: `COMPONENTS` in
   the same file). Every file installed is listed, with its sha256 and the

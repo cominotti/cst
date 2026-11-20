@@ -303,6 +303,16 @@ class ModuleRoutePort(Protocol):
         ...
 
 
+class SystemctlHost(StrEnum):
+    """Which systemctl calls of a SystemctlAdapter run on the host from a toolbox (flatpak-spawn
+    --host), decided when the adapter is built: none (local), show only (show-only: what an adapter
+    built without one does), or every call (every). Outside a container every call runs here."""
+
+    LOCAL = "local"
+    SHOW_ONLY = "show-only"
+    EVERY = "every"
+
+
 class SystemdPort(Protocol):
     """Manages systemd units and path escaping."""
 
@@ -334,9 +344,10 @@ class SystemdPort(Protocol):
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName: ...
 
-    def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
+    def show(self, unit: UnitName, props: Sequence[str], *, user: bool = False) -> dict[str, str]:
         """`systemctl show -p PROP... unit` as {prop: value}; {} when systemctl cannot answer.
-        on_host: the host's systemd from a toolbox (False: the systemd where the caller runs);
+        Which systemd answers from a toolbox (the host's or the one where the caller runs) is the
+        implementation's, decided when it is built (SystemctlAdapter's on_host);
         user: the user's own manager (`systemctl --user show`)."""
         ...
 

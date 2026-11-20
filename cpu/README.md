@@ -326,8 +326,28 @@ can write there, replaced and never followed), and its unit does not fail. `off`
 still undoes everything (for the user `on` acted for, the uid of its
 `user@UID.service` record in `game.state`, also when `TARGET_USER` sets
 nothing or names another user now; the watchdog's `tick` acts for that
-user too, without a word every 30 s about a `TARGET_USER` that names no
-account), and `cst cpu game state` shows the line.
+user too, and never prints `id`'s `no such user` line, neither for a
+`TARGET_USER` that names no account nor when the account of the recorded
+uid is gone; `off` prints it once), and `cst cpu game state` shows the line.
+
+A `TARGET_USER` that is not set, or that names no account, does not switch
+the profile on either: `cpu-game.service` fails, its journal says
+`TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf` or `TARGET_USER names
+no account: NAME (in /etc/cpu-setup/cpu-setup.conf)`, nothing is changed, and
+the by-hand mark is dropped, as above. (Before 2026-11, a name with no account
+switched the profile on for no user: it set `user@.service` and
+`user-.slice`, which are nobody's.) The watchdog does not start the profile
+for such a `TARGET_USER` while a game runs either (it would fail again every
+30 s): it says why in the journal once per boot (`GameMode client running,
+profile not switched on: ...`; again after a tick found the name fixed; the
+same mark as for a settings line, `/run/cpu-setup/settings-warned`, whose
+word on a line is still forgotten once the line is fixed), and its unit does
+not fail. `cst cpu game state` names the reason too (`settings: TARGET_USER
+names no account: NAME (in ...) ('on' refuses until it is fixed)`), and
+prints no `toolboxes` lines then: there is no user manager to ask. It looks the name up only when it needs the answer: when it would
+switch the profile on, while that mark is there, and with the profile on; not
+at every run (on a machine whose accounts come from sssd or LDAP, each lookup
+can be slow).
 
 | Key | Meaning | Read by |
 |-----|---------|---------|
@@ -655,13 +675,20 @@ that has GameMode's library (`libgamemode`) loaded.
   and builds are not left slowed down.
 - Profile off, a client runs, and you did not switch it off by hand: it
   switches on (`GameMode client running but profile off: switching on`). This
-  is a fallback if the GameMode hook failed.
+  is a fallback if the GameMode hook failed. It does not when `on` would
+  refuse (6.2: a settings line that sets nothing, a `TARGET_USER` that is
+  unset or names no account); it says why once per boot.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
   Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
   other boxes next to the game that appeared in the meantime get the idle
   class (7.1). A box it already handled is skipped, so `game.state` does not
   grow at each run. A setting of the profile that something undid in the
-  meantime is set again (section 7.5).
+  meantime is set again (section 7.5). When the user the profile acts for has
+  no account (6.2: `TARGET_USER` names none, or the account was deleted
+  while the profile was on), the Steam scopes and the boxes of its user
+  manager are left alone (there is no such user manager); the journal says
+  why once per boot (`profile on, its user manager's side not handled:
+  ...`), and `off` still undoes everything.
 - Profile off: if the profile's `zz-cst-game.conf` drop-ins (7.5) are still
   there, it removes them and reloads systemd (logged at level warning).
 
@@ -748,6 +775,14 @@ later) first removes it, so the two never glue into one line `off` would
 read as whole; the journal names it (`<4>... line N: a record cut short
 (its change was never made), removed before the next record: TEXT`). The
 same holds for `game.intended`, whose cut line the drift repair never read.
+A cut line is no record of a box handled either: a box whose own record was
+cut short (a Docker container, a Steam scope, a box next to the game) is set
+by the next tick, whose record of it removes the cut line first. A box next
+to the game counts as handled only when each of its settings has a whole
+record: with cpuset delegated it gets two, `CPUWeight` and `AllowedCPUs`,
+which are recorded one after the other before either is set, so a box whose
+`CPUWeight` record is whole but whose `AllowedCPUs` record was cut short (or
+is missing) is set again, both settings.
 The `zz-cst-game.conf` drop-ins (7.5) are removed **first, and always**, even
 when `game.state` is missing: a drop-in left behind would keep the game's
 memory protection until the next reboot. Then `off` reloads systemd.
@@ -1411,7 +1446,8 @@ suggestions:
    journalctl -b -u cpu-game.service -u cpu-game-watchdog.service
    ```
    `TARGET_USER not set in /etc/cpu-setup/cpu-setup.conf` means the settings
-   file is broken: fix `TARGET_USER`.
+   file is broken: fix `TARGET_USER`. `TARGET_USER names no account: NAME`
+   means NAME is no user of this machine: set it to yours (`id -un`).
 
 **Does GameMode work inside the Steam Flatpak?** Start the game with
 `gamemoderun %command%`, wait 30 s, and run `game state`. Then look at the log
@@ -1550,7 +1586,8 @@ this is harmless.
 | `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
 | `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
-| `game/adapters.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, the locale's collation |
 | `game/cli.py` | The command line of `cpu-game-profile` |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |

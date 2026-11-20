@@ -115,6 +115,9 @@ compressor later creates a second pool that lives until the old one drains).
   0644). Nothing is configured by default: without it `plan` and `status`
   show `REFUSE` for `cst/swap.conf` (and no crypttab, fstab or partition
   rows), `cst doctor` warns, and `apply` stops before it changes anything.
+  `cst doctor` reads the file as `cst swap` does: for one this user may
+  not read it shows `info` (on the host, `cst swap status --root` reads
+  it) rather than "not configured".
   A `/etc/cst/swap.conf` that is there but cannot be read is never treated
   as missing: as a user who may not read it (its mode or owner, or a folder
   above it the user may not enter) `plan` and `status` show `?` and ask for

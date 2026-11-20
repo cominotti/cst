@@ -277,11 +277,9 @@ PRIMITIVE_BUDGETS: Final[dict[str, int]] = {
     "btrfs/docker_volumes_nocow os.fsync": 1,
     "btrfs/stall_monitord subprocess.Popen": 1,
     "cpu subprocess.Popen": 1,
-    "cpu tempfile.NamedTemporaryFile": 1,
     "cst_core subprocess.run": 1,
     "toolchains fcntl.flock": 3,
     "vm subprocess.Popen": 1,
-    "vm tempfile.mkstemp": 1,
 }
 
 # Uses of a primitive's literal outside its owners (docstrings aside), per
