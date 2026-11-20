@@ -3,7 +3,8 @@
 
 from cst_core.domain.errors import Refused
 from vm import application, wiring
-from vm.domain import ON_CALENDAR, TimerStep, TimerStepKind, VmSettings, VmSub, instance, timer_file_words
+from vm.domain import ON_CALENDAR, TimerStep, TimerStepKind, VmSettings, VmSub, instance
+from vm.domain.backup import timer_status_lines
 from vm.ports import TimerFilesPort
 
 
@@ -14,20 +15,9 @@ def cmd_timer(cfg: VmSettings, sub: VmSub, vm: str, entry_file: str, timers: Tim
         raise Refused(f"backup-timer {sub} needs root: run it as `{cfg.prog} backup-timer {sub}` (it calls sudo)")
     port, sysd = (wiring.timer_port(cfg, entry_file) if timers is None else timers), wiring.systemd()
     if sub == VmSub.STATUS:
-        st = application.timer_status(port, sysd, vm)
-        print(f"weekly NAS backup of {vm}: {'on' if st.on else 'off'} ({unit}; {ON_CALENDAR}, up to 30 min later)")
-        words = timer_file_words(cfg.prog, vm)
-        for p, state in st.files.items():
-            print(f"  {p}: {words[state]}")
-        if st.next_run:
-            print(f"  next run: {st.next_run}")
-        if st.last_result:
-            print(f"  last run of the service: {st.last_result}")
-        store = wiring.backup_store(cfg)
-        nas = [e for e in store.read_index() if e["vm"] == vm and e.get("mode") == "nas"]
-        print(f"  last NAS backup: {store.describe(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
-        if not wiring.settings_port(cfg).nas_set_up():
-            print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")
+        for line in timer_status_lines(application.timer_status(port, sysd, vm), vm, cfg.prog):
+            print(line)
+        _print_nas_state(cfg, vm)
         return
     if sub == VmSub.ON:
         application.timer_on(port, sysd, vm, wiring.settings_port(cfg).nas_repo, show_step)
@@ -40,6 +30,15 @@ def cmd_timer(cfg: VmSettings, sub: VmSub, vm: str, entry_file: str, timers: Tim
     if still:
         print(f"  kept the units and {cfg.paths.sbin_copy}: still used by {', '.join(still)}")
     print(f"The backups on the NAS stay (list: {cfg.cst} vm list).")
+
+
+def _print_nas_state(cfg: VmSettings, vm: str) -> None:
+    """backup-timer status's lines about the NAS: the VM's last NAS backup, and whether it is set up."""
+    store = wiring.backup_store(cfg)
+    nas = [e for e in store.read_index() if e["vm"] == vm and e.get("mode") == "nas"]
+    print(f"  last NAS backup: {store.describe(max(nas, key=lambda e: e.get('epoch') or 0)) if nas else 'none'}")
+    if not wiring.settings_port(cfg).nas_set_up():
+        print(f"  the NAS backup is not set up: {cfg.cst} btrfs snapshots nas setup")
 
 
 def show_step(step: TimerStep) -> None:

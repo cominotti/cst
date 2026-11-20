@@ -1114,13 +1114,16 @@ The Python code inside `vm/` (standard library only at run time):
   `backup-timer on`).
 - `vm/domain/`: the rules, no I/O. `tune.py`: the hardware `tune` recommends
   (`tune_domain`, `guest_kind`) and the lines that report it (`tune_line`,
-  `cpu_status_line`, `cpu_owner_line`). `__init__.py`: what a domain definition is
+  `cpu_status_line`, `cpu_owner_line`, and the plan's, `tune_plan_lines`). `__init__.py`: what a domain definition is
   made of (`domain_parts`), the lines that describe an image folder
   (`nocow_lines`), the NAS backup's names and retention (`valid_keep`,
   `overlay_kind`, `forget_args`), the timer units (`render_service`,
   `render_timer`), the command line (`parse_args`, which returns a `VmArgs`),
   and the records the other modules pass around (`DomainParts`, `LiveDisk`,
-  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too).
+  `ImageDir`, `ImageProbe`; `cst doctor` uses the last two too). `backup.py`: the
+  records of the backups (an index entry, the manifests, restic's summary, a
+  fingerprint) and the lines `status` and `backup-timer status` print about them
+  (`package_change_lines`, `timer_status_lines`).
 - `vm/adapters/`: what reaches the host. `__init__.py`: `virsh`, `rpm`, `rpm-ostree`
   (with `LC_ALL=C`, through cst_core's
   `SubprocessCommandRunner`; virsh through its `SubprocessVirshAdapter`), the settings
@@ -1169,8 +1172,8 @@ The Python code inside `vm/` (standard library only at run time):
   local copy), `nas.py` (the NAS backup), `timer.py` (`backup-timer`),
   `status.py` (`list`, `status`), `tune.py`, `nocow.py`; `main` is in
   `__init__.py`. They parse, take their ports from `vm/wiring.py`, run a use
-  case (or read the ports, for list, status and nocow) and print: no I/O of
-  their own.
+  case (or read the ports, for list, status and nocow) and print lines that
+  are mostly built in `vm/domain`: no I/O of their own.
 
 `cst doctor` imports `vm.domain.tune` (tune rules), the records of `vm.domain`,
 `vm.adapters` (knobs) and `vm.adapters.images` (the image folder probe) from

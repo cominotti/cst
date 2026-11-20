@@ -12,6 +12,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.libvirt_xml import keep_prefixes
+from vm.domain import KNOBS
 
 
 class GuestKind(StrEnum):
@@ -319,6 +320,35 @@ def cpu_owner_line(root: ET.Element, names: Sequence[str], cst: str) -> str:
     else:
         feat = f"cpu mode {mode}"
     return f"CPU (owned by {cst} cpu vm-pin, not by tune): {feat}; {pin}; check: {cst} cpu vm-pin plan"
+
+
+def tune_plan_lines(plan: TunePlan, cpu_disable: Sequence[str], *, vm_conf: str, cst: str) -> list[str]:
+    """What tune plan and apply print before the diff: the guest, the knobs vm_conf turns off, the
+    changes, what is held back, the notes, the CPU's owner (cpu_disable: the features vm-pin keeps
+    disabled), the Linux and Windows hints, and, when nothing differs, that nothing does."""
+    label = {GuestKind.WINDOWS: "Windows", GuestKind.LINUX: "Linux", GuestKind.UNKNOWN: "not known"}[plan.kind]
+    out = [f"{plan.vm}: {plan.state}; guest: {label} ({plan.why})"]
+    off = [k for k in KNOBS[1:] if not plan.knobs[k]]
+    if off:
+        out.append(f"  skipped by {vm_conf}: {', '.join(k + '=no' for k in off)}")
+    out += [f"  change: {c}" for c in plan.changes]
+    out += [f"  held back: {h}" for h in plan.held]
+    out += [f"  note: {n}" for n in plan.notes]
+    out.append(f"  {cpu_owner_line(plan.root, cpu_disable, cst)}")
+    if plan.kind == GuestKind.LINUX and plan.changes and any("bus" in c or "network card" in c for c in plan.changes):
+        out.append(
+            "  note: Linux has the virtio drivers in its kernel; an initramfs built with only the needed "
+            "drivers (hostonly) may lack virtio_scsi: check `lsinitrd | grep virtio` in the guest first."
+        )
+    if plan.held:
+        out.append(f"\nHeld back: the guest is {label}, and its virtio drivers are not known to be installed.")
+        out.append(WINDOWS_STEPS.format(cst=cst, vm=plan.vm))
+    if not plan.diff:
+        out.append(
+            f"\n{plan.vm}: disks and network card already as {cst} vm tune recommends"
+            + (" (except what is held back above)." if plan.held else ".")
+        )
+    return out
 
 
 def tune_line(xml_text: str, kn: Mapping[str, bool], cst: str) -> str:

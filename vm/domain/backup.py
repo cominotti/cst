@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """The records of the backups: an index entry, the two manifests, restic's summary of a backup,
-the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain). Pure."""
+the fingerprint of a source, and the two ways a backup stops (Stop, Uncertain); the lines status
+and backup-timer status print about them. Pure."""
 
+from collections.abc import Sequence
 import datetime
 import json
 from enum import StrEnum
@@ -10,6 +12,7 @@ from typing import Final, NotRequired, Required, TypedDict, TypeIs
 from cst_core.domain.errors import Refused
 from cst_core.domain.shapes import KeyTypes, has_shape, items_of, json_object
 from cst_core.domain.values import MINUTE, Json
+from vm.domain import ON_CALENDAR, TimerStatus, timer_file_words
 
 # The files a backup writes next to the copies (a local one) or stages for restic (the NAS one).
 DOMAIN_XML = "domain.xml"
@@ -269,3 +272,26 @@ def utc_stamp(seconds: float) -> str:
 def manifest_text(manifest: Manifest) -> str:
     """manifest.json as a backup writes it."""
     return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+
+def package_change_lines(changes: Sequence[str]) -> list[str]:
+    """status's lines about the virtualization packages since the last backup (changes: version_changes)."""
+    if not changes:
+        return ["  virtualization packages: unchanged since the last backup"]
+    return [
+        "  virtualization packages changed since then (back up again once the VM works on them):",
+        *(f"    {c}" for c in changes),
+    ]
+
+
+def timer_status_lines(st: TimerStatus, vm: str, prog: str) -> list[str]:
+    """backup-timer status's lines from the timer's state (st): on or off, its files, the next run
+    and the last result."""
+    words = timer_file_words(prog, vm)
+    out = [f"weekly NAS backup of {vm}: {'on' if st.on else 'off'} ({st.unit}; {ON_CALENDAR}, up to 30 min later)"]
+    out += [f"  {p}: {words[state]}" for p, state in st.files.items()]
+    if st.next_run:
+        out.append(f"  next run: {st.next_run}")
+    if st.last_result:
+        out.append(f"  last run of the service: {st.last_result}")
+    return out
