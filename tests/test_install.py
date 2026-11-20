@@ -953,17 +953,27 @@ _SHELL_END = ("|", ";", "&", "<", ">", ")")
 
 
 _REDIRECTION = re.compile(r"[0-9]*[<>]|&>")
+_COMMENT = re.compile(r"(?:^|\s)#")
+
+
+def _before_redirection(word: str) -> tuple[str, bool]:
+    """The part of a word before a redirection glued to it (`C>/dev/null`, `C&>/dev/null`: C), and whether
+    one was there."""
+    cut = min((i for i in (word.find("<"), word.find(">")) if i >= 0), default=-1)
+    if cut < 0:
+        return word, False
+    return word[: cut - 1 if word[cut - 1 : cut] == "&" else cut], True
 
 
 def _logical_lines(text: str) -> list[tuple[int, str]]:
     """(number of its first line, text) of each command line, a line ending in a backslash joined with
-    the next one."""
+    the next one, unless that backslash is in a comment (bash continues no comment)."""
     out: list[tuple[int, str]] = []
     first, parts = 0, []
     for number, line in enumerate(text.splitlines(), 1):
         if not parts:
             first = number
-        if line.endswith("\\"):
+        if line.endswith("\\") and not _COMMENT.search("".join([*parts, line])):
             parts.append(line[:-1])
             continue
         out.append((first, " ".join([*parts, line])))
@@ -984,13 +994,17 @@ def shell_component_words(text: str) -> list[tuple[int, str]]:
         for i, word in enumerate(words):
             args: list[str] = []
             if word.startswith("--component="):
-                args = [word.removeprefix("--component=").removesuffix(";")]
+                args = [_before_redirection(word.removeprefix("--component="))[0].removesuffix(";")]
             elif word == "--component" and i + 1 < len(words):
-                args = [words[i + 1].removesuffix(";")]
+                args = [_before_redirection(words[i + 1])[0].removesuffix(";")]
             elif word in _COMPONENT_CALLS:
                 rest: list[str] = []
                 for w in words[i + 1 :]:
                     if w.startswith(_SHELL_END) or w == "||" or _REDIRECTION.match(w):
+                        break
+                    head, redirected = _before_redirection(w)
+                    if redirected:  # `cst_mark C>/dev/null`: C, then the redirection ends the arguments
+                        rest.append(head)
                         break
                     rest.append(w.removesuffix(";"))
                     if w.endswith(";"):  # `cst_mark C; fi`: the command ends there
@@ -1058,6 +1072,34 @@ class ShellComponentWordsTest(unittest.TestCase):
         )
         # A planted misspelt word is reported by the gate's check.
         self.assertNotIn("btrfs:cor", {str(c) for c in Component})
+
+    def test_a_comment_does_not_continue_and_a_glued_redirection_ends_the_word(self) -> None:
+        # bash: a backslash at the end of a comment continues nothing, and `C>/dev/null` is the word C
+        # with a redirection after it.
+        text = (
+            "# see cst_mark \\\n"
+            "cst_mark btrfs:snapshot\n"
+            "cst_install_text a 0644 root \\\n"
+            "    btrfs:core # a note \\\n"
+            "cst_mark btrfs:alerts\n"
+            "cst_mark btrfs:cor>/dev/null\n"
+            "check_component_syntax btrfs:core btrfs:x2>/dev/null 2>&1\n"
+            "cst_mark btrfs:y&>/dev/null\n"
+            "cst_installer dests --component=btrfs:z>/dev/null\n"
+        )
+        self.assertEqual(
+            shell_component_words(text),
+            [
+                (2, "btrfs:snapshot"),
+                (3, "btrfs:core"),
+                (5, "btrfs:alerts"),
+                (6, "btrfs:cor"),
+                (7, "btrfs:core"),
+                (7, "btrfs:x2"),
+                (8, "btrfs:y"),
+                (9, "btrfs:z"),
+            ],
+        )
 
 
 if __name__ == "__main__":
