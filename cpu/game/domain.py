@@ -315,6 +315,20 @@ def unreadable_lines(text: str, *, intended: bool) -> list[tuple[int, str]]:
     return out
 
 
+def state_head(*, on: bool, manual: bool, problem_lines: Sequence[str], why: str | None) -> list[str]:
+    """The first lines of 'state': on (by hand) or off, then each problem line of the settings file and why
+    'on' refuses for TARGET_USER (why: None when it does not)."""
+    head = "game profile: ON (by hand)" if manual else "game profile: ON"
+    lines = [head if on else "game profile: off"]
+    lines += [
+        f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
+        for line in problem_lines
+    ]
+    if why is not None:
+        lines.append(f"  settings: {why} ('on' refuses until it is fixed)")
+    return lines
+
+
 def unreadable_report(paths: GamePaths, state_text: str, intended_text: str, *, judged: bool) -> list[str]:
     """The lines of 'state' that name each line of game.state, and of game.intended when it is judged (not
     a newer format's: its lines may mean something else), that holds no record (unreadable_lines)."""

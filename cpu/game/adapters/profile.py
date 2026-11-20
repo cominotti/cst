@@ -64,6 +64,7 @@ from cpu.game.domain import (
     unreadable_lines,
     unreadable_report,
     show_values,
+    state_head,
     state_uid,
     state_undo,
     shown,
@@ -734,24 +735,11 @@ class GameProfile:
         if on:
             self._user_from_state(state_recs, say=False)
         p, s = self.paths, self.s
-        self.say(f"game profile: ON{' (by hand)' if manual else ''}" if on else "game profile: off")
-        self.say_lines(
-            f"  settings: {line} (sets nothing: 'on' refuses and the watchdog changes nothing until it is fixed)"
-            for line in self._problem_lines()
-        )
-        if why is not None:
-            self.say(f"  settings: {why} ('on' refuses until it is fixed)")
+        self.say_lines(state_head(on=on, manual=manual, problem_lines=self._problem_lines(), why=why))
         self._slice_line("machine.slice")
         if self.uses_builds_slice():
             self._slice_line(BUILDS_SLICE)
-        if self._target_refusal() is None:  # a user manager to ask (the user 'on' acted for, with the profile on)
-            self.say(f"  toolboxes       weight={self.prop('usr', USER_SLICE, 'CPUWeight')}")
-            self.say(f"  app.slice       zswap writeback={self.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
-            cg = self.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
-            effective = read_stripped(f"{p.cgroot}{cg}/cpuset.cpus.effective") or ""
-            self.say(f"  toolboxes       cpus effective={effective}")
-            if on:
-                self.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
+        self._user_manager_lines(state_recs if on else None)
         newer = None if intended_text is None else newer_intended(p.intended, intended_text)
         if on:
             self.say_lines(unreadable_report(p, state_text or "", intended_text or "", judged=newer is None))
@@ -760,6 +748,18 @@ class GameProfile:
         if on:
             self.say_lines(self.drift_report(state_recs, intended_text, newer, manual=manual))
         return 0
+
+    def _user_manager_lines(self, state_recs: Sequence[Record] | None) -> None:
+        """The lines of the user manager 'on' acted for (none without one), with game.state's idle boxes when on."""
+        if self._target_refusal() is not None:
+            return
+        self.say(f"  toolboxes       weight={self.prop('usr', USER_SLICE, 'CPUWeight')}")
+        self.say(f"  app.slice       zswap writeback={self.prop('usr', APP_SLICE, 'MemoryZSwapWriteback')}")
+        cg = self.ask("usr", "show", "-P", "ControlGroup", USER_SLICE).stdout.rstrip("\n")
+        effective = read_stripped(f"{self.paths.cgroot}{cg}/cpuset.cpus.effective") or ""
+        self.say(f"  toolboxes       cpus effective={effective}")
+        if state_recs is not None:
+            self.say(f"  other boxes     idle: {escapes_in_state(state_recs)}")
 
     def drift_report(
         self, state_recs: Sequence[Record], intended_text: str | None, newer: str | None, *, manual: bool
