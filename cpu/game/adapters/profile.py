@@ -623,20 +623,7 @@ class GameProfile:
         if not self.problems:  # fixed: a line or a name that breaks again is said again
             self._forget_fixed_settings()
         if not os.path.exists(p.state):
-            self.remove_leftover_dropins()
-            if not self.gamemode_client():
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(p.suppress)
-            elif not os.path.exists(p.suppress):
-                if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
-                    self.warn_once("GameMode client running, profile not switched on")
-                    return 0
-                why = self._target_refusal()  # the same for TARGET_USER, with the same mark
-                if why is not None:
-                    self._say_refusal("GameMode client running, profile not switched on", why)
-                else:
-                    self.log(5, "GameMode client running but profile off: switching on")
-                    self.ctl("sys", "start", "--no-block", "cpu-game.service")
+            self._tick_while_off()
             return 0
         if not os.path.exists(p.manual) and not self.gamemode_client():
             self.log(5, "no GameMode client left: switching off")
@@ -655,6 +642,25 @@ class GameProfile:
             self._say_refusal("profile on, its user manager's side not handled", why)
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
+
+    def _tick_while_off(self) -> None:
+        """The tick with the profile off: leftover drop-ins go, and a GameMode client switches the profile on,
+        unless it was switched off by hand while that client runs (suppress) or 'on' would refuse."""
+        p = self.paths
+        self.remove_leftover_dropins()
+        if not self.gamemode_client():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(p.suppress)
+        elif not os.path.exists(p.suppress):
+            if self.problems:  # 'on' would refuse: no failed cpu-game.service every 30 s
+                self.warn_once("GameMode client running, profile not switched on")
+                return
+            why = self._target_refusal()  # the same for TARGET_USER, with the same mark
+            if why is not None:
+                self._say_refusal("GameMode client running, profile not switched on", why)
+            else:
+                self.log(5, "GameMode client running but profile off: switching on")
+                self.ctl("sys", "start", "--no-block", "cpu-game.service")
 
     def _say_refusal(self, what: str, why: str) -> None:
         """The watchdog's word on a TARGET_USER 'on' refuses (_target_refusal's why), once per boot, in the
