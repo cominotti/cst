@@ -40,6 +40,7 @@ from toolchains.domain.build import (
     TOOL_FILE_TOP,
     WORKSPACE_REL,
     Workspaces,
+    folder_key,
     is_tool_file,
     manifest_arg,
     prefixes,
@@ -375,21 +376,12 @@ def cargo_users(
         if why is not None or bd is None:
             unknown.append((p.pid, p.comm, p.cwd, why or "unknown"))
             continue
-        k = _build_folder_key(pre, bd)
+        k = folder_key(pre, bd)
         if k is not None:
             lst = found.setdefault(k, [])
             if (p.pid, p.comm) not in lst:
                 lst.append((p.pid, p.comm))
     return found, unknown
-
-
-def _build_folder_key(pre: Sequence[str], bd: str) -> str | None:
-    """The key ('XX/YYYY') of build folder BD under the first of the root's
-    paths PRE it is in, or None when it is under none of them."""
-    for pr in pre:
-        if bd.startswith(pr + "/"):
-            return "/".join(bd[len(pr) + 1 :].split("/")[:2])
-    return None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -443,7 +435,7 @@ def _claim_build_folder(ws: Workspaces, pre: Sequence[str], data: CargoMetadata,
     bd = data.get("build_directory")
     if not isinstance(bd, str) or not bd:
         return  # a cargo without build-dir support: not in this root
-    key = _build_folder_key(pre, os.path.normpath(bd))
+    key = folder_key(pre, os.path.normpath(bd))
     if key is None:
         return
     wr = data.get("workspace_root")

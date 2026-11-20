@@ -152,6 +152,18 @@ def prefixes(root: str) -> tuple[str, ...]:
     return tuple(sorted(out))
 
 
+def folder_key(pre: Sequence[str], path: str, *, trash: bool = False) -> str | None:
+    """The folder key of PATH under the first of the root's paths PRE (see
+    prefixes) it is in: 'XX/YYYY', its first two parts below the root; with
+    TRASH, the trash name alone for a path in a leftover of an interrupted
+    run. None when PATH is under none of them."""
+    for p in pre:
+        if path.startswith(p + "/"):
+            parts = path[len(p) + 1 :].split("/")
+            return parts[0] if trash and parts[0].startswith(TRASH_PREFIX) else "/".join(parts[:2])
+    return None
+
+
 # Cargo holds its build-dir lock only while it compiles. While `cargo test`,
 # `cargo bench` or `cargo nextest` run the test binaries, the lock is free and
 # cargo itself has nothing open in the build folder; between two test

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-from toolchains.domain.build import CARGO_COMM, CARGO_ENV, CargoProc, RUST_TOOLS, TRASH_PREFIX, prefixes
+from toolchains.domain.build import CARGO_COMM, CARGO_ENV, CargoProc, RUST_TOOLS, folder_key, prefixes
 
 
 PROC = "/proc"
@@ -68,18 +68,6 @@ def proc_users(root: str, uid: int | None = None) -> tuple[dict[str, list[tuple[
     return found, unreadable
 
 
-def _used_folder_key(pre: Sequence[str], path: str) -> str | None:
-    """The folder key of PATH (a ' (deleted)' suffix dropped) under the first
-    of the root's paths PRE it is in: 'XX/YYYY', or the trash name for a
-    leftover; None when it is under none of them."""
-    path = path.removesuffix(" (deleted)")
-    for p in pre:
-        if path.startswith(p + "/"):
-            parts = path[len(p) + 1 :].split("/")
-            return parts[0] if parts[0].startswith(TRASH_PREFIX) else "/".join(parts[:2])
-    return None
-
-
 def _link_or_none(path: str) -> str | None:
     """Where the link PATH points, or None when it cannot be read."""
     try:
@@ -92,7 +80,7 @@ def _used_keys(pre: Sequence[str], base: str, cwd: str | None) -> Iterator[str]:
     """The folder keys under the root (paths PRE) of the paths process BASE
     uses (see _used_paths), in that order."""
     for path in _used_paths(base, cwd):
-        key = _used_folder_key(pre, path)
+        key = folder_key(pre, path.removesuffix(" (deleted)"), trash=True)
         if key is not None:
             yield key
 
