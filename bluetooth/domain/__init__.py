@@ -654,8 +654,9 @@ def _hashable(value: object) -> object:
     return value
 
 
-def _device_profiles(params: object, raw_rule: object) -> tuple[str, str | None]:
-    """(the card's profiles, the LDAC rule's quality) of the headset's Device object (pw_state)."""
+def _device_parts(params: object, raw_rule: object) -> tuple[str, str | None]:
+    """(profiles, rule quality) of the headset's Device object (pw_state): the names of the card's
+    Profile params, and its bluez5.a2dp.ldac.quality rule (RAW_RULE) as text, None when unset."""
     prof = " ".join(str(object_of(pr).get("name", "?")) for pr in items_of(object_of(params).get("Profile", []) or []))
     return prof, None if raw_rule is None else str(raw_rule)
 
@@ -690,7 +691,7 @@ def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None
         params: object = info.get("params") or {}
         if kind.endswith("Device") and p.get("device.name") == CARD_PREFIX + dev:
             found = True
-            prof, rule = _device_profiles(params, p.get("bluez5.a2dp.ldac.quality"))
+            prof, rule = _device_parts(params, p.get("bluez5.a2dp.ldac.quality"))
         if (
             kind.endswith("Node")
             and str(p.get("node.name", "")).startswith("bluez_output." + dev)
