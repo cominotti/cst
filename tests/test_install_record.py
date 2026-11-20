@@ -60,6 +60,60 @@ def _f(sha: str = "aa", component: str = "m:t", commit: str = "c1") -> RecordedF
     return RecordedFile("m/a", component, "data", sha, 0o644, Owner.ROOT, None, commit, "t")
 
 
+# What main's installer (4edbe5a, run from `git archive main`, so its commit is "unknown") wrote with --root STAGE for
+# `install --component btrfs:docker-gc`, `mark --component btrfs:docker-gc done` and `forget btrfs/units/docker-gc.timer`
+# (test_upgrade_a_record_written_by_main_without_a_files_line).
+MAIN_RECORD = """\
+{
+ "components": {
+  "btrfs:docker-gc": "done"
+ },
+ "files": {
+  "/etc/systemd/system/docker-gc-recorder.service": {
+   "component": "btrfs:docker-gc",
+   "cst": {
+    "commit": "unknown",
+    "tree": "51c5080b7683ba507a92d98be5457e8b10dfaefcf265fdd21ac5c6d8a31e1045"
+   },
+   "kind": "unit",
+   "mode": "0644",
+   "owner": "root",
+   "sha256": "e4e0a7889f29fde99f905a0f39d711aacb201b414f2e8c8cf371ef22e1b98dd2",
+   "src": "btrfs/units/docker-gc-recorder.service",
+   "values": null
+  },
+  "/etc/systemd/system/docker-gc.service": {
+   "component": "btrfs:docker-gc",
+   "cst": {
+    "commit": "unknown",
+    "tree": "51c5080b7683ba507a92d98be5457e8b10dfaefcf265fdd21ac5c6d8a31e1045"
+   },
+   "kind": "unit",
+   "mode": "0644",
+   "owner": "root",
+   "sha256": "f9b258639a025f990bbe3161074fb6407bd4f66323bc2e994c7d46d56b8a6c7e",
+   "src": "btrfs/units/docker-gc.service",
+   "values": null
+  },
+  "/usr/local/sbin/docker-gc": {
+   "component": "btrfs:docker-gc",
+   "cst": {
+    "commit": "unknown",
+    "tree": "51c5080b7683ba507a92d98be5457e8b10dfaefcf265fdd21ac5c6d8a31e1045"
+   },
+   "kind": "python-entry",
+   "mode": "0755",
+   "owner": "root",
+   "sha256": "1622a2fbe62d8c7d45c07a85bbfaebc27e255971a3bfec7c4856afc1f5dbae47",
+   "src": "btrfs/docker-gc",
+   "values": null
+  }
+ },
+ "format": 1
+}
+"""
+
+
 class _MemoryRecord:
     """InstallRecordPort in memory: {path: text}; writes counts the files written."""
 
@@ -713,10 +767,10 @@ class InstallerRecordCliTest(unittest.TestCase):
         want = [e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc"]
         self.assertTrue(all(os.path.isfile(self.stage + d) for d in want))
 
-    def test_plan_names_the_files_an_older_install_left_unrecorded_and_check_stays_current(self) -> None:
+    def test_plan_names_the_files_an_older_install_left_unrecorded_and_check_says_not_current(self) -> None:
         # An install from before the record (its lines taken out): plan says "would record:" for each file
-        # and changes nothing; check still exits 0 (its exit code is a later decision); install writes
-        # nothing and lists them; plan then says only "unchanged:".
+        # and changes nothing; check exits 1 (current means current and recorded); install writes nothing
+        # and lists them; plan then says only "unchanged:", and check exits 0.
         sel = ("--component", "btrfs:docker-gc")
         want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
         self.assertEqual(self.cli("install", *sel).returncode, 0)
@@ -727,17 +781,19 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(sorted(plan.stdout.decode().splitlines()), [f"would record: {self.stage}{d}" for d in want])
         self.assertEqual(Path(self.record).read_bytes(), before)
         check = self.cli("check", *sel)
-        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        self.assertEqual((check.returncode, check.stdout), (1, b""), check.stderr)
+        self.assertEqual(Path(self.record).read_bytes(), before)
         r = self.cli("install", *sel)
         self.assertEqual(sorted(r.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
         self.assertEqual(sorted(self.doc().files), want)
         again = self.cli("plan", *sel)
         self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+        self.assertEqual(self.cli("check", *sel).returncode, 0)
 
-    def test_plan_names_a_file_whose_record_line_is_stale_and_check_stays_current(self) -> None:
+    def test_plan_names_a_file_whose_record_line_is_stale_and_check_says_not_current(self) -> None:
         # The file was written, the record kept an older line (its sha256): plan says "would record:" for
-        # that file alone and changes nothing; check exits 0; install puts the line right; plan is then
-        # "unchanged:" for every file.
+        # that file alone and changes nothing; check exits 1; install puts the line right; plan is then
+        # "unchanged:" for every file, and check exits 0.
         sel = ("--component", "btrfs:docker-gc")
         want = sorted(e.dest for e in INSTALL_MANIFEST if e.component == "btrfs:docker-gc")
         self.assertEqual(self.cli("install", *sel).returncode, 0)
@@ -754,11 +810,45 @@ class InstallerRecordCliTest(unittest.TestCase):
         )
         self.assertEqual(Path(self.record).read_bytes(), before)
         check = self.cli("check", *sel)
-        self.assertEqual((check.returncode, check.stdout), (0, b""), check.stderr)
+        self.assertEqual((check.returncode, check.stdout), (1, b""), check.stderr)
         self.assertEqual(self.cli("install", *sel).returncode, 0)
         self.assertEqual(self.doc().files[stale].sha256, rec.files[stale].sha256)
         again = self.cli("plan", *sel)
         self.assertEqual(sorted(again.stdout.decode().splitlines()), [f"unchanged: {self.stage}{d}" for d in want])
+        self.assertEqual(self.cli("check", *sel).returncode, 0)
+
+    def test_check_judges_the_files_alone_when_the_record_cannot_be_read(self) -> None:
+        # A record that cannot be read (here a folder in its place): plan cannot tell what it lists, so
+        # check exits 0 for current files and 1 for a file that is not; nothing is written.
+        sel = ("--component", "btrfs:docker-gc")
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        os.remove(self.record)
+        os.mkdir(self.record)
+        self.assertEqual(self.cli("check", *sel).returncode, 0)
+        with open(self.stage + "/usr/local/sbin/docker-gc", "ab") as f:
+            f.write(b"# edited\n")
+        self.assertEqual(self.cli("check", *sel).returncode, 1)
+        self.assertTrue(os.path.isdir(self.record))
+
+    def test_upgrade_a_record_written_by_main_without_a_files_line(self) -> None:
+        # MAIN_RECORD: what main's installer (4edbe5a) wrote for `install --component btrfs:docker-gc`,
+        # `mark ... done`, then `forget btrfs/units/docker-gc.timer`: the timer is current on disk but has
+        # no line. check exits 1, install adopts it (no write) and keeps main's other lines (the component
+        # is pending again, as after any install, until its setup command marks it), and check then exits 0.
+        timer = "btrfs/units/docker-gc.timer"
+        dest = "/etc/systemd/system/docker-gc.timer"
+        self.assertEqual(self.cli("install", timer).returncode, 0)
+        Path(self.record).write_text(MAIN_RECORD)
+        self.assertEqual(self.cli("check", timer).returncode, 1)
+        r = self.cli("install", timer)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        doc = self.doc()
+        self.assertEqual(doc.files[dest].src, timer)
+        self.assertEqual(doc.components, {"btrfs:docker-gc": "pending"})
+        main_lines = json.loads(MAIN_RECORD)["files"]
+        self.assertEqual(sorted(doc.files), sorted([*main_lines, dest]))
+        self.assertEqual({d: doc.files[d].sha256 for d in main_lines}, {d: f["sha256"] for d, f in main_lines.items()})
+        self.assertEqual(self.cli("check", timer).returncode, 0)
 
     def test_text_plan_with_a_component_names_a_current_file_its_record_does_not_list_so(self) -> None:
         # text-plan --component says what text --component would do to the record too: "would record:" for

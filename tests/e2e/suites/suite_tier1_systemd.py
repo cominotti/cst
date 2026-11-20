@@ -575,6 +575,14 @@ rec = json.load(open(sys.argv[1]))
 for dest in sys.argv[2:]:
     del rec["files"][dest]
 json.dump(rec, open(sys.argv[1], "w"))' "$record" "$watch" "$unit"
+# installer check counts the current but unrecorded copy as not current (exit 1), so plan says apply
+# installs it; the install then adopts it and check exits 0.
+inst() { /usr/bin/python3 -I /opt/cst-rw/cst_core/installer.py "$@"; }
+rc=0; inst check --home "$H" bluetooth/bt-ldac-watch || rc=$?
+[[ "$rc" == 1 ]] || { echo "test_80: check took the unrecorded watcher for current (exit $rc)" >&2; false; }
+rc=0; out="$(bt plan 2>&1)" || rc=$?
+show "plan over an unrecorded watcher" "$out"
+grep -qE '^  update +~/\.local/lib/cst/bt-ldac-watch +older copy \(apply installs the one in CST\)$' <<<"$out"
 lw_pid="$(systemctl --user show -p MainPID --value cst-bt-ldac48.service)"
 step "apply over an unrecorded watcher" apply --yes
 no_writes "apply over an unrecorded watcher" "$out"
@@ -588,6 +596,7 @@ python3 -I -c 'import json, sys
 files = json.load(open(sys.argv[1]))["files"]
 assert files[sys.argv[2]]["src"] == "bluetooth/bt-ldac-watch", files.get(sys.argv[2])
 assert files[sys.argv[3]]["component"] == "bluetooth:ldac", files.get(sys.argv[3])' "$record" "$watch" "$unit"
+inst check --home "$H" bluetooth/bt-ldac-watch
 
 # 4. le-audio without on/off only shows the setting.
 out="$(bt le-audio)"
@@ -4079,8 +4088,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         writes nothing; `plan` then has nothing to do (exit 0). A second
         `apply` changes nothing: the same inode, mtime and content of each
         file, no new main.conf backup, no restart of WirePlumber. With the watcher's program and unit
-        taken out of the install record, the next `apply` adds them back, writes nothing and restarts
-        neither the watcher nor WirePlumber. `le-audio` alone only shows the setting.
+        taken out of the install record, `installer.py check` counts the program as not current (exit 1)
+        and `plan` says apply installs it; the next `apply` adds them back, writes nothing and restarts
+        neither the watcher nor WirePlumber, and check then exits 0. `le-audio` alone only shows the setting.
         `le-audio on` writes LE_AUDIO=on (the other lines kept), removes the
         drop-in and restarts WirePlumber, whose roles are then the PipeWire
         defaults; nothing else changes and `plan` exits 0. A second
@@ -6700,8 +6710,9 @@ echo E2E-OK
         that component (another test's) stay as they are. Then cpu:gamemode (tester's ~/.config/gamemode.ini,
         through the real runuser, so tester's record is the one read; no test before this one leaves it,
         and its being there fails the test) installed as an older CST left it (installed, its lines
-        taken out): plan prints "would record:" for it and changes nothing, check exits 0, install writes
-        nothing and lists it, plan then says "unchanged:", and a second install changes nothing."""
+        taken out): plan prints "would record:" for it and changes nothing, check exits 1 (current means
+        current and recorded), install writes nothing and lists it, plan then says "unchanged:" and check
+        exits 0, and a second install changes nothing."""
         c = self.SYSTEMD_CONTAINER
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         script = (
@@ -6774,12 +6785,14 @@ echo E2E-OK
             plan="$({user_installer} plan "${{sel[@]}}")"
             [[ "$plan" == "would record: {ini}" ]] || {{ echo "plan said: $plan" >&2; exit 1; }}
             [[ "$(sha256sum "$U")" == "$before" ]] || {{ echo "plan changed the record" >&2; exit 1; }}
-            {user_installer} check "${{sel[@]}}" || {{ echo "check: exit $?" >&2; exit 1; }}
+            rc=0; {user_installer} check "${{sel[@]}}" || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "check took the unrecorded file for current: exit $rc" >&2; exit 1; }}
             out="$({user_installer} install "${{sel[@]}}")"
             [[ "$out" == "unchanged: {ini}" ]] || {{ echo "install said: $out" >&2; exit 1; }}
             [[ "$({lines} "$U" cpu:gamemode)" == "{ini} pending" ]]
             plan="$({user_installer} plan "${{sel[@]}}")"
             [[ "$plan" == "unchanged: {ini}" ]] || {{ echo "plan after install said: $plan" >&2; exit 1; }}
+            {user_installer} check "${{sel[@]}}" || {{ echo "check after install: exit $?" >&2; exit 1; }}
             before="$(sha256sum "$U" {ini})"
             again="$({user_installer} install "${{sel[@]}}")"
             [[ "$again" == "unchanged: {ini}" && "$(sha256sum "$U" {ini})" == "$before" ]] ||

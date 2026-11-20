@@ -439,7 +439,7 @@ class InstallService:
 
         A current file its record does not list yet, or lists otherwise (other bytes, mode, owner, component,
         source or values: a record not saved after a write), is `would record:` (install records it again).
-        It is not counted: it needs no write, so `check` still takes it as current."""
+        It is not counted here (it needs no write); `check` reads the lines and counts it as not current."""
         lines: list[str] = []
         replaced: list[Placement] = []
         todo, records = self._prepare(entries, req)
