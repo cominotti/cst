@@ -109,7 +109,7 @@ MAGIC_EXEMPT: Final[dict[str, str]] = {
         "returns a JSON value nobody has checked yet (docker's answers, last-run.json) when it is an object;"
         " each caller checks the key it uses, and some of those objects are free maps (Labels)"
     ),
-    "btrfs/stall_report/adapters.py:below_top.pick": (
+    "btrfs/stall_report/adapters.py:_pick": (
         "rows of `below dump --raw -O json`, whose column names change between below versions: matched by substring"
     ),
     "toolchains/domain/common.py:plain": "any TOML document (the user's cargo or uv config) as json.loads would give it",
