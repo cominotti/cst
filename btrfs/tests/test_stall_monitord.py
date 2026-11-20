@@ -24,6 +24,7 @@ import fnmatch
 import json
 import os
 import queue
+import select
 import shutil
 import signal
 import socket
@@ -533,6 +534,98 @@ class TopologyTest(unittest.TestCase):
         self.assertEqual(topo.top_devs, {"253:0", "253:1", "", "251:0", "253:2"})
 
 
+class SampleRecordTest(unittest.TestCase):
+    """sample(): one sample's record from every source, on fake /proc, /sys and cgroupfs readers."""
+
+    def test_every_source(self) -> None:
+        mon = monitor(load())
+        uuid = "u-1"
+        base = f"/sys/fs/btrfs/{uuid}"
+        cg = md_proc.CGROUP_ROOT
+        mon.topo.fs = {uuid: {"label": "", "devs": ["dm-0"], "disks": ["nvme0n1"], "devids": ["1", "2"]}}
+        mon.topo.disks = {"nvme0n1": "btrfs:u-1", "dm-0": "btrfs:u-1"}
+        mon.topo.top_devs = {"253:0"}
+        mon.topo.containers = {"docker-abc": "/cg/docker-abc", "libpod-def": "/cg/libpod-def"}
+        mon.cmax = {uuid: 900, "gone": 5}
+        kv = {
+            "/proc/vmstat": {"nr_dirty": 5, "pswpout": 7, "zswpwb": 2},
+            "/proc/stat": {"procs_running": 3, "procs_blocked": 1},
+            f"{base}/commit_stats": {"commits": 10, "total_commit_ms": 100, "cur_commit_ms": 300, "last_commit_ms": 20},
+            f"{base}/devinfo/1/error_stats": {"write_errs": 1, "read_errs": 2},
+        }
+        texts = {
+            "/proc/loadavg": "1.5 1.0 0.5 2/300 99\n",
+            "/proc/diskstats": (
+                " 259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n"
+                " 253 0 dm-0 1 2 3 4 5 6 7 8 9 10 11\n"
+                "   8 0 sda 1 2 3 4 5 6 7 8 9 10 11 12 13 14\n"
+                " 1 2 short\n"
+            ),
+        }
+        psi = {
+            "/proc/pressure/io": [1.5, 20, 0.5, 10],
+            "/proc/pressure/memory": [0.0, 3, 0.0, 1],
+            "/proc/pressure/cpu": [2.0, 40, 0.0, 0],
+            f"{cg}/system.slice/io.pressure": [0.0, 7, 0.0, 6],
+            f"{cg}/system.slice/memory.pressure": [0.0, 5, 0.0, 4],
+            f"{cg}/user.slice/io.pressure": [0.0, 9, 0.0, 8],
+            "/cg/docker-abc/io.pressure": [0.0, 30, 0.0, 20],
+        }
+        io_stat = {f"{cg}/system.slice/io.stat": [100, 200], "/cg/docker-abc/io.stat": [1, 2]}
+
+        def read_int(path: str) -> int:
+            return len(path)  # each file of its own value
+
+        with (
+            mock.patch.object(md_monitor, "read_kv", lambda path: kv.get(path, {})),
+            mock.patch.object(md_monitor, "read_int", read_int),
+            mock.patch.object(md_monitor, "read_text", texts.get),
+            mock.patch.object(md_monitor, "parse_psi", psi.get),
+            mock.patch.object(
+                md_monitor, "parse_io_stat", lambda path, devs: io_stat.get(path) if devs == {"253:0"} else None
+            ),
+        ):
+            rec = dict(mon.sample([]))
+        del rec["ts"], rec["mono"]
+        self.assertEqual(
+            rec,
+            {
+                "t": "s",
+                "psi": {"io": [1.5, 20, 0.5, 10], "memory": [0.0, 3, 0.0, 1], "cpu": [2.0, 40, 0.0, 0]},
+                "vm": [5, 0, 0, 0, 0, 0, 0, 7, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "procs": [3, 1],
+                "d": 0,
+                "d_all": 0,
+                "d_fuse": 0,
+                "d_maint": 0,
+                "d_mem": 0,
+                "load1": 1.5,
+                # The highest commit time since the last sample (cmax) is taken once.
+                "fs": {
+                    uuid: {
+                        "c": [10, 100, 300, 20, 0, 900],
+                        "err": {"1": 3, "2": 0},
+                        "space": {
+                            "data": [44, 45, 47, 46, 48],
+                            "metadata": [48, 49, 51, 50, 52],
+                            "global_rsv": [44, 48],
+                        },
+                        "discard": [43, 45],
+                    }
+                },
+                # Only the topology's disks, and lines with all the fields.
+                "disk": {"nvme0n1": list(range(1, 18)), "dm-0": list(range(1, 12))},
+                # A slice without io.pressure is left out; a container has no memory figures.
+                "cg": {
+                    "system.slice": [7, 6, 5, 4, 100, 200],
+                    "user.slice": [9, 8, 0, 0, 0, 0],
+                    "docker-abc": [30, 20, 0, 0, 1, 2],
+                },
+            },
+        )
+        self.assertEqual(mon.cmax, {"gone": 5})
+
+
 class WaitKindTest(unittest.TestCase):
     m: _StallMonitordModule
 
@@ -830,6 +923,40 @@ class HungKindTest(unittest.TestCase):
             {t.name: t.value for t in md_domain.StallRecordTag},
             {"META": "meta", "SAMPLE": "s", "EPISODE": "ep", "EVENT": "ev", "ALERT": "al"},
         )
+
+    def test_each_kind_once_per_repeat_window(self) -> None:
+        # A third look, right after the report: no second report (HUNG_REPEAT). An idle wait is never
+        # one; a maintenance wait is an event without an alert; a FUSE wait opens no episode.
+        maint, fuse = "maintenance-wait", "fuse-wait"
+        for name, events, alerts in (
+            ("futex", [], []),
+            ("fstrim", [maint], []),
+            ("fuse", [fuse], [("fuse", "Program waiting on a FUSE filesystem (network share / portal)")]),
+        ):
+            with self.subTest(name=name):
+                self.mon = monitor(self.m)
+                self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS[name])})
+                d_tasks = [("10", "100", "java", STACKS[name], None, self.m.wait_kind(STACKS[name], None))]
+                with self.mon.fake:
+                    for now in (1000.0, 1000.0 + self.m.HUNG_SECONDS + 1, 1000.0 + self.m.HUNG_SECONDS + 2):
+                        self.mon.track_hung(d_tasks, now)
+                self.assertEqual([json.loads(line)["kind"] for _, line in self.mon.buffer], events)
+                self.assertEqual(self.mon.alerts, alerts)
+                self.assertIsNone(self.mon.episode)
+
+    def test_a_storage_wait_that_keeps_running_is_a_busy_wait(self) -> None:
+        # Scheduled between the samples (its run count grows): not stuck, but in D at every sample.
+        self.mon.fake = FakeProc(self.m, {"100": ("10", "java", STACKS["fsync"])})
+        d_tasks = [("10", "100", "java", STACKS["fsync"], None, "storage")]
+        runs = iter(range(100))
+        with self.mon.fake, mock.patch.object(self.m, "run_slices", lambda _pid, _tid: next(runs)):
+            for now in (1000.0, 1000.0 + self.m.HUNG_SECONDS + 1, 1000.0 + self.m.HUNG_SECONDS + 2):
+                self.mon.track_hung(d_tasks, now)
+        events = [json.loads(line) for _, line in self.mon.buffer]
+        self.assertEqual([(e["kind"], e["severe"]) for e in events], [("io-busy", False)])
+        self.assertIn("waited on storage at every sample for 31s while still being scheduled", events[0]["msg"])
+        self.assertEqual(self.mon.alerts, [])
+        self.assertIsNone(self.mon.episode)
 
     def test_storage_hung_task_unchanged(self) -> None:
         events = self.stuck("sync_log")
@@ -1273,6 +1400,93 @@ class NotifyLoopTest(unittest.TestCase):
         self.assertEqual((len(passes), len(os.listdir(run_dir))), (3, 3))
         self.assertTrue(_eventually(lambda: len(started) == 1))
         self.assertEqual(started, [["systemctl", "--no-block", "start", "btrfs-stall-alert.service"]])
+
+    def test_what_the_loop_does_with_poll_events(self) -> None:
+        """A PSI trigger the kernel closed (POLLERR) is opened again; one that fired asks for a sample now and
+        names the episode's reason; /dev/kmsg is drained; a new day writes the meta record again; at the end an
+        open episode is ended and the log flushed."""
+        record = self.events.append
+        mon = self.monitor(_FakeNotifier(self.events, pings=4))
+        fds: list[int] = []
+        current: dict[str, int] = {}
+
+        def pipe_fd(name: str) -> int:
+            r, w = os.pipe()
+            os.close(w)
+            fds.append(r)
+            current[name] = r
+            return r
+
+        def open_psi() -> None:
+            mon.psi_fd = pipe_fd("psi")
+            record("psi")
+
+        def open_kmsg() -> None:
+            mon.kmsg_fd = pipe_fd("kmsg")
+            record("kmsg")
+
+        def update_episode(_rec: object, _tasks: object) -> None:
+            record(f"episode reason {mon.want_episode}")
+            if mon.want_episode is not None:
+                mon.episode = md_domain.Episode(0.0, mon.want_episode)
+
+        script: list[Callable[[], list[tuple[int, int]]]] = [
+            lambda: [(current["psi"], select.POLLERR)],
+            lambda: [(current["psi"], select.POLLPRI)],
+            lambda: [(current["kmsg"], select.POLLIN)],
+            list,
+        ]
+
+        class Poller:
+            def poll(self, _timeout: float) -> list[tuple[int, int]]:
+                record("poll")
+                return script.pop(0)()
+
+            def unregister(self, fd: int) -> None:
+                record(f"unregister {fds.index(fd)}")
+
+        days = iter(["day 1", "day 1", "day 2"])
+        clock = types.SimpleNamespace(
+            time=time.time, monotonic=time.monotonic, strftime=lambda _fmt, *_t: next(days, "day 2")
+        )
+        for name, value in (
+            ("poller", Poller()),
+            ("open_psi_trigger", open_psi),
+            ("open_kmsg", open_kmsg),
+            ("drain_kmsg", lambda: record("drain")),
+            ("probe_commits", lambda: record("probe")),
+            ("sample", lambda _tasks: (record("sample"), {"t": "s", "ts": 0.0})[1]),
+            ("update_episode", update_episode),
+            ("meta_record", lambda: (record("meta"), {"t": "meta", "ts": 0.0})[1]),
+            ("end_episode", lambda: record("end episode")),
+            ("flush", lambda: record("flush")),
+        ):
+            setattr(mon, name, value)
+        with (
+            mock.patch.object(md_monitor, "time", clock),
+            mock.patch.object(md_monitor, "FLUSH_EVERY", 0),  # a flush at the end of every pass
+            mock.patch.object(md_monitor, "BASE_INTERVAL", 3600),
+            mock.patch.object(md_monitor, "EPISODE_INTERVAL", 3600),
+            mock.patch.object(md_monitor, "PROBE_INTERVAL", 3600),
+        ):
+            mon.run()
+        for fd in fds[1:]:  # the first one the loop closed itself
+            os.close(fd)
+        term, intr = f"signal:{int(md_monitor.signal.SIGTERM)}", f"signal:{int(md_monitor.signal.SIGINT)}"
+        self.assertEqual(
+            self.events,
+            [
+                *("psi", "kmsg", term, intr, "meta", "log:started", "READY=1"),
+                # POLLERR: the trigger is closed and opened again; the first pass probes and samples.
+                *("WATCHDOG=1", "poll", "unregister 0", "log:PSI trigger closed by kernel; re-arming", "psi"),
+                *("probe", "sample", "episode reason None", "flush"),
+                # The trigger fired: a sample now, its reason for the episode; a new day: the meta record.
+                *("WATCHDOG=1", "poll", "sample", "episode reason psi trigger", "meta", "flush"),
+                *("WATCHDOG=1", "poll", "drain", "flush"),
+                *("WATCHDOG=1", "poll", "flush"),
+                *("end episode", "flush", "log:stopped"),
+            ],
+        )
 
     def test_without_a_notifier_the_loop_sends_nothing(self) -> None:
         mon = self.monitor(None)
