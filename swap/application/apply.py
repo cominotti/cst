@@ -25,12 +25,10 @@ from swap.domain import (
     SwapApplyResult,
     SwapHardwareSpec,
     SwapSpecState,
-    can_evict_zram,
     crypto_has_algorithm,
     find_swap_used_kib,
     is_safe_partition_type,
     killed_text,
-    parse_meminfo,
     parse_tmpfiles_params,
     render_swap_settings,
     same_param,
@@ -387,9 +385,7 @@ class SwapApplicationService(SwapReports):
         zram_used = find_swap_used_kib(swaps_after_zswap, "/dev/zram0")
         if zram_used is None:
             return
-        meminfo = parse_meminfo(self._fs.read_text(posixpath.join(env.proc_dir, "meminfo"), "") or "")
-        avail_kib = meminfo.get("MemAvailable", 0) // 1024
-        if not can_evict_zram(zram_used, avail_kib):
+        if not self._zram_evictable(zram_used):
             events.append(
                 ApplyEvent(
                     "err",

@@ -289,6 +289,12 @@ class SwapReports:
     def _zram_masked(self) -> bool:
         return self._fs.is_symlink(self._env.zram_conf) and self._fs.readlink(self._env.zram_conf) == "/dev/null"
 
+    def _zram_evictable(self, zram_used: int) -> bool:
+        """Whether free RAM (MemAvailable in /proc/meminfo) can take the zram0 swap in use now
+        (zram_used, in KiB), so that swapping it off is safe."""
+        meminfo = parse_meminfo(self._fs.read_text(posixpath.join(self._env.proc_dir, "meminfo"), "") or "")
+        return can_evict_zram(zram_used, meminfo.get("MemAvailable", 0) // 1024)
+
     def _partition_size_sysfs(self, device_path: str) -> tuple[str, int] | None:
         return sysfs_partition(
             device_path,
@@ -486,9 +492,7 @@ class SwapReports:
         zram_used = find_swap_used_kib(swaps_text, "/dev/zram0")
         if zram_used is None:
             return PlanItem("ok", "zram0", "not active as swap")
-        meminfo = parse_meminfo(self._fs.read_text(posixpath.join(self._env.proc_dir, "meminfo"), "") or "")
-        avail_kib = meminfo.get("MemAvailable", 0) // 1024
-        if can_evict_zram(zram_used, avail_kib):
+        if self._zram_evictable(zram_used):
             return PlanItem("swapoff", "zram0", "active; free RAM can take its contents: apply swaps it off")
         return PlanItem("later", "zram0", "active; not enough free RAM to swap it off now: gone after a reboot")
 
