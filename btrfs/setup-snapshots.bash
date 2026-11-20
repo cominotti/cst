@@ -922,7 +922,7 @@ snap_nas() {
                 echo "  restic not active yet (after the next reboot)"
             elif [[ -s "${SNAP_RESTIC_PW}" ]]; then
                 snap_restic snapshots --compact --latest 1 --host "${NAS_RESTIC_HOST:-$(hostname -s)}" \
-                    --tag btrfs-setup 2>&1 | sed 's/^/  /'
+                    --tag btrfs-setup 2>&1 | cst_indent
             fi
             ;;
         enable)

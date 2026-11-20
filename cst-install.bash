@@ -10,7 +10,8 @@
 # atomically, and prints `unchanged: DEST` or `written:   DEST`.
 # Always on the system Python, so the zipapp bytes do not depend on PATH.
 # cst_as_user (at the end) runs a command as the user with that user's
-# session variables, for the steps a setup script runs as the user.
+# session variables, for the steps a setup script runs as the user, and
+# cst_indent indents a block of status output.
 
 CST_INSTALLER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/cst_core/installer.py"
 
@@ -186,4 +187,9 @@ cst_as_user() {
     runuser -u "${user}" -- env -u SUDO_USER \
         "HOME=${home}" "USER=${user}" "LOGNAME=${user}" \
         "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" "$@"
+}
+
+# cst_indent: the lines of stdin, two spaces in (a block of status output).
+cst_indent() {
+    sed 's/^/  /'
 }

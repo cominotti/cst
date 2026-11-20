@@ -323,10 +323,10 @@ status() {
     echo "deployments (initramfs-etc tracked files):"
     ostree_query summary
     echo "degraded flags in ${FLAG_DIR}:"
-    ls -l "${FLAG_DIR}" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+    ls -l "${FLAG_DIR}" 2>/dev/null | cst_indent || echo "  (none)"
     echo "persistent degraded markers in ${STATE_DIR}:"
-    ls -l "${STATE_DIR}" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-    systemctl list-units --all --no-pager --no-legend 'btrfs-last-resort@*' | sed 's/^/  /'
+    ls -l "${STATE_DIR}" 2>/dev/null | cst_indent || echo "  (none)"
+    systemctl list-units --all --no-pager --no-legend 'btrfs-last-resort@*' | cst_indent
     summary "${uuid}" "${rc}"
 }
 
