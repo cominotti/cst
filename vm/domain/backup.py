@@ -383,7 +383,7 @@ def nas_done_lines(notes: Sequence[str], snap: str, vm: str, consistency: str, k
     ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class NasRun:
     """One NAS backup: what its checks read before restic is asked anything (the definition, the
     sources, the stamp, the live snapshot's overlays: specs target -> (image, overlay), others the

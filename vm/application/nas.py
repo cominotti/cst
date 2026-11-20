@@ -316,14 +316,22 @@ def _nas_preflight(cfg: VmSettings, p: NasBackup, vm: str, *, live: bool, quiesc
     notes = list(parts.skipped)
     sources = nas_sources(cfg, p.store, vm, parts, notes)
     epoch, stamp = backup_time(cfg, p.clock)
-    specs: dict[str, tuple[str, str]] = {}
-    others: list[str] = []  # target -> (image, overlay); targets left out of the snapshot
-    agent = "none"
-    if live:
-        specs, others, agent = _nas_live_specs(cfg, p, vm, stamp, sources)
-    versions, deployment = p.commands.package_versions(), p.commands.booted_deployment()
+    specs, others, agent = _nas_live_specs(cfg, p, vm, stamp, sources) if live else ({}, [], "none")
     return NasRun(
-        vm, live, quiesce, xml_text, parts, notes, sources, epoch, stamp, specs, others, agent, versions, deployment
+        vm=vm,
+        live=live,
+        quiesce=quiesce,
+        xml_text=xml_text,
+        parts=parts,
+        versions=p.commands.package_versions(),
+        deployment=p.commands.booted_deployment(),
+        notes=notes,
+        sources=sources,
+        epoch=epoch,
+        stamp=stamp,
+        specs=specs,
+        others=others,
+        agent=agent,
     )
 
 
