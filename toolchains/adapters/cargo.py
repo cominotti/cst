@@ -62,6 +62,8 @@ def is_cargo_metadata(data: object) -> TypeIs[CargoMetadata]:
 
 
 CARGO_PROGRAM: Final = "cargo"  # the file name of cargo's program (not a ConfigTool)
+# Why cargo metadata could not be used: its output is not the JSON object it writes.
+METADATA_UNEXPECTED: Final = "cargo metadata: unexpected output"
 
 
 def cargo_binary(p: CargoProc, home: str) -> str:
@@ -118,9 +120,9 @@ def ask_cargo(cmd: Sequence[str], env: Mapping[str, str], cwd: str) -> tuple[str
     try:
         data = parse_json(r.stdout)
     except ValueError:
-        return None, "cargo metadata: unexpected output"
+        return None, METADATA_UNEXPECTED
     if not json_object(data):  # no .get: it raised AttributeError
-        return None, "cargo metadata: unexpected output"
+        return None, METADATA_UNEXPECTED
     bd = data.get("build_directory")
     # No build_directory: a cargo without build-dir support, so not this root.
     return (os.path.normpath(bd) if isinstance(bd, str) and bd else ""), None
@@ -329,7 +331,7 @@ def workspace_metadata(
         if not is_cargo_metadata(data):
             raise ValueError
     except ValueError:
-        return None, "cargo metadata: unexpected output"
+        return None, METADATA_UNEXPECTED
     return data, None
 
 
