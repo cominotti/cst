@@ -110,6 +110,9 @@ elif cmd == "snapshot-create-as":
         sys.exit("error: Guest agent is not responding: QEMU guest agent is not connected")
     if "snapshot" in fail:
         sys.exit("error: internal error: snapshot failed")
+    if "snapshot-hang-none" in fail:
+        # virsh hangs; libvirt made no overlay file and never switched the disk.
+        import time; time.sleep(30)
     if "snapshot-hang-nothing" in fail:
         # virsh hangs; libvirt made the file but never switched the disk (yet).
         for i, a in enumerate(args):
@@ -1180,6 +1183,33 @@ class NasPreflightAndSourcesTest(Nas):
             ],
         )
         self.assertEqual(self.index_entries()[0]["consistency"], "crash-consistent")
+
+    def test_a_failed_merge_back_names_the_backups_own_failure(self) -> None:
+        self.restic_cfg(backup_rc=1)
+        self.vm(fail=["commit"], agent="connected")
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("DISK NOT MERGED BACK:\n  ", r.stderr)
+        self.assertIn("\n(the backup itself: restic backup failed: restic exit 1; no backup recorded)\n", r.stderr)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertTrue(os.path.exists(self.overlay))
+
+    def test_an_unclear_snapshot_without_any_overlay_file_alerts_and_names_no_file(self) -> None:
+        self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")
+        self.vm(agent=None, fail=["snapshot-hang-none"])
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "cst vm: DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within 2 s and, 3 s later, "
+            "the VM's disks still do not all show the overlay: libvirt may still switch to it. Nothing was removed\n",
+            r.stderr,
+        )
+        self.assertNotIn("(kept:", r.stderr)
+        self.assertNotIn("(the backup itself", r.stderr)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertFalse(os.path.exists(self.overlay))
+        self.assertEqual(self.virsh_calls("blockcommit"), [])
+        self.assertNotIn("backup", [c["args"][0] for c in self.restic_calls()])
 
     def test_a_snapshot_timeout_without_quiesce_thaws_nothing(self) -> None:
         self.env.update(CST_VM_SNAPSHOT_TIMEOUT="2", CST_VM_SNAPSHOT_SETTLE="3")

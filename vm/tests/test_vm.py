@@ -1019,6 +1019,7 @@ class ListStatusTest(Scratch):
 
     def status_head(self) -> list[str]:
         """The lines of status win before the image folders (those depend on the machine's folders)."""
+        self.env.update(CST_VM_CONF=os.path.join(self.tmp, "vm.conf"), CST_VM_UNIT_DIR=os.path.join(self.tmp, "units"))
         r = self.run_tool("status", "win")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.replace(self.tmp, "TMP").splitlines()
@@ -1097,7 +1098,7 @@ class ListStatusTest(Scratch):
                 "mode": "nas",
                 "snapshot": "a1b2c3d4" + "e" * 56,
                 "repository": "sftp:nas:/r",
-                "host": "sophia",
+                "host": "nas-host",
                 "consistency": "quiesced",
                 "keep": None,
                 "versions": {},
