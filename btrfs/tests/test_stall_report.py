@@ -714,6 +714,12 @@ class ClassifyBranchesTest(unittest.TestCase):
             (("ep_poll", [], (), "storage"), "other"),
             (("mystery", [["x", "wbt_wait"]], (), None), "wbt"),
             (("mystery", [["x", "y"]], (), None), "other"),
+            # A FUSE signature, before the stack rules.
+            (("fuse_simple_request", [["btrfs_sync_log"]], (), None), "fuse"),
+            # The stack rules go rule by rule over each example; the last step frame by frame.
+            (("mystery", [["btrfs_sync_log", "btrfs_commit_transaction"]], (), None), "commit"),
+            (("mystery", [["x", "wbt_wait", "zstd_get_workspace"]], (), None), "wbt"),
+            (("mystery", [["x"], ["zstd_get_workspace", "wbt_wait"]], (), None), "zstd-workspace"),
         ]
         for (sig, examples, comms, kind), want in cases:
             with self.subTest(sig=sig, comms=comms, kind=kind):
