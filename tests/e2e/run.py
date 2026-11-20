@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 import datetime
 import os
 from pathlib import Path
+from types import ModuleType
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,8 @@ ARTIFACTS_BASE = E2E_DIR / ".artifacts"
 IMG_SYSTEMD = "cst-e2e-systemd:local"
 IMG_NAS = "cst-e2e-nas:local"
 IMG_PRIV = "cst-e2e-priv:local"
+# The label each image carries: the digest of its sources (image_digest.py's LABEL).
+SOURCES_LABEL = "org.cst.e2e.sources"
 
 # Tier 2 starts a --privileged container. Such a container sees the host's
 # block devices and loop devices and can load kernel modules, so a mistake in
@@ -158,14 +161,53 @@ def host_lsm_security_opts(apparmor: Path = APPARMOR_ENABLED) -> list[str]:
     return opts
 
 
-def docker_build(tag: str, dockerfile: Path, *, force: bool = False) -> None:
+def _image_digest_module() -> ModuleType:
+    """tests/e2e/image_digest.py, loaded by its path (run.py runs with -I: its folder is not on sys.path)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cst_e2e_image_digest", E2E_DIR / "image_digest.py")
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def sources_digest(name: str) -> str:
+    """The digest of image NAME's sources in this checkout (image_digest.py)."""
+    digest = vars(_image_digest_module())["image_digest"](name, REPO_ROOT)
+    if not isinstance(digest, str):
+        raise TypeError(f"image_digest({name!r}) gave {digest!r}")
+    return digest
+
+
+def image_label(tag: str) -> str | None:
+    """The org.cst.e2e.sources label of the local image TAG ("" without one), None when there is no image."""
+    fmt = '{{ index .Config.Labels "' + SOURCES_LABEL + '" }}'
+    found = run(["docker", "image", "inspect", "-f", fmt, tag], check=False, capture=True)
+    if found.returncode != 0:
+        return None
+    label = found.stdout.strip()
+    return "" if label == "<no value>" else label
+
+
+def docker_build(tag: str, dockerfile: Path, *, digest: str, force: bool = False) -> None:
+    """Build TAG from DOCKERFILE with the label of its sources' DIGEST, unless (without force) a local
+    image of that tag has that label: an image without it, or with another, is rebuilt, never used."""
     if not force:
-        check = run(["docker", "image", "inspect", tag], check=False, capture=True)
-        if check.returncode == 0:
-            print(f"[e2e] using cached image {tag}", flush=True)
+        label = image_label(tag)
+        if label == digest:
+            print(f"[e2e] using cached image {tag} (its sources are this checkout's)", flush=True)
             return
+        if label is None:
+            why = "no image"
+        elif label == "":
+            why = "no sources label"
+        else:
+            why = "other sources"
+        print(f"[e2e] {tag}: {why}: rebuilding", flush=True)
     print(f"[e2e] building {tag} from {dockerfile}...", flush=True)
-    cmd = ["docker", "build"]
+    cmd = ["docker", "build", "--label", f"{SOURCES_LABEL}={digest}"]
     cache_from = os.environ.get("CST_E2E_BUILD_CACHE_FROM", "").strip()
     if cache_from:
         for ref in (r.strip() for r in cache_from.split(",") if r.strip()):
@@ -242,8 +284,10 @@ def load_suite(filename: str) -> unittest.TestSuite:
 
 
 def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
-    docker_build(IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", force=rebuild)
-    docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", force=rebuild)
+    docker_build(
+        IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
+    )
+    docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", digest=sources_digest("nas"), force=rebuild)
 
     net = f"cst-e2e-net-{run_id}"
     nas = f"cst-e2e-nas-{run_id}"
@@ -298,9 +342,11 @@ def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
 
 
 def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
-    docker_build(IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", force=rebuild)
-    docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", force=rebuild)
-    docker_build(IMG_PRIV, E2E_DIR / "images" / "priv.Dockerfile", force=rebuild)
+    docker_build(
+        IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
+    )
+    docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", digest=sources_digest("nas"), force=rebuild)
+    docker_build(IMG_PRIV, E2E_DIR / "images" / "priv.Dockerfile", digest=sources_digest("priv"), force=rebuild)
 
     net = f"cst-e2e-net2-{run_id}"
     nas = f"cst-e2e-nas2-{run_id}"
