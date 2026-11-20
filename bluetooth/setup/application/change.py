@@ -41,7 +41,7 @@ from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
 from cst_core.domain.install import Component
 from cst_core.domain.units import ActiveState
-from cst_core.ports import OutputMode
+from cst_core.ports import CommandResult, OutputMode, UnitName
 
 SPACE = r"[ \t\n\r\f\v]"
 
@@ -94,11 +94,15 @@ class Change(Checks):
     def undo_hint(self) -> str:
         return f" Backup of main.conf: {self.backup or 'none taken'}. Undo: {self.c.prog} revert"
 
+    def _must_result(self, r: CommandResult) -> None:
+        if r.returncode != 0:
+            raise StepFailed(shell_exit_status(r.returncode))
+
     def preconditions(self) -> None:
         for name in ("bluetoothctl", "busctl", "systemctl", "python3", "journalctl", "timeout", "sudo"):
             if not self.m.files.which(name):
                 raise self.die(f"command not found: {name}")
-        if not self.ok(["systemctl", "--user", "show-environment"]):
+        if self.m.user_systemd.show_environment().returncode != 0:
             raise self.die("no systemd --user session (XDG_RUNTIME_DIR/D-Bus): run it in your desktop or login session")
 
     def checked(self, args: list[str], input_text: str | None = None) -> str:
@@ -157,9 +161,7 @@ class Change(Checks):
 
     def restart_wireplumber(self) -> bool:
         self.out("restart:   wireplumber (your session; audio stops for a moment)\n")
-        restarted = (
-            self.run(["systemctl", "--user", "restart", "wireplumber"], output=OutputMode.INHERIT).returncode == 0
-        )
+        restarted = self.m.user_systemd.restart(UnitName("wireplumber"), output=OutputMode.INHERIT).returncode == 0
         self.forget_unit(WIREPLUMBER_UNIT)
         if not restarted:
             self.err(
@@ -450,20 +452,20 @@ class Change(Checks):
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
         unit_changed = said.startswith("written:")
         if unit_changed:
-            self.must(["systemctl", "--user", "daemon-reload"])
+            self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
         changed = unit_changed or any(line.startswith("written:") for line in r.stdout.splitlines())
         if self.lw_enabled != "enabled":
-            self.must(["systemctl", "--user", "enable", unit])
+            self._must_result(self.m.user_systemd.enable(UnitName(unit), output=OutputMode.INHERIT))
             self.out(f"enabled:   {unit} (starts with your session)\n")
         if self.lw_active != ActiveState.ACTIVE:
-            self.must(["systemctl", "--user", "start", unit])
+            self._must_result(self.m.user_systemd.start(UnitName(unit), output=OutputMode.INHERIT))
             self.out(f"started:   {unit} (logs: journalctl --user -u {unit})\n")
         elif changed:
-            self.must(["systemctl", "--user", "restart", unit])
+            self._must_result(self.m.user_systemd.restart(UnitName(unit), output=OutputMode.INHERIT))
             self.out(f"restarted: {unit} (new files)\n")
         else:
             self.out(f"unchanged: {unit} enabled and active\n")
-        self.lw_active = self.quiet(["systemctl", "--user", "is-active", unit])
+        self.lw_active = self.m.user_systemd.is_active(UnitName(unit), output=OutputMode.STDOUT).stdout.rstrip("\n")
         r = self.installer("mark", "--home", p.home, "--component", Component.BLUETOOTH_LDAC, "done")
         if r.returncode != 0:
             raise StepFailed(shell_exit_status(r.returncode))
@@ -482,10 +484,10 @@ class Change(Checks):
             self.out(f"would stop, disable and remove {unit} and {p.lw_prog}\n")
             return
         if self.lw_unit_st in (OwnedState.OK, OwnedState.CHANGE):
-            self.out(self.run(["systemctl", "--user", "disable", "--now", unit], output=OutputMode.STDOUT).stdout)
+            self.out(self.m.user_systemd.disable(UnitName(unit), now=True, output=OutputMode.STDOUT).stdout)
             self.checked(["remove-text", "--home", p.home, p.lw_unit_file])
             self.out(f"removed:   {p.lw_unit_file} (stopped and disabled)\n")
-            self.must(["systemctl", "--user", "daemon-reload"])
+            self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
         if self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT, OwnedState.CHANGE):
             self.checked(["remove", "--home", p.home, "bluetooth/bt-ldac-watch"])
             self.m.files.remove_empty_dir(os.path.dirname(p.lw_prog))

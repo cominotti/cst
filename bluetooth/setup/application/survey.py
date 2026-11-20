@@ -133,6 +133,8 @@ class SetupMachine:
 
     runner: CommandRunnerPort
     systemd: SystemdPort  # its show only: ActiveState and InvocationID (unit_show)
+    user_systemd_host: SystemdPort  # user manager queries on the host (survey)
+    user_systemd: SystemdPort  # user manager changes/checks locally (change)
     clock: ClockPort
     console: SetupConsolePort
     files: SetupFilesPort
@@ -366,7 +368,8 @@ class Survey:
         bluetoothd's invocation, running or not (a stopped unit keeps its last one), as unit_show
         has it; fresh: read again (the wait after a restart)."""
         inv = self.unit_show(BLUETOOTH_UNIT, user=False, fresh=fresh)[1]
-        wp_pid = self.quiet(["systemctl", "--user", "show", "-p", "MainPID", "--value", "wireplumber"], host=True)
+        u = self.m.user_systemd_host
+        wp_pid = u.show_value(UnitName("wireplumber"), "MainPID", output=OutputMode.STDOUT).stdout.rstrip("\n")
         if not inv or not re.fullmatch(r"[1-9][0-9]*", wp_pid):
             return BapState.UNKNOWN
         senders = senders_of(self.quiet(["busctl", "--system", "list", "--no-legend", "--unique"], host=True), wp_pid)
@@ -496,15 +499,12 @@ class Survey:
             self.p.lw_unit_file, render_unit(self.c.device, self.c.ldac_rate or "48000"), unit=True
         )
         self.lw_prog_st = self._lw_prog_state() if f.exists(self.p.lw_prog) else OwnedState.MISSING
-        self.lw_enabled = self.quiet(["systemctl", "--user", "is-enabled", LDAC_UNIT], host=True)
-        self.lw_active = self.quiet(["systemctl", "--user", "is-active", LDAC_UNIT], host=True)
+        u = self.m.user_systemd_host
+        self.lw_enabled = u.is_enabled(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
+        self.lw_active = u.is_active(UnitName(LDAC_UNIT), output=OutputMode.STDOUT).stdout.rstrip("\n")
         if self.lw_want:
-            done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == (
-                OwnedState.OK,
-                OwnedState.OK,
-                "enabled",
-                ActiveState.ACTIVE,
-            )
+            want = (OwnedState.OK, OwnedState.OK, "enabled", ActiveState.ACTIVE)
+            done = (self.lw_unit_st, self.lw_prog_st, self.lw_enabled, self.lw_active) == want
             self.lw_change = not done
         else:
             self.lw_change = self.lw_ours_present()
@@ -577,11 +577,8 @@ class Survey:
         word, note = notes[self.bearer_state]
         self.item(word, "preferred bearer", note)
         if b == "le" and self.c.le_audio == "off":
-            self.item(
-                "warn",
-                "preferred bearer",
-                "BEARER=le while LE Audio is off: connections the PC starts get no audio profile; use bredr",
-            )
+            msg = "BEARER=le while LE Audio is off: connections the PC starts get no audio profile; use bredr"
+            self.item("warn", "preferred bearer", msg)
         self.lw_report()
 
     def le_report(self) -> None:
@@ -624,17 +621,11 @@ class Survey:
             if not path:
                 continue
             if where == "before":
-                self.item(
-                    "warn",
-                    self.tilde(path),
-                    "also sets monitor.bluez.properties: while LE Audio is off the CST file replaces that section, so its settings there do not apply",
-                )
+                msg = "also sets monitor.bluez.properties: while LE Audio is off the CST file replaces that section, so its settings there do not apply"
+                self.item("warn", self.tilde(path), msg)
             else:
-                self.item(
-                    "warn",
-                    self.tilde(path),
-                    "sets monitor.bluez.properties after the CST file: it can bring the LE Audio roles back (status checks them)",
-                )
+                msg = "sets monitor.bluez.properties after the CST file: it can bring the LE Audio roles back (status checks them)"
+                self.item("warn", self.tilde(path), msg)
 
     def lw_report(self) -> None:
         svc = f"{LDAC_UNIT} (your session)"
@@ -643,16 +634,10 @@ class Survey:
             self._lw_off_report(rate)
             return
         if self.user_sets("LDAC_RATE"):
-            self.item(
-                "note",
-                LDAC_WATCHER_LABEL,
-                f"on because {self.tilde(self.p.user_settings)} sets LDAC_RATE={rate} (CST default: off)",
-            )
-            self.item(
-                "note",
-                "",
-                f"CST keeps it off until it is checked again on PipeWire 1.6.11; to turn it off: remove LDAC_RATE from that file, then {self.c.prog} apply",
-            )
+            why = f"on because {self.tilde(self.p.user_settings)} sets LDAC_RATE={rate} (CST default: off)"
+            self.item("note", LDAC_WATCHER_LABEL, why)
+            hint = f"CST keeps it off until it is checked again on PipeWire 1.6.11; to turn it off: remove LDAC_RATE from that file, then {self.c.prog} apply"
+            self.item("note", "", hint)
         if self.o.cmd == BluetoothCommand.PLAN and self.lw_last_failure():
             self.item("warn", LDAC_WATCHER_LABEL, self.lw_failure_text())
         unit_rows = {
@@ -675,11 +660,10 @@ class Survey:
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
         if self.lw_enabled != "enabled" or self.lw_active != ActiveState.ACTIVE:
-            self.item(
-                "enable",
-                svc,
-                f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it",
+            why = (
+                f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it"
             )
+            self.item("enable", svc, why)
         elif self.lw_unit_st == OwnedState.OK and self.lw_prog_st in (OwnedState.OK, OwnedState.ADOPT):
             self.item("ok", svc, "enabled, active")
         else:

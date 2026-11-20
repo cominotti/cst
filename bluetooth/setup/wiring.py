@@ -135,6 +135,8 @@ def build(opts: Options, cfg: Config, where: Paths, *, container: bool, bt_timeo
         SetupMachine(
             runner=runner,
             systemd=SystemctlAdapter(runner, on_host=SystemctlHost.SHOW_ONLY),
+            user_systemd_host=SystemctlAdapter(runner, user=True, on_host=SystemctlHost.EVERY),
+            user_systemd=SystemctlAdapter(runner, user=True, on_host=SystemctlHost.LOCAL),
             clock=SystemClockAdapter(),
             console=SetupTerminal(),
             files=LocalSetupFiles(),
