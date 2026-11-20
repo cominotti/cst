@@ -215,9 +215,13 @@ doctor: needs attention: 0 ERROR, 1 WARN, 1 info, 3 ok
   asks `getent passwd TARGET_USER` on the host (through `flatpak-spawn --host` in a toolbox) whether it names an account,
   and asks `systemctl show -p LoadState -p PROP... UNIT` once per unit, of
   the system and of your user manager (`systemctl --user show`; as root,
-  `systemctl --user -M TARGET_USER@ show`). When the profile is for another
-  user than the one running the doctor, the user manager's units are skipped
-  (`info`). A `cpuset.cpus` file the profile wrote directly is read under
+  `systemctl --user -M USER@ show`). USER is the one the profile acts for, as
+  its tick and `cst cpu game state` ask: the user whose `user@UID.service`
+  `game.state` names (`on` records it first), so a `TARGET_USER` changed while
+  the profile is on does not move the check to another user; `TARGET_USER`
+  when `game.state` names none (or its uid names no account). When the
+  profile is for another user than the one running the doctor, the user
+  manager's units are skipped (`info`). A `cpuset.cpus` file the profile wrote directly is read under
   `/sys/fs/cgroup`. While the profile is off it lists
   `/run/systemd/system/*.d/zz-cst-game.conf`. The check of the user
   manager's boxes reads only files: the folder names and `cpu.stat` under

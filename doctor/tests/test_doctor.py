@@ -2048,6 +2048,28 @@ class GameProfileTest(Scratch):
         self.assertIn("user@1000.service", res[1].message)
         self.assertIn("user.slice", res[1].message)
 
+    def test_the_user_game_state_names_is_asked_not_a_changed_target_user(self) -> None:
+        # 'on' acted for the user whose user@UID.service it recorded first; TARGET_USER names another
+        # user now (results() sets tester). The profile's tick and 'state' ask the user game.state
+        # names, and so does the doctor; a uid that names no account leaves TARGET_USER's.
+        me = pwd.getpwuid(os.getuid()).pw_name
+        state = os.path.join(self.run_dir, "game.state")
+        for uid, asked in ((os.getuid(), me), (999999, "tester")):
+            with self.subTest(uid=uid):
+                self.profile_on()
+                with open(state, "w") as f:
+                    f.write(f"prop sys user@{uid}.service MemoryLow new -\n")
+                before = len(self.calls())
+                host = doc_adapters.Host(self.env, repo=REPO)
+                host.uid = 0
+                with open(os.path.join(self.root, "etc", "cpu-setup", "cpu-setup.conf"), "w") as f:
+                    f.write("TARGET_USER='tester'\n")
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    list(doc_cpu.check_game_profile_drift(host))
+                calls = self.calls()[before:]
+                self.assertIn(f"systemctl --user -M {asked}@ show -p LoadState -p CPUWeight user.slice", calls)
+                self.assertEqual([c for c in calls if " -M " in c and f"-M {asked}@" not in c], [])
+
     def test_other_user_skips_the_user_manager(self) -> None:
         self.profile_on()
         host = doc_adapters.Host(self.env, repo=REPO)

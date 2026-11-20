@@ -5,7 +5,7 @@ boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
-from cpu.game.domain import GameRecordKind, Record, intended_records, newer_intended
+from cpu.game.domain import GameRecordKind, Record, intended_records, newer_intended, records, state_uid
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
     CPU_CONF,
@@ -81,9 +81,23 @@ def check_cpu_settings(host: DoctorHostPort) -> Iterator[Result]:
         )
 
 
-def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
-    """(systemctl args for the target user's manager, or None, why not)."""
+def profile_user(host: DoctorHostPort) -> str:
+    """The user the game profile acts for, as its tick and 'state' ask that user's manager: the one
+    game.state names ('on' records that user's user@UID.service first: state_uid), so a TARGET_USER
+    changed while the profile is on does not move the check to another user; else (no such record,
+    or its uid names no account here) TARGET_USER ("" when not set)."""
     target = conf_value(host, CPU_CONF, "TARGET_USER") or ""
+    try:
+        with host.open_text(host.path(GAME_STATE)) as f:
+            uid = state_uid(records(f.read()))
+    except OSError:
+        return target
+    return (host.user_name(int(uid)) if uid is not None else "") or target
+
+
+def user_manager(host: DoctorHostPort) -> tuple[list[str] | None, str]:
+    """(systemctl args for the manager of the user the profile acts for (profile_user), or None, why not)."""
+    target = profile_user(host)
     if host.uid == 0:
         if not target:
             return None, f"no TARGET_USER in {CPU_CONF}"
