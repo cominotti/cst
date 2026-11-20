@@ -273,6 +273,8 @@ def scrub_problems(m: Probe, mnt: str) -> list[str]:
     if not scrub.started:
         problems.append(f"btrfs {mnt}: no scrub has ever completed")
     elif scrub.status == "running":
+        # A scrub in progress is no problem: this arm keeps it out of the
+        # "did not finish" and age checks below.
         pass
     elif scrub.status != "finished":
         problems.append(
