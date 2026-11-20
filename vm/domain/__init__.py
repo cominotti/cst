@@ -293,48 +293,59 @@ def domain_parts(xml_text: str) -> DomainParts:
     disks: list[str] = []
     skipped: list[str] = []
     problems: list[str] = []
-    nvram = ""
     for disk in root.findall("devices/disk"):
-        device = disk.get("device", "disk")
-        kind = disk.get("type", "file")
-        target = disk.find("target")
-        dev = target.get("dev") if target is not None else None
-        src = disk.find("source")
-        if device in ("cdrom", "floppy"):
-            image = (src.get("file") or src.get("dev") or "") if src is not None else ""
-            skipped.append(f"{disk_label(dev, image)} ({device}, not copied)")
-            continue
-        if kind != "file":
-            where = ""
-            if src is not None:
-                where = src.get("dev") or src.get("name") or src.get("volume") or src.get("dir") or ""
-            problems.append(
-                f"{disk_label(dev)}: a {kind} disk{f' ({where})' if where else ''}: only file disks "
-                "can be copied; back it up by hand"
-            )
-            continue
-        path = src.get("file") if src is not None else None
-        if path is None or path == "":
-            skipped.append(f"{disk_label(dev)} (no source file)")
-            continue
-        if path not in disks:
-            disks.append(path)
-    nv = root.find("os/nvram")
-    if nv is not None:
-        path = (nv.text or "").strip()
-        s = nv.find("source")
-        if not path and s is not None:
-            path = s.get("file") or ""
-        nvram = path
+        _sort_backup_disk(disk, disks, skipped, problems)
     tpm = any(b.get("type") == "emulator" for b in root.findall("devices/tpm/backend"))
     return DomainParts(
         uuid=(root.findtext("uuid") or "").strip(),
         disks=disks,
-        nvram=nvram,
+        nvram=_nvram_path(root),
         tpm=tpm,
         skipped=skipped,
         problems=problems,
     )
+
+
+def _sort_backup_disk(disk: ET.Element, disks: list[str], skipped: list[str], problems: list[str]) -> None:
+    """One <disk> into domain_parts' disks (a file's path, once), skipped (CD-ROM, floppy, no file) or problems."""
+    device = disk.get("device", "disk")
+    kind = disk.get("type", "file")
+    target = disk.find("target")
+    dev = target.get("dev") if target is not None else None
+    src = disk.find("source")
+    if device in ("cdrom", "floppy"):
+        image = (src.get("file") or src.get("dev") or "") if src is not None else ""
+        skipped.append(f"{disk_label(dev, image)} ({device}, not copied)")
+        return
+    if kind != "file":
+        problems.append(
+            f"{disk_label(dev)}: a {kind} disk{_disk_source_where(src)}: only file disks "
+            "can be copied; back it up by hand"
+        )
+        return
+    path = src.get("file") if src is not None else None
+    if path is None or path == "":
+        skipped.append(f"{disk_label(dev)} (no source file)")
+    elif path not in disks:
+        disks.append(path)
+
+
+def _disk_source_where(src: ET.Element | None) -> str:
+    """' (WHERE)' for a disk that is not a file: the device, name, volume or folder <source> names, or ""."""
+    where = (src.get("dev") or src.get("name") or src.get("volume") or src.get("dir") or "") if src is not None else ""
+    return f" ({where})" if where else ""
+
+
+def _nvram_path(root: ET.Element) -> str:
+    """The UEFI variables file of a definition: <os><nvram>'s text, else its <source file>; "" for none."""
+    nv = root.find("os/nvram")
+    if nv is None:
+        return ""
+    path = (nv.text or "").strip()
+    s = nv.find("source")
+    if not path and s is not None:
+        path = s.get("file") or ""
+    return path
 
 
 def stored(dest_dir: str, src: str) -> str:
@@ -668,6 +679,12 @@ def nocow_lines(d: ImageProbe, prog: str, verbose: bool = True) -> list[str]:
         if d.nocow is not None or d.scope != "system":
             out.append("  images: folder not listable as your user")
         return out
+    return out + _nocow_image_lines(d, root_hint, verbose=verbose)
+
+
+def _nocow_image_lines(d: ImageProbe, root_hint: str, *, verbose: bool) -> list[str]:
+    """nocow_lines' lines about a listed folder's images (verbose: how to convert each copy-on-write one)."""
+    out: list[str] = []
     cow = [i for i in d.images if i.nocow is False]
     unknown = [i for i in d.images if i.nocow is None]
     ok = [i for i in d.images if i.nocow is True]
@@ -710,35 +727,7 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
         if sub is None:
             raise Usage(f"{cmd}: {' or '.join(subs)}")
         rest = rest[1:]
-    flags = _FLAGS.get(cmd, ())
-    if cmd == VmCommand.NOCOW and sub != VmSub.PLAN:
-        flags = ()
-    takes_vm = cmd != VmCommand.NOCOW
-    where = " ".join(filter(None, (cmd, sub)))
-    seen: set[str] = set()
-    vm: str | None = None
-    keep: str | None = None
-    while rest:
-        x = rest.pop(0)
-        if cmd == VmCommand.BACKUP and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
-            if "=" in x:
-                value = x.split("=", 1)[1]
-            elif rest:
-                value = rest.pop(0)
-            else:
-                value = ""
-            if not valid_keep(value):
-                raise Usage(
-                    f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
-                    "starting with cst- or vm:), e.g. pre-f46"
-                )
-            keep = value
-        elif x in flags and x not in seen:
-            seen.add(x)
-        elif takes_vm and not x.startswith("-") and vm is None:
-            vm = x
-        else:
-            raise Usage(f"{where}: unexpected argument '{x}'")
+    vm, keep, seen = _vm_words(cmd, sub, rest)
     a = VmArgs(
         cmd=cmd,
         sub=sub,
@@ -750,11 +739,55 @@ def parse_args(argv: Sequence[str]) -> VmArgs:
         keep=keep,
         no_quiesce="--no-quiesce" in seen,
     )
+    _check_backup_flags(a)
+    return a
+
+
+def _check_backup_flags(a: VmArgs) -> None:
+    """Usage for backup flags that do not go together: --full with --nas, --keep-tag or --no-quiesce without it."""
     if a.full and a.nas:
         raise Usage("backup: --full is for the local copy, --nas for the NAS: one of them")
     if (a.keep is not None or a.no_quiesce) and not a.nas:
         raise Usage("backup: --keep-tag and --no-quiesce go with --nas")
-    return a
+
+
+def _vm_words(cmd: VmCommand, sub: VmSub | None, rest: list[str]) -> tuple[str | None, str | None, set[str]]:
+    """(VM, --keep-tag value, flags) from the words after the command and its sub; Usage for another word."""
+    flags = _FLAGS.get(cmd, ())
+    if cmd == VmCommand.NOCOW and sub != VmSub.PLAN:
+        flags = ()
+    takes_vm = cmd != VmCommand.NOCOW
+    where = " ".join(filter(None, (cmd, sub)))
+    seen: set[str] = set()
+    vm: str | None = None
+    keep: str | None = None
+    while rest:
+        x = rest.pop(0)
+        if cmd == VmCommand.BACKUP and (x == "--keep-tag" or x.startswith("--keep-tag=")) and keep is None:
+            keep = _keep_tag_value(x, rest)
+        elif x in flags and x not in seen:
+            seen.add(x)
+        elif takes_vm and not x.startswith("-") and vm is None:
+            vm = x
+        else:
+            raise Usage(f"{where}: unexpected argument '{x}'")
+    return vm, keep, seen
+
+
+def _keep_tag_value(x: str, rest: list[str]) -> str:
+    """The value of x, --keep-tag=VALUE or --keep-tag and the next word (taken from rest); Usage if invalid."""
+    if "=" in x:
+        value = x.split("=", 1)[1]
+    elif rest:
+        value = rest.pop(0)
+    else:
+        value = ""
+    if not valid_keep(value):
+        raise Usage(
+            f"--keep-tag {value!r}: a name of letters, digits and . _ - (up to 64, not "
+            "starting with cst- or vm:), e.g. pre-f46"
+        )
+    return value
 
 
 # The flags each command takes (nocow: --root with plan only).
