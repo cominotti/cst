@@ -660,15 +660,15 @@ def _device_profiles(params: object, raw_rule: object) -> tuple[str, str | None]
     return prof, None if raw_rule is None else str(raw_rule)
 
 
-def _node_parts(codec: object, info: object, params: object, quality: str | None) -> tuple[str, str | None, str | None]:
-    """(codec, rate, quality) of the headset's output Node (pw_state); QUALITY, an earlier node's,
+def _node_parts(info: object, params: object, quality: str | None) -> tuple[str | None, str | None]:
+    """(rate, quality) of the headset's output Node (pw_state); QUALITY, an earlier node's,
     stays when its Props name none."""
     rate = node_rate(info)
     for pr in items_of(object_of(params).get("Props", []) or []):
         if has_item(pr, "quality"):
             q = object_of(pr)["quality"]
             quality = QUALITY_NUM.get(q, str(q)) if isinstance(q, int) else str(q)
-    return str(codec), None if rate is None else str(rate), quality
+    return None if rate is None else str(rate), quality
 
 
 def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
@@ -696,7 +696,8 @@ def pw_state(dev: str, objs: object) -> tuple[str | None, str | None, str | None
             and str(p.get("node.name", "")).startswith("bluez_output." + dev)
             and p.get(CODEC_KEY, "")
         ):
-            codec, rate, quality = _node_parts(p[CODEC_KEY], info, params, quality)
+            codec = str(p[CODEC_KEY])
+            rate, quality = _node_parts(info, params, quality)
     if not found:
         return None
     return prof or None, rule, codec, quality, rate
