@@ -1223,6 +1223,282 @@ class ReportTextTest(unittest.TestCase):
         )
 
 
+CAT_LOG_SYNC = "fsync log-tree sync (btrfs_sync_log)"
+MAINT_TITLE = "btrfs maintenance (fstrim/scrub) waiting (recorded as stuck on IO)"
+
+
+class SummariseBranchesTest(unittest.TestCase):
+    """summarise() on small windows that each reach one branch: coverage and gaps, the btrfs, disk and
+    cgroup totals, the episodes of older daemons and their estimates, and the events it renames."""
+
+    @staticmethod
+    def rec(ts: float, **fields: object) -> dict[str, object]:
+        """A sample record of a v8 daemon at ts (mono follows ts), with fields replaced."""
+        base: dict[str, object] = {
+            "t": "s",
+            "ts": ts,
+            "mono": ts - T0 + 100,
+            "psi": {"io": [1.0, 1000 * ts, 0.5, 500 * ts], "memory": [0, 0, 0, 0], "cpu": [0, 0, 0, 0]},
+            "procs": [1, 2],
+            "vm": [1, 2, 0, 0, 0, 0, 0],
+            "fs": {},
+            "disk": {},
+            "cg": {},
+            "d": 1,
+            "d_all": 2,
+            "d_maint": 0,
+            "d_mem": 1,
+        }
+        base.update(fields)
+        return base
+
+    @staticmethod
+    def window(records: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+        """The records of a window [T0, T0 + 60] after a v8 meta record, for analyse()."""
+        return [meta(T0 - 100, 8), *records]
+
+    def test_totals_of_the_sample_pairs(self) -> None:
+        fs_a = {"u": {"c": [10, 100, 0, 0, 0, 50], "err": {"1": 1, "2": 0}, "space": {"metadata": [1, 2, 0, 0, 0]}}}
+        fs_b = {"u": {"c": [12, 160, 0, 0, 0, 900], "err": {"1": 3, "2": 0}}, "v": {"c": [1, 1, 0, 0, 0, 5], "err": {}}}
+        fs_c = {
+            "u": {"c": [11, 170, 0, 0, 0, 20], "err": {"1": 3, "2": 1}},
+            "v": {"c": [2, 3, 0, 0, 0, 5], "err": {"9": 4}},
+        }
+
+        def disk(n: int) -> list[int]:
+            return [n] * 17
+
+        samples = [
+            self.rec(T0 - 20),
+            self.rec(T0 - 10),
+            self.rec(T0 + 1, fs=fs_a, disk={"nvme0n1": disk(10), "sda": []}, cg={"user.slice": [1, 1, 0, 0, 10, 20]}),
+            self.rec(
+                T0 + 6,
+                fs=fs_b,
+                disk={"nvme0n1": disk(20), "sda": disk(1)},
+                cg={"user.slice": [5, 2, 0, 0, 30, 60], "x": [1, 1, 0, 0, 1, 1]},
+            ),
+            self.rec(
+                T0 + 11,
+                fs=fs_c,
+                disk={"nvme0n1": disk(15), "sda": disk(2)},
+                cg={"user.slice": [4, 3, 0, 0, 40, 70], "x": [2, 2, 0, 0, 2, 2]},
+            ),
+            self.rec(T0 + 11),
+            self.rec(T0 + 50),
+            self.rec(T0 + 55, d=4, d_mem=2, d_maint=1),
+        ]
+        # A meta record after the window does not count; the samples before the one at or before since go.
+        m = load()
+        later = {"t": "meta", "ts": T0 + 100, "v": 8, "kernel": "later"}
+        res, _ = m.analyse(self.window([later, *samples]), T0, T0 + 60, with_below=False, verbose=False)
+        self.assertEqual((res["kernel"], res["samples"]), ("7.2.0", 7))
+        # Two gaps: a pair 0 s apart, one 39 s apart.
+        self.assertEqual(
+            res["coverage"],
+            {"window_s": 60, "covered_s": 26, "first_sample": T0 - 10, "last_sample": T0 + 55, "complete": False}
+            | {"skipped": 0, "gaps": 2},
+        )
+        # A filesystem new in a pair counts its longest commit only; commits that went back are left out;
+        # device errors count what grew.
+        self.assertEqual(
+            res["fs"],
+            {
+                "u": {"commits": 2, "commit_ms": 60, "max_commit_ms": 900, "max_at": T0 + 6, "new_device_errors": 3}
+                | {"space": {}, "avg_commit_ms": 30.0},
+                "v": {"commits": 1, "commit_ms": 2, "max_commit_ms": 5, "max_at": T0 + 6, "new_device_errors": 0}
+                | {"space": {}, "avg_commit_ms": 2.0},
+            },
+        )
+        # A disk new in a pair, or with a counter that went back, is left out of that pair.
+        disks = res["disks"]
+        self.assertEqual(
+            {
+                n: (d["rd_ios"], d["peak_util_pct"], d["peak_at"], d["await_ms"], d["util_pct"])
+                for n, d in disks.items()
+            },
+            {"nvme0n1": (10, 0.2, T0 + 6, 1.0, 1 / 26), "sda": (1, 0.02, T0 + 11, 1.0, 0.1 / 26)},
+        )
+        self.assertEqual(
+            res["cgroups"],
+            {
+                "user.slice": {"io_some": 4, "io_full": 1, "read_bytes": 20, "write_bytes": 40, "wall": 5.0}
+                | {"io_some_pct": 4 / 1e6 / 5 * 100, "io_full_pct": 1 / 1e6 / 5 * 100},
+                "x": {"io_some": 1, "io_full": 1, "read_bytes": 1, "write_bytes": 1, "wall": 5.0}
+                | {"io_some_pct": 1 / 1e6 / 5 * 100, "io_full_pct": 1 / 1e6 / 5 * 100},
+            },
+        )
+        peak = res["peak"]
+        self.assertEqual(
+            (
+                peak["d_tasks"],
+                peak["mem_tasks"],
+                peak["maint_tasks"],
+                res["maintenance_samples"],
+                res["sample_d_tasks"],
+            ),
+            (4, 2, 1, 1, 4),
+        )
+        # One sample: the window, the counts and the coverage only.
+        self.assertEqual(
+            m.analyse(self.window(samples[:1]), T0, T0 + 60, with_below=False, verbose=False)[0],
+            {
+                "window": {"since": T0, "until": T0 + 60},
+                "kernel": "7.2.0",
+                "samples": 1,
+                "episodes": [],
+                "events": [],
+                "alerts": [],
+                "coverage": {"window_s": 60, "covered_s": 0, "first_sample": T0 - 20, "last_sample": T0 - 20}
+                | {"complete": False, "skipped": 0},
+            },
+        )
+
+    def test_older_daemons_episodes_and_notices(self) -> None:
+        def sig(name: str, n: int, kind: str | None = None) -> dict[str, object]:
+            s: dict[str, object] = {
+                "sig": name,
+                "ctx": "",
+                "n": n,
+                "comms": {"a": n},
+                "cgroups": {"x.slice": n},
+                "examples": [[name]],
+            }
+            if kind is not None:
+                s["kind"] = kind
+            return s
+
+        v2 = {
+            "t": "ep",
+            "start": T0 + 20,
+            "end": T0 + 30,
+            "reason": "psi",
+            "max_d": 10,
+            "peak": {"commit_ms": 5},
+            "sigs": [sig("btrfs_sync_log", 6), sig("zswap_load", 2), sig("fuse_simple_request", 2)],
+        }
+        v2_empty = {"t": "ep", "start": T0 + 31, "end": T0 + 32, "reason": "psi", "max_d": 3, "peak": {}, "sigs": []}
+        v5 = {
+            "t": "ep",
+            "start": T0 + 45,
+            "end": T0 + 50,
+            "reason": "hung task",
+            "max_d": 8,
+            "max_d_all": 9,
+            "peak": {"io_full_avg10": 3},
+            "sigs": [
+                sig("btrfs_sync_log", 3, "storage"),
+                sig("shrink_node", 1, "storage"),
+                sig("btrfs_ioctl_fitrim", 4, "storage"),
+                sig("futex_wait", 5, "idle"),
+            ],
+        }
+        v5_storage = {
+            "t": "ep",
+            "start": T0 + 52,
+            "end": T0 + 53,
+            "reason": "psi",
+            "max_d": 4,
+            "max_d_all": 4,
+            "peak": {},
+            "sigs": [sig("btrfs_sync_log", 3, "storage")],
+        }
+        v8 = {
+            "t": "ep",
+            "start": T0 + 54,
+            "end": T0 + 56,
+            "reason": "psi",
+            "max_d": 2,
+            "max_d_all": 3,
+            "max_d_mem": 1,
+            "peak": {"commit_ms": 9},
+            "sigs": [sig("btrfs_sync_log", 3, "storage"), sig("zswap_load", 1, "memory")],
+        }
+        old = {k: v for k, v in self.rec(0).items() if k not in ("d_maint", "d_mem")}
+        samples = [
+            self.rec(T0 + 1),
+            {**old, "ts": T0 + 5, "mono": 105.0, "d": 5},  # v3/v4: d counted memory and maintenance too
+            {**old, "ts": T0 + 10, "mono": 110.0, "d": 2},
+            {**old, "ts": T0 + 15, "mono": 115.0, "d": 9},
+            {**old, "ts": T0 + 20, "mono": 120.0, "d": 7},
+            {**{k: v for k, v in self.rec(0).items() if k != "d_mem"}, "ts": T0 + 25, "mono": 125.0, "d": 6},
+            {**{k: v for k, v in self.rec(0).items() if k != "d_mem"}, "ts": T0 + 46, "mono": 146.0, "d": 9},
+            self.rec(T0 + 50),
+        ]
+        v2_fuse = "task gvfsd:1 blocked 30 s at fuse_simple_request"
+        maint = "z:3 waited 31 s"
+        events = [
+            {"t": "ev", "ts": T0 + 5, "kind": "hung", "severe": True, "msg": v2_fuse},
+            {
+                "t": "ev",
+                "ts": T0 + 6,
+                "kind": "hung",
+                "severe": True,
+                "msg": maint,
+                "stack": ["schedule", "btrfs_ioctl_fitrim"],
+            },
+            {"t": "ev", "ts": T0 + 7, "kind": "hung", "severe": True, "msg": "task fstrim:123 blocked at x"},
+            {
+                "t": "ev",
+                "ts": T0 + 8,
+                "kind": "hung",
+                "severe": True,
+                "msg": "w:4 at btrfs_sync_log",
+                "stack": ["btrfs_sync_log"],
+            },
+            {"t": "ev", "ts": T0 - 5, "kind": "hung", "msg": "outside the window at fuse_x"},
+        ]
+        alerts = [
+            {"t": "al", "ts": T0 + 5, "kind": "hung", "title": "T", "body": "y:2 stuck at request_wait_answer"},
+            {"t": "al", "ts": T0 + 6, "kind": "hung", "title": "T", "body": maint},
+            {"t": "al", "ts": T0 + 9, "kind": "hung", "title": "T", "body": "in cgroup btrfs-scrub@home.service"},
+            {"t": "al", "ts": T0 + 9, "kind": "hung", "title": "T", "body": "w:4 at btrfs_sync_log"},
+        ]
+        for verbose in (False, True):
+            with self.subTest(verbose=verbose):
+                records = [meta(T0, 4), *samples, v2, v2_empty, v5, v5_storage, v8, *events, *alerts]
+                res, _ = load().analyse(
+                    self.window(copy.deepcopy(records)), T0, T0 + 60, with_below=False, verbose=verbose
+                )
+                eps = res["episodes"]
+                # v2 (no max_d_all) and v3-v7 (no max_d_mem): max_d estimated from the storage share.
+                self.assertEqual(
+                    [(e["start"] - T0, e["max_d"], e["max_d_all"], e["max_d_mem"], e.get("estimated")) for e in eps],
+                    [
+                        (20, 6, 10, 2, True),
+                        (52, 4, 4, 0, None),
+                        (45, 3, 9, 1, True),
+                        (54, 2, 3, 1, None),
+                        (31, 0, 3, 0, True),
+                    ],
+                )
+                self.assertEqual({"examples" in s for e in eps for s in e["sigs"]}, {verbose})
+                self.assertEqual([s["cat"] for s in eps[2]["sigs"]], ["log-sync", "reclaim", "maintenance", "idle"])
+                self.assertEqual(
+                    res["categories"],
+                    [{"category": "log-sync", "description": CAT_LOG_SYNC, "task_samples": 15, "share": 1.0}],
+                )
+                self.assertEqual(res["non_storage_waits"], {"reclaim": 4, "fuse": 2, "maintenance": 4, "idle": 5})
+                # The v3-v7 samples within a capped episode (from 35 s before a hung task's) count its estimate.
+                peak = res["peak"]
+                self.assertEqual((peak["d_tasks"], peak["mem_tasks"], res["sample_d_tasks"]), (6, 2, 3))
+                notices = res["events"] + res["alerts"]
+                self.assertEqual(
+                    [(n["kind"], n.get("severe"), n.get("title")) for n in notices],
+                    [
+                        ("fuse-wait", False, None),
+                        ("maintenance-wait", False, None),
+                        ("maintenance-wait", False, None),
+                        ("hung", True, None),
+                        ("fuse", None, "Program waiting on a FUSE filesystem (recorded as stuck on IO)"),
+                        ("maintenance-wait", None, MAINT_TITLE),
+                        ("maintenance-wait", None, MAINT_TITLE),
+                        ("hung", None, "T"),
+                    ],
+                )
+                self.assertEqual((res["open_episode"], res["v6_since"]), (None, T0 - 100))
+
+
 class ClassifyBranchesTest(unittest.TestCase):
     """Each way classify() decides, one case per branch (the mutation run left them unchecked)."""
 
