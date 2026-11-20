@@ -19,10 +19,12 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
 import datetime
+import errno
 import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -168,6 +170,9 @@ for a in "$@"; do
   case "$a" in --reflink=*|--sparse=*) ;; *) set -- "$@" "$a" ;; esac
   shift
 done
+if [ -n "$FIX_CP_REMOVES" ]; then
+  case " $* " in *"$FIX_CP_REMOVE_WHEN"*) /usr/bin/cp "$@" || exit; rm -rf "$FIX_CP_REMOVES"; exit 0 ;; esac
+fi
 exec /usr/bin/cp "$@"
 """
 RPM = """#!/bin/sh
@@ -835,6 +840,84 @@ class BackupTest(Scratch):
         with open(os.path.join(self.dest(), "manifest.json")) as f:
             man = json.load(f)
         self.assertEqual(man["files"][0]["source"], real)
+
+    def test_a_disk_that_is_not_there_is_refused_before_any_copy(self) -> None:
+        gone = os.path.join(self.images, "gone.qcow2")
+        self.domain(
+            self.domain_xml(f"<disk type='file' device='disk'><source file='{gone}'/><target dev='sdc'/></disk>")
+        )
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"cst vm: win: disk {gone} not found\n", r.stderr)
+        self.assertFalse(os.path.exists(self.backups))
+        self.assertFalse([c for c in self.calls() if c.startswith("cp ")])
+
+    def test_two_disks_through_one_file_are_copied_once(self) -> None:
+        link = os.path.join(self.images, "link.qcow2")
+        os.symlink(self.disk, link)
+        self.domain(
+            self.domain_xml(f"<disk type='file' device='disk'><source file='{link}'/><target dev='sdc'/></disk>")
+        )
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
+        self.assertEqual(
+            [(e["source"], e["kind"]) for e in man["files"]],
+            [(self.disk, "disk"), (self.nvram, "nvram"), (os.path.join(self.swtpm, UUID), "tpm")],
+        )
+        self.assertEqual(
+            man["notes"],
+            [
+                "sdb (cdrom, not copied)",
+                f"disk {link} is a symbolic link: copied (and restored) through it: {self.disk}",
+            ],
+        )
+        self.assertIn("Done: 3 item(s), definition and manifest in", r.stdout)
+
+    def test_a_definition_without_uefi_variables_or_tpm(self) -> None:
+        xml = self.domain_xml()
+        xml = xml.replace(f"<nvram template='/usr/share/x.qcow2' format='qcow2'>{self.nvram}</nvram>", "")
+        xml = xml.replace("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>", "")
+        self.domain(xml)
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            man = json.load(f)
+        self.assertEqual([e["source"] for e in man["files"]], [self.disk])
+        self.assertEqual(man["notes"], ["sdb (cdrom, not copied)"])
+        self.assertIn("Done: 1 item(s), definition and manifest in", r.stdout)
+
+    def test_uefi_variables_not_there_yet_are_a_note(self) -> None:
+        os.unlink(self.nvram)
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f"  note: UEFI variables {self.nvram} not there yet (the VM never started?): not copied\n", r.stdout
+        )
+        with open(os.path.join(self.dest(), "manifest.json")) as f:
+            self.assertEqual([e["kind"] for e in json.load(f)["files"]], ["disk", "tpm"])
+
+    def test_a_source_removed_during_the_copy_is_a_change(self) -> None:
+        self.env.update(FIX_CP_REMOVES=self.disk, FIX_CP_REMOVE_WHEN=os.path.join(self.swtpm, UUID))
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(
+            "cst vm: changed during the copy (the VM was started?), the copy is not consistent: "
+            f"{self.disk}. Shut the VM off and run the backup again\n",
+            r.stderr,
+        )
+        self.assertIn(f"  incomplete backup removed: {self.dest()}", r.stderr)
+        self.assertFalse(os.path.exists(self.dest()))
+        self.assertFalse(os.path.exists(self.index))
+
+    def test_a_backup_folder_of_the_same_second_is_refused(self) -> None:
+        os.makedirs(self.dest())
+        r = self.run_tool("backup", "win")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"cst vm: {self.dest()} already exists: wait a second and run it again\n", r.stderr)
+        self.assertEqual(os.listdir(self.dest()), [])
+        self.assertFalse([c for c in self.calls() if c.startswith("cp ")])
 
     def test_missing_tpm_state_is_a_note(self) -> None:
         shutil.rmtree(os.path.join(self.swtpm, UUID))
@@ -1690,6 +1773,78 @@ class NocowTest(unittest.TestCase):
         self.assertEqual(verbose[6:12], [f"      {ln}" for ln in vm_domain.convert_lines(images[0], system=True)])
         self.assertEqual(verbose[12], "  still copy-on-write: d.qcow2  1.0 MiB allocated, 2.0 MiB apparent")
         self.assertEqual(len(verbose), 21)
+
+    def test_mark_system_dir_as_root(self) -> None:
+        path = os.path.join(self.tmp, "var", "lib", "libvirt", "new-images")
+        ran: list[list[str]] = []
+
+        def fake_run(cmd: Sequence[str], timeout: int = 120) -> tuple[int, str, str]:
+            ran.append(list(cmd))
+            return 0, "", ""
+
+        def _root() -> int:
+            return 0
+
+        def mark(p: str) -> None:
+            self.flags[p] = inode_attrs.FS_NOCOW_FL
+
+        def no_mark(p: str) -> None:
+            pass
+
+        def refused(p: str) -> None:
+            raise OSError(errno.EPERM, "Operation not permitted")
+
+        absent = vm_domain.ImageProbe("system", path, "x")
+        present = vm_domain.ImageProbe("system", path, "x", present=True)
+        with mock.patch.object(os, "geteuid", _root), patch_vm("run", fake_run):
+            with patch_vm("mark_folder_nocow", mark):
+                self.assertEqual(vm_adapters_images.mark_system_dir(absent, print), "")
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o711)
+            self.assertEqual(ran, [["restorecon", path]])
+            self.flags[path] = 0
+            with patch_vm("mark_folder_nocow", no_mark):
+                self.assertEqual(vm_adapters_images.mark_system_dir(present, print), f"{path}: the mark did not stick")
+            with patch_vm("mark_folder_nocow", refused):
+                self.assertEqual(vm_adapters_images.mark_system_dir(present, print), f"{path}: Operation not permitted")
+            orphan = vm_domain.ImageProbe("system", os.path.join(self.tmp, "no", "such", "images"), "x")
+            with patch_vm("mark_folder_nocow", mark):
+                self.assertEqual(
+                    vm_adapters_images.mark_system_dir(orphan, print), f"{orphan.path}: No such file or directory"
+                )
+        self.assertEqual(ran, [["restorecon", path]])
+
+    def test_mark_system_dir_through_sudo_stops_at_the_failed_step(self) -> None:
+        new = self.system + " new"
+        ran: list[list[str]] = []
+        said: list[str] = []
+
+        def on_terminal(cmd: Sequence[str]) -> int:
+            ran.append(list(cmd))
+            return 1 if cmd[2] == "install" else 0
+
+        def fake_run(cmd: Sequence[str], timeout: int = 120) -> tuple[int, str, str]:
+            ran.append(list(cmd))
+            return 1, "", ""
+
+        def _user() -> int:
+            return 1000
+
+        with (
+            mock.patch.object(os, "geteuid", _user),
+            patch_vm("run_on_terminal", on_terminal),
+            patch_vm("run", fake_run),
+        ):
+            err = vm_adapters_images.mark_system_dir(vm_domain.ImageProbe("system", new, "x"), said.append)
+            self.assertEqual(err, f"sudo install {shlex.quote(new)}: exit 1")
+            self.assertEqual(ran, [["sudo", "--", "install", "-d", "-o", "root", "-g", "root", "-m", "0711", new]])
+            self.assertEqual(said, [f"  sudo install -d -o root -g root -m 0711 {shlex.quote(new)}"])
+            ran.clear()
+            present = vm_domain.ImageProbe("system", self.system, "x", present=True)
+            err = vm_adapters_images.mark_system_dir(present, said.append)
+        self.assertEqual(err, f"{self.system}: the mark could not be confirmed (sudo lsattr -d {self.system})")
+        self.assertEqual(
+            ran, [["sudo", "--", "chattr", "+C", self.system], ["sudo", "--", "lsattr", "-d", self.system]]
+        )
 
     def test_convert_lines_order(self) -> None:
         img = vm_domain.ImageInfo("w b.qcow2", "/i/w b.qcow2", 0, 0, False)
