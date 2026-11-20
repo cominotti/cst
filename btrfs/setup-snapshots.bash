@@ -308,6 +308,7 @@ snap_plan_summary() {   # home: prints the plan; sets SNAP_TODO
             aside) state="cache: deleted before converting its parent"; SNAP_TODO=$((SNAP_TODO + 1)) ;;
             absent) state="absent (created when its parent appears)" ;;
             -) continue ;;
+            *) ;;  # any other state (skipped: REASON) is printed as it is
         esac
         printf '  ~/%-62s %s\n' "${rel}" "${state}"
     done
@@ -647,6 +648,7 @@ snap_status() {
             aside) state="pending (delete cache)" ;;
             absent) state="absent" ;;
             -) continue ;;
+            *) ;;  # any other state (skipped: REASON) is shown as it is
         esac
         printf '  %-23s ~/%s\n' "${state}" "${rel}"
     done

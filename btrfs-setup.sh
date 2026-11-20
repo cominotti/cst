@@ -222,6 +222,7 @@ case "${cmd}" in
     --test-alert) cmd=test-alert ;;
     --no-below) cmd=install; set -- --no-below "$@" ;;
     -h|--help) cmd=help ;;
+    *) ;;  # any other word: checked by the dispatch below
 esac
 
 case "${cmd}" in
@@ -761,6 +762,7 @@ crypt_perf() {
                 same_cpu_crypt) opts+=(--perf-same_cpu_crypt) ;;
                 submit_from_crypt_cpus) opts+=(--perf-submit_from_crypt_cpus) ;;
                 high_priority) opts+=(--perf-high_priority) ;;
+                *) ;;  # no_read/no_write_workqueue: set or dropped by the action below, never carried over
             esac
         done
         if [[ "${action}" == enable ]]; then
@@ -862,6 +864,7 @@ docker_gc() {
             case "${timer}" in
                 "") timer=off ;;
                 not-found) timer="not installed" ;;
+                *) ;;  # systemd's other words (enabled, disabled, static, masked...) are shown as they are
             esac
             printf 'timer %s, recorder %s\n' "${timer}" \
                 "$(systemctl is-active docker-gc-recorder.service 2>/dev/null || true)"

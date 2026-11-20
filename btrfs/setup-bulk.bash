@@ -68,6 +68,7 @@ bulk_warn() {   # btrfs-bulk's status
             echo "  An item marked NEEDS A LOOK is inside ~/Bulk only (no data of it in /home):"
             echo "  snapshots do not wait for it. Fix it as '${PROG} bulk status' says."
             return 0 ;;
+        *) ;;  # any other status: the general warning below
     esac
     echo "  Items marked NEEDS A LOOK are not handled automatically: once snapshots run,"
     echo "  their data would stay in /home snapshots for months. Fix each one as"
