@@ -232,11 +232,13 @@ Then, if you want a backup on the NAS:
 **4. Smaller storage options** (each one is a separate decision)
 
 ```
-cst btrfs crypt-perf enable   # asks the passphrase of each disk
-cst btrfs docker-gc enable    # weekly, careful Docker cleanup
+cst btrfs crypt-perf enable     # asks the passphrase of each disk
+cst btrfs compress-force plan   # dry run: force zstd compression across mount layers
+cst btrfs docker-gc enable      # weekly, careful Docker cleanup
 ```
 
-Details: [btrfs/README.md, section 9](btrfs/README.md#9-crypt-perf-faster-encryption-path)
+Details: [btrfs/README.md, section 9](btrfs/README.md#9-crypt-perf-faster-encryption-path),
+[section 9.1](btrfs/README.md#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator)
 and [section 11](btrfs/README.md#11-docker-gc-weekly-careful-docker-cleanup).
 
 **5. Swap and memory** (no reboot needed)
@@ -368,6 +370,7 @@ swap and memory, with counters since boot.
 | Disk monitoring and tuning | `cst btrfs uninstall` | [btrfs/README.md, section 6](btrfs/README.md#6-uninstall-how-to-undo) |
 | Degraded boot | `cst btrfs degraded-boot uninstall`, then reboot | [btrfs/README.md, section 8](btrfs/README.md#8-degraded-boot-start-the-pc-with-one-disk-dead) |
 | Faster encryption | `cst btrfs crypt-perf disable` | [btrfs/README.md, section 9](btrfs/README.md#9-crypt-perf-faster-encryption-path) |
+| Forced zstd compression | `cst btrfs compress-force revert` | [btrfs/README.md, section 9.1](btrfs/README.md#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator) |
 | Snapshots and NAS backup | `cst btrfs snapshots disable` (add `--purge` to delete the snapshots) | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#12-how-to-undo) |
 | One `~/Bulk` link | `cst btrfs bulk keep ID`, then remove the link and move the folder back by hand | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#undo-one-bulk-link) |
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |
@@ -433,8 +436,8 @@ everything with `plan`, `status` or `doctor` before changing anything:
 - `fix-anaconda-webui-btrfs-compress.sh`: a one-time helper for **installing**
   Fedora, not for the running system. You run it as root in the Fedora Live
   system, before the installer, so that btrfs mount points created in the
-  installer's web interface get the options `compress=...` (Fedora's default,
-  usually `zstd:1`), `noatime`, `flushoncommit` and `commit=10`. Run
+  installer's web interface get the options `compress-force=...` (Fedora's default
+  zstd level, usually `zstd:1`), `noatime`, `flushoncommit` and `commit=10`. Run
   `sudo ./fix-anaconda-webui-btrfs-compress.sh --help` for its own help.
   *(Not verified: whether the current installation was made with it.
   `cst btrfs status` does not check `commit=10`.)*

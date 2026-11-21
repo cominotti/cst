@@ -1046,6 +1046,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         for extra_flags, subcmd in (
             ([], "/opt/cst/cst cpu install"),
             ([], "/opt/cst/cst btrfs install --no-below"),
+            ([], "/opt/cst/cst btrfs compress-force apply --yes"),
+            ([], "/opt/cst/cst btrfs compress-force revert --yes"),
             ([], "/opt/cst/cst swap apply"),
             (["--user", "tester"], "/opt/cst/cst bluetooth apply --no-restart --yes"),
         ):
@@ -6991,6 +6993,151 @@ echo E2E-OK
                 echo "doctor still warns about the launcher" >&2; exit 1
             fi
             rm -f "$err"
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    def test_157_btrfs_compress_force_plan_apply_revert_and_doctor(self) -> None:
+        """`cst btrfs compress-force` updates real /etc/fstab, real btrfs:top-mount (verified by
+        systemd-analyze verify + recorded in installed.json + reloaded by PID 1 systemd), kargs/mount
+        stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-compress"
+        top_unit = r"var-mnt-btrfs\x2dtop.mount"
+        auto_unit = r"var-mnt-btrfs\x2dtop.automount"
+        uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            if [[ -f {w}/fstab.bak ]]; then
+                cp -a {w}/fstab.bak /etc/fstab
+            else
+                rm -f /etc/fstab
+            fi
+            if [[ -f {w}/installed.json.bak ]]; then
+                cp -a {w}/installed.json.bak /var/lib/cst/installed.json
+            else
+                rm -f /var/lib/cst/installed.json
+            fi
+            if [[ ! -f {w}/had-ostree-booted ]]; then
+                rm -f /run/ostree-booted
+            fi
+            rm -f /etc/systemd/system/{top_unit} /etc/systemd/system/{auto_unit}
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w} && mkdir -p {w}/bin {w}/proc
+            [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
+            touch /run/ostree-booted
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
+            printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "rpm-ostree $*" >>{w}/calls
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then
+    cat {w}/kargs
+    exit 0
+fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+    cur="$(cat {w}/kargs)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete=*) old="${{1#--delete=}}"; cur="${{cur//${{old}}/}}" ;;
+            --append=*) add="${{1#--append=}}"; cur="${{cur}} ${{add}}" ;;
+        esac
+        shift
+    done
+    printf '%s\\n' "$(echo "${{cur}}" | xargs)" >{w}/kargs
+    exit 0
+fi
+exit 1
+EOF
+            cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then
+    echo "{uuid}"
+    exit 0
+fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do
+        printf '%s %s %s\\n' "$src" "$tgt" "$opts"
+    done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "mount $*" >>{w}/calls
+opt=""
+for a in "$@"; do
+    case "$a" in remount,*) opt="${{a#remount,}}" ;; esac
+done
+if [[ -n "$opt" ]]; then
+    python3 -c '
+import sys
+p, opt = sys.argv[1], sys.argv[2]
+lines = open(p).read().splitlines(keepends=True)
+out = []
+for ln in lines:
+    toks = ln.split()
+    toks[3] = ",".join([opt if t.startswith("compress") else t for t in toks[3].split(",")])
+    out.append(" ".join(toks) + "\\n")
+open(p, "w").write("".join(out))
+' {w}/proc/mounts "$opt"
+fi
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            . /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMPRESS_PROC="{w}/proc"
+
+            plan_out="$(/opt/cst-rw/cst btrfs compress-force plan)"
+            grep -q 'compress-force=zstd:1' <<<"$plan_out"
+            grep -q 'compress=zstd:1' /etc/fstab
+
+            apply_out="$(/opt/cst-rw/cst btrfs compress-force apply --yes)"
+            grep -q 'Updated /etc/fstab' <<<"$apply_out"
+            grep -q 'compress-force=zstd:1' /etc/fstab
+            grep -q 'compress-force=zstd:1' {w}/kargs
+            grep -q 'compress-force=zstd:1' {w}/proc/mounts
+            grep -q 'Options=.*compress-force=zstd:1' "/etc/systemd/system/{top_unit}"
+            systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
+
+            second_out="$(/opt/cst-rw/cst btrfs compress-force apply)"
+            grep -q 'nothing to do' <<<"$second_out"
+
+            status_out="$(/opt/cst-rw/cst btrfs compress-force status)"
+            grep -q 'coherent (compress-force=zstd:1)' <<<"$status_out"
+
+            doc_out="$(/opt/cst-rw/cst doctor || true)"
+            grep -q 'ok     root btrfs compression: coherent (compress-force=zstd:1)' <<<"$doc_out"
+
+            /opt/cst-rw/cst btrfs compress-force revert --yes >/dev/null
+            grep -q 'compress=zstd:1' /etc/fstab
+            grep -q 'compress=zstd:1' {w}/kargs
+            grep -q 'compress=zstd:1' {w}/proc/mounts
+            grep -q 'Options=.*compress=zstd:1' "/etc/systemd/system/{top_unit}"
             echo E2E-OK
             """,
         ).stdout

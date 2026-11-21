@@ -10,6 +10,20 @@ import shlex
 import time
 from typing import Final, NamedTuple
 
+from btrfs.compress.domain import (
+    OSTREE_BOOTED_PATH,
+    ROOT_TARGETS,
+    TOP_MOUNT_UNIT_PATH,
+    CoherenceReport,
+    CompressMode,
+    CompressSnapshot,
+    assess_coherence,
+    parse_compress_spec,
+    parse_fstab_root_entries,
+    parse_proc_mounts,
+    parse_top_mount_unit,
+    pick_root_mounts,
+)
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import ShellAssignments, parse_shell_assignments
@@ -27,6 +41,7 @@ from doctor.domain import (
     BTRFS_SYSFS,
     ERROR,
     FS_UUID,
+    FSTAB,
     HEALTH_CHECK_HOST,
     INFO,
     MIRROR_COPIES,
@@ -399,15 +414,19 @@ def _unallocated_striped(host: DoctorHostPort, fs: _Fs, levels: _Levels) -> Resu
     return Result(INFO, f"{fs.name}: {fs.needs_root}")
 
 
-@check(CHECKS, "btrfs")
-def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | None = None) -> Iterator[Result]:
-    sysfs = host.path(BTRFS_SYSFS)
+def _btrfs_sysfs_uuids(host: DoctorHostPort, sysfs: ViewPath) -> list[str]:
     try:
-        uuids = sorted(
+        return sorted(
             n for n in host.listdir(sysfs) if FS_UUID.match(n) and host.isdir(view_join(sysfs, n, "allocation"))
         )
     except OSError:
-        uuids = []
+        return []
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_allocation(host: DoctorHostPort, *, health_check_repo: str | None = None) -> Iterator[Result]:
+    sysfs = host.path(BTRFS_SYSFS)
+    uuids = _btrfs_sysfs_uuids(host, sysfs)
     if not uuids:
         yield Result(INFO, f"allocation: no mounted btrfs filesystem ({BTRFS_SYSFS} has none)")
         return
@@ -572,3 +591,91 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
         )
     else:
         yield Result(INFO, f"{msg}; tried again at the next boot")
+
+
+def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
+    rc, out, _ = host.run(["findmnt", "-rn", "-t", "btrfs", "-o", "SOURCE,TARGET,OPTIONS,UUID"], timeout=15)
+    if rc != 0 or not out.strip():
+        return None, ""
+    lines: list[str] = []
+    root_uuid = ""
+    for raw in out.splitlines():
+        match raw.strip().split(None, 3):
+            case [src, tgt, opts, uuid]:
+                lines.append(f"{src} {tgt} btrfs {opts} 0 0\n")
+                if not root_uuid and tgt in ROOT_TARGETS:
+                    root_uuid = uuid
+            case [src, tgt, opts]:
+                lines.append(f"{src} {tgt} btrfs {opts} 0 0\n")
+    return ("".join(lines) or None), root_uuid
+
+
+_COMPRESSION_LABEL: Final[str] = "root btrfs compression"
+
+
+def _read_ostree_kargs(host: DoctorHostPort) -> str | None:
+    rc, kout, _ = host.run(["rpm-ostree", "kargs"])
+    if rc == 0 and kout.strip():
+        return kout
+    return read_text(host, host.path(HostPath("/proc/cmdline")), 65536) or None
+
+
+def _compression_report_result(
+    host: DoctorHostPort,
+    report: CoherenceReport,
+    *,
+    has_sources: bool,
+) -> Result | None:
+    if not report.coherent:
+        has_force = any(
+            "=" in d
+            and (sp := parse_compress_spec(d.split("=", 1)[1])) is not None
+            and sp.mode == CompressMode.COMPRESS_FORCE
+            for d in report.drift_details
+        )
+        fix_sub = "apply" if has_force else "revert"
+        return Result(
+            WARN,
+            f"{_COMPRESSION_LABEL}: {report.summary}",
+            f"{host.cst} btrfs compress-force {fix_sub}",
+        )
+    if report.has_compression:
+        return Result(OK, f"{_COMPRESSION_LABEL}: {report.summary}")
+    if has_sources:
+        return Result(INFO, f"{_COMPRESSION_LABEL}: {report.summary}")
+    return None
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_compression(host: DoctorHostPort) -> Iterator[Result]:
+    """Coherence of root btrfs compression across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
+    fstab_raw = read_text(host, host.path(FSTAB), 65536)
+    proc_mounts_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
+    top_text = read_text(host, host.path(HostPath(TOP_MOUNT_UNIT_PATH)), 65536)
+    has_btrfs_fstab = bool(parse_proc_mounts(fstab_raw))
+    has_btrfs_proc = bool(pick_root_mounts(parse_proc_mounts(proc_mounts_raw)))
+    if not (has_btrfs_fstab or has_btrfs_proc or top_text or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
+        return
+    live_findmnt, root_uuid = _findmnt_root_btrfs_info(host)
+    live_text = live_findmnt or proc_mounts_raw
+    if not (
+        parse_fstab_root_entries(fstab_raw, root_uuid) or pick_root_mounts(parse_proc_mounts(live_text)) or top_text
+    ):
+        return
+
+    is_ostree = host.exists(host.path(HostPath(OSTREE_BOOTED_PATH)))
+    kargs_text = _read_ostree_kargs(host) if is_ostree else None
+    top_mount = parse_top_mount_unit(top_text) if top_text else None
+    report = assess_coherence(
+        CompressSnapshot(
+            is_ostree=is_ostree,
+            root_uuid=root_uuid,
+            fstab_text=fstab_raw or None,
+            kargs_text=kargs_text,
+            proc_mounts_text=live_text or None,
+            top_mount=top_mount,
+        )
+    )
+    res = _compression_report_result(host, report, has_sources=bool(fstab_raw or live_text or top_text))
+    if res is not None:
+        yield res

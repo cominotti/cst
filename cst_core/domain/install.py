@@ -240,6 +240,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         ".github/scripts/pin_invowk.py",
         "bluetooth/bt-helper",
         "bluetooth/bt-setup",
+        "btrfs/btrfs-compress",
         "btrfs/btrfs-stall-watch",
         "btrfs/chrome-cache",
         "btrfs/tests/realbtrfs-snapshot-core.sh",

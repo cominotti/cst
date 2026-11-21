@@ -30,6 +30,7 @@ the CPU side (`cst cpu`), is [../README.md](../README.md).
 7. [`report`: was storage the bottleneck?](#7-report-was-storage-the-bottleneck)
 8. [`degraded-boot`: start the PC with one disk dead](#8-degraded-boot-start-the-pc-with-one-disk-dead)
 9. [`crypt-perf`: faster encryption path](#9-crypt-perf-faster-encryption-path)
+    - [9.1 `compress-force`: skip the cheap btrfs compressibility estimator](#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator)
 10. [`snapshots` (summary)](#10-snapshots-summary)
     - [10.1 `bulk`: one folder for everything you can download again](#101-bulk-one-folder-for-everything-you-can-download-again)
     - [10.2 Toolchain caches: in `cst toolchains` now](#102-toolchain-caches-in-cst-toolchains-now)
@@ -111,7 +112,7 @@ Rules:
   with the message
   `'<command>' must run on the host, not inside a toolbox/container ...`.
   Open a terminal on the host for them.
-- `report` and `watch` work on the host and inside a toolbox.
+- `report`, `watch`, `compress-force status` and `compress-force plan` work on the host and inside a toolbox.
 - Run it as your normal user, through `cst` (not `sudo cst`), for example:
 
 ```
@@ -130,6 +131,7 @@ cst btrfs help
 | `test-alert` | root | Sends a test desktop alert. |
 | `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
+| `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
 | `bulk steam plan\|apply [--app ID] [--copy]` | root | Moves your installed Steam games into the `~/Bulk/steam` library, with Steam closed (section 10.1). `plan` is a dry run. `apply` also installs the boot step that repairs an interrupted move. `--copy` allows a real copy of NOCOW game data (it cannot be reflinked). |
@@ -843,7 +845,8 @@ Read-only. Sections:
 | `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
-| `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry `compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file |
+| `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry either `compress=zstd[:N]` or `compress-force=zstd[:N]` plus `flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file |
+| `compression (compress-force)` | summary of root btrfs compression across live mount, `/etc/fstab`, `rpm-ostree kargs`, and `btrfs:top-mount` |
 | `degraded boot` | the summary of the degraded-boot part |
 | `alerts raised while nobody was logged in` | alerts of the last 7 days that no desktop could show when they happened (section 4.9), with time, program and title. Each line says whether **you** (the user who ran the script) have seen it: `[shown to you]`, `[NOT shown to you yet: next login]`, or `[only counted in the summary at login; text not shown]` (when many alerts waited). Lines marked `[shown to you]` need nothing from you; they stay listed until they expire. `none` if there were none. `shown at login: NOT installed` means the login part is missing: run `install` |
 | `snapshots` | the snapshot summary |
@@ -1328,6 +1331,52 @@ the same way and also asks the passphrase of each disk.
 
 To compare before and after, look at the `disks` lines (NVMe vs `dm-N` await)
 with `btrfs-stall-report --since '<time>' -v` on a similar workload.
+
+### 9.1 `compress-force`: skip the cheap btrfs compressibility estimator
+
+```
+cst btrfs compress-force               # status (default; user + toolbox)
+cst btrfs compress-force plan          # dry run (also: --level N, --revert)
+cst btrfs compress-force apply         # root on host; asks confirmation unless --yes
+cst btrfs compress-force revert        # root on host; back to compress=zstd:N
+```
+
+**Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
+before invoking zstd and skips compression altogether when the sample looks only
+borderline compressible. With `compress-force=zstd:1`, btrfs hands every extent
+directly to zstd: incompressible blocks still fail zstd's early incompressible
+abort at minimal CPU cost, while binaries, build artefacts, and mixed data compress
+instead of being stored raw.
+
+**What `apply` keeps in sync:** four independent places can hold the root btrfs
+compression option, and updating only `/etc/fstab` leaves the next boot or
+remount inconsistent (`cst doctor` flags any cross-layer drift):
+
+1. `/etc/fstab` (`write_atomic`, then `systemctl daemon-reload`),
+2. next-boot `rpm-ostree kargs` (`rootflags=...`, atomic `--delete`/`--append` on
+   Silverblue/OSTree),
+3. the live filesystem superblock (`mount -o remount,compress-force=zstd:N` on a
+   writable root mount such as `/var`, verified afterwards against mounted
+   subvolumes),
+4. `btrfs:top-mount` (`/etc/systemd/system/var-mnt-btrfs\x2dtop.mount`, when
+   `snapshots setup` installed it), rendered through CST's installer so
+   `installed.json` stays current.
+
+On failure at any step, prior changes are rolled back so the layers never drift.
+
+**What it does not touch:** the live remount takes effect immediately for new
+writes without rebooting. Existing files keep their current extents until rewritten
+or updated: CST never runs `btrfs filesystem defragment -r` automatically, because
+rewriting existing extents breaks reflinks across snapshots and Silverblue OSTree
+deployments.
+
+**To undo:** `cst btrfs compress-force revert` switches all active layers back to
+`compress=zstd:N`.
+
+**For fresh Fedora installations:** `fix-anaconda-webui-btrfs-compress.sh`
+patches Anaconda's Web UI manual partitioning backend to apply
+`compress-force=...` (Fedora's default zstd level, usually `zstd:1`) from
+installation time.
 
 ---
 
@@ -2307,6 +2356,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), the safeguards, snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`, and the values the ports and the presenter pass (`Scan`, `CacheWalk`, `RunOptions`, `Listing`); no I/O. `ports.py`: the host, btrfs, state directory, pin file, run lock and log boundaries. `application.py`: one `Run` per invocation (clock guards, state lists, creation, sealing, deletions under the circuit breaker and their re-checks), the scan of the snapshot folder and the bodies of the six commands. `adapters.py`: the `Host` (commands, clock, directory entries, the cache-folder walk; tests replace it), the btrfs commands, the state directory, the pin file (it resolves pinned paths on the filesystem), the run lock, the journal lines and the local time zone. `wiring.py`: `$TZ`, the time zone and the adapters. `presenter.py`: what `list`, `caches` and `latest` print. `cli.py`: the argument parser and `main()`. |
 | `btrfs-snapshot-runtime` | `snapshot_runtime/` | The Python side of `btrfs-snapshot` (`hourly`, `nas`, `list`, `caches`, `prune`, `purge`, `configure`), which the bash front `btrfs/btrfs-snapshot` execs for them; the front's conversion engine (`convert`, `convert-boot`, `convert-one`, `convert-planned`, `planned-left`) and `busy` stay bash for good. `domain.py`: the settings and their defaults (`DEFAULTS`; the space-guard numbers also stay as three lines in the front, for btrfs-bulk), bash arithmetic as the guard reads it (`guard_number`), the core's sources and cache options, `CORE_REASON` and the blocked alert, the NAS texts, durations and summary, the vocabularies (`AlertKind`, `CoreExit`, `ResticExit`, ...); no I/O. `adapters/`: `machine.py` (`SnapshotRun`: the paths below `CST_SNAPSHOT_ROOT` for a run that is not root, `snapshots.conf` read as data with cst_core's `parse_snapshots_conf`, the commands with the run's lock fds handed on, the files as the bash's commands treated them, the trapped signals), `hourly.py` (`hourly`, `prune`, `purge`: the lock, the space guard, the waits, the core's runs and alerts), `nas.py` (`Nas`: the NAS backup), `commands.py` (`list`, `caches`, `configure`, the table of commands). `cli.py`: `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
+| `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain.py` (pure CLI arg parser, `CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |

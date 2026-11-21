@@ -147,6 +147,12 @@
 #                          bottleneck in a time window, and why
 #   watch  [args]          (user) run a command and save the report of its
 #                          window, labelled (A/B comparisons)
+#   compress-force [status|plan|apply|revert] [--level N] [--revert] [--yes]
+#                          root btrfs zstd compression mode across /etc/fstab,
+#                          rpm-ostree kargs, live mount, and btrfs:top-mount.
+#                          `status` and `plan` work as your user (also inside a
+#                          toolbox); `apply` and `revert` need root on the host.
+#                          Never runs automatic `btrfs filesystem defragment`.
 #   help
 #
 # Without a command it only prints this help and changes nothing; `install`
@@ -197,8 +203,9 @@ BTRFS_CONF=/etc/btrfs-setup/snapshots.conf
 BTRFS_SYSFS=/sys/fs/btrfs
 SCRUB_SERVICE=btrfs-scrub-weekly.service
 SCRUB_DROPIN="${UNIT_DIR}/${SCRUB_SERVICE}.d/10-cst-limit.conf"
-# Mount options every btrfs mount of the root fs is expected to carry.
-EXPECTED_OPTS=(compress=zstd:1 flushoncommit noatime discard=async degraded space_cache=v2 ssd)
+# Mount options every btrfs mount of the root fs is expected to carry
+# (compression itself is checked separately to allow compress=zstd:* or compress-force=zstd:*).
+EXPECTED_OPTS=(flushoncommit noatime discard=async degraded space_cache=v2 ssd)
 
 # Shown in the help and in hints: "cst btrfs" when run through the cst
 # command (it sets CST_PROG), else the name this script was started with.
@@ -239,6 +246,9 @@ case "${cmd}" in
         ;;
     watch)
         exec bash "${SRC}/btrfs-stall-watch" "$@"
+        ;;
+    compress-force)
+        CST_PROG="${PROG} compress-force" exec python3 -I -B "${SRC}/btrfs-compress" "$@"
         ;;
     install|status|uninstall|test-alert|degraded-boot|crypt-perf|snapshots|bulk|docker-gc)
         ;;
@@ -607,18 +617,27 @@ status_space() {
 }
 
 status_mounts() {
-    local mnt opts o missing want have
+    local mnt opts o comp_opt tok missing want have
+    local -a _toks
     for mnt in /sysroot /var /var/home; do
         opts="$(findmnt -rn -o OPTIONS -M "${mnt}" 2>/dev/null | head -n1)"
         [[ -n "${opts}" ]] || continue
         missing=()
+        comp_opt=""
+        IFS=',' read -r -a _toks <<<"${opts}"
+        for tok in "${_toks[@]}"; do
+            if [[ "${tok}" =~ ^compress(-force)?=zstd(:[0-9]+)?$ ]]; then
+                comp_opt="${tok}"
+            fi
+        done
+        [[ -n "${comp_opt}" ]] || missing+=("compress=zstd/compress-force=zstd")
         for o in "${EXPECTED_OPTS[@]}"; do
             [[ ",${opts}," == *",${o},"* ]] || missing+=("${o}")
         done
         if (( ${#missing[@]} )); then
             printf '  %-10s MISSING: %s\n' "${mnt}" "${missing[*]}"
         else
-            printf '  %-10s ok (%s)\n' "${mnt}" "${EXPECTED_OPTS[*]}"
+            printf '  %-10s ok (%s %s)\n' "${mnt}" "${comp_opt}" "${EXPECTED_OPTS[*]}"
         fi
     done
     for o in dirty_bytes dirty_background_bytes; do
@@ -670,6 +689,8 @@ status() (
     [[ -n "${uuid}" ]] && status_space "${uuid}"
     section "mount options and writeback limits"
     status_mounts
+    section "compression (compress-force)"
+    python3 -I -B "${SRC}/btrfs-compress" status 2>&1 | cst_indent
     section "degraded boot"
     if [[ -x "${DEGRADED}" ]]; then
         "${DEGRADED}" --status 2>/dev/null | sed -n '/==== summary/,$p' | sed '1d; s/^/  /'

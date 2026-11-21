@@ -2621,3 +2621,57 @@ assert d["samples"] >= 1, d["samples"]
         docker_exec(self.PRIV_CONTAINER, ["bash", "-c", f"cat >{w}/pty-answer.py"], input_text=PTY_ANSWER_DRIVER)
         out = exec_bash(self.PRIV_CONTAINER, VM_NOCOW_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_22_btrfs_compress_force_plan_apply_idempotent_and_revert(self) -> None:
+        """`cst btrfs compress-force` toggles live kernel mount options on the loopback Btrfs
+        RAID1 (`/var` and `/sysroot`), keeps `/etc/fstab` in sync, reports healthy in
+        `cst btrfs status` / `cst doctor`, and cleanly reverts."""
+        w = "/var/tmp/e2e-btrfs-compress-t2"
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            f"""
+            /opt/cst-rw/cst btrfs compress-force revert --yes >/dev/null 2>&1 || true
+            if [[ -f {w}/fstab.bak ]]; then
+                cp -a {w}/fstab.bak /etc/fstab
+            else
+                rm -f /etc/fstab
+            fi
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            f"""
+            set -euo pipefail
+            rm -rf {w} && mkdir -p {w}
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            loop_uuid="$(cat /run/e2e-loop-uuid)"
+            printf 'UUID=%s /sysroot btrfs subvol=root,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\nUUID=%s /var btrfs subvol=var,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\nUUID=%s /var/home btrfs subvol=home,degraded,compress=zstd:1,noatime,discard=async,space_cache=v2,ssd,flushoncommit 0 0\\n' "$loop_uuid" "$loop_uuid" "$loop_uuid" >/etc/fstab
+
+            plan_out="$(/opt/cst-rw/cst btrfs compress-force plan)"
+            grep -q 'compress-force=zstd:1' <<<"$plan_out"
+            findmnt -rn -o OPTIONS --target /var | grep -q 'compress=zstd:1'
+
+            /opt/cst-rw/cst btrfs compress-force apply --yes >/dev/null
+            findmnt -rn -o OPTIONS --target /var | grep -q 'compress-force=zstd:1'
+            findmnt -rn -o OPTIONS --target /sysroot | grep -q 'compress-force=zstd:1'
+            grep -q 'compress-force=zstd:1' /etc/fstab
+
+            second_out="$(/opt/cst-rw/cst btrfs compress-force apply)"
+            grep -q 'nothing to do' <<<"$second_out"
+
+            btrfs_status="$(/opt/cst-rw/cst btrfs status)"
+            grep -q 'compress-force=zstd:1' <<<"$btrfs_status"
+            grep -q 'coherent (compress-force=zstd:1)' <<<"$btrfs_status"
+
+            doc_out="$(/opt/cst-rw/cst doctor || true)"
+            grep -q 'ok     root btrfs compression: coherent (compress-force=zstd:1)' <<<"$doc_out"
+
+            /opt/cst-rw/cst btrfs compress-force revert --yes >/dev/null
+            findmnt -rn -o OPTIONS --target /var | grep -q 'compress=zstd:1'
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
