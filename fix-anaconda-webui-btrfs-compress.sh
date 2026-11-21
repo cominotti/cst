@@ -11,7 +11,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<'EOF'
 Patch Fedora Anaconda's manual partitioning backend so Btrfs mount points
 created through Anaconda Web UI + Cockpit inherit Fedora's configured
-btrfs_compression value, usually compress=zstd:1, and also get noatime and
+btrfs_compression value, usually compress-force=zstd:1, and also get noatime and
 flushoncommit plus commit=10.
 
 Run this in the Live ISO before starting the installer:
@@ -50,7 +50,9 @@ for target in "${targets[@]}"; do
         exit 1
     fi
 
-    if grep -q '_anaconda_webui_btrfs_mount_options_fix' "${target}" && grep -q 'commit=10' "${target}"; then
+    if grep -q '_anaconda_webui_btrfs_mount_options_fix' "${target}" \
+        && grep -q 'commit=10' "${target}" \
+        && grep -q 'compress-force=%s' "${target}"; then
         echo "Already patched: ${target}"
         continue
     fi
@@ -96,7 +98,7 @@ helper = '''def _anaconda_webui_btrfs_mount_options_fix(device, mount_options):
 
     compression = blivet_flags.btrfs_compression
     if compression and not any(option.startswith("compress") for option in option_list):
-        option_list.append("compress=%s" % compression)
+        option_list.append("compress-force=%s" % compression)
 
     for option in ("noatime", "flushoncommit", "commit=10"):
         if option not in option_list:

@@ -1808,5 +1808,73 @@ class PendingAlertsStatusTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.runuser_log))
 
 
+class StatusMountsAndCompressDispatchTest(unittest.TestCase):
+    """status_mounts accepts compress=zstd:* or compress-force=zstd:* and btrfs-setup dispatches compress-force."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-status-mounts-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def _run_status_mounts(self, opts_by_mount: str) -> str:
+        script = "\n".join(
+            [
+                "set -Eeuo pipefail",
+                assignment("EXPECTED_OPTS"),
+                shell_function(SETUP, "status_mounts"),
+                f'SYSCTL_FILE="{self.tmp}/sysctl.conf"',
+                f'echo "2147483648" > "{self.tmp}/dirty_bytes"',
+                f'echo "536870912" > "{self.tmp}/dirty_background_bytes"',
+                'printf "vm.dirty_bytes = 2147483648\\nvm.dirty_background_bytes = 536870912\\n" > "${SYSCTL_FILE}"',
+                "findmnt() {",
+                '  local mnt="$5"',
+                '  case "${mnt}" in',
+                opts_by_mount,
+                "  esac",
+                "}",
+                "cat() {",
+                '  case "$1" in',
+                f'    /proc/sys/vm/dirty_bytes) command cat "{self.tmp}/dirty_bytes" ;;',
+                f'    /proc/sys/vm/dirty_background_bytes) command cat "{self.tmp}/dirty_background_bytes" ;;',
+                '    *) command cat "$@" ;;',
+                "  esac",
+                "}",
+                "status_mounts",
+            ]
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        return r.stdout
+
+    def test_accepts_compress_and_compress_force_and_flags_missing(self) -> None:
+        base = "flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+        out_comp = self._run_status_mounts(f'    /var) echo "compress=zstd:1,{base}" ;;')
+        self.assertIn("/var       ok (compress=zstd:1 ", out_comp)
+        out_force = self._run_status_mounts(f'    /var) echo "compress-force=zstd:1,{base}" ;;')
+        self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
+        out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
+        self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
+
+    def test_btrfs_setup_dispatches_compress_force_help(self) -> None:
+        r = subprocess.run(
+            ["bash", SETUP, "compress-force", "--help"],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("compress-force", r.stdout)
+        self.assertIn("revert", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

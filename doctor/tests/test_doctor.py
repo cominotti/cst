@@ -100,6 +100,7 @@ echo "rpm-ostree $*" >>"$STUB_LOG"
 case "$1" in
   status) [ "$2" = --json ] && exec cat "$FIX_STATUS" ;;
   db) [ "$2" = list ] && [ -f "$FIX_DB/$3" ] && exec cat "$FIX_DB/$3" ;;
+  kargs) [ -n "$FIX_KARGS" ] && [ -f "$FIX_KARGS" ] && exec cat "$FIX_KARGS" ;;
 esac
 exit 1
 """
@@ -118,6 +119,9 @@ esac
 """
 FINDMNT = """#!/bin/sh
 echo "findmnt $*" >>"$STUB_LOG"
+case " $* " in
+  *"OPTIONS"*) [ -n "$FIX_FINDMNT_OPTS" ] && [ -f "$FIX_FINDMNT_OPTS" ] && exec cat "$FIX_FINDMNT_OPTS" ;;
+esac
 [ -f "$FIX_FINDMNT" ] && exec cat "$FIX_FINDMNT"
 exit 1
 """
@@ -207,6 +211,8 @@ class Scratch(unittest.TestCase):
             "FIX_SYSTEM_FAILED": self.sys_failed,
             "FIX_USER_FAILED": self.user_failed,
             "FIX_FINDMNT": os.path.join(self.tmp, "findmnt.out"),
+            "FIX_FINDMNT_OPTS": os.path.join(self.tmp, "findmnt-opts.out"),
+            "FIX_KARGS": os.path.join(self.tmp, "kargs.out"),
             "FIX_STATFS": os.path.join(self.tmp, "statfs.out"),
             "FIX_VIRSH": "",
             "FIX_SHOW": os.path.join(self.tmp, "show"),
@@ -238,6 +244,7 @@ class Scratch(unittest.TestCase):
         allowed = (
             "rpm-ostree status --json",
             "rpm-ostree db list ",
+            "rpm-ostree kargs",
             "systemctl list-units --state=failed",
             "systemctl --user list-units --state=failed",
             "flatpak-spawn --host ",
@@ -1314,6 +1321,119 @@ class BtrfsTest(Scratch):
                     "MOUNTPOINT (the hourly btrfs-health-check watches it); not estimated: no device list in sysfs"
                 ),
             ],
+        )
+
+
+class BtrfsCompressionDoctorTest(Scratch):
+    """check_btrfs_compression checks coherence across fstab, kargs, live mounts, and top-mount."""
+
+    def _setup_compression(
+        self,
+        *,
+        fstab_opt: str | None = "compress=zstd:1",
+        kargs_opt: str | None = "compress=zstd:1",
+        live_opt: str | None = "compress=zstd:1",
+        top_opt: str | None = "compress=zstd:1",
+    ) -> None:
+        if fstab_opt is not None:
+            etc = os.path.join(self.root, "etc")
+            os.makedirs(etc, exist_ok=True)
+            with open(os.path.join(etc, "fstab"), "w") as f:
+                opt = f",{fstab_opt}" if fstab_opt else ""
+                f.write(f"UUID={UUID} /var btrfs subvol=var,degraded{opt},noatime 0 0\n")
+        if kargs_opt is not None:
+            opt = f",{kargs_opt}" if kargs_opt else ""
+            with open(self.env["FIX_KARGS"], "w") as f:
+                f.write(f"ostree=/abc root=UUID={UUID} rw rootflags=subvol=root,degraded{opt},noatime\n")
+        if live_opt is not None:
+            opt = f",{live_opt}" if live_opt else ""
+            with open(self.env["FIX_FINDMNT_OPTS"], "w") as f:
+                f.write(f"/dev/dm-0[/var] /var rw,seclabel{opt},ssd,noatime\n")
+            proc = os.path.join(self.root, "proc")
+            os.makedirs(proc, exist_ok=True)
+            with open(os.path.join(proc, "mounts"), "w") as f:
+                f.write(f"/dev/dm-0 /var btrfs rw,seclabel{opt},ssd,noatime 0 0\n")
+        if top_opt is not None:
+            units = os.path.join(self.root, "etc", "systemd", "system")
+            os.makedirs(units, exist_ok=True)
+            opt = f",{top_opt}" if top_opt else ""
+            with open(os.path.join(units, r"var-mnt-btrfs\x2dtop.mount"), "w") as f:
+                f.write(
+                    f"[Mount]\nWhat=/dev/disk/by-uuid/{UUID}\nWhere=/var/mnt/btrfs-top\nOptions=subvolid=5{opt},noatime\n"
+                )
+
+    def test_coherent_compress_and_compress_force_are_ok(self) -> None:
+        self._setup_compression(
+            fstab_opt="compress=zstd:1",
+            kargs_opt="compress=zstd:1",
+            live_opt="compress=zstd:1",
+            top_opt="compress=zstd:1",
+        )
+        r = self.run_tool()
+        self.assertIn("  ok     root btrfs compression: coherent (compress=zstd:1)", area_lines(r.stdout, "btrfs"))
+        self.assert_read_only()
+
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1",
+            kargs_opt="compress-force=zstd:1",
+            live_opt="compress-force=zstd:1",
+            top_opt="compress-force=zstd:1",
+        )
+        r = self.run_tool()
+        self.assertIn(
+            "  ok     root btrfs compression: coherent (compress-force=zstd:1)", area_lines(r.stdout, "btrfs")
+        )
+        self.assert_read_only()
+
+    def test_drift_warns_with_fix_and_works_in_toolbox(self) -> None:
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1",
+            kargs_opt="compress=zstd:1",
+            live_opt="compress-force=zstd:1",
+            top_opt="compress=zstd:1",
+        )
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs compression: drift across layers:", btrfs_text)
+        self.assertIn("fix (on the host): cst btrfs compress-force apply", btrfs_text)
+        self.assertIn("flatpak-spawn --host rpm-ostree kargs", self.calls())
+        self.assert_read_only()
+
+    def test_toolbox_without_proc_mounts_and_uuid_fstab_entry(self) -> None:
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        etc = os.path.join(self.root, "etc")
+        os.makedirs(etc, exist_ok=True)
+        with open(os.path.join(etc, "fstab"), "w") as f:
+            f.write(f"UUID={UUID} /mnt/subvol-root btrfs subvol=extra,compress=zstd:1 0 0\n")
+        with open(self.env["FIX_KARGS"], "w") as f:
+            f.write(f"ostree=/abc root=UUID={UUID} rw rootflags=subvol=root,compress-force=zstd:1\n")
+        with open(self.env["FIX_FINDMNT_OPTS"], "w") as f:
+            f.write(f"/dev/dm-0[/var] /var rw,seclabel,compress-force=zstd:1,ssd {UUID}\n")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs compression: drift across layers:", btrfs_text)
+        self.assertIn("fstab /mnt/subvol-root=compress=zstd:1", btrfs_text)
+        self.assertIn("flatpak-spawn --host findmnt -rn -t btrfs -o SOURCE,TARGET,OPTIONS,UUID", self.calls())
+        self.assert_read_only()
+
+    def test_no_compression_anywhere_is_info(self) -> None:
+        self._setup_compression(fstab_opt=None, kargs_opt=None, live_opt=None, top_opt="")
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn(
+            "  info   root btrfs compression: no compression option set across active layers",
+            area_lines(r.stdout, "btrfs"),
+        )
+
+        self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
+        r2 = self.run_tool()
+        self.assertEqual(r2.returncode, 0, r2.stdout)
+        self.assertIn(
+            "  info   root btrfs compression: no compression option set across active layers",
+            area_lines(r2.stdout, "btrfs"),
         )
 
 

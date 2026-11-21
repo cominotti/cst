@@ -150,6 +150,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/setup/cli.py": 32,
     "btrfs/bulk/cli.py": 88,
     "btrfs/chrome_cache/cli.py": 84,
+    "btrfs/compress/cli.py": 75,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
@@ -215,6 +216,7 @@ IO_BUDGETS: Final[dict[str, int]] = {
 HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "bluetooth/setup": "bluetooth/setup/wiring.py",
     "btrfs/bulk": "btrfs/bulk/wiring.py",
+    "btrfs/compress": "btrfs/compress/wiring.py",
     "btrfs/docker_gc": "btrfs/docker_gc/wiring.py",
     "btrfs/docker_volumes_nocow": "btrfs/docker_volumes_nocow/wiring.py",
     "btrfs/snapshot": "btrfs/snapshot/wiring.py",
