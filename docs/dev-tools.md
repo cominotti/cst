@@ -39,7 +39,9 @@ with an error when `uv.lock` does not match `pyproject.toml`, and uv checks
 the hash of every package against the lock.
 
 The unit tests do not need any of this: `python3 -I -B tests/run_unit.py`
-still runs on the system Python with the standard library.
+still runs on the system Python with the standard library (in parallel across
+CPUs by default; pass `--jobs 1` to force a single process, or let it fall back
+to 1 automatically when run under `coverage.py`).
 
 ## Where the virtual environment lives
 

@@ -1,11 +1,12 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: MPL-2.0
-"""Run the unit tests with a socket as stdin (a run-time gate).
+"""Run the unit tests in parallel across CPU cores with a socket as stdin (run-time gates).
 
-Use: python3 -I -B tests/run_unit.py [-v] [--gates | NAME...]   (from anywhere)
+Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | NAME...]   (from anywhere)
 
-With no NAME it runs every unit test of the checkout. A NAME is a test
-module, class or method as unittest names it (vm.tests.test_vm,
+With no NAME it runs every unit test of the checkout across parallel worker
+processes (`default_jobs()`, 1 per CPU; automatically 1 under `coverage.py`).
+A NAME is a test module, class or method as unittest names it (vm.tests.test_vm,
 vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
 runs one that way, so the socket gate below still applies. `--gates` runs
 the static gate modules only (GATE_MODULES: `invowk cmd test arch`).
@@ -89,14 +90,23 @@ each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 """
 
 from collections.abc import Callable, Sequence
+import concurrent.futures
+import contextlib
 import ctypes
+from dataclasses import dataclass, field
 import gc
+import io
+import json
 import os
+import queue
 import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from typing import Final, override
 import unittest
 from unittest import mock
@@ -471,37 +481,635 @@ class LeakRecordingRunner(unittest.TextTestRunner):
     def _makeResult(self) -> LeakRecordingResult:
         return LeakRecordingResult(self.stream, self.descriptions, self.verbosity, durations=self.durations)
 
+    def make_result(self) -> LeakRecordingResult:
+        """Create the runner's `LeakRecordingResult` bound to its decorated stream."""
+        return self._makeResult()
 
-def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
-    """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
-    names = [a for a in args if a != "-v"]
-    if names == ["--gates"]:
+
+DEFAULT_CLASS_CHUNK: Final = 10
+_JOBS_FLAG: Final = "--jobs"
+_WORKER_FDS_FLAG: Final = "--worker-fds"
+_ERR_LOAD_MODULE: Final = "unittest.loader"
+_SEP1: Final = "=" * 70
+_SEP2: Final = "-" * 70
+_FAIL_LABEL: Final = "FAIL"
+_ERROR_LABEL: Final = "ERROR"
+
+
+@dataclass(frozen=True, slots=True)
+class RunOptions:
+    """Parsed command-line options for `tests/run_unit.py`."""
+
+    verbosity: int = 1
+    jobs: int | None = None
+    gates: bool = False
+    names: tuple[str, ...] = ()
+    worker_fds: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerReport:
+    ran: int
+    stream: str
+    extra_stderr: str
+    failures: tuple[tuple[str, str], ...]
+    errors: tuple[tuple[str, str], ...]
+    expected_failures: int
+    unexpected_successes: tuple[str, ...]
+    skipped: tuple[tuple[str, str], ...]
+    leaks: tuple[str, ...]
+    lost_exceptions: tuple[str, ...]
+    hook_problems: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _WorkerHandle:
+    proc: subprocess.Popen[bytes]
+    cmd_fh: io.TextIOWrapper
+    res_fh: io.TextIOWrapper
+
+
+@dataclass(slots=True)
+class _ParallelTotals:
+    lock: threading.Lock
+    ran: int = 0
+    expected_failures: int = 0
+    failures: list[tuple[str, str]] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    unexpected_successes: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    leaks: list[str] = field(default_factory=list)
+    lost_exceptions: list[str] = field(default_factory=list)
+    hook_problems: list[str] = field(default_factory=list)
+    worker_errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _GateFindings:
+    skipped: Sequence[tuple[str, str]]
+    leaks: Sequence[str]
+    lost: Sequence[str]
+    extra_errors: Sequence[str]
+
+
+def _decode_json(line: str) -> object:
+    return json.loads(line)
+
+
+def _str_field(obj: dict[object, object], key: str) -> str:
+    val = obj.get(key)
+    if not isinstance(val, str):
+        raise ValueError(f"expected string for {key!r}")
+    return val
+
+
+def _int_field(obj: dict[object, object], key: str) -> int:
+    val = obj.get(key)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"expected int for {key!r}")
+    return val
+
+
+def _str_list_field(obj: dict[object, object], key: str) -> tuple[str, ...]:
+    raw = obj.get(key)
+    if not isinstance(raw, list):
+        raise ValueError(f"expected list for {key!r}")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError(f"expected string entry in {key!r}")
+        out.append(item)
+    return tuple(out)
+
+
+def _pair_list_field(obj: dict[object, object], key: str) -> tuple[tuple[str, str], ...]:
+    raw = obj.get(key)
+    if not isinstance(raw, list):
+        raise ValueError(f"expected list for {key!r}")
+    out: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], str):
+            raise ValueError(f"expected 2-string pair in {key!r}")
+        out.append((item[0], item[1]))
+    return tuple(out)
+
+
+def _decode_worker_report(line: str) -> _WorkerReport:
+    raw = _decode_json(line)
+    if not isinstance(raw, dict):
+        raise ValueError("worker reply is not a JSON object")
+    return _WorkerReport(
+        ran=_int_field(raw, "ran"),
+        stream=_str_field(raw, "stream"),
+        extra_stderr=_str_field(raw, "extra_stderr"),
+        failures=_pair_list_field(raw, "failures"),
+        errors=_pair_list_field(raw, "errors"),
+        expected_failures=_int_field(raw, "expected_failures"),
+        unexpected_successes=_str_list_field(raw, "unexpected_successes"),
+        skipped=_pair_list_field(raw, "skipped"),
+        leaks=_str_list_field(raw, "leaks"),
+        lost_exceptions=_str_list_field(raw, "lost_exceptions"),
+        hook_problems=_str_list_field(raw, "hook_problems"),
+    )
+
+
+def _coverage_active() -> bool:
+    if sys.gettrace() is not None or sys.modules.get("coverage") is not None:
+        return True
+    return sys.monitoring.get_tool(sys.monitoring.COVERAGE_ID) is not None
+
+
+def default_jobs() -> int:
+    """Default worker count when `-j`/`--jobs` is unset or 0 (1 under coverage.py)."""
+    if _coverage_active():
+        return 1
+    return max(1, os.cpu_count() or 1)
+
+
+def _consume_value(args: Sequence[str], index: int, flag: str) -> tuple[str, int]:
+    tok = args[index]
+    prefix = f"{flag}="
+    if tok.startswith(prefix):
+        return tok[len(prefix) :], 1
+    if index + 1 >= len(args):
+        raise SystemExit(f"run_unit: {flag} requires a value")
+    return args[index + 1], 2
+
+
+@dataclass(slots=True)
+class _ParseAcc:
+    verbosity: int = 1
+    jobs: int | None = None
+    gates: bool = False
+    names: list[str] = field(default_factory=list)
+    worker_fds: tuple[int, int] | None = None
+
+
+def _parse_jobs_value(raw: str) -> int:
+    if not raw.isdigit():
+        raise SystemExit(f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
+    return int(raw)
+
+
+def _parse_worker_fds(raw: str) -> tuple[int, int]:
+    parts = raw.split(",")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise SystemExit(f"run_unit: invalid {_WORKER_FDS_FLAG} value {raw!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _consume_arg(args: Sequence[str], index: int, acc: _ParseAcc) -> int:
+    tok = args[index]
+    step = 1
+    if tok == "-v":
+        acc.verbosity = 2
+    elif tok == "--gates":
+        acc.gates = True
+    elif tok in ("-j", _JOBS_FLAG) or tok.startswith(f"{_JOBS_FLAG}="):
+        flag = _JOBS_FLAG if tok.startswith(_JOBS_FLAG) else "-j"
+        val, step = _consume_value(args, index, flag)
+        acc.jobs = _parse_jobs_value(val)
+    elif tok == _WORKER_FDS_FLAG or tok.startswith(f"{_WORKER_FDS_FLAG}="):
+        val, step = _consume_value(args, index, _WORKER_FDS_FLAG)
+        acc.worker_fds = _parse_worker_fds(val)
+    elif tok.startswith("-"):
+        raise SystemExit(
+            f"run_unit: unknown option in {' '.join(args)} (use -v, -j/{_JOBS_FLAG} N, --gates or test names)"
+        )
+    else:
+        acc.names.append(tok)
+    return step
+
+
+def parse_args(args: Sequence[str]) -> RunOptions:
+    """Parse CLI options for `tests/run_unit.py`."""
+    acc = _ParseAcc()
+    i = 0
+    while i < len(args):
+        i += _consume_arg(args, i, acc)
+    if acc.gates and acc.names:
+        raise SystemExit(f"run_unit: --gates takes no test names ({' '.join(acc.names)})")
+    return RunOptions(
+        verbosity=acc.verbosity,
+        jobs=acc.jobs,
+        gates=acc.gates,
+        names=tuple(acc.names),
+        worker_fds=acc.worker_fds,
+    )
+
+
+def _load_options(repo: str, opts: RunOptions) -> unittest.TestSuite:
+    if opts.gates:
         return unittest.defaultTestLoader.loadTestsFromNames(GATE_MODULES)
-    if any(n.startswith("-") for n in names):
-        raise SystemExit(f"run_unit: unknown option in {' '.join(names)} (use -v, --gates or test names)")
-    if names:
-        return unittest.defaultTestLoader.loadTestsFromNames(names)
+    if opts.names:
+        return unittest.defaultTestLoader.loadTestsFromNames(opts.names)
     return unittest.defaultTestLoader.discover(repo)
 
 
-def main(argv: Sequence[str]) -> int:
-    sys.dont_write_bytecode = True  # run by its shebang (no -B): the test modules it imports write none
-    verbosity = 2 if "-v" in argv else 1
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def load(repo: str, args: Sequence[str]) -> unittest.TestSuite:
+    """The tests to run: every test (no name), the static gates (--gates) or the named ones."""
+    return _load_options(repo, parse_args(args))
+
+
+def _iter_cases(suite: unittest.TestSuite) -> list[unittest.TestCase]:
+    cases: list[unittest.TestCase] = []
+    stack: list[unittest.TestSuite | unittest.TestCase] = [suite]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, unittest.TestSuite):
+            stack.extend(reversed(list(item)))
+        else:
+            cases.append(item)
+    return cases
+
+
+def _has_module_fixture(module_name: str) -> bool:
+    mod = sys.modules.get(module_name)
+    return mod is not None and (hasattr(mod, "setUpModule") or hasattr(mod, "tearDownModule"))
+
+
+def _has_class_fixture(cls: type[unittest.TestCase]) -> bool:
+    return any(
+        "setUpClass" in base.__dict__ or "tearDownClass" in base.__dict__
+        for base in cls.__mro__
+        if base is not unittest.TestCase and issubclass(base, unittest.TestCase)
+    )
+
+
+def _split_balanced(items: Sequence[str], max_chunk: int) -> list[tuple[str, ...]]:
+    chunk_count = (len(items) + max_chunk - 1) // max_chunk
+    base, rem = divmod(len(items), chunk_count)
+    out: list[tuple[str, ...]] = []
+    offset = 0
+    for idx in range(chunk_count):
+        size = base + (1 if idx < rem else 0)
+        out.append(tuple(items[offset : offset + size]))
+        offset += size
+    return out
+
+
+def _shard_module_cases(
+    module_name: str, mod_cases: Sequence[unittest.TestCase], max_chunk: int
+) -> list[tuple[str, ...]]:
+    if _has_module_fixture(module_name):
+        return [tuple(c.id() for c in mod_cases)]
+    by_cls: dict[type[unittest.TestCase], list[str]] = {}
+    for case in mod_cases:
+        by_cls.setdefault(type(case), []).append(case.id())
+    units: list[tuple[str, ...]] = []
+    for cls, cls_ids in by_cls.items():
+        if _has_class_fixture(cls) or len(cls_ids) <= max_chunk:
+            units.append(tuple(cls_ids))
+        else:
+            units.extend(_split_balanced(cls_ids, max_chunk))
+    return units
+
+
+def plan_work_units(
+    suite: unittest.TestSuite, *, max_chunk: int = DEFAULT_CLASS_CHUNK
+) -> tuple[list[tuple[str, ...]], bool]:
+    """Partition `suite` into isolated work units, falling back on loader errors."""
+    cases = _iter_cases(suite)
+    if any(type(c).__module__ == _ERR_LOAD_MODULE for c in cases):
+        return [], True
+    by_mod: dict[str, list[unittest.TestCase]] = {}
+    for case in cases:
+        by_mod.setdefault(type(case).__module__, []).append(case)
+    units: list[tuple[str, ...]] = []
+    for module_name, mod_cases in by_mod.items():
+        units.extend(_shard_module_cases(module_name, mod_cases, max_chunk))
+    units.sort(key=lambda u: (-len(u), u[0]))
+    return units, False
+
+
+def _open_socket_stdin() -> socket.socket:
+    ours, theirs = socket.socketpair()
+    os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
+    theirs.close()
+    sys.stdin = open(0, closefd=False)
+    return ours
+
+
+def _run_unit_payload(names: Sequence[str], verbosity: int) -> dict[str, object]:
+    suite = unittest.defaultTestLoader.loadTestsFromNames(names)
+    stream_buf = io.StringIO()
+    err_buf = io.StringIO()
+    result = LeakRecordingRunner(stream=stream_buf, descriptions=True, verbosity=verbosity).make_result()
+    gc_was_enabled = gc.isenabled()
+    with warnings.catch_warnings(), contextlib.redirect_stderr(err_buf):
+        result.startTestRun()
+        try:
+            suite.run(result)
+        finally:
+            result.stopTestRun()
+            if gc_was_enabled and not gc.isenabled():
+                gc.enable()
+    return {
+        "ran": result.testsRun,
+        "stream": stream_buf.getvalue(),
+        "extra_stderr": err_buf.getvalue(),
+        "failures": [[result.getDescription(t), tb] for t, tb in result.failures],
+        "errors": [[result.getDescription(t), tb] for t, tb in result.errors],
+        "expected_failures": len(result.expectedFailures),
+        "unexpected_successes": [result.getDescription(t) for t in result.unexpectedSuccesses],
+        "skipped": [[t.id(), reason] for t, reason in result.skipped],
+        "leaks": list(result.leaks),
+        "lost_exceptions": list(result.lost_exceptions),
+        "hook_problems": list(result.hook_problems),
+    }
+
+
+def _handle_worker_line(line: str, verbosity: int) -> dict[str, object]:
+    raw = _decode_json(line)
+    if not isinstance(raw, dict):
+        raise ValueError("worker command is not a JSON object")
+    return _run_unit_payload(_str_list_field(raw, "names"), verbosity)
+
+
+def _worker_main(repo: str, opts: RunOptions) -> int:
+    if opts.worker_fds is None:
+        raise SystemExit("run_unit: missing worker file descriptors")
+    cmd_fd, res_fd = opts.worker_fds
+    inheritable = False
+    for fd in (cmd_fd, res_fd):
+        os.set_inheritable(fd, inheritable)
     os.chdir(repo)
     if repo not in sys.path:
         sys.path.insert(0, repo)
-    forbid_privilege_gain()
-    guard = tempfile.mkdtemp(prefix="cst-unit-host-guard-")
+    ours = _open_socket_stdin()
     try:
-        guard_host_commands(guard)
-        rc = _run(repo, argv, verbosity)
-        hits = guard_hits(guard)
-        for line in hits:
-            print(f"error: a unit test reached the real {line}", file=sys.stderr)
-        return 1 if hits else rc
+        with (
+            os.fdopen(cmd_fd, "r", encoding="utf-8") as cmd_fh,
+            os.fdopen(res_fd, "w", encoding="utf-8") as res_fh,
+        ):
+            for raw_line in cmd_fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                payload = _handle_worker_line(line, opts.verbosity)
+                res_fh.write(json.dumps(payload) + "\n")
+                res_fh.flush()
+        return 0
     finally:
-        shutil.rmtree(guard, ignore_errors=True)
+        ours.close()
+
+
+def _xoptions_argv() -> list[str]:
+    out: list[str] = []
+    for key, val in sys._xoptions.items():
+        opt = f"{key}={val}" if isinstance(val, str) else key
+        out.extend(("-X", opt))
+    return out
+
+
+def _worker_argv(verbosity: int, cmd_r: int, res_w: int) -> list[str]:
+    argv = [sys.executable]
+    if sys.flags.isolated:
+        argv.append("-I")
+    argv.append("-B")
+    argv.extend(_xoptions_argv())
+    argv.append(os.path.abspath(__file__))
+    if verbosity >= 2:
+        argv.append("-v")
+    argv.extend((_WORKER_FDS_FLAG, f"{cmd_r},{res_w}"))
+    return argv
+
+
+def _spawn_worker(repo: str, verbosity: int) -> _WorkerHandle:
+    cmd_r, cmd_w = os.pipe()
+    res_r, res_w = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            _worker_argv(verbosity, cmd_r, res_w),
+            pass_fds=(cmd_r, res_w),
+            stdin=subprocess.DEVNULL,
+            cwd=repo,
+        )
+    except OSError:
+        for fd in (cmd_r, cmd_w, res_r, res_w):
+            os.close(fd)
+        raise
+    os.close(cmd_r)
+    os.close(res_w)
+    return _WorkerHandle(
+        proc=proc,
+        cmd_fh=os.fdopen(cmd_w, "w", encoding="utf-8"),
+        res_fh=os.fdopen(res_r, "r", encoding="utf-8"),
+    )
+
+
+def _close_worker(worker: _WorkerHandle, totals: _ParallelTotals) -> None:
+    with contextlib.suppress(OSError):
+        worker.cmd_fh.close()
+    with contextlib.suppress(OSError):
+        worker.res_fh.close()
+    if worker.proc.poll() is None:
+        worker.proc.terminate()
+        try:
+            worker.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            worker.proc.kill()
+            worker.proc.wait(timeout=10)
+        with totals.lock:
+            totals.worker_errors.append("a worker process was still alive at shutdown")
+
+
+def _spawn_workers(repo: str, verbosity: int, count: int) -> list[_WorkerHandle]:
+    workers: list[_WorkerHandle] = []
+    try:
+        workers.extend(_spawn_worker(repo, verbosity) for _ in range(count))
+    except OSError:
+        for worker in workers:
+            with contextlib.suppress(OSError):
+                worker.cmd_fh.close()
+            with contextlib.suppress(OSError):
+                worker.res_fh.close()
+            worker.proc.terminate()
+            worker.proc.wait(timeout=10)
+        raise
+    return workers
+
+
+def _record_report(report: _WorkerReport, totals: _ParallelTotals) -> None:
+    with totals.lock:
+        if report.stream:
+            sys.stderr.write(report.stream)
+        if report.extra_stderr:
+            sys.stderr.write(report.extra_stderr)
+        sys.stderr.flush()
+        totals.ran += report.ran
+        totals.expected_failures += report.expected_failures
+        totals.failures.extend(report.failures)
+        totals.errors.extend(report.errors)
+        totals.unexpected_successes.extend(report.unexpected_successes)
+        totals.skipped.extend(report.skipped)
+        totals.leaks.extend(report.leaks)
+        totals.lost_exceptions.extend(report.lost_exceptions)
+        totals.hook_problems.extend(report.hook_problems)
+
+
+def _drain_worker(
+    worker: _WorkerHandle,
+    work_q: queue.SimpleQueue[tuple[str, ...]],
+    totals: _ParallelTotals,
+) -> None:
+    while True:
+        try:
+            unit = work_q.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            worker.cmd_fh.write(json.dumps({"names": list(unit)}) + "\n")
+            worker.cmd_fh.flush()
+            reply = worker.res_fh.readline()
+        except OSError as exc:
+            with totals.lock:
+                totals.worker_errors.append(f"worker I/O failed running {unit[0]}: {exc}")
+            return
+        if not reply:
+            with totals.lock:
+                totals.worker_errors.append(f"worker exited unexpectedly running {unit[0]}")
+            return
+        try:
+            report = _decode_worker_report(reply)
+        except (ValueError, json.JSONDecodeError) as exc:
+            with totals.lock:
+                totals.worker_errors.append(f"malformed worker reply running {unit[0]}: {exc}")
+            return
+        _record_report(report, totals)
+    worker.cmd_fh.close()
+    worker.res_fh.close()
+    rc = worker.proc.wait(timeout=30)
+    if rc != 0:
+        with totals.lock:
+            totals.worker_errors.append(f"worker exited with status {rc}")
+
+
+def _execute_workers(workers: list[_WorkerHandle], units: Sequence[tuple[str, ...]]) -> _ParallelTotals:
+    work_q: queue.SimpleQueue[tuple[str, ...]] = queue.SimpleQueue()
+    for unit in units:
+        work_q.put(unit)
+    totals = _ParallelTotals(lock=threading.Lock())
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            futures = [pool.submit(_drain_worker, worker, work_q, totals) for worker in workers]
+            for fut in futures:
+                fut.result()
+    finally:
+        for worker in workers:
+            _close_worker(worker, totals)
+    return totals
+
+
+def _format_error_list(flavour: str, pairs: Sequence[tuple[str, str]]) -> str:
+    parts: list[str] = []
+    for label, err in pairs:
+        parts.extend((_SEP1, f"{flavour}: {label}", _SEP2, err.rstrip("\n"), ""))
+    return "\n".join(parts)
+
+
+def _summary_status(totals: _ParallelTotals) -> str:
+    failed = bool(totals.failures or totals.errors or totals.unexpected_successes)
+    infos: list[str] = []
+    if totals.failures:
+        infos.append(f"failures={len(totals.failures)}")
+    if totals.errors:
+        infos.append(f"errors={len(totals.errors)}")
+    if totals.unexpected_successes:
+        infos.append(f"unexpected successes={len(totals.unexpected_successes)}")
+    if totals.skipped:
+        infos.append(f"skipped={len(totals.skipped)}")
+    if totals.expected_failures:
+        infos.append(f"expected failures={totals.expected_failures}")
+    head = "FAILED" if failed else "OK"
+    return f"{head} ({', '.join(infos)})" if infos else head
+
+
+def _emit_parallel_report(totals: _ParallelTotals, verbosity: int, workers_used: int, elapsed: float) -> None:
+    if verbosity == 1 and totals.ran:
+        print(file=sys.stderr)
+    err_block = _format_error_list(_ERROR_LABEL, totals.errors)
+    fail_block = _format_error_list(_FAIL_LABEL, totals.failures)
+    if err_block:
+        print(err_block, file=sys.stderr)
+    if fail_block:
+        print(fail_block, file=sys.stderr)
+    for label in totals.unexpected_successes:
+        print(f"{_SEP1}\nUNEXPECTED SUCCESS: {label}", file=sys.stderr)
+    print(_SEP2, file=sys.stderr)
+    plural = "s" if totals.ran != 1 else ""
+    print(f"Ran {totals.ran} test{plural} in {elapsed:.3f}s ({workers_used} workers)\n", file=sys.stderr)
+    print(_summary_status(totals), file=sys.stderr)
+
+
+def _emit_gate_checks(repo: str, bytecode_before: dict[str, int], findings: _GateFindings) -> list[str]:
+    bytecode = [
+        f"a test wrote bytecode into the checkout: {path}"
+        for path in new_bytecode(bytecode_before, bytecode_files(repo))
+    ]
+    for test_id, reason in findings.skipped:
+        print(f"skipped: {test_id}: {reason}", file=sys.stderr)
+    problems = skip_problems(findings.skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
+    errors = [*problems, *findings.leaks, *findings.lost, *findings.extra_errors, *bytecode]
+    for line in errors:
+        print(f"error: {line}", file=sys.stderr)
+    if findings.leaks:
+        print(LEAK_HINT, file=sys.stderr)
+    if findings.lost:
+        print(LOST_EXCEPTION_HINT, file=sys.stderr)
+    if bytecode:
+        print(BYTECODE_HINT, file=sys.stderr)
+    return errors
+
+
+def _run_in_process(repo: str, opts: RunOptions) -> int:
+    ours = _open_socket_stdin()
+    bytecode_before = bytecode_files(repo)
+    try:
+        suite = _load_options(repo, opts)
+        result = LeakRecordingRunner(verbosity=opts.verbosity).run(suite)
+    finally:
+        ours.close()
+    if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
+        raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
+    findings = _GateFindings(
+        skipped=[(test.id(), reason) for test, reason in result.skipped],
+        leaks=result.leaks,
+        lost=result.lost_exceptions,
+        extra_errors=result.hook_problems,
+    )
+    errors = _emit_gate_checks(repo, bytecode_before, findings)
+    return 0 if result.wasSuccessful() and not errors else 1
+
+
+def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]], jobs: int) -> int:
+    effective_jobs = min(jobs, len(units))
+    bytecode_before = bytecode_files(repo)
+    started = time.monotonic()
+    workers = _spawn_workers(repo, opts.verbosity, effective_jobs)
+    totals = _execute_workers(workers, units)
+    elapsed = time.monotonic() - started
+    _emit_parallel_report(totals, opts.verbosity, effective_jobs, elapsed)
+    findings = _GateFindings(
+        skipped=sorted(totals.skipped),
+        leaks=totals.leaks,
+        lost=totals.lost_exceptions,
+        extra_errors=[*totals.hook_problems, *totals.worker_errors],
+    )
+    errors = _emit_gate_checks(repo, bytecode_before, findings)
+    has_test_fail = bool(totals.failures or totals.errors or totals.unexpected_successes)
+    return 0 if not has_test_fail and not errors else 1
+
+
+def _run(repo: str, opts: RunOptions) -> int:
+    requested = default_jobs() if opts.jobs is None or opts.jobs == 0 else opts.jobs
+    if requested <= 1:
+        return _run_in_process(repo, opts)
+    suite = _load_options(repo, opts)
+    units, has_load_error = plan_work_units(suite)
+    if has_load_error or min(requested, len(units)) <= 1:
+        return _run_in_process(repo, opts)
+    return _run_parallel(repo, opts, units, requested)
 
 
 def guard_hits(folder: str) -> list[str]:
@@ -513,36 +1121,26 @@ def guard_hits(folder: str) -> list[str]:
         return []
 
 
-def _run(repo: str, argv: Sequence[str], verbosity: int) -> int:
-    ours, theirs = socket.socketpair()
-    os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
-    theirs.close()
-    sys.stdin = open(0, closefd=False)
-    bytecode_before = bytecode_files(repo)
-    suite = load(repo, argv)
-    result = LeakRecordingRunner(verbosity=verbosity).run(suite)
-    ours.close()
-    bytecode = [
-        f"a test wrote bytecode into the checkout: {path}"
-        for path in new_bytecode(bytecode_before, bytecode_files(repo))
-    ]
-    if not isinstance(result, LeakRecordingResult):  # its _makeResult makes one: never silently no leaks
-        raise TypeError(f"the runner made a {type(result).__name__}, not a LeakRecordingResult")
-    skipped = [(test.id(), reason) for test, reason in result.skipped]
-    for test_id, reason in skipped:
-        print(f"skipped: {test_id}: {reason}", file=sys.stderr)
-    problems = skip_problems(skipped, git_checkout=os.path.exists(os.path.join(repo, ".git")))
-    leaks, lost = result.leaks, result.lost_exceptions
-    errors = [*problems, *leaks, *lost, *result.hook_problems, *bytecode]
-    for line in errors:
-        print(f"error: {line}", file=sys.stderr)
-    if leaks:
-        print(LEAK_HINT, file=sys.stderr)
-    if lost:
-        print(LOST_EXCEPTION_HINT, file=sys.stderr)
-    if bytecode:
-        print(BYTECODE_HINT, file=sys.stderr)
-    return 0 if result.wasSuccessful() and not errors else 1
+def main(argv: Sequence[str]) -> int:
+    sys.dont_write_bytecode = True  # run by its shebang (no -B): the test modules it imports write none
+    opts = parse_args(argv)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if opts.worker_fds is not None:
+        return _worker_main(repo, opts)
+    os.chdir(repo)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    forbid_privilege_gain()
+    guard = tempfile.mkdtemp(prefix="cst-unit-host-guard-")
+    try:
+        guard_host_commands(guard)
+        rc = _run(repo, opts)
+        hits = guard_hits(guard)
+        for line in hits:
+            print(f"error: a unit test reached the real {line}", file=sys.stderr)
+        return 1 if hits else rc
+    finally:
+        shutil.rmtree(guard, ignore_errors=True)
 
 
 if __name__ == "__main__":

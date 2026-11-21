@@ -6,10 +6,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 from tests.repo_files import REPO, repo_files
 from tests.run_unit import (
+    BYTECODE_HINT,
+    DEFAULT_CLASS_CHUNK,
     EXPECTED_SKIPS,
     GATE_MODULES,
     HOST_COMMANDS,
@@ -17,11 +21,14 @@ from tests.run_unit import (
     HOST_GUARD_EXIT,
     LEAK_HINT,
     LOST_EXCEPTION_HINT,
-    BYTECODE_HINT,
+    RunOptions,
     bytecode_files,
+    default_jobs,
     expected_skip,
     load,
     new_bytecode,
+    parse_args,
+    plan_work_units,
     skip_problems,
 )
 
@@ -583,6 +590,271 @@ class LoadTest(unittest.TestCase):
     def test_unknown_option_is_refused(self) -> None:
         with self.assertRaises(SystemExit):
             load(REPO, ["--gate"])
+
+
+class ParseArgsAndJobsTest(unittest.TestCase):
+    def test_parse_args_valid_flags(self) -> None:
+        self.assertEqual(parse_args([]), RunOptions())
+        self.assertEqual(
+            parse_args(["-v", "--jobs", "4", "a.b"]),
+            RunOptions(verbosity=2, jobs=4, gates=False, names=("a.b",)),
+        )
+        self.assertEqual(
+            parse_args(["-j", "2", "--gates"]),
+            RunOptions(verbosity=1, jobs=2, gates=True, names=()),
+        )
+        self.assertEqual(
+            parse_args(["--jobs=0", "mod"]),
+            RunOptions(verbosity=1, jobs=0, gates=False, names=("mod",)),
+        )
+        self.assertEqual(
+            parse_args(["-v", "--worker-fds=3,4"]),
+            RunOptions(verbosity=2, jobs=None, gates=False, names=(), worker_fds=(3, 4)),
+        )
+
+    def test_parse_args_rejects_bad_flags(self) -> None:
+        for bad in (
+            ["--gate"],
+            ["--gates", "mod"],
+            ["--jobs"],
+            ["--jobs", "-1"],
+            ["--jobs", "abc"],
+            ["--worker-fds", "3"],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                parse_args(bad)
+
+    def test_default_jobs_falls_back_to_one_under_coverage(self) -> None:
+        with (
+            mock.patch("sys.gettrace", return_value=lambda *_a: None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
+            mock.patch.dict(sys.modules, {"coverage": None}),
+        ):
+            self.assertEqual(default_jobs(), 1)
+        with (
+            mock.patch("sys.gettrace", return_value=None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value="coverage"),
+            mock.patch.dict(sys.modules, {"coverage": None}),
+        ):
+            self.assertEqual(default_jobs(), 1)
+        with (
+            mock.patch("sys.gettrace", return_value=None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
+            mock.patch.dict(sys.modules, {"coverage": types.ModuleType("coverage")}),
+        ):
+            self.assertEqual(default_jobs(), 1)
+        with (
+            mock.patch("sys.gettrace", return_value=None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
+            mock.patch.dict(sys.modules, {"coverage": None}),
+            mock.patch("os.cpu_count", return_value=8),
+        ):
+            self.assertEqual(default_jobs(), 8)
+
+
+class PlanWorkUnitsTest(unittest.TestCase):
+    def _register_dummy_module(self, mod_name: str, *, with_module_fixture: bool = False) -> types.ModuleType:
+        mod = types.ModuleType(mod_name)
+        if with_module_fixture:
+            mod.__dict__["setUpModule"] = lambda: None
+        sys.modules[mod_name] = mod
+        self.addCleanup(sys.modules.pop, mod_name, None)
+        return mod
+
+    def test_respects_module_and_class_fixtures_and_chunks_plain_classes(self) -> None:
+        mod_plain = "_cst_dummy_plain"
+        mod_fix = "_cst_dummy_mod_fix"
+        self._register_dummy_module(mod_plain, with_module_fixture=False)
+        self._register_dummy_module(mod_fix, with_module_fixture=True)
+
+        big_methods: dict[str, object] = {"__module__": mod_plain}
+        for idx in range(25):
+            big_methods[f"test_{idx:02d}"] = lambda _self: None
+        big_cls = type("BigPlain", (unittest.TestCase,), big_methods)
+
+        base_with_cls = type(
+            "BaseFix",
+            (unittest.TestCase,),
+            {"__module__": mod_plain, "setUpClass": classmethod(lambda _cls: None)},
+        )
+        sub_methods: dict[str, object] = {"__module__": mod_plain}
+        for idx in range(15):
+            sub_methods[f"test_sub_{idx:02d}"] = lambda _self: None
+        sub_cls = type("SubFix", (base_with_cls,), sub_methods)
+
+        mod_fix_methods_a: dict[str, object] = {"__module__": mod_fix, "test_a": lambda _self: None}
+        mod_fix_methods_b: dict[str, object] = {"__module__": mod_fix, "test_b": lambda _self: None}
+        cls_a = type("ModFixA", (unittest.TestCase,), mod_fix_methods_a)
+        cls_b = type("ModFixB", (unittest.TestCase,), mod_fix_methods_b)
+
+        suite = unittest.TestSuite(
+            [
+                unittest.defaultTestLoader.loadTestsFromTestCase(big_cls),
+                unittest.defaultTestLoader.loadTestsFromTestCase(sub_cls),
+                unittest.defaultTestLoader.loadTestsFromTestCase(cls_a),
+                unittest.defaultTestLoader.loadTestsFromTestCase(cls_b),
+            ]
+        )
+        units, has_load_err = plan_work_units(suite, max_chunk=DEFAULT_CLASS_CHUNK)
+        self.assertFalse(has_load_err)
+        self.assertEqual([len(u) for u in units], [15, 9, 8, 8, 2])
+        self.assertTrue(any(u[0].startswith(f"{mod_fix}.") for u in units if len(u) == 2))
+
+    def test_detects_loader_errors(self) -> None:
+        suite = unittest.defaultTestLoader.loadTestsFromNames(["_cst_no_such_module_xyz"])
+        units, has_load_err = plan_work_units(suite)
+        self.assertTrue(has_load_err)
+        self.assertEqual(units, [])
+
+
+class ParallelRunnerTest(unittest.TestCase):
+    def _run_modules(self, files: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-par-run-"))
+        for name, text in files.items():
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        return subprocess.run(
+            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), *args],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env={**os.environ, "PYTHONPATH": tmp},
+        )
+
+    def test_parallel_enforces_runtime_gates_and_aggregates_passes(self) -> None:
+        probe_a = (
+            "import os, shutil, stat, unittest\n"
+            "class GatesA(unittest.TestCase):\n"
+            "    def test_socket_stdin_no_new_privs_and_host_guard(self):\n"
+            "        self.assertTrue(stat.S_ISSOCK(os.fstat(0).st_mode))\n"
+            "        with open('/proc/self/status') as f:\n"
+            "            self.assertEqual(next(l for l in f if l.startswith('NoNewPrivs:')).split()[1], '1')\n"
+            f"        guard = os.environ.get({HOST_GUARD_ENV!r}, '')\n"
+            "        self.assertTrue(guard)\n"
+            "        self.assertEqual(shutil.which('systemctl'), os.path.join(guard, 'systemctl'))\n"
+            "    def test_ok_two(self):\n"
+            "        pass\n"
+        )
+        probe_b = (
+            "import subprocess, unittest\n"
+            "class GatesB(unittest.TestCase):\n"
+            "    def test_bash_devnull(self):\n"
+            "        r = subprocess.run(['bash', '-c', 'echo hi'], capture_output=True, text=True,"
+            " stdin=subprocess.DEVNULL, check=False)\n"
+            "        self.assertEqual(r.returncode, 0)\n"
+        )
+        done = self._run_modules(
+            {"probe_pa.py": probe_a, "probe_pb.py": probe_b},
+            "-v",
+            "--jobs",
+            "2",
+            "probe_pa",
+            "probe_pb",
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Ran 3 tests in", done.stderr)
+        self.assertIn("(2 workers)", done.stderr)
+        self.assertNotIn("error:", done.stderr)
+
+    def test_parallel_reports_test_failures_and_unexpected_skips(self) -> None:
+        probe_fail = (
+            "import unittest\nclass F(unittest.TestCase):\n    def test_fail(self):\n        self.fail('boom')\n"
+        )
+        probe_skip = (
+            "import unittest\n"
+            "class S(unittest.TestCase):\n"
+            "    @unittest.skip('bad skip')\n"
+            "    def test_skip(self):\n"
+            "        pass\n"
+        )
+        done = self._run_modules(
+            {"probe_fail.py": probe_fail, "probe_skip.py": probe_skip},
+            "--jobs",
+            "2",
+            "probe_fail",
+            "probe_skip",
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("FAIL: test_fail (probe_fail.F.test_fail)", done.stderr)
+        self.assertIn("FAILED (failures=1, skipped=1)", done.stderr)
+        self.assertIn("not in EXPECTED_SKIPS of tests/run_unit.py", done.stderr)
+
+    def test_parallel_catches_leaks_hooks_and_host_command_hits(self) -> None:
+        probe_guard = (
+            "import subprocess, unittest\n"
+            "class G(unittest.TestCase):\n"
+            "    def test_hits(self):\n"
+            "        subprocess.run(['systemctl', 'start', 'x.service'], capture_output=True,"
+            " stdin=subprocess.DEVNULL, check=False)\n"
+        )
+        done = self._run_modules(
+            {"probe_leaks.py": _LEAKS, "probe_guard.py": probe_guard},
+            "--jobs",
+            "2",
+            "probe_leaks.T.test_leaks_a_file",
+            "probe_leaks.U.test_a_weakref_callback_raises",
+            "probe_guard",
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("error: ResourceWarning in probe_leaks.T.test_leaks_a_file", done.stderr)
+        self.assertIn(LEAK_HINT, done.stderr)
+        self.assertIn("error: exception in probe_leaks.U.test_a_weakref_callback_raises", done.stderr)
+        self.assertIn(LOST_EXCEPTION_HINT, done.stderr)
+        self.assertIn("error: a unit test reached the real systemctl start x.service", done.stderr)
+
+        hook_done = self._run_modules(
+            {"probe_first.py": _HOOK_LEFT_BY_A_MODULE, "probe_second.py": _LOSES_AN_EXCEPTION},
+            "--jobs",
+            "2",
+            "probe_first",
+            "probe_second",
+        )
+        self.assertEqual(hook_done.returncode, 1, hook_done.stderr)
+        self.assertIn(
+            "error: sys.unraisablehook replaced and not restored by a class or module set-up or tear-down "
+            "before probe_first.T.test_a",
+            hook_done.stderr,
+        )
+        self.assertIn("error: exception in probe_second.T.test_a_weakref_callback_raises: ", hook_done.stderr)
+
+    def test_parallel_detects_bytecode_written_into_copy(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-par-pyc-"))
+        os.makedirs(os.path.join(tmp, "tests"))
+        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        for rel, text in (
+            ("probe_bytecode.py", _BYTECODE),
+            (
+                "child.py",
+                "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport sibling\n",
+            ),
+            ("sibling.py", "X = 1\n"),
+        ):
+            with open(os.path.join(tmp, rel), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                os.path.join(tmp, "tests", "run_unit.py"),
+                "--jobs",
+                "2",
+                "probe_bytecode.T.test_a_child_without_b",
+                "probe_bytecode.T.test_imports_a_sibling",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+        )
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertRegex(
+            done.stderr, r"error: a test wrote bytecode into the checkout: __pycache__/sibling\.cpython-\d+\.pyc"
+        )
+        self.assertIn(BYTECODE_HINT, done.stderr)
 
 
 if __name__ == "__main__":
