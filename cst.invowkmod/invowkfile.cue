@@ -60,11 +60,19 @@ cmds: [
 	{
 		name:        "test unit"
 		category:    "test"
-		description: "Run all unit tests (with a socket as stdin, see tests/run_unit.py) without generating __pycache__"
+		description: "Run all unit tests in parallel across CPU cores (with a socket as stdin, see tests/run_unit.py) without generating __pycache__"
+		flags: [
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto per CPU, 1 = single-process)"},
+		]
 		implementations: [{
 			platforms: [{name: "linux"}]
 			runtimes: [{name: "native"}]
-			script: {content: "python3 -I -B tests/run_unit.py -v"}
+			script: {content: """
+				set -euo pipefail
+				args=(-v)
+				[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				exec python3 -I -B tests/run_unit.py "${args[@]}"
+				"""}
 		}]
 	},
 	{
@@ -267,7 +275,7 @@ cmds: [
 				export PYTHONDONTWRITEBYTECODE=1
 				cov=(tests/uv-dev --group coverage coverage)
 				data="--data-file=${out}/coverage.data"
-				"${cov[@]}" run "${data}" tests/run_unit.py
+				"${cov[@]}" run "${data}" tests/run_unit.py --jobs 1
 				"${cov[@]}" report "${data}" > "${out}/report.txt"
 				"${cov[@]}" json "${data}" -q -o "${out}/coverage.json"
 				"${cov[@]}" html "${data}" -q -d "${out}/html"
