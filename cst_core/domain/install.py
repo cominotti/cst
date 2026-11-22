@@ -132,6 +132,7 @@ btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify
 btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root   btrfs:snapshots
 # btrfs: systemd units and data
 btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root   btrfs:below
+btrfs/units/journald.conf.d/10-cst-write-budget.conf /etc/systemd/journald.conf.d/10-cst-write-budget.conf        644  root  data          root   btrfs:core
 btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root   btrfs:snapshots
 btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root   btrfs:core
 btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root   btrfs:core
@@ -256,6 +257,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         ".github/scripts/pin_invowk.py",
         "bluetooth/bt-helper",
         "bluetooth/bt-setup",
+        "btrfs/btrfs-commit-interval",
         "btrfs/btrfs-compress",
         "btrfs/btrfs-scrub-limit",
         "btrfs/btrfs-stall-watch",

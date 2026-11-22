@@ -25,7 +25,9 @@
 #       * stall recording: btrfs-stall-monitord (always on, read-only) + below
 #         (rpm-ostree layered), queried with `report`
 #       * automatic block-group reclaim (dynamic + periodic, data)
-#       * writeback limits vm.dirty_bytes 2 GiB / background 512 MiB
+#       * writeback limits: vm.dirty_bytes 2 GiB, background 512 MiB,
+#         writeback 15 s (1500 cs), expire 60 s (6000 cs)
+#       * journald write budget: 10-cst-write-budget.conf (15 min sync, 1 GiB max)
 #       * NVMe APST latency cap 0 us (cst-nvme-apst.conf + udev rule: no sleep pauses)
 #       * desktop alerts (btrfs-notify) for every component; one raised while
 #         no graphical session can show it (at boot, nobody logged in) is kept
@@ -154,6 +156,12 @@
 #                          `status` and `plan` work as your user (also inside a
 #                          toolbox); `apply` and `revert` need root on the host.
 #                          Never runs automatic `btrfs filesystem defragment`.
+#   commit-interval [status|plan [SECONDS|--revert]|apply [SECONDS]|revert] [--yes]
+#                          root btrfs `commit=N` interval (default 60s) across
+#                          /etc/fstab, rpm-ostree kargs, live mount, and
+#                          btrfs:top-mount (keeps flushoncommit untouched).
+#                          `status` and `plan` work in a toolbox; `apply` and
+#                          `revert` need root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
 #                          per-device weekly scrub speed limit (SCRUB_LIMIT in
 #                          /etc/btrfs-setup/snapshots.conf + service drop-in).
@@ -176,6 +184,7 @@ source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 SYSCTL_FILE="/etc/sysctl.d/90-btrfs-writeback.conf"
 SYSCTL_SRC=btrfs/sysctl/90-btrfs-writeback.conf
+JOURNALD_DROPIN="/etc/systemd/journald.conf.d/10-cst-write-budget.conf"
 RECLAIM_FILE="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
 RECLAIM_SRC=btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in
 NVME_APST_FILE="/etc/tmpfiles.d/cst-nvme-apst.conf"
@@ -258,6 +267,9 @@ case "${cmd}" in
         ;;
     compress-force)
         CST_PROG="${PROG} compress-force" exec python3 -I -B "${SRC}/btrfs-compress" "$@"
+        ;;
+    commit-interval)
+        CST_PROG="${PROG} commit-interval" exec python3 -I -B "${SRC}/btrfs-commit-interval" "$@"
         ;;
     iocost)
         case "${1:-status}" in
@@ -661,17 +673,23 @@ status_mounts() {
             printf '  %-10s ok (%s %s)\n' "${mnt}" "${comp_opt}" "${EXPECTED_OPTS[*]}"
         fi
     done
-    for o in dirty_bytes dirty_background_bytes; do
+    for o in dirty_bytes dirty_background_bytes dirty_writeback_centisecs dirty_expire_centisecs; do
         want="$(awk -v k="vm.${o}" '$1 == k {print $3}' "${SYSCTL_FILE}" 2>/dev/null)"
-        have="$(cat "/proc/sys/vm/${o}")"
+        have="$(cat "/proc/sys/vm/${o}" 2>/dev/null || echo '?')"
         if [[ -z "${want}" ]]; then
-            printf '  vm.%-22s %s (not managed: run install)\n' "${o}" "${have}"
+            printf '  vm.%-26s %s (not managed: run install)\n' "${o}" "${have}"
         elif [[ "${want}" == "${have}" ]]; then
-            printf '  vm.%-22s %s ok\n' "${o}" "${have}"
+            printf '  vm.%-26s %s ok\n' "${o}" "${have}"
         else
-            printf '  vm.%-22s %s DRIFT (expected %s; run install)\n' "${o}" "${have}" "${want}"
+            printf '  vm.%-26s %s DRIFT (expected %s; run install)\n' "${o}" "${have}" "${want}"
         fi
     done
+    local journald_dropin="${JOURNALD_DROPIN:-/etc/systemd/journald.conf.d/10-cst-write-budget.conf}"
+    if [[ -e "${journald_dropin}" ]]; then
+        printf '  %-29s %s\n' "journald write budget" "ok (${journald_dropin})"
+    else
+        printf '  %-29s %s\n' "journald write budget" "not managed (run install)"
+    fi
     local nvme_param="${NVME_APST_PARAM:-/sys/module/nvme_core/parameters/default_ps_max_latency_us}"
     local nvme_file="${NVME_APST_FILE:-/etc/tmpfiles.d/cst-nvme-apst.conf}"
     if [[ -r "${nvme_param}" ]]; then
@@ -726,6 +744,8 @@ status() (
     status_mounts
     section "compression (compress-force)"
     python3 -I -B "${SRC}/btrfs-compress" status 2>&1 | cst_indent
+    section "commit interval (commit=60)"
+    python3 -I -B "${SRC}/btrfs-commit-interval" status 2>&1 | cst_indent
     section "degraded boot"
     if [[ -x "${DEGRADED}" ]]; then
         "${DEGRADED}" --status 2>/dev/null | sed -n '/==== summary/,$p' | sed '1d; s/^/  /'
@@ -1030,6 +1050,8 @@ uninstall() {
         [[ -w "${qos}" ]] && printf '100000\n' > "${qos}" 2>/dev/null || true
     done
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
+    rmdir "$(dirname "${JOURNALD_DROPIN}")" 2>/dev/null || true
+    systemctl try-restart systemd-journald.service 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
     remove_report_launcher
     systemctl daemon-reload
@@ -1069,6 +1091,7 @@ install_all() {
     install_scrub_limit "${scrub_limit}"
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
+    systemctl try-restart systemd-journald.service 2>/dev/null || true
     systemd-tmpfiles --create "${RECLAIM_FILE}"
     systemd-tmpfiles --create "${NVME_APST_FILE}" 2>/dev/null || true
     if command -v udevadm >/dev/null 2>&1; then

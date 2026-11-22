@@ -1428,6 +1428,28 @@ class BtrfsCompressionDoctorTest(Scratch):
             area_lines(r.stdout, "btrfs"),
         )
 
+    def test_commit_interval_coherence_and_drift(self) -> None:
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        ok_r = self.run_tool()
+        self.assertIn("  ok     root btrfs commit interval: coherent (commit=60)", area_lines(ok_r.stdout, "btrfs"))
+
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1",
+            live_opt="compress-force=zstd:1",
+            top_opt="compress-force=zstd:1",
+        )
+        drift_r = self.run_tool()
+        self.assertEqual(drift_r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(drift_r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs commit interval: drift across layers:", btrfs_text)
+        self.assertIn("fix: cst btrfs commit-interval apply", btrfs_text)
+
         self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
         r2 = self.run_tool()
         self.assertEqual(r2.returncode, 0, r2.stdout)

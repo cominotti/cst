@@ -133,6 +133,7 @@ cst btrfs help
 | `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
+| `commit-interval [status\|plan\|apply\|revert]` | user / root | Keep the root Btrfs `commit=` interval aligned across the live mount, `/etc/fstab`, BLS kernel args, and top-mount drop-ins (section 9.3; default target `60`s): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
 | `iocost [status\|plan [--device N]\|apply [--live-only] [--device N]\|revert [--live-only]]` | user / root | Enable kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without an upstream hwdb entry so cgroup `IOWeight=` is arbitrated across slices (section 9.2): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
 | `scrub-limit [status\|plan [SIZE\|off]\|set [SIZE]\|off]` | user / root | Inspect or configure `SCRUB_LIMIT` (default `500M`) and `10-cst-limit.conf` (section 4.3): `status` and `plan` work as your user and in a toolbox; `set` and `off` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
@@ -189,7 +190,7 @@ Unit files go to `/etc/systemd/system/`.
 | Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00, up to 15 min later (or after the next boot if the PC was off); speed limit: `SCRUB_LIMIT` |
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
-| Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
+| Writeback limits & journald budget (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf`, `/etc/systemd/journald.conf.d/10-cst-write-budget.conf` | at every boot, and at every `install` |
 | NVMe APST latency cap | `/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules` | at every boot, NVMe udev events, and at `install` |
 | Stall monitor (4.7) | `/usr/local/sbin/btrfs-stall-monitord`, `btrfs-stall-monitor.service` | always |
 | Stall report (section 7) | `/usr/local/bin/btrfs-stall-report`, and a small launcher `~/.local/bin/btrfs-stall-report` | when you run it |
@@ -430,23 +431,34 @@ wait, and the desktop can freeze.
 **How:** `/etc/sysctl.d/90-btrfs-writeback.conf` sets fixed limits. These are
 **global** kernel settings: they apply to all filesystems and disks, not only to
 btrfs. The real file is a comment block (the same reasons as above) and these
-two lines:
+four lines:
 
 ```
 vm.dirty_background_bytes = 536870912
 vm.dirty_bytes = 2147483648
+vm.dirty_writeback_centisecs = 1500
+vm.dirty_expire_centisecs = 6000
 ```
 
 - `vm.dirty_background_bytes` = 512 MiB: above this, Linux starts writing in
   the background.
 - `vm.dirty_bytes` = 2 GiB: above this, programs that write must wait.
+- `vm.dirty_writeback_centisecs` = 1500 (15 s): wakes the background flusher 3x
+  less often than the 5 s default.
+- `vm.dirty_expire_centisecs` = 6000 (60 s): aligns page expiry with
+  `commit=60` (section 9.3) so short-lived build files expire in RAM before
+  hitting NAND.
 
-This does not change how much is written in total. It only limits the size of
-each burst (2 GiB is about 0.5 s of NVMe writes). Setting these values turns
-off tuned's `vm.dirty_ratio`. tuned is configured with `reapply_sysctl=1`, so
-the file in `/etc/sysctl.d` wins over the tuned profile. `install` applies the
-values again every time it runs. `status` shows `DRIFT` if the live values
-differ.
+Setting byte limits turns off tuned's `vm.dirty_ratio`. tuned is configured with
+`reapply_sysctl=1`, so `/etc/sysctl.d` wins over the tuned profile. `install`
+applies the values again every time it runs. `status` shows `DRIFT` if any live
+value differs.
+
+`btrfs:core` also installs
+`/etc/systemd/journald.conf.d/10-cst-write-budget.conf` (`SyncIntervalSec=15m`,
+`SystemMaxUse=1G`, `MaxRetentionSec=1month`) and tries restarting
+`systemd-journald` so periodic non-critical journal fsyncs drop without losing
+crash logs or reboot persistence.
 
 ### 4.7 Stall monitor (`btrfs-stall-monitord`, always on)
 
@@ -559,8 +571,8 @@ every 15 minutes.
 
 ### 4.8 below
 
-**below** is a separate tool (a Fedora package) that records, every 5 s, how much
-each process and cgroup read and wrote. The stall monitor knows *that* the disk
+**below** is a separate tool (a Fedora package) that records, every **15 s** (`--interval 15`), how much
+each process and cgroup read and wrote (reduced from 5 s to cut continuous metadata write amplification by 3x while `btrfs-stall-monitord` keeps sampling every 5 s / 1 s in RAM, and `btrfs-stall-report` integrates `below` samples using actual timestamp deltas). The stall monitor knows *that* the disk
 was busy; below knows *who* did it.
 
 `install` adds it with `rpm-ostree install --apply-live below`. **rpm-ostree** is
@@ -1421,6 +1433,27 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
 - **`revert`** disables only `MAJ:MIN` devices tracked in
   `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`), stops and disables
   `cst-btrfs-iocost.service`, and removes `btrfs:iocost`.
+
+### 9.3 `commit-interval`: coherent `commit=60` across root btrfs layers
+
+```
+cst btrfs commit-interval               # status (default; user + toolbox)
+cst btrfs commit-interval plan          # dry run (also: SECONDS, --revert)
+cst btrfs commit-interval apply         # root on host; sets commit=60 (--yes skips prompt)
+cst btrfs commit-interval revert        # root on host; back to kernel default (30 s)
+```
+
+- Spaces periodic btrfs transaction commits from the 30 s default to **60 s**
+  (allowed range `15..300` s) across all four layers (`/etc/fstab`, next-boot
+  `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
+  partial error.
+- Keeps **`flushoncommit`** untouched on the root RAID1 filesystem so crash
+  consistency is preserved while Halving periodic `flushoncommit` barriers
+  (aligned with `vm.dirty_expire_centisecs = 6000` in section 4.6).
+- Because the Linux kernel omits `commit=30` from `/proc/mounts`, missing
+  `commit=` is treated as `30 s` default everywhere (`revert` removes `commit=`
+  from `fstab`/`kargs`/`top-mount` and remounts with `commit=30`). `cst doctor`
+  flags any cross-layer drift.
 
 ---
 
@@ -2401,6 +2434,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-runtime` | `snapshot_runtime/` | The Python side of `btrfs-snapshot` (`hourly`, `nas`, `list`, `caches`, `prune`, `purge`, `configure`), which the bash front `btrfs/btrfs-snapshot` execs for them; the front's conversion engine (`convert`, `convert-boot`, `convert-one`, `convert-planned`, `planned-left`) and `busy` stay bash for good. `domain.py`: the settings and their defaults (`DEFAULTS`; the space-guard numbers also stay as three lines in the front, for btrfs-bulk), bash arithmetic as the guard reads it (`guard_number`), the core's sources and cache options, `CORE_REASON` and the blocked alert, the NAS texts, durations and summary, the vocabularies (`AlertKind`, `CoreExit`, `ResticExit`, ...); no I/O. `adapters/`: `machine.py` (`SnapshotRun`: the paths below `CST_SNAPSHOT_ROOT` for a run that is not root, `snapshots.conf` read as data with cst_core's `parse_snapshots_conf`, the commands with the run's lock fds handed on, the files as the bash's commands treated them, the trapped signals), `hourly.py` (`hourly`, `prune`, `purge`: the lock, the space guard, the waits, the core's runs and alerts), `nas.py` (`Nas`: the NAS backup), `commands.py` (`list`, `caches`, `configure`, the table of commands). `cli.py`: `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
 | `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain.py` (pure CLI arg parser, `CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
+| `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
 | `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |

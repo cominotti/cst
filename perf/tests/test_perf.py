@@ -320,6 +320,43 @@ class PerfEvaluatorTest(unittest.TestCase):
         iocost_f = next(f for f in io_rep.findings if f.finding_id == "io-weight-no-iocost")
         self.assertEqual(iocost_f.fix_command, "sudo cst btrfs iocost apply")
 
+        # Short 30s commit with flushoncommit + expire < commit flagged; coherent 60s + 60s expire is clean.
+        short_commit = IoProbeSnapshot(
+            dirty_background_bytes=512 * MIB,
+            dirty_bytes=2 * GIB,
+            dirty_writeback_cs=500,
+            dirty_expire_cs=3000,
+            root_btrfs_commit_s=30,
+            root_btrfs_flushoncommit=True,
+        )
+        short_rep = evaluate_perf_io(short_commit)
+        self.assertIn("io-btrfs-commit-short", [f.finding_id for f in short_rep.findings])
+
+        mismatch_commit = IoProbeSnapshot(
+            dirty_background_bytes=512 * MIB,
+            dirty_bytes=2 * GIB,
+            dirty_writeback_cs=1500,
+            dirty_expire_cs=3000,
+            root_btrfs_commit_s=60,
+            root_btrfs_commit_explicit=True,
+            root_btrfs_flushoncommit=True,
+        )
+        mismatch_rep = evaluate_perf_io(mismatch_commit)
+        self.assertEqual([f.finding_id for f in mismatch_rep.findings], ["io-dirty-expire-mismatch"])
+
+        aligned_commit = IoProbeSnapshot(
+            dirty_background_bytes=512 * MIB,
+            dirty_bytes=2 * GIB,
+            dirty_writeback_cs=1500,
+            dirty_expire_cs=6000,
+            root_btrfs_commit_s=60,
+            root_btrfs_commit_explicit=True,
+            root_btrfs_flushoncommit=True,
+        )
+        aligned_rep = evaluate_perf_io(aligned_commit)
+        self.assertEqual(aligned_rep.verdict, PerfVerdict.OPTIMIZED)
+        self.assertTrue(any(m.label == "dirty writeback" and "exp=60s" in m.value for m in aligned_rep.metrics))
+
         gpu_rep = evaluate_perf_gpu(
             GpuProbeSnapshot(
                 gpus=(

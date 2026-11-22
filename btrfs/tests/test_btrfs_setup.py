@@ -1823,9 +1823,12 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
                 assignment("EXPECTED_OPTS"),
                 shell_function(SETUP, "status_mounts"),
                 f'SYSCTL_FILE="{self.tmp}/sysctl.conf"',
+                f'JOURNALD_DROPIN="{self.tmp}/10-cst-write-budget.conf"',
                 f'echo "2147483648" > "{self.tmp}/dirty_bytes"',
                 f'echo "536870912" > "{self.tmp}/dirty_background_bytes"',
-                'printf "vm.dirty_bytes = 2147483648\\nvm.dirty_background_bytes = 536870912\\n" > "${SYSCTL_FILE}"',
+                f'echo "1500" > "{self.tmp}/dirty_writeback_centisecs"',
+                f'echo "6000" > "{self.tmp}/dirty_expire_centisecs"',
+                'printf "vm.dirty_bytes = 2147483648\\nvm.dirty_background_bytes = 536870912\\nvm.dirty_writeback_centisecs = 1500\\nvm.dirty_expire_centisecs = 6000\\n" > "${SYSCTL_FILE}"',
                 "findmnt() {",
                 '  local mnt="$5"',
                 '  case "${mnt}" in',
@@ -1836,6 +1839,8 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
                 '  case "$1" in',
                 f'    /proc/sys/vm/dirty_bytes) command cat "{self.tmp}/dirty_bytes" ;;',
                 f'    /proc/sys/vm/dirty_background_bytes) command cat "{self.tmp}/dirty_background_bytes" ;;',
+                f'    /proc/sys/vm/dirty_writeback_centisecs) command cat "{self.tmp}/dirty_writeback_centisecs" ;;',
+                f'    /proc/sys/vm/dirty_expire_centisecs) command cat "{self.tmp}/dirty_expire_centisecs" ;;',
                 '    *) command cat "$@" ;;',
                 "  esac",
                 "}",
@@ -1857,23 +1862,27 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         base = "flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
         out_comp = self._run_status_mounts(f'    /var) echo "compress=zstd:1,{base}" ;;')
         self.assertIn("/var       ok (compress=zstd:1 ", out_comp)
+        self.assertIn("vm.dirty_writeback_centisecs", out_comp)
+        self.assertIn("1500 ok", out_comp)
+        self.assertIn("journald write budget", out_comp)
         out_force = self._run_status_mounts(f'    /var) echo "compress-force=zstd:1,{base}" ;;')
         self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
 
-    def test_btrfs_setup_dispatches_compress_force_help(self) -> None:
-        r = subprocess.run(
-            ["bash", SETUP, "compress-force", "--help"],
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            check=False,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("compress-force", r.stdout)
-        self.assertIn("revert", r.stdout)
+    def test_btrfs_setup_dispatches_compress_and_commit_help(self) -> None:
+        for cmd, needle in (("compress-force", "revert"), ("commit-interval", "commit=SECONDS")):
+            r = subprocess.run(
+                ["bash", SETUP, cmd, "--help"],
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(cmd, r.stdout)
+            self.assertIn(needle, r.stdout)
 
 
 if __name__ == "__main__":

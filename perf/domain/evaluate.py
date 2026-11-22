@@ -16,6 +16,7 @@ from perf.domain.models import (
     BTRFS_MAX_COMMIT_ATTENTION_MS,
     BTRFS_MAX_COMMIT_BOTTLENECK_MS,
     BTRFS_SHORT_UUID_LEN,
+    CENTISECONDS_PER_SEC,
     COMPACT_ATTENTION_PER_HOUR,
     COMPACT_BOTTLENECK_PER_HOUR,
     CSTATE_DEEP_LATENCY_US,
@@ -29,6 +30,7 @@ from perf.domain.models import (
     IrqLineSample,
     IRQ_DOMINANT_SHARE,
     IoProbeSnapshot,
+    KERNEL_DEFAULT_BTRFS_COMMIT_S,
     LARGE_RAM_THRESHOLD_BYTES,
     MAX_BLOCK_DISPLAY,
     MEM_MIN_FREE_LARGE_RAM_BYTES,
@@ -51,6 +53,7 @@ from perf.domain.models import (
     PerfReport,
     PerfReportJson,
     PerfVerdict,
+    ROOT_BTRFS_TARGET_COMMIT_S,
     SESSION_FLOOR_HEADROOM_DEN,
     SESSION_FLOOR_HEADROOM_NUM,
     SESSION_MIN_RECOMMENDED_BYTES,
@@ -550,13 +553,48 @@ def _eval_io_nvme_and_dirty(col: _AxisCollector, io: IoProbeSnapshot) -> None:
     if io.dirty_background_bytes is not None and io.dirty_bytes is not None:
         bg_txt = format_bytes_human(io.dirty_background_bytes) if io.dirty_background_bytes else "0 (ratio)"
         lim_txt = format_bytes_human(io.dirty_bytes) if io.dirty_bytes else "0 (ratio)"
-        col.metric("dirty writeback", f"bg={bg_txt}, max={lim_txt}")
+        cadence_txt = ""
+        if io.dirty_writeback_cs is not None and io.dirty_expire_cs is not None:
+            wb_s = io.dirty_writeback_cs / CENTISECONDS_PER_SEC
+            exp_s = io.dirty_expire_cs / CENTISECONDS_PER_SEC
+            cadence_txt = f", wb={wb_s:g}s, exp={exp_s:g}s"
+        col.metric("dirty writeback", f"bg={bg_txt}, max={lim_txt}{cadence_txt}")
         if io.dirty_background_bytes == 0 and io.dirty_bytes == 0:
             col.warn(
                 "io-dirty-bytes-unbounded",
                 "vm.dirty_bytes / dirty_background_bytes are 0 (RAM-percentage defaults)",
                 "Large-RAM hosts accumulate gigabytes of dirty buffers before writeback starts.",
                 "Bound dirty writeback in bytes (e.g. 512 MiB / 2 GiB via cst btrfs).",
+            )
+    if io.root_btrfs_commit_s is not None:
+        flush_txt = ", flushoncommit" if io.root_btrfs_flushoncommit else ""
+        default_txt = (
+            " (default)"
+            if io.root_btrfs_commit_s == KERNEL_DEFAULT_BTRFS_COMMIT_S and not io.root_btrfs_commit_explicit
+            else ""
+        )
+        col.metric("root btrfs commit", f"{io.root_btrfs_commit_s}s{default_txt}{flush_txt}")
+        if io.root_btrfs_flushoncommit and io.root_btrfs_commit_s < ROOT_BTRFS_TARGET_COMMIT_S:
+            col.warn_fix(
+                "io-btrfs-commit-short",
+                f"Root btrfs commit interval is {io.root_btrfs_commit_s}s with flushoncommit",
+                "Frequent 30s flushoncommit barriers increase metadata commits and SSD write amplification.",
+                (
+                    f"Align root btrfs mounts to commit={ROOT_BTRFS_TARGET_COMMIT_S} via `cst btrfs commit-interval`.",
+                    "sudo cst btrfs commit-interval apply",
+                ),
+            )
+        if (
+            io.dirty_expire_cs is not None
+            and io.dirty_expire_cs > 0
+            and io.dirty_expire_cs < io.root_btrfs_commit_s * CENTISECONDS_PER_SEC
+        ):
+            exp_s = io.dirty_expire_cs / CENTISECONDS_PER_SEC
+            col.warn_fix(
+                "io-dirty-expire-mismatch",
+                f"vm.dirty_expire_centisecs ({exp_s:g}s) is shorter than root btrfs commit ({io.root_btrfs_commit_s}s)",
+                "Kernel page expiry forces dirty pages to disk before the btrfs commit window closes.",
+                ("Apply CST writeback sysctl tuning so page expiry matches commit=60.", "sudo cst btrfs install"),
             )
 
 

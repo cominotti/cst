@@ -7460,3 +7460,135 @@ EOF
         ).stdout
         self.assertIn("fix: sudo cst cpu irq apply", doc_out)
         self.assertIn("fix: sudo cst btrfs iocost apply", doc_out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:
+        """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
+        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-commit"
+        top_unit = r"var-mnt-btrfs\x2dtop.mount"
+        auto_unit = r"var-mnt-btrfs\x2dtop.automount"
+        journald_dest = "/etc/systemd/journald.conf.d/10-cst-write-budget.conf"
+        uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"[[ ! -e {journald_dest} ]] || echo present").stdout.strip():
+            self.skipTest(f"{journald_dest} already present (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/installed.json.bak ]]; then cp -a {w}/installed.json.bak /var/lib/cst/installed.json; else rm -f /var/lib/cst/installed.json; fi
+            if [[ ! -f {w}/had-ostree-booted ]]; then rm -f /run/ostree-booted; fi
+            rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
+            rm -f {journald_dest} && rmdir /etc/systemd/journald.conf.d 2>/dev/null || true
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w} && mkdir -p {w}/bin {w}/proc
+            [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
+            touch /run/ostree-booted
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+    cur="$(cat {w}/kargs)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete=*) old="${{1#--delete=}}"; cur="${{cur//${{old}}/}}" ;;
+            --append=*) add="${{1#--append=}}"; cur="${{cur}} ${{add}}" ;;
+        esac
+        shift
+    done
+    printf '%s\\n' "$(echo "${{cur}}" | xargs)" >{w}/kargs
+    exit 0
+fi
+exit 1
+EOF
+            cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then echo "{uuid}"; exit 0; fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do printf '%s %s %s\\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+opt=""
+for a in "$@"; do case "$a" in remount,*) opt="${{a#remount,}}" ;; esac; done
+if [[ -n "$opt" ]]; then
+    python3 -c '
+import sys
+p, opt = sys.argv[1], sys.argv[2]
+val = int(opt.split("=", 1)[1])
+lines = open(p).read().splitlines(keepends=True)
+out = []
+for ln in lines:
+    toks = ln.split()
+    kept = [t for t in toks[3].split(",") if not t.startswith("commit=")]
+    if val != 30:
+        kept.append(opt)
+    toks[3] = ",".join(kept)
+    out.append(" ".join(toks) + "\\n")
+open(p, "w").write("".join(out))
+' {w}/proc/mounts "$opt"
+fi
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            . /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/units/journald.conf.d/10-cst-write-budget.conf"
+            {installer} install btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
+            [[ -f {journald_dest} ]]
+            grep -qxF "SyncIntervalSec=15m" {journald_dest}
+            grep -qF -- "--interval 15" /opt/cst-rw/btrfs/units/below.service.d/10-cst.conf
+            grep -qxF "vm.dirty_expire_centisecs = 6000" /opt/cst-rw/btrfs/sysctl/90-btrfs-writeback.conf
+            {installer} remove btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
+            [[ ! -e {journald_dest} ]]
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            /opt/cst-rw/cst btrfs commit-interval plan | grep -qF "commit=60"
+            ! grep -qF "commit=60" /etc/fstab
+            /opt/cst-rw/cst btrfs commit-interval apply --yes
+            grep -qF "commit=60" /etc/fstab
+            grep -qF "flushoncommit" /etc/fstab
+            grep -qF "commit=60" {w}/kargs
+            grep -qF "commit=60" {w}/proc/mounts
+            grep -qF "commit=60" "/etc/systemd/system/{top_unit}"
+            systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval apply | grep -qF "nothing to do"
+            /opt/cst-rw/cst btrfs commit-interval status | grep -qF "coherent (commit=60)"
+            doc_out="$(/opt/cst-rw/cst doctor || true)"
+            grep -qF "ok     root btrfs commit interval: coherent (commit=60)" <<<"$doc_out"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            ! grep -qF "commit=" /etc/fstab
+            ! grep -qF "commit=" {w}/kargs
+            ! grep -qF "commit=" {w}/proc/mounts
+            ! grep -qF "commit=" "/etc/systemd/system/{top_unit}"
+            echo E2E-COMMIT-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-COMMIT-OK", out)

@@ -10,6 +10,13 @@ import shlex
 import time
 from typing import Final, NamedTuple
 
+from btrfs.commit.domain import (
+    CommitCoherenceReport,
+    DEFAULT_TARGET_COMMIT_S,
+    ROOTFLAGS_PREFIX as COMMIT_ROOTFLAGS_PREFIX,
+    assess_commit_coherence,
+    effective_commit_seconds,
+)
 from btrfs.compress.domain import (
     OSTREE_BOOTED_PATH,
     ROOT_TARGETS,
@@ -18,6 +25,7 @@ from btrfs.compress.domain import (
     CompressMode,
     CompressSnapshot,
     assess_coherence,
+    extract_rootflags_tokens,
     parse_compress_spec,
     parse_fstab_root_entries,
     parse_proc_mounts,
@@ -611,6 +619,7 @@ def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
 
 
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"
+_COMMIT_INTERVAL_LABEL: Final[str] = "root btrfs commit interval"
 
 
 def _read_ostree_kargs(host: DoctorHostPort) -> str | None:
@@ -618,6 +627,34 @@ def _read_ostree_kargs(host: DoctorHostPort) -> str | None:
     if rc == 0 and kout.strip():
         return kout
     return read_text(host, host.path(HostPath("/proc/cmdline")), 65536) or None
+
+
+def _read_root_btrfs_snapshot(host: DoctorHostPort) -> tuple[CompressSnapshot, bool] | None:
+    fstab_raw = read_text(host, host.path(FSTAB), 65536)
+    proc_mounts_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
+    top_text = read_text(host, host.path(HostPath(TOP_MOUNT_UNIT_PATH)), 65536)
+    has_btrfs_fstab = bool(parse_proc_mounts(fstab_raw))
+    has_btrfs_proc = bool(pick_root_mounts(parse_proc_mounts(proc_mounts_raw)))
+    if not (has_btrfs_fstab or has_btrfs_proc or top_text or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
+        return None
+    live_findmnt, root_uuid = _findmnt_root_btrfs_info(host)
+    live_text = live_findmnt or proc_mounts_raw
+    if not (
+        parse_fstab_root_entries(fstab_raw, root_uuid) or pick_root_mounts(parse_proc_mounts(live_text)) or top_text
+    ):
+        return None
+    is_ostree = host.exists(host.path(HostPath(OSTREE_BOOTED_PATH)))
+    kargs_text = _read_ostree_kargs(host) if is_ostree else None
+    top_mount = parse_top_mount_unit(top_text) if top_text else None
+    snap = CompressSnapshot(
+        is_ostree=is_ostree,
+        root_uuid=root_uuid,
+        fstab_text=fstab_raw or None,
+        kargs_text=kargs_text,
+        proc_mounts_text=live_text or None,
+        top_mount=top_mount,
+    )
+    return snap, bool(fstab_raw or live_text or top_text)
 
 
 def _compression_report_result(
@@ -649,33 +686,45 @@ def _compression_report_result(
 @check(CHECKS, "btrfs")
 def check_btrfs_compression(host: DoctorHostPort) -> Iterator[Result]:
     """Coherence of root btrfs compression across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
-    fstab_raw = read_text(host, host.path(FSTAB), 65536)
-    proc_mounts_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
-    top_text = read_text(host, host.path(HostPath(TOP_MOUNT_UNIT_PATH)), 65536)
-    has_btrfs_fstab = bool(parse_proc_mounts(fstab_raw))
-    has_btrfs_proc = bool(pick_root_mounts(parse_proc_mounts(proc_mounts_raw)))
-    if not (has_btrfs_fstab or has_btrfs_proc or top_text or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
+    loaded = _read_root_btrfs_snapshot(host)
+    if loaded is None:
         return
-    live_findmnt, root_uuid = _findmnt_root_btrfs_info(host)
-    live_text = live_findmnt or proc_mounts_raw
-    if not (
-        parse_fstab_root_entries(fstab_raw, root_uuid) or pick_root_mounts(parse_proc_mounts(live_text)) or top_text
-    ):
-        return
-
-    is_ostree = host.exists(host.path(HostPath(OSTREE_BOOTED_PATH)))
-    kargs_text = _read_ostree_kargs(host) if is_ostree else None
-    top_mount = parse_top_mount_unit(top_text) if top_text else None
-    report = assess_coherence(
-        CompressSnapshot(
-            is_ostree=is_ostree,
-            root_uuid=root_uuid,
-            fstab_text=fstab_raw or None,
-            kargs_text=kargs_text,
-            proc_mounts_text=live_text or None,
-            top_mount=top_mount,
-        )
-    )
-    res = _compression_report_result(host, report, has_sources=bool(fstab_raw or live_text or top_text))
+    snap, has_sources = loaded
+    res = _compression_report_result(host, assess_coherence(snap), has_sources=has_sources)
     if res is not None:
         yield res
+
+
+def _commit_fix_subcmd(snap: CompressSnapshot, report: CommitCoherenceReport) -> str:
+    custom_secs: list[int] = [
+        effective_commit_seconds(m.options) for m in parse_fstab_root_entries(snap.fstab_text or "", snap.root_uuid)
+    ]
+    if snap.is_ostree and snap.kargs_text is not None:
+        custom_secs.extend(
+            effective_commit_seconds(t.removeprefix(COMMIT_ROOTFLAGS_PREFIX))
+            for t in extract_rootflags_tokens(snap.kargs_text)
+        )
+    non_default = sorted({s for s in custom_secs if s not in {DEFAULT_TARGET_COMMIT_S, 30}})
+    if len(non_default) == 1:
+        return f"apply {non_default[0]}"
+    if report.is_custom:
+        return "apply"
+    return "revert"
+
+
+@check(CHECKS, "btrfs")
+def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
+    """Coherence of root btrfs `commit=N` across /etc/fstab, rpm-ostree kargs, live mounts, and top-mount."""
+    loaded = _read_root_btrfs_snapshot(host)
+    if loaded is None:
+        return
+    snap, _ = loaded
+    report = assess_commit_coherence(snap)
+    if not report.coherent:
+        yield Result(
+            WARN,
+            f"{_COMMIT_INTERVAL_LABEL}: {report.summary}",
+            f"{host.cst} btrfs commit-interval {_commit_fix_subcmd(snap, report)}",
+        )
+    elif report.is_custom:
+        yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")

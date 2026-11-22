@@ -3,20 +3,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TextIO
 
 from btrfs.compress.application import CompressChangeResult, CompressPlanResult
-from btrfs.compress.domain import CompressPlan, CompressStatusView, LayerName, LayerStatus
+from btrfs.compress.domain import (
+    CompressPlan,
+    CompressStatusView,
+    LayerName,
+    LayerPlan,
+    LayerStatus,
+)
 
 
-def _emit_seam(seam_proc: str, out: TextIO) -> None:
-    if seam_proc:
-        print(f"test seam (CST_BTRFS_COMPRESS_PROC): /proc in {seam_proc}, not the kernel's", file=out)
-
-
-def _render_plan(plan: CompressPlan, out: TextIO) -> None:
-    print(f"Target compression: {plan.target_option}", file=out)
-    for lp in plan.layers:
+def format_layer_plan_lines(header: str, layers: Sequence[LayerPlan]) -> list[str]:
+    """Render shared multi-layer plan header and per-layer status rows."""
+    lines = [header]
+    for lp in layers:
         match lp.status:
             case LayerStatus.CHANGE:
                 marker = "CHANGE"
@@ -26,25 +29,57 @@ def _render_plan(plan: CompressPlan, out: TextIO) -> None:
                 marker = "skip"
             case _:
                 marker = lp.status.value
-        print(f"  {lp.layer.value:<10} [{marker:<6}] {lp.current} -> {lp.target} ({lp.detail})", file=out)
+        lines.append(f"  {lp.layer.value:<10} [{marker:<6}] {lp.current} -> {lp.target} ({lp.detail})")
+    return lines
+
+
+def format_layer_status_lines(
+    header: str,
+    live_entries: Sequence[tuple[str, str]],
+    layers: Sequence[LayerPlan],
+    *,
+    kargs_error: str = "",
+    booted_diff: tuple[str, str] | None = None,
+) -> list[str]:
+    """Render shared multi-layer `status` header, live mounts, persistent layers, and boot diff."""
+    lines = [header]
+    for target, raw in live_entries:
+        lines.append(f"  live {target:<10} {raw}")
+    if not live_entries:
+        lines.append("  live            (no root btrfs mount in /proc/mounts)")
+    for lp in layers:
+        if lp.layer == LayerName.LIVE:
+            continue
+        detail = f"(error: {kargs_error})" if lp.layer == LayerName.KARGS and kargs_error else lp.current
+        lines.append(f"  {lp.layer.value:<15} {detail}")
+    if booted_diff is not None:
+        lines.append(
+            f"  note            booted /proc/cmdline ({booted_diff[0]}) differs from next-boot kargs ({booted_diff[1]})"
+        )
+    return lines
+
+
+def _emit_seam(seam_proc: str, out: TextIO) -> None:
+    if seam_proc:
+        print(f"test seam (CST_BTRFS_COMPRESS_PROC): /proc in {seam_proc}, not the kernel's", file=out)
+
+
+def _render_plan(plan: CompressPlan, out: TextIO) -> None:
+    for line in format_layer_plan_lines(f"Target compression: {plan.target_option}", plan.layers):
+        print(line, file=out)
 
 
 def render_compress_status(view: CompressStatusView, out: TextIO) -> int:
     """Render `status` output cleanly."""
     _emit_seam(view.seam_proc, out)
-    print("Root btrfs compression:", file=out)
-    for target, raw in view.live_entries:
-        print(f"  live {target:<10} {raw}", file=out)
-    if not view.live_entries:
-        print("  live            (no root btrfs mount in /proc/mounts)", file=out)
-    for lp in view.layers:
-        if lp.layer == LayerName.LIVE:
-            continue
-        detail = f"(error: {view.kargs_error})" if lp.layer == LayerName.KARGS and view.kargs_error else lp.current
-        print(f"  {lp.layer.value:<15} {detail}", file=out)
-    if view.booted_diff is not None:
-        booted, staged = view.booted_diff
-        print(f"  note            booted /proc/cmdline ({booted}) differs from next-boot kargs ({staged})", file=out)
+    for line in format_layer_status_lines(
+        "Root btrfs compression:",
+        view.live_entries,
+        view.layers,
+        kargs_error=view.kargs_error,
+        booted_diff=view.booted_diff,
+    ):
+        print(line, file=out)
     print(f"  overall         {view.coherence.summary}", file=out)
     return 0
 

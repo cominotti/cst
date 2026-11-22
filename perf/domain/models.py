@@ -35,6 +35,9 @@ IRQ_DOMINANT_SHARE: Final = 0.5
 TOP_IRQ_DISPLAY_LIMIT: Final = 3
 
 NVME_PS_MAX_LATENCY_WARN_US: Final = 50_000
+ROOT_BTRFS_TARGET_COMMIT_S: Final = 60
+KERNEL_DEFAULT_BTRFS_COMMIT_S: Final = 30
+CENTISECONDS_PER_SEC: Final = 100
 BTRFS_MAX_COMMIT_ATTENTION_MS: Final = 500
 BTRFS_MAX_COMMIT_BOTTLENECK_MS: Final = 2000
 BTRFS_AVG_COMMIT_ATTENTION_MS: Final = 25.0
@@ -122,6 +125,9 @@ class PerfPathKey(StrEnum):
     VM_COMPACTION = "proc/sys/vm/compaction_proactiveness"
     VM_DIRTY_BG_BYTES = "proc/sys/vm/dirty_background_bytes"
     VM_DIRTY_BYTES = "proc/sys/vm/dirty_bytes"
+    VM_DIRTY_WRITEBACK_CS = "proc/sys/vm/dirty_writeback_centisecs"
+    VM_DIRTY_EXPIRE_CS = "proc/sys/vm/dirty_expire_centisecs"
+    PROC_MOUNTS = "proc/mounts"
     THP_ENABLED = "sys/kernel/mm/transparent_hugepage/enabled"
     THP_DEFRAG = "sys/kernel/mm/transparent_hugepage/defrag"
     LRU_GEN_ENABLED = "sys/kernel/mm/lru_gen/enabled"
@@ -193,6 +199,9 @@ IO_FILE_KEYS: Final[tuple[PerfPathKey, ...]] = tuple(
         "sys/module/nvme_core/parameters/default_ps_max_latency_us",
         "proc/sys/vm/dirty_background_bytes",
         "proc/sys/vm/dirty_bytes",
+        "proc/sys/vm/dirty_writeback_centisecs",
+        "proc/sys/vm/dirty_expire_centisecs",
+        "proc/mounts",
         "cgroup/io.cost.qos",
         "etc/btrfs-setup/snapshots.conf",
     )
@@ -373,6 +382,11 @@ class IoProbeSnapshot:
     nvme_ps_max_latency_us: int | None = None
     dirty_background_bytes: int | None = None
     dirty_bytes: int | None = None
+    dirty_writeback_cs: int | None = None
+    dirty_expire_cs: int | None = None
+    root_btrfs_commit_s: int | None = None
+    root_btrfs_commit_explicit: bool = False
+    root_btrfs_flushoncommit: bool = False
     iocost_qos_active: bool | None = None
     iocost_enabled_devices: int = 0
     nonzero_slice_io_weights: tuple[tuple[str, int], ...] = ()

@@ -48,7 +48,7 @@ does nothing by itself: it passes your command to one **module**.
 
 | Command | Module script | Folder | What it is for | Detailed documents |
 |---|---|---|---|---|
-| `cst btrfs ...` | `btrfs-setup.sh` | `btrfs/` | Storage: disk health, scrub (`scrub-limit`), stall recording, writeback limits, NVMe APST, `blk-iocost` QoS (`iocost`), `compress-force`, Docker volumes, degraded boot, faster encryption, snapshots, NAS backup, `~/Bulk`, Docker cleanup | [btrfs/README.md](btrfs/README.md), and [btrfs/SNAPSHOTS.md](btrfs/SNAPSHOTS.md) for snapshots and the NAS backup |
+| `cst btrfs ...` | `btrfs-setup.sh` | `btrfs/` | Storage: disk health, scrub (`scrub-limit`), stall recording, writeback limits + journald budget, NVMe APST, `blk-iocost` QoS (`iocost`), `compress-force`, `commit-interval`, Docker volumes, degraded boot, faster encryption, snapshots, NAS backup, `~/Bulk`, Docker cleanup | [btrfs/README.md](btrfs/README.md), and [btrfs/SNAPSHOTS.md](btrfs/SNAPSHOTS.md) for snapshots and the NAS backup |
 | `cst cpu ...` | `cpu-setup.sh` | `cpu/` | CPU & GPU power: game profile (with active-GPU boost and P-core C-state cap), low priority for the VM, toolboxes and Docker, E-cores for builds, baseline connected-GPU runtime PM & CPU C-state policy (`cst cpu power`), adaptive `irqbalance` ban-list (`cst cpu irq`), `ntsync` autoload, measurements | [cpu/README.md](cpu/README.md) |
 | `cst swap ...` | `swap-setup.sh` | `swap/` | Swap and memory: zswap, encrypted NVMe swap, zram off, swap and reclaim sysctls (`min_free_kbytes`, watermarks), THP/MGLRU sysfs knobs, `uresourced` `MemoryMin=1G` session floor, memory floor for the VM, swap status per cgroup | [swap/README.md](swap/README.md) |
 | `cst bluetooth ...` | `bluetooth-setup.sh` | `bluetooth/` | Bluetooth audio: LE Audio (BAP/LC3) ready in BlueZ but off in PipeWire by default, adaptive LDAC quality for the headset, checks of both | [bluetooth/README.md](bluetooth/README.md) |
@@ -238,6 +238,7 @@ Then, if you want a backup on the NAS:
 ```
 cst btrfs crypt-perf enable     # asks the passphrase of each disk
 cst btrfs compress-force plan   # dry run: force zstd compression across mount layers
+cst btrfs commit-interval plan  # dry run: align root btrfs commit=60 across mount layers
 cst btrfs docker-gc enable      # weekly, careful Docker cleanup
 ```
 

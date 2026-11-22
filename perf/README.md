@@ -36,10 +36,11 @@ Exit codes:
    - `ntsync`: checks `/dev/ntsync`, `/sys/class/misc/ntsync`, and `/sys/module/ntsync` (`fix: sudo cst cpu install`).
    - `irqbalance` & `BUILD_CPUS`: checks systemd unit runtime marker (`/run/systemd/units/invocation:irqbalance.service`), reads `IRQBALANCE_BANNED_CPULIST` from `/etc/cpu-setup/irqbalance.env` (falling back to `/etc/sysconfig/irqbalance`), flags inactive `irqbalance` or an active `irqbalance` without `BUILD_CPUS` banned (`fix: sudo cst cpu irq apply`), and inspects live `/proc/irq/<id>/effective_affinity_list` (falling back to `/proc/interrupts`) for movable latency-sensitive IRQs (`nvme*q0`, GPUs, NICs, `xhci`, audio, `kvm`, excluding `blk-mq` managed per-CPU `nvme*q1+` queues) on `BUILD_CPUS` (`fix: sudo cst cpu irq apply`).
 
-3. **io** (`block/*/queue/scheduler`, `io.cost.qos`, `io.weight`, `nvme_core`, dirty writeback, btrfs `commit_stats` & `SCRUB_LIMIT`):
+3. **io** (`block/*/queue/scheduler`, `io.cost.qos`, `io.weight`, `nvme_core`, dirty writeback, root btrfs `commit=`, `commit_stats`, `SCRUB_LIMIT`):
    - Counts active `enable=1` entries in `io.cost.qos` and flags non-default slice `io.weight` (other than `100`) when no device has `blk-iocost` enabled on `none` NVMe queues (`fix: sudo cst btrfs iocost apply`).
    - Flags `nvme_core.default_ps_max_latency_us > 50000` (deep APST sleep states; `fix: sudo cst btrfs install`).
-   - Flags both `vm.dirty_background_bytes` and `vm.dirty_bytes` set to `0` (unbounded percentage-based dirty cache).
+   - Shows `dirty_background_bytes`, `dirty_bytes`, `dirty_writeback_centisecs` (`wb`), and `dirty_expire_centisecs` (`exp`), flagging unbounded `0` byte limits or an expire interval shorter than the root btrfs `commit=` window (`fix: sudo cst btrfs install`).
+   - Inspects root btrfs mount `commit=` + `flushoncommit` and flags `< 60 s` when `flushoncommit` is enabled (`fix: sudo cst btrfs commit-interval apply`).
    - Flags unset `SCRUB_LIMIT` in `/etc/btrfs-setup/snapshots.conf` when btrfs filesystems exist (`fix: sudo cst btrfs scrub-limit set 500M`).
    - Evaluates `/sys/fs/btrfs/*/commit_stats` (`avg >= 25 ms` or `max >= 500 ms` -> `ATTENTION`; `avg >= 100 ms` or `max >= 2000 ms` -> `BOTTLENECK`).
 

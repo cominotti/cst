@@ -32,6 +32,11 @@ _BRACKET_RE: Final = re.compile(r"\[([^\]]+)\]")
 _AMD_PROFILE_ACTIVE_RE: Final = re.compile(r"^\s*\d+\s+([A-Za-z0-9_-]+)\*\s*:?")
 _PREEMPT_TOKEN_RE: Final = re.compile(r"\bpreempt=([a-z]+)\b")
 _ALLOCSTALL_PREFIX: Final = "allocstall_"
+_FLUSHONCOMMIT_OPT: Final = "flushoncommit"
+_DEFAULT_BTRFS_COMMIT_S: Final = 30
+_COMMIT_OPT_PREFIX: Final = "commit="
+_ROOT_BTRFS_PRIORITY: Final = ("/var", "/var/home", "/sysroot", "/")
+_PROC_MOUNTS_FIELDS: Final = 4
 _BOOL_TRUE_TOKENS: Final[frozenset[str]] = frozenset({"Y", "1", "TRUE", "YES"})
 _BOOL_FALSE_TOKENS: Final[frozenset[str]] = frozenset({"N", "0", "FALSE", "NO"})
 _COLON: Final = ":"
@@ -406,6 +411,28 @@ def count_iocost_enabled(text: str) -> int:
     return enabled
 
 
+def _parse_root_btrfs_opts(proc_mounts_text: str) -> tuple[int, bool, bool] | None:
+    by_target: dict[str, str] = {}
+    for line in proc_mounts_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if len(fields) >= _PROC_MOUNTS_FIELDS and fields[2] == "btrfs" and fields[1] in _ROOT_BTRFS_PRIORITY:
+            by_target[fields[1]] = fields[3]
+    raw_opts = next((by_target[t] for t in _ROOT_BTRFS_PRIORITY if t in by_target), None)
+    if raw_opts is None:
+        return None
+    commit_vals = [
+        int(val)
+        for tok in raw_opts.split(",")
+        if tok.startswith(_COMMIT_OPT_PREFIX) and (val := tok.removeprefix(_COMMIT_OPT_PREFIX)).isdigit()
+    ]
+    explicit = bool(commit_vals)
+    commit_s = commit_vals[-1] if explicit else _DEFAULT_BTRFS_COMMIT_S
+    return commit_s, explicit, (_FLUSHONCOMMIT_OPT in raw_opts.split(","))
+
+
 def assemble_io_probe(
     files: Mapping[PerfPathKey, str | None],
     *,
@@ -419,11 +446,20 @@ def assemble_io_probe(
     iocost_enabled = count_iocost_enabled(qos_text) if qos_text is not None else 0
     iocost_active: bool | None = (iocost_enabled > 0) if qos_text is not None else None
     btrfs_conf = files.get(PerfPathKey.BTRFS_CONF)
+    parsed_root = _parse_root_btrfs_opts(files.get(PerfPathKey.PROC_MOUNTS) or "")
+    root_commit_s, root_commit_explicit, root_flushoncommit = (
+        parsed_root if parsed_root is not None else (None, False, False)
+    )
     return IoProbeSnapshot(
         block_devices=tuple(block_devices),
         nvme_ps_max_latency_us=parse_optional_int(files.get(PerfPathKey.NVME_APST_LATENCY)),
         dirty_background_bytes=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_BG_BYTES)),
         dirty_bytes=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_BYTES)),
+        dirty_writeback_cs=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_WRITEBACK_CS)),
+        dirty_expire_cs=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_EXPIRE_CS)),
+        root_btrfs_commit_s=root_commit_s,
+        root_btrfs_commit_explicit=root_commit_explicit,
+        root_btrfs_flushoncommit=root_flushoncommit,
         iocost_qos_active=iocost_active,
         iocost_enabled_devices=iocost_enabled,
         nonzero_slice_io_weights=tuple(nonzero_slice_io_weights),

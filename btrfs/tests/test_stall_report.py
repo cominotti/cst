@@ -2039,6 +2039,28 @@ class ReportCommandsTest(unittest.TestCase):
         self.fake("docker", b"0123456789abcdef\tw\xffeb\n")
         self.assertEqual(rp_adapters.container_names(), {"docker-0123456789ab": "w\ufffdeb"})
 
+    def test_below_top_integrates_actual_timestamp_intervals(self) -> None:
+        # 15 s interval (e.g. below --interval 15) across epoch timestamps + ISO timestamps, plus a gap > 300 s.
+        rows = [
+            {"timestamp": 1000, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},
+            {"timestamp": 1015, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},
+            {"timestamp": 1030, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},
+            {"timestamp": 1600, "comm": "worker", "cgroup": "/builds.slice", "io.wbytes_per_sec": 100},
+        ]
+        self.fake("below", json.dumps(rows).encode())
+        items, err = rp_adapters.below_top(1000, 1600, "io.wbytes_per_sec")
+        self.assertIsNone(err)
+        self.assertEqual(items, [{"comm": "worker", "cgroup": "builds.slice", "bytes": 6000}])
+
+        iso_rows = [
+            {"timestamp": "2026-11-22T12:00:00Z", "comm": "iso", "cgroup": "/user.slice", "io.wbytes_per_sec": 200},
+            {"timestamp": "2026-11-22T12:00:30Z", "comm": "iso", "cgroup": "/user.slice", "io.wbytes_per_sec": 200},
+        ]
+        self.fake("below", json.dumps(iso_rows).encode())
+        items2, err2 = rp_adapters.below_top(1, 2, "io.wbytes_per_sec")
+        self.assertIsNone(err2)
+        self.assertEqual(items2, [{"comm": "iso", "cgroup": "user.slice", "bytes": 12000}])
+
 
 if __name__ == "__main__":
     unittest.main()
