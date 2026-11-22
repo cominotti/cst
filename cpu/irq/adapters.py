@@ -85,19 +85,33 @@ def collect_irq_snapshot(
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     settings, problems = read_settings(paths.conf)
     warnings: list[str] = [f"{paths.conf} line {p.line}: {p.text}" for p in problems]
+    build_cpus_error: str | None = (
+        f"{paths.conf} has syntax errors; fix them before running apply" if problems else None
+    )
 
     online_opt = read_text(paths.online_cpus)
     online_raw = online_opt.strip() if online_opt is not None and online_opt.strip() else None
 
     banned = ""
     notes: tuple[str, ...] = ()
-    if online_raw is None:
-        warnings.append(f"cannot read {paths.online_cpus}")
+    build_set: CpuSet | None = None
+    if not settings.build_cpus.strip():
+        build_cpus_error = build_cpus_error or f"BUILD_CPUS is empty in {paths.conf}"
+        warnings.append(f"BUILD_CPUS is empty in {paths.conf}")
     else:
         try:
-            banned, notes = compute_banned_cpulist(CpuSet.parse(settings.build_cpus), CpuSet.parse(online_raw))
+            build_set = CpuSet.parse(settings.build_cpus)
         except DomainValidationError as exc:
-            warnings.append(f"invalid cpulist: {exc}")
+            msg = f"invalid BUILD_CPUS ({settings.build_cpus}): {exc}"
+            build_cpus_error = build_cpus_error or msg
+            warnings.append(msg)
+    if online_raw is None:
+        warnings.append(f"cannot read {paths.online_cpus}")
+    elif build_set is not None:
+        try:
+            banned, notes = compute_banned_cpulist(build_set, CpuSet.parse(online_raw))
+        except DomainValidationError as exc:
+            warnings.append(f"invalid online cpulist: {exc}")
 
     env_text, env_banned = _read_banned_var(paths.env_path)
     _, sysconfig_banned = _read_banned_var(paths.sysconfig_path)
@@ -122,6 +136,7 @@ def collect_irq_snapshot(
         service_enabled=enabled,
         rpm_ostree_present=rpm_ostree_ok,
         warnings=tuple(warnings),
+        build_cpus_error=build_cpus_error,
     )
 
 
@@ -269,6 +284,9 @@ def apply_irq_policy(
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     snap = collect_irq_snapshot(paths, runner=cmd_runner, has_rpm_ostree=has_rpm_ostree)
     out: list[str] = [f"WARN: {w}" for w in snap.warnings]
+    if snap.build_cpus_error is not None:
+        # Nothing written, removed or restarted: an empty ban-list here would remove the files.
+        return 1, [*out, f"ERROR: {snap.build_cpus_error}"]
     if snap.online_cpus_raw is None:
         return 1, out
 

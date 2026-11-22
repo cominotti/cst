@@ -62,6 +62,8 @@ class IrqSnapshot:
     service_enabled: str
     rpm_ostree_present: bool
     warnings: tuple[str, ...] = ()
+    # Why apply must refuse: BUILD_CPUS empty or not a CPU list, or a syntax error in the settings file.
+    build_cpus_error: str | None = None
 
 
 def format_cpulist(cpus: Iterable[int]) -> str:
@@ -194,6 +196,11 @@ def format_irq_plan(snap: IrqSnapshot, *, no_pkg: bool = False) -> list[str]:
         f"target ban={snap.banned_cpulist or 'none'}"
     )
     lines.extend(f"note:      {n}" for n in snap.compute_notes)
+
+    if snap.build_cpus_error is not None:
+        lines.append(f"ERROR: {snap.build_cpus_error}")
+        lines.append("Dry run: nothing is changed.")
+        return lines
 
     if snap.online_cpus_raw is None:
         lines.append("ERROR: cannot read online CPUs from /sys/devices/system/cpu/online")

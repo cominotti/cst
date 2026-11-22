@@ -411,6 +411,9 @@ entry so `IOWeight` arbitrates NVMe traffic, run `cst btrfs iocost apply`
 When keeping **`irqbalance`** active, run `cst cpu irq apply` to ban `BUILD_CPUS`
 (intersected with online CPUs, keeping `>= 2` unbanned IRQ handler CPUs) via
 `/etc/cpu-setup/irqbalance.env` and `irqbalance.service.d/10-cst-ban.conf`.
+`apply` refuses (exit 1, nothing written, removed or restarted) when
+`BUILD_CPUS` is empty or not a CPU list, or `cpu-setup.conf` has a syntax
+error; `plan` shows the same error.
 
 **Why the E-core limit helps builds too:** programs like Claude Code, shells,
 cargo, go, gradle and maven look at the CPUs they are *allowed* to use to

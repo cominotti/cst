@@ -4272,7 +4272,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
             "/opt/cst-rw/cst cpu irq revert >/dev/null 2>&1 || true; "
-            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak; "
+            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak /tmp/e2e-128a-bad.out; "
             "[[ ! -e /tmp/e2e-128a-cpu.orig ]] || mv /tmp/e2e-128a-cpu.orig /etc/cpu-setup/cpu-setup.conf; "
             "systemctl daemon-reload",
             check=False,
@@ -4301,6 +4301,14 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 systemctl show -p EnvironmentFiles irqbalance.service | grep -qF "/etc/cpu-setup/irqbalance.env"
                 systemctl show -p DropInPaths irqbalance.service | grep -qF "10-cst-ban.conf"
                 /opt/cst-rw/cst cpu irq apply --no-pkg | grep -qE "unchanged:|skipped:"
+                # A BUILD_CPUS that is not a CPU list: apply refuses (exit 1) and keeps CST's files.
+                printf "BUILD_CPUS='%s-x'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+                rc=0; /opt/cst-rw/cst cpu irq apply --no-pkg >/tmp/e2e-128a-bad.out 2>&1 || rc=$?
+                [[ $rc == 1 ]]
+                grep -qF "ERROR: invalid BUILD_CPUS" /tmp/e2e-128a-bad.out
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                [[ -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
                 /opt/cst-rw/cst cpu irq revert
                 [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
                 rm -f /run/systemd/system/irqbalance.service

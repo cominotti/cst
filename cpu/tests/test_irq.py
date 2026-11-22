@@ -245,6 +245,30 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.dirname(self.paths.dropin_path)))
         self.assertTrue(any("restarted: irqbalance.service (CST ban-list removed)" in line for line in out_rev))
 
+    def test_bad_build_cpus_or_settings_refuse_apply_and_keep_files(self) -> None:
+        # An empty ban-list would remove the files; a bad BUILD_CPUS must refuse instead (exit 1),
+        # touching no file and restarting nothing.
+        self._write(self.paths.env_path, render_irq_env("12-23"))
+        self._write(self.paths.dropin_path, render_irq_dropin())
+        self.runner.load_state, self.runner.active_state, self.runner.enabled_state = "loaded", "active", "enabled"
+        for bad_conf, why in (
+            ("BUILD_CPUS='12-abc'\n", "invalid BUILD_CPUS"),
+            ("BUILD_CPUS=''\n", "BUILD_CPUS is empty"),
+            ("BUILD_CPUS='12-23'\nP_CORES = '0-7'\n", "syntax errors"),
+        ):
+            with self.subTest(conf=bad_conf):
+                self._write(self.paths.conf, bad_conf)
+                self.runner.calls.clear()
+                rc, out = apply_irq_policy(self.paths, no_pkg=True, runner=self.runner)
+                self.assertEqual(rc, 1)
+                self.assertTrue(any(line.startswith("ERROR:") and why in line for line in out), out)
+                self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
+                self.assertEqual(self._read(self.paths.dropin_path), render_irq_dropin())
+                self.assertEqual([c for c in self.runner.calls if c[:2] != ["systemctl", "show"]], [], "only reads")
+                plan = format_irq_plan(collect_irq_snapshot(self.paths, runner=self.runner, has_rpm_ostree=True))
+                self.assertTrue(any(line.startswith("ERROR:") and why in line for line in plan), plan)
+                self.assertFalse(any(line.startswith("would ") for line in plan), plan)
+
     def test_no_overlap_removes_stale_files_and_container_paths(self) -> None:
         self._write(self.paths.env_path, render_irq_env("12-23"))
         self._write(self.paths.dropin_path, render_irq_dropin())
