@@ -67,10 +67,10 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
             f" {posixpath.basename(report.cst_dropin)} (drop-ins in file-name order, the last one wins). apply leaves it.",
             file=out,
         )
-    if report.has_exp:
+    for exp_name, exp_key in report.experiments:
         print(
-            f"  exp: the cpu experiment {report.exp_name} is on and sets {report.exp_key}; apply leaves it alone."
-            f" Back to the desired value: `cst cpu experiment off {report.exp_name}`, then apply",
+            f"  exp: the cpu experiment {exp_name} is on and sets {exp_key}; apply leaves it alone."
+            f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply",
             file=out,
         )
     return report.has_diff

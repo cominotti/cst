@@ -575,11 +575,11 @@ class SwapReports:
             rows.append(ures_row)
         row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
         rows.append(row)
-        active_exp_name, active_exp_key = THP_EXPERIMENT if (thp_overridden and not wsf_overridden) else WSF_EXPERIMENT
         return SettingsReport(
             rows=tuple(rows),
-            exp_name=active_exp_name,
-            exp_key=active_exp_key,
+            experiments=tuple(
+                exp for exp, on in ((WSF_EXPERIMENT, wsf_overridden), (THP_EXPERIMENT, thp_overridden)) if on
+            ),
             override_source=source,
             cst_dropin=DROPIN_ENTRY.dest,
         )

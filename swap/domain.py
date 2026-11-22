@@ -669,8 +669,8 @@ class SettingsReport:
     """Comparison of live zswap, sysctl, and cgroup settings against desired values."""
 
     rows: tuple[SettingCheckRow, ...]
-    exp_name: str
-    exp_key: str
+    # (name, key) of each cpu experiment that is on and holds a setting away from CST's (an EXP row).
+    experiments: tuple[tuple[str, str], ...] = ()
     # The drop-in machine.slice's MemoryLow comes from when it is not CST's ("": CST's): its "over" row.
     override_source: str = ""
     cst_dropin: str = ""
@@ -679,11 +679,6 @@ class SettingsReport:
     def has_diff(self) -> bool:
         """Return True if any inspected setting differs from desired."""
         return any(row.state == SettingState.DIFF for row in self.rows)
-
-    @property
-    def has_exp(self) -> bool:
-        """Return True if a transient CPU experiment override is active."""
-        return any(row.state == SettingState.EXP for row in self.rows)
 
 
 @dataclass(frozen=True, slots=True)

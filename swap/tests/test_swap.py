@@ -2144,8 +2144,6 @@ class SwapApplyOutputTest(_SwapScratch):
     def test_the_settings_state_column_fits_every_state_word(self) -> None:
         report = D.SettingsReport(
             rows=tuple(SettingCheckRow(state, f"label-{state.name}", "live", "want") for state in D.SettingState),
-            exp_name="",
-            exp_key="",
         )
         out = io.StringIO()
         render_settings(report, out=out, header=False)
@@ -2868,6 +2866,32 @@ class Phase1MemoryTuningTest(_SwapScratch):
         render_status(svc.status_report(include_config=False), out=st_out)
         self.assertIn("  exp     THP defrag", st_out.getvalue())
         self.assertIn("cst cpu experiment off thp-defer", st_out.getvalue())
+
+    def test_both_experiments_on_get_a_note_each(self) -> None:
+        # wsf-300 holds vm.watermark_scale_factor and thp-defer THP defrag at once: status names both.
+        self._populate_mm_nodes(defrag="always [defer] defer+madvise madvise never", min_ttl="1000")
+        with open(os.path.join(self.env.proc_dir, "sys", "vm", "watermark_scale_factor"), "w", encoding="utf-8") as fh:
+            fh.write("300\n")
+        for name, saved in (("wsf-300", "125\n"), ("thp-defer", "madvise\n")):
+            with open(os.path.join(self.env.cpu_run_dir, f"exp-{name}"), "w", encoding="utf-8") as fh:
+                fh.write(saved)
+        svc, _ = self._service_with()
+        st_out = io.StringIO()
+        render_status(svc.status_report(include_config=False), out=st_out)
+        notes = [line for line in st_out.getvalue().splitlines() if line.startswith("  exp:")]
+        self.assertEqual(
+            notes,
+            [
+                (
+                    "  exp: the cpu experiment wsf-300 is on and sets vm.watermark_scale_factor; apply leaves it alone."
+                    " Back to the desired value: `cst cpu experiment off wsf-300`, then apply"
+                ),
+                (
+                    "  exp: the cpu experiment thp-defer is on and sets /sys/kernel/mm/transparent_hugepage/defrag;"
+                    " apply leaves it alone. Back to the desired value: `cst cpu experiment off thp-defer`, then apply"
+                ),
+            ],
+        )
 
     def test_apply_waits_for_uresourced_async_memory_min_update(self) -> None:
         self._populate_mm_nodes()

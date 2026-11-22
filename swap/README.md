@@ -159,7 +159,8 @@ Two more kernel reclaim knobs persist via `/etc/tmpfiles.d/cst-mm-responsiveness
 The `cpu` module's memory experiments `wsf-300` (changes
 `vm.watermark_scale_factor` to 300) and `thp-defer` (changes THP `defrag` to
 `defer`) change those two knobs at runtime. While either is on, `plan` and
-`status` show its row as `exp` (not `DIFF`) with a note, also inside a toolbox,
+`status` show its row as `exp` (not `DIFF`) with a note (one for each, when
+both are on), also inside a toolbox,
 and `apply` leaves that setting alone (it says `kept:`), so it does not end a
 measurement silently. After `cst cpu experiment off NAME` the old value is
 back; `apply` sets CST's default if it was something else (`minfree-256m` matches
