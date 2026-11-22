@@ -2,6 +2,7 @@
 """Memory reclaim responsiveness and uresourced session floor helpers for `swap`."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 import posixpath
 import re
 from typing import Final
@@ -10,8 +11,8 @@ from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.text import group
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandResult, FileSystemPort, SystemdPort, UnitName
-from perf.domain.models import PerfPathKey, PerfRootKind, perf_path_spec
-from perf.domain.parsers import parse_bracket_choice, parse_sysfs_tmpfiles_writes
+from perf.domain.models import KIB, PerfPathKey, PerfRootKind, perf_path_spec
+from perf.domain.parsers import parse_bracket_choice, parse_proc_kib_table, parse_sysfs_tmpfiles_writes
 from swap.domain import (
     ActiveState,
     ApplyEvent,
@@ -32,9 +33,17 @@ _URESOURCED_WAIT_STEPS: Final[int] = 20
 _URESOURCED_WAIT_STEP_S: Final[float] = 0.1
 
 _SYS_PREFIX: Final = "/sys/"
+_GLOBAL_SECTION: Final = "[Global]"
 _ACTIVE_USER_SECTION: Final = "[ActiveUser]"
 _USER_SLICE_ROW: Final = "user.slice memory.min"
 _MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MemoryMin\s*=\s*(\S+)")
+_MAX_MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MaxMemoryMin\s*=\s*(\S+)")
+_PERCENT_RE: Final = re.compile(r"^([0-9]+)%$")
+_PERCENT: Final = 100
+# The kernel keeps memory.min in pages: a value systemd writes reads back rounded down to one.
+_PAGE_BYTES: Final = 4096
+# logind's seat files (/run/systemd/seats/SEAT): ACTIVE= names the seat's foreground session, if any.
+_SEAT_ACTIVE_KEY: Final = "ACTIVE="
 _MM_LABELS: Final[dict[str, str]] = {
     "/sys/kernel/mm/transparent_hugepage/defrag": "THP defrag",
     "/sys/kernel/mm/lru_gen/min_ttl_ms": "MGLRU min_ttl_ms",
@@ -147,25 +156,92 @@ def mm_settings_rows(
     return rows, thp_overridden
 
 
+def parse_uresourced_max_memory_min(text: str) -> tuple[int | None, int | None]:
+    """`[Global] MaxMemoryMin=` of a uresourced.conf as `(percent, bytes)` (None for the form it is not)."""
+    section = ""
+    for line in (raw.strip() for raw in text.splitlines()):
+        if line.startswith("[") and line.endswith("]"):
+            section = line
+        elif section == _GLOBAL_SECTION and (found := _MAX_MEMORY_MIN_LINE_RE.match(line)) is not None:
+            pct = _PERCENT_RE.match(group(found, 1))
+            return (int(group(pct, 1)), None) if pct is not None else (None, parse_size(group(found, 1)))
+    return None, None
+
+
+def effective_uresourced_memory_min(uresourced_text: str, mem_total_bytes: int | None) -> tuple[int | None, bool]:
+    """`(bytes, capped)`: `[ActiveUser] MemoryMin` as uresourced gives it to user.slice for one active user,
+    after `[Global] MaxMemoryMin` (a share of MemTotal, rounded down to a page, or a size). capped: a
+    share of MemTotal decided it, so the live value may differ by a page (MemTotal is read here, not by it)."""
+    want = parse_uresourced_memory_min(uresourced_text)
+    if want is None:
+        return None, False
+    max_pct, max_bytes = parse_uresourced_max_memory_min(uresourced_text)
+    capped = False
+    if max_pct is not None and mem_total_bytes is not None:
+        cap = mem_total_bytes * max_pct // _PERCENT // _PAGE_BYTES * _PAGE_BYTES
+        if cap < want:
+            want, capped = cap, True
+    if max_bytes is not None and max_bytes < want:
+        want, capped = max_bytes, False
+    return want, capped
+
+
+def _mem_total_bytes(fs: FileSystemPort, proc_dir: str) -> int | None:
+    mem = parse_proc_kib_table(fs.read_text(posixpath.join(proc_dir, "meminfo")))
+    return mem["MemTotal"] * KIB if "MemTotal" in mem else None
+
+
+def _memory_min_matches(live: int, want: int, *, capped: bool) -> bool:
+    return abs(live - want) <= _PAGE_BYTES if capped else live == want
+
+
+def has_active_seat_session(fs: FileSystemPort, seats_dir: str) -> bool:
+    """Whether a seat has a foreground session (logind's seat files: ACTIVE=): uresourced gives its
+    memory floor only to such a session's user. False when the folder cannot be read (no logind)."""
+    if not fs.is_dir(seats_dir):
+        return False
+    try:
+        seats = fs.list_dir(seats_dir)
+    except OSError:
+        return False
+    for seat in seats:
+        for line in (fs.read_text(posixpath.join(seats_dir, seat)) or "").splitlines():
+            if line.startswith(_SEAT_ACTIVE_KEY) and line.removeprefix(_SEAT_ACTIVE_KEY).strip():
+                return True
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class UresourcedView:
+    """Where uresourced's floor is read: the cgroup tree, /proc (MemTotal) and logind's seat files."""
+
+    cgroup_dir: str
+    proc_dir: str
+    seats_dir: str
+
+
 def uresourced_settings_row(
     fs: FileSystemPort,
     systemd: SystemdPort,
     *,
-    cgroup_dir: str,
+    where: UresourcedView,
     uresourced_text: str,
 ) -> SettingCheckRow | None:
-    """Compare live `user.slice/memory.min` against `uresourced.conf` when `uresourced.service` is active."""
-    want = parse_uresourced_memory_min(uresourced_text)
+    """Compare live `user.slice/memory.min` against `uresourced.conf` (after its MaxMemoryMin) when
+    `uresourced.service` is active; a live 0 with no active seat session is inactive, not a difference."""
+    want, capped = effective_uresourced_memory_min(uresourced_text, _mem_total_bytes(fs, where.proc_dir))
     if want is None:
         return None
     want_txt = human(want)
     active = systemd.show(URESOURCED_UNIT, ("ActiveState",)).get("ActiveState", "")
     if active != ActiveState.ACTIVE:
         return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "uresourced not active", want_txt)
-    live_min = fs.read_first_line(posixpath.join(cgroup_dir, USER_SLICE, "memory.min"))
+    live_min = fs.read_first_line(posixpath.join(where.cgroup_dir, USER_SLICE, "memory.min"))
     if live_min is None:
         return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "no memory.min in cgroup", want_txt)
-    ok = live_min.isdigit() and int(live_min) == want
+    if live_min == "0" and not has_active_seat_session(fs, where.seats_dir):
+        return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "no active seat session", want_txt)
+    ok = live_min.isdigit() and _memory_min_matches(int(live_min), want, capped=capped)
     live_txt = human(int(live_min)) if live_min.isdigit() else live_min
     return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _USER_SLICE_ROW, live_txt, want_txt)
 
@@ -216,7 +292,8 @@ def maybe_restart_uresourced(
     events: list[ApplyEvent],
     show_result: Callable[[CommandResult], None],
 ) -> tuple[int, bool]:
-    """Restart `uresourced.service` after rewriting `/etc/uresourced.conf` when it is active."""
+    """Restart `uresourced.service` when it is active and `/etc/uresourced.conf` was rewritten or the live
+    floor differs from it (written: either)."""
     if not written:
         return (0, False)
     if systemd.show(URESOURCED_UNIT, ("ActiveState",)).get("ActiveState", "") != ActiveState.ACTIVE:
@@ -241,16 +318,17 @@ def wait_for_uresourced_floor(
     cgroup_dir: str,
     uresourced_text: str,
     sleep: Callable[[float], None],
+    proc_dir: str,
 ) -> bool:
     """Wait briefly after restarting `uresourced` for `user.slice/memory.min` to reflect `uresourced.conf`."""
-    want = parse_uresourced_memory_min(uresourced_text)
+    want, capped = effective_uresourced_memory_min(uresourced_text, _mem_total_bytes(fs, proc_dir))
     if want is None:
         return True
     path = posixpath.join(cgroup_dir, USER_SLICE, "memory.min")
 
     def _matches() -> bool:
         raw = fs.read_first_line(path)
-        return raw is not None and raw.isdigit() and int(raw) == want
+        return raw is not None and raw.isdigit() and _memory_min_matches(int(raw), want, capped=capped)
 
     if _matches():
         return True

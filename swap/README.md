@@ -227,12 +227,22 @@ modern GNOME Shell / compositor working set. In Linux cgroup v2, effective
 `units/uresourced.conf` installs `/etc/uresourced.conf` preserving Fedora's
 defaults (`MaxMemoryMin=10%`, `IOWeight=500`, `CPUWeight=500`, `AppBoost`
 weights, and no `MemoryLow` so `cpu/game-profile` owns soft protection) while
-raising `[ActiveUser] MemoryMin=1G`. When `apply` rewrites `/etc/uresourced.conf`,
-it saves a one-time backup of the pre-existing file as
-`/etc/uresourced.conf.pre-swap-config.bak` and restarts `uresourced.service` if
-active (`systemctl --user daemon-reload` or a new login propagates the drop-in to
-live `session.slice`). On systems without `uresourced`, `apply` writes the file
-only if managed and `status` marks `user.slice memory.min` as inactive (`-`).
+raising `[ActiveUser] MemoryMin=1G`. `MaxMemoryMin=10%` caps it: on a machine
+with less than 10 GiB of RAM, uresourced gives 10% of `MemTotal` (in whole
+pages) instead, and `plan`, `status` and `apply` compare
+`user.slice memory.min` with that capped value (within one page).
+
+`apply` writes `/etc/uresourced.conf` when it differs, whether or not
+uresourced is installed (it takes effect once it is), after saving a one-time
+backup of a pre-existing file that is not CST's as
+`/etc/uresourced.conf.pre-swap-config.bak`. It restarts `uresourced.service`,
+when active, if it rewrote the file **or** the live `user.slice memory.min`
+differs from what the file asks (uresourced started before the file, or did not
+apply it); `systemctl --user daemon-reload` or a new login propagates the
+drop-in to a live `session.slice`. `user.slice memory.min` is inactive (`-`),
+not a difference, when uresourced is not active, and when it reads 0 while no
+session is in a seat's foreground (logind's `/run/systemd/seats`: a server, an
+ssh login), since uresourced protects only that session's user.
 
 ---
 
@@ -319,11 +329,19 @@ What `apply` does, in order:
    `/etc/sysctl.d/99-swap-tuning.conf`, applies it (without
    `vm.watermark_scale_factor` while the `cpu` experiment `wsf-300` is on,
    section 2.4).
-6. **machine.slice**: writes the drop-in, removes the one under its old name
+6. **memory responsiveness**: writes
+   `/etc/tmpfiles.d/cst-mm-responsiveness.conf`, then sets THP `defrag` and
+   MGLRU `min_ttl_ms` live (a knob this kernel lacks is skipped; THP `defrag`
+   is kept while the `cpu` experiment `thp-defer` is on).
+7. **session memory floor (uresourced)**: backs up a pre-existing
+   `/etc/uresourced.conf` that is not CST's, writes CST's, and restarts
+   `uresourced.service` when active if the file changed or the live
+   `user.slice memory.min` differs (section 2.6).
+8. **machine.slice**: writes the drop-in, removes the one under its old name
    (`50-memory-low.conf`, section 2.5); `daemon-reload` when a file was
    rewritten or removed (also for a renewed comment, for the same reason as
    in step 2).
-7. **Verification**: the live settings against this folder, `swap0` active,
+9. **Verification**: the live settings against this folder, `swap0` active,
    `zram0` gone; `swapon --show`. Any `DIFF` makes `apply` end with an error.
 
 Files are written only when they differ, always atomically. Each step's lines

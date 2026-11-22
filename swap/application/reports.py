@@ -21,6 +21,7 @@ from swap.application.memory_tuning import (
     THP_EXPERIMENT,
     URESOURCED_ENTRY,
     SwapPerfReader,
+    UresourcedView,
     mm_settings_rows,
     uresourced_settings_row,
 )
@@ -108,6 +109,8 @@ class SwapEnvironment:
     zswap_params_dir: str = "/sys/module/zswap/parameters"
     zswap_debug_dir: str = "/sys/kernel/debug/zswap"
     cpu_run_dir: str = "/run/cpu-setup"
+    # logind's seat files: whether a session is in the foreground (uresourced's floor).
+    seats_dir: str = "/run/systemd/seats"
     prog: str = "cst swap"
     # The install record that lists swap's three files ("": not recorded) and whether apply runs as
     # root (a root file owned by another account is then rewritten, as by the installer).
@@ -115,6 +118,11 @@ class SwapEnvironment:
     as_root: bool = False
     # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
     test_seam: tuple[tuple[str, str, str], ...] = ()
+
+    @property
+    def uresourced_view(self) -> UresourcedView:
+        """Where uresourced's floor is read (the cgroup tree, /proc, the seat files)."""
+        return UresourcedView(self.cgroup_dir, self.proc_dir, self.seats_dir)
 
     def host_view(self, host_path: str) -> str:
         """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
@@ -560,7 +568,7 @@ class SwapReports:
         ures_row = uresourced_settings_row(
             self._fs,
             self._systemd,
-            cgroup_dir=self._env.cgroup_dir,
+            where=self._env.uresourced_view,
             uresourced_text=self._desired_text(self._env.src_path(URESOURCED_ENTRY)),
         )
         if ures_row is not None:

@@ -15,6 +15,7 @@ from swap.application.memory_tuning import (
     URESOURCED_ENTRY,
     apply_mm_knobs,
     maybe_restart_uresourced,
+    uresourced_settings_row,
     wait_for_uresourced_floor,
 )
 from swap.application.reports import (
@@ -477,9 +478,19 @@ class SwapApplicationService(SwapReports):
         ):
             self._fs.copy_if_absent(dest, dest + URESOURCED_BAK_SUFFIX)
         written = self._apply_managed_file(URESOURCED_ENTRY, src, dest, events)
+        text = self._desired_text(src)
+        # A file already current can still disagree with the live floor (uresourced started before it, or
+        # failed to apply it): a restart applies it again.
+        live = uresourced_settings_row(
+            self._fs,
+            self._systemd,
+            where=env.uresourced_view,
+            uresourced_text=text,
+        )
+        drifted = live is not None and live.state == SettingState.DIFF
         rc, restarted = maybe_restart_uresourced(
             self._systemd,
-            written=written,
+            written=written or drifted,
             events=events,
             show_result=lambda res: _show_output(res, events, env.prog),
         )
@@ -487,8 +498,9 @@ class SwapApplicationService(SwapReports):
             wait_for_uresourced_floor(
                 self._fs,
                 cgroup_dir=env.cgroup_dir,
-                uresourced_text=self._desired_text(src),
+                uresourced_text=text,
                 sleep=self._system.sleep,
+                proc_dir=env.proc_dir,
             )
         return rc
 

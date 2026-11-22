@@ -265,6 +265,11 @@ swap_cleanup() {
         rm -rf "$W"
         return 0
     fi
+    # test_88 step 9's stand-in uresourced, when it failed before removing it.
+    if [[ -e "$W/orig/ures-standin" ]]; then
+        systemctl stop uresourced.service 2>/dev/null || true
+        rm -f /run/systemd/system/uresourced.service /run/systemd/system.control/user.slice.d/50-MemoryMin.conf
+    fi
     for f in crypttab fstab; do
         rm -f "/etc/$f.pre-swap-config.bak"
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
@@ -1671,6 +1676,38 @@ check_runtime_over
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]]
+
+# 9. uresourced's floor, where user.slice has a memory controller and no uresourced is installed: a
+# stand-in unit sets user.slice's MemoryMin as uresourced does (through systemd). MemTotal here is
+# 8000000 kB, so [Global] MaxMemoryMin=10% caps MemoryMin=1G to 819200000 bytes.
+ures_unit=/run/systemd/system/uresourced.service
+umin=/sys/fs/cgroup/user.slice/memory.min
+if [[ -e "$umin" ]] && [[ "$(systemctl show -P LoadState uresourced.service)" == not-found ]]; then
+    : >"$W/orig/ures-standin"
+    printf '[Service]\nExecStartPre=/usr/bin/systemctl set-property --runtime user.slice MemoryMin=819200000\nExecStart=/usr/bin/sleep infinity\n' >"$ures_unit"
+    systemctl daemon-reload
+    systemctl start uresourced.service
+    [[ "$(cat "$umin")" == 819200000 ]] || fail "the stand-in uresourced"
+    swap_run apply
+    [[ $rc == 0 ]] || fail "apply with uresourced's capped floor"
+    [[ "$out" != *"restarted: uresourced"* ]] || fail "restarted uresourced with the floor in place"
+    # /etc/uresourced.conf is current; the live floor drifted: apply restarts uresourced.
+    systemctl set-property --runtime user.slice MemoryMin=262144000
+    swap_run apply
+    [[ $rc == 0 ]] || fail "apply with a drifted uresourced floor"
+    grep -qF "restarted: uresourced.service" <<<"$out" || fail "uresourced not restarted on a drifted floor"
+    [[ "$(cat "$umin")" == 819200000 ]] || fail "the floor after the restart"
+    # A live 0 with no session in a seat's foreground (a server, this container) is no difference.
+    if ! grep -qs '^ACTIVE=.' /run/systemd/seats/*; then
+        systemctl set-property --runtime user.slice MemoryMin=0
+        swap_run status
+        [[ $rc == 0 ]] || fail "status with a 0 floor and no seat session"
+        grep -qF "no active seat session" <<<"$out" || fail "status row without a seat session"
+    fi
+    systemctl stop uresourced.service
+    rm -f "$ures_unit" /run/systemd/system.control/user.slice.d/50-MemoryMin.conf "$W/orig/ures-standin"
+    systemctl daemon-reload
+fi
 echo E2E-OK
 """,
             check=False,

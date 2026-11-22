@@ -32,6 +32,7 @@ from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries
 from swap.application.apply import SwapApplicationService
+from swap.application.memory_tuning import effective_uresourced_memory_min
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -1037,7 +1038,12 @@ class _SwapScratch(unittest.TestCase):
             zswap_params_dir=zparams,
             zswap_debug_dir=zdebug,
             cpu_run_dir=run_dir,
+            seats_dir=os.path.join(self.tmp, "run", "systemd", "seats"),
         )
+        # A desktop: seat0 has a session in the foreground (uresourced gives it its floor).
+        os.makedirs(self.env.seats_dir)
+        with open(os.path.join(self.env.seats_dir, "seat0"), "w", encoding="utf-8") as f:
+            f.write("# This is private data. Do not parse.\nIS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\nSESSIONS=3 c1\n")
         os.makedirs(os.path.join(etc, "cst"))
         with open(self.env.settings_path, "w", encoding="utf-8") as f:
             f.write(TEST_SETTINGS)
@@ -2709,6 +2715,7 @@ class SwapWiringTest(unittest.TestCase):
                 src_dir=os.path.join(os.path.realpath(REPO), "swap"),
                 etc_dir="/x/etc",
                 cpu_run_dir="/x/run/cpu-setup",
+                seats_dir="/x/run/systemd/seats",
                 prog="cst swap",
                 install_record="/x/var/lib/cst/installed.json",
             ),
@@ -2890,6 +2897,94 @@ class Phase1MemoryTuningTest(_SwapScratch):
         self.assertEqual(render_apply(svc.apply_changes(), out=out, err=err), 0, err.getvalue())
         self.assertIn(("restart", "uresourced.service"), sd.calls)
         self.assertEqual(len(system.sleeps), 2)
+
+    def _uresourced_case(self, live_min: str, *, mem_total_kib: int | None = None) -> str:
+        """The mm nodes, MemTotal and user.slice's live memory.min: the path of that file."""
+        self._populate_mm_nodes(defrag="always defer [defer+madvise] madvise never", min_ttl="1000")
+        if mem_total_kib is not None:
+            with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as fh:
+                fh.write(f"MemTotal:       {mem_total_kib} kB\nMemAvailable:   {mem_total_kib // 2} kB\n")
+        user_min_path = os.path.join(self.env.cgroup_dir, "user.slice", "memory.min")
+        with open(user_min_path, "w", encoding="utf-8") as fh:
+            fh.write(live_min + "\n")
+        return user_min_path
+
+    def _apply_with_uresourced(
+        self, on_call: Callable[[str, str], object] | None = None
+    ) -> tuple[int, str, _FakeSystemd]:
+        svc, sd = self._service_with(
+            unit_shown={"uresourced.service": {"ActiveState": "active"}}, mapper_present=True, on_call=on_call
+        )
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_apply(svc.apply_changes(), out=out, err=err)
+        return rc, out.getvalue() + err.getvalue(), sd
+
+    def test_max_memory_min_forms(self) -> None:
+        one_g = 2**30
+        for text, total, want in (
+            ("[Global]\nMaxMemoryMin=10%\n[ActiveUser]\nMemoryMin=1G\n", 64 * one_g, (one_g, False)),
+            ("[Global]\nMaxMemoryMin=10%\n[ActiveUser]\nMemoryMin=1G\n", None, (one_g, False)),
+            ("[Global]\nMaxMemoryMin=512M\n[ActiveUser]\nMemoryMin=1G\n", 64 * one_g, (512 * 2**20, False)),
+            # A comment, or the key in another section, sets nothing.
+            ("[Global]\n#MaxMemoryMin=1%\n[ActiveUser]\nMaxMemoryMin=1%\nMemoryMin=1G\n", 64 * one_g, (one_g, False)),
+            ("[Global]\nMaxMemoryMin=1%\n", 64 * one_g, (None, False)),
+        ):
+            with self.subTest(text=text, total=total):
+                self.assertEqual(effective_uresourced_memory_min(text, total), want)
+
+    def test_uresourced_floor_is_capped_by_max_memory_min(self) -> None:
+        # 8 GiB of RAM: [Global] MaxMemoryMin=10% caps MemoryMin=1G to 10% of MemTotal, in whole pages.
+        capped = 8 * 2**30 * 10 // 100 // 4096 * 4096
+        for live in (capped, capped - 4096):
+            with self.subTest(live=live):
+                self._uresourced_case(str(live), mem_total_kib=8 * 2**20)
+                rc, out, _ = self._apply_with_uresourced()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("  ok      user.slice memory.min", out)
+        self._uresourced_case(str(2**30), mem_total_kib=8 * 2**20)
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertNotEqual(rc, 0, out)
+        self.assertRegex(out, r"DIFF +user\.slice memory\.min")
+
+    def test_uresourced_floor_without_a_seat_session_is_inactive(self) -> None:
+        # A machine with no session in a seat's foreground (a server, an ssh login): uresourced protects
+        # nobody, user.slice's memory.min stays 0, and that is no difference for apply to fail on.
+        self._uresourced_case("0")
+        with open(os.path.join(self.env.seats_dir, "seat0"), "w", encoding="utf-8") as fh:
+            fh.write("IS_SEAT0=1\nCAN_GRAPHICAL=1\n")
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no active seat session", out)
+        self.assertNotRegex(out, r"DIFF +user\.slice memory\.min")
+        # With a session in the foreground, a live 0 is a difference.
+        with open(os.path.join(self.env.seats_dir, "seat0"), "w", encoding="utf-8") as fh:
+            fh.write("IS_SEAT0=1\nACTIVE=3\nACTIVE_UID=1000\n")
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertNotEqual(rc, 0, out)
+        self.assertRegex(out, r"DIFF +user\.slice memory\.min")
+
+    def test_apply_restarts_uresourced_when_the_live_floor_drifted(self) -> None:
+        user_min_path = self._uresourced_case(str(2**30))
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)  # writes /etc/uresourced.conf
+
+        def _uresourced_applies(verb: str, unit: str) -> None:
+            if (verb, unit) == ("restart", "uresourced.service"):
+                with open(user_min_path, "w", encoding="utf-8") as fh:
+                    fh.write(f"{2**30}\n")
+
+        # The file is current; the live floor is not (uresourced started before it): apply restarts it.
+        with open(user_min_path, "w", encoding="utf-8") as fh:
+            fh.write("262144000\n")
+        rc, out, sd = self._apply_with_uresourced(_uresourced_applies)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(("restart", "uresourced.service"), sd.calls)
+        self.assertIn("unchanged:", out)
+        self.assertIn("  ok      user.slice memory.min", out)
+        # Current file and live floor: no restart.
+        rc, out, sd = self._apply_with_uresourced(_uresourced_applies)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn(("restart", "uresourced.service"), sd.calls)
 
 
 if __name__ == "__main__":

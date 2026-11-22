@@ -125,6 +125,7 @@ def desired_paths(
         src_dir=os.path.join(checkout_root(__file__) or fallback_root, "swap"),
         etc_dir=etc,
         cpu_run_dir=ctx.host_run_dir("cpu-setup"),
+        seats_dir=ctx.host_run_dir("systemd/seats"),
         prog=prog,
         # Next to the /etc it writes (the host's /var/lib/cst; under a test's folder, that folder's).
         install_record=os.path.join(os.path.dirname(etc.rstrip("/")), ROOT_RECORD.lstrip("/")),
