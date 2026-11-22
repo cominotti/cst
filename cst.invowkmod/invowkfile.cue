@@ -334,6 +334,8 @@ cmds: [
 			{name: "rebuild", type: "bool", default_value: "false", description: "Force rebuild of E2E Docker images"},
 			{name: "match", description: "Substring or glob pattern(s) on test name, comma-separated (e.g. test_02,test_157)"},
 			{name: "tag", description: "Semantic tag(s), comma-separated (smoke, btrfs, cpu, bluetooth, swap, toolchains, vm, doctor, install, nas)"},
+			{name: "shard", description: "Run only shard I/N (e.g. 1/3)"},
+			{name: "jobs", type: "int", default_value: "0", description: "Parallel Tier 1 containers (0 = auto, 1 = single container; forbidden > 1 with --shard)"},
 			{name: "list_tests", type: "bool", default_value: "false", description: "List matching Tier 1 tests without starting Docker"},
 		]
 		implementations: [{
@@ -347,6 +349,12 @@ cmds: [
 				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && args+=(--rebuild)
 				[[ -n "${INVOWK_FLAG_MATCH:-}" ]] && args+=(--match "${INVOWK_FLAG_MATCH}")
 				[[ -n "${INVOWK_FLAG_TAG:-}" ]] && args+=(--tag "${INVOWK_FLAG_TAG}")
+				if [[ -n "${INVOWK_FLAG_SHARD:-}" ]]; then
+					args+=(--shard "${INVOWK_FLAG_SHARD}")
+					[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				else
+					args+=(--jobs "${INVOWK_FLAG_JOBS:-0}")
+				fi
 				[[ "${INVOWK_FLAG_LIST_TESTS:-false}" == "true" ]] && args+=(--list-tests)
 				python3 -I -B tests/e2e/run.py "${args[@]}"
 				"""}

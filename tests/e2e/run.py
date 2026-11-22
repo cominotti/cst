@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+import concurrent.futures
 import datetime
 import functools
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,13 +25,21 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests.e2e.selection import (
     E2ETag,
+    HostScope,
+    ShardSpec,
     SuiteSelection,
+    assign_shards,
     build_suite,
+    default_tier1_jobs,
+    filter_host_scope,
     format_case_line,
     iter_cases,
     parse_patterns,
+    parse_shard,
     parse_tags,
     select_cases,
+    select_shard,
+    split_host_exclusive,
 )
 
 E2E_DIR = Path(__file__).resolve().parent
@@ -305,38 +315,68 @@ def load_suite(filename: str) -> unittest.TestSuite:
     return unittest.defaultTestLoader.loadTestsFromModule(mod)
 
 
-def _selected_suite(tier: int, selection: SuiteSelection) -> unittest.TestSuite | None:
+class _Tier1Exec(NamedTuple):
+    run_id: str
+    artifact_dir: Path
+    rebuild: bool = False
+    keep_logs: bool = False
+    build_images: bool = True
+    selection: SuiteSelection = SuiteSelection()
+
+
+def _resolve_cases(tier: int, selection: SuiteSelection) -> tuple[list[unittest.TestCase], bool]:
     suite = load_suite(SUITE_FILES[tier])
     scoped = selection.for_tier(tier)
-    if not scoped.active:
-        return suite
-    selected = select_cases(iter_cases(suite), patterns=scoped.patterns, tags=scoped.tags)
-    if not selected:
-        return None
-    return build_suite(selected)
+    filtered_by_query = scoped.active
+    if filtered_by_query or scoped.shard is not None or scoped.host_scope != HostScope.ALL:
+        cases = select_cases(iter_cases(suite), patterns=scoped.patterns, tags=scoped.tags)
+        if filtered_by_query and not cases:
+            return [], True
+        cases = filter_host_scope(cases, scoped.host_scope)
+        if scoped.shard is not None:
+            cases = select_shard(cases, scoped.shard)
+        return cases, True
+    return iter_cases(suite), False
 
 
-def run_tier1(
-    run_id: str,
-    artifact_dir: Path,
-    *,
-    rebuild: bool = False,
-    keep_logs: bool = False,
-    selection: SuiteSelection | None = None,
-) -> bool:
-    suite = _selected_suite(1, selection or SuiteSelection())
-    if suite is None:
-        print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
-        return False
-
+def _ensure_tier1_images(*, rebuild: bool) -> None:
     docker_build(
         IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
     )
     docker_build(IMG_NAS, E2E_DIR / "images" / "nas.Dockerfile", digest=sources_digest("nas"), force=rebuild)
 
-    net = f"cst-e2e-net-{run_id}"
-    nas = f"cst-e2e-nas-{run_id}"
-    sysd = f"cst-e2e-sysd-{run_id}"
+
+def _tier1_log_dir(cfg: _Tier1Exec) -> Path:
+    if cfg.selection.shard is not None:
+        return cfg.artifact_dir / f"tier1-{cfg.selection.shard.dir_suffix()}"
+    if cfg.selection.host_scope == HostScope.EXCLUSIVE:
+        return cfg.artifact_dir / "tier1-exclusive"
+    return cfg.artifact_dir / "tier1"
+
+
+def _run_tier1_container(cfg: _Tier1Exec) -> bool:
+    cases, is_sliced = _resolve_cases(1, cfg.selection)
+    if is_sliced and not cases:
+        if cfg.selection.patterns or cfg.selection.tags:
+            matched = select_cases(
+                iter_cases(load_suite(SUITE_FILES[1])),
+                patterns=cfg.selection.patterns,
+                tags=cfg.selection.tags,
+            )
+            if not matched:
+                print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
+                return False
+        shard_msg = f" shard {cfg.selection.shard.label()}" if cfg.selection.shard is not None else ""
+        print(f"[e2e] tier 1{shard_msg}: 0 tests selected", flush=True)
+        return True
+
+    suite = build_suite(cases) if is_sliced else load_suite(SUITE_FILES[1])
+    if cfg.build_images:
+        _ensure_tier1_images(rebuild=cfg.rebuild)
+
+    net = f"cst-e2e-net-{cfg.run_id}"
+    nas = f"cst-e2e-nas-{cfg.run_id}"
+    sysd = f"cst-e2e-sysd-{cfg.run_id}"
     ok = False
     try:
         run(["docker", "network", "create", net])
@@ -378,11 +418,131 @@ def run_tier1(
         ok = result.wasSuccessful()
         return ok
     finally:
-        if not ok or keep_logs:
-            dump_logs([sysd, nas], artifact_dir / "tier1")
+        if not ok or cfg.keep_logs:
+            dump_logs([sysd, nas], _tier1_log_dir(cfg))
         for c in (sysd, nas):
             run(["docker", "rm", "-f", c], check=False, capture=True)
         run(["docker", "network", "rm", net], check=False, capture=True)
+
+
+def run_tier1(
+    run_id: str,
+    artifact_dir: Path,
+    *,
+    rebuild: bool = False,
+    keep_logs: bool = False,
+    selection: SuiteSelection | None = None,
+) -> bool:
+    return _run_tier1_container(
+        _Tier1Exec(
+            run_id=run_id,
+            artifact_dir=artifact_dir,
+            rebuild=rebuild,
+            keep_logs=keep_logs,
+            selection=selection or SuiteSelection(),
+        )
+    )
+
+
+def _shard_child_cmd(cfg: _Tier1Exec, shard: ShardSpec) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(Path(__file__).resolve()),
+        "--tier",
+        "1",
+        "--no-build",
+        "--host-scope",
+        HostScope.PARALLEL,
+        "--shard",
+        shard.label(),
+        "--run-id",
+        f"{cfg.run_id}-s{shard.index}",
+        "--artifact-dir",
+        str(cfg.artifact_dir),
+    ]
+    if cfg.keep_logs:
+        cmd.append("--keep-logs")
+    if cfg.selection.patterns:
+        cmd.extend(["--match", ",".join(cfg.selection.patterns)])
+    if cfg.selection.tags:
+        cmd.extend(["--tag", ",".join(sorted(t.value for t in cfg.selection.tags))])
+    return cmd
+
+
+def _exec_shard_child(shard: ShardSpec, cmd: Sequence[str]) -> tuple[ShardSpec, bool, float, str]:
+    start = time.monotonic()
+    proc = subprocess.run(
+        list(cmd),
+        cwd=str(REPO_ROOT),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    elapsed = time.monotonic() - start
+    combined = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+    return shard, proc.returncode == 0, elapsed, combined
+
+
+def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
+    all_cases = select_cases(
+        iter_cases(load_suite(SUITE_FILES[1])),
+        patterns=cfg.selection.patterns,
+        tags=cfg.selection.tags,
+    )
+    if not all_cases:
+        print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
+        return False
+    resolved_jobs = default_tier1_jobs(len(all_cases)) if jobs == 0 else jobs
+    parallel_cases, exclusive_cases = split_host_exclusive(all_cases)
+    if resolved_jobs <= 1 or (len(parallel_cases) <= 1 and not exclusive_cases):
+        return _run_tier1_container(cfg)
+
+    if cfg.build_images:
+        _ensure_tier1_images(rebuild=cfg.rebuild)
+
+    started = time.monotonic()
+    ok = True
+    worker_count = min(resolved_jobs, len(parallel_cases))
+    if worker_count > 0:
+        shards = [ShardSpec(index=i, total=worker_count) for i in range(1, worker_count + 1)]
+        print(
+            f"[e2e] tier 1: running {len(parallel_cases)} tests across {worker_count} parallel containers"
+            + (f" (+{len(exclusive_cases)} host-exclusive solo afterwards)" if exclusive_cases else ""),
+            flush=True,
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(_exec_shard_child, s, _shard_child_cmd(cfg, s)) for s in shards]
+            for fut in concurrent.futures.as_completed(futures):
+                shard, shard_ok, dur_s, output = fut.result()
+                status = "OK" if shard_ok else "FAILED"
+                print(f"\n--- Tier 1 shard {shard.label()} ({status}, {dur_s:.1f}s) ---", flush=True)
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n", flush=True)
+                ok = ok and shard_ok
+
+    if exclusive_cases:
+        print(
+            f"\n--- Tier 1 host-exclusive solo phase ({len(exclusive_cases)} tests) ---",
+            flush=True,
+        )
+        solo_cfg = cfg._replace(
+            run_id=f"{cfg.run_id}-solo",
+            build_images=False,
+            selection=SuiteSelection(
+                patterns=cfg.selection.patterns,
+                tags=cfg.selection.tags,
+                host_scope=HostScope.EXCLUSIVE,
+            ),
+        )
+        solo_ok = _run_tier1_container(solo_cfg)
+        ok = ok and solo_ok
+
+    total_s = time.monotonic() - started
+    print(f"[e2e] tier 1 parallel summary: {len(all_cases)} tests in {total_s:.1f}s ({'OK' if ok else 'FAILED'})")
+    return ok
 
 
 def run_tier2(
@@ -393,10 +553,11 @@ def run_tier2(
     keep_logs: bool = False,
     selection: SuiteSelection | None = None,
 ) -> bool:
-    suite = _selected_suite(2, selection or SuiteSelection())
-    if suite is None:
+    cases, is_sliced = _resolve_cases(2, selection or SuiteSelection())
+    if is_sliced and not cases:
         print("[e2e] tier 2: no tests matched selection", file=sys.stderr)
         return False
+    suite = build_suite(cases) if is_sliced else load_suite(SUITE_FILES[2])
 
     docker_build(
         IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
@@ -488,32 +649,85 @@ def run_tier2(
             raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
 
 
-def _validate_filters(
-    tiers: Sequence[int], raw_match: Sequence[str] | None, raw_tag: Sequence[str] | None
-) -> SuiteSelection:
-    if raw_tag is not None and 2 in tiers:
+def _validate_options(tiers: Sequence[int], args: argparse.Namespace) -> tuple[SuiteSelection, int]:
+    if args.tag is not None and 2 in tiers:
         raise ValueError("--tag is only supported for tier 1")
-    patterns = parse_patterns(raw_match) if raw_match is not None else ()
-    tags = parse_tags(raw_tag) if raw_tag is not None else frozenset()
-    return SuiteSelection(patterns=patterns, tags=tags)
+    patterns = parse_patterns(args.match) if args.match is not None else ()
+    tags = parse_tags(args.tag) if args.tag is not None else frozenset()
+    shard = parse_shard(args.shard) if args.shard is not None else None
+    if shard is not None and 2 in tiers:
+        raise ValueError("--shard is only supported for tier 1")
+    raw_jobs = args.jobs
+    if raw_jobs is None:
+        jobs = 1
+    else:
+        assert isinstance(raw_jobs, int) and not isinstance(raw_jobs, bool)
+        if raw_jobs < 0:
+            raise ValueError(f"--jobs must be >= 0, got {raw_jobs}")
+        if shard is not None and raw_jobs != 1:
+            raise ValueError("cannot combine --shard with --jobs")
+        if 2 in tiers and raw_jobs != 1:
+            raise ValueError("--jobs is only supported for tier 1")
+        jobs = raw_jobs
+    host_scope = HostScope(args.host_scope)
+    return SuiteSelection(patterns=patterns, tags=tags, shard=shard, host_scope=host_scope), jobs
 
 
-def _list_tier_tests(tier: int, selection: SuiteSelection) -> int:
-    suite = _selected_suite(tier, selection)
-    if suite is None:
+def _print_parallel_listing(cases: Sequence[unittest.TestCase], resolved_jobs: int) -> None:
+    parallel_cases, exclusive_cases = split_host_exclusive(cases)
+    worker_count = min(resolved_jobs, len(parallel_cases))
+    print(f"Tier 1 ({len(cases)} tests across {worker_count} parallel shards):")
+    if worker_count > 0:
+        for idx, bucket in enumerate(assign_shards(parallel_cases, worker_count), 1):
+            print(f"  Shard {idx}/{worker_count} ({len(bucket)} tests):")
+            for case in bucket:
+                print(f"    {format_case_line(case)}")
+    if exclusive_cases:
+        print(f"  Host-exclusive solo phase ({len(exclusive_cases)} tests):")
+        for case in exclusive_cases:
+            print(f"    {format_case_line(case)}")
+
+
+def _list_tier_tests(tier: int, selection: SuiteSelection, jobs: int) -> int:
+    cases, is_sliced = _resolve_cases(tier, selection)
+    if is_sliced and selection.active and not cases and selection.shard is None:
         print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
         return 2
-    cases = iter_cases(suite)
-    print(f"Tier {tier} ({len(cases)} tests):")
+    if tier == 1 and jobs != 1 and selection.shard is None:
+        resolved = default_tier1_jobs(len(cases)) if jobs == 0 else jobs
+        if resolved > 1:
+            _print_parallel_listing(cases, resolved)
+            return 0
+    shard_note = f", shard {selection.shard.label()}" if tier == 1 and selection.shard is not None else ""
+    print(f"Tier {tier} ({len(cases)} tests{shard_note}):")
     for case in cases:
         print(f"  {format_case_line(case)}")
     return 0
 
 
-def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selection: SuiteSelection) -> int:
+def _dispatch_tier(tier: int, cfg: _Tier1Exec, jobs: int, *, direct: bool) -> bool:
+    if tier == 2:
+        return run_tier2(
+            cfg.run_id, cfg.artifact_dir, rebuild=cfg.rebuild, keep_logs=cfg.keep_logs, selection=cfg.selection
+        )
+    if jobs != 1:
+        return _run_tier1_parallel(cfg, jobs)
+    if direct:
+        return run_tier1(
+            cfg.run_id, cfg.artifact_dir, rebuild=cfg.rebuild, keep_logs=cfg.keep_logs, selection=cfg.selection
+        )
+    return _run_tier1_container(cfg)
+
+
+def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selection: SuiteSelection, jobs: int) -> int:
     if selection.active:
         for tier in tiers:
-            if _selected_suite(tier, selection) is None:
+            cases = select_cases(
+                iter_cases(load_suite(SUITE_FILES[tier])),
+                patterns=selection.patterns,
+                tags=selection.tags if tier == 1 else frozenset(),
+            )
+            if not cases:
                 print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
                 return 2
     problem = checkout_preflight()
@@ -523,26 +737,29 @@ def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selectio
     if args.check_only:
         return 0
 
-    run_id = datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
-    artifact_dir = ARTIFACTS_BASE / run_id
+    run_id = args.run_id or (datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}")
+    artifact_dir = Path(args.artifact_dir) if args.artifact_dir is not None else (ARTIFACTS_BASE / run_id)
+    cleanup_dir = args.artifact_dir is None
+    direct = not args.no_build and args.run_id is None and cleanup_dir
     all_ok = True
     try:
         for tier in tiers:
             print(f"\n=== CST E2E LAYER {tier} (run_id={run_id}) ===", flush=True)
-            if tier == 1:
-                ok = run_tier1(
-                    run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs, selection=selection
-                )
-            else:
-                ok = run_tier2(
-                    run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs, selection=selection
-                )
-            all_ok = all_ok and ok
+            cfg = _Tier1Exec(
+                run_id=run_id,
+                artifact_dir=artifact_dir,
+                rebuild=args.rebuild,
+                keep_logs=args.keep_logs,
+                build_images=not args.no_build,
+                selection=selection,
+            )
+            all_ok = _dispatch_tier(tier, cfg, jobs, direct=direct) and all_ok
     finally:
-        if all_ok and not args.keep_logs and artifact_dir.exists():
-            shutil.rmtree(artifact_dir, ignore_errors=True)
-        elif artifact_dir.exists():
-            print(f"[e2e] logs preserved at {artifact_dir}", file=sys.stderr)
+        if cleanup_dir:
+            if all_ok and not args.keep_logs and artifact_dir.exists():
+                shutil.rmtree(artifact_dir, ignore_errors=True)
+            elif artifact_dir.exists():
+                print(f"[e2e] logs preserved at {artifact_dir}", file=sys.stderr)
 
     return 0 if all_ok else 1
 
@@ -562,6 +779,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--tag",
         action="append",
         help=f"filter tier 1 tests by domain tag ({', '.join(t.value for t in E2ETag)}; repeatable or comma-separated)",
+    )
+    parser.add_argument("--shard", help="run only shard I/N of tier 1 (e.g. 1/3)")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=None,
+        help="parallel tier 1 containers (0 = auto, 1 = single container)",
+    )
+    parser.add_argument("--no-build", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--artifact-dir", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--host-scope",
+        choices=tuple(s.value for s in HostScope),
+        default=HostScope.ALL.value,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--list-tests",
@@ -585,19 +819,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
         return 2
     try:
-        selection = _validate_filters(tiers, args.match, args.tag)
+        selection, jobs = _validate_options(tiers, args)
     except ValueError as exc:
         print(f"[e2e] {exc}", file=sys.stderr)
         return 2
 
     if args.list_tests:
         for tier in tiers:
-            rc = _list_tier_tests(tier, selection)
+            rc = _list_tier_tests(tier, selection, jobs)
             if rc != 0:
                 return rc
         return 0
 
-    return _run_selected_tiers(tiers, args, selection)
+    return _run_selected_tiers(tiers, args, selection, jobs)
 
 
 if __name__ == "__main__":

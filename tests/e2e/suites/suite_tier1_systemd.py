@@ -447,6 +447,7 @@ journal_named() {
 # The helpers of test_80 and test_101, which run `cst bluetooth` as tester: TEST names the test
 # in the CI log; bt runs this checkout's cst bluetooth.
 BT_STEPS = r"""
+systemctl --user start wireplumber.service
 bt() { /opt/cst-rw/cst bluetooth "$@"; }
 show() { sed "s/^/$TEST $1: /" <<<"$2" >&2; }   # the CI log
 verify_failed_only() {   # verify_failed_only LABEL RC OUT: the live checks failed, nothing else
@@ -1376,6 +1377,12 @@ class Tier1SystemdE2ETest(unittest.TestCase):
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.NAS)
     def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self) -> None:
         """btrfs-notify queue -> cst-pending-alerts delivery + doctor detection + real restic over SFTP."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            "rm -rf /tmp/nas-payload /etc/btrfs-setup/restic-password /var/lib/cst-alerts/pending/*.alert",
+            check=False,
+        )
         # 1. Queue pending alert, detect via cst doctor, deliver via cst-pending-alerts
         exec_bash(
             self.SYSTEMD_CONTAINER,
@@ -4913,6 +4920,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             r"""
             set -E
             trap 'echo "test_95 FAILED at line $LINENO: $BASH_COMMAND" >&2; echo "--- bt95.out:" >&2; cat /tmp/bt95.out >&2' ERR
+            systemctl --user start wireplumber.service
             NEW=/opt/cst-rw/bluetooth-setup.sh
             OLD=/opt/cst-old/bluetooth-setup.sh
             # apply PROGRAM LINE ARGS...: exit 1 (its checks find no Bluetooth adapter in the
@@ -7106,7 +7114,7 @@ echo E2E-OK
             if [[ ! -f {w}/had-ostree-booted ]]; then
                 rm -f /run/ostree-booted
             fi
-            rm -f /etc/systemd/system/{top_unit} /etc/systemd/system/{auto_unit}
+            rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
             systemctl daemon-reload || true
             rm -rf {w}
             """,

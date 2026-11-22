@@ -124,6 +124,17 @@ also supports filtering and dry listing without starting containers:
 - `--list_tests` (`run.py --list-tests`): list matching test names and tags and
   exit without building or starting Docker containers (`run.py` also supports
   `--match` and `--list-tests` with `--tier 2`).
+
+Tier 1 also supports balanced LPT sharding across independent systemd + NAS
+container pairs:
+
+- `--shard I/N` (`invowk cmd test e2e tier1 --shard 1/3`): run only shard `I` of
+  `N` (used by CI's 3-shard `e2e-tier1` matrix).
+- `--jobs N` (`run.py --jobs N` / `-j N`; `invowk cmd test e2e tier1` defaults
+  to `0` = auto up to 4 parallel containers when more than 4 tests are
+  selected, `1` for smaller selections): images are built or checked once,
+  parallel shards run concurrently, and `test_10_cpu_quiet_reads_the_real_proc_files`
+  (which loads every host CPU) runs alone after the parallel shards finish.
 Without `--rebuild`, `run.py` uses a local image only when its label
 `org.cst.e2e.sources` is the digest of this checkout's sources
 (`tests/e2e/image_digest.py`: the image's Dockerfile, every file under

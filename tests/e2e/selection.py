@@ -6,10 +6,11 @@ Standard library only.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import fnmatch
+import os
 from typing import Final
 import unittest
 
@@ -152,12 +153,138 @@ def format_case_line(case: unittest.TestCase) -> str:
     return f"{name} [{', '.join(tags)}]"
 
 
+class HostScope(StrEnum):
+    """Whether host-exclusive Tier 1 tests run with or apart from parallel shards."""
+
+    ALL = "all"
+    PARALLEL = "parallel"
+    EXCLUSIVE = "exclusive"
+
+
+@dataclass(frozen=True, slots=True)
+class ShardSpec:
+    """1-based shard selector (`index/total`) for splitting a suite."""
+
+    index: int
+    total: int
+
+    def label(self) -> str:
+        """Compact `I/N` representation."""
+        return f"{self.index}/{self.total}"
+
+    def dir_suffix(self) -> str:
+        """Directory suffix for shard artifact folders."""
+        return f"s{self.index}-of-{self.total}"
+
+
+DEFAULT_TEST_WEIGHT: Final = 4
+# Measured CI seconds for the slower Tier 1 tests so LPT packing balances shards.
+TIER1_WEIGHTS: Final[Mapping[str, int]] = {
+    "test_80_bluetooth_second_apply_and_le_audio_cycle": 82,
+    "test_26_btrfs_watch_saves_the_report_of_a_run": 66,
+    "test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc": 60,
+    "test_95_bluetooth_python_program_with_the_bash_one_runuser_and_le_audio": 50,
+    "test_19_every_component_full_cycle_on_the_container_root": 33,
+    "test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one": 27,
+    "test_11_manifest_installs_and_every_entry_runs_from_root": 26,
+    "test_106_stall_monitor_upgrade_installs_the_program_before_the_unit": 20,
+    "test_104_stall_monitor_unit_is_active_only_after_ready": 17,
+    "test_105_stall_monitor_is_restarted_when_its_pings_stop": 15,
+    "test_13_degraded_boot_install_cycle": 14,
+    "test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic": 13,
+    "test_85_cpu_game_profile_bash_and_python_copies_share_their_state_and_lock": 12,
+    "test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low": 10,
+    "test_10_cpu_quiet_reads_the_real_proc_files": 10,
+    "test_84_cpu_install_cycle_over_the_bash_version": 10,
+    "test_103_docker_gc_installer_keeps_the_registry_of_mains_install": 10,
+    "test_90_swap_upgrade_from_an_install_with_the_partition_in_the_code": 9,
+    "test_05_bluetooth_config_wp_roles_and_ldac_unit": 8,
+    "test_102_docker_gc_enable_keeps_the_registry_of_mains_install": 7,
+}
+# Tests that load all host CPUs and must run solo when local containers run in parallel.
+HOST_EXCLUSIVE_TESTS: Final[frozenset[str]] = frozenset({"test_10_cpu_quiet_reads_the_real_proc_files"})
+
+
+def parse_shard(raw: str) -> ShardSpec:
+    """Parse an `I/N` shard specification (1 <= I <= N)."""
+    parts = raw.strip().split("/")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
+    index, total = int(parts[0]), int(parts[1])
+    if total < 1 or index < 1 or index > total:
+        raise ValueError(f"invalid --shard {raw!r} (expected 1 <= I <= N)")
+    return ShardSpec(index=index, total=total)
+
+
+def case_weight(case: unittest.TestCase, weights: Mapping[str, int] = TIER1_WEIGHTS) -> int:
+    """Estimated execution weight of one TestCase for shard balancing."""
+    return weights.get(test_method_name(case), DEFAULT_TEST_WEIGHT)
+
+
+def assign_shards(
+    cases: Sequence[unittest.TestCase],
+    total: int,
+    weights: Mapping[str, int] = TIER1_WEIGHTS,
+) -> list[list[unittest.TestCase]]:
+    """Partition cases across `total` bins via deterministic LPT packing."""
+    if total < 1:
+        raise ValueError(f"shard count must be >= 1, got {total}")
+    indexed = list(enumerate(cases))
+    indexed.sort(key=lambda pair: (-case_weight(pair[1], weights), pair[0]))
+    bins: list[list[tuple[int, unittest.TestCase]]] = [[] for _ in range(total)]
+    bin_weights = [0] * total
+    for orig_idx, case in indexed:
+        target = min(range(total), key=lambda idx: (bin_weights[idx], idx))
+        bins[target].append((orig_idx, case))
+        bin_weights[target] += case_weight(case, weights)
+    return [[case for _, case in sorted(bucket, key=lambda pair: pair[0])] for bucket in bins]
+
+
+def select_shard(
+    cases: Sequence[unittest.TestCase],
+    shard: ShardSpec,
+    weights: Mapping[str, int] = TIER1_WEIGHTS,
+) -> list[unittest.TestCase]:
+    """Return the ordered subset of cases belonging to `shard`."""
+    return assign_shards(cases, shard.total, weights)[shard.index - 1]
+
+
+def split_host_exclusive(cases: Sequence[unittest.TestCase]) -> tuple[list[unittest.TestCase], list[unittest.TestCase]]:
+    """Split cases into `(parallel_cases, host_exclusive_cases)`."""
+    parallel: list[unittest.TestCase] = []
+    exclusive: list[unittest.TestCase] = []
+    for case in cases:
+        if test_method_name(case) in HOST_EXCLUSIVE_TESTS:
+            exclusive.append(case)
+        else:
+            parallel.append(case)
+    return parallel, exclusive
+
+
+def filter_host_scope(cases: Sequence[unittest.TestCase], scope: HostScope) -> list[unittest.TestCase]:
+    """Keep all cases, only parallel cases, or only host-exclusive cases."""
+    if scope == HostScope.ALL:
+        return list(cases)
+    parallel, exclusive = split_host_exclusive(cases)
+    return parallel if scope == HostScope.PARALLEL else exclusive
+
+
+def default_tier1_jobs(selected_count: int, cpu_count: int | None = None) -> int:
+    """Default parallel container count for local Tier 1 runs (`1` for small selections)."""
+    if selected_count <= 4:
+        return 1
+    cpus = max(1, os.cpu_count() or 1) if cpu_count is None else max(1, cpu_count)
+    return min(4, max(1, cpus // 2), selected_count)
+
+
 @dataclass(frozen=True, slots=True)
 class SuiteSelection:
-    """Filter criteria for selecting tests from an E2E suite."""
+    """Filter and sharding criteria for selecting tests from an E2E suite."""
 
     patterns: tuple[str, ...] = ()
     tags: frozenset[E2ETag] = frozenset()
+    shard: ShardSpec | None = None
+    host_scope: HostScope = HostScope.ALL
 
     @property
     def active(self) -> bool:
@@ -165,5 +292,5 @@ class SuiteSelection:
         return bool(self.patterns or self.tags)
 
     def for_tier(self, tier: int) -> SuiteSelection:
-        """Return selection scoped to tier (tags only apply to tier 1)."""
+        """Return selection scoped to tier (tags, shards and host scope apply to tier 1)."""
         return self if tier == 1 else SuiteSelection(patterns=self.patterns)
