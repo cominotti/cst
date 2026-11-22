@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 import os
+from typing import Final
 
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text
@@ -36,6 +37,11 @@ from cpu.irq.domain import (
     render_irq_env,
 )
 
+# The host's rpm-ostree: read through /run/host in a toolbox, not looked up on this container's PATH.
+_RPM_OSTREE_PATH: Final = "/usr/bin/rpm-ostree"
+# What writing or removing a managed file through the InstallService can raise.
+_INSTALL_ERRORS: Final = (InstallRefused, WriteFailed, OSError)
+
 
 @dataclass(frozen=True, slots=True)
 class IrqPaths:
@@ -46,7 +52,7 @@ class IrqPaths:
     env_path: str = IRQ_ENV_PATH
     sysconfig_path: str = IRQ_SYSCONFIG_PATH
     dropin_path: str = IRQ_DROPIN_PATH
-    rpm_ostree_path: str = "/usr/bin/rpm-ostree"
+    rpm_ostree_path: str = _RPM_OSTREE_PATH
     record_path: str = ROOT_RECORD
     entry_file: str = ""
     fallback_root: str = ""
@@ -67,7 +73,7 @@ def irq_paths_for(
             IRQ_ENV_PATH,
             IRQ_SYSCONFIG_PATH,
             IRQ_DROPIN_PATH,
-            "/usr/bin/rpm-ostree",
+            _RPM_OSTREE_PATH,
         )
     ]
     return IrqPaths(*paths, entry_file=entry_file, fallback_root=fallback_root)
@@ -100,16 +106,17 @@ def collect_irq_snapshot(
     banned = ""
     notes: tuple[str, ...] = ()
     build_set: CpuSet | None = None
+    msg: str | None = None
     if not settings.build_cpus.strip():
-        build_cpus_error = build_cpus_error or f"BUILD_CPUS is empty in {paths.conf}"
-        warnings.append(f"BUILD_CPUS is empty in {paths.conf}")
+        msg = f"BUILD_CPUS is empty in {paths.conf}"
     else:
         try:
             build_set = CpuSet.parse(settings.build_cpus)
         except DomainValidationError as exc:
             msg = f"invalid BUILD_CPUS ({settings.build_cpus}): {exc}"
-            build_cpus_error = build_cpus_error or msg
-            warnings.append(msg)
+    if msg is not None:
+        build_cpus_error = build_cpus_error or msg
+        warnings.append(msg)
     if online_raw is None:
         warnings.append(f"cannot read {paths.online_cpus}")
     elif build_set is not None:
@@ -121,7 +128,6 @@ def collect_irq_snapshot(
     env_text, env_banned = _read_banned_var(paths.env_path)
     _, sysconfig_banned = _read_banned_var(paths.sysconfig_path)
     unit_present, active, enabled = probe_systemd_unit(cmd_runner, IRQBALANCE_SERVICE)
-    # The host's rpm-ostree (paths.rpm_ostree_path: under /run/host in a toolbox), not this container's PATH.
     rpm_ostree_ok = os.path.exists(paths.rpm_ostree_path) if has_rpm_ostree is None else has_rpm_ostree
 
     return IrqSnapshot(
@@ -166,7 +172,7 @@ def _remove_managed_files(svc: InstallService, paths: IrqPaths) -> tuple[int, li
     ]
     try:
         lines = list(svc.remove(places))
-    except (InstallRefused, WriteFailed, OSError) as exc:
+    except _INSTALL_ERRORS as exc:
         return 1, [f"ERROR: {exc}"], False, False
     with contextlib.suppress(OSError):
         os.rmdir(os.path.dirname(paths.dropin_path))
@@ -193,7 +199,7 @@ def _sync_irq_files(svc: InstallService, paths: IrqPaths, snap: IrqSnapshot) -> 
             out.append(f"{'written:  ' if written else 'unchanged:'} {path}")
             env_changed = env_changed or (is_env and written)
             dropin_changed = dropin_changed or (not is_env and written)
-    except (InstallRefused, WriteFailed, OSError) as exc:
+    except _INSTALL_ERRORS as exc:
         return 1, [*out, f"ERROR: {exc}"], dropin_changed, env_changed
     return 0, out, dropin_changed, env_changed
 
@@ -303,7 +309,7 @@ def _apply_irq_changes(
     if rc_end == 0 and snap.banned_cpulist:
         try:
             svc.mark(paths.record_path, Component.CPU_IRQ)
-        except (InstallRefused, WriteFailed, OSError) as exc:
+        except _INSTALL_ERRORS as exc:
             return 1, [*out, f"ERROR: {exc}"]
     return rc_end, out
 
