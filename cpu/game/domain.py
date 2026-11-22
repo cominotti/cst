@@ -158,7 +158,9 @@ class GameSettings:
     game_memory_low: str = "16G"  # Dota 2 ~10 GB resident + steamwebhelper
     game_zswap_writeback: str = "no"  # app.slice during games: "no" = swapped pages stay in zswap
     gpu_pm_mode: str = "always"
-    cpu_cstate_max_latency_us: str = "200"
+    # "" when the settings file does not set it: cpu-power then applies boot_cstate_limit_us's default for
+    # the host's cpuidle driver (200 us with intel_idle).
+    cpu_cstate_max_latency_us: str = ""
     game_cstate_max_latency_us: str = "50"
 
 

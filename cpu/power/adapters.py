@@ -14,7 +14,6 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
-from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
@@ -44,7 +43,6 @@ _CARD_RE: Final = re.compile(r"^card([0-9]+)$")
 _CPU_RE: Final = re.compile(r"^cpu([0-9]+)$")
 _STATE_RE: Final = re.compile(r"^state([0-9]+)$")
 _CONNECTED_VALUE: Final = "connected"
-_CSTATE_SETTING: Final = "CPU_CSTATE_MAX_LATENCY_US"
 # The run lock's wait, as cpu-game-profile's (a name of this module, which a test shortens).
 _POWER_LOCK_TIMEOUT_S: Final = RUN_LOCK_WAIT_S
 
@@ -207,9 +205,11 @@ def collect_power_snapshot(paths: PowerPaths) -> PowerSnapshot:
     gpu_mode, gpu_err = parse_gpu_pm_mode(settings.gpu_pm_mode)
     if gpu_err is not None:
         warnings.append(gpu_err)
-    explicit = bool((parse_shell_assignments(read_text(paths.conf) or "").values.get(_CSTATE_SETTING) or "").strip())
+    # A file without the setting leaves it "" (GameSettings' default): the driver then decides the cap.
     cstate_limit, cs_err = boot_cstate_limit_us(
-        settings.cpu_cstate_max_latency_us, explicit=explicit, cpuidle_driver=_cpuidle_driver(paths.sys_cpu)
+        settings.cpu_cstate_max_latency_us,
+        explicit=bool(settings.cpu_cstate_max_latency_us.strip()),
+        cpuidle_driver=_cpuidle_driver(paths.sys_cpu),
     )
     if cs_err is not None:
         warnings.append(f"CPU_CSTATE_MAX_LATENCY_US: {cs_err}")
