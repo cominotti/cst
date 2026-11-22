@@ -131,6 +131,7 @@ Run from the repository root.
 ```
 invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (what CI runs)
 invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism)
+invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits)
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
 invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
@@ -143,7 +144,7 @@ invowk cmd test types                         # ty on the ty gate list + ruff's 
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
-invowk cmd test e2e tier1                     # Docker, Fedora 45 + systemd; needs no opt-in
+invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
 

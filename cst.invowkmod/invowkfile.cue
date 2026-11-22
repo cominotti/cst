@@ -86,6 +86,32 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test affected"
+		category:    "test"
+		description: "Run only the unit test modules statically affected by changes (plus static gates; falls back to the full suite for cst_core or shared files)"
+		flags: [
+			{name: "base", description: "Git ref to diff against (default: merge-base with main, or HEAD)"},
+			{name: "list", type: "bool", default_value: "false", description: "List selected modules without running tests"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto per CPU, 1 = single-process)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=(-v)
+				if [[ "${INVOWK_FLAG_LIST:-false}" == "true" ]]; then
+					args+=(--list-affected)
+				else
+					args+=(--affected)
+				fi
+				[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && args+=(--base "${INVOWK_FLAG_BASE}")
+				exec python3 -I -B tests/run_unit.py "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "test module"
 		category:    "test"
 		description: "Run one unit test module, class or method through tests/run_unit.py (so the socket-stdin gate still applies)"
@@ -332,6 +358,11 @@ cmds: [
 		flags: [
 			{name: "keep_logs", type: "bool", default_value: "false", description: "Preserve collected journald/systemd artifacts even on success"},
 			{name: "rebuild", type: "bool", default_value: "false", description: "Force rebuild of E2E Docker images"},
+			{name: "match", description: "Substring or glob pattern(s) on test name, comma-separated (e.g. test_02,test_157)"},
+			{name: "tag", description: "Semantic tag(s), comma-separated (smoke, btrfs, cpu, bluetooth, swap, toolchains, vm, doctor, install, nas)"},
+			{name: "shard", description: "Run only shard I/N (e.g. 1/3)"},
+			{name: "jobs", type: "int", default_value: "0", description: "Parallel Tier 1 containers (0 = auto, 1 = single container; forbidden > 1 with --shard)"},
+			{name: "list_tests", type: "bool", default_value: "false", description: "List matching Tier 1 tests without starting Docker"},
 		]
 		implementations: [{
 			platforms: [{name: "linux"}]
@@ -342,6 +373,15 @@ cmds: [
 				args=(--tier 1)
 				[[ "${INVOWK_FLAG_KEEP_LOGS:-false}" == "true" ]] && args+=(--keep-logs)
 				[[ "${INVOWK_FLAG_REBUILD:-false}" == "true" ]] && args+=(--rebuild)
+				[[ -n "${INVOWK_FLAG_MATCH:-}" ]] && args+=(--match "${INVOWK_FLAG_MATCH}")
+				[[ -n "${INVOWK_FLAG_TAG:-}" ]] && args+=(--tag "${INVOWK_FLAG_TAG}")
+				if [[ -n "${INVOWK_FLAG_SHARD:-}" ]]; then
+					args+=(--shard "${INVOWK_FLAG_SHARD}")
+					[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				else
+					args+=(--jobs "${INVOWK_FLAG_JOBS:-0}")
+				fi
+				[[ "${INVOWK_FLAG_LIST_TESTS:-false}" == "true" ]] && args+=(--list-tests)
 				python3 -I -B tests/e2e/run.py "${args[@]}"
 				"""}
 		}]

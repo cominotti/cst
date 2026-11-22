@@ -41,7 +41,12 @@ the hash of every package against the lock.
 The unit tests do not need any of this: `python3 -I -B tests/run_unit.py`
 still runs on the system Python with the standard library (in parallel across
 CPUs by default; pass `--jobs 1` to force a single process, or let it fall back
-to 1 automatically when run under `coverage.py`).
+to 1 automatically when run under `coverage.py`). For faster local iterations,
+`invowk cmd test affected [--list] [--base REF]` (`tests/run_unit.py --affected`)
+selects only the static gates and unit modules statically reachable from your
+changed files, falling back conservatively to the full suite for `cst_core` or
+shared files; `invowk cmd test e2e tier1` supports `--match`, `--tag`,
+`--list_tests`, `--shard I/N`, and `--jobs N`.
 
 ## Where the virtual environment lives
 
