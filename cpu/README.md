@@ -1435,10 +1435,10 @@ cst cpu uninstall
 `uninstall`:
 
 - stops `cpu-game.service` (this runs the exact revert), disables the timer;
-- disables and stops `cst-cpu-power.service`, runs `cpu-power revert` to restore CST-managed GPU runtime PM and CPU C-states, and reloads udev rules;
+- disables and stops `cst-cpu-power.service`, runs `cpu-power revert` to restore CST-managed GPU runtime PM and CPU C-states, runs `cpu-irq revert` (as `cst cpu irq revert`: removes CST's `irqbalance` ban-list files and restarts `irqbalance.service` if it is active), and reloads udev rules;
 - removes the units, the `machine.slice` and `user@.service` drop-ins (also
   `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the udev rule,
-  the polkit rule and the four programs;
+  the polkit rule and the five programs;
 - removes any `/run/systemd/system/*.d/zz-cst-game.conf` left behind (7.5);
 - removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
   and `~/.config/gamemode.ini` (only if it is the script's file);

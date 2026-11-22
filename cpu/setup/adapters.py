@@ -441,6 +441,7 @@ class CpuSetup:
         self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
         self.run(["systemctl", "disable", "--now", CPU_POWER_SERVICE], check=False, quiet=True)
         self.run(self._checkout_program("cpu-power", "revert"), check=False, quiet=True)
+        self.run(self._checkout_program("cpu-irq", "revert"), check=False, quiet=True)  # cpu:irq, before cpu:core
         # Without the watchdog nothing would remove one left behind (the reload below then drops its MemoryLow).
         self.remove_game_dropins()
         self.installer("remove", "--component", CORE_COMPONENT)

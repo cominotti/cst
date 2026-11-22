@@ -711,6 +711,7 @@ class UninstallTest(CpuSetupCase):
                 "systemctl stop cpu-game.service",
                 "systemctl disable --now cst-cpu-power.service",
                 f"python3 -I -B {REPO}/cpu/cpu-power revert",
+                f"python3 -I -B {REPO}/cpu/cpu-irq revert",
                 f"{inst} remove --component cpu:core",
                 "udevadm control --reload-rules",
                 # Through the installer, with their install record lines (the hwp file also when gone).
