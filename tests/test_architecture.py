@@ -162,6 +162,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/stall_report/cli.py": 34,
     "cpu/cli.py": 146,
     "cpu/game/cli.py": 13,
+    "cpu/power/cli.py": 55,
     "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 7,
     "doctor/cli.py": 24,

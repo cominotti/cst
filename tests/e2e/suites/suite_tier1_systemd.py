@@ -1059,6 +1059,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         repo = self.CST_ROOT_MOUNT
         for extra_flags, subcmd in (
             ([], "/opt/cst/cst cpu install"),
+            ([], "/opt/cst/cst cpu power apply"),
+            ([], "/opt/cst/cst cpu power revert"),
             ([], "/opt/cst/cst btrfs install --no-below"),
             ([], "/opt/cst/cst btrfs compress-force apply --yes"),
             ([], "/opt/cst/cst btrfs compress-force revert --yes"),
@@ -2505,6 +2507,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/usr/local/sbin/cpu-power": ("--help", 0),
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
             "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
@@ -3004,6 +3007,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "btrfs-subvol-convert.service": 94,
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
+        "cst-cpu-power.service": 94,
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
         # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
@@ -4200,6 +4204,49 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-SCRUB-OK", out)
 
+    @e2e_tags(E2ETag.CPU, E2ETag.INSTALL)
+    def test_127_cpu_power_unit_udev_and_lifecycle(self) -> None:
+        """`cst-cpu-power.service`, `65-cst-gpu-pm.rules`, `65-cst-nvme-apst.rules`, and
+        `cst cpu power` plan/status/apply/revert against the real systemd and udevadm."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        dests = exec_bash(c, f"{installer} dests --component cpu:core").stdout.split()
+        if exec_bash(
+            c, " ".join(f"[[ ! -e {shlex.quote(d)} ]] || echo {shlex.quote(d)};" for d in dests)
+        ).stdout.strip():
+            self.skipTest("cpu:core files already exist on container (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"systemctl disable --now cst-cpu-power.service 2>/dev/null || true; "
+            f"{installer} remove --component cpu:core >/dev/null 2>&1 || true; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            {installer} install --set USER=tester --component cpu:core >/dev/null
+            {installer} srcs --component cpu:core | grep -qxF "cpu/cpu-power"
+            {installer} srcs --component cpu:core | grep -qxF "cpu/units/cst-cpu-power.service"
+            {installer} srcs --component cpu:core | grep -qxF "cpu/udev/65-cst-gpu-pm.rules"
+            udevadm verify --resolve-names=never --no-style \\
+                /etc/udev/rules.d/65-cst-gpu-pm.rules \\
+                /opt/cst-rw/btrfs/udev/65-cst-nvme-apst.rules
+            systemctl daemon-reload
+            systemctl start cst-cpu-power.service
+            [[ "$(systemctl show -P ActiveState cst-cpu-power.service)" == active ]]
+            /opt/cst-rw/cst cpu power help | grep -qF "GPU_PM_MODE"
+            runuser -u tester -- /opt/cst-rw/cst cpu power status | grep -qF "GPU_PM_MODE=always"
+            runuser -u tester -- /opt/cst-rw/cst cpu power plan | grep -qF "Dry run: nothing is changed."
+            /opt/cst-rw/cst cpu power apply | grep -qE "unchanged:|set:|skipped:"
+            /opt/cst-rw/cst cpu power revert | grep -qE "unchanged:|reverted:|skipped:"
+            echo E2E-CPU-POWER-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CPU-POWER-OK", out)
+
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
@@ -5386,8 +5433,8 @@ PY
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-new.txt
             written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
 ' ' ')
-            # The game profile becomes a zipapp; cpu-watch and cpu-vm-pin carry this version's cst_core.
-            [[ "$written" == "/usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin " ]] \
+            # The game profile becomes a zipapp; cpu-watch, cpu-power, and cpu-vm-pin + new unit/udev rule.
+            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
                 || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
             grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
             grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
@@ -5414,7 +5461,7 @@ PY
             fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
-            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
+            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "GPU runtime PM and CPU C-states" "last measurements"; do
                 grep -qx "== $s" <<<"$st" || {{ echo "status without '$s'" >&2; exit 1; }}
             done
             # A second install writes nothing.
@@ -5422,7 +5469,7 @@ PY
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
             # uninstall, twice.
             as_root /opt/cst-rw/cst cpu uninstall
-            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service                     /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules                     /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
+            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
                 [[ ! -e "$f" ]] || {{ echo "uninstall left $f" >&2; exit 1; }}
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi

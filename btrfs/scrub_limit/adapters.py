@@ -8,7 +8,6 @@ import contextlib
 from dataclasses import dataclass
 import glob
 import os
-import sys
 from typing import Final, NoReturn
 
 from btrfs.scrub_limit.domain import (
@@ -23,7 +22,15 @@ from btrfs.scrub_limit.domain import (
 )
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
-from cst_core.adapters.runtime import SYSTEM_PYTHON, checkout_root, lc_ctype_handover, program_path, undo_python_start
+from cst_core.adapters.runtime import (
+    SYSTEM_PYTHON,
+    RootElevation,
+    checkout_root,
+    enforce_host_root,
+    host_view_path,
+    lc_ctype_handover,
+    undo_python_start,
+)
 from cst_core.domain.install import Component
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
 
@@ -55,14 +62,6 @@ def start_scrub_process() -> None:
     undo_python_start()
 
 
-def _host_view(exec_ctx: ExecutionContextPort, host_path: str) -> str:
-    if not exec_ctx.is_container():
-        return host_path
-    etc = exec_ctx.etc_dir().rstrip("/")
-    prefix = etc[: -len("/etc")] if etc.endswith("/etc") else "/run/host"
-    return f"{prefix}/{host_path.lstrip('/')}"
-
-
 def scrub_paths_for(
     entry_file: str,
     *,
@@ -76,9 +75,9 @@ def scrub_paths_for(
     installer = os.path.join(root, "cst_core", "installer.py") if root else ""
     if read_only:
         return ScrubPaths(
-            conf_path=_host_view(exec_ctx, SCRUB_CONF_PATH),
-            dropin_path=_host_view(exec_ctx, SCRUB_DROPIN_PATH),
-            btrfs_sysfs=_host_view(exec_ctx, "/sys/fs/btrfs"),
+            conf_path=host_view_path(exec_ctx, SCRUB_CONF_PATH),
+            dropin_path=host_view_path(exec_ctx, SCRUB_DROPIN_PATH),
+            btrfs_sysfs=host_view_path(exec_ctx, "/sys/fs/btrfs"),
             installer_script=installer,
         )
     return ScrubPaths(
@@ -99,29 +98,17 @@ def enforce_scrub_host_root(
     """Enforce host execution and root privilege for mutating `set`/`off` commands."""
     if action not in (ScrubLimitAction.SET, ScrubLimitAction.OFF):
         return None
-    exec_ctx = HostExecutionContext() if ctx is None else ctx
-    if exec_ctx.is_container():
-        return (
-            f"'{invocation.prog} {action.value}' must run on the host, not inside a toolbox/container "
-            "(writes /etc/btrfs-setup/snapshots.conf and systemd drop-in)."
-        )
-    if not exec_ctx.is_root():
-        argv = [
-            "sudo",
-            "--",
-            "env",
-            f"CST_PROG={invocation.prog}",
-            lc_ctype_handover(),
-            sys.executable,
-            "-I",
-            "-B",
-            program_path(invocation.entry_file),
-            *invocation.args,
-        ]
-        if elevate is not None:
-            elevate(argv)
-        os.execvp("sudo", argv)
-    return None
+    return enforce_host_root(
+        RootElevation(
+            prog=invocation.prog,
+            action=action.value,
+            args=invocation.args,
+            entry_file=invocation.entry_file,
+            reason="writes /etc/btrfs-setup/snapshots.conf and systemd drop-in",
+        ),
+        ctx=ctx,
+        elevate=elevate,
+    )
 
 
 def _read_optional_strict(path: str) -> tuple[str | None, bool]:

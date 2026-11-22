@@ -155,16 +155,19 @@ btrfs/tmpfiles/cst-nvme-apst.conf                   /etc/tmpfiles.d/cst-nvme-aps
 btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvme-apst.rules                      644  root  data          root   btrfs:core
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
+cpu/cpu-power                                       /usr/local/sbin/cpu-power                                     755  root  python-entry  root   cpu:core
 cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
 cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  python-entry  root   cpu:core
 cpu/units/builds.slice.in                           /etc/systemd/system/builds.slice                              644  root  unit          root   cpu:docker-slice
 cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root   cpu:core
+cpu/units/cst-cpu-power.service                     /etc/systemd/system/cst-cpu-power.service                     644  root  unit          root   cpu:core
 cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root   cpu:core
 cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root   cpu:core
 cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user   cpu:gamemode
 cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root   cpu:core
+cpu/udev/65-cst-gpu-pm.rules                        /etc/udev/rules.d/65-cst-gpu-pm.rules                         644  root  data          root   cpu:core
 # bluetooth
 bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user   bluetooth:ldac
 # swap

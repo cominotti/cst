@@ -31,7 +31,7 @@ def main(
     prog = h.cst_prog or h.arg0
     cmd = argv[0] if argv and argv[0] else "help"  # ${1:-help}
     rest = list(argv[1:])
-    where = route(cmd)
+    where = route(cmd, rest)
     if where == CpuRoute.HELP:
         machine.say("out", script_help(machine.read_text(h.script), prog))
         return 0

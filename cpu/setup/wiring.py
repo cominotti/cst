@@ -16,7 +16,7 @@ from cst_core.adapters.runtime import undo_python_start
 from cst_core.ports import ModuleRoutePort
 from cpu.game.adapters.host import collate_as_bash
 from cpu.setup.adapters import CpuSetup, target_user
-from cpu.setup.domain import QUIET_ENV, SetupPaths
+from cpu.setup.domain import QUIET_ENV, CpuRootCommand, SetupPaths
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +54,9 @@ def checkout(handed: Handed) -> str:
 
 
 def watch_argv(handed: Handed, cmd: str, rest: Sequence[str], *, in_container: bool) -> list[str]:
-    """cpu-watch CMD ARGS from the checkout; from a toolbox on the host, with quiet's limits handed over
-    (flatpak-spawn passes no environment on)."""
+    """cpu-watch or cpu-power CMD ARGS from the checkout; cpu-watch runs on the host from a toolbox."""
+    if cmd == CpuRootCommand.POWER:
+        return ["python3", "-I", "-B", os.path.join(checkout(handed), "cpu", "cpu-power"), *rest]
     argv = ["python3", "-I", "-B", os.path.join(checkout(handed), "cpu", "cpu-watch"), cmd, *rest]
     return on_host_argv(argv, handed.quiet) if in_container else argv
 

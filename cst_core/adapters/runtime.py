@@ -8,17 +8,72 @@ the same answer in both, so no program computes paths from `__file__` by
 itself.
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import pwd
 import signal
 import stat
+import sys
+from typing import NoReturn
 import zipfile
 
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.install import expand_dest, manifest_by_src
+from cst_core.ports import ExecutionContextPort
 
 SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+@dataclass(frozen=True, slots=True)
+class RootElevation:
+    """Metadata for refusing container writes or re-executing a CST entry through `sudo`."""
+
+    prog: str
+    action: str
+    args: tuple[str, ...]
+    entry_file: str
+    reason: str
+
+
+def host_view_path(exec_ctx: ExecutionContextPort, host_path: str) -> str:
+    """Map an absolute host path through `/run/host` (or container prefix) inside a container."""
+    if not exec_ctx.is_container():
+        return host_path
+    etc = exec_ctx.etc_dir().rstrip("/")
+    prefix = etc[: -len("/etc")] if etc.endswith("/etc") else "/run/host"
+    return f"{prefix}/{host_path.lstrip('/')}"
+
+
+def enforce_host_root(
+    req: RootElevation,
+    *,
+    ctx: ExecutionContextPort | None = None,
+    elevate: Callable[[list[str]], NoReturn] | None = None,
+) -> str | None:
+    """Refuse container writes and re-exec through `sudo` when not root."""
+    exec_ctx = HostExecutionContext() if ctx is None else ctx
+    if exec_ctx.is_container():
+        return f"'{req.prog} {req.action}' must run on the host, not inside a toolbox/container ({req.reason})."
+    if not exec_ctx.is_root():
+        argv = [
+            "sudo",
+            "--",
+            "env",
+            f"CST_PROG={req.prog}",
+            lc_ctype_handover(),
+            sys.executable,
+            "-I",
+            "-B",
+            program_path(req.entry_file),
+            *req.args,
+        ]
+        if elevate is not None:
+            elevate(argv)
+        os.execvp("sudo", argv)
+    return None
 
 
 def running_archive(main_file: str) -> str | None:

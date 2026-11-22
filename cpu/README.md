@@ -27,14 +27,19 @@ described in [../btrfs/README.md](../btrfs/README.md).
 > **In short: what this does to your system**
 >
 > - **Permanent** (until `uninstall`): lower CPU priority for the VM and the
->   toolboxes, toolboxes on the E-cores only, a GameMode hook, and a watchdog
+>   toolboxes, toolboxes on the E-cores only, connected display GPUs kept awake
+>   (`GPU_PM_MODE='always'` across monitor hotplug via udev + `cst-cpu-power.service`),
+>   deep CPU C-states capped at `200 µs` (`CPU_CSTATE_MAX_LATENCY_US`),
+>   `ntsync` autoloaded for Wine/Proton, a GameMode hook, and a watchdog
 >   timer. The files are listed in section 6.1.
 > - **Only while a game runs** (and cleared by a reboot): the VM and Docker
 >   move to CPUs 12-23 with a very low priority, toolboxes and the other
 >   boxes of your session that sit next to the game (GNOME's file indexer,
 >   `systemd-run --user` jobs) get the lowest priority, the game's memory is
 >   protected, desktop apps' swapped pages stay in RAM (zswap) instead of
->   the swap disk, the P-cores react faster.
+>   the swap disk, P-cores get EPP `performance` and a `50 µs` C-state cap,
+>   and active game GPUs (discovered dynamically via open `/dev/dri/*` fds with
+>   connected-display fallback) get `power/control=on` and AMD `3D_FULL_SCREEN`.
 > - **Optional, only if you run them**: `vm-pin` (section 8), `docker-slice`
 >   (section 9), memory experiments (section 12).
 > - **Undo**: `cst cpu uninstall` (section 13).
@@ -205,6 +210,7 @@ cst cpu help
 | `vm-pin plan\|apply\|status` | needs sudo | Pin the VM to CPUs 12-23 permanently, and keep CET/MBEC off for a host-passthrough VM (8.1). |
 | `docker-slice install\|status\|uninstall` | needs sudo | Put Docker containers in `builds.slice`. |
 | `experiment list\|on NAME\|off NAME` | needs sudo | Runtime-only memory settings for A/B tests. |
+| `power [status\|plan\|apply\|revert]` | `status`/`plan`: your user; `apply`/`revert`: needs sudo | Inspect or apply baseline connected-GPU runtime PM (`GPU_PM_MODE`) and CPU C-state latency caps (`CPU_CSTATE_MAX_LATENCY_US`). |
 | `watch -l LABEL [...]` | your user | Record game wait, memory stalls, frequencies. |
 | `report [RUN...]` | your user | Compare recorded runs. |
 | `quiet [--for S] [--wait MAX] [--json] [...]` | your user | Is the machine quiet enough for a benchmark? Exit 0 if yes (11.1). |
@@ -233,11 +239,14 @@ Rules:
 |------|---------|
 | `/etc/cpu-setup/cpu-setup.conf` | Settings (6.2). Written only if missing. |
 | `/usr/local/sbin/cpu-game-profile` | The game profile (from `cpu/game-profile`). |
+| `/usr/local/sbin/cpu-power` | Baseline & hotplug GPU runtime PM + CPU C-state latency helper (from `cpu/cpu-power`). |
 | `/usr/local/sbin/cpu-vm-pin` | VM pinning and CPU-feature tool (from `cpu/vm-pin`). |
 | `/usr/local/bin/cpu-watch` | Measurement tool (from `cpu/cpu-watch`). |
 | `~/.local/bin/cst` | Link to the `cst` of the CST folder, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
+| `/etc/systemd/system/cst-cpu-power.service` | Applies baseline GPU runtime PM and CPU C-state limits at boot (`cpu-power apply`). |
+| `/etc/udev/rules.d/65-cst-gpu-pm.rules` | Re-runs `cpu-power apply --gpu-only` on DRM card `add`/`change` (monitor hotplug). |
 | `/etc/systemd/system/machine.slice.d/10-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
 | `/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf` | `Delegate=cpuset` for user managers (6.3). |
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
@@ -300,6 +309,9 @@ GAME_ZSWAP_WRITEBACK='no'
 VM_NAME='win11-devbox'
 VM_VCPUS=12
 VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'
+GPU_PM_MODE='always'
+CPU_CSTATE_MAX_LATENCY_US='200'
+GAME_CSTATE_MAX_LATENCY_US='50'
 ```
 
 (Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
@@ -361,6 +373,9 @@ can be slow).
 | `VM_NAME` | The libvirt VM name. | `vm-pin` |
 | `VM_VCPUS` | Number of virtual CPUs `vm-pin` gives the VM. | `vm-pin` |
 | `VM_CPU_DISABLE` | CPU features `vm-pin` keeps switched off for a VM with `<cpu mode='host-passthrough'>` (section 8.1). Empty (`VM_CPU_DISABLE=''`): `vm-pin` leaves the CPU features alone. Missing: the default list. | `vm-pin`, `cst doctor`, `cst vm status` |
+| `GPU_PM_MODE` | `always` (default): force `power/control=on` on every GPU with connected monitors and track hotplug via udev; `game`: only boost active game GPUs during the game profile; `off`: never modify GPU runtime PM. | `cst cpu power`, `cst-cpu-power.service`, game profile |
+| `CPU_CSTATE_MAX_LATENCY_US` | Baseline `cpuidle` exit-latency ceiling in microseconds (`200` default disables states with `latency >= 200` such as `C3_ACPI`; `off`/`0` leaves all C-states enabled). | `cst cpu power`, `cst-cpu-power.service` |
+| `GAME_CSTATE_MAX_LATENCY_US` | Per-game `cpuidle` ceiling on `P_CORES` while the game profile runs (`50` default disables `C2_ACPI` `127 µs` on P-cores while preserving baseline-disabled states across `off`; `off`/`0` disables). | game profile |
 
 You may edit the values. Rules:
 
@@ -381,6 +396,8 @@ You may edit the values. Rules:
 | `flatpak-session-helper.service` | `AllowedCPUs=8-23` | Commands that toolboxes start on the host with `flatpak-spawn --host` run here, outside the toolbox's box. Without this, they would escape to the P-cores. |
 | `builds.slice` (only after `docker-slice install`) | `CPUWeight=20`, `IOWeight=20`, `AllowedCPUs=8-23` | Docker builds and tests stay low and on the E-cores (`IOWeight=20` is likewise dormant without `bfq` or `iocost`). |
 | CPU frequency (intel_pstate) | `hwp_dynamic_boost=1` | When a task wakes up after waiting for the disk (a build doing many fsyncs, a game loading files), the CPU raises its frequency at once instead of ramping up. Costs a little power during those moments. `install` sets it now and a tmpfiles.d file keeps it after reboots; `uninstall` removes the file and sets it back to `0`. Skipped (with a NOTE) on CPUs without intel_pstate in HWP mode. |
+| Connected GPUs (`cst cpu power`, udev `65-cst-gpu-pm.rules`) | `power/control=on` (when `GPU_PM_MODE='always'`) | Prevents PCIe runtime PM sleep/wakeup stalls on any GPU currently driving a connected monitor, while leaving unplugged GPUs (`auto`) free to sleep and handling monitor hotplug automatically via PCI slot tracking in `/run/cpu-setup/gpu-pm-managed`. |
+| Deep CPU C-states (`cst-cpu-power.service`) | `cpuidle/state*/disable=1` for `latency >= 200 µs` | Keeps `C3_ACPI` (`1048 µs` wakeup latency) off while keeping shallow `C1`/`C2` states available; `cpu-power` records modified states in `/run/cpu-setup/cstate-disabled` so `revert` / `uninstall` only re-enables states CST disabled. |
 
 **Note on `IOWeight` (`machine.slice` and `builds.slice`):** cgroup I/O weights
 (`io.weight`) are only enforced when the block device uses the **BFQ** I/O
@@ -566,7 +583,8 @@ are the defaults from `/etc/cpu-setup/cpu-setup.conf` (`BUILD_CPUS`,
 | 2 | Only if cpuset is delegated (6.3): toolboxes and `flatpak-session-helper.service` | `AllowedCPUs=12-23`; if your user manager is older than the delegation (no reboot since `install`), it ignores this, and the profile writes `12-23` straight into their cgroup file `cpuset.cpus` |
 | 4 | Memory chain: system `user.slice`, `user-<uid>.slice`, `user@<uid>.service`, then `app.slice` in your user manager, and **every** Steam scope `app-flatpak-com.valvesoftware.Steam-*` (the client has one, and each game gets its own; a game started after the profile gets it at the next watchdog run, within 30 s) | `MemoryLow=16G`; for the first three also a drop-in, `/run/systemd/system/<unit>.d/zz-cst-game.conf`, that wins at every `daemon-reload` (7.5) |
 | 4 | Desktop apps and the game: `app.slice` in your user manager (only if `GAME_ZSWAP_WRITEBACK=no`, and only if systemd knows `MemoryZSwapWriteback`) | `MemoryZSwapWriteback=no` |
-| - | P-cores 0-7 | EPP `performance` (E-cores keep their EPP) |
+| - | P-cores (`P_CORES`, 0-7) | EPP `performance`, and `cpuidle` states with `latency >= GAME_CSTATE_MAX_LATENCY_US` (`50 µs` -> disables `C2_ACPI` on P-cores only) |
+| - | Active game GPUs (`/proc/<pid>/fd/*` DRM `renderD*`/`card*` discovery, falling back to connected display cards) | `power/control=on` (when `GPU_PM_MODE != off`), and on AMD GPUs `power_dpm_force_performance_level=manual` + `pp_power_profile_mode` `3D_FULL_SCREEN` (discovered dynamically by profile name); watchdog `tick` also picks up GPUs opened after launch |
 
 In short: the game gets the P-cores and E-cores 8-11, the VM and Docker move
 to 12-23 with a low priority, toolboxes and the other boxes next to the game
@@ -771,6 +789,7 @@ when the game ends. (A failed oneshot unit never runs its ExecStop.)
   a container on 12-23, or a Steam scope protected, until it ended.);
 - property that **had** an override: its old value is set back;
 - EPP: each P-core gets its old value back;
+- sysfs GPU/C-state records (`sys FILE OLD`): written back in reverse order (so AMD `pp_power_profile_mode` is restored while `power_dpm_force_performance_level` is still `manual`, and baseline-disabled C-states like `C3_ACPI` remain untouched while P-core `C2_ACPI` is re-enabled);
 - a `cpuset.cpus` file written directly (7.1, toolboxes): its old value is
   written back (usually empty, which means "no limit of its own").
 
@@ -1412,9 +1431,10 @@ cst cpu uninstall
 `uninstall`:
 
 - stops `cpu-game.service` (this runs the exact revert), disables the timer;
+- disables and stops `cst-cpu-power.service`, runs `cpu-power revert` to restore CST-managed GPU runtime PM and CPU C-states, and reloads udev rules;
 - removes the units, the `machine.slice` and `user@.service` drop-ins (also
-  `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the
-  polkit rule and the three programs;
+  `machine.slice.d/50-cpu-setup.conf`, the name before 2026-11), the udev rule,
+  the polkit rule and the four programs;
 - removes any `/run/systemd/system/*.d/zz-cst-game.conf` left behind (7.5);
 - removes the two user drop-ins (both names, `10-` and `50-cpu-setup.conf`)
   and `~/.config/gamemode.ini` (only if it is the script's file);
@@ -1604,8 +1624,11 @@ this is harmless.
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
 | `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
 | `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
-| `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, the locale's collation |
+| `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
+| `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
 | `game/cli.py` | The command line of `cpu-game-profile` |
+| `cpu-power` | `/usr/local/sbin/cpu-power`: a zipapp of this entry point with the `cpu.power`, `cpu.game`, and `cst_core` packages; `cst cpu power` runs the checkout's copy |
+| `power/domain.py`, `power/adapters.py`, `power/cli.py` | Baseline and hotplug GPU runtime PM (`GPU_PM_MODE`) plus baseline CPU `cpuidle` latency ceiling (`CPU_CSTATE_MAX_LATENCY_US`) |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
 | `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |
@@ -1613,7 +1636,8 @@ this is harmless.
 | `cli.py` | The command lines of `vm-pin` and `cpu-watch` (the two entry points above only call it) |
 | `gamemode.ini` | `~/.config/gamemode.ini` |
 | `cpu-game.rules.in` | polkit rule (`@USER@` replaced by your user) |
-| `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer` | `/etc/systemd/system/` |
+| `udev/65-cst-gpu-pm.rules` | `/etc/udev/rules.d/65-cst-gpu-pm.rules` (hotplug GPU runtime PM) |
+| `units/cpu-game.service`, `units/cpu-game-watchdog.service`, `units/cpu-game-watchdog.timer`, `units/cst-cpu-power.service` | `/etc/systemd/system/` |
 | `units/machine.slice.d-10-cpu-setup.conf` | `machine.slice.d/10-cpu-setup.conf` |
 | `units/user@.service.d-50-cpu-setup-cpuset.conf` | `user@.service.d/50-cpu-setup-cpuset.conf` |
 | `units/builds.slice.in` | `/etc/systemd/system/builds.slice` (by `docker-slice install`; `@ALLOWED@` becomes `AllowedCPUs=` with the E-cores, or nothing when there are none) |

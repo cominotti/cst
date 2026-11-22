@@ -19,6 +19,7 @@ from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
 from cpu.game.domain import BUILDS_SLICE
+from cpu.power.domain import PowerAction
 
 
 class CpuRoute(StrEnum):
@@ -40,6 +41,7 @@ class CpuRootCommand(StrEnum):
     VM_PIN = "vm-pin"
     DOCKER_SLICE = "docker-slice"
     EXPERIMENT = "experiment"
+    POWER = "power"
 
 
 class DockerSliceAction(StrEnum):
@@ -71,6 +73,10 @@ GAMEMODE_COMPONENT: Final = Component.CPU_GAMEMODE
 DOCKER_SLICE_COMPONENT: Final = Component.CPU_DOCKER_SLICE
 # The timer that runs the game profile's watchdog (cpu-game-profile tick).
 WATCHDOG_TIMER: Final = "cpu-game-watchdog.timer"
+# Oneshot service applying GPU runtime PM and CPU C-state limits at boot.
+CPU_POWER_SERVICE: Final = "cst-cpu-power.service"
+# Subcommands of `cst cpu power` that mutate `/sys` and `/run` and therefore need host + root.
+POWER_ROOT_ACTIONS: Final = frozenset({PowerAction.APPLY, PowerAction.REVERT})
 # GameMode's group: its members may ask gamemoded for the game profile.
 GAMEMODE_GROUP: Final = "gamemode"
 
@@ -82,12 +88,15 @@ EXPERIMENTS: Final[Mapping[str, tuple[str, str]]] = {
 }
 
 
-def route(cmd: str) -> CpuRoute:
+def route(cmd: str, rest: Sequence[str] = ()) -> CpuRoute:
     """Where a command goes (an empty one, or none, is help)."""
     if not cmd or cmd in HELP_WORDS:
         return CpuRoute.HELP
     if cmd in WATCH_COMMANDS:
         return CpuRoute.WATCH
+    if cmd == CpuRootCommand.POWER:
+        action = rest[0] if rest else ""
+        return CpuRoute.ROOT if action in POWER_ROOT_ACTIONS else CpuRoute.WATCH
     return CpuRoute.ROOT if cmd in ROOT_COMMANDS else CpuRoute.UNKNOWN
 
 
@@ -174,6 +183,9 @@ def conf_lines(target_user: str) -> str:
             "VM_NAME='win11-devbox'",
             "VM_VCPUS=12",
             "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'",
+            "GPU_PM_MODE='always'",
+            "CPU_CSTATE_MAX_LATENCY_US='200'",
+            "GAME_CSTATE_MAX_LATENCY_US='50'",
         )
     )
 

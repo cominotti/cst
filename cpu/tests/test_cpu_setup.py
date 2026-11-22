@@ -259,6 +259,20 @@ class RouteTest(unittest.TestCase):
                     host.said, [("err", f"'{cmd}' must run on the host, not inside a toolbox/container.\n")]
                 )
                 self.assertEqual((host.execs, self.ran), ([], []))
+        for act in ("apply", "revert"):
+            host = FakeHost(container=True, euid=0)
+            self.assertEqual(self.main("power", act, host=host), 1)
+            self.assertEqual(host.said, [("err", "'power' must run on the host, not inside a toolbox/container.\n")])
+
+    def test_power_readonly_routes_without_flatpak_spawn(self) -> None:
+        power_bin = os.path.join(REPO, "cpu", "cpu-power")
+        for sub in ((), ("status",), ("plan", "--gpu-only"), ("help",)):
+            host = FakeHost(container=True)
+            self.assertEqual(self.main("power", *sub, host=host), 0)
+            self.assertEqual(host.execs, [["python3", "-I", "-B", power_bin, *sub]])
+        host_apply = FakeHost(euid=0)
+        self.assertEqual(self.main("power", "apply", host=host_apply), 7)
+        self.assertEqual(self.ran, [("power", ["apply"])])
 
     def test_as_a_user_root_commands_run_the_script_again_through_sudo(self) -> None:
         host = FakeHost()
@@ -511,7 +525,9 @@ class InstallTest(CpuSetupCase):
             "usermod -aG gamemode tester",
             "systemctl daemon-reload",
             "systemctl --user -M tester@ daemon-reload",
+            "udevadm control --reload-rules",
             "systemctl enable --now cpu-game-watchdog.timer",
+            "systemctl enable --now cst-cpu-power.service",
             f"{inst} mark --component cpu:core done",
             f"{runuser} mark --home {self.home} --component cpu:toolbox done",
             f"{runuser} mark --home {self.home} --component cpu:gamemode done",
@@ -543,6 +559,9 @@ class InstallTest(CpuSetupCase):
         texts = self.runner.inputs
         self.assertEqual(texts[self.paths.conf], conf_lines("tester"))
         self.assertIn("TARGET_USER='tester'\n", conf_lines("tester"))
+        self.assertIn("GPU_PM_MODE='always'\n", conf_lines("tester"))
+        self.assertIn("CPU_CSTATE_MAX_LATENCY_US='200'\n", conf_lines("tester"))
+        self.assertIn("GAME_CSTATE_MAX_LATENCY_US='50'\n", conf_lines("tester"))
         self.assertTrue(str(texts[self.paths.ntsync_modules_load]).endswith("\nntsync\n"))
         self.assertTrue(str(texts[toolbox_dropin(self.home)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
         self.assertTrue(str(texts[helper_dropin(self.home)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
@@ -690,7 +709,10 @@ class UninstallTest(CpuSetupCase):
                 # before its unit and its off program are deleted.
                 "systemctl disable --now cpu-game-watchdog.timer",
                 "systemctl stop cpu-game.service",
+                "systemctl disable --now cst-cpu-power.service",
+                f"python3 -I -B {REPO}/cpu/cpu-power revert",
                 f"{inst} remove --component cpu:core",
+                "udevadm control --reload-rules",
                 # Through the installer, with their install record lines (the hwp file also when gone).
                 f"{inst} remove-text {self.paths.hwp_tmpfiles}",
                 f"{inst} remove-text {self.paths.ntsync_modules_load}",
@@ -958,6 +980,11 @@ class GameAndVmPinTest(CpuSetupCase):
         self.assertEqual(self.command("game", "on")[0], 1)
         self.assertEqual(self.runner.joined(), ["systemctl start cpu-game.service"])
 
+    def test_power_command_forwards_to_cpu_power(self) -> None:
+        self.runner.calls.clear()
+        self.assertEqual(self.command("power", "plan")[0], 0)
+        self.assertEqual(self.runner.joined(), [f"python3 -I -B {REPO}/cpu/cpu-power plan"])
+
     def test_vm_pin_runs_in_the_foreground(self) -> None:
         self.assertEqual(self.command("vm-pin", "apply", "vm1")[0], 3)
         self.assertEqual(self.passed, [["python3", "-I", "-B", f"{REPO}/cpu/vm-pin", "apply", "vm1"]])
@@ -984,6 +1011,7 @@ class StatusTest(CpuSetupCase):
             ("show -P AllowedCPUs user.slice", CommandResult(0, "8-23\n", "")),
             ("vm-pin status", CommandResult(0, vm, "")),
             ("is-active builds.slice", CommandResult(3, "inactive\n", "")),
+            ("cpu-power status", CommandResult(0, "settings: GPU_PM_MODE=always\n", "")),
             ("cpu-watch report", CommandResult(0, "".join(f"r{i}\n" for i in range(7)), "")),
         ]
         rc, out, err = self.command("status")
@@ -1007,6 +1035,8 @@ class StatusTest(CpuSetupCase):
             "\n== memory experiments\n"
             f"  minfree-256m   {self.tmp}/proc/min_free_kbytes -> 262144   now: 67584\n"
             f"  thp-defer      {self.tmp}/sys/defrag -> defer    now: always defer [madvise] never\n"
+            "\n== GPU runtime PM and CPU C-states\n"
+            "  settings: GPU_PM_MODE=always\n"
             "\n== last measurements\n  r2\n  r3\n  r4\n  r5\n  r6\n",
         )
         self.assertIn(
@@ -1018,7 +1048,7 @@ class StatusTest(CpuSetupCase):
         self.assertEqual(rc, 1)
         self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n  ntsync: inactive (not managed)\n", out)
         self.assertIn("\n== E-cores for toolboxes and host commands\n\n== VM\n", out)
-        self.assertTrue(out.endswith("\n== last measurements\n"))
+        self.assertTrue(out.endswith("\n== GPU runtime PM and CPU C-states\n\n== last measurements\n"))
         self.assertFalse([c for c in self.runner.joined() if c.startswith("runuser")])
 
     def test_target_user(self) -> None:

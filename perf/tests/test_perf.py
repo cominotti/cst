@@ -245,6 +245,8 @@ class PerfEvaluatorTest(unittest.TestCase):
                 "cpu-irq-build-overlap",
             },
         )
+        cstate_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-deep-cstates")
+        self.assertEqual(cstate_f.fix_command, "sudo cst cpu install")
         ntsync_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-ntsync-absent")
         self.assertEqual(ntsync_f.fix_command, "sudo cst cpu install")
 
@@ -293,6 +295,10 @@ class PerfEvaluatorTest(unittest.TestCase):
             {f.finding_id for f in gpu_rep.findings},
             {"gpu-runtime-pm-card3", "gpu-game-profile-card3"},
         )
+        pm_f = next(f for f in gpu_rep.findings if f.finding_id == "gpu-runtime-pm-card3")
+        self.assertEqual(pm_f.fix_command, "sudo cst cpu install")
+        prof_f = next(f for f in gpu_rep.findings if f.finding_id == "gpu-game-profile-card3")
+        self.assertEqual(prof_f.fix_command, "sudo systemctl restart cpu-game.service")
 
 
 class PerfScratchIntegrationTest(unittest.TestCase):

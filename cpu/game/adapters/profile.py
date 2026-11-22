@@ -22,7 +22,16 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
-from cpu.game.adapters.host import holds, read_settings, read_snapshot, read_stripped, user_id, user_name
+from cpu.game.adapters.host import (
+    holds,
+    read_settings,
+    read_snapshot,
+    read_stripped,
+    user_id,
+    user_name,
+    write_sysfs_line,
+)
+from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -40,6 +49,7 @@ from cpu.game.domain import (
     IDLE_WEIGHT,
     Manager,
     Record,
+    SysfsUndo,
     cpuset_in,
     ctl_file,
     cut_tail,
@@ -48,7 +58,6 @@ from cpu.game.domain import (
     dropin_text,
     escaped_unit,
     escapes_in_state,
-    expand_cpus,
     first_cpu,
     has_prop_record,
     intended_header,
@@ -83,16 +92,6 @@ def load_profile(paths: GamePaths, runner: CommandRunnerPort) -> GameProfile:
     """The game profile over paths.conf's settings (and its problem lines)."""
     settings, problems = read_settings(paths.conf)
     return GameProfile(paths, settings, runner, problems=problems)
-
-
-def _write_line(path: str, value: str) -> bool:
-    """echo VALUE >PATH (a sysfs or cgroup file); False when it cannot be written."""
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(value + "\n")
-    except OSError:
-        return False
-    return True
 
 
 class GameProfile:
@@ -233,12 +232,17 @@ class GameProfile:
         self.log(4, f"{path} line {number}: a record cut short ({why}), removed before the next record: {text}")
         return True
 
-    def _unrecorded(self, what: str) -> None:
+    def report_unrecorded(self, what: str) -> None:
         """A change not made because its record could not be written: 'off' could not undo it."""
         self.log(4, f"{what}: not done, its record could not be written to {self.paths.state}")
 
-    def _state_text(self) -> str:
+    def state_text(self) -> str:
+        """Read current `game.state` contents (empty when missing)."""
         return read_text(self.paths.state) or ""
+
+    def append_state(self, *fields: str) -> bool:
+        """Append one whole record to `game.state`."""
+        return self._append(self.paths.state, *fields)
 
     def setp(self, mgr: Manager, unit: str, *settings: str) -> None:
         """Record, per property, whether a runtime override existed (and its value), then set
@@ -250,7 +254,7 @@ class GameProfile:
             else:
                 rec = (GameRecordKind.PROP, mgr, unit, p, "new", "-")
             if not self._append(self.paths.state, *rec):
-                self._unrecorded(f"{unit}: {' '.join(settings)}")
+                self.report_unrecorded(f"{unit}: {' '.join(settings)}")
                 return
         if self.ctl(mgr, "set-property", "--runtime", unit, *settings) != 0:
             self.log(4, f"{unit}: could not set {' '.join(settings)}")
@@ -326,14 +330,14 @@ class GameProfile:
     def protect_steam(self) -> None:
         """MemoryLow for each Steam scope not handled yet (a game started after 'on')."""
         for s in self.steam_scopes():
-            if has_prop_record(self._state_text(), "usr", s, "MemoryLow"):
+            if has_prop_record(self.state_text(), "usr", s, "MemoryLow"):
                 continue
             self.setp("usr", s, f"MemoryLow={self.s.game_memory_low}")
 
     def pin_docker(self) -> None:
         """The game's CPUs off for each Docker container not handled yet."""
         for s in self.loose_docker_scopes():
-            if has_prop_record(self._state_text(), "sys", s, "AllowedCPUs"):
+            if has_prop_record(self.state_text(), "sys", s, "AllowedCPUs"):
                 continue
             self.setp("sys", s, f"AllowedCPUs={self.s.build_cpus}")
 
@@ -348,9 +352,9 @@ class GameProfile:
         if old == self.s.build_cpus:
             return
         if not self._append(self.paths.state, GameRecordKind.CGW, f, old):
-            self._unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
+            self.report_unrecorded(f"{unit}: {f} = {self.s.build_cpus}")
             return
-        if _write_line(f, self.s.build_cpus):
+        if write_sysfs_line(f, self.s.build_cpus):
             self._append(self.paths.intended, GameRecordKind.CGW, f, self.s.build_cpus, read_stripped(f) or "")
         else:
             self.log(4, f"{unit}: could not write {f}")
@@ -359,7 +363,7 @@ class GameProfile:
         """game.state holds a whole record of each of settings for unit, a box of the user manager: setp
         records them one after the other before it sets any, so a box whose last record was cut short
         (or never written) is not handled yet, even when its first record is whole."""
-        text = self._state_text()
+        text = self.state_text()
         return all(has_prop_record(text, "usr", unit, kv.split("=", 1)[0]) for kv in settings)
 
     def demote_escapes(self) -> None:
@@ -479,20 +483,11 @@ class GameProfile:
         self.protect_steam()
         if s.game_zswap_writeback == "no" and self.prop("usr", APP_SLICE, "MemoryZSwapWriteback"):
             self.setp("usr", APP_SLICE, "MemoryZSwapWriteback=no")
-        self.boost_p_cores()
+        boost_p_cores(self)
+        apply_game_cstates(self)
+        apply_game_gpu(self)
         self.log(5, on_text(s))
         return 0
-
-    def boost_p_cores(self) -> None:
-        """EPP performance on each P-core whose preference can be written, its old value recorded first."""
-        for cpu in expand_cpus(self.s.p_cores):
-            f = self.paths.epp(cpu)
-            if not os.access(f, os.W_OK):
-                continue
-            if not self._append(self.paths.state, GameRecordKind.EPP, cpu, read_stripped(f) or ""):
-                self._unrecorded(f"cpu{cpu}: EPP performance")
-                continue
-            _write_line(f, "performance")
 
     def _target_refusal(self) -> str | None:
         """Why 'on' refuses for TARGET_USER: unset, or a name with no account (it would act for user@.service
@@ -514,7 +509,7 @@ class GameProfile:
             self.remove_leftover_dropins()
             return 0
         reload = {"sys": self.remove_game_dropins(), "usr": False}
-        text = self._state_text()
+        text = self.state_text()
         for number, line in unreadable_lines(text, intended=False):
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
@@ -555,10 +550,10 @@ class GameProfile:
     def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
         """Undo one record of game.state (as state_undo reads it)."""
         match state_undo(rec):
-            case CgroupUndo(file=f, old=old):
-                _write_line(f, old)
+            case CgroupUndo(file=f, old=old) | SysfsUndo(file=f, old=old):
+                write_sysfs_line(f, old)
             case EppUndo(cpu=cpu, old=old):
-                _write_line(self.paths.epp(cpu), old)
+                write_sysfs_line(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
                     f = self.ctl_file(mgr, unit, prop, say=True)
@@ -598,14 +593,14 @@ class GameProfile:
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
             return
         drifts = self.drift(text)
-        skipped = unheld(drifts, records(self._state_text()))
+        skipped = unheld(drifts, records(self.state_text()))
         self._say_unheld(skipped)
         for d in drifts:
             if d in skipped:
                 continue
             r = d.record
             if d.is_cgroup_file:
-                ok = _write_line(r[1], r[2])
+                ok = write_sysfs_line(r[1], r[2])
             else:
                 ok = (
                     self.ctl(manager_of(r[1]) or "usr", "set-property", "--runtime", r[2], f"{r[3]}={r[4]}", quiet=True)
@@ -643,7 +638,7 @@ class GameProfile:
         if self.problems:
             self.warn_once("tick changes nothing")
             return 0
-        self._user_from_state(records(self._state_text()), say=False)  # the user 'off' undoes for
+        self._user_from_state(records(self.state_text()), say=False)  # the user 'off' undoes for
         self.pin_docker()  # containers started meanwhile
         why = self._target_refusal()  # no account for the user acted for: no user manager to change
         if why is None:
@@ -651,6 +646,7 @@ class GameProfile:
             self.demote_escapes()  # boxes next to the game that appeared after 'on'
         else:
             self._say_refusal("profile on, its user manager's side not handled", why)
+        apply_game_gpu(self)
         self.repair_drift()  # settings a daemon-reload or uresourced undid
         return 0
 

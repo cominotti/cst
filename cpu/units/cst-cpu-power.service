@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MPL-2.0
+# Managed by cpu-setup.sh (CST). Applies GPU runtime PM (GPU_PM_MODE) and CPU
+# deep C-state latency ceiling (CPU_CSTATE_MAX_LATENCY_US) at boot.
+[Unit]
+Description=CST GPU runtime PM and CPU C-state latency policy
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cpu-power apply
+
+[Install]
+WantedBy=multi-user.target

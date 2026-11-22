@@ -4377,6 +4377,14 @@ class ResponsivenessAreaTest(Scratch):
         self.assertIn("WARN   io: nvme_core default_ps_max_latency_us=100000", nvme_res.stdout)
         self.assertIn("fix: sudo cst btrfs install", nvme_res.stdout)
 
+        self._write_host("sys/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self._write_host("sys/class/drm/card0/card0-DP-1/status", "connected\n")
+        self._write_host("sys/class/drm/card0/device/power/control", "auto\n")
+        gpu_res = self.run_tool()
+        self.assertEqual(gpu_res.returncode, 1, gpu_res.stdout + gpu_res.stderr)
+        self.assertIn("WARN   gpu: Connected display GPU card0 (amdgpu, DP-1) has power/control=auto", gpu_res.stdout)
+        self.assertIn("fix: sudo cst cpu install", gpu_res.stdout)
+
         self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
         mglru_res = self.run_tool()
         self.assertEqual(mglru_res.returncode, 1, mglru_res.stdout + mglru_res.stderr)

@@ -67,3 +67,13 @@ def holds(path: str, needle: str) -> bool:
     """The file holds needle (grep -qsF): False when it cannot be read."""
     data = read_bytes(path)
     return data is not None and needle.encode() in data
+
+
+def write_sysfs_line(path: str, value: str) -> bool:
+    """Write `value + '\\n'` to a sysfs or cgroup file; return False on OSError."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(value + "\n")
+    except OSError:
+        return False
+    return True

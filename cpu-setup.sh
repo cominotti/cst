@@ -17,8 +17,14 @@
 #         Docker builds to CPUs 12-23 with a low weight, toolboxes idle-class,
 #         and so are the other boxes of your user manager next to the game
 #         (background.slice, `systemd-run --user` jobs and their own slices),
-#         P-cores EPP performance, the game's memory protected along the
-#         whole cgroup chain; runtime-only, exact revert
+#         P-cores EPP performance and C-state latency ceiling (<= GAME_CSTATE_MAX_LATENCY_US),
+#         active game GPU boost (render-offload DRM discovery + connected
+#         display GPU runtime PM on + AMD DPM 3D_FULL_SCREEN), the game's
+#         memory protected along the whole cgroup chain; runtime-only, exact revert
+#       * GPU runtime PM & CPU C-state baseline (cst-cpu-power.service +
+#         65-cst-gpu-pm.rules): keeps power/control=on on connected display GPUs
+#         across hotplug (GPU_PM_MODE='always') and caps baseline deep C-states
+#         (CPU_CSTATE_MAX_LATENCY_US='200')
 #       * baseline weights: VM (machine.slice) 50, toolboxes 30 (like
 #         background.slice), so they never tie with the desktop
 #       * toolboxes and their host commands (flatpak-spawn --host) always on
@@ -57,6 +63,9 @@
 #   experiment list|on NAME|off NAME   (root) runtime-only memory A/B knobs
 #                          (thp-defer, wsf-300, minfree-256m); persist the
 #                          winners in swap/sysctl/ (`cst swap apply`)
+#   power [status|plan|apply|revert]   (`status`/`plan`: user & toolbox;
+#                          `apply`/`revert`: root on host) manage connected display GPU
+#                          runtime PM and CPU deep C-state latency ceilings
 #   watch -l LABEL [--game NAME] [--seconds N] [--mangohud DIR] [-- CMD]
 #                          (user) record game wait/memory stalls/frequencies
 #   report [RUN...]        (user) compare recorded runs
@@ -69,7 +78,7 @@
 #   help
 #
 # Root commands must run on the host, not inside toolbox; watch/report/quiet
-# work in both (inside a toolbox they run on the host).
+# and read-only `power status|plan` work in both (cpu-watch runs on the host).
 
 set -Eeuo pipefail
 

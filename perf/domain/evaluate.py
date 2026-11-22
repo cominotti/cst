@@ -436,14 +436,14 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
         max_enabled = max((s.latency_us for s in cpu.idle_states if not s.disabled), default=0)
         col.metric("cpuidle max enabled", f"{cpu.cpuidle_driver or 'cpuidle'}: {max_enabled} µs")
         if worst_deep is not None:
-            col.warn(
+            col.warn_fix(
                 "cpu-deep-cstates",
                 (
                     f"Deep idle state {worst_deep.name} enabled "
                     f"({worst_deep.latency_us} µs >= {CSTATE_DEEP_LATENCY_US} µs)"
                 ),
                 "Deep package/core C-states add wakeup tail latency spikes during interactive/gaming loads.",
-                "Cap C-state latency via /dev/cpu_dma_latency or idle limit policy.",
+                ("Cap C-state latency via CPU_CSTATE_MAX_LATENCY_US (`cst cpu power`).", "sudo cst cpu install"),
             )
     _eval_cpu_kernel(col, cpu)
     if cpu.irqbalance_active is not None:
@@ -576,14 +576,14 @@ def evaluate_perf_gpu(gpu: GpuProbeSnapshot) -> PerfAxisReport:
             parts.append(f"profile={dev.power_profile_mode}")
         col.metric(dev.card, ", ".join(parts))
         if dev.connected_outputs and dev.power_control == _GPU_RUNTIME_CONTROL_AUTO:
-            col.warn(
+            col.warn_fix(
                 f"gpu-runtime-pm-{dev.card}",
                 (
                     f"Connected display GPU {dev.card} ({drv}, {outputs}) "
                     f"has power/control=auto (runtime_status={dev.runtime_status or '?'})"
                 ),
                 "Runtime PM auto can gate/sleep a display-driving GPU between compositor/game frames.",
-                "Force power/control=on for GPUs with active monitors.",
+                ("Force power/control=on for GPUs with active monitors.", "sudo cst cpu install"),
             )
         if (
             dev.connected_outputs
@@ -591,11 +591,14 @@ def evaluate_perf_gpu(gpu: GpuProbeSnapshot) -> PerfAxisReport:
             and dev.power_profile_mode == _GPU_AMD_BOOTUP_PROFILE
             and dev.dpm_force_level == _GPU_RUNTIME_CONTROL_AUTO
         ):
-            col.warn(
+            col.warn_fix(
                 f"gpu-game-profile-{dev.card}",
                 f"Game mode active while {dev.card} remains on {dev.power_profile_mode}",
                 "GPU stays on conservative desktop clock-ramp heuristics under active game session.",
-                "Switch active GPU pp_power_profile_mode to 3D_FULL_SCREEN / VR in game mode.",
+                (
+                    "Switch active GPU pp_power_profile_mode to 3D_FULL_SCREEN / VR in game mode.",
+                    "sudo systemctl restart cpu-game.service",
+                ),
             )
     return col.report()
 

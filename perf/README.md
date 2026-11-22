@@ -31,7 +31,7 @@ Exit codes:
    - Session memory floor (`user-*.slice/user@*.service/session.slice`): computes effective `min(session.memory.min, user.slice.memory.min, user-<uid>.slice.memory.min, user@<uid>.service.memory.min)` and flags unset floors or active working sets above the protected floor (`fix: sudo cst swap apply`).
 
 2. **cpu** (`cpuidle`, `preempt`, `sched_ext`, `/dev/ntsync`, `irqbalance`, `/proc/interrupts`, `BUILD_CPUS`):
-   - `cpuidle`: flags enabled C-states on `cpu0` with exit latency `>= 200 µs`.
+   - `cpuidle`: flags enabled C-states on `cpu0` with exit latency `>= 200 µs` (`fix: sudo cst cpu install`; configurable via `CPU_CSTATE_MAX_LATENCY_US` and `cst cpu power`).
    - Preemption mode (`sched/preempt` or kernel cmdline `preempt=`): expects `lazy` or `full`.
    - `ntsync`: checks `/dev/ntsync`, `/sys/class/misc/ntsync`, and `/sys/module/ntsync` (`fix: sudo cst cpu install`).
    - `irqbalance` & `BUILD_CPUS`: checks systemd unit runtime marker (`/run/systemd/units/invocation:irqbalance.service`) and detects high-volume latency-sensitive IRQs (`nvme`, GPUs, NICs, `xhci`, audio, `kvm`) whose interrupts land predominantly on `BUILD_CPUS`.
@@ -44,8 +44,8 @@ Exit codes:
    - Evaluates `/sys/fs/btrfs/*/commit_stats` (`avg >= 25 ms` or `max >= 500 ms` -> `ATTENTION`; `avg >= 100 ms` or `max >= 2000 ms` -> `BOTTLENECK`).
 
 4. **gpu** (`/sys/class/drm/card*`, `device/power/control`, `power_dpm_force_performance_level`, `pp_power_profile_mode`):
-   - Inspects DRM connector status dynamically and flags only GPUs with connected monitors when `power/control=auto` (runtime PM sleep risk).
-   - Flags connected AMD GPUs staying on `BOOTUP_DEFAULT` with `power_dpm_force_performance_level=auto` when CST game mode is active.
+   - Inspects DRM connector status dynamically and flags only GPUs with connected monitors when `power/control=auto` (runtime PM sleep risk; `fix: sudo cst cpu install`).
+   - Flags connected AMD GPUs staying on `BOOTUP_DEFAULT` with `power_dpm_force_performance_level=auto` when CST game mode is active (`fix: sudo systemctl restart cpu-game.service`).
 
 ## 3. Integrations across CST
 

@@ -33,6 +33,7 @@ class GameRecordKind(StrEnum):
     PROP = "prop"  # a unit property (set-property --runtime)
     CGW = "cgw"  # a cgroup file written directly
     EPP = "epp"  # a CPU's energy/performance preference (game.state only)
+    SYSFS = "sysfs"  # a generic sysfs file written directly and restored on off (game.state only)
 
 
 _MANAGERS: Final[dict[str, Manager]] = {"sys": "sys", "usr": "usr"}
@@ -91,6 +92,7 @@ class GamePaths:
     run_systemd: str = "/run/systemd"
     run_user: str = "/run/user"
     sys_cpu: str = "/sys/devices/system/cpu"
+    sys_drm: str = "/sys/class/drm"
     proc: str = "/proc"
 
     @property
@@ -144,6 +146,9 @@ class GameSettings:
     vm_weight: str = "10"
     game_memory_low: str = "16G"  # Dota 2 ~10 GB resident + steamwebhelper
     game_zswap_writeback: str = "no"  # app.slice during games: "no" = swapped pages stay in zswap
+    gpu_pm_mode: str = "always"
+    cpu_cstate_max_latency_us: str = "200"
+    game_cstate_max_latency_us: str = "50"
 
 
 _SETTING_KEYS: Final = {
@@ -153,7 +158,43 @@ _SETTING_KEYS: Final = {
     "VM_WEIGHT": "vm_weight",
     "GAME_MEMORY_LOW": "game_memory_low",
     "GAME_ZSWAP_WRITEBACK": "game_zswap_writeback",
+    "GPU_PM_MODE": "gpu_pm_mode",
+    "CPU_CSTATE_MAX_LATENCY_US": "cpu_cstate_max_latency_us",
+    "GAME_CSTATE_MAX_LATENCY_US": "game_cstate_max_latency_us",
 }
+
+
+_CSTATE_OFF_WORDS: Final = frozenset({"0", "off", "none"})
+_AMD_PROFILE_ROW_RE: Final = re.compile(r"^\s*([0-9]+)\s+([A-Z0-9_]+)\s*(\*?)\s*(?::|$)")
+_AMD_FULLSCREEN_PROFILE: Final = "3D_FULL_SCREEN"
+
+
+def parse_cstate_limit_us(raw: str, *, default_us: int) -> tuple[int | None, str | None]:
+    """Parse a C-state exit latency ceiling (`200`, `50`, or `off`/`0`); return `(limit_us_or_None, error)`."""
+    cleaned = raw.strip().lower()
+    if not cleaned:
+        return default_us, None
+    if cleaned in _CSTATE_OFF_WORDS:
+        return None, None
+    if re.fullmatch(r"[0-9]+", cleaned) and int(cleaned) > 0:
+        return int(cleaned), None
+    return default_us, f"{raw!r} must be a positive microsecond integer or 'off'"
+
+
+def parse_amd_profile_modes(text: str) -> tuple[str | None, str | None]:
+    """Return `(current_index, 3D_FULL_SCREEN_index)` parsed from `pp_power_profile_mode`."""
+    current_idx: str | None = None
+    fullscreen_idx: str | None = None
+    for line in text.splitlines():
+        m = _AMD_PROFILE_ROW_RE.match(line)
+        if m is None:
+            continue
+        idx, name, marker = group(m, 1), group(m, 2), group(m, 3)
+        if marker == "*":
+            current_idx = idx
+        if name == _AMD_FULLSCREEN_PROFILE:
+            fullscreen_idx = idx
+    return current_idx, fullscreen_idx
 
 
 def game_settings(values: Mapping[str, str]) -> GameSettings:
@@ -479,6 +520,14 @@ class EppUndo:
 
 
 @dataclass(frozen=True, slots=True)
+class SysfsUndo:
+    """A sys record of game.state: 'off' writes old back into the sysfs file."""
+
+    file: str
+    old: str
+
+
+@dataclass(frozen=True, slots=True)
 class PropUndo:
     """A prop record of game.state: 'off' removes the override 'on' made (mode new) or sets old again."""
 
@@ -489,20 +538,22 @@ class PropUndo:
     old: str
 
 
-type StateUndo = CgroupUndo | EppUndo | PropUndo
+type StateUndo = CgroupUndo | EppUndo | PropUndo | SysfsUndo
 
 
 def state_undo(rec: Sequence[str]) -> StateUndo | None:
-    """What 'off' undoes for one record of game.state, None for one it cannot read: cgw and epp need
+    """What 'off' undoes for one record of game.state, None for one it cannot read: cgw, epp and sysfs need
     three fields; any other kind with six fields or more is a prop record (a manager other than usr is
     the system's)."""
     match _kind(rec):
-        case GameRecordKind.CGW | GameRecordKind.EPP if len(rec) < STATE_FILE_FIELDS:
+        case GameRecordKind.CGW | GameRecordKind.EPP | GameRecordKind.SYSFS if len(rec) < STATE_FILE_FIELDS:
             return None
         case GameRecordKind.CGW:
             return CgroupUndo(rec[1], rec[2])
         case GameRecordKind.EPP:
             return EppUndo(rec[1], rec[2])
+        case GameRecordKind.SYSFS:
+            return SysfsUndo(rec[1], rec[2])
         case _ if len(rec) >= STATE_PROP_FIELDS:
             return PropUndo(manager_of(rec[1]) or "sys", rec[2], rec[3], rec[4], rec[5])
         case _:
@@ -516,6 +567,8 @@ def _state_keys(state_recs: Sequence[Record]) -> set[Record]:
         match state_undo(r):
             case CgroupUndo(file=f):
                 keys.add((GameRecordKind.CGW, f))
+            case SysfsUndo(file=f):
+                keys.add((GameRecordKind.SYSFS, f))
             case PropUndo(mgr=mgr, unit=unit, prop=prop):
                 keys.add((GameRecordKind.PROP, mgr, unit, prop))
             case _:
@@ -529,6 +582,16 @@ def has_prop_record(text: str, mgr: Manager, unit: str, prop: str) -> bool:
     cannot read (an unclosed quote) or a last line cut short holds none, and a unit name is matched
     as it is, whatever printf %q made of it in the file (a backslash of systemd's \\x2d)."""
     return (GameRecordKind.PROP, mgr, unit, prop) in _state_keys(records(text))
+
+
+def has_sys_record(text: str, path: str) -> bool:
+    """Return True when `game.state` holds a whole `sysfs` undo record for `path`."""
+    return (GameRecordKind.SYSFS, path) in _state_keys(records(text))
+
+
+def held_sys_paths(text: str) -> frozenset[str]:
+    """Return all sysfs file paths currently held by readable `sysfs` records in `game.state`."""
+    return frozenset(k[1] for k in _state_keys(records(text)) if k[0] == GameRecordKind.SYSFS)
 
 
 def _drift_key(d: Drift) -> Record:

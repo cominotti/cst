@@ -37,6 +37,7 @@ from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
 from cpu.setup.domain import (
     CORE_COMPONENT,
+    CPU_POWER_SERVICE,
     DOCKER_SLICE_COMPONENT,
     GAMEMODE_COMPONENT,
     GAMEMODE_GROUP,
@@ -351,7 +352,9 @@ class CpuSetup:
         self._gamemode_group()
         self.run(["systemctl", "daemon-reload"])
         self.usys("daemon-reload")
+        self.run(["udevadm", "control", "--reload-rules"], check=False, quiet=True)
         self.run(["systemctl", "enable", "--now", WATCHDOG_TIMER])
+        self.run(["systemctl", "enable", "--now", CPU_POWER_SERVICE])
         self.installer("mark", "--component", CORE_COMPONENT, ComponentState.DONE)
         home = self.required_home(user, "cst-install.bash")
         self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, ComponentState.DONE, as_user=user)
@@ -363,11 +366,12 @@ class CpuSetup:
 
     def _ntsync_active(self) -> bool:
         p = self.paths
-        return (
-            os.path.exists(p.ntsync_dev)
-            or os.path.isdir(os.path.join(p.sys_dir, "class", "misc", "ntsync"))
-            or os.path.isdir(os.path.join(p.sys_dir, "module", "ntsync"))
+        ntsync_nodes = (
+            p.ntsync_dev,
+            os.path.join(p.sys_dir, "class", "misc", "ntsync"),
+            os.path.join(p.sys_dir, "module", "ntsync"),
         )
+        return any(os.path.exists(node) for node in ntsync_nodes)
 
     def _install_ntsync(self) -> None:
         p = self.paths
@@ -435,9 +439,12 @@ class CpuSetup:
         # unit and its off program are deleted.
         self.run(["systemctl", "disable", "--now", WATCHDOG_TIMER], check=False, quiet=True)
         self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
+        self.run(["systemctl", "disable", "--now", CPU_POWER_SERVICE], check=False, quiet=True)
+        self.run(self._checkout_program("cpu-power", "revert"), check=False, quiet=True)
         # Without the watchdog nothing would remove one left behind (the reload below then drops its MemoryLow).
         self.remove_game_dropins()
         self.installer("remove", "--component", CORE_COMPONENT)
+        self.run(["udevadm", "control", "--reload-rules"], check=False, quiet=True)
         self.remove_old_dropins()
         had_hwp = os.path.isfile(p.hwp_tmpfiles)
         # Also when it is gone already: its install record line goes too.
@@ -643,6 +650,10 @@ class CpuSetup:
         """vm-pin plan|apply|status: the checkout's cpu-vm-pin, in the foreground (apply asks)."""
         return self._passthrough(self._checkout_program("vm-pin", *args))
 
+    def power(self, args: Sequence[str]) -> int:
+        """power apply|revert|status|plan: apply or revert GPU runtime PM and CPU C-state ceiling."""
+        return self.run(self._checkout_program("cpu-power", *args), check=False).returncode
+
     # ---- status --------------------------------------------------------------------------------------
     def section(self, title: str) -> None:
         self.say()
@@ -650,32 +661,30 @@ class CpuSetup:
 
     def _render_perf_diagnosis(self) -> None:
         p = self.paths
-        if not (
-            os.path.exists(os.path.join(p.proc_dir, "interrupts"))
-            or os.path.isdir(os.path.join(p.sys_dir, "devices", "system", "cpu", "cpu0"))
-            or os.path.isdir(os.path.join(p.sys_dir, "class", "drm"))
-        ):
+        probes = (
+            os.path.join(p.proc_dir, "interrupts"),
+            os.path.join(p.sys_dir, "devices", "system", "cpu", "cpu0"),
+            os.path.join(p.sys_dir, "class", "drm"),
+        )
+        if not any(os.path.exists(node) for node in probes):
             return
-        host_root = "/" if p.sys_dir == "/sys" else os.path.dirname(p.sys_dir)
-        probe = LinuxPerfProbe(
-            PerfPaths(
-                proc_dir=p.proc_dir,
-                sys_dir=p.sys_dir,
-                cgroup_dir=p.cgroot,
-                etc_dir=os.path.join(host_root, "etc"),
-                run_dir=os.path.join(host_root, "run"),
-                dev_dir=os.path.join(host_root, "dev"),
-                zswap_params_dir=os.path.join(p.sys_dir, "module", "zswap", "parameters"),
-                cpu_conf_path=p.conf,
-                preempt_path=p.preempt,
-                sched_ext_path=p.sched_ext,
-            )
+        hr = "/" if p.sys_dir == "/sys" else os.path.dirname(p.sys_dir)
+        paths = PerfPaths(
+            p.proc_dir,
+            p.sys_dir,
+            p.cgroot,
+            os.path.join(hr, "etc"),
+            os.path.join(hr, "run"),
+            os.path.join(hr, "dev"),
+            os.path.join(p.sys_dir, "module", "zswap", "parameters"),
+            p.conf,
+            p.preempt,
+            p.sched_ext,
         )
         axes = (PerfAxis.CPU, PerfAxis.GPU)
-        rep = evaluate_perf_snapshot(probe.collect_snapshot(axes), axes)
-        findings = [f for ax in rep.axes for f in ax.findings]
+        rep = evaluate_perf_snapshot(LinuxPerfProbe(paths).collect_snapshot(axes), axes)
         buf = io.StringIO()
-        render_perf_findings_block(findings, buf)
+        render_perf_findings_block([f for ax in rep.axes for f in ax.findings], buf)
         self.section("diagnosis")
         self.write(buf.getvalue())
 
@@ -723,6 +732,8 @@ class CpuSetup:
         self.write(indented(self.docker_slice_status() + "\n"))
         self.section("memory experiments")
         self.experiment(["list"])
+        self.section("GPU runtime PM and CPU C-states")
+        self.write(indented(self.run(self._checkout_program("cpu-power", "status"), check=False, capture=True).stdout))
         self._render_perf_diagnosis()
         self.section("last measurements")
         if not user:
@@ -768,6 +779,8 @@ class CpuSetup:
                     return self.vm_pin(args)
                 case CpuRootCommand.DOCKER_SLICE:
                     return self.docker_slice(args)
+                case CpuRootCommand.POWER:
+                    return self.power(args)
                 case _:
                     return self.experiment(args)
         except Halt as stop:
