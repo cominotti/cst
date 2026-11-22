@@ -14,9 +14,7 @@ from typing import NoReturn, override
 import unittest
 
 from btrfs.scrub_limit.adapters import (
-    ScrubInvocation,
     ScrubPaths,
-    enforce_scrub_host_root,
     scrub_limit_apply,
     scrub_limit_plan,
     scrub_limit_status,
@@ -227,19 +225,20 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             self.assertEqual(fh.read(), "NAS_ENABLED=1\n")
 
     def test_container_refusal_and_non_root_elevation(self) -> None:
-        inv = ScrubInvocation(
-            prog="cst btrfs scrub-limit",
-            args=("set", "500M"),
-            entry_file=os.path.join(REPO, "btrfs", "btrfs-scrub-limit"),
+        entry = os.path.join(REPO, "btrfs", "btrfs-scrub-limit")
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_scrub_limit_cli(
+            ["set", "500M"],
+            deps=ScrubCliDeps(
+                entry_file=entry,
+                env={"CST_PROG": "cst btrfs scrub-limit"},
+                out=out,
+                err=err,
+                ctx=_FakeCtx(container=True, root=False),
+            ),
         )
-        refusal = enforce_scrub_host_root(
-            ScrubLimitAction.SET,
-            inv,
-            ctx=_FakeCtx(container=True, root=False),
-        )
-        self.assertIsNotNone(refusal)
-        assert refusal is not None
-        self.assertIn("must run on the host", refusal)
+        self.assertEqual(rc, 1)
+        self.assertIn("must run on the host", err.getvalue())
 
         elevated: list[list[str]] = []
 
@@ -248,11 +247,16 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             raise SystemExit(99)
 
         with self.assertRaises(SystemExit):
-            enforce_scrub_host_root(
-                ScrubLimitAction.SET,
-                inv,
-                ctx=_FakeCtx(container=False, root=False),
-                elevate=_elevate,
+            run_scrub_limit_cli(
+                ["set", "500M"],
+                deps=ScrubCliDeps(
+                    entry_file=entry,
+                    env={"CST_PROG": "cst btrfs scrub-limit"},
+                    out=io.StringIO(),
+                    err=io.StringIO(),
+                    ctx=_FakeCtx(container=False, root=False),
+                    elevate=_elevate,
+                ),
             )
         self.assertEqual(len(elevated), 1)
         self.assertEqual(elevated[0][0], "sudo")
