@@ -42,6 +42,10 @@ def _suffix_num(name: str, pattern: re.Pattern[str]) -> int:
     return int(m.group(1)) if m is not None else -1
 
 
+def _card_number(name: str) -> int:
+    return _suffix_num(name, _CARD_NAME_RE)
+
+
 def _parse_int_stripped(path: str) -> int | None:
     raw = read_stripped(path)
     if raw is None or not re.fullmatch(r"[0-9]+", raw):
@@ -131,7 +135,7 @@ def _drm_device_map(sys_drm: str) -> tuple[dict[str, str], list[str]]:
         dev_link = os.path.join(sys_drm, entry, "device")
         if os.path.exists(dev_link):
             dev_to_card[os.path.realpath(dev_link)] = entry
-    cards.sort(key=lambda n: _suffix_num(n, _CARD_NAME_RE))
+    cards.sort(key=_card_number)
     return dev_to_card, cards
 
 
@@ -179,8 +183,8 @@ def active_game_gpu_cards(profile: GameProfile) -> list[str]:
             if card is not None:
                 found.add(card)
     if matched:
-        return sorted(matched, key=lambda n: _suffix_num(n, _CARD_NAME_RE))
-    return _connected_cards(sys_drm, cards) or sorted(client, key=lambda n: _suffix_num(n, _CARD_NAME_RE))
+        return sorted(matched, key=_card_number)
+    return _connected_cards(sys_drm, cards) or sorted(client, key=_card_number)
 
 
 def apply_game_gpu(profile: GameProfile) -> None:
