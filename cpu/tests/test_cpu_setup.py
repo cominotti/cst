@@ -29,6 +29,7 @@ from cpu.setup.domain import (
     QUIET_ENV,
     SetupPaths,
     conf_lines,
+    first_conf_lines,
     gamemode_ini,
     helper_dropin,
     toolbox_dropin,
@@ -619,14 +620,34 @@ class InstallTest(CpuSetupCase):
             (CpuTopology("", "12-15", "0-15", (), "intel_idle"), ("12-15", "0-11", "200")),
             # 8 cores, no SMT, siblings unreadable: the online CPUs split in half.
             (CpuTopology("", "", "0-7", (), "acpi_idle"), ("4-7", "0-3", "off")),
-            # One core, or nothing readable: the fixed defaults; an unknown driver keeps the 200 us cap.
-            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), ("12-23", "0-7", "200")),
+            # One core with SMT: its two logical CPUs split; an unknown driver keeps the 200 us cap.
+            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), ("1", "0", "200")),
+            # One CPU: the game and builds share it.
+            (CpuTopology("", "", "0", ("0",), "acpi_idle"), ("0", "0", "off")),
+            # A CPU whose siblings could not be read is a core of its own, not dropped.
+            (CpuTopology("", "", "0-3", ("0,2", "", "0,2", ""), "acpi_idle"), ("1,3", "0,2", "off")),
+            # No online list: the fixed defaults.
             (CpuTopology(), ("12-23", "0-7", "200")),
             (CpuTopology("", "", "0-x", (), "intel_idle"), ("12-23", "0-7", "200")),
         )
         for topo, want in cases:
             with self.subTest(topo=topo):
                 self.assertEqual(default_settings(topo), want)
+
+    def test_first_vm_vcpus_fit_build_cpus(self) -> None:
+        # vm-pin pins VM_VCPUS vCPUs onto BUILD_CPUS: as many as BUILD_CPUS has CPUs, at most 12.
+        for topo, want in (
+            (CpuTopology("0-7", "8-23", "0-23", (), "intel_idle"), "VM_VCPUS=12\n"),  # the 285K: 12-23
+            (CpuTopology("", "12-15", "0-15", (), "intel_idle"), "VM_VCPUS=4\n"),  # i5, 4 E-cores
+            (
+                CpuTopology("", "", "0-31", tuple(f"{c % 16},{c % 16 + 16}" for c in range(32)), "acpi_idle"),
+                "VM_VCPUS=12\n",
+            ),
+            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), "VM_VCPUS=1\n"),
+            (CpuTopology(), "VM_VCPUS=12\n"),  # the fixed 12-23
+        ):
+            with self.subTest(topo=topo):
+                self.assertIn(want, first_conf_lines("tester", topo))
 
     def test_what_install_hands_the_installer(self) -> None:
         self.command("install")

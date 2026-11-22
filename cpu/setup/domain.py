@@ -179,6 +179,8 @@ def target_user_in(conf_text: str) -> str:
 DEFAULT_BUILD_CPUS: Final = "12-23"
 DEFAULT_P_CORES: Final = "0-7"
 DEFAULT_CPU_CSTATE: Final = "200"
+# vm-pin's vCPUs in the first settings: as many as BUILD_CPUS has CPUs (where vm-pin pins them), at most this.
+DEFAULT_VM_VCPUS: Final = 12
 # A hybrid CPU with this many E-cores or more keeps its first E_CORES_KEPT ones out of BUILD_CPUS
 # (285K: E-cores 8-23, BUILD_CPUS 12-23); with fewer, BUILD_CPUS is every E-core.
 _MANY_E_CORES: Final = 12
@@ -187,7 +189,8 @@ _MIN_SPLIT_CORES: Final = 2
 
 
 def _split_cores(topo: CpuTopology) -> tuple[str, str] | None:
-    """(BUILD_CPUS, P_CORES) from the topology; None when it gives no split (unreadable, one core)."""
+    """(BUILD_CPUS, P_CORES) from the topology; None when it gives no split (no online CPU list, or a
+    hybrid CPU whose lists say nothing usable)."""
     if topo.e_cores:
         e_cpus = CpuSet.parse(topo.e_cores).sorted_cpus()
         if not e_cpus:
@@ -196,11 +199,19 @@ def _split_cores(topo: CpuTopology) -> tuple[str, str] | None:
         p_cores = topo.p_cores or format_cpulist(set(CpuSet.parse(topo.online).sorted_cpus()) - set(e_cpus))
         return (format_cpulist(build), p_cores) if p_cores else None
     # Not hybrid (AMD, older Intel): the physical cores in order, each with its SMT sibling; the first
-    # half for the game, the second for builds (on a two-CCD Ryzen, one CCD each).
+    # half for the game, the second for builds (on a two-CCD Ryzen, one CCD each). An online CPU whose
+    # siblings could not be read is a core of its own.
     online = CpuSet.parse(topo.online).sorted_cpus()
-    cores = sorted({tuple(CpuSet.parse(s).sorted_cpus()) for s in topo.siblings if s} or {(c,) for c in online})
-    if len(cores) < _MIN_SPLIT_CORES:
+    if not online:
         return None
+    found = {tuple(CpuSet.parse(s).sorted_cpus()) for s in topo.siblings if s}
+    covered = {c for core in found for c in core}
+    cores = sorted(found | {(c,) for c in online if c not in covered})
+    if len(cores) < _MIN_SPLIT_CORES:
+        # One core: its logical CPUs split; one CPU: the game and builds share it.
+        cores = [(c,) for c in online]
+        if len(cores) < _MIN_SPLIT_CORES:
+            return format_cpulist(online), format_cpulist(online)
     half = len(cores) // 2
     return format_cpulist(c for core in cores[half:] for c in core), format_cpulist(
         c for core in cores[:half] for c in core
@@ -209,7 +220,7 @@ def _split_cores(topo: CpuTopology) -> tuple[str, str] | None:
 
 def default_settings(topo: CpuTopology) -> tuple[str, str, str]:
     """cpu-setup.conf's first (BUILD_CPUS, P_CORES, CPU_CSTATE_MAX_LATENCY_US) for this host: the CPU split
-    from its topology (the fixed defaults when it gives none), and the C-state cap of 200 us only with
+    from its topology (the fixed defaults when it gives none: no online CPU list), and the C-state cap of 200 us only with
     intel_idle or an unknown driver (off with AMD's acpi_idle, whose states the 200 us was not chosen on)."""
     try:
         split = _split_cores(topo)
@@ -225,6 +236,7 @@ def conf_lines(
     build_cpus: str = DEFAULT_BUILD_CPUS,
     p_cores: str = DEFAULT_P_CORES,
     cpu_cstate: str = DEFAULT_CPU_CSTATE,
+    vm_vcpus: int = DEFAULT_VM_VCPUS,
 ) -> str:
     """cpu-setup.conf as install writes it the first time (the CPU split and C-state cap: default_settings)."""
     return "".join(
@@ -238,7 +250,7 @@ def conf_lines(
             "GAME_MEMORY_LOW='16G'",
             "GAME_ZSWAP_WRITEBACK='no'",
             "VM_NAME='win11-devbox'",
-            "VM_VCPUS=12",
+            f"VM_VCPUS={vm_vcpus}",
             "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'",
             "GPU_PM_MODE='always'",
             f"CPU_CSTATE_MAX_LATENCY_US='{cpu_cstate}'",
@@ -248,9 +260,11 @@ def conf_lines(
 
 
 def first_conf_lines(target_user: str, topo: CpuTopology) -> str:
-    """cpu-setup.conf as install writes it the first time on a host of this topology (default_settings)."""
+    """cpu-setup.conf as install writes it the first time on a host of this topology (default_settings;
+    VM_VCPUS: BUILD_CPUS's CPUs, at most DEFAULT_VM_VCPUS)."""
     build, p_cores, cstate = default_settings(topo)
-    return conf_lines(target_user, build_cpus=build, p_cores=p_cores, cpu_cstate=cstate)
+    vcpus = min(DEFAULT_VM_VCPUS, len(CpuSet.parse(build).cpus))
+    return conf_lines(target_user, build_cpus=build, p_cores=p_cores, cpu_cstate=cstate, vm_vcpus=vcpus)
 
 
 def hwp_tmpfiles_text(hwp_boost: str) -> str:

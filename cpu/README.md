@@ -318,7 +318,7 @@ CPU_CSTATE_MAX_LATENCY_US='200'
 GAME_CSTATE_MAX_LATENCY_US='50'
 ```
 
-`install` writes the file only when it is missing, and reads three values
+`install` writes the file only when it is missing, and reads four values
 from the machine's sysfs for it:
 
 - `BUILD_CPUS` and `P_CORES`: on a hybrid Intel CPU (`/sys/devices/cpu_atom/cpus`),
@@ -327,8 +327,12 @@ from the machine's sysfs for it:
   12 or more (the 285K: `12-23`). On any other CPU (AMD, older Intel), the
   physical cores in order, each with its SMT sibling
   (`topology/thread_siblings_list`): the first half is `P_CORES`, the second
-  `BUILD_CPUS` (on a two-CCD Ryzen, one CCD each). With one core, or nothing
-  readable, the values above.
+  `BUILD_CPUS` (on a two-CCD Ryzen, one CCD each); an online CPU whose
+  siblings cannot be read is a core of its own. With one core, its logical
+  CPUs split the same way; with one CPU, both are that CPU. With no readable
+  online list (`/sys/devices/system/cpu/online`), the values above.
+- `VM_VCPUS`: as many as `BUILD_CPUS` has CPUs, at most 12 (`vm-pin` pins
+  that many vCPUs onto `BUILD_CPUS`).
 - `CPU_CSTATE_MAX_LATENCY_US`: `200` with the `intel_idle` cpuidle driver (or
   when it cannot be read), `off` with any other (AMD's `acpi_idle`, whose
   states the 200 µs was not chosen for). `cpu-power` applies the same rule
