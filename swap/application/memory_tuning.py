@@ -191,7 +191,11 @@ def _mem_total_bytes(fs: FileSystemPort, proc_dir: str) -> int | None:
     return mem["MemTotal"] * KIB if "MemTotal" in mem else None
 
 
-def _memory_min_matches(live: int, want: int, *, capped: bool) -> bool:
+def _floor_matches(raw: str | None, want: int, *, capped: bool) -> bool:
+    """Whether memory.min's text is the floor wanted (within a page when a share of MemTotal decided it)."""
+    if raw is None or not raw.isdigit():
+        return False
+    live = int(raw)
     return abs(live - want) <= _PAGE_BYTES if capped else live == want
 
 
@@ -241,7 +245,7 @@ def uresourced_settings_row(
         return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "no memory.min in cgroup", want_txt)
     if live_min == "0" and not has_active_seat_session(fs, where.seats_dir):
         return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "no active seat session", want_txt)
-    ok = live_min.isdigit() and _memory_min_matches(int(live_min), want, capped=capped)
+    ok = _floor_matches(live_min, want, capped=capped)
     live_txt = human(int(live_min)) if live_min.isdigit() else live_min
     return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _USER_SLICE_ROW, live_txt, want_txt)
 
@@ -315,20 +319,18 @@ def maybe_restart_uresourced(
 def wait_for_uresourced_floor(
     fs: FileSystemPort,
     *,
-    cgroup_dir: str,
+    where: UresourcedView,
     uresourced_text: str,
     sleep: Callable[[float], None],
-    proc_dir: str,
 ) -> bool:
     """Wait briefly after restarting `uresourced` for `user.slice/memory.min` to reflect `uresourced.conf`."""
-    want, capped = effective_uresourced_memory_min(uresourced_text, _mem_total_bytes(fs, proc_dir))
+    want, capped = effective_uresourced_memory_min(uresourced_text, _mem_total_bytes(fs, where.proc_dir))
     if want is None:
         return True
-    path = posixpath.join(cgroup_dir, USER_SLICE, "memory.min")
+    path = posixpath.join(where.cgroup_dir, USER_SLICE, "memory.min")
 
     def _matches() -> bool:
-        raw = fs.read_first_line(path)
-        return raw is not None and raw.isdigit() and _memory_min_matches(int(raw), want, capped=capped)
+        return _floor_matches(fs.read_first_line(path), want, capped=capped)
 
     if _matches():
         return True

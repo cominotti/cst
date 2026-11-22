@@ -481,12 +481,7 @@ class SwapApplicationService(SwapReports):
         text = self._desired_text(src)
         # A file already current can still disagree with the live floor (uresourced started before it, or
         # failed to apply it): a restart applies it again.
-        live = uresourced_settings_row(
-            self._fs,
-            self._systemd,
-            where=env.uresourced_view,
-            uresourced_text=text,
-        )
+        live = uresourced_settings_row(self._fs, self._systemd, where=env.uresourced_view, uresourced_text=text)
         drifted = live is not None and live.state == SettingState.DIFF
         rc, restarted = maybe_restart_uresourced(
             self._systemd,
@@ -496,11 +491,7 @@ class SwapApplicationService(SwapReports):
         )
         if rc == 0 and restarted:
             wait_for_uresourced_floor(
-                self._fs,
-                cgroup_dir=env.cgroup_dir,
-                uresourced_text=text,
-                sleep=self._system.sleep,
-                proc_dir=env.proc_dir,
+                self._fs, where=env.uresourced_view, uresourced_text=text, sleep=self._system.sleep
             )
         return rc
 
