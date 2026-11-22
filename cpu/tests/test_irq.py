@@ -67,6 +67,7 @@ class _FakeRunner:
         self.active_state = "inactive"
         self.enabled_state = "disabled"
         self.install_rpm_succeeds = True
+        self.install_goes_live = True  # False: the package is there only after a reboot
         self.restart_rc = 0
 
     def _run_systemctl(self, cmd: list[str]) -> CommandResult:
@@ -96,7 +97,8 @@ class _FakeRunner:
         if cmd[:2] == ["rpm-ostree", "install"]:
             if not self.install_rpm_succeeds:
                 return CommandResult(1, "", "error: network unreachable", argv=tuple(cmd))
-            self.load_state, self.active_state, self.enabled_state = "loaded", "inactive", "disabled"
+            if self.install_goes_live:
+                self.load_state, self.active_state, self.enabled_state = "loaded", "inactive", "disabled"
             return CommandResult(0, "Checking out tree... done\n", "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
 
@@ -215,12 +217,15 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         self.assertTrue(any("--no-pkg" in line for line in out_nopkg))
         self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
         self.assertEqual(self._read(self.paths.dropin_path), render_irq_dropin())
-        self.assertEqual(self._irq_state(), ComponentState.DONE)
+        # No irqbalance.service runs the ban-list yet: cpu:irq stays pending.
+        self.assertEqual(self._irq_state(), ComponentState.PENDING)
+        self.assertIn("pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)", out_nopkg)
 
         rc_apply, out_apply = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
         self.assertEqual(rc_apply, 0)
         self.assertIn(["rpm-ostree", "install", "--idempotent", "--apply-live", "irqbalance"], self.runner.calls)
         self.assertTrue(any("restarted: irqbalance.service" in line for line in out_apply))
+        self.assertEqual(self._irq_state(), ComponentState.DONE)
 
         self.runner.calls.clear()
         rc_again, out_again = apply_irq_policy(self.paths, runner=self.runner, has_rpm_ostree=True)
@@ -250,6 +255,7 @@ class CpuIrqLifecycleTest(unittest.TestCase):
             rpm_ostree_path=self.paths.rpm_ostree_path,
             record_path=self.paths.record_path,
         )
+        self.runner.load_state = "loaded"  # irqbalance.service is there: apply restarts it, cpu:irq is done
         rc, out = apply_irq_policy(paths, no_pkg=True, runner=self.runner)
         self.assertEqual(rc, 0, out)
         self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
@@ -271,6 +277,22 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         rec = JsonInstallRecord().read(self.paths.record_path)
         assert rec is not None
         self.assertEqual(dict(rec.files), {})
+
+    def test_irq_stays_pending_until_irqbalance_runs_the_ban_list(self) -> None:
+        # rpm-ostree installed the package (exit 0) but irqbalance.service is not live before a reboot:
+        # the files are written, nothing is started, and cpu:irq stays pending until an apply starts it.
+        self.runner.install_goes_live = False
+        rc, out = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
+        self.assertFalse(any(c[:2] == ["systemctl", "restart"] for c in self.runner.calls))
+        self.assertEqual(self._irq_state(), ComponentState.PENDING)
+        self.assertIn("pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)", out)
+        self.runner.load_state = "loaded"  # after the reboot
+        rc, out = apply_irq_policy(self.paths, no_pkg=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("restarted: irqbalance.service (ban 12-23)", out)
+        self.assertEqual(self._irq_state(), ComponentState.DONE)
 
     def test_rpm_ostree_probe_reads_the_host_view(self) -> None:
         # In a toolbox, rpm-ostree is the host's (/run/host/usr/bin/rpm-ostree), not the container's PATH.

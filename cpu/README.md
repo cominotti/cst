@@ -430,7 +430,17 @@ When keeping **`irqbalance`** active, run `cst cpu irq apply` to ban `BUILD_CPUS
 `/etc/cpu-setup/irqbalance.env` and `irqbalance.service.d/10-cst-ban.conf`.
 `apply` refuses (exit 1, nothing written, removed or restarted) when
 `BUILD_CPUS` is empty or not a CPU list, or `cpu-setup.conf` has a syntax
-error; `plan` shows the same error.
+error; `plan` shows the same error. Otherwise it goes in this order and
+stops at the first failure: it installs the `irqbalance` package when
+`irqbalance.service` is missing (`rpm-ostree install --apply-live`; skipped
+with `--no-pkg`; a failed install writes nothing), writes the two files
+through CST's installer (install record component `cpu:irq`), reloads
+systemd for a new drop-in, enables `irqbalance.service` and restarts it when
+it was stopped or the files changed. `cpu:irq` is recorded done only then.
+It stays pending after a failed restart, and when there is no
+`irqbalance.service` yet (`--no-pkg`, or a package rpm-ostree applies only
+at the next boot): `apply` then says
+`pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)`.
 
 **Why the E-core limit helps builds too:** programs like Claude Code, shells,
 cargo, go, gradle and maven look at the CPUs they are *allowed* to use to
@@ -1653,7 +1663,7 @@ this is harmless.
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
 | `game/cli.py` | The command line of `cpu-game-profile` |
 | `cpu-irq` | `/usr/local/sbin/cpu-irq`: a zipapp of this entry point with `cpu.irq`, `cpu.game`, and `cst_core`; `cst cpu irq` runs the checkout's copy |
-| `irq/domain.py`, `irq/adapters.py`, `irq/cli.py` | Adaptive `irqbalance` ban-list calculation (`BUILD_CPUS` intersected with online CPUs, keeping `>= 2` unbanned CPUs), `/etc/cpu-setup/irqbalance.env`, drop-in, and RPM handling |
+| `irq/domain.py`, `irq/adapters.py`, `irq/cli.py` | Adaptive `irqbalance` ban-list calculation (`BUILD_CPUS` intersected with online CPUs, keeping `>= 2` unbanned CPUs), RPM handling first, then `/etc/cpu-setup/irqbalance.env` and the drop-in written in-process through `InstallService`, then the service; `cpu:irq` done last (section 6.3) |
 | `cpu-power` | `/usr/local/sbin/cpu-power`: a zipapp of this entry point with the `cpu.power`, `cpu.game`, and `cst_core` packages; `cst cpu power` runs the checkout's copy |
 | `power/domain.py`, `power/adapters.py`, `power/cli.py` | Baseline and hotplug GPU runtime PM (`GPU_PM_MODE`) plus baseline CPU `cpuidle` latency ceiling (`CPU_CSTATE_MAX_LATENCY_US`, by default only with `intel_idle`); the sysfs CPU topology `install` reads for `cpu-setup.conf`'s first values |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |

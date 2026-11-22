@@ -305,8 +305,11 @@ def _apply_irq_changes(
 
     rc_end, tail_lines = _finish_irq_apply(systemd, snap, unit_state, changed=(env_changed or dropin_changed))
     out.extend(tail_lines)
-    # cpu:irq is done only once irqbalance runs with the ban-list (a failed restart leaves it pending).
-    if rc_end == 0 and snap.banned_cpulist:
+    # cpu:irq is done only once irqbalance runs with the ban-list: a failed restart, or no irqbalance.service
+    # (--no-pkg, or a package rpm-ostree installs only for the next boot), leaves it pending.
+    if rc_end == 0 and snap.banned_cpulist and not unit_state[0]:
+        out.append(f"pending:   cpu:irq ({IRQBALANCE_SERVICE} is not there yet: run apply again once it is)")
+    elif rc_end == 0 and snap.banned_cpulist:
         try:
             svc.mark(paths.record_path, Component.CPU_IRQ)
         except _INSTALL_ERRORS as exc:

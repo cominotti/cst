@@ -5542,7 +5542,11 @@ PY
             f"""
             /usr/bin/python3 -I -B /opt/cst-rw/cpu/cpu-irq revert >/dev/null 2>&1
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
-            rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf
+            if [[ -e /run/systemd/system/irqbalance.service ]]; then
+                systemctl stop irqbalance.service
+                rm -f /run/systemd/system/irqbalance.service
+            fi
+            rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf /tmp/e2e-84-irq.out
             if [[ -e /tmp/e2e-84-conf.bak ]]; then mv /tmp/e2e-84-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rm -rf {old}
             systemctl daemon-reload
@@ -5597,18 +5601,32 @@ PY
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
             # The installed cpu-irq is a zipapp with no checkout beside it: apply and revert write and remove
-            # through the installer's use case in the program itself, and record cpu:irq.
+            # through the installer's use case in the program itself, and record cpu:irq: pending while no
+            # irqbalance.service runs the ban-list, done once one does.
             last_cpu="$(( $(nproc) - 1 ))"
             if (( last_cpu >= 2 )); then
                 cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf
                 sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='$last_cpu'/" /etc/cpu-setup/cpu-setup.conf
-                /usr/local/sbin/cpu-irq apply --no-pkg
+                /usr/local/sbin/cpu-irq apply --no-pkg >/tmp/e2e-84-irq.out
+                grep -qxF "pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)" /tmp/e2e-84-irq.out
                 grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                irq_lines="$(/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json cpu:irq)"
+                [[ "$irq_lines" == "/etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf pending" ]] \
+                    || {{ echo "root's record for cpu:irq without irqbalance: $irq_lines" >&2; exit 1; }}
+                printf '[Unit]\nDescription=e2e irqbalance\n[Service]\nExecStart=/usr/bin/sleep infinity\n' \
+                    >/run/systemd/system/irqbalance.service
+                systemctl daemon-reload
+                /usr/local/sbin/cpu-irq apply --no-pkg >/tmp/e2e-84-irq.out
+                grep -qF "restarted: irqbalance.service (ban $last_cpu)" /tmp/e2e-84-irq.out
+                systemctl -q is-active irqbalance.service
                 irq_lines="$(/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json cpu:irq)"
                 [[ "$irq_lines" == "/etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf done" ]] \
                     || {{ echo "root's record for cpu:irq: $irq_lines" >&2; exit 1; }}
                 /usr/local/sbin/cpu-irq revert
                 [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                systemctl stop irqbalance.service
+                rm -f /run/systemd/system/irqbalance.service
+                systemctl daemon-reload
                 # Applied again: uninstall below reverts it.
                 /usr/local/sbin/cpu-irq apply --no-pkg >/dev/null
                 mv /tmp/e2e-84-irq.conf /etc/cpu-setup/cpu-setup.conf
