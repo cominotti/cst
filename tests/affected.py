@@ -22,14 +22,28 @@ MODULE_ROOTS: Final = frozenset({"bluetooth", "btrfs", "cpu", "doctor", "swap", 
 DOCS_GATES: Final = ("tests.test_docs", "tests.test_license_headers", "tests.test_repo_paths")
 INSTALL_TESTS: Final = ("tests.test_install", "tests.test_install_record", "tests.test_module_routing")
 E2E_UNIT_TESTS: Final = ("tests.e2e.test_run_guard", "tests.e2e.test_selection", "tests.e2e.test_image_digest")
-INSTALL_SENSITIVE_SUFFIXES: Final = ("-setup.sh", ".service", ".timer", ".slice", ".mount", ".rules", ".in", ".conf")
-_DOCS_ONLY_FILES: Final = frozenset({"LICENSE", ".gitignore"})
+INSTALL_SENSITIVE_SUFFIXES: Final = (
+    "-setup.sh",
+    ".bash",
+    ".sh",
+    ".service",
+    ".timer",
+    ".slice",
+    ".mount",
+    ".rules",
+    ".in",
+    ".conf",
+    ".ini",
+)
+_DOCS_ONLY_FILES: Final = frozenset({"LICENSE"})
 _DOCS_ONLY_PREFIXES: Final = (".agents/", ".claude/", "docs/")
 _NON_UNIT_TEST_PREFIXES: Final = ("tests/e2e/suites/", "tests/fixtures/")
 _E2E_PREFIX: Final = "tests/e2e/"
 _GIT_REV_PARSE: Final = "rev-parse"
 _GIT_VERIFY: Final = "--verify"
 _MAIN_BRANCH: Final = "main"
+_ORIGIN_MAIN_BRANCH: Final = "origin/main"
+_BASE_CANDIDATES: Final = (_MAIN_BRANCH, _ORIGIN_MAIN_BRANCH)
 _HEAD_REF: Final = "HEAD"
 _FULL_SUITE_ROOT_REASONS: Final[dict[str, str]] = {
     "cst_core": "shared core (cst_core)",
@@ -67,17 +81,25 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _find_default_ref(repo: str) -> tuple[str, str] | None:
+    for ref in _BASE_CANDIDATES:
+        checked = _git(repo, _GIT_REV_PARSE, _GIT_VERIFY, f"{ref}^{{commit}}")
+        if checked.returncode == 0 and checked.stdout.strip():
+            return ref, checked.stdout.strip()
+    return None
+
+
 def resolve_base(repo: str = REPO, base: str | None = None) -> str:
-    """Resolve explicit `--base` ref or default to merge-base with `main` (else `HEAD`)."""
+    """Resolve explicit `--base` ref or default to merge-base with `main`/`origin/main` (else `HEAD`)."""
     if base is not None:
         checked = _git(repo, _GIT_REV_PARSE, _GIT_VERIFY, f"{base}^{{commit}}")
         if checked.returncode != 0:
             raise ValueError(f"unknown git revision {base!r}")
         return base
     head = _git(repo, _GIT_REV_PARSE, _GIT_VERIFY, _HEAD_REF)
-    main_ref = _git(repo, _GIT_REV_PARSE, _GIT_VERIFY, f"{_MAIN_BRANCH}^{{commit}}")
-    if head.returncode == 0 and main_ref.returncode == 0 and head.stdout.strip() != main_ref.stdout.strip():
-        mb = _git(repo, "merge-base", _MAIN_BRANCH, _HEAD_REF)
+    default_ref = _find_default_ref(repo) if head.returncode == 0 else None
+    if default_ref is not None and default_ref[1] != head.stdout.strip():
+        mb = _git(repo, "merge-base", default_ref[0], _HEAD_REF)
         if mb.returncode == 0 and mb.stdout.strip():
             return mb.stdout.strip()
     return _HEAD_REF
@@ -86,17 +108,13 @@ def resolve_base(repo: str = REPO, base: str | None = None) -> str:
 def git_changed_files(repo: str = REPO, base: str | None = None) -> tuple[str, tuple[str, ...]]:
     """Return `(resolved_base, sorted_changed_paths)` including untracked files."""
     resolved = resolve_base(repo, base)
-    diff = _git(repo, "diff", "--name-only", resolved)
+    diff = _git(repo, "diff", "--name-only", "-z", resolved)
     if diff.returncode != 0:
         raise ValueError(f"git diff failed for {resolved!r}: {diff.stderr.strip()}")
-    untracked = _git(repo, "ls-files", "--others", "--exclude-standard")
+    untracked = _git(repo, "ls-files", "-z", "--others", "--exclude-standard")
     if untracked.returncode != 0:
         raise ValueError(f"git ls-files failed: {untracked.stderr.strip()}")
-    paths = {
-        line.strip().replace("\\", "/")
-        for line in (*diff.stdout.splitlines(), *untracked.stdout.splitlines())
-        if line.strip()
-    }
+    paths = {entry.replace("\\", "/") for entry in (*diff.stdout.split("\0"), *untracked.stdout.split("\0")) if entry}
     return resolved, tuple(sorted(paths))
 
 
@@ -225,6 +243,17 @@ def _build_repo_index(inventory: Sequence[str], repo: str) -> _RepoIndex:
     return _RepoIndex(test_mods_by_file=test_mods_by_file, valid_mods=valid_mods, rev=rev, manifest_srcs=manifest_srcs)
 
 
+def _apply_install_and_script_rules(path: str, index: _RepoIndex, selected: set[str]) -> None:
+    top = path.split("/", 1)[0]
+    is_extensionless_module_file = top in MODULE_ROOTS and "." not in os.path.basename(path)
+    if path in index.manifest_srcs or path.endswith(INSTALL_SENSITIVE_SUFFIXES) or is_extensionless_module_file:
+        selected.update(mod for mod in INSTALL_TESTS if mod in index.valid_mods)
+    if path.endswith((".bash", ".conf")) and "tests.test_cst_core_shared" in index.valid_mods:
+        selected.add("tests.test_cst_core_shared")
+    if path.startswith(_E2E_PREFIX):
+        selected.update(mod for mod in E2E_UNIT_TESTS if mod in index.valid_mods)
+
+
 def _apply_path_rules(path: str, index: _RepoIndex, selected: set[str]) -> None:
     if is_docs_only(path):
         selected.update(DOCS_GATES)
@@ -238,10 +267,7 @@ def _apply_path_rules(path: str, index: _RepoIndex, selected: set[str]) -> None:
         selected.update(mod for rel, mod in index.test_mods_by_file.items() if rel.startswith(prefix))
         if top != "doctor" and "doctor.tests.test_doctor" in index.valid_mods:
             selected.add("doctor.tests.test_doctor")
-    if path in index.manifest_srcs or path.endswith(INSTALL_SENSITIVE_SUFFIXES):
-        selected.update(mod for mod in INSTALL_TESTS if mod in index.valid_mods)
-    if path.startswith(_E2E_PREFIX):
-        selected.update(mod for mod in E2E_UNIT_TESTS if mod in index.valid_mods)
+    _apply_install_and_script_rules(path, index, selected)
 
 
 def select_affected(

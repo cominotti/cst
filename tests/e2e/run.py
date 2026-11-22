@@ -5,18 +5,21 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 import concurrent.futures
+import contextlib
 import datetime
 import functools
 import os
 from pathlib import Path
 from types import ModuleType
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
-from typing import NamedTuple
+from typing import IO, Final, NamedTuple
 import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -354,19 +357,34 @@ def _tier1_log_dir(cfg: _Tier1Exec) -> Path:
     return cfg.artifact_dir / "tier1"
 
 
+def _count_noun(count: int, singular: str) -> str:
+    return f"{count} {singular}" if count == 1 else f"{count} {singular}s"
+
+
 def _handle_empty_tier1_slice(cfg: _Tier1Exec) -> bool:
-    if cfg.selection.patterns or cfg.selection.tags:
-        matched = select_cases(
-            iter_cases(load_suite(SUITE_FILES[1])),
-            patterns=cfg.selection.patterns,
-            tags=cfg.selection.tags,
-        )
-        if not matched:
-            print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
-            return False
+    if (cfg.selection.patterns or cfg.selection.tags) and not _check_selection_nonempty((1,), cfg.selection):
+        return False
     shard_msg = f" shard {cfg.selection.shard.label()}" if cfg.selection.shard is not None else ""
     print(f"[e2e] tier 1{shard_msg}: 0 tests selected", flush=True)
     return True
+
+
+@contextlib.contextmanager
+def _sigterm_to_exit(on_term: Callable[[], None] | None = None) -> Generator[None]:
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(_signum: int, _frame: object) -> None:
+        if on_term is not None:
+            on_term()
+        raise SystemExit(143)
+
+    prev = signal.signal(signal.SIGTERM, _handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, prev)
 
 
 def _run_tier1_container(cfg: _Tier1Exec) -> bool:
@@ -382,51 +400,52 @@ def _run_tier1_container(cfg: _Tier1Exec) -> bool:
     nas = f"cst-e2e-nas-{cfg.run_id}"
     sysd = f"cst-e2e-sysd-{cfg.run_id}"
     ok = False
-    try:
-        run(["docker", "network", "create", net])
-        run(["docker", "run", "-d", "--name", nas, "--network", net, IMG_NAS])
-        run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                sysd,
-                "--network",
-                net,
-                "--cap-add",
-                "SYS_ADMIN",
-                *host_lsm_security_opts(),
-                "--cgroupns=private",
-                "--tmpfs",
-                "/run",
-                "--tmpfs",
-                "/run/lock",
-                "--tmpfs",
-                "/tmp",
-                "-v",
-                f"{REPO_ROOT}:/opt/cst:ro",
-                IMG_SYSTEMD,
-            ]
-        )
-        wait_systemd_ready(sysd)
+    with _sigterm_to_exit():
+        try:
+            run(["docker", "network", "create", net])
+            run(["docker", "run", "-d", "--name", nas, "--network", net, IMG_NAS])
+            run(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--name",
+                    sysd,
+                    "--network",
+                    net,
+                    "--cap-add",
+                    "SYS_ADMIN",
+                    *host_lsm_security_opts(),
+                    "--cgroupns=private",
+                    "--tmpfs",
+                    "/run",
+                    "--tmpfs",
+                    "/run/lock",
+                    "--tmpfs",
+                    "/tmp",
+                    "-v",
+                    f"{REPO_ROOT}:/opt/cst:ro",
+                    IMG_SYSTEMD,
+                ]
+            )
+            wait_systemd_ready(sysd)
 
-        os.environ["CST_E2E_SYSTEMD_CONTAINER"] = sysd
-        os.environ["CST_E2E_NAS_CONTAINER"] = nas
-        os.environ["CST_E2E_SYSTEMD_IMAGE"] = IMG_SYSTEMD
-        os.environ["CST_E2E_REPO_ROOT"] = str(REPO_ROOT)
-        # test_01 starts containers of its own on the checkout: the same options.
-        os.environ["CST_E2E_SECURITY_OPTS"] = " ".join(host_lsm_security_opts())
+            os.environ["CST_E2E_SYSTEMD_CONTAINER"] = sysd
+            os.environ["CST_E2E_NAS_CONTAINER"] = nas
+            os.environ["CST_E2E_SYSTEMD_IMAGE"] = IMG_SYSTEMD
+            os.environ["CST_E2E_REPO_ROOT"] = str(REPO_ROOT)
+            # test_01 starts containers of its own on the checkout: the same options.
+            os.environ["CST_E2E_SECURITY_OPTS"] = " ".join(host_lsm_security_opts())
 
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
-        ok = result.wasSuccessful()
-        return ok
-    finally:
-        if not ok or cfg.keep_logs:
-            dump_logs([sysd, nas], _tier1_log_dir(cfg))
-        for c in (sysd, nas):
-            run(["docker", "rm", "-f", c], check=False, capture=True)
-        run(["docker", "network", "rm", net], check=False, capture=True)
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            ok = result.wasSuccessful()
+            return ok
+        finally:
+            if not ok or cfg.keep_logs:
+                dump_logs([sysd, nas], _tier1_log_dir(cfg))
+            for c in (sysd, nas):
+                run(["docker", "rm", "-f", c], check=False, capture=True)
+            run(["docker", "network", "rm", net], check=False, capture=True)
 
 
 def run_tier1(
@@ -475,37 +494,96 @@ def _shard_child_cmd(cfg: _Tier1Exec, shard: ShardSpec) -> list[str]:
     return cmd
 
 
-def _exec_shard_child(shard: ShardSpec, cmd: Sequence[str]) -> tuple[ShardSpec, bool, float, str]:
+_PARALLEL_SHARD_TIMEOUT_S: Final = 1080
+_TERM_GRACE_S: Final = 15.0
+
+
+class _WorkerSync(NamedTuple):
+    procs: set[subprocess.Popen[str]]
+    procs_lock: threading.Lock
+    print_lock: threading.Lock
+
+
+def _terminate_proc(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is None:
+        with contextlib.suppress(OSError):
+            proc.terminate()
+
+
+def _terminate_active(procs: set[subprocess.Popen[str]], lock: threading.Lock) -> None:
+    with lock:
+        snapshot = list(procs)
+    for proc in snapshot:
+        _terminate_proc(proc)
+    deadline = time.monotonic() + _TERM_GRACE_S
+    for proc in snapshot:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                proc.kill()
+
+
+def _stream_child_output(pipe: IO[str] | None, tag: str, lock: threading.Lock) -> None:
+    if pipe is None:
+        return
+    for line in pipe:
+        with lock:
+            print(f"{tag} {line}", end="" if line.endswith("\n") else "\n", flush=True)
+
+
+def _exec_shard_child(shard: ShardSpec, cmd: Sequence[str], sync: _WorkerSync) -> tuple[ShardSpec, bool, float]:
     start = time.monotonic()
-    proc = subprocess.run(
+    with subprocess.Popen(
         list(cmd),
         cwd=str(REPO_ROOT),
         stdin=subprocess.DEVNULL,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        check=False,
-    )
-    elapsed = time.monotonic() - start
-    combined = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
-    return shard, proc.returncode == 0, elapsed, combined
+    ) as proc:
+        with sync.procs_lock:
+            sync.procs.add(proc)
+        timer = threading.Timer(_PARALLEL_SHARD_TIMEOUT_S, _terminate_proc, args=(proc,))
+        timer.daemon = True
+        timer.start()
+        try:
+            _stream_child_output(proc.stdout, f"[s{shard.label()}]", sync.print_lock)
+            rc = proc.wait()
+        finally:
+            timer.cancel()
+            with sync.procs_lock:
+                sync.procs.discard(proc)
+    return shard, rc == 0, time.monotonic() - start
 
 
 def _run_parallel_workers(cfg: _Tier1Exec, parallel_count: int, exclusive_count: int, worker_count: int) -> bool:
     shards = [ShardSpec(index=i, total=worker_count) for i in range(1, worker_count + 1)]
     solo_note = f" (+{exclusive_count} host-exclusive solo afterwards)" if exclusive_count else ""
     print(
-        f"[e2e] tier 1: running {parallel_count} tests across {worker_count} parallel containers{solo_note}", flush=True
+        f"[e2e] tier 1: running {_count_noun(parallel_count, 'test')} across "
+        f"{_count_noun(worker_count, 'parallel container')}{solo_note}",
+        flush=True,
     )
+    sync = _WorkerSync(procs=set(), procs_lock=threading.Lock(), print_lock=threading.Lock())
     ok = True
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        futures = [pool.submit(_exec_shard_child, s, _shard_child_cmd(cfg, s)) for s in shards]
-        for fut in concurrent.futures.as_completed(futures):
-            shard, shard_ok, dur_s, output = fut.result()
-            status = "OK" if shard_ok else "FAILED"
-            print(f"\n--- Tier 1 shard {shard.label()} ({status}, {dur_s:.1f}s) ---", flush=True)
-            if output:
-                print(output, end="" if output.endswith("\n") else "\n", flush=True)
-            ok = ok and shard_ok
+
+    def _cleanup() -> None:
+        _terminate_active(sync.procs, sync.procs_lock)
+
+    with _sigterm_to_exit(_cleanup), concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+        try:
+            futures = [pool.submit(_exec_shard_child, s, _shard_child_cmd(cfg, s), sync) for s in shards]
+            for fut in concurrent.futures.as_completed(futures):
+                shard, shard_ok, dur_s = fut.result()
+                status = "OK" if shard_ok else "FAILED"
+                with sync.print_lock:
+                    print(f"--- Tier 1 shard {shard.label()} ({status}, {dur_s:.1f}s) ---", flush=True)
+                ok = ok and shard_ok
+        except BaseException:
+            _cleanup()
+            raise
     return ok
 
 
@@ -533,7 +611,7 @@ def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
         ok = _run_parallel_workers(cfg, len(parallel_cases), len(exclusive_cases), worker_count)
 
     if exclusive_cases:
-        print(f"\n--- Tier 1 host-exclusive solo phase ({len(exclusive_cases)} tests) ---", flush=True)
+        print(f"\n--- Tier 1 host-exclusive solo phase ({_count_noun(len(exclusive_cases), 'test')}) ---", flush=True)
         solo_cfg = cfg._replace(
             run_id=f"{cfg.run_id}-solo",
             build_images=False,
@@ -546,7 +624,10 @@ def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
         ok = _run_tier1_container(solo_cfg) and ok
 
     total_s = time.monotonic() - started
-    print(f"[e2e] tier 1 parallel summary: {len(all_cases)} tests in {total_s:.1f}s ({'OK' if ok else 'FAILED'})")
+    print(
+        f"[e2e] tier 1 parallel summary: {_count_noun(len(all_cases), 'test')} "
+        f"in {total_s:.1f}s ({'OK' if ok else 'FAILED'})"
+    )
     return ok
 
 
@@ -691,22 +772,22 @@ def _validate_options(tiers: Sequence[int], args: argparse.Namespace) -> tuple[S
 def _print_parallel_listing(cases: Sequence[unittest.TestCase], resolved_jobs: int) -> None:
     parallel_cases, exclusive_cases = split_host_exclusive(cases)
     worker_count = min(resolved_jobs, len(parallel_cases))
-    print(f"Tier 1 ({len(cases)} tests across {worker_count} parallel shards):")
+    scope = f" across {_count_noun(worker_count, 'parallel shard')}" if worker_count > 0 else ""
+    print(f"Tier 1 ({_count_noun(len(cases), 'test')}{scope}):")
     if worker_count > 0:
         for idx, bucket in enumerate(assign_shards(parallel_cases, worker_count), 1):
-            print(f"  Shard {idx}/{worker_count} ({len(bucket)} tests):")
+            print(f"  Shard {idx}/{worker_count} ({_count_noun(len(bucket), 'test')}):")
             for case in bucket:
                 print(f"    {format_case_line(case)}")
     if exclusive_cases:
-        print(f"  Host-exclusive solo phase ({len(exclusive_cases)} tests):")
+        print(f"  Host-exclusive solo phase ({_count_noun(len(exclusive_cases), 'test')}):")
         for case in exclusive_cases:
             print(f"    {format_case_line(case)}")
 
 
 def _list_tier_tests(tier: int, selection: SuiteSelection, jobs: int) -> int:
     cases, is_sliced = _resolve_cases(tier, selection)
-    if is_sliced and selection.active and not cases and selection.shard is None:
-        print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
+    if is_sliced and (selection.patterns or selection.tags) and not _check_selection_nonempty((tier,), selection):
         return 2
     if tier == 1 and jobs != 1 and selection.shard is None:
         resolved = default_tier1_jobs(len(cases)) if jobs == 0 else jobs
@@ -714,7 +795,7 @@ def _list_tier_tests(tier: int, selection: SuiteSelection, jobs: int) -> int:
             _print_parallel_listing(cases, resolved)
             return 0
     shard_note = f", shard {selection.shard.label()}" if tier == 1 and selection.shard is not None else ""
-    print(f"Tier {tier} ({len(cases)} tests{shard_note}):")
+    print(f"Tier {tier} ({_count_noun(len(cases), 'test')}{shard_note}):")
     for case in cases:
         print(f"  {format_case_line(case)}")
     return 0

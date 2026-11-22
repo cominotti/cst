@@ -8,9 +8,9 @@ import contextlib
 import io
 import os
 from pathlib import Path
-import subprocess
 import tempfile
-from typing import override
+import threading
+from typing import Self, override
 import unittest
 from unittest import mock
 
@@ -230,20 +230,33 @@ class ShardingTest(unittest.TestCase):
         rc, out, err = self._run_cli("--tier", "1", "--jobs", "4", "--list-tests")
         self.assertEqual(rc, 0, err)
         self.assertIn("across 4 parallel shards", out)
-        self.assertIn("Host-exclusive solo phase (1 tests):", out)
+        self.assertIn("Host-exclusive solo phase (1 test):", out)
 
         rc_solo, out_solo, err_solo = self._run_cli(
             "--tier", "1", "--jobs", "4", "--match", "test_10_cpu_quiet", "--list-tests"
         )
         self.assertEqual(rc_solo, 0, err_solo)
-        self.assertNotIn("Shard 1/0", out_solo)
-        self.assertIn("Host-exclusive solo phase (1 tests):", out_solo)
+        self.assertIn("Tier 1 (1 test):", out_solo)
+        self.assertNotIn("0 parallel shard", out_solo)
+        self.assertIn("Host-exclusive solo phase (1 test):", out_solo)
+
+        rc_bogus, _, err_bogus = self._run_cli("--tier", "1", "--shard", "1/3", "--match", "bogus", "--list-tests")
+        self.assertEqual(rc_bogus, 2)
+        self.assertIn("no tests matched selection", err_bogus)
+
+        rc_empty_bucket, out_empty_bucket, err_empty_bucket = self._run_cli(
+            "--tier", "1", "--shard", "5/5", "--match", "test_02", "--list-tests"
+        )
+        self.assertEqual(rc_empty_bucket, 0, err_empty_bucket)
+        self.assertIn("Tier 1 (0 tests, shard 5/5):", out_empty_bucket)
 
     def test_empty_shard_skips_docker_cleanly(self) -> None:
         builds: list[str] = []
-        self.mod.docker_build = lambda tag, *a, **k: builds.append(tag)
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-e2e-empty-shard-")))
-        with contextlib.redirect_stdout(io.StringIO()):
+        with (
+            mock.patch.object(self.mod, "docker_build", side_effect=lambda tag, *_a, **_k: builds.append(tag)),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             ok = self.mod.run_tier1(
                 "t",
                 tmp,
@@ -257,19 +270,24 @@ class ShardingTest(unittest.TestCase):
         child_cmds: list[list[str]] = []
         solo_scopes: list[object] = []
 
-        self.mod.docker_build = lambda tag, *_a, force=False, **_k: builds.append((tag, bool(force)))
-
-        def fake_subprocess_run(cmd: Sequence[str], **_k: object) -> subprocess.CompletedProcess[str]:
+        def fake_popen(cmd: Sequence[str], **_k: object) -> _FakePopen:
             child_cmds.append(list(cmd))
-            return subprocess.CompletedProcess(list(cmd), 0, "Ran tests OK\n", "")
+            return _FakePopen(text_out="Ran tests OK\n")
 
         def fake_container(cfg: object) -> bool:
             sel = getattr(cfg, "selection", None)
             solo_scopes.append(getattr(sel, "host_scope", None))
             return True
 
-        vars(self.mod)["_run_tier1_container"] = fake_container
-        with mock.patch("subprocess.run", side_effect=fake_subprocess_run):
+        with (
+            mock.patch.object(
+                self.mod,
+                "docker_build",
+                side_effect=lambda tag, *_a, force=False, **_k: builds.append((tag, bool(force))),
+            ),
+            mock.patch.object(self.mod, "_run_tier1_container", side_effect=fake_container),
+            mock.patch("subprocess.Popen", side_effect=fake_popen),
+        ):
             rc, out, err = self._run_cli("--tier", "1", "--jobs", "2", "--rebuild")
 
         self.assertEqual(rc, 0, err + out)
@@ -283,14 +301,88 @@ class ShardingTest(unittest.TestCase):
             self.assertIn("parallel", cmd)
         self.assertEqual([str(s) for s in solo_scopes], ["exclusive"])
 
-        # One failing child shard fails the parallel run.
-        def one_fail(cmd: Sequence[str], **_k: object) -> subprocess.CompletedProcess[str]:
-            code = 1 if "1/2" in cmd else 0
-            return subprocess.CompletedProcess(list(cmd), code, "shard output\n", "")
+        def one_fail(cmd: Sequence[str], **_k: object) -> _FakePopen:
+            return _FakePopen(returncode=1 if "1/2" in cmd else 0, text_out="shard output\n")
 
-        with mock.patch("subprocess.run", side_effect=one_fail):
+        with (
+            mock.patch.object(self.mod, "docker_build"),
+            mock.patch.object(self.mod, "_run_tier1_container", side_effect=fake_container),
+            mock.patch("subprocess.Popen", side_effect=one_fail),
+        ):
             rc_fail, _, _ = self._run_cli("--tier", "1", "--jobs", "2")
         self.assertEqual(rc_fail, 1)
+
+    def test_parallel_abort_terminates_active_shard_processes(self) -> None:
+        shard2_started = threading.Event()
+        shard2_terminated = threading.Event()
+
+        def abort_popen(cmd: Sequence[str], **_k: object) -> _FakePopen:
+            if "1/2" in cmd:
+
+                def raise_interrupt() -> int:
+                    shard2_started.wait(timeout=2.0)
+                    raise KeyboardInterrupt
+
+                return _FakePopen(on_wait=raise_interrupt)
+
+            def shard2_wait() -> int:
+                shard2_started.set()
+                return -15 if shard2_terminated.wait(timeout=2.0) else 0
+
+            return _FakePopen(
+                on_wait=shard2_wait,
+                on_terminate=shard2_terminated.set,
+            )
+
+        with (
+            mock.patch.object(self.mod, "docker_build"),
+            mock.patch("subprocess.Popen", side_effect=abort_popen),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self._run_cli("--tier", "1", "--jobs", "2")
+        self.assertTrue(shard2_terminated.is_set())
+
+
+class _FakePopen:
+    def __init__(
+        self,
+        *,
+        returncode: int = 0,
+        text_out: str = "",
+        on_wait: Callable[[], int] | None = None,
+        on_terminate: Callable[[], None] | None = None,
+    ) -> None:
+        self._rc = returncode
+        self.stdout = io.StringIO(text_out)
+        self._polled: int | None = None
+        self._on_wait = on_wait
+        self._on_terminate = on_terminate
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.stdout.close()
+
+    def poll(self) -> int | None:
+        return self._polled
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        if self._on_wait is not None:
+            return self._on_wait()
+        self._polled = self._rc
+        return self._rc
+
+    def terminate(self) -> None:
+        self._polled = -15
+        if self._on_terminate is not None:
+            self._on_terminate()
+
+    def kill(self) -> None:
+        self._polled = -9
+        if self._on_terminate is not None:
+            self._on_terminate()
 
 
 if __name__ == "__main__":

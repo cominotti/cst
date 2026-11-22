@@ -22,11 +22,14 @@ from tests.affected import (
 from tests.run_unit import GATE_MODULES
 
 _SAMPLE_INVENTORY = (
+    ".gitignore",
     "AGENTS.md",
     "README.md",
     "docs/dev-tools.md",
     "pyproject.toml",
     ".github/workflows/ci.yml",
+    "bluetooth/__init__.py",
+    "bluetooth/bluetooth.conf",
     "cst_core/__init__.py",
     "cst_core/domain/__init__.py",
     "cst_core/domain/files.py",
@@ -35,6 +38,8 @@ _SAMPLE_INVENTORY = (
     "swap/tests/__init__.py",
     "swap/tests/test_swap.py",
     "swap/units/10-swap-memory-low.conf",
+    "toolchains/__init__.py",
+    "toolchains/toolchains.conf",
     "vm/__init__.py",
     "vm/cli.py",
     "vm/tests/__init__.py",
@@ -43,12 +48,15 @@ _SAMPLE_INVENTORY = (
     "doctor/tests/__init__.py",
     "doctor/tests/test_doctor.py",
     "btrfs/__init__.py",
+    "btrfs/btrfs-stall-watch",
+    "btrfs/setup-snapshots.bash",
     "btrfs/units/btrfs-scrub-weekly.service",
     "btrfs/tests/__init__.py",
     "btrfs/tests/test_btrfs_setup.py",
     "tests/__init__.py",
     "tests/run_unit.py",
     "tests/test_architecture.py",
+    "tests/test_cst_core_shared.py",
     "tests/test_docs.py",
     "tests/test_install.py",
     "tests/test_install_record.py",
@@ -116,6 +124,7 @@ class SelectAffectedRulesTest(unittest.TestCase):
         for path in (
             "cst_core/domain/files.py",
             "pyproject.toml",
+            ".gitignore",
             ".github/workflows/ci.yml",
             "cst.invowkmod/invowkfile.cue",
             "tests/run_unit.py",
@@ -125,6 +134,22 @@ class SelectAffectedRulesTest(unittest.TestCase):
                 self.assertTrue(plan.full_suite)
                 self.assertEqual(plan.modules, ())
                 self.assertIn("selected: FULL SUITE", format_plan(plan))
+
+    def test_shell_and_conf_scripts_include_install_and_shared_parser_tests(self) -> None:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-aff-sh-")))
+        for path in ("btrfs/setup-snapshots.bash", "toolchains/toolchains.conf", "bluetooth/bluetooth.conf"):
+            with self.subTest(path=path):
+                plan = select_affected([path], all_files=_SAMPLE_INVENTORY, repo=str(tmp))
+                self.assertFalse(plan.full_suite)
+                self.assertIn("tests.test_cst_core_shared", plan.modules)
+                for inst_mod in INSTALL_TESTS:
+                    self.assertIn(inst_mod, plan.modules)
+
+        extless = select_affected(["btrfs/btrfs-stall-watch"], all_files=_SAMPLE_INVENTORY, repo=str(tmp))
+        self.assertFalse(extless.full_suite)
+        self.assertIn("btrfs.tests.test_btrfs_setup", extless.modules)
+        for inst_mod in INSTALL_TESTS:
+            self.assertIn(inst_mod, extless.modules)
 
     def test_direct_test_and_e2e_edits_stay_scoped(self) -> None:
         tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-aff-direct-")))
@@ -212,6 +237,13 @@ class GitAffectedIntegrationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unknown git revision"):
             git_changed_files(str(tmp), "no-such-branch-xyz")
+
+        # Detached/branch-only checkout with origin/main and no local main ref uses origin/main.
+        _git(tmp, "update-ref", "refs/remotes/origin/main", main_sha)
+        _git(tmp, "branch", "-D", "main")
+        self.assertEqual(resolve_base(str(tmp)), main_sha)
+        _, changed_no_local_main = git_changed_files(str(tmp))
+        self.assertEqual(changed_no_local_main, ("docs/new.md", "swap/domain.py"))
         self.assertTrue(os.path.isdir(tmp))
 
 

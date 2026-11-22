@@ -104,8 +104,8 @@ cmds: [
 					args+=(--list-affected)
 				else
 					args+=(--affected)
-					[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
 				fi
+				[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
 				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && args+=(--base "${INVOWK_FLAG_BASE}")
 				exec python3 -I -B tests/run_unit.py "${args[@]}"
 				"""}
@@ -377,7 +377,7 @@ cmds: [
 				[[ -n "${INVOWK_FLAG_TAG:-}" ]] && args+=(--tag "${INVOWK_FLAG_TAG}")
 				if [[ -n "${INVOWK_FLAG_SHARD:-}" ]]; then
 					args+=(--shard "${INVOWK_FLAG_SHARD}")
-					[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+					[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
 				else
 					args+=(--jobs "${INVOWK_FLAG_JOBS:-0}")
 				fi
