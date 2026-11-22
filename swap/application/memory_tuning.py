@@ -18,6 +18,7 @@ from swap.domain import (
     ApplyEvent,
     ApplyEventKind,
     SettingCheckRow,
+    PAGE,
     SettingState,
     parse_size,
 )
@@ -40,8 +41,6 @@ _MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MemoryMin\s*=\s*(\S+)")
 _MAX_MEMORY_MIN_LINE_RE: Final = re.compile(r"^\s*MaxMemoryMin\s*=\s*(\S+)")
 _PERCENT_RE: Final = re.compile(r"^([0-9]+)%$")
 _PERCENT: Final = 100
-# The kernel keeps memory.min in pages: a value systemd writes reads back rounded down to one.
-_PAGE_BYTES: Final = 4096
 # logind's seat files (/run/systemd/seats/SEAT): ACTIVE= names the seat's foreground session, if any,
 # and ACTIVE_UID= its user.
 _SEAT_ACTIVE_KEY: Final = "ACTIVE"
@@ -184,7 +183,7 @@ def effective_uresourced_memory_min(
     max_pct, max_bytes = parse_uresourced_max_memory_min(uresourced_text)
     capped = False
     if max_pct is not None and mem_total_bytes is not None:
-        cap = mem_total_bytes * max_pct // _PERCENT // _PAGE_BYTES * _PAGE_BYTES
+        cap = mem_total_bytes * max_pct // _PERCENT // PAGE * PAGE
         if cap < want:
             want, capped = cap, True
     if max_bytes is not None and max_bytes < want:
@@ -198,11 +197,12 @@ def _mem_total_bytes(fs: FileSystemPort, proc_dir: str) -> int | None:
 
 
 def _floor_matches(raw: str | None, want: int, *, capped: bool) -> bool:
-    """Whether memory.min's text is the floor wanted (within a page when a share of MemTotal decided it)."""
+    """Whether memory.min's text is the floor wanted (within a page when a share of MemTotal decided it: the
+    kernel keeps memory.min in pages, so a value systemd writes reads back rounded down to one)."""
     if raw is None or not raw.isdigit():
         return False
     live = int(raw)
-    return abs(live - want) <= _PAGE_BYTES if capped else live == want
+    return abs(live - want) <= PAGE if capped else live == want
 
 
 def active_seat_users(fs: FileSystemPort, seats_dir: str) -> int:
