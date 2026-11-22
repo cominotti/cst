@@ -22,6 +22,11 @@ from typing import Final, Literal
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, first_line_version, state_format
 from cst_core.domain.text import enum_member, file_lines, group, printf_q, printf_q_words
+from cst_core.domain.values import MINUTE
+
+# How long a writer under the run lock (/run/cpu-setup/lock: the game profile's on, off and tick,
+# cpu-power's apply and revert) waits for it before it gives up.
+RUN_LOCK_WAIT_S: Final = MINUTE
 
 type Manager = Literal["sys", "usr"]
 type Record = tuple[str, ...]

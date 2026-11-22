@@ -47,6 +47,7 @@ from cpu.game.domain import (
     GamePaths,
     GameSettings,
     IDLE_WEIGHT,
+    RUN_LOCK_WAIT_S,
     Manager,
     Record,
     SysfsUndo,
@@ -783,7 +784,7 @@ class GameProfile:
         try:
             ensure_dir(run, 0o755)
             os.chmod(run, 0o755)  # install -d -m 0755 sets the mode of a folder already there too
-            fd = take_lock(self.paths.lock, wait=True, mode=0o644, timeout=60)
+            fd = take_lock(self.paths.lock, wait=True, mode=0o644, timeout=RUN_LOCK_WAIT_S)
         except OSError:
             fd = None
         if fd is None:

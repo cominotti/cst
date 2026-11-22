@@ -18,7 +18,7 @@ from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
-from cpu.game.domain import held_sys_paths, parse_cstate_limit_us
+from cpu.game.domain import RUN_LOCK_WAIT_S, held_sys_paths, parse_cstate_limit_us
 from cpu.power.domain import (
     CSTATE_OFF,
     CSTATE_ON,
@@ -45,8 +45,8 @@ _CPU_RE: Final = re.compile(r"^cpu([0-9]+)$")
 _STATE_RE: Final = re.compile(r"^state([0-9]+)$")
 _CONNECTED_VALUE: Final = "connected"
 _CSTATE_SETTING: Final = "CPU_CSTATE_MAX_LATENCY_US"
-# As long as cpu-game-profile waits for the same lock.
-_POWER_LOCK_TIMEOUT_S: Final = 60
+# The run lock's wait, as cpu-game-profile's (a name of this module, which a test shortens).
+_POWER_LOCK_TIMEOUT_S: Final = RUN_LOCK_WAIT_S
 
 
 @dataclass(frozen=True, slots=True)
