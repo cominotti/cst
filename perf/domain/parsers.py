@@ -396,6 +396,16 @@ def assemble_cpu_probe(
     )
 
 
+def count_iocost_enabled(text: str) -> int:
+    """Count `/sys/fs/cgroup/io.cost.qos` device lines where `enable=1`."""
+    enabled = 0
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and ":" in parts[0] and "enable=1" in parts[1:]:
+            enabled += 1
+    return enabled
+
+
 def assemble_io_probe(
     files: Mapping[PerfPathKey, str | None],
     *,
@@ -406,7 +416,8 @@ def assemble_io_probe(
 ) -> IoProbeSnapshot:
     """Build `IoProbeSnapshot` cleanly from raw text keyed by `PerfPathKey`."""
     qos_text = files.get(PerfPathKey.IO_COST_QOS)
-    iocost_active: bool | None = clean_opt_str(qos_text) is not None if qos_text is not None else None
+    iocost_enabled = count_iocost_enabled(qos_text) if qos_text is not None else 0
+    iocost_active: bool | None = (iocost_enabled > 0) if qos_text is not None else None
     btrfs_conf = files.get(PerfPathKey.BTRFS_CONF)
     return IoProbeSnapshot(
         block_devices=tuple(block_devices),
@@ -414,6 +425,7 @@ def assemble_io_probe(
         dirty_background_bytes=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_BG_BYTES)),
         dirty_bytes=parse_optional_int(files.get(PerfPathKey.VM_DIRTY_BYTES)),
         iocost_qos_active=iocost_active,
+        iocost_enabled_devices=iocost_enabled,
         nonzero_slice_io_weights=tuple(nonzero_slice_io_weights),
         btrfs_commits=tuple(btrfs_commits),
         btrfs_scrub_limit=btrfs_scrub_limit,

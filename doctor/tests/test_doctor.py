@@ -4353,7 +4353,23 @@ class ResponsivenessAreaTest(Scratch):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertNotIn("responsiveness:", res.stdout)
 
+    def test_unconfigured_host_skips_responsiveness_even_with_kernel_telemetry(self) -> None:
+        self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
+        self._write_host("proc/sys/vm/min_free_kbytes", "65536\n")
+        self._write_host("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        self._write_host("sys/module/zswap/parameters/enabled", "N\n")
+        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
+        self._write_host("sys/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self._write_host("sys/class/drm/card0/card0-DP-1/status", "connected\n")
+        self._write_host("sys/class/drm/card0/device/power/control", "auto\n")
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("0 ERROR, 0 WARN", res.stdout)
+        self.assertNotIn("responsiveness", res.stdout)
+
     def test_healthy_and_flagged_host_states(self) -> None:
+        self._write_host("etc/sysctl.d/99-swap-tuning.conf", "vm.swappiness = 60\n")
         self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
         self._write_host("proc/sys/vm/min_free_kbytes", "262144\n")
         self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
@@ -4366,11 +4382,19 @@ class ResponsivenessAreaTest(Scratch):
         self.assertIn("responsiveness: 1 axes checked, no bottlenecks", ok_res.stdout)
 
         # Advisory cpu item -> info (no fix command); NVMe APST / MGLRU / zswap -> WARN with fix command.
+        self._write_host(
+            "etc/tmpfiles.d/cpu-setup-hwp-boost.conf",
+            "w /sys/devices/system/cpu/cpufreq/boost - - - - 1\n",
+        )
+        self._write_host("dev/ntsync", "")
+        os.makedirs(os.path.join(self.root, "run/systemd/units"), exist_ok=True)
+        self._write_host("run/systemd/units/invocation:irqbalance.service", "1\n")
         self._write_host("proc/cmdline", "quiet preempt=voluntary\n")
         info_res = self.run_tool()
         self.assertEqual(info_res.returncode, 0, info_res.stdout + info_res.stderr)
         self.assertIn("info   cpu: Kernel preemption is 'voluntary'", info_res.stdout)
 
+        self._write_host("etc/sysctl.d/90-btrfs-writeback.conf", "vm.dirty_bytes = 268435456\n")
         self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
         nvme_res = self.run_tool()
         self.assertEqual(nvme_res.returncode, 1, nvme_res.stdout + nvme_res.stderr)
@@ -4396,6 +4420,16 @@ class ResponsivenessAreaTest(Scratch):
         self.assertEqual(warn_res.returncode, 1, warn_res.stdout + warn_res.stderr)
         self.assertIn("WARN   memory: zswap is disabled", warn_res.stdout)
         self.assertIn("fix: sudo cst swap apply", warn_res.stdout)
+
+        self._write_host("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\n")
+        self._write_host("sys/block/nvme0n1/queue/scheduler", "[none]\n")
+        self._write_host("sys/block/nvme0n1/queue/rotational", "0\n")
+        self._write_host("sys/fs/cgroup/io.cost.qos", "")
+        self._write_host("sys/fs/cgroup/builds.slice/io.weight", "default 20\n")
+        p4_res = self.run_tool()
+        self.assertEqual(p4_res.returncode, 1, p4_res.stdout + p4_res.stderr)
+        self.assertIn("fix: sudo cst cpu irq apply", p4_res.stdout)
+        self.assertIn("fix: sudo cst btrfs iocost apply", p4_res.stdout)
 
 
 if __name__ == "__main__":

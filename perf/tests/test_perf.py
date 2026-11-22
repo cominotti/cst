@@ -219,6 +219,7 @@ class PerfEvaluatorTest(unittest.TestCase):
             preempt_mode="lazy",
             ntsync_present=True,
             irqbalance_active=True,
+            irqbalance_banned_cpus=parse_optional_cpuset("12-23"),
             build_cpus=parse_optional_cpuset("12-23"),
             irq_lines=(IrqLineSample("246", "IR-PCI-MSIX amdgpu", {1: 500_000}),),
         )
@@ -249,6 +250,44 @@ class PerfEvaluatorTest(unittest.TestCase):
         self.assertEqual(cstate_f.fix_command, "sudo cst cpu install")
         ntsync_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-ntsync-absent")
         self.assertEqual(ntsync_f.fix_command, "sudo cst cpu install")
+        irq_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-irqbalance-inactive")
+        self.assertEqual(irq_f.fix_command, "sudo cst cpu irq apply")
+        ov_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-irq-build-overlap")
+        self.assertEqual(ov_f.fix_command, "sudo cst cpu irq apply")
+
+        # Active irqbalance without BUILD_CPUS banned -> cpu-irqbalance-ban-missing
+        missing_ban = CpuProbeSnapshot(
+            irqbalance_active=True,
+            irqbalance_banned_cpus=None,
+            build_cpus=parse_optional_cpuset("12-23"),
+            irq_lines=(
+                # Managed per-CPU blk-mq queues (q1+) must be ignored; q0 + amdgpu checked
+                IrqLineSample("130", "IR-PCI-MSIX nvme0q13", {20: 900_000}),
+                # Historical counter on CPU 20, but live effective_affinity moved to P-core 2 -> healthy
+                IrqLineSample(
+                    "246",
+                    "IR-PCI-MSIX amdgpu",
+                    {20: 900_000, 2: 100},
+                    effective_cpus=parse_optional_cpuset("2"),
+                ),
+            ),
+        )
+        miss_rep = evaluate_perf_cpu(missing_ban)
+        self.assertEqual([f.finding_id for f in miss_rep.findings], ["cpu-irqbalance-ban-missing"])
+        self.assertEqual(miss_rep.findings[0].fix_command, "sudo cst cpu irq apply")
+
+        # Live effective_affinity hitting BUILD_CPUS and nvme0q0 admin queue
+        live_hit = CpuProbeSnapshot(
+            irqbalance_active=True,
+            irqbalance_banned_cpus=parse_optional_cpuset("12-23"),
+            build_cpus=parse_optional_cpuset("12-23"),
+            irq_lines=(
+                IrqLineSample("120", "IR-PCI-MSIX nvme0q0", {1: 500_000}, effective_cpus=parse_optional_cpuset("18")),
+            ),
+        )
+        live_rep = evaluate_perf_cpu(live_hit)
+        self.assertEqual([f.finding_id for f in live_rep.findings], ["cpu-irq-build-overlap"])
+        self.assertIn("nvme0q0", live_rep.findings[0].summary)
 
     def test_io_and_gpu_evaluation(self) -> None:
         bad_io = IoProbeSnapshot(
@@ -278,6 +317,8 @@ class PerfEvaluatorTest(unittest.TestCase):
         self.assertEqual(nvme_f.fix_command, "sudo cst btrfs install")
         scrub_f = next(f for f in io_rep.findings if f.finding_id == "io-btrfs-scrub-limit")
         self.assertEqual(scrub_f.fix_command, "sudo cst btrfs scrub-limit set 500M")
+        iocost_f = next(f for f in io_rep.findings if f.finding_id == "io-weight-no-iocost")
+        self.assertEqual(iocost_f.fix_command, "sudo cst btrfs iocost apply")
 
         gpu_rep = evaluate_perf_gpu(
             GpuProbeSnapshot(
@@ -430,6 +471,22 @@ class PerfScratchIntegrationTest(unittest.TestCase):
             rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.MEMORY,))
         self.assertEqual(rep.verdict, PerfVerdict.ATTENTION)
         self.assertTrue(any(f.finding_id == "memory-session-floor" for f in rep.axes[0].findings))
+
+    def test_irqbalance_env_precedence_effective_affinity_and_iocost_enable_zero(self) -> None:
+        self._populate_healthy_tree()
+        self._write("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\n")
+        self._write("etc/sysconfig/irqbalance", "IRQBALANCE_BANNED_CPULIST=0\n")
+        self._write("etc/cpu-setup/irqbalance.env", "IRQBALANCE_BANNED_CPULIST=12-23\n")
+        self._write("proc/interrupts", "           CPU0       CPU20\n  246:      100    500000   IR-PCI-MSIX amdgpu\n")
+        self._write("proc/irq/246/effective_affinity_list", "2\n")
+        self._write("sys/fs/cgroup/io.cost.qos", "259:1 enable=0 ctrl=auto\n")
+        with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+            rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.CPU, PerfAxis.IO))
+        cpu_rep = next(ax for ax in rep.axes if ax.axis == PerfAxis.CPU)
+        io_rep = next(ax for ax in rep.axes if ax.axis == PerfAxis.IO)
+        self.assertEqual(cpu_rep.verdict, PerfVerdict.OPTIMIZED)
+        self.assertEqual([f.finding_id for f in io_rep.findings], ["io-weight-no-iocost"])
+        self.assertEqual(io_rep.findings[0].fix_command, "sudo cst btrfs iocost apply")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 import os
 import shlex
 import subprocess
@@ -7424,3 +7425,38 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR)
+    def test_158_cst_perf_and_doctor_responsiveness_scoping(self) -> None:
+        """`cst perf` checks all four axes unconditionally while `cst doctor` scopes responsiveness
+        to axes whose CST module is installed/configured, surfacing Phase 4 fix commands when present."""
+        c = self.SYSTEMD_CONTAINER
+        perf_res = as_tester_bash(c, "/opt/cst-rw/cst perf --json", check=False)
+        self.assertIn(perf_res.returncode, (0, 1), perf_res.stdout + perf_res.stderr)
+        payload = json.loads(perf_res.stdout)
+        self.assertIn(payload["verdict"], {"OPTIMIZED", "ATTENTION", "BOTTLENECK", "SKIP"})
+        axis_names = {entry["axis"] for entry in payload["axes"]}
+        self.assertEqual(axis_names, {"memory", "cpu", "io", "gpu"})
+
+        clean = as_tester_bash(c, "/opt/cst-rw/cst doctor")
+        self.assertIn("0 ERROR, 0 WARN", clean.stdout)
+
+        doc_out = exec_bash(
+            c,
+            """
+            stage="$(mktemp -d)"
+            trap 'rm -rf "$stage"' EXIT
+            mkdir -p "$stage/etc/cpu-setup" "$stage/etc/sysctl.d" "$stage/run/systemd/units" \
+                     "$stage/sys/block/nvme0n1/queue" "$stage/sys/fs/cgroup/builds.slice"
+            printf "BUILD_CPUS='12-23'\\n" >"$stage/etc/cpu-setup/cpu-setup.conf"
+            printf 'vm.dirty_bytes = 268435456\\n' >"$stage/etc/sysctl.d/90-btrfs-writeback.conf"
+            printf '1\\n' >"$stage/run/systemd/units/invocation:irqbalance.service"
+            printf '[none]\\n' >"$stage/sys/block/nvme0n1/queue/scheduler"
+            printf '0\\n' >"$stage/sys/block/nvme0n1/queue/rotational"
+            : >"$stage/sys/fs/cgroup/io.cost.qos"
+            printf 'default 20\\n' >"$stage/sys/fs/cgroup/builds.slice/io.weight"
+            CST_DOCTOR_ROOT="$stage" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true
+            """,
+        ).stdout
+        self.assertIn("fix: sudo cst cpu irq apply", doc_out)
+        self.assertIn("fix: sudo cst btrfs iocost apply", doc_out)

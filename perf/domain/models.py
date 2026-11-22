@@ -140,6 +140,7 @@ class PerfPathKey(StrEnum):
     IO_COST_QOS = "cgroup/io.cost.qos"
     CPU_CONF = "etc/cpu-setup/cpu-setup.conf"
     BTRFS_CONF = "etc/btrfs-setup/snapshots.conf"
+    IRQBALANCE_CST_ENV = "etc/cpu-setup/irqbalance.env"
     IRQBALANCE_SYSCONFIG = "etc/sysconfig/irqbalance"
 
 
@@ -181,6 +182,7 @@ CPU_FILE_KEYS: Final[tuple[PerfPathKey, ...]] = tuple(
         "proc/interrupts",
         "proc/irq/default_smp_affinity",
         "etc/cpu-setup/cpu-setup.conf",
+        "etc/cpu-setup/irqbalance.env",
         "etc/sysconfig/irqbalance",
     )
 )
@@ -298,11 +300,12 @@ class CpuIdleStateSample:
 
 @dataclass(frozen=True, slots=True)
 class IrqLineSample:
-    """One `/proc/interrupts` line with per-CPU counts."""
+    """One `/proc/interrupts` line with per-CPU counts and optional live effective affinity."""
 
     irq_id: str
     label: str
     counts_by_cpu: dict[int, int]
+    effective_cpus: CpuSet | None = None
 
     @property
     def total_count(self) -> int:
@@ -371,6 +374,7 @@ class IoProbeSnapshot:
     dirty_background_bytes: int | None = None
     dirty_bytes: int | None = None
     iocost_qos_active: bool | None = None
+    iocost_enabled_devices: int = 0
     nonzero_slice_io_weights: tuple[tuple[str, int], ...] = ()
     btrfs_commits: tuple[BtrfsCommitSample, ...] = ()
     btrfs_scrub_limit: str | None = None

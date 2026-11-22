@@ -163,6 +163,30 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
 CPU_CONF = HostPath(CPU_SETTINGS)
+# Host markers showing which CST modules are installed or configured for `doctor`'s responsiveness area.
+MEMORY_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    SWAP_CONF,
+    ZSWAP_CONF,
+    MM_RESPONSIVENESS_CONF,
+    SWAP_DROPIN,
+    HostPath(_BY_SRC["swap/sysctl/99-swap-tuning.conf"].dest),
+    HostPath("/etc/uresourced.conf.d/10-cst-memory-min.conf"),
+)
+CPU_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    CPU_CONF,
+    HostPath("/etc/cpu-setup/irqbalance.env"),
+    HostPath(_BY_SRC["cpu/units/cst-cpu-power.service"].dest),
+    HostPath(_BY_SRC["cpu/units/cpu-game.service"].dest),
+    HostPath("/etc/tmpfiles.d/cpu-setup-hwp-boost.conf"),
+)
+IO_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    SNAP_CONF,
+    RECLAIM_CONF,
+    SCRUB_UNIT,
+    HostPath(_BY_SRC["btrfs/sysctl/90-btrfs-writeback.conf"].dest),
+    HostPath(_BY_SRC["btrfs/tmpfiles/cst-nvme-apst.conf"].dest),
+    HostPath(_BY_SRC["btrfs/units/cst-btrfs-iocost.service"].dest),
+)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)

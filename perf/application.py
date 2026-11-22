@@ -6,8 +6,11 @@ import posixpath
 from typing import Final
 
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
+from dataclasses import replace
+
 from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import (
+    IRQ_ACTIVE_MIN_COUNT,
     ALL_PERF_AXES,
     BlockDeviceSample,
     BtrfsCommitSample,
@@ -157,11 +160,16 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
         build_cpus = parse_optional_cpuset(assigned.get("BUILD_CPUS"))
         p_cores = parse_optional_cpuset(assigned.get("P_CORES"))
     banned_cpus = None
-    irq_sysconf = files.get(PerfPathKey.IRQBALANCE_SYSCONFIG)
-    if irq_sysconf is not None:
-        banned_cpus = parse_optional_cpuset(
-            parse_shell_assignments(irq_sysconf).values.get("IRQBALANCE_BANNED_CPULIST")
-        )
+    cst_irq_env = files.get(PerfPathKey.IRQBALANCE_CST_ENV)
+    cst_assigned = parse_shell_assignments(cst_irq_env).values if cst_irq_env is not None else {}
+    if "IRQBALANCE_BANNED_CPULIST" in cst_assigned:
+        banned_cpus = parse_optional_cpuset(cst_assigned.get("IRQBALANCE_BANNED_CPULIST"))
+    else:
+        irq_sysconf = files.get(PerfPathKey.IRQBALANCE_SYSCONFIG)
+        if irq_sysconf is not None:
+            banned_cpus = parse_optional_cpuset(
+                parse_shell_assignments(irq_sysconf).values.get("IRQBALANCE_BANNED_CPULIST")
+            )
     irqbalance_active: bool | None = None
     if reader.is_dir_rel(PerfRootKind.RUN, _SYSTEMD_UNITS_DIR):
         irqbalance_active = reader.exists_rel(PerfRootKind.RUN, _IRQBALANCE_INVOCATION)
@@ -172,7 +180,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             or reader.is_dir_rel(PerfRootKind.SYS, _NTSYNC_CLASS)
             or reader.is_dir_rel(PerfRootKind.SYS, _NTSYNC_MODULE)
         )
-    return assemble_cpu_probe(
+    snap = assemble_cpu_probe(
         files,
         CpuProbeExtra(
             idle_states=_collect_idle_states(reader),
@@ -184,6 +192,20 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             irqbalance_banned_cpus=banned_cpus,
         ),
     )
+    if not snap.irq_lines:
+        return snap
+    enriched = tuple(
+        replace(
+            line,
+            effective_cpus=parse_optional_cpuset(
+                reader.read_rel(PerfRootKind.PROC, posixpath.join("irq", line.irq_id, "effective_affinity_list"))
+            ),
+        )
+        if line.irq_id.isdigit() and line.total_count >= IRQ_ACTIVE_MIN_COUNT
+        else line
+        for line in snap.irq_lines
+    )
+    return replace(snap, irq_lines=enriched)
 
 
 def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:

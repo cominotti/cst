@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+import re
 from typing import Final
 
 from cst_core.domain.values import CpuSet, HOUR, format_bytes_human
@@ -25,6 +26,7 @@ from perf.domain.models import (
     EXIT_PERF_OK,
     GpuProbeSnapshot,
     IRQ_ACTIVE_MIN_COUNT,
+    IrqLineSample,
     IRQ_DOMINANT_SHARE,
     IoProbeSnapshot,
     LARGE_RAM_THRESHOLD_BYTES,
@@ -85,6 +87,7 @@ _LATENCY_IRQ_TOKENS: Final[tuple[str, ...]] = (
 _GPU_RUNTIME_CONTROL_AUTO: Final = "auto"
 _GPU_AMD_BOOTUP_PROFILE: Final = "BOOTUP_DEFAULT"
 _SCHED_NONE: Final = "none"
+_MANAGED_NVME_QUEUE_RE: Final = re.compile(r"\bnvme[0-9]+q[1-9][0-9]*\b")
 _ZERO_HEX: Final = "0x0000"
 _ZERO_DEC: Final = "0"
 
@@ -372,6 +375,24 @@ def _worst_enabled_deep_cstate(states: Sequence[CpuIdleStateSample]) -> CpuIdleS
     return max(enabled_deep, key=lambda s: s.latency_us) if enabled_deep else None
 
 
+def _irq_overlap_detail(line: IrqLineSample, build_set: frozenset[int]) -> str | None:
+    """Return a formatted overlap label if a movable IRQ hits `build_set`, else None."""
+    if _MANAGED_NVME_QUEUE_RE.search(line.label) is not None:
+        return None
+    dev_name = line.label.split()[-1] if line.label.strip() else "irq"
+    if line.effective_cpus is not None:
+        overlap = line.effective_cpus.cpus & build_set
+        if not overlap:
+            return None
+        return f"IRQ {line.irq_id} ({dev_name} on CPU {format_perf_cpuset(CpuSet(frozenset(overlap)))})"
+    total = line.total_count
+    build_hits = sum(cnt for c, cnt in line.counts_by_cpu.items() if c in build_set)
+    if total <= 0 or build_hits / total < IRQ_DOMINANT_SHARE:
+        return None
+    dom_cpu = max(line.counts_by_cpu.items(), key=lambda kv: kv[1])[0]
+    return f"IRQ {line.irq_id} ({dev_name} on CPU {dom_cpu})"
+
+
 def _eval_irq_build_overlap(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
     if cpu.build_cpus is None or not cpu.irq_lines:
         return
@@ -379,27 +400,27 @@ def _eval_irq_build_overlap(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
     build_set = cpu.build_cpus.cpus
     hot_on_build: list[str] = []
     for line in cpu.irq_lines:
-        total = line.total_count
-        if total < IRQ_ACTIVE_MIN_COUNT:
+        if line.total_count < IRQ_ACTIVE_MIN_COUNT:
             continue
         low_label = line.label.lower()
         if not any(tok in low_label for tok in _LATENCY_IRQ_TOKENS):
             continue
-        build_hits = sum(cnt for c, cnt in line.counts_by_cpu.items() if c in build_set)
-        if build_hits / total >= IRQ_DOMINANT_SHARE:
-            dom_cpu = max(line.counts_by_cpu.items(), key=lambda kv: kv[1])[0]
-            dev_name = line.label.split()[-1] if line.label.strip() else "irq"
-            hot_on_build.append(f"IRQ {line.irq_id} ({dev_name} on CPU {dom_cpu})")
+        detail = _irq_overlap_detail(line, build_set)
+        if detail is not None:
+            hot_on_build.append(detail)
     col.metric("BUILD_CPUS", build_spec)
     if hot_on_build:
         summary_list = ", ".join(hot_on_build[:TOP_IRQ_DISPLAY_LIMIT])
         if len(hot_on_build) > TOP_IRQ_DISPLAY_LIMIT:
             summary_list += f" (+{len(hot_on_build) - TOP_IRQ_DISPLAY_LIMIT} more)"
-        col.warn(
+        col.warn_fix(
             "cpu-irq-build-overlap",
             f"Latency-sensitive IRQs hit BUILD_CPUS ({build_spec}): {summary_list}",
             "Hardware interrupts routed onto build cores compete with heavy compilation/indexing.",
-            "Configure irqbalance ban-list (`IRQBALANCE_BANNED_CPULIST`) or steer IRQs off BUILD_CPUS.",
+            (
+                "Configure irqbalance ban-list (`IRQBALANCE_BANNED_CPULIST`) or steer IRQs off BUILD_CPUS.",
+                "sudo cst cpu irq apply",
+            ),
         )
 
 
@@ -447,14 +468,30 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
             )
     _eval_cpu_kernel(col, cpu)
     if cpu.irqbalance_active is not None:
-        col.metric("irqbalance", "active" if cpu.irqbalance_active else "inactive")
         if cpu.irqbalance_active is False:
-            col.warn(
+            col.metric("irqbalance", "inactive")
+            col.warn_fix(
                 "cpu-irqbalance-inactive",
                 "irqbalance service is inactive",
                 "Hardware interrupts stay pinned statically instead of balancing across cores.",
-                "Enable irqbalance (with BUILD_CPUS excluded when builds slice is configured).",
+                ("Enable irqbalance with BUILD_CPUS excluded via `cst cpu irq`.", "sudo cst cpu irq apply"),
             )
+        else:
+            ban_txt = (
+                f"ban={format_perf_cpuset(cpu.irqbalance_banned_cpus)}"
+                if cpu.irqbalance_banned_cpus is not None
+                else "no ban-list"
+            )
+            col.metric("irqbalance", f"active ({ban_txt})")
+            if cpu.build_cpus is not None and (
+                cpu.irqbalance_banned_cpus is None or not (cpu.build_cpus.cpus & cpu.irqbalance_banned_cpus.cpus)
+            ):
+                col.warn_fix(
+                    "cpu-irqbalance-ban-missing",
+                    "irqbalance is active without banning BUILD_CPUS",
+                    "Movable hardware interrupts may still be steered onto busy build cores.",
+                    ("Configure CST's adaptive irqbalance ban-list via `cst cpu irq`.", "sudo cst cpu irq apply"),
+                )
     _eval_irq_build_overlap(col, cpu)
     return col.report()
 
@@ -474,18 +511,26 @@ def _eval_io_queues(col: _AxisCollector, io: IoProbeSnapshot) -> None:
             if io.nonzero_slice_io_weights
             else "none"
         )
-        qos_txt = "configured" if io.iocost_qos_active is True else "empty"
+        if io.iocost_qos_active is True:
+            qos_txt = (
+                f"configured ({io.iocost_enabled_devices} device(s))" if io.iocost_enabled_devices > 0 else "configured"
+            )
+        else:
+            qos_txt = "empty"
         col.metric("blk-iocost / io.weight", f"qos={qos_txt}; weights={weights_txt}")
         nvme_none = any(d.name.startswith("nvme") and d.scheduler == _SCHED_NONE for d in io.block_devices)
         if has_non_default_weight and io.iocost_qos_active is not True and (nvme_none or not io.block_devices):
-            col.warn(
+            col.warn_fix(
                 "io-weight-no-iocost",
                 "Cgroup io.weight is configured without blk-iocost QoS",
                 (
                     f"Slices ({weights_txt}) set non-default io.weight, which has no effect "
                     "when io.cost.qos is empty and NVMe queues use scheduler=none."
                 ),
-                "Configure blk-iocost (`io.cost.model` / `io.cost.qos`) for active NVMe disks.",
+                (
+                    "Enable kernel blk-iocost QoS (`enable=1 ctrl=auto`) on SSDs via `cst btrfs iocost`.",
+                    "sudo cst btrfs iocost apply",
+                ),
             )
 
 

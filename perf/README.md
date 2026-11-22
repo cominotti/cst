@@ -34,10 +34,10 @@ Exit codes:
    - `cpuidle`: flags enabled C-states on `cpu0` with exit latency `>= 200 µs` (`fix: sudo cst cpu install`; configurable via `CPU_CSTATE_MAX_LATENCY_US` and `cst cpu power`).
    - Preemption mode (`sched/preempt` or kernel cmdline `preempt=`): expects `lazy` or `full`.
    - `ntsync`: checks `/dev/ntsync`, `/sys/class/misc/ntsync`, and `/sys/module/ntsync` (`fix: sudo cst cpu install`).
-   - `irqbalance` & `BUILD_CPUS`: checks systemd unit runtime marker (`/run/systemd/units/invocation:irqbalance.service`) and detects high-volume latency-sensitive IRQs (`nvme`, GPUs, NICs, `xhci`, audio, `kvm`) whose interrupts land predominantly on `BUILD_CPUS`.
+   - `irqbalance` & `BUILD_CPUS`: checks systemd unit runtime marker (`/run/systemd/units/invocation:irqbalance.service`), reads `IRQBALANCE_BANNED_CPULIST` from `/etc/cpu-setup/irqbalance.env` (falling back to `/etc/sysconfig/irqbalance`), flags inactive `irqbalance` or an active `irqbalance` without `BUILD_CPUS` banned (`fix: sudo cst cpu irq apply`), and inspects live `/proc/irq/<id>/effective_affinity_list` (falling back to `/proc/interrupts`) for movable latency-sensitive IRQs (`nvme*q0`, GPUs, NICs, `xhci`, audio, `kvm`, excluding `blk-mq` managed per-CPU `nvme*q1+` queues) on `BUILD_CPUS` (`fix: sudo cst cpu irq apply`).
 
 3. **io** (`block/*/queue/scheduler`, `io.cost.qos`, `io.weight`, `nvme_core`, dirty writeback, btrfs `commit_stats` & `SCRUB_LIMIT`):
-   - Flags non-default slice `io.weight` (other than `100`) when `io.cost.qos` is empty and NVMe queues use `none`.
+   - Counts active `enable=1` entries in `io.cost.qos` and flags non-default slice `io.weight` (other than `100`) when no device has `blk-iocost` enabled on `none` NVMe queues (`fix: sudo cst btrfs iocost apply`).
    - Flags `nvme_core.default_ps_max_latency_us > 50000` (deep APST sleep states; `fix: sudo cst btrfs install`).
    - Flags both `vm.dirty_background_bytes` and `vm.dirty_bytes` set to `0` (unbounded percentage-based dirty cache).
    - Flags unset `SCRUB_LIMIT` in `/etc/btrfs-setup/snapshots.conf` when btrfs filesystems exist (`fix: sudo cst btrfs scrub-limit set 500M`).
@@ -49,7 +49,7 @@ Exit codes:
 
 ## 3. Integrations across CST
 
-- `cst doctor` runs the `responsiveness` area using the exact same rules (`BOTTLENECK` or auto-fixable issues become `WARN`; advisory items become `INFO`).
+- `cst doctor` runs the `responsiveness` area using the same rules for axes whose CST module (`swap`, `cpu`, or `btrfs`) is installed or configured on the host (`BOTTLENECK` or auto-fixable issues become `WARN`; advisory items become `INFO`; `cst perf` itself always checks all four axes unconditionally).
 - `cst swap status` includes a `== diagnosis` section evaluating memory signals from swap's view.
 - `cst cpu status` includes a `== diagnosis` section evaluating CPU and GPU signals when host sysfs/procfs telemetry is present.
 - `cst btrfs status` includes a compact `--axis io` diagnosis block.

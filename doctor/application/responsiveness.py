@@ -5,13 +5,31 @@ from collections.abc import Iterable
 from typing import Final
 
 from doctor.application.shared import check
-from doctor.domain import HostPath, INFO, OK, ViewPath, WARN, Result, host_join
+from doctor.domain import (
+    CPU_RESPONSIVENESS_MARKERS,
+    HostPath,
+    INFO,
+    IO_RESPONSIVENESS_MARKERS,
+    MEMORY_RESPONSIVENESS_MARKERS,
+    OK,
+    ViewPath,
+    WARN,
+    Result,
+    host_join,
+)
 from doctor.ports import CheckFn, DoctorHostPort
 from perf.application import collect_snapshot_from_reader
 from perf.domain.evaluate import evaluate_perf_snapshot
-from perf.domain.models import ALL_PERF_AXES, PerfPathKey, PerfRootKind, PerfVerdict, perf_path_spec
+from perf.domain.models import ALL_PERF_AXES, PerfAxis, PerfPathKey, PerfRootKind, PerfVerdict, perf_path_spec
 
 CHECKS: list[tuple[str, CheckFn]] = []
+
+_AXIS_MARKERS: Final[dict[PerfAxis, tuple[HostPath, ...]]] = {
+    PerfAxis.MEMORY: MEMORY_RESPONSIVENESS_MARKERS,
+    PerfAxis.CPU: CPU_RESPONSIVENESS_MARKERS,
+    PerfAxis.IO: IO_RESPONSIVENESS_MARKERS,
+    PerfAxis.GPU: CPU_RESPONSIVENESS_MARKERS,
+}
 
 _ROOT_HOSTS: Final[dict[PerfRootKind, HostPath]] = {
     PerfRootKind.PROC: HostPath("/proc"),
@@ -74,11 +92,21 @@ class _DoctorPerfReader:
         return self._host.isdir(self._vp(root, rel))
 
 
+def _active_axes(host: DoctorHostPort) -> tuple[PerfAxis, ...]:
+    """Return responsiveness axes whose CST module is installed or configured on the host."""
+    return tuple(
+        axis for axis in ALL_PERF_AXES if any(host.exists(host.path(marker)) for marker in _AXIS_MARKERS[axis])
+    )
+
+
 @check(CHECKS, "responsiveness")
 def check_responsiveness(host: DoctorHostPort) -> Iterable[Result]:
-    """Summarize responsiveness diagnosis from `perf` rules across memory/cpu/io/gpu."""
-    snapshot = collect_snapshot_from_reader(_DoctorPerfReader(host), ALL_PERF_AXES)
-    report = evaluate_perf_snapshot(snapshot, ALL_PERF_AXES)
+    """Summarize responsiveness diagnosis from `perf` rules for installed/configured CST axes."""
+    axes = _active_axes(host)
+    if not axes:
+        return ()
+    snapshot = collect_snapshot_from_reader(_DoctorPerfReader(host), axes)
+    report = evaluate_perf_snapshot(snapshot, axes)
     sampled = [ax for ax in report.axes if ax.verdict is not PerfVerdict.SKIP]
     if not sampled:
         return ()
