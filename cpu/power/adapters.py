@@ -10,6 +10,7 @@ import re
 from typing import Final
 
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
@@ -40,6 +41,8 @@ _CARD_RE: Final = re.compile(r"^card([0-9]+)$")
 _CPU_RE: Final = re.compile(r"^cpu([0-9]+)$")
 _STATE_RE: Final = re.compile(r"^state([0-9]+)$")
 _CONNECTED_VALUE: Final = "connected"
+# As long as cpu-game-profile waits for the same lock.
+_POWER_LOCK_TIMEOUT_S: Final = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,12 @@ class PowerPaths:
     sys_cpu: str = "/sys/devices/system/cpu"
     run: str = "/run/cpu-setup"
     game_state: str = state_format(StateFormatKey.GAME_STATE).path
+
+    @property
+    def lock_file(self) -> str:
+        """The run lock cpu-game-profile's on, off and tick hold (/run/cpu-setup/lock): apply and revert
+        take it too, so a udev hotplug run or the unit never writes GPU and C-state files meanwhile."""
+        return f"{self.run}/lock"
 
     @property
     def gpu_managed_file(self) -> str:
@@ -244,16 +253,27 @@ def apply_power_plan(
 
 
 def execute_power_action(parsed: PowerParsedArgs, paths: PowerPaths) -> tuple[int, list[str]]:
-    """Collect a snapshot and format or execute a validated `cpu-power` action."""
-    snap = collect_power_snapshot(paths)
-    match parsed.action:
-        case PowerAction.STATUS:
+    """Collect a snapshot and format or execute a validated `cpu-power` action (apply and revert under
+    the run lock, the snapshot taken once it is held)."""
+    if parsed.action in (PowerAction.STATUS, PowerAction.PLAN):
+        snap = collect_power_snapshot(paths)
+        if parsed.action == PowerAction.STATUS:
             return 0, format_power_status(snap)
-        case PowerAction.PLAN:
-            pl = plan_power_apply(snap, gpu_only=parsed.gpu_only)
-            return 0, format_power_plan(snap, pl, gpu_only=parsed.gpu_only)
-        case PowerAction.APPLY:
-            pl = plan_power_apply(snap, gpu_only=parsed.gpu_only)
-            return apply_power_plan(paths, snap, pl, gpu_only=parsed.gpu_only)
-        case _:
-            return apply_power_plan(paths, snap, plan_power_revert(snap))
+        pl = plan_power_apply(snap, gpu_only=parsed.gpu_only)
+        return 0, format_power_plan(snap, pl, gpu_only=parsed.gpu_only)
+    try:
+        ensure_dir(paths.run, 0o755)
+        fd = take_lock(paths.lock_file, wait=True, mode=0o644, timeout=_POWER_LOCK_TIMEOUT_S)
+    except OSError as exc:
+        return 1, [f"ERROR: cannot lock {paths.lock_file}: {exc.strerror or exc}"]
+    if fd is None:
+        return 1, [f"ERROR: {paths.lock_file} still held after {_POWER_LOCK_TIMEOUT_S} s; nothing changed"]
+    try:
+        snap = collect_power_snapshot(paths)
+        if parsed.action == PowerAction.APPLY:
+            return apply_power_plan(
+                paths, snap, plan_power_apply(snap, gpu_only=parsed.gpu_only), gpu_only=parsed.gpu_only
+            )
+        return apply_power_plan(paths, snap, plan_power_revert(snap))
+    finally:
+        os.close(fd)

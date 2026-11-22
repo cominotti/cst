@@ -10,12 +10,15 @@ import subprocess
 import tempfile
 from typing import NoReturn, override
 import unittest
+from unittest import mock
 
+from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runtime import RootElevation, enforce_host_root
 from cpu.power.adapters import (
     PowerPaths,
     apply_power_plan,
     collect_power_snapshot,
+    execute_power_action,
     power_paths_for,
 )
 from cpu.power.cli import PowerCliDeps, run_power_cli
@@ -233,6 +236,44 @@ class CpuPowerLifecycleTest(unittest.TestCase):
         )
         self.assertEqual((r_help.returncode, r_help.stderr), (0, ""))
         self.assertIn("Usage: cst cpu power", r_help.stdout)
+
+    def test_apply_and_revert_wait_for_the_run_lock(self) -> None:
+        # cpu-game-profile holds /run/cpu-setup/lock while it switches; apply and revert wait for it
+        # and change nothing when it stays held. status and plan never wait.
+        self._write(self.paths.conf, "GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='200'\n")
+        card3 = os.path.join(self.paths.sys_drm, "card3/device/power/control")
+        c3 = os.path.join(self.paths.sys_cpu, "cpu0/cpuidle/state2/disable")
+        lock = os.path.join(self.paths.run, "lock")
+        # Created as cpu-game-profile creates it: 0644 (cst doctor reads it as a user).
+        self.assertEqual(execute_power_action(parse_power_args(["revert"]), self.paths)[0], 0)
+        self.assertEqual(os.stat(lock).st_mode & 0o777, 0o644)
+        held = take_lock(lock, wait=False)
+        assert held is not None
+        try:
+            with mock.patch("cpu.power.adapters._POWER_LOCK_TIMEOUT_S", 0.3, create=True):
+                self.assertEqual(execute_power_action(parse_power_args(["plan"]), self.paths)[0], 0)
+                rc, out = execute_power_action(parse_power_args(["apply"]), self.paths)
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"ERROR: {lock} still held after 0.3 s; nothing changed", out)
+                self.assertEqual((self._read(card3), self._read(c3)), ("auto", "0"))
+                self.assertFalse(os.path.exists(os.path.join(self.paths.run, "gpu-pm-managed")))
+        finally:
+            os.close(held)
+        rc, out = execute_power_action(parse_power_args(["apply"]), self.paths)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self._read(card3), self._read(c3)), ("on", "1"))
+        held = take_lock(lock, wait=False)
+        assert held is not None
+        try:
+            with mock.patch("cpu.power.adapters._POWER_LOCK_TIMEOUT_S", 0.3, create=True):
+                rc, out = execute_power_action(parse_power_args(["revert"]), self.paths)
+                self.assertEqual(rc, 1, out)
+                self.assertEqual((self._read(card3), self._read(c3)), ("on", "1"))
+        finally:
+            os.close(held)
+        rc, out = execute_power_action(parse_power_args(["revert"]), self.paths)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self._read(card3), self._read(c3)), ("auto", "0"))
 
 
 if __name__ == "__main__":

@@ -4250,6 +4250,15 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             runuser -u tester -- /opt/cst-rw/cst cpu power status | grep -qF "GPU_PM_MODE=always"
             runuser -u tester -- /opt/cst-rw/cst cpu power plan | grep -qF "Dry run: nothing is changed."
             /opt/cst-rw/cst cpu power apply | grep -qE "unchanged:|set:|skipped:"
+            # apply and revert wait for the game profile's run lock (flock(2) on /run/cpu-setup/lock).
+            mkdir -p /run/cpu-setup
+            for action in "apply --gpu-only" revert; do
+                (flock /run/cpu-setup/lock sleep 3) &
+                sleep 0.5
+                t0=$(date +%s); /usr/local/sbin/cpu-power $action >/dev/null; t1=$(date +%s)
+                (( t1 - t0 >= 2 )) || {{ echo "cpu-power $action did not wait for the run lock" >&2; exit 1; }}
+                wait
+            done
             /opt/cst-rw/cst cpu power revert | grep -qE "unchanged:|reverted:|skipped:"
             echo E2E-CPU-POWER-OK
             """,

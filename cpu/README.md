@@ -720,7 +720,10 @@ that has GameMode's library (`libgamemode`) loaded.
   there, it removes them and reloads systemd (logged at level warning).
 
 `on`, `off` and `tick` never run at the same time: they share a lock file,
-`/run/cpu-setup/lock`, and wait up to 60 s for it. `state` takes no lock, so
+`/run/cpu-setup/lock`, and wait up to 60 s for it. `cpu-power apply` and
+`revert` (the boot unit, the udev hotplug rule, `cst cpu power`) take the same
+lock, also for up to 60 s (then exit 1, nothing changed), so they never write
+GPU runtime PM or C-state files while the profile switches. `state` takes no lock, so
 it never waits: it reads `game.state` and `game.intended` once, and every line
 it prints (on or off, the user, the idle boxes, unreadable lines, drift) judges
 that one reading, also when `off` or a tick changes the files meanwhile.
