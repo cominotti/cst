@@ -268,7 +268,7 @@ def dispatch_iocost_cli_action(
         case IocostAction.PLAN:
             snap = collect_iocost_snapshot(paths, runner=env.runner)
             pl = plan_iocost_apply(snap, target_device=parsed.device)
-            return (1 if pl.error is not None else 0), format_iocost_plan(snap, pl)
+            return (1 if pl.error is not None else 0), format_iocost_plan(snap, pl, live_only=parsed.live_only)
         case IocostAction.APPLY:
             return apply_iocost(paths, live_only=parsed.live_only, target_device=parsed.device, runner=env.runner)
         case _:

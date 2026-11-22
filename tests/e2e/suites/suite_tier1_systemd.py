@@ -4366,6 +4366,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "cgroup io:"
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "Dry run: nothing is changed."
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost apply --help | grep -qF "Usage: cst btrfs iocost"
+            # --device writes one disk now: only with --live-only (exit 2 without, nothing written).
+            rc=0; runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --device sda >/dev/null 2>&1 || rc=$?
+            [[ $rc == 2 ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --live-only | grep -qF "Dry run: nothing is changed."
             {installer} install --component btrfs:iocost >/dev/null
             {installer} mark --component btrfs:iocost done >/dev/null
             systemctl daemon-reload

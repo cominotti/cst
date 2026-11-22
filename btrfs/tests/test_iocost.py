@@ -91,7 +91,7 @@ class BtrfsIocostDomainTest(unittest.TestCase):
     def test_parse_args(self) -> None:
         self.assertEqual(parse_iocost_args([]).action, IocostAction.STATUS)
         self.assertEqual(parse_iocost_args(["--help"]).action, IocostAction.HELP)
-        self.assertEqual(parse_iocost_args(["plan", "--device", "/dev/nvme0n1"]).device, "nvme0n1")
+        self.assertEqual(parse_iocost_args(["plan", "--live-only", "--device", "/dev/nvme0n1"]).device, "nvme0n1")
         parsed = parse_iocost_args(["apply", "--live-only", "--device=nvme1n1"])
         self.assertTrue(parsed.live_only)
         self.assertEqual(parsed.device, "nvme1n1")
@@ -99,6 +99,22 @@ class BtrfsIocostDomainTest(unittest.TestCase):
         self.assertIsNotNone(parse_iocost_args(["revert", "--device", "nvme0n1"]).error)
         self.assertIsNotNone(parse_iocost_args(["apply", "--device"]).error)
         self.assertIsNotNone(parse_iocost_args(["unknown"]).error)
+
+    def test_device_needs_live_only(self) -> None:
+        for argv in (["apply", "--device", "nvme0n1"], ["plan", "--device=nvme0n1"]):
+            with self.subTest(argv=argv):
+                parsed = parse_iocost_args(argv)
+                self.assertEqual(parsed.code, 2)
+                self.assertEqual(
+                    parsed.error, "--device needs --live-only (it writes one disk now and installs nothing)"
+                )
+        self.assertEqual(
+            parse_iocost_args(["plan", "--device", "nvme0n1", "--live-only"]),
+            IocostParsedArgs(IocostAction.PLAN, live_only=True, device="nvme0n1"),
+        )
+        self.assertEqual(
+            parse_iocost_args(["plan", "--live-only"]), IocostParsedArgs(IocostAction.PLAN, live_only=True)
+        )
 
     def test_a_help_word_after_the_subcommand_asks_for_help(self) -> None:
         for argv in (["apply", "--help"], ["revert", "--live-only", "-h"], ["plan", "help"], ["status", "--help"]):
@@ -162,6 +178,14 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertEqual(plan.writes[0].line, "259:1 enable=1 ctrl=auto")
         self.assertEqual(plan.next_managed, frozenset({"259:1"}))
         self.assertTrue(any("pre-existing:" in line for line in format_iocost_plan(snap, plan)))
+
+    def test_plan_live_only_shows_no_component_install(self) -> None:
+        snap = collect_iocost_snapshot(self.paths, runner=self.runner)
+        plan = plan_iocost_apply(snap, target_device="nvme0n1")
+        lines = format_iocost_plan(snap, plan, live_only=True)
+        self.assertFalse(any("component btrfs:iocost" in line for line in lines), lines)
+        self.assertIn("would write:   /sys/fs/cgroup/io.cost.qos <- '259:1 enable=1 ctrl=auto'", "\n".join(lines))
+        self.assertTrue(any("would install: component btrfs:iocost" in line for line in format_iocost_plan(snap, plan)))
 
     def test_apply_live_only_and_full_revert_respect_vendor(self) -> None:
         rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)

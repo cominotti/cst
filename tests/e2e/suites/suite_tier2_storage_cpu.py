@@ -2695,7 +2695,7 @@ assert d["samples"] >= 1, d["samples"]
             loop_name="$(basename "$loop_src")"
             devno="$(cat "/sys/block/$loop_name/dev")"
 
-            plan_out="$(/opt/cst-rw/cst btrfs iocost plan --device "$loop_name")"
+            plan_out="$(/opt/cst-rw/cst btrfs iocost plan --live-only --device "$loop_name")"
             grep -qF "$devno enable=1 ctrl=auto" <<<"$plan_out"
 
             /opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name" >/dev/null

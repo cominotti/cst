@@ -135,7 +135,7 @@ cst btrfs help
 | `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
 | `commit-interval [status\|plan\|apply\|revert]` | user / root | Keep the root Btrfs `commit=` interval aligned across the live mount, `/etc/fstab`, BLS kernel args, and top-mount drop-ins (section 9.3; default target `60`s): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
 | `scratch [status\|plan\|attach\|detach]` | user / root | Multi-user bind mounts for a dedicated NVMe scratch/cache drive (`/var/mnt/cache/<user>` -> `~/.cache`, `/var/mnt/scratch/<user>` -> `~/Scratch`; section 9.4): `status` and `plan` run in a toolbox; `attach` and `detach` need root on the host. |
-| `iocost [status\|plan [--device N]\|apply [--live-only] [--device N]\|revert [--live-only]]` | user / root | Enable kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without an upstream hwdb entry so cgroup `IOWeight=` is arbitrated across slices (section 9.2): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
+| `iocost [status\|plan [--live-only [--device N]]\|apply [--live-only [--device N]]\|revert [--live-only]]` | user / root | Enable kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without an upstream hwdb entry so cgroup `IOWeight=` is arbitrated across slices (section 9.2): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
 | `scrub-limit [status\|plan [SIZE\|off]\|set [SIZE]\|off]` | user / root | Inspect or configure `SCRUB_LIMIT` (default `500M`) and `10-cst-limit.conf` (section 4.3): `status` and `plan` work as your user and in a toolbox; `set` and `off` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
@@ -1431,6 +1431,11 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   into `/sys/fs/cgroup/io.cost.qos` for every non-rotational NVMe/SATA/VirtIO
   whole disk whose `enable` is not already `1` (vendor/pre-existing `enable=1`
   entries are preserved untouched and excluded from `/run/btrfs-setup/iocost-managed`);
+- `--live-only` writes `io.cost.qos` only (no unit, rule or install record
+  change); this is what the service and the udev rule run. `--device NAME`
+  limits the write to one whole disk and is accepted only together with
+  `--live-only` (for `apply` and `plan`): a one-disk request never installs
+  the service, whose next boot would write every disk;
 - **`revert`** disables only `MAJ:MIN` devices tracked in
   `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`), stops and disables
   `cst-btrfs-iocost.service`, and removes `btrfs:iocost`.

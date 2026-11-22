@@ -143,11 +143,12 @@ def format_iocost_usage(prog: str) -> str:
         f"{prog}: enable kernel blk-iocost (enable=1 ctrl=auto) on SSDs without an upstream hwdb solution.\n\n"
         "Commands:\n"
         "  status                             read-only (user/toolbox): show cgroup io controller, io.cost.qos, disks, unit\n"
-        "  plan [--device NAME]               dry run (user/toolbox): show what `apply` would install and write\n"
-        "  apply [--live-only] [--device N]   (root on host) enable blk-iocost and install persistent unit + udev rule\n"
+        "  plan [--live-only [--device N]]    dry run (user/toolbox): show what `apply` would install and write\n"
+        "  apply [--live-only [--device N]]   (root on host) enable blk-iocost and install persistent unit + udev rule;\n"
+        "                                     --live-only writes io.cost.qos only, --device N one disk only\n"
         "  revert [--live-only]               (root on host) reset CST-managed io.cost.qos entries and remove unit/rule\n"
         "  help                               show this help\n\n"
-        f"Usage: {prog} <status|plan|apply|revert|help> [--live-only] [--device NAME]\n"
+        f"Usage: {prog} <status|plan|apply|revert|help> [--live-only [--device NAME]]\n"
     )
 
 
@@ -179,7 +180,7 @@ def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
     err: str | None = None
     while idx < len(rest):
         tok = rest[idx]
-        if tok == _LIVE_ONLY_FLAG and action in (IocostAction.APPLY, IocostAction.REVERT) and not live_only:
+        if tok == _LIVE_ONLY_FLAG and action != IocostAction.STATUS and not live_only:
             live_only = True
             idx += 1
         elif (tok == _DEVICE_FLAG or tok.startswith(f"{_DEVICE_FLAG}=")) and action in (
@@ -192,6 +193,9 @@ def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
         else:
             err = f"{action.value}: unexpected argument {tok!r}"
             break
+    if err is None and device is not None and not live_only:
+        # One disk now: without --live-only, apply would also install the service, which writes every disk.
+        err = f"{_DEVICE_FLAG} needs {_LIVE_ONLY_FLAG} (it writes one disk now and installs nothing)"
     if err is not None:
         return IocostParsedArgs(action, error=err, code=2)
     return IocostParsedArgs(action, live_only=live_only, device=device)
@@ -310,8 +314,8 @@ def format_iocost_status(snap: IocostSnapshot) -> list[str]:
     return lines
 
 
-def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan) -> list[str]:
-    """Render dry-run output for `cst btrfs iocost plan`."""
+def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan, *, live_only: bool = False) -> list[str]:
+    """Render dry-run output for `cst btrfs iocost plan` (live_only: only the io.cost.qos writes, no component)."""
     if plan.error is not None:
         return [f"ERROR: {plan.error}", "Dry run: nothing is changed."]
     lines: list[str] = []
@@ -319,7 +323,9 @@ def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan) -> list[str]:
         lines.append("WARN: cgroup v2 'io' controller is not listed in cgroup.controllers")
     if not snap.qos_exists:
         lines.append(f"WARN: {IOCOST_QOS_PATH} is absent (kernel without CONFIG_BLK_CGROUP_IOCOST?)")
-    if not snap.service_present or not snap.rule_installed:
+    if live_only:
+        lines.append("live only:     io.cost.qos writes; no unit, rule or record change")
+    elif not snap.service_present or not snap.rule_installed:
         lines.append(f"would install: component btrfs:iocost ({IOCOST_SERVICE}, {IOCOST_RULE_DEST}) + enable service")
     else:
         lines.append(f"unchanged:     component btrfs:iocost ({snap.service_active}, {snap.service_enabled})")
