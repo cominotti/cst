@@ -4221,6 +4221,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
             install -d -m 0755 /etc/btrfs-setup
             printf "HOME_SUBVOL='home'\\n" > {conf}
+            # Help after a write subcommand needs no sudo (tester has none here).
+            runuser -u tester -- /opt/cst-rw/cst btrfs scrub-limit set --help | grep -qF "Usage: cst btrfs scrub-limit"
             /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
             [[ ! -e {dropin} ]] || {{ echo "plan wrote {dropin}" >&2; exit 1; }}
             grep -qxF "HOME_SUBVOL='home'" {conf}
@@ -4363,6 +4365,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             udevadm verify --resolve-names=never --no-style /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "cgroup io:"
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "Dry run: nothing is changed."
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost apply --help | grep -qF "Usage: cst btrfs iocost"
             {installer} install --component btrfs:iocost >/dev/null
             {installer} mark --component btrfs:iocost done >/dev/null
             systemctl daemon-reload

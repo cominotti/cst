@@ -117,7 +117,7 @@ def parse_scrub_limit_args(argv: Sequence[str]) -> ScrubParsedArgs:
         return ScrubParsedArgs(ScrubLimitAction.STATUS)
     cmd = argv[0]
     rest = argv[1:]
-    if cmd in HELP_WORDS:
+    if cmd in HELP_WORDS or any(tok in HELP_WORDS for tok in rest):
         return ScrubParsedArgs(ScrubLimitAction.HELP)
     result: ScrubParsedArgs
     match cmd:

@@ -281,16 +281,12 @@ case "${cmd}" in
         CST_PROG="${PROG} scratch" exec python3 -I -B "${SRC}/btrfs-scratch" "$@"
         ;;
     iocost)
-        case "${1:-status}" in
-            apply|revert) ;;
-            *) CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@" ;;
-        esac
+        # Python refuses in a container and elevates through sudo itself (apply, revert).
+        CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@"
         ;;
     scrub-limit)
-        case "${1:-status}" in
-            set|off) ;;
-            *) CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@" ;;
-        esac
+        # Python refuses in a container and elevates through sudo itself (set, off).
+        CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@"
         ;;
     install|status|uninstall|test-alert|degraded-boot|crypt-perf|snapshots|bulk|docker-gc)
         ;;
@@ -1204,8 +1200,6 @@ case "${cmd}" in
             "Notifications from btrfs-health-check and btrfs-stall-monitor are working."
         ;;
     crypt-perf) crypt_perf "$@" ;;
-    iocost) CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@" ;;
-    scrub-limit) CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@" ;;
     docker-gc) docker_gc "$@" ;;
     snapshots)
         # shellcheck source=btrfs/setup-snapshots.bash

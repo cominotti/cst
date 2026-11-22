@@ -25,6 +25,7 @@ from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
     BlockDisk,
     IocostAction,
+    IocostParsedArgs,
     format_iocost_plan,
     format_iocost_status,
     is_auto_eligible_disk,
@@ -98,6 +99,11 @@ class BtrfsIocostDomainTest(unittest.TestCase):
         self.assertIsNotNone(parse_iocost_args(["revert", "--device", "nvme0n1"]).error)
         self.assertIsNotNone(parse_iocost_args(["apply", "--device"]).error)
         self.assertIsNotNone(parse_iocost_args(["unknown"]).error)
+
+    def test_a_help_word_after_the_subcommand_asks_for_help(self) -> None:
+        for argv in (["apply", "--help"], ["revert", "--live-only", "-h"], ["plan", "help"], ["status", "--help"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(parse_iocost_args(argv), IocostParsedArgs(IocostAction.HELP))
 
     def test_parse_qos_and_eligible_disks(self) -> None:
         entries = parse_iocost_qos("259:1 enable=1 ctrl=auto rpct=95.00\n259:2 enable=0 ctrl=user\n")

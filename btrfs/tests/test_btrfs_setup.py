@@ -1930,5 +1930,42 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
             self.assertIn(needle, r.stdout)
 
 
+class WriteCommandHelpTest(unittest.TestCase):
+    """`cst btrfs iocost apply --help` and `scrub-limit set --help` print help without sudo:
+    btrfs-setup.sh hands every iocost and scrub-limit word to Python, which elevates only to write."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-write-help-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.mkdir(self.bin)
+        self.marker = os.path.join(self.tmp, "sudo-ran")
+        sudo = os.path.join(self.bin, "sudo")
+        Path(sudo).write_text(f'#!/bin/sh\necho "$@" >"{self.marker}"\nexit 97\n', encoding="utf-8")
+        os.chmod(sudo, 0o755)
+
+    def test_help_after_a_write_subcommand_needs_no_sudo(self) -> None:
+        for argv, usage in (
+            (["iocost", "apply", "--help"], "Usage: cst btrfs iocost"),
+            (["iocost", "revert", "-h"], "Usage: cst btrfs iocost"),
+            (["scrub-limit", "set", "--help"], "Usage: cst btrfs scrub-limit"),
+            (["scrub-limit", "off", "--help"], "Usage: cst btrfs scrub-limit"),
+        ):
+            with self.subTest(argv=argv):
+                r = subprocess.run(
+                    ["bash", SETUP, *argv],
+                    env={"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": self.tmp, "CST_PROG": "cst btrfs"},
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    timeout=60,
+                )
+                self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+                self.assertIn(usage, r.stdout)
+                self.assertFalse(os.path.exists(self.marker), "sudo was run")
+
+
 if __name__ == "__main__":
     unittest.main()

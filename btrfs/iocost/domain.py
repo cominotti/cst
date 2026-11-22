@@ -9,7 +9,7 @@ from enum import StrEnum
 import re
 from typing import Final
 
-from cst_core.domain.text import parse_subcommand_head
+from cst_core.domain.text import HELP_WORDS, parse_subcommand_head
 
 IOCOST_QOS_PATH: Final = "/sys/fs/cgroup/io.cost.qos"
 IOCOST_MODEL_PATH: Final = "/sys/fs/cgroup/io.cost.model"
@@ -170,6 +170,8 @@ def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
     )
     if head_err is not None:
         return IocostParsedArgs(action, error=head_err, code=2)
+    if any(tok in HELP_WORDS for tok in rest):
+        return IocostParsedArgs(IocostAction.HELP)
 
     live_only = False
     device: str | None = None

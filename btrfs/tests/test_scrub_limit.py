@@ -23,6 +23,7 @@ from btrfs.scrub_limit.cli import ScrubCliDeps, run_scrub_limit_cli
 from btrfs.scrub_limit.domain import (
     DEFAULT_SCRUB_LIMIT,
     ScrubLimitAction,
+    ScrubParsedArgs,
     parse_scrub_dropin_limit,
     parse_scrub_limit_args,
     render_scrub_dropin,
@@ -123,6 +124,11 @@ class ScrubLimitDomainTest(unittest.TestCase):
         self.assertIsNotNone(parse_scrub_limit_args(["bogus"]).error)
         self.assertEqual(validate_scrub_size("500M"), ("500M", None))
         self.assertIsNotNone(validate_scrub_size("0G")[1])
+
+    def test_a_help_word_after_the_subcommand_asks_for_help(self) -> None:
+        for argv in (["set", "--help"], ["set", "500M", "-h"], ["off", "--help"], ["plan", "off", "help"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(parse_scrub_limit_args(argv), ScrubParsedArgs(ScrubLimitAction.HELP))
 
     def test_render_dropin_matches_btrfs_setup_script_byte_for_byte(self) -> None:
         setup = os.path.join(REPO, "btrfs-setup.sh")
