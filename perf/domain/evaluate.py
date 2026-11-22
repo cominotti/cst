@@ -8,6 +8,7 @@ from typing import Final
 
 from cst_core.domain.text import group
 from cst_core.domain.values import CpuSet, HOUR, format_bytes_human
+from cpu.power.domain import default_cstate_cap_off
 from perf.domain.models import (
     ALL_PERF_AXES,
     ALLOCSTALL_ATTENTION_PER_HOUR,
@@ -493,7 +494,11 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate cpuidle wakeup latency, preemption mode, ntsync, and IRQ placement."""
     col = _AxisCollector(PerfAxis.CPU)
     if cpu.idle_states:
-        worst_deep = _worst_enabled_deep_cstate(cpu.idle_states)
+        # Where cpu-power leaves the C-states on by default (any driver but intel_idle, such as AMD's
+        # acpi_idle), a deep state is what `cst cpu install` chose: no warning its fix cannot clear.
+        worst_deep = (
+            None if default_cstate_cap_off(cpu.cpuidle_driver or "") else _worst_enabled_deep_cstate(cpu.idle_states)
+        )
         max_enabled = max((s.latency_us for s in cpu.idle_states if not s.disabled), default=0)
         col.metric("cpuidle max enabled", f"{cpu.cpuidle_driver or 'cpuidle'}: {max_enabled} µs")
         if worst_deep is not None:

@@ -255,6 +255,17 @@ class PerfEvaluatorTest(unittest.TestCase):
         self.assertEqual([f.finding_id for f in unprot_rep.findings], ["memory-session-floor-unset"])
         self.assertIn("user-1000.slice", unprot_rep.findings[0].summary)
 
+    def test_deep_cstates_warn_only_where_cpu_power_caps_them_by_default(self) -> None:
+        # cpu-power leaves the C-states on by default with any cpuidle driver but intel_idle (AMD's
+        # acpi_idle): a deep state there is not a finding `cst cpu install` could clear.
+        deep = (CpuIdleStateSample("C1", 2, disabled=False), CpuIdleStateSample("C3", 350, disabled=False))
+        for driver, warned in (("intel_idle", True), (None, True), ("acpi_idle", False), ("haltpoll", False)):
+            with self.subTest(driver=driver):
+                rep = evaluate_perf_cpu(CpuProbeSnapshot(cpuidle_driver=driver, idle_states=deep))
+                ids = {f.finding_id for f in rep.findings}
+                self.assertEqual("cpu-deep-cstates" in ids, warned, ids)
+                self.assertIn(f"{driver or 'cpuidle'}: 350 µs", [m.value for m in rep.metrics])
+
     def test_cpu_evaluation(self) -> None:
         ok_cpu = CpuProbeSnapshot(
             cpuidle_driver="intel_idle",
