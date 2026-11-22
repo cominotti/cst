@@ -336,7 +336,12 @@ from the machine's sysfs for it:
 - `CPU_CSTATE_MAX_LATENCY_US`: `200` with the `intel_idle` cpuidle driver (or
   when it cannot be read), `off` with any other (AMD's `acpi_idle`, whose
   states the 200 µs was not chosen for). `cpu-power` applies the same rule
-  when the file has no such line; a value the file sets always counts.
+  when the file has no such line; a value the file sets always counts. A file
+  an older CST wrote always has `CPU_CSTATE_MAX_LATENCY_US='200'`, and
+  `install` keeps an existing file, so an AMD host installed before keeps the
+  200 µs cap after an upgrade: set the line to `'off'` (or remove it), then
+  run `cst cpu power apply` (or reboot), which turns the states it disabled
+  back on.
 
 (Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
 uses the same five names as its default.) A byte that is not UTF-8 in this
