@@ -3,17 +3,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 import glob
 import os
-from typing import Final, NoReturn
+from typing import Final
 
 from btrfs.scrub_limit.domain import (
     SCRUB_CONF_PATH,
     SCRUB_DROPIN_PATH,
-    ScrubLimitAction,
     ScrubStatusSnapshot,
     render_scrub_dropin,
     scrub_limit_plan_lines,
@@ -23,8 +21,6 @@ from btrfs.scrub_limit.domain import (
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
-    RootElevation,
-    enforce_host_root,
     host_view_path,
     installer_script_for,
     run_installer,
@@ -45,15 +41,6 @@ class ScrubPaths:
     dropin_path: str = SCRUB_DROPIN_PATH
     btrfs_sysfs: str = "/sys/fs/btrfs"
     installer_script: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ScrubInvocation:
-    """Caller identity and command arguments for elevation checks."""
-
-    prog: str
-    args: tuple[str, ...]
-    entry_file: str
 
 
 def start_scrub_process() -> None:
@@ -83,29 +70,6 @@ def scrub_paths_for(
         dropin_path=SCRUB_DROPIN_PATH,
         btrfs_sysfs="/sys/fs/btrfs",
         installer_script=installer,
-    )
-
-
-def enforce_scrub_host_root(
-    action: ScrubLimitAction,
-    invocation: ScrubInvocation,
-    *,
-    ctx: ExecutionContextPort | None = None,
-    elevate: Callable[[list[str]], NoReturn] | None = None,
-) -> str | None:
-    """Enforce host execution and root privilege for mutating `set`/`off` commands."""
-    if action not in (ScrubLimitAction.SET, ScrubLimitAction.OFF):
-        return None
-    return enforce_host_root(
-        RootElevation(
-            prog=invocation.prog,
-            action=action.value,
-            args=invocation.args,
-            entry_file=invocation.entry_file,
-            reason="writes /etc/btrfs-setup/snapshots.conf and systemd drop-in",
-        ),
-        ctx=ctx,
-        elevate=elevate,
     )
 
 
