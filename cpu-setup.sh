@@ -81,7 +81,8 @@
 #   help
 #
 # Root commands must run on the host, not inside toolbox; watch/report/quiet
-# and read-only `power status|plan` work in both (cpu-watch runs on the host).
+# and read-only `power status|plan` and `irq status|plan` work in both
+# (cpu-watch runs on the host).
 
 set -Eeuo pipefail
 

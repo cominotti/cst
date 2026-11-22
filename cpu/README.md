@@ -1449,6 +1449,7 @@ see [../swap/README.md](../swap/README.md).
 cst cpu game off               # optional; uninstall also stops the profile
 cst cpu experiment off NAME    # for each experiment that is ON
 cst cpu docker-slice uninstall # if installed; then: sudo systemctl restart docker
+cst cpu irq revert             # optional; uninstall also runs it
 cst cpu uninstall
 ```
 
