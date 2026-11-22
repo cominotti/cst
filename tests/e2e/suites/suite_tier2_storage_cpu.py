@@ -2677,3 +2677,39 @@ assert d["samples"] >= 1, d["samples"]
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    def test_23_btrfs_iocost_plan_apply_and_revert_live(self) -> None:
+        """`cst btrfs iocost` writes real kernel `/sys/fs/cgroup/io.cost.qos` on a loopback block
+        device and cleanly reverts only CST-managed rows without disturbing other entries."""
+        self.addCleanup(
+            exec_bash,
+            self.PRIV_CONTAINER,
+            "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true",
+            check=False,
+        )
+        out = exec_bash(
+            self.PRIV_CONTAINER,
+            """
+            set -euo pipefail
+            loop_src="$(findmnt -rn -o SOURCE --target /var | sed 's/\\[.*//')"
+            loop_name="$(basename "$loop_src")"
+            devno="$(cat "/sys/block/$loop_name/dev")"
+
+            plan_out="$(/opt/cst-rw/cst btrfs iocost plan --device "$loop_name")"
+            grep -qF "$devno enable=1 ctrl=auto" <<<"$plan_out"
+
+            /opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name" >/dev/null
+            grep -qE "^${devno} enable=1" /sys/fs/cgroup/io.cost.qos
+
+            st="$(/opt/cst-rw/cst btrfs iocost status)"
+            grep -qE "[1-9][0-9]* active device" <<<"$st"
+
+            /opt/cst-rw/cst btrfs iocost revert --live-only >/dev/null
+            if grep -qE "^${devno} enable=1" /sys/fs/cgroup/io.cost.qos; then
+                echo "io.cost.qos still has enable=1 for $devno after revert" >&2
+                exit 1
+            fi
+            echo E2E-IOCOST-T2-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-IOCOST-T2-OK", out)

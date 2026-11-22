@@ -1059,11 +1059,15 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         repo = self.CST_ROOT_MOUNT
         for extra_flags, subcmd in (
             ([], "/opt/cst/cst cpu install"),
+            ([], "/opt/cst/cst cpu irq apply"),
+            ([], "/opt/cst/cst cpu irq revert"),
             ([], "/opt/cst/cst cpu power apply"),
             ([], "/opt/cst/cst cpu power revert"),
             ([], "/opt/cst/cst btrfs install --no-below"),
             ([], "/opt/cst/cst btrfs compress-force apply --yes"),
             ([], "/opt/cst/cst btrfs compress-force revert --yes"),
+            ([], "/opt/cst/cst btrfs iocost apply"),
+            ([], "/opt/cst/cst btrfs iocost revert"),
             ([], "/opt/cst/cst btrfs scrub-limit set 500M"),
             ([], "/opt/cst/cst swap apply"),
             (["--user", "tester"], "/opt/cst/cst bluetooth apply --no-restart --yes"),
@@ -2498,6 +2502,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
         entries = {
             "/usr/local/sbin/btrfs-bulk": ("--help", 2),
+            "/usr/local/sbin/btrfs-iocost": ("--help", 0),
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
             "/usr/local/sbin/btrfs-snapshot-runtime": ("--help", 2),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
@@ -2507,6 +2512,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/usr/local/sbin/cpu-irq": ("--help", 0),
             "/usr/local/sbin/cpu-power": ("--help", 0),
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
             "/usr/local/sbin/cpu-game-profile": ("--help", 2),
@@ -3007,6 +3013,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "btrfs-subvol-convert.service": 94,
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
+        "cst-btrfs-iocost.service": 68,
         "cst-cpu-power.service": 94,
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
@@ -3101,6 +3108,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         for name in (
             "btrfs-scrub-weekly.service",
             "below.service",
+            "irqbalance.service",
             "machine.slice",
             "user@e2e.service",
             "user@1000.service",
@@ -4246,6 +4254,71 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             """,
         ).stdout
         self.assertIn("E2E-CPU-POWER-OK", out)
+
+    @e2e_tags(E2ETag.CPU, E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_128a_cpu_irq_and_btrfs_iocost_lifecycle(self) -> None:
+        """`cst cpu irq` and `cst btrfs iocost` real-systemd drop-in, unit, udev, and revert lifecycle."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(
+            c,
+            "[[ ! -e /etc/cpu-setup/irqbalance.env ]] && [[ ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]] "
+            "&& [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service ]] || echo busy",
+        ).stdout.strip():
+            self.skipTest("irqbalance or btrfs:iocost files already present on container")
+        self.addCleanup(
+            exec_bash,
+            c,
+            "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
+            "/opt/cst-rw/cst cpu irq revert >/dev/null 2>&1 || true; "
+            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak; "
+            "[[ ! -e /tmp/e2e-128a-cpu.orig ]] || mv /tmp/e2e-128a-cpu.orig /etc/cpu-setup/cpu-setup.conf; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.orig
+            last_cpu="$(( $(nproc) - 1 ))"
+            mkdir -p /etc/cpu-setup
+            if (( last_cpu >= 2 )); then
+                printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+            else
+                printf "BUILD_CPUS=''\n" >/etc/cpu-setup/cpu-setup.conf
+            fi
+            runuser -u tester -- /opt/cst-rw/cst cpu irq status | grep -qF "BUILD_CPUS="
+            runuser -u tester -- /opt/cst-rw/cst cpu irq plan --no-pkg | grep -qF "Dry run: nothing is changed."
+            if (( last_cpu >= 2 )); then
+                /opt/cst-rw/cst cpu irq apply --no-pkg
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                grep -qxF "EnvironmentFile=-/etc/cpu-setup/irqbalance.env" /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf
+                printf '[Unit]\nDescription=e2e irqbalance\n[Service]\nEnvironmentFile=-/etc/sysconfig/irqbalance\nExecStart=/usr/bin/true\n' \
+                    >/run/systemd/system/irqbalance.service
+                systemctl daemon-reload
+                systemctl show -p EnvironmentFiles irqbalance.service | grep -qF "/etc/cpu-setup/irqbalance.env"
+                systemctl show -p DropInPaths irqbalance.service | grep -qF "10-cst-ban.conf"
+                /opt/cst-rw/cst cpu irq apply --no-pkg | grep -qE "unchanged:|skipped:"
+                /opt/cst-rw/cst cpu irq revert
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                rm -f /run/systemd/system/irqbalance.service
+            fi
+
+            udevadm verify --resolve-names=never --no-style /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "cgroup io:"
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "Dry run: nothing is changed."
+            {installer} install --component btrfs:iocost >/dev/null
+            {installer} mark --component btrfs:iocost done >/dev/null
+            systemctl daemon-reload
+            systemctl start cst-btrfs-iocost.service
+            [[ "$(systemctl show -P ActiveState cst-btrfs-iocost.service)" == active ]]
+            /opt/cst-rw/cst btrfs iocost revert
+            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
+            echo E2E-IRQ-IOCOST-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-IRQ-IOCOST-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
@@ -5433,8 +5506,8 @@ PY
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-new.txt
             written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
 ' ' ')
-            # The game profile becomes a zipapp; cpu-watch, cpu-power, and cpu-vm-pin + new unit/udev rule.
-            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
+            # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, and cpu-vm-pin + new unit/udev rule.
+            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
                 || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
             grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
             grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
@@ -5461,7 +5534,7 @@ PY
             fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
-            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "GPU runtime PM and CPU C-states" "last measurements"; do
+            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "GPU runtime PM and CPU C-states" "irqbalance" "last measurements"; do
                 grep -qx "== $s" <<<"$st" || {{ echo "status without '$s'" >&2; exit 1; }}
             done
             # A second install writes nothing.
@@ -5469,7 +5542,7 @@ PY
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
             # uninstall, twice.
             as_root /opt/cst-rw/cst cpu uninstall
-            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
+            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
                 [[ ! -e "$f" ]] || {{ echo "uninstall left $f" >&2; exit 1; }}
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi

@@ -44,10 +44,12 @@ class Component(StrEnum):
     BTRFS_TOP_MOUNT = "btrfs:top-mount"
     BTRFS_DOCKER_GC = "btrfs:docker-gc"
     BTRFS_DEGRADED_BOOT = "btrfs:degraded-boot"
+    BTRFS_IOCOST = "btrfs:iocost"
     BTRFS_REPORT_LAUNCHER = "btrfs:report-launcher"
     CPU_CORE = "cpu:core"
     CPU_GAMEMODE = "cpu:gamemode"
     CPU_DOCKER_SLICE = "cpu:docker-slice"
+    CPU_IRQ = "cpu:irq"
     CPU_TOOLBOX = "cpu:toolbox"
     BLUETOOTH_LDAC = "bluetooth:ldac"
     SWAP_CORE = "swap:core"
@@ -153,8 +155,12 @@ btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-write
 btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root   btrfs:core
 btrfs/tmpfiles/cst-nvme-apst.conf                   /etc/tmpfiles.d/cst-nvme-apst.conf                            644  root  data          root   btrfs:core
 btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvme-apst.rules                      644  root  data          root   btrfs:core
+btrfs/btrfs-iocost                                  /usr/local/sbin/btrfs-iocost                                  755  root  python-entry  root   btrfs:iocost
+btrfs/units/cst-btrfs-iocost.service                /etc/systemd/system/cst-btrfs-iocost.service                  644  root  unit          root   btrfs:iocost
+btrfs/udev/91-cst-iocost.rules                      /etc/udev/rules.d/91-cst-iocost.rules                         644  root  data          root   btrfs:iocost
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
+cpu/cpu-irq                                         /usr/local/sbin/cpu-irq                                       755  root  python-entry  root   cpu:core
 cpu/cpu-power                                       /usr/local/sbin/cpu-power                                     755  root  python-entry  root   cpu:core
 cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
 cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  python-entry  root   cpu:core
@@ -199,10 +205,12 @@ _COMMANDS: Final = {
     "btrfs:top-mount": "cst btrfs snapshots setup",
     "btrfs:docker-gc": "cst btrfs docker-gc enable",
     "btrfs:degraded-boot": "cst btrfs degraded-boot install",
+    "btrfs:iocost": "cst btrfs iocost apply",
     "btrfs:report-launcher": "cst btrfs install",
     "cpu:core": "cst cpu install",
     "cpu:gamemode": "cst cpu install",
     "cpu:docker-slice": "cst cpu docker-slice install",
+    "cpu:irq": "cst cpu irq apply",
     "cpu:toolbox": "cst cpu install",
     "bluetooth:ldac": "cst bluetooth apply",
     "swap:core": "cst swap apply",
@@ -220,6 +228,7 @@ COMPONENTS: Final[Mapping[Component, str]] = {c: _COMMANDS[c] for c in Component
 GENERATED_COMPONENTS: Final[Mapping[Component, Owner]] = {
     Component.BTRFS_DEGRADED_BOOT: Owner.ROOT,
     Component.BTRFS_REPORT_LAUNCHER: Owner.USER,
+    Component.CPU_IRQ: Owner.ROOT,
     Component.CPU_TOOLBOX: Owner.USER,
 }
 

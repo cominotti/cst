@@ -8,7 +8,7 @@ the same answer in both, so no program computes paths from `__file__` by
 itself.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -16,13 +16,14 @@ import pwd
 import signal
 import stat
 import sys
-from typing import NoReturn
+from typing import NoReturn, Protocol, TextIO
 import zipfile
 
+from cst_core.adapters import SystemctlAdapter, SystemctlHost, terminal
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.install import expand_dest, manifest_by_src
-from cst_core.ports import ExecutionContextPort
+from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, UnitName
 
 SYSTEM_PYTHON = "/usr/bin/python3"
 
@@ -290,3 +291,105 @@ def process_identity() -> tuple[bool, str]:
     whose install record a process such as the installer writes. Not $HOME: runuser keeps root's."""
     euid = os.geteuid()
     return euid == 0, pwd.getpwuid(euid).pw_dir
+
+
+def installer_script_for(entry_file: str, fallback_root: str = "") -> str:
+    """Locate `cst_core/installer.py` from `entry_file`'s checkout root or `fallback_root`."""
+    root = checkout_root(entry_file) or fallback_root
+    return os.path.join(root, "cst_core", "installer.py") if root else ""
+
+
+def run_installer(
+    runner: CommandRunnerPort,
+    script: str,
+    args: Sequence[str],
+    *,
+    input_text: str | None = None,
+) -> tuple[int, list[str], str]:
+    """Invoke `cst_core/installer.py` under `SYSTEM_PYTHON -I -B` and return `(rc, non_empty_lines, stderr)`."""
+    key, _, val = lc_ctype_handover().partition("=")
+    res = runner.run(
+        [SYSTEM_PYTHON, "-I", "-B", script, *args],
+        input_text=input_text,
+        env={key: val},
+        output=OutputMode.CAPTURE,
+    )
+    lines = [line for line in res.stdout.splitlines() if line.strip()]
+    return res.returncode, lines, res.stderr.strip()
+
+
+def probe_systemd_unit(runner: CommandRunnerPort, unit: str) -> tuple[bool, str, str]:
+    """Query `(unit_present, ActiveState, UnitFileState)` via `SystemctlAdapter(..., SHOW_ONLY)`."""
+    systemd = SystemctlAdapter(runner, on_host=SystemctlHost.SHOW_ONLY)
+    props = systemd.show(UnitName(unit), ("LoadState", "ActiveState", "UnitFileState"))
+    present = bool(props) and props.get("LoadState", "not-found") != "not-found"
+    return present, props.get("ActiveState", "unknown"), props.get("UnitFileState", "unknown")
+
+
+class _CliExecutor[P](Protocol):
+    """Callback executing a validated CLI command with environment metadata and read-only flag."""
+
+    def __call__(self, parsed: P, env: ManagedCliEnv, /, *, read_only: bool) -> tuple[int, list[str]]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedCliEnv:
+    """Injected streams, environment, and execution context for `run_managed_cli`."""
+
+    entry_file: str = ""
+    env: Mapping[str, str] | None = None
+    out: TextIO | None = None
+    err: TextIO | None = None
+    ctx: ExecutionContextPort | None = None
+    runner: CommandRunnerPort | None = None
+    fallback_root: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedCliSpec[P]:
+    """Behavioral hooks and metadata for a host-root-gated managed CLI entry."""
+
+    default_prog: str
+    parse: Callable[[Sequence[str]], P]
+    format_usage: Callable[[str], str]
+    is_help: Callable[[P], bool]
+    parse_error: Callable[[P], tuple[int, str] | None]
+    write_action: Callable[[P], str | None]
+    elevation_reason: str
+    execute: _CliExecutor[P]
+    resolve_prog: Callable[[str], str] | None = None
+    is_err_line: Callable[[int, str], bool] | None = None
+
+
+def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: ManagedCliEnv | None = None) -> int:
+    """Execute one standardized CLI invocation with help, usage error, and host-root checks."""
+    cfg = ManagedCliEnv() if env is None else env
+    env_map = os.environ if cfg.env is None else cfg.env
+    raw_prog = env_map.get("CST_PROG") or ""
+    prog = spec.resolve_prog(raw_prog) if spec.resolve_prog is not None else (raw_prog or spec.default_prog)
+    out_fh = terminal.stdout() if cfg.out is None else cfg.out
+    err_fh = terminal.stderr() if cfg.err is None else cfg.err
+
+    parsed = spec.parse(args)
+    if (err_info := spec.parse_error(parsed)) is not None:
+        code, msg = err_info
+        err_fh.write(f"{prog}: {msg}\n\n{spec.format_usage(prog)}")
+        return code
+    if spec.is_help(parsed):
+        out_fh.write(spec.format_usage(prog))
+        return 0
+
+    action = spec.write_action(parsed)
+    writes = action is not None
+    if action is not None:
+        req = RootElevation(prog, action, tuple(args), cfg.entry_file, spec.elevation_reason)
+        if (refusal := enforce_host_root(req, ctx=cfg.ctx)) is not None:
+            err_fh.write(f"{refusal}\n")
+            return 1
+
+    rc, output_lines = spec.execute(parsed, cfg, read_only=not writes)
+    err_pred = spec.is_err_line or (lambda code, line: code != 0 and line.startswith("ERROR:"))
+    for line in output_lines:
+        target = err_fh if err_pred(rc, line) else out_fh
+        target.write(f"{line}\n")
+    return rc

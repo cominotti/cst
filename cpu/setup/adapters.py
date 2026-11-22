@@ -650,10 +650,6 @@ class CpuSetup:
         """vm-pin plan|apply|status: the checkout's cpu-vm-pin, in the foreground (apply asks)."""
         return self._passthrough(self._checkout_program("vm-pin", *args))
 
-    def power(self, args: Sequence[str]) -> int:
-        """power apply|revert|status|plan: apply or revert GPU runtime PM and CPU C-state ceiling."""
-        return self.run(self._checkout_program("cpu-power", *args), check=False).returncode
-
     # ---- status --------------------------------------------------------------------------------------
     def section(self, title: str) -> None:
         self.say()
@@ -734,6 +730,8 @@ class CpuSetup:
         self.experiment(["list"])
         self.section("GPU runtime PM and CPU C-states")
         self.write(indented(self.run(self._checkout_program("cpu-power", "status"), check=False, capture=True).stdout))
+        self.section("irqbalance")
+        self.write(indented(self.run(self._checkout_program("cpu-irq", "status"), check=False, capture=True).stdout))
         self._render_perf_diagnosis()
         self.section("last measurements")
         if not user:
@@ -779,8 +777,9 @@ class CpuSetup:
                     return self.vm_pin(args)
                 case CpuRootCommand.DOCKER_SLICE:
                     return self.docker_slice(args)
-                case CpuRootCommand.POWER:
-                    return self.power(args)
+                case CpuRootCommand.POWER | CpuRootCommand.IRQ:
+                    prog = "cpu-power" if cmd == CpuRootCommand.POWER else "cpu-irq"
+                    return self.run(self._checkout_program(prog, *args), check=False).returncode
                 case _:
                     return self.experiment(args)
         except Halt as stop:

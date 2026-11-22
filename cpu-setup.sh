@@ -66,6 +66,9 @@
 #   power [status|plan|apply|revert]   (`status`/`plan`: user & toolbox;
 #                          `apply`/`revert`: root on host) manage connected display GPU
 #                          runtime PM and CPU deep C-state latency ceilings
+#   irq [status|plan|apply [--no-pkg]|revert]   (`status`/`plan`: user & toolbox;
+#                          `apply`/`revert`: root on host) configure adaptive irqbalance
+#                          CPU ban-list from BUILD_CPUS and online CPUs
 #   watch -l LABEL [--game NAME] [--seconds N] [--mangohud DIR] [-- CMD]
 #                          (user) record game wait/memory stalls/frequencies
 #   report [RUN...]        (user) compare recorded runs

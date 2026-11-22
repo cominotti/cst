@@ -2429,5 +2429,58 @@ class ServiceNotifierTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "<4>cannot notify systemd (READY): [Errno 24] Too many open files\n")
 
 
+class ManagedRuntimeHelpersTest(unittest.TestCase):
+    """installer_script_for, run_installer, probe_systemd_unit, and run_managed_cli."""
+
+    def test_installer_script_run_and_probe(self) -> None:
+        from cst_core.adapters.runtime import (
+            ManagedCliEnv,
+            ManagedCliSpec,
+            installer_script_for,
+            probe_systemd_unit,
+            run_installer,
+            run_managed_cli,
+        )
+        from cst_core.domain.text import parse_subcommand_head
+        from cst_core.ports import CommandResult
+        from enum import StrEnum
+
+        script = installer_script_for("", fallback_root="/tmp/cst-root")
+        self.assertEqual(script, "/tmp/cst-root/cst_core/installer.py")
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
+                self.calls.append(list(argv))
+                if argv[0] == "systemctl":
+                    return CommandResult(0, "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n", "")
+                return CommandResult(0, "written:   /etc/foo\n", "")
+
+        runner = _Runner()
+        rc, lines, err = run_installer(runner, script, ["text", "/etc/foo", "0644"], input_text="hi\n")
+        self.assertEqual((rc, lines, err), (0, ["written:   /etc/foo"], ""))
+        self.assertEqual(probe_systemd_unit(runner, "foo.service"), (True, "active", "enabled"))
+
+        class _Cmd(StrEnum):
+            STATUS = "status"
+            HELP = "help"
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec = ManagedCliSpec(
+            default_prog="cst foo",
+            parse=lambda a: parse_subcommand_head(a, _Cmd, default=_Cmd.STATUS, help_action=_Cmd.HELP),
+            format_usage=lambda p: f"usage: {p}\n",
+            is_help=lambda t: t[0] == _Cmd.HELP,
+            parse_error=lambda t: None if t[2] is None else (2, t[2]),
+            write_action=lambda _t: None,
+            elevation_reason="none",
+            execute=lambda _t, _env, *, read_only: (0, [f"ok ro={read_only}"]),
+        )
+        code = run_managed_cli(["status"], spec, ManagedCliEnv(env={}, out=out_s, err=err_s))
+        self.assertEqual((code, out_s.getvalue(), err_s.getvalue()), (0, "ok ro=True\n", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

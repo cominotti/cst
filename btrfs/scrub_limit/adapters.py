@@ -23,12 +23,11 @@ from btrfs.scrub_limit.domain import (
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
-    SYSTEM_PYTHON,
     RootElevation,
-    checkout_root,
     enforce_host_root,
     host_view_path,
-    lc_ctype_handover,
+    installer_script_for,
+    run_installer,
     undo_python_start,
 )
 from cst_core.domain.install import Component
@@ -71,8 +70,7 @@ def scrub_paths_for(
 ) -> ScrubPaths:
     """Build `ScrubPaths` mapped to `/run/host` inside containers for read-only views."""
     exec_ctx = HostExecutionContext() if ctx is None else ctx
-    root = checkout_root(entry_file) or fallback_root
-    installer = os.path.join(root, "cst_core", "installer.py") if root else ""
+    installer = installer_script_for(entry_file, fallback_root)
     if read_only:
         return ScrubPaths(
             conf_path=host_view_path(exec_ctx, SCRUB_CONF_PATH),
@@ -194,36 +192,26 @@ def scrub_limit_apply(
         suffix = " (absent)" if conf_text is None else ""
         out.append(f"unchanged: {paths.conf_path}{suffix}")
 
-    handover = lc_ctype_handover().partition("=")
-    env = {handover[0]: handover[2]}
     if target_limit is not None:
         dropin_text = render_scrub_dropin(target_limit)
-        argv = [
-            SYSTEM_PYTHON,
-            "-I",
-            "-B",
+        rc_i, inst_lines, err_i = run_installer(
+            cmd_runner,
             paths.installer_script,
-            "text",
-            paths.dropin_path,
-            "0644",
-            "--component",
-            Component.BTRFS_CORE.value,
-        ]
-        res = cmd_runner.run(argv, input_text=dropin_text, env=env, output=OutputMode.CAPTURE)
+            ["text", paths.dropin_path, "0644", "--component", Component.BTRFS_CORE.value],
+            input_text=dropin_text,
+        )
     else:
-        argv = [SYSTEM_PYTHON, "-I", "-B", paths.installer_script, "remove-text", paths.dropin_path]
-        res = cmd_runner.run(argv, env=env, output=OutputMode.CAPTURE)
+        rc_i, inst_lines, err_i = run_installer(cmd_runner, paths.installer_script, ["remove-text", paths.dropin_path])
 
-    out.extend(line for line in res.stdout.splitlines() if line.strip())
-    if res.returncode != 0:
-        if res.stderr.strip():
-            out.append(res.stderr.strip())
-        return res.returncode, out
+    out.extend(inst_lines)
+    if rc_i != 0:
+        if err_i:
+            out.append(err_i)
+        return rc_i, out
 
     if target_limit is None:
         with contextlib.suppress(OSError):
             os.rmdir(os.path.dirname(paths.dropin_path))
-    dropin_changed = any(line.startswith(("written:", "removed:")) for line in res.stdout.splitlines())
-    if dropin_changed:
+    if any(line.startswith(("written:", "removed:")) for line in inst_lines):
         cmd_runner.run(["systemctl", "daemon-reload"], output=OutputMode.CAPTURE)
     return 0, out

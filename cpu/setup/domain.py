@@ -19,6 +19,7 @@ from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
 from cst_core.domain.values import Json
 from cpu.game.domain import BUILDS_SLICE
+from cpu.irq.domain import IrqAction
 from cpu.power.domain import PowerAction
 
 
@@ -42,6 +43,7 @@ class CpuRootCommand(StrEnum):
     DOCKER_SLICE = "docker-slice"
     EXPERIMENT = "experiment"
     POWER = "power"
+    IRQ = "irq"
 
 
 class DockerSliceAction(StrEnum):
@@ -75,8 +77,9 @@ DOCKER_SLICE_COMPONENT: Final = Component.CPU_DOCKER_SLICE
 WATCHDOG_TIMER: Final = "cpu-game-watchdog.timer"
 # Oneshot service applying GPU runtime PM and CPU C-state limits at boot.
 CPU_POWER_SERVICE: Final = "cst-cpu-power.service"
-# Subcommands of `cst cpu power` that mutate `/sys` and `/run` and therefore need host + root.
+# Subcommands of `cst cpu power` and `cst cpu irq` that mutate host state and therefore need host + root.
 POWER_ROOT_ACTIONS: Final = frozenset({PowerAction.APPLY, PowerAction.REVERT})
+IRQ_ROOT_ACTIONS: Final = frozenset({IrqAction.APPLY, IrqAction.REVERT})
 # GameMode's group: its members may ask gamemoded for the game profile.
 GAMEMODE_GROUP: Final = "gamemode"
 
@@ -94,9 +97,11 @@ def route(cmd: str, rest: Sequence[str] = ()) -> CpuRoute:
         return CpuRoute.HELP
     if cmd in WATCH_COMMANDS:
         return CpuRoute.WATCH
+    action = rest[0] if rest else ""
     if cmd == CpuRootCommand.POWER:
-        action = rest[0] if rest else ""
         return CpuRoute.ROOT if action in POWER_ROOT_ACTIONS else CpuRoute.WATCH
+    if cmd == CpuRootCommand.IRQ:
+        return CpuRoute.ROOT if action in IRQ_ROOT_ACTIONS else CpuRoute.WATCH
     return CpuRoute.ROOT if cmd in ROOT_COMMANDS else CpuRoute.UNKNOWN
 
 

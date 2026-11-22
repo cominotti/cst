@@ -40,6 +40,7 @@ if REPO not in sys.path:
 from bluetooth.domain import LDAC_UNIT, render_unit as bt_render_unit
 from btrfs.tests.test_degraded_boot import EXPECTED_RECORD, EXPECTED_SERVICE, EXPECTED_TIMER
 from cpu.game import domain as game_domain
+from cpu.irq import domain as irq_domain
 from cpu.setup import domain as cpu_domain
 from cst_core.domain.install import INSTALL_MANIFEST, manifest_by_src, render_template
 from cst_core.domain.text import file_lines, parse_shell_assignments
@@ -187,6 +188,13 @@ def generated_dropins() -> list[UnitText]:
             "user",
             "cpu/cpu-setup",
             "flatpak-session-helper.service",
+        ),
+        UnitText(
+            "10-cst-ban.conf",
+            irq_domain.render_irq_dropin(),
+            "system",
+            "cpu/cpu-irq",
+            irq_domain.IRQBALANCE_SERVICE,
         ),
         *(
             UnitText(

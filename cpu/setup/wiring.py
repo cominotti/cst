@@ -54,9 +54,10 @@ def checkout(handed: Handed) -> str:
 
 
 def watch_argv(handed: Handed, cmd: str, rest: Sequence[str], *, in_container: bool) -> list[str]:
-    """cpu-watch or cpu-power CMD ARGS from the checkout; cpu-watch runs on the host from a toolbox."""
-    if cmd == CpuRootCommand.POWER:
-        return ["python3", "-I", "-B", os.path.join(checkout(handed), "cpu", "cpu-power"), *rest]
+    """cpu-watch, cpu-power, or cpu-irq CMD ARGS from the checkout; cpu-watch runs on the host from a toolbox."""
+    direct = {CpuRootCommand.POWER: "cpu-power", CpuRootCommand.IRQ: "cpu-irq"}.get(cmd)
+    if direct is not None:
+        return ["python3", "-I", "-B", os.path.join(checkout(handed), "cpu", direct), *rest]
     argv = ["python3", "-I", "-B", os.path.join(checkout(handed), "cpu", "cpu-watch"), cmd, *rest]
     return on_host_argv(argv, handed.quiet) if in_container else argv
 

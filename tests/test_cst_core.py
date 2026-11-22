@@ -1871,5 +1871,31 @@ class CstPerfDispatchTest(unittest.TestCase):
         self.assertIn("CST_PROG=cst perf", argv)
 
 
+class SubcommandHeadTest(unittest.TestCase):
+    def test_parse_subcommand_head_handles_default_help_member_and_unknown(self) -> None:
+        from enum import StrEnum
+        from cst_core.domain.text import parse_subcommand_head
+
+        class Act(StrEnum):
+            STATUS = "status"
+            APPLY = "apply"
+            HELP = "help"
+
+        self.assertEqual(
+            parse_subcommand_head([], Act, default=Act.STATUS, help_action=Act.HELP), (Act.STATUS, (), None)
+        )
+        self.assertEqual(
+            parse_subcommand_head(["--help", "x"], Act, default=Act.STATUS, help_action=Act.HELP),
+            (Act.HELP, ["x"], None),
+        )
+        self.assertEqual(
+            parse_subcommand_head(["apply", "--yes"], Act, default=Act.STATUS, help_action=Act.HELP),
+            (Act.APPLY, ["--yes"], None),
+        )
+        act, rest, err = parse_subcommand_head(["bogus"], Act, default=Act.STATUS, help_action=Act.HELP)
+        self.assertEqual((act, rest), (Act.STATUS, ()))
+        self.assertIn("unknown subcommand", err or "")
+
+
 if __name__ == "__main__":
     unittest.main()

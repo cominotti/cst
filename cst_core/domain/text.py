@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Small text rules shared by CST programs."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import re
@@ -97,6 +97,25 @@ def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
     answer), or None for any other word: the caller keeps its own fall-through (never cls(word),
     which raises)."""
     return next((m for m in cls if m == word), None)
+
+
+def parse_subcommand_head[E: StrEnum](
+    argv: Sequence[str],
+    enum_cls: type[E],
+    *,
+    default: E,
+    help_action: E,
+) -> tuple[E, Sequence[str], str | None]:
+    """Resolve the leading subcommand word against `enum_cls` and `HELP_WORDS` without side effects."""
+    if not argv:
+        return default, (), None
+    head = argv[0]
+    if head in HELP_WORDS:
+        return help_action, argv[1:], None
+    action = enum_member(enum_cls, head)
+    if action is None:
+        return default, (), f"unknown subcommand {head!r}"
+    return action, argv[1:], None
 
 
 _KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

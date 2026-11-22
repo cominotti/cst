@@ -156,7 +156,10 @@ class DomainTest(unittest.TestCase):
 
     def test_select_entries_by_module_and_kind(self) -> None:
         cpu = select_entries(INSTALL_MANIFEST, module="cpu", kind=ArtifactKind.PYTHON_ENTRY)
-        self.assertEqual({e.src for e in cpu}, {"cpu/vm-pin", "cpu/cpu-power", "cpu/cpu-watch", "cpu/game-profile"})
+        self.assertEqual(
+            {e.src for e in cpu},
+            {"cpu/vm-pin", "cpu/cpu-irq", "cpu/cpu-power", "cpu/cpu-watch", "cpu/game-profile"},
+        )
         self.assertTrue(all(e.module == "cpu" for e in select_entries(INSTALL_MANIFEST, module="cpu")))
 
     def test_select_entries_by_component(self) -> None:
@@ -810,6 +813,7 @@ class BashLibraryTest(unittest.TestCase):
             r.stdout.decode().split(),
             [
                 "/usr/local/sbin/cpu-vm-pin",
+                "/usr/local/sbin/cpu-irq",
                 "/usr/local/sbin/cpu-power",
                 "/usr/local/bin/cpu-watch",
                 "/usr/local/sbin/cpu-game-profile",

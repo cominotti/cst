@@ -259,6 +259,12 @@ case "${cmd}" in
     compress-force)
         CST_PROG="${PROG} compress-force" exec python3 -I -B "${SRC}/btrfs-compress" "$@"
         ;;
+    iocost)
+        case "${1:-status}" in
+            apply|revert) ;;
+            *) CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@" ;;
+        esac
+        ;;
     scrub-limit)
         case "${1:-status}" in
             set|off) ;;
@@ -699,6 +705,8 @@ status() (
     btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | cst_indent
     section "weekly scrub speed limit (per device)"
     status_scrub_limit "${uuid}"
+    section "blk-iocost"
+    python3 -I -B "${SRC}/btrfs-iocost" status 2>&1 | cst_indent
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
         grep -E 'trimmed|Failed|failed' | tail -n 4 | cst_indent
@@ -1159,6 +1167,7 @@ case "${cmd}" in
             "Notifications from btrfs-health-check and btrfs-stall-monitor are working."
         ;;
     crypt-perf) crypt_perf "$@" ;;
+    iocost) CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@" ;;
     scrub-limit) CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@" ;;
     docker-gc) docker_gc "$@" ;;
     snapshots)

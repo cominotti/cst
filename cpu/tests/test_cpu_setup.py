@@ -1012,6 +1012,7 @@ class StatusTest(CpuSetupCase):
             ("vm-pin status", CommandResult(0, vm, "")),
             ("is-active builds.slice", CommandResult(3, "inactive\n", "")),
             ("cpu-power status", CommandResult(0, "settings: GPU_PM_MODE=always\n", "")),
+            ("cpu-irq status", CommandResult(0, "service:   irqbalance.service (active, enabled)\n", "")),
             ("cpu-watch report", CommandResult(0, "".join(f"r{i}\n" for i in range(7)), "")),
         ]
         rc, out, err = self.command("status")
@@ -1037,6 +1038,8 @@ class StatusTest(CpuSetupCase):
             f"  thp-defer      {self.tmp}/sys/defrag -> defer    now: always defer [madvise] never\n"
             "\n== GPU runtime PM and CPU C-states\n"
             "  settings: GPU_PM_MODE=always\n"
+            "\n== irqbalance\n"
+            "  service:   irqbalance.service (active, enabled)\n"
             "\n== last measurements\n  r2\n  r3\n  r4\n  r5\n  r6\n",
         )
         self.assertIn(
@@ -1048,7 +1051,7 @@ class StatusTest(CpuSetupCase):
         self.assertEqual(rc, 1)
         self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n  ntsync: inactive (not managed)\n", out)
         self.assertIn("\n== E-cores for toolboxes and host commands\n\n== VM\n", out)
-        self.assertTrue(out.endswith("\n== GPU runtime PM and CPU C-states\n\n== last measurements\n"))
+        self.assertTrue(out.endswith("\n== GPU runtime PM and CPU C-states\n\n== irqbalance\n\n== last measurements\n"))
         self.assertFalse([c for c in self.runner.joined() if c.startswith("runuser")])
 
     def test_target_user(self) -> None:
