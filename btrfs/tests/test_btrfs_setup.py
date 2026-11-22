@@ -1816,7 +1816,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-status-mounts-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
 
-    def _run_status_mounts(self, opts_by_mount: str) -> str:
+    def _run_status_mounts(self, opts_by_mount: str, *extra: str) -> str:
         script = "\n".join(
             [
                 "set -Eeuo pipefail",
@@ -1844,6 +1844,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
                 '    *) command cat "$@" ;;',
                 "  esac",
                 "}",
+                *extra,
                 "status_mounts",
             ]
         )
@@ -1869,6 +1870,46 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
+
+    def _nvme_lines(self, param: str | None, *, managed: bool) -> list[str]:
+        """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file)."""
+        param_path = os.path.join(self.tmp, "default_ps_max_latency_us")
+        managed_path = os.path.join(self.tmp, "cst-nvme-apst.conf")
+        if param is not None:
+            Path(param_path).write_text(f"{param}\n", encoding="utf-8")
+        if managed:
+            Path(managed_path).write_text(
+                "w /sys/module/nvme_core/parameters/default_ps_max_latency_us\n", encoding="utf-8"
+            )
+        out = self._run_status_mounts(
+            "    *) ;;",
+            f'NVME_APST_PARAM="{param_path}"',
+            f'NVME_APST_FILE="{managed_path}"',
+        )
+        return [line for line in out.splitlines() if "nvme" in line]
+
+    def test_nvme_default_latency_ok_drift_and_not_managed(self) -> None:
+        self.assertEqual(self._nvme_lines("0", managed=True), ["  nvme default_ps_latency   0 us ok"])
+        self.assertEqual(
+            self._nvme_lines("100000", managed=True),
+            ["  nvme default_ps_latency   100000 us DRIFT (expected 0; run install)"],
+        )
+        os.unlink(os.path.join(self.tmp, "cst-nvme-apst.conf"))
+        self.assertEqual(
+            self._nvme_lines("100000", managed=False),
+            ["  nvme default_ps_latency   100000 us (not managed: run install)"],
+        )
+
+    def test_nvme_without_the_kernel_parameter_prints_no_line(self) -> None:
+        self.assertEqual(self._nvme_lines(None, managed=True), [])
+
+    def test_journald_write_budget_ok_and_not_managed(self) -> None:
+        dropin = os.path.join(self.tmp, "10-cst-write-budget.conf")
+        out = self._run_status_mounts("    *) ;;")
+        self.assertIn("  journald write budget         not managed (run install)\n", out)
+        Path(dropin).write_text("[Journal]\n", encoding="utf-8")
+        out = self._run_status_mounts("    *) ;;")
+        self.assertIn(f"  journald write budget         ok ({dropin})\n", out)
 
     def test_btrfs_setup_dispatches_compress_and_commit_help(self) -> None:
         for cmd, needle in (
