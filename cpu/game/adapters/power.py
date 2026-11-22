@@ -32,6 +32,9 @@ _DPM_MANUAL: Final = "manual"
 _CSTATE_ENABLE: Final = "0"
 _CSTATE_DISABLE: Final = "1"
 _CONNECTED_STATE: Final = "connected"
+# The Steam client's own processes (their /proc/PID/comm): the client UI renders on some GPU too, which
+# says nothing about the GPU the game runs on.
+_STEAM_CLIENT_COMMS: Final = frozenset({"steam", "steamwebhelper"})
 
 
 def _suffix_num(name: str, pattern: re.Pattern[str]) -> int:
@@ -147,13 +150,17 @@ def _connected_cards(sys_drm: str, cards: list[str]) -> list[str]:
 
 
 def active_game_gpu_cards(profile: GameProfile) -> list[str]:
-    """Return sorted DRM `cardN` names actively used by game processes, or connected display cards as fallback."""
+    """Return sorted DRM `cardN` names the game's processes render on; without any, the connected display
+    cards; without those, the cards the Steam client's own processes (steam, steamwebhelper) hold."""
     sys_drm = profile.paths.sys_drm
     dev_to_card, cards = _drm_device_map(sys_drm)
     if not cards:
         return []
     matched: set[str] = set()
+    client: set[str] = set()
     for pid in _game_pids(profile):
+        comm = read_stripped(os.path.join(profile.paths.proc, pid, "comm")) or ""
+        found = client if comm in _STEAM_CLIENT_COMMS else matched
         fd_dir = os.path.join(profile.paths.proc, pid, "fd")
         try:
             entries = os.listdir(fd_dir)
@@ -170,10 +177,10 @@ def active_game_gpu_cards(profile: GameProfile) -> list[str]:
             dev_path = os.path.join(sys_drm, m.group(1), "device")
             card = dev_to_card.get(os.path.realpath(dev_path))
             if card is not None:
-                matched.add(card)
+                found.add(card)
     if matched:
         return sorted(matched, key=lambda n: _suffix_num(n, _CARD_NAME_RE))
-    return _connected_cards(sys_drm, cards)
+    return _connected_cards(sys_drm, cards) or sorted(client, key=lambda n: _suffix_num(n, _CARD_NAME_RE))
 
 
 def apply_game_gpu(profile: GameProfile) -> None:
@@ -194,10 +201,11 @@ def apply_game_gpu(profile: GameProfile) -> None:
         if has_sys_record(profile.state_text(), prof_path):
             continue
         current_idx, fullscreen_idx = parse_amd_profile_modes(read_text(prof_path) or "")
-        if fullscreen_idx is None or current_idx == fullscreen_idx:
+        # No current profile (no "*" row) means nothing to restore: DPM stays as it is, not manual.
+        if current_idx is None or fullscreen_idx is None or current_idx == fullscreen_idx:
             continue
         dpm_old = read_stripped(dpm_path) or ""
         if dpm_old and dpm_old != _DPM_MANUAL:
             _record_and_write_sys(profile, dpm_path, dpm_old, _DPM_MANUAL)
-        if read_stripped(dpm_path) == _DPM_MANUAL and current_idx is not None:
+        if read_stripped(dpm_path) == _DPM_MANUAL:
             _record_and_write_sys(profile, prof_path, current_idx, fullscreen_idx)

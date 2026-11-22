@@ -2220,6 +2220,38 @@ class GameProfilePowerTest(GameProfileCase):
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
 
+    def test_amd_profile_without_a_current_row_keeps_dpm_auto(self) -> None:
+        # pp_power_profile_mode with no "*" row: there is no profile to restore, so DPM is not forced to
+        # manual (it would stay there with the profile unchanged) and nothing is recorded for it.
+        _, pci3 = self._setup_gpus()
+        self.write(
+            os.path.join(pci3, "pp_power_profile_mode"),
+            "PROFILE_INDEX(NAME)\n 0 BOOTUP_DEFAULT :\n 1 3D_FULL_SCREEN :\n",
+        )
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power_dpm_force_performance_level")), "auto\n")
+        self.assertNotIn("power_dpm_force_performance_level", self.read(self.state))
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
+    def test_steam_client_render_fds_do_not_pick_the_game_gpu(self) -> None:
+        pci1, pci3 = self._setup_gpus()
+
+        def holds(pid: str, comm: str, node: str) -> None:
+            fd_dir = os.path.join(self.paths.proc, pid, "fd")
+            os.makedirs(fd_dir, exist_ok=True)
+            os.symlink(f"/dev/dri/{node}", os.path.join(fd_dir, "9"))
+            self.write(os.path.join(self.paths.proc, pid, "comm"), comm + "\n")
+
+        # Only steamwebhelper holds the iGPU (card1, no monitor): the connected dGPU (card3) is the one.
+        holds("1", "steamwebhelper", "renderD128")
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
     def test_connected_amd_fallback_3d_fullscreen_and_strict_write_order(self) -> None:
         _, pci3 = self._setup_gpus()
         writes: list[tuple[str, str]] = []
