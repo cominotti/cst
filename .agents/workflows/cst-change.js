@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Design', detail: 'brief + advisor review' },
     { title: 'Implement', detail: 'worktree, commits of one kind, check green' },
     { title: 'Simplify', detail: 'quality pass by hand, in the worktree' },
-    { title: 'Review', detail: 'findings only: code-review high <branch> + checklist lenses by path' },
+    { title: 'Review', detail: 'findings only: code-review high <branch> + checklist lenses by path, at most 3 agents at once' },
     { title: 'Fix', detail: 'one independent agent applies confirmed findings, runs the gates once' },
     { title: 'Fast lane', detail: 'instead of Review and Fix for a small change of docs, tests and tooling: one agent reviews by hand and fixes' },
     { title: 'Re-review', detail: 'when the fixer changed code outside tests: findings only, by hand, on its commits; a high finding stops the run' },
@@ -120,6 +120,25 @@ function pickLenses(kind, changed) {
   if (code.some(bashSource) && code.some((p) => p.status === 'A' && /\.py$/.test(p.path))) lenses.add('port')
   if (code.some((p) => python(p) && !UNIT_TEST.test(p.path) && !REPO_ONLY.test(p.path))) lenses.add('primitives')
   return { lenses: [...lenses].sort(), tier1: kind !== 'docs' && machine.length > 0 }
+}
+
+// The most agents one stage runs at once (the owner's limit, 2026-11-22). A code-review reviewer counts 2: its skill
+// forks one more agent. Every other stage runs one agent.
+const MAX_STAGE_AGENTS = 3
+const agentCost = (label) => (label === 'code-review' ? 2 : 1)
+// The review labels in waves, in order, each running at most cap agents at once. Pure: tested below.
+function reviewWaves(labels, cap = MAX_STAGE_AGENTS) {
+  const waves = []
+  let cur = [], used = 0
+  for (const l of labels) {
+    const c = agentCost(l)
+    if (c > cap) throw new Error('review ' + l + ' alone needs ' + c + ' agents, more than ' + cap)
+    if (cur.length && used + c > cap) { waves.push(cur); cur = []; used = 0 }
+    cur.push(l)
+    used += c
+  }
+  if (cur.length) waves.push(cur)
+  return waves
 }
 
 // Why a review does not count ('' when it counts): the code-review agent must have read the fork's findings, and
@@ -236,6 +255,8 @@ function selftest() {
   eq([deferralProblem([]), deferralProblem([{ finding: 'f', reason: 'the parser wants a redesign' }]), deferralProblem([{ finding: 'f', reason: ' ' }, { reason: 'r' }]), deferralProblem(undefined)], ['', '', '2 deferral(s) without a finding or a reason', 'deferred is not a list'], 'deferrals')
   const fh = { file: 'a', summary: 's', scenario: 'c', severity: 'high' }, fl = { ...fh, severity: 'low' }, fn = { file: 'a', summary: 's', scenario: 'c' }
   eq([reReviewOutcome([]), reReviewOutcome([fh, fl]), reReviewOutcome([fn, { ...fl, severity: 'LOW ' }, { ...fl, severity: 'medium' }])], [{ high: [], low: [] }, { high: [fh], low: [fl] }, { high: [fn, { ...fl, severity: 'medium' }], low: [{ ...fl, severity: 'LOW ' }] }], 're-review outcome')
+  eq([reviewWaves([]), reviewWaves(['parity']), reviewWaves(['code-review', 'command', 'primitives']), reviewWaves(['code-review', 'command', 'helper', 'primitives']), reviewWaves(['code-review', 'parity', 'port', 'primitives', 'command'])], [[], [['parity']], [['code-review', 'command'], ['primitives']], [['code-review', 'command'], ['helper', 'primitives']], [['code-review', 'parity'], ['port', 'primitives', 'command']]], 'review waves')
+  throws(() => reviewWaves(['code-review'], 1), 'a cap below one reviewer')
   return 'ok'
 }
 
@@ -364,7 +385,8 @@ if (LANE === 'full') {
     const r = await guarded('review: ' + l, 'Review', reviewPrompt(l), props, l === 'code-review' ? ['findings', 'reviewed_head', 'skill_findings_read', 'fork_agent_id'] : ['findings', 'reviewed_head'])
     return counted(r, l, HEAD, 'review: ' + l, 'review ' + l)
   }
-  let reviews = await parallel(labels.map((l) => () => runReview(l)))
+  let reviews = []
+  for (const wave of reviewWaves(labels)) reviews = reviews.concat(await parallel(wave.map((l) => () => runReview(l))))
   for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
   const missing = labels.filter((l, i) => !reviews[i])
   if (missing.length) return stopped('review', { impl, simp, missing })
