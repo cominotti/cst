@@ -611,6 +611,14 @@ class ParseArgsAndJobsTest(unittest.TestCase):
             parse_args(["-v", "--worker-fds=3,4"]),
             RunOptions(verbosity=2, jobs=None, gates=False, names=(), worker_fds=(3, 4)),
         )
+        self.assertEqual(
+            parse_args(["--affected", "--base", "main"]),
+            RunOptions(affected=True, base="main"),
+        )
+        self.assertEqual(
+            parse_args(["--list-affected", "--base=HEAD~1"]),
+            RunOptions(affected=True, list_affected=True, base="HEAD~1"),
+        )
 
     def test_parse_args_rejects_bad_flags(self) -> None:
         for bad in (
@@ -620,9 +628,53 @@ class ParseArgsAndJobsTest(unittest.TestCase):
             ["--jobs", "-1"],
             ["--jobs", "abc"],
             ["--worker-fds", "3"],
+            ["--affected", "--gates"],
+            ["--affected", "mod"],
+            ["--list-affected", "mod"],
+            ["--base", "main"],
+            ["--affected", "--base"],
         ):
             with self.subTest(bad=bad), self.assertRaises(SystemExit):
                 parse_args(bad)
+
+    def test_list_affected_and_affected_cli(self) -> None:
+        list_done = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                os.path.join(REPO, "tests", "run_unit.py"),
+                "--list-affected",
+                "--base",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(list_done.returncode, 0, list_done.stderr)
+        self.assertIn("Affected unit-test plan (base=HEAD):", list_done.stdout)
+
+        bad_base = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                os.path.join(REPO, "tests", "run_unit.py"),
+                "--affected",
+                "--base",
+                "nope-xyz",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(bad_base.returncode, 2)
+        self.assertIn("unknown git revision", bad_base.stderr)
 
     def test_default_jobs_falls_back_to_one_under_coverage(self) -> None:
         with (

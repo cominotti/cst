@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Run the unit tests in parallel across CPU cores with a socket as stdin (run-time gates).
 
-Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | NAME...]   (from anywhere)
+Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affected | --list-affected] [--base REF] [NAME...]   (from anywhere)
 
 With no NAME it runs every unit test of the checkout across parallel worker
 processes (`default_jobs()`, 1 per CPU; automatically 1 under `coverage.py`).
@@ -488,6 +488,9 @@ class LeakRecordingRunner(unittest.TextTestRunner):
 
 DEFAULT_CLASS_CHUNK: Final = 10
 _JOBS_FLAG: Final = "--jobs"
+_AFFECTED_FLAG: Final = "--affected"
+_LIST_AFFECTED_FLAG: Final = "--list-affected"
+_BASE_FLAG: Final = "--base"
 _WORKER_FDS_FLAG: Final = "--worker-fds"
 _ERR_LOAD_MODULE: Final = "unittest.loader"
 _SEP1: Final = "=" * 70
@@ -503,6 +506,9 @@ class RunOptions:
     verbosity: int = 1
     jobs: int | None = None
     gates: bool = False
+    affected: bool = False
+    list_affected: bool = False
+    base: str | None = None
     names: tuple[str, ...] = ()
     worker_fds: tuple[int, int] | None = None
 
@@ -641,6 +647,9 @@ class _ParseAcc:
     verbosity: int = 1
     jobs: int | None = None
     gates: bool = False
+    affected: bool = False
+    list_affected: bool = False
+    base: str | None = None
     names: list[str] = field(default_factory=list)
     worker_fds: tuple[int, int] | None = None
 
@@ -658,27 +667,55 @@ def _parse_worker_fds(raw: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def _consume_arg(args: Sequence[str], index: int, acc: _ParseAcc) -> int:
-    tok = args[index]
-    step = 1
+def _consume_simple_flag(tok: str, acc: _ParseAcc) -> bool:
     if tok == "-v":
         acc.verbosity = 2
-    elif tok == "--gates":
+        return True
+    if tok == "--gates":
         acc.gates = True
-    elif tok in ("-j", _JOBS_FLAG) or tok.startswith(f"{_JOBS_FLAG}="):
+        return True
+    if tok == _AFFECTED_FLAG:
+        acc.affected = True
+        return True
+    if tok == _LIST_AFFECTED_FLAG:
+        acc.affected = True
+        acc.list_affected = True
+        return True
+    return False
+
+
+def _consume_value_flag(args: Sequence[str], index: int, acc: _ParseAcc) -> int | None:
+    tok = args[index]
+    if tok in ("-j", _JOBS_FLAG) or tok.startswith(f"{_JOBS_FLAG}="):
         flag = _JOBS_FLAG if tok.startswith(_JOBS_FLAG) else "-j"
         val, step = _consume_value(args, index, flag)
         acc.jobs = _parse_jobs_value(val)
-    elif tok == _WORKER_FDS_FLAG or tok.startswith(f"{_WORKER_FDS_FLAG}="):
+        return step
+    if tok == _BASE_FLAG or tok.startswith(f"{_BASE_FLAG}="):
+        val, step = _consume_value(args, index, _BASE_FLAG)
+        acc.base = val
+        return step
+    if tok == _WORKER_FDS_FLAG or tok.startswith(f"{_WORKER_FDS_FLAG}="):
         val, step = _consume_value(args, index, _WORKER_FDS_FLAG)
         acc.worker_fds = _parse_worker_fds(val)
-    elif tok.startswith("-"):
+        return step
+    return None
+
+
+def _consume_arg(args: Sequence[str], index: int, acc: _ParseAcc) -> int:
+    tok = args[index]
+    if _consume_simple_flag(tok, acc):
+        return 1
+    value_step = _consume_value_flag(args, index, acc)
+    if value_step is not None:
+        return value_step
+    if tok.startswith("-"):
         raise SystemExit(
-            f"run_unit: unknown option in {' '.join(args)} (use -v, -j/{_JOBS_FLAG} N, --gates or test names)"
+            f"run_unit: unknown option in {' '.join(args)} "
+            f"(use -v, -j/{_JOBS_FLAG} N, --gates, {_AFFECTED_FLAG}, {_LIST_AFFECTED_FLAG}, {_BASE_FLAG} or test names)"
         )
-    else:
-        acc.names.append(tok)
-    return step
+    acc.names.append(tok)
+    return 1
 
 
 def parse_args(args: Sequence[str]) -> RunOptions:
@@ -689,10 +726,17 @@ def parse_args(args: Sequence[str]) -> RunOptions:
         i += _consume_arg(args, i, acc)
     if acc.gates and acc.names:
         raise SystemExit(f"run_unit: --gates takes no test names ({' '.join(acc.names)})")
+    if acc.affected and (acc.gates or acc.names):
+        raise SystemExit(f"run_unit: {_AFFECTED_FLAG} takes neither --gates nor test names")
+    if acc.base is not None and not acc.affected:
+        raise SystemExit(f"run_unit: {_BASE_FLAG} requires {_AFFECTED_FLAG} or {_LIST_AFFECTED_FLAG}")
     return RunOptions(
         verbosity=acc.verbosity,
         jobs=acc.jobs,
         gates=acc.gates,
+        affected=acc.affected,
+        list_affected=acc.list_affected,
+        base=acc.base,
         names=tuple(acc.names),
         worker_fds=acc.worker_fds,
     )
@@ -1101,15 +1145,48 @@ def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]],
     return 0 if not has_test_fail and not errors else 1
 
 
+def _print_affected_plan(repo: str, base: str | None) -> int:
+    from tests.affected import format_plan, git_changed_files, select_affected
+
+    try:
+        resolved_base, changed = git_changed_files(repo, base)
+    except ValueError as exc:
+        print(f"run_unit: {exc}", file=sys.stderr)
+        return 2
+    plan = select_affected(changed, repo=repo, base=resolved_base)
+    print(format_plan(plan))
+    return 0
+
+
+def _resolve_affected_opts(repo: str, opts: RunOptions) -> RunOptions:
+    from tests.affected import git_changed_files, select_affected
+
+    resolved_base, changed = git_changed_files(repo, opts.base)
+    plan = select_affected(changed, repo=repo, base=resolved_base)
+    print(f"[affected] {plan.reason} (base={plan.base[:12]})", file=sys.stderr)
+    return RunOptions(
+        verbosity=opts.verbosity,
+        jobs=opts.jobs,
+        names=() if plan.full_suite else plan.modules,
+    )
+
+
 def _run(repo: str, opts: RunOptions) -> int:
-    requested = default_jobs() if opts.jobs is None or opts.jobs == 0 else opts.jobs
+    active_opts = opts
+    if opts.affected:
+        try:
+            active_opts = _resolve_affected_opts(repo, opts)
+        except ValueError as exc:
+            print(f"run_unit: {exc}", file=sys.stderr)
+            return 2
+    requested = default_jobs() if active_opts.jobs is None or active_opts.jobs == 0 else active_opts.jobs
     if requested <= 1:
-        return _run_in_process(repo, opts)
-    suite = _load_options(repo, opts)
+        return _run_in_process(repo, active_opts)
+    suite = _load_options(repo, active_opts)
     units, has_load_error = plan_work_units(suite)
     if has_load_error or min(requested, len(units)) <= 1:
-        return _run_in_process(repo, opts)
-    return _run_parallel(repo, opts, units, requested)
+        return _run_in_process(repo, active_opts)
+    return _run_parallel(repo, active_opts, units, requested)
 
 
 def guard_hits(folder: str) -> list[str]:
@@ -1130,6 +1207,8 @@ def main(argv: Sequence[str]) -> int:
     os.chdir(repo)
     if repo not in sys.path:
         sys.path.insert(0, repo)
+    if opts.list_affected:
+        return _print_affected_plan(repo, opts.base)
     forbid_privilege_gain()
     guard = tempfile.mkdtemp(prefix="cst-unit-host-guard-")
     try:

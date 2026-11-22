@@ -86,6 +86,32 @@ cmds: [
 		}]
 	},
 	{
+		name:        "test affected"
+		category:    "test"
+		description: "Run only the unit test modules statically affected by changes (plus static gates; falls back to the full suite for cst_core or shared files)"
+		flags: [
+			{name: "base", description: "Git ref to diff against (default: merge-base with main, or HEAD)"},
+			{name: "list", type: "bool", default_value: "false", description: "List selected modules without running tests"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto per CPU, 1 = single-process)"},
+		]
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			script: {content: """
+				set -euo pipefail
+				args=(-v)
+				if [[ "${INVOWK_FLAG_LIST:-false}" == "true" ]]; then
+					args+=(--list-affected)
+				else
+					args+=(--affected)
+					[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				fi
+				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && args+=(--base "${INVOWK_FLAG_BASE}")
+				exec python3 -I -B tests/run_unit.py "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "test module"
 		category:    "test"
 		description: "Run one unit test module, class or method through tests/run_unit.py (so the socket-stdin gate still applies)"
