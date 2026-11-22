@@ -852,6 +852,7 @@ Read-only. Sections:
 | `snapshots` | the snapshot summary |
 | `Bulk (re-downloadable data: ...)` | the output of `bulk status` (section 10.1): `~/Bulk` is a subvolume, `CACHEDIR.TAG`, each link, the `+C` state of the emulator folders (`~/Bulk/emulators`), items waiting for the next boot, game data still in the old Steam library (with the command that moves it: `bulk steam plan`), an interrupted Steam game move |
 | `stalls, last hour` | the verdict lines of `report --since '1 hour ago' --no-below` |
+| `responsiveness diagnosis` | compact `io` axis diagnosis from `cst perf --axis io --compact` (block schedulers vs `blk-iocost`, NVMe APST latency, dirty writeback limits, `SCRUB_LIMIT`, and btrfs `commit_stats`; see [../perf/README.md](../perf/README.md)) |
 
 At the end: the size of the recorded data and the btrfs features.
 

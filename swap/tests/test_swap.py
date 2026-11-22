@@ -2687,5 +2687,43 @@ class SwapWiringTest(unittest.TestCase):
         )
 
 
+class SwapStatusDiagnosisTest(_SwapScratch):
+    """`cst swap status` appends an objective `== diagnosis` block using `perf` memory rules."""
+
+    def _diag_service(self) -> SwapApplicationService:
+        fs = self._fs()
+        return SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+
+    def test_diagnosis_reports_zswap_and_headroom_and_skips_settings_only(self) -> None:
+        svc = self._diag_service()
+        out = io.StringIO()
+        render_status(svc.status_report(include_config=False), out=out)
+        text = out.getvalue()
+        self.assertIn("== diagnosis", text)
+        self.assertIn("zswap is disabled", text)
+        self.assertIn("fix: sudo cst swap apply", text)
+
+        only_out = io.StringIO()
+        render_status(svc.status_report(settings_only=True, include_config=False), out=only_out)
+        self.assertNotIn("== diagnosis", only_out.getvalue())
+
+    def test_diagnosis_reports_optimized_when_memory_knobs_healthy(self) -> None:
+        with open(os.path.join(self.env.zswap_params_dir, "enabled"), "w", encoding="utf-8") as f:
+            f.write("Y\n")
+        with open(os.path.join(self.env.proc_dir, "sys", "vm", "min_free_kbytes"), "w", encoding="utf-8") as f:
+            f.write("262144\n")
+        out = io.StringIO()
+        render_status(self._diag_service().status_report(include_config=False), out=out)
+        text = out.getvalue()
+        self.assertIn("== diagnosis", text)
+        self.assertIn("[OPTIMIZED]", text)
+
+
 if __name__ == "__main__":
     unittest.main()

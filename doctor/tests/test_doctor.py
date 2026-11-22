@@ -3471,7 +3471,9 @@ class CommandLineTest(Scratch):
         for a, _ in doc_registry.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "install"])
+        self.assertEqual(
+            areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "responsiveness", "install"]
+        )
 
     def test_every_module_that_registers_checks_is_an_area(self) -> None:
         # registry.CHECKS holds only the checks of the modules in AREAS: a module of doctor/application/
@@ -3981,7 +3983,7 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("btrfs", "cst_core", "cpu", "swap", "vm"):  # doctor imports these packages
+        for pkg in ("btrfs", "cst_core", "cpu", "perf", "swap", "vm"):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )
@@ -4289,6 +4291,45 @@ class DoctorWiringTest(unittest.TestCase):
                 ["help"], doc="usage: doctor [--brief]", entry_file=os.path.join(DOCTOR_DIR, "cst-doctor"), out=out
             )
         self.assertEqual((rc, out.getvalue()), (0, "usage: my doctor [--brief]\n"))
+
+
+class ResponsivenessAreaTest(Scratch):
+    """Doctor's `responsiveness` area delegates cleanly to `perf` diagnosis rules."""
+
+    def _write_host(self, rel: str, content: str) -> None:
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def test_empty_root_emits_no_responsiveness_findings(self) -> None:
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("responsiveness:", res.stdout)
+
+    def test_healthy_and_flagged_host_states(self) -> None:
+        self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
+        self._write_host("proc/sys/vm/min_free_kbytes", "262144\n")
+        self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
+        self._write_host("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "1000\n")
+        self._write_host("sys/module/zswap/parameters/enabled", "Y\n")
+
+        ok_res = self.run_tool()
+        self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+        self.assertIn("responsiveness: 1 axes checked, no bottlenecks", ok_res.stdout)
+
+        # Unhealthy MGLRU ttl=0 -> info (no fix command yet); zswap disabled -> WARN with fix command.
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        info_res = self.run_tool()
+        self.assertEqual(info_res.returncode, 0, info_res.stdout + info_res.stderr)
+        self.assertIn("memory: MGLRU min_ttl_ms is 0", info_res.stdout)
+
+        self._write_host("sys/module/zswap/parameters/enabled", "N\n")
+        warn_res = self.run_tool()
+        self.assertEqual(warn_res.returncode, 1, warn_res.stdout + warn_res.stderr)
+        self.assertIn("WARN   memory: zswap is disabled", warn_res.stdout)
+        self.assertIn("fix: sudo cst swap apply", warn_res.stdout)
 
 
 if __name__ == "__main__":

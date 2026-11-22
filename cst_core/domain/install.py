@@ -250,6 +250,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "cpu/cpu-setup",
         "doctor/cst-doctor",
         "fix-anaconda-webui-btrfs-compress.sh",
+        "perf/cst-perf",
         "swap/cli.py",
         "tests/mutation/cst-mutation",
         "tests/uv-dev",

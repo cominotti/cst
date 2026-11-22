@@ -1829,5 +1829,47 @@ class StateContractsTest(unittest.TestCase):
         )
 
 
+class CstPerfDispatchTest(unittest.TestCase):
+    """`cst perf` dispatches cleanly like `cst doctor` and steps down under sudo."""
+
+    def _run(self, port: _FakeDispatchPort, args: Sequence[str]) -> tuple[int, str, str]:
+        out = io.StringIO()
+        err = io.StringIO()
+        dispatcher = CstDispatcher(
+            port=port, repo_dir="/repo", self_path="/repo/cst", arg0="./cst", stdout=out, stderr=err
+        )
+        return dispatcher.dispatch(args), out.getvalue(), err.getvalue()
+
+    def test_perf_usage_mentions_cst_perf(self) -> None:
+        rc, stdout, _ = self._run(_FakeDispatchPort(), ["--help"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cst perf", stdout)
+
+    def test_perf_missing_entry_returns_one(self) -> None:
+        rc, _, stderr = self._run(_FakeDispatchPort(), ["perf"])
+        self.assertEqual(rc, 1)
+        self.assertIn("perf is not in this copy", stderr)
+
+    def test_perf_as_user_and_sudo_step_down(self) -> None:
+        port = _FakeDispatchPort(files={"/repo/perf/cst-perf"}, uid=1000, env={"CST_NAME": "cst", "KEEP": "1"})
+        rc, _, _ = self._run(port, ["perf", "--json"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(port.calls[0][0], ["python3", "-I", "-B", "/repo/perf/cst-perf", "--json"])
+        self.assertEqual((port.calls[0][1] or {}).get("CST_PROG"), "cst perf")
+
+        sudo_port = _FakeDispatchPort(
+            files={"/repo/perf/cst-perf"},
+            uid=0,
+            env={"CST_NAME": "cst", "SUDO_USER": "alice"},
+            passwd={"alice": (1000, "/home/alice")},
+        )
+        rc_sudo, _, _ = self._run(sudo_port, ["perf", "--compact"])
+        self.assertEqual(rc_sudo, 0)
+        argv = sudo_port.calls[0][0]
+        self.assertIn("/repo/perf/cst-perf", argv)
+        self.assertIn("--compact", argv)
+        self.assertIn("CST_PROG=cst perf", argv)
+
+
 if __name__ == "__main__":
     unittest.main()

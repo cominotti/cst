@@ -458,6 +458,11 @@ from disk swap.
 **memory pressure**: `/proc/pressure/memory` for the whole system. `some` =
 at least one task waited, `full` = all tasks waited.
 
+**diagnosis**: objective findings evaluated from the live memory probes
+(`perf` memory axis: `vm.min_free_kbytes`, `allocstall` / `compact_stall`, THP
+defrag, MGLRU `min_ttl_ms`, `zswap`, memory PSI, and `session.slice` floors; see
+[../perf/README.md](../perf/README.md)).
+
 If the disks themselves are slow, `cst btrfs report --since '<time>'` tells
 you whether memory reclaim or the filesystem held programs up
 ([../btrfs/README.md, section 7](../btrfs/README.md#7-report-was-storage-the-bottleneck)).

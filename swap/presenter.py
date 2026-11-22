@@ -9,6 +9,7 @@ from typing import Literal, TextIO, assert_never
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandFailed, WriteFailed
+from perf.presenter import render_perf_findings_block
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError
 from swap.domain import (
@@ -224,6 +225,9 @@ def render_status(report: SwapStatusReport, out: TextIO = sys.stdout) -> int:
     render_devices(report.devices, out)
     render_cgroups(report.cgroups, out)
     render_psi(report.psi_lines, out)
+    if report.diagnosis is not None:
+        out.write("\n== diagnosis\n")
+        render_perf_findings_block(report.diagnosis, out)
     return 0
 
 

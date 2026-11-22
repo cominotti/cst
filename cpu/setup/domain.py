@@ -108,6 +108,8 @@ class SetupPaths:
     cgroot: str = "/sys/fs/cgroup"
     sched_ext: str = "/sys/kernel/sched_ext/state"
     preempt: str = "/sys/kernel/debug/sched/preempt"
+    proc_dir: str = "/proc"
+    sys_dir: str = "/sys"
     etc_group: str = "/etc/group"
     lib_group: str = "/usr/lib/group"
     etc_gshadow: str = "/etc/gshadow"

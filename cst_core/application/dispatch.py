@@ -80,11 +80,11 @@ class CstDispatcher:
         env["CST_PROG"] = f"{self._cst_name} {module_name}"
         return self._port.exec_replace(["bash", script_path, *args], env=env)
 
-    def run_doctor(self, args: Sequence[str]) -> int:
-        """Run `doctor/cst-doctor` as the invoking user, stepping down from sudo if needed."""
-        doctor = os.path.join(self._repo_dir, "doctor", "cst-doctor")
-        if not self._port.is_file(doctor):
-            _say(self._stderr, f"{self._cst_name}: doctor is not in this copy ({doctor} is missing)")
+    def _run_checkout_tool(self, *, cmd_name: str, sub_path: tuple[str, ...], args: Sequence[str]) -> int:
+        """Run an unprivileged checkout Python entry point, stepping down from sudo if needed."""
+        tool = os.path.join(self._repo_dir, *sub_path)
+        if not self._port.is_file(tool):
+            _say(self._stderr, f"{self._cst_name}: {cmd_name} is not in this copy ({tool} is missing)")
             return 1
         env = dict(self._port.environ())
         user = env.get("SUDO_USER", "")
@@ -94,10 +94,18 @@ class CstDispatcher:
             except KeyError:
                 _say(self._stderr, f"{self._cst_name}: ERROR: SUDO_USER={user}: no such user")
                 return 1
-            then = [f"CST_PROG={self._cst_name} doctor", "python3", "-I", "-B", doctor, *args]
+            then = [f"CST_PROG={self._cst_name} {cmd_name}", "python3", "-I", "-B", tool, *args]
             return self._port.run_passthrough(step_down_argv(user, uid, home, unset=("XDG_STATE_HOME",), then=then))
-        env["CST_PROG"] = f"{self._cst_name} doctor"
-        return self._port.run_passthrough(["python3", "-I", "-B", doctor, *args], env=env)
+        env["CST_PROG"] = f"{self._cst_name} {cmd_name}"
+        return self._port.run_passthrough(["python3", "-I", "-B", tool, *args], env=env)
+
+    def run_doctor(self, args: Sequence[str]) -> int:
+        """Run `doctor/cst-doctor` as the invoking user, stepping down from sudo if needed."""
+        return self._run_checkout_tool(cmd_name="doctor", sub_path=("doctor", "cst-doctor"), args=args)
+
+    def run_perf(self, args: Sequence[str]) -> int:
+        """Run `perf/cst-perf` as the invoking user, stepping down from sudo if needed."""
+        return self._run_checkout_tool(cmd_name="perf", sub_path=("perf", "cst-perf"), args=args)
 
     def status_all(self) -> int:
         """Run read-only `status` across all modules (elevating once if needed) and finish with `doctor --brief`."""
@@ -147,8 +155,8 @@ class CstDispatcher:
                 )
                 return 2
             return self.status_all()
-        if cmd == "doctor":
-            return self.run_doctor(rest)
+        if cmd in ("doctor", "perf"):
+            return self.run_doctor(rest) if cmd == "doctor" else self.run_perf(rest)
         if cmd in MODULE_BY_NAME:
             return self.run_module(cmd, rest)
 

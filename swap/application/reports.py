@@ -13,6 +13,9 @@ from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
+from perf.application import collect_memory_from_reader
+from perf.domain.evaluate import evaluate_perf_memory
+from perf.domain.models import PerfPathKey, PerfRootKind, PerfVerdict, perf_path_spec
 from swap.domain import (
     MACHINE_SLICE,
     WSF_EXPERIMENT,
@@ -212,6 +215,57 @@ class _FileSettingsFacts:
     def partition_size(self, device_path: str) -> int | None:
         part = self._partition(device_path)
         return None if part is None else part[1]
+
+
+class _SwapPerfReader:
+    """Adapt swap's `FileSystemPort` and `SwapEnvironment` to `PerfFsReader`."""
+
+    def __init__(self, fs: FileSystemPort, env: SwapEnvironment) -> None:
+        self._fs = fs
+        self._roots = {
+            PerfRootKind.PROC: env.proc_dir,
+            PerfRootKind.SYS: env.sys_dir,
+            PerfRootKind.CGROUP: env.cgroup_dir,
+            PerfRootKind.ETC: env.etc_dir,
+            PerfRootKind.ZSWAP_PARAMS: env.zswap_params_dir,
+        }
+
+    def _path(self, root: PerfRootKind, rel: str) -> str | None:
+        base = self._roots.get(root)
+        return posixpath.join(base, rel) if base is not None else None
+
+    def read_key(self, key: PerfPathKey) -> str | None:
+        """Read `PerfPathKey` under swap's configured root dirs."""
+        return self.read_rel(*perf_path_spec(key))
+
+    def read_preempt(self) -> tuple[str | None, bool]:
+        """Swap reports do not inspect sched debugfs."""
+        return (None, False)
+
+    def read_rel(self, root: PerfRootKind, rel: str) -> str | None:
+        """Read relative path under `root`, or `None` if absent."""
+        target = self._path(root, rel)
+        return self._fs.read_text(target) if target is not None else None
+
+    def list_rel(self, root: PerfRootKind, rel: str) -> tuple[str, ...]:
+        """List directory entries under `root/rel`."""
+        target = self._path(root, rel)
+        if target is None or not self._fs.is_dir(target):
+            return ()
+        try:
+            return tuple(sorted(self._fs.list_dir(target)))
+        except OSError:
+            return ()
+
+    def exists_rel(self, root: PerfRootKind, rel: str) -> bool:
+        """Return True when `root/rel` exists."""
+        target = self._path(root, rel)
+        return target is not None and self._fs.exists(target)
+
+    def is_dir_rel(self, root: PerfRootKind, rel: str) -> bool:
+        """Return True when `root/rel` is a directory."""
+        target = self._path(root, rel)
+        return target is not None and self._fs.is_dir(target)
 
 
 class SwapReports:
@@ -666,6 +720,8 @@ class SwapReports:
         devices = self._build_devices()
         cgroups = self._build_cgroup_rows()
         psi_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "pressure", "memory")) or "  not available\n"
+        mem_diag = evaluate_perf_memory(collect_memory_from_reader(_SwapPerfReader(self._fs, self._env)))
+        diagnosis = mem_diag.findings if mem_diag.verdict is not PerfVerdict.SKIP else None
         return SwapStatusReport(
             config=config,
             settings=settings,
@@ -676,4 +732,5 @@ class SwapReports:
             devices=devices,
             cgroups=cgroups,
             psi_lines=tuple(psi_text.splitlines()),
+            diagnosis=diagnosis,
         )

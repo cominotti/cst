@@ -716,6 +716,12 @@ status() (
     section "stalls, last hour (report --since '1 hour ago' --no-below)"
     python3 -I -B "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
         cst_indent
+    local perf_tool
+    perf_tool="$(dirname "${SRC}")/perf/cst-perf"
+    if [[ -f "${perf_tool}" ]]; then
+        section "responsiveness diagnosis"
+        python3 -I -B "${perf_tool}" --axis io --compact 2>&1 | cst_indent || true
+    fi
     data="$(du -sh "${DATA_DIR}" 2>/dev/null | cut -f1)"
     echo
     echo "data: stall log ${data:-?}, below store $(du -sh /var/log/below/store 2>/dev/null | cut -f1)"

@@ -199,7 +199,7 @@ cst cpu help
 | Command | Runs as | What it does |
 |---------|---------|--------------|
 | `install` | needs sudo (asks for password) | Installs everything in section 6. Safe to run again (idempotent: running it twice gives the same result; unchanged files print `unchanged:`). |
-| `status` | needs sudo | The whole picture (sample in 6.5). |
+| `status` | needs sudo | The whole picture (sample in 6.5), including a `== diagnosis` block for CPU/GPU responsiveness ([../perf/README.md](../perf/README.md)). |
 | `uninstall` | needs sudo | Removes what `install` added. |
 | `game on\|off\|state` | needs sudo | Switch the game profile by hand, or show it (`state` also flags each setting that drifted, 7.5). |
 | `vm-pin plan\|apply\|status` | needs sudo | Pin the VM to CPUs 12-23 permanently, and keep CET/MBEC off for a host-passthrough VM (8.1). |

@@ -14,6 +14,7 @@ import contextlib
 import fnmatch
 import glob
 import grp
+import io
 import locale
 import os
 import pwd
@@ -28,6 +29,10 @@ from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
+from perf.adapters import LinuxPerfProbe, PerfPaths
+from perf.domain.evaluate import evaluate_perf_snapshot
+from perf.domain.models import PerfAxis
+from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
 from cpu.setup.domain import (
@@ -614,6 +619,37 @@ class CpuSetup:
         self.say()
         self.say(f"== {title}")
 
+    def _render_perf_diagnosis(self) -> None:
+        p = self.paths
+        if not (
+            os.path.exists(os.path.join(p.proc_dir, "interrupts"))
+            or os.path.isdir(os.path.join(p.sys_dir, "devices", "system", "cpu", "cpu0"))
+            or os.path.isdir(os.path.join(p.sys_dir, "class", "drm"))
+        ):
+            return
+        host_root = "/" if p.sys_dir == "/sys" else os.path.dirname(p.sys_dir)
+        probe = LinuxPerfProbe(
+            PerfPaths(
+                proc_dir=p.proc_dir,
+                sys_dir=p.sys_dir,
+                cgroup_dir=p.cgroot,
+                etc_dir=os.path.join(host_root, "etc"),
+                run_dir=os.path.join(host_root, "run"),
+                dev_dir=os.path.join(host_root, "dev"),
+                zswap_params_dir=os.path.join(p.sys_dir, "module", "zswap", "parameters"),
+                cpu_conf_path=p.conf,
+                preempt_path=p.preempt,
+                sched_ext_path=p.sched_ext,
+            )
+        )
+        axes = (PerfAxis.CPU, PerfAxis.GPU)
+        rep = evaluate_perf_snapshot(probe.collect_snapshot(axes), axes)
+        findings = [f for ax in rep.axes for f in ax.findings]
+        buf = io.StringIO()
+        render_perf_findings_block(findings, buf)
+        self.section("diagnosis")
+        self.write(buf.getvalue())
+
     def status(self) -> int:
         """The whole picture; nothing in it stops the rest."""
         p, user = self.paths, self.user
@@ -655,6 +691,7 @@ class CpuSetup:
         self.write(indented(self.docker_slice_status() + "\n"))
         self.section("memory experiments")
         self.experiment(["list"])
+        self._render_perf_diagnosis()
         self.section("last measurements")
         if not user:
             return 1

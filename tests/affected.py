@@ -18,7 +18,7 @@ from tests.code_graph import module_of
 from tests.repo_files import REPO, repo_files
 from tests.run_unit import GATE_MODULES
 
-MODULE_ROOTS: Final = frozenset({"bluetooth", "btrfs", "cpu", "doctor", "swap", "toolchains", "vm"})
+MODULE_ROOTS: Final = frozenset({"bluetooth", "btrfs", "cpu", "doctor", "perf", "swap", "toolchains", "vm"})
 DOCS_GATES: Final = ("tests.test_docs", "tests.test_license_headers", "tests.test_repo_paths")
 INSTALL_TESTS: Final = ("tests.test_install", "tests.test_install_record", "tests.test_module_routing")
 E2E_UNIT_TESTS: Final = ("tests.e2e.test_run_guard", "tests.e2e.test_selection", "tests.e2e.test_image_digest")

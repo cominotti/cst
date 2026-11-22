@@ -38,7 +38,7 @@ from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from tests.repo_files import REPO
 
 # What cpu-setup.sh reads or runs for these commands (a module that is not there fails the copy).
-NEEDED = ("cpu-setup.sh", "cst-install.bash", "cst-link.bash", "cst", "cpu", "cst_core")
+NEEDED = ("cpu-setup.sh", "cst-install.bash", "cst-link.bash", "cst", "cpu", "cst_core", "perf")
 
 
 def help_text(script: str, prog: str) -> str:
@@ -402,6 +402,8 @@ class CpuSetupCase(unittest.TestCase):
             cgroot=f"{t}/sys/fs/cgroup",
             sched_ext=f"{t}/sys/sched_ext",
             preempt=f"{t}/sys/preempt",
+            proc_dir=f"{t}/proc",
+            sys_dir=f"{t}/sys",
             etc_group=f"{t}/etc/group",
             lib_group=f"{t}/usr/lib/group",
             etc_gshadow=f"{t}/etc/gshadow",
@@ -1046,6 +1048,23 @@ class BaselineDropinTest(unittest.TestCase):
         self.assertEqual(
             helper_dropin("/home/u"), "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
         )
+
+
+class StatusDiagnosisTest(CpuSetupCase):
+    """`cst cpu status` renders a `== diagnosis` block when sys/proc CPU or GPU nodes exist."""
+
+    def test_status_emits_diagnosis_when_telemetry_present(self) -> None:
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/name", "C3_ACPI\n")
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/latency", "1048\n")
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/disable", "0\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/card0-DP-1/status", "connected\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/device/power/control", "auto\n")
+        self.runner.answers = [("game-profile state", CommandResult(0, "off\n", ""))]
+        _, out, _ = self.command("status", user="")
+        self.assertIn("== diagnosis", out)
+        self.assertIn("Deep idle state C3_ACPI enabled", out)
+        self.assertIn("Connected display GPU card0 (amdgpu, DP-1) has power/control=auto", out)
 
 
 if __name__ == "__main__":
