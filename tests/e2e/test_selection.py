@@ -186,7 +186,7 @@ class ShardingTest(unittest.TestCase):
             rc, _, _ = self._run_cli(*argv)
             self.assertEqual(rc, 2, argv)
 
-    def test_assign_shards_partitions_all_tier1_tests_weighted_lpt(self) -> None:
+    def test_assign_shards_partitions_all_tier1_tests(self) -> None:
         cases = iter_cases(self.mod.load_suite("suite_tier1_systemd.py"))
         all_names = [test_method_name(c) for c in cases]
         for total in (1, 2, 3, 4, 80):
@@ -200,6 +200,8 @@ class ShardingTest(unittest.TestCase):
                 self.assertEqual(names, [n for n in all_names if n in set(names)])
                 self.assertEqual([test_method_name(c) for c in select_shard(cases, ShardSpec(idx, total))], names)
 
+    def test_assign_shards_balances_heavy_tests_across_workers(self) -> None:
+        cases = iter_cases(self.mod.load_suite("suite_tier1_systemd.py"))
         four = [{test_method_name(c) for c in bucket} for bucket in assign_shards(cases, 4)]
         heavy = (
             "test_80_bluetooth_second_apply_and_le_audio_cycle",

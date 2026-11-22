@@ -354,21 +354,25 @@ def _tier1_log_dir(cfg: _Tier1Exec) -> Path:
     return cfg.artifact_dir / "tier1"
 
 
+def _handle_empty_tier1_slice(cfg: _Tier1Exec) -> bool:
+    if cfg.selection.patterns or cfg.selection.tags:
+        matched = select_cases(
+            iter_cases(load_suite(SUITE_FILES[1])),
+            patterns=cfg.selection.patterns,
+            tags=cfg.selection.tags,
+        )
+        if not matched:
+            print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
+            return False
+    shard_msg = f" shard {cfg.selection.shard.label()}" if cfg.selection.shard is not None else ""
+    print(f"[e2e] tier 1{shard_msg}: 0 tests selected", flush=True)
+    return True
+
+
 def _run_tier1_container(cfg: _Tier1Exec) -> bool:
     cases, is_sliced = _resolve_cases(1, cfg.selection)
     if is_sliced and not cases:
-        if cfg.selection.patterns or cfg.selection.tags:
-            matched = select_cases(
-                iter_cases(load_suite(SUITE_FILES[1])),
-                patterns=cfg.selection.patterns,
-                tags=cfg.selection.tags,
-            )
-            if not matched:
-                print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
-                return False
-        shard_msg = f" shard {cfg.selection.shard.label()}" if cfg.selection.shard is not None else ""
-        print(f"[e2e] tier 1{shard_msg}: 0 tests selected", flush=True)
-        return True
+        return _handle_empty_tier1_slice(cfg)
 
     suite = build_suite(cases) if is_sliced else load_suite(SUITE_FILES[1])
     if cfg.build_images:
@@ -486,6 +490,25 @@ def _exec_shard_child(shard: ShardSpec, cmd: Sequence[str]) -> tuple[ShardSpec, 
     return shard, proc.returncode == 0, elapsed, combined
 
 
+def _run_parallel_workers(cfg: _Tier1Exec, parallel_count: int, exclusive_count: int, worker_count: int) -> bool:
+    shards = [ShardSpec(index=i, total=worker_count) for i in range(1, worker_count + 1)]
+    solo_note = f" (+{exclusive_count} host-exclusive solo afterwards)" if exclusive_count else ""
+    print(
+        f"[e2e] tier 1: running {parallel_count} tests across {worker_count} parallel containers{solo_note}", flush=True
+    )
+    ok = True
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(_exec_shard_child, s, _shard_child_cmd(cfg, s)) for s in shards]
+        for fut in concurrent.futures.as_completed(futures):
+            shard, shard_ok, dur_s, output = fut.result()
+            status = "OK" if shard_ok else "FAILED"
+            print(f"\n--- Tier 1 shard {shard.label()} ({status}, {dur_s:.1f}s) ---", flush=True)
+            if output:
+                print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            ok = ok and shard_ok
+    return ok
+
+
 def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
     all_cases = select_cases(
         iter_cases(load_suite(SUITE_FILES[1])),
@@ -507,27 +530,10 @@ def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
     ok = True
     worker_count = min(resolved_jobs, len(parallel_cases))
     if worker_count > 0:
-        shards = [ShardSpec(index=i, total=worker_count) for i in range(1, worker_count + 1)]
-        print(
-            f"[e2e] tier 1: running {len(parallel_cases)} tests across {worker_count} parallel containers"
-            + (f" (+{len(exclusive_cases)} host-exclusive solo afterwards)" if exclusive_cases else ""),
-            flush=True,
-        )
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-            futures = [pool.submit(_exec_shard_child, s, _shard_child_cmd(cfg, s)) for s in shards]
-            for fut in concurrent.futures.as_completed(futures):
-                shard, shard_ok, dur_s, output = fut.result()
-                status = "OK" if shard_ok else "FAILED"
-                print(f"\n--- Tier 1 shard {shard.label()} ({status}, {dur_s:.1f}s) ---", flush=True)
-                if output:
-                    print(output, end="" if output.endswith("\n") else "\n", flush=True)
-                ok = ok and shard_ok
+        ok = _run_parallel_workers(cfg, len(parallel_cases), len(exclusive_cases), worker_count)
 
     if exclusive_cases:
-        print(
-            f"\n--- Tier 1 host-exclusive solo phase ({len(exclusive_cases)} tests) ---",
-            flush=True,
-        )
+        print(f"\n--- Tier 1 host-exclusive solo phase ({len(exclusive_cases)} tests) ---", flush=True)
         solo_cfg = cfg._replace(
             run_id=f"{cfg.run_id}-solo",
             build_images=False,
@@ -537,12 +543,56 @@ def _run_tier1_parallel(cfg: _Tier1Exec, jobs: int) -> bool:
                 host_scope=HostScope.EXCLUSIVE,
             ),
         )
-        solo_ok = _run_tier1_container(solo_cfg)
-        ok = ok and solo_ok
+        ok = _run_tier1_container(solo_cfg) and ok
 
     total_s = time.monotonic() - started
     print(f"[e2e] tier 1 parallel summary: {len(all_cases)} tests in {total_s:.1f}s ({'OK' if ok else 'FAILED'})")
     return ok
+
+
+def _cleanup_tier2_host(priv: str, nas: str, net: str) -> None:
+    run(
+        [
+            "docker",
+            "exec",
+            priv,
+            "bash",
+            "-c",
+            (
+                "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
+                "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
+                "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
+                "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
+                "if [ -f /run/e2e-loop-devs ]; then "
+                "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi"
+            ),
+        ],
+        check=False,
+        capture=True,
+    )
+    for c in (priv, nas):
+        run(["docker", "rm", "-f", c], check=False, capture=True)
+    run(["docker", "network", "rm", net], check=False, capture=True)
+    leaked: list[str] = []
+    for _ in range(5):
+        leaked = _leaked_e2e_loops()
+        if not leaked:
+            break
+        time.sleep(0.2)
+    if leaked:
+        raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
+
+
+def _leaked_e2e_loops() -> list[str]:
+    leaked: list[str] = []
+    for bf in Path("/sys/block").glob("loop*/loop/backing_file"):
+        try:
+            val = bf.read_text().strip()
+        except OSError:
+            continue
+        if "/e2e-disks/" in val:
+            leaked.append(f"{bf.parent.parent.name}:{val}")
+    return leaked
 
 
 def run_tier2(
@@ -608,67 +658,32 @@ def run_tier2(
     finally:
         if not ok or keep_logs:
             dump_logs([priv, nas], artifact_dir / "tier2")
-        # Stop services holding btrfs mounts, detach loop devices inside priv,
-        # remove containers, and assert no /e2e-disks loop device leaks on host.
-        run(
-            [
-                "docker",
-                "exec",
-                priv,
-                "bash",
-                "-c",
-                (
-                    "systemctl stop e2e-dind virtqemud virtqemud.socket virtqemud-ro.socket "
-                    "virtqemud-admin.socket docker-gc-recorder btrfs-stall-monitor "
-                    "var-mnt-btrfs\\\\x2dtop.automount var-mnt-btrfs\\\\x2dtop.mount 2>/dev/null || true; "
-                    "umount -l /var/mnt/btrfs-top /var/home /sysroot /var 2>/dev/null || true; "
-                    "if [ -f /run/e2e-loop-devs ]; then "
-                    "xargs -r losetup -d </run/e2e-loop-devs 2>/dev/null || true; fi"
-                ),
-            ],
-            check=False,
-            capture=True,
-        )
-        for c in (priv, nas):
-            run(["docker", "rm", "-f", c], check=False, capture=True)
-        run(["docker", "network", "rm", net], check=False, capture=True)
-        leaked: list[str] = []
-        for _ in range(5):
-            leaked = []
-            for bf in Path("/sys/block").glob("loop*/loop/backing_file"):
-                try:
-                    val = bf.read_text().strip()
-                except OSError:
-                    continue
-                if "/e2e-disks/" in val:
-                    leaked.append(f"{bf.parent.parent.name}:{val}")
-            if not leaked:
-                break
-            time.sleep(0.2)
-        if leaked:
-            raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
+        _cleanup_tier2_host(priv, nas, net)
+
+
+def _parse_jobs_option(raw_jobs: object, *, has_shard: bool, has_tier2: bool) -> int:
+    if raw_jobs is None:
+        return 1
+    assert isinstance(raw_jobs, int) and not isinstance(raw_jobs, bool)
+    if raw_jobs < 0:
+        raise ValueError(f"--jobs must be >= 0, got {raw_jobs}")
+    if has_shard and raw_jobs != 1:
+        raise ValueError("cannot combine --shard with --jobs")
+    if has_tier2 and raw_jobs != 1:
+        raise ValueError("--jobs is only supported for tier 1")
+    return raw_jobs
 
 
 def _validate_options(tiers: Sequence[int], args: argparse.Namespace) -> tuple[SuiteSelection, int]:
-    if args.tag is not None and 2 in tiers:
+    has_tier2 = 2 in tiers
+    if args.tag is not None and has_tier2:
         raise ValueError("--tag is only supported for tier 1")
     patterns = parse_patterns(args.match) if args.match is not None else ()
     tags = parse_tags(args.tag) if args.tag is not None else frozenset()
     shard = parse_shard(args.shard) if args.shard is not None else None
-    if shard is not None and 2 in tiers:
+    if shard is not None and has_tier2:
         raise ValueError("--shard is only supported for tier 1")
-    raw_jobs = args.jobs
-    if raw_jobs is None:
-        jobs = 1
-    else:
-        assert isinstance(raw_jobs, int) and not isinstance(raw_jobs, bool)
-        if raw_jobs < 0:
-            raise ValueError(f"--jobs must be >= 0, got {raw_jobs}")
-        if shard is not None and raw_jobs != 1:
-            raise ValueError("cannot combine --shard with --jobs")
-        if 2 in tiers and raw_jobs != 1:
-            raise ValueError("--jobs is only supported for tier 1")
-        jobs = raw_jobs
+    jobs = _parse_jobs_option(args.jobs, has_shard=shard is not None, has_tier2=has_tier2)
     host_scope = HostScope(args.host_scope)
     return SuiteSelection(patterns=patterns, tags=tags, shard=shard, host_scope=host_scope), jobs
 
@@ -719,17 +734,33 @@ def _dispatch_tier(tier: int, cfg: _Tier1Exec, jobs: int, *, direct: bool) -> bo
     return _run_tier1_container(cfg)
 
 
+def _check_selection_nonempty(tiers: Sequence[int], selection: SuiteSelection) -> bool:
+    if not selection.active:
+        return True
+    for tier in tiers:
+        cases = select_cases(
+            iter_cases(load_suite(SUITE_FILES[tier])),
+            patterns=selection.patterns,
+            tags=selection.tags if tier == 1 else frozenset(),
+        )
+        if not cases:
+            print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
+            return False
+    return True
+
+
+def _finalize_artifact_dir(artifact_dir: Path, *, cleanup_dir: bool, all_ok: bool, keep_logs: bool) -> None:
+    if not cleanup_dir:
+        return
+    if all_ok and not keep_logs and artifact_dir.exists():
+        shutil.rmtree(artifact_dir, ignore_errors=True)
+    elif artifact_dir.exists():
+        print(f"[e2e] logs preserved at {artifact_dir}", file=sys.stderr)
+
+
 def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selection: SuiteSelection, jobs: int) -> int:
-    if selection.active:
-        for tier in tiers:
-            cases = select_cases(
-                iter_cases(load_suite(SUITE_FILES[tier])),
-                patterns=selection.patterns,
-                tags=selection.tags if tier == 1 else frozenset(),
-            )
-            if not cases:
-                print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
-                return 2
+    if not _check_selection_nonempty(tiers, selection):
+        return 2
     problem = checkout_preflight()
     if problem is not None:
         print(problem, file=sys.stderr, end="")
@@ -755,11 +786,7 @@ def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selectio
             )
             all_ok = _dispatch_tier(tier, cfg, jobs, direct=direct) and all_ok
     finally:
-        if cleanup_dir:
-            if all_ok and not args.keep_logs and artifact_dir.exists():
-                shutil.rmtree(artifact_dir, ignore_errors=True)
-            elif artifact_dir.exists():
-                print(f"[e2e] logs preserved at {artifact_dir}", file=sys.stderr)
+        _finalize_artifact_dir(artifact_dir, cleanup_dir=cleanup_dir, all_ok=all_ok, keep_logs=args.keep_logs)
 
     return 0 if all_ok else 1
 
