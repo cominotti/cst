@@ -162,6 +162,12 @@
 #                          btrfs:top-mount (keeps flushoncommit untouched).
 #                          `status` and `plan` work in a toolbox; `apply` and
 #                          `revert` need root on the host.
+#   scratch [status|plan|attach|detach] [--user NAME] [--no-cache] [--no-scratch] [--allow-nonempty]
+#                          multi-user dedicated NVMe cache/scratch bind mounts
+#                          (/var/mnt/cache/<user> -> ~/.cache and
+#                          /var/mnt/scratch/<user> -> ~/Scratch). `status` and
+#                          `plan` run in a toolbox; `attach` and `detach` need
+#                          root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
 #                          per-device weekly scrub speed limit (SCRUB_LIMIT in
 #                          /etc/btrfs-setup/snapshots.conf + service drop-in).
@@ -270,6 +276,9 @@ case "${cmd}" in
         ;;
     commit-interval)
         CST_PROG="${PROG} commit-interval" exec python3 -I -B "${SRC}/btrfs-commit-interval" "$@"
+        ;;
+    scratch)
+        CST_PROG="${PROG} scratch" exec python3 -I -B "${SRC}/btrfs-scratch" "$@"
         ;;
     iocost)
         case "${1:-status}" in
@@ -746,6 +755,11 @@ status() (
     python3 -I -B "${SRC}/btrfs-compress" status 2>&1 | cst_indent
     section "commit interval (commit=60)"
     python3 -I -B "${SRC}/btrfs-commit-interval" status 2>&1 | cst_indent
+    if mountpoint -q /var/mnt/cache 2>/dev/null || mountpoint -q /var/mnt/scratch 2>/dev/null ||
+        grep -qE 'managed-by: btrfs-scratch|/var/mnt/(cache|scratch)' /etc/fstab 2>/dev/null; then
+        section "dedicated NVMe cache/scratch mounts"
+        python3 -I -B "${SRC}/btrfs-scratch" status 2>&1 | cst_indent
+    fi
     section "degraded boot"
     if [[ -x "${DEGRADED}" ]]; then
         "${DEGRADED}" --status 2>/dev/null | sed -n '/==== summary/,$p' | sed '1d; s/^/  /'

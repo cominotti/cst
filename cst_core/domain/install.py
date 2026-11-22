@@ -259,6 +259,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "bluetooth/bt-setup",
         "btrfs/btrfs-commit-interval",
         "btrfs/btrfs-compress",
+        "btrfs/btrfs-scratch",
         "btrfs/btrfs-scrub-limit",
         "btrfs/btrfs-stall-watch",
         "btrfs/chrome-cache",

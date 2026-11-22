@@ -202,6 +202,20 @@ class ConvertTest(Base):
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(read(self.state_file("drop-pending")), "")
 
+    def test_put_aside_leaves_cache_alone_when_parent_is_an_external_mountpoint(self) -> None:
+        cache = self.tree(".cache")
+        uv = os.path.join(cache, "uv")
+        os.makedirs(os.path.join(uv, "wheels"))
+        self.machine(mountpoints=[cache])
+        self.plan(f"aside {uv}", f"copy {cache}")
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.isdir(os.path.join(uv, "wheels")))
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+
     def test_a_busy_cache_stays_and_its_parent_is_still_cloned(self) -> None:
         cache = self.tree(".cache")
         uv = os.path.join(cache, "uv")
@@ -445,7 +459,9 @@ class ConvertBootTest(Base):
         self.assertEqual(self.notified(), [["-u", "critical", "-a", "btrfs-snapshot", title, body]])
         self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
         self.assertFalse(os.path.exists(self.state_file("boot-attempts")))
-        self.assertEqual(self.calls("mountpoint"), [])
+        # planned_left() checks mountpoint -q; no findmnt/btrfs proves convert_one() did not run.
+        self.assertEqual(self.calls("findmnt"), [])
+        self.assertEqual(self.calls("btrfs"), [])
 
     def test_an_empty_attempts_file_counts_as_none(self) -> None:
         self.plan(f"copy {self.tree('Workspace')}")

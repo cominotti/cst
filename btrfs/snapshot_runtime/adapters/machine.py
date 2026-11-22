@@ -223,8 +223,13 @@ class SnapshotRun:
         """[[ -d PATH && $(stat -c %i PATH) == 256 ]]: a btrfs subvolume's root."""
         return os.path.isdir(path) and self.capture(["stat", "-c", "%i", path]).rstrip("\n") == SUBVOL_ROOT_INODE
 
+    def is_mountpoint(self, path: str) -> bool:
+        """mountpoint -q PATH: True when PATH is an explicit mountpoint (e.g. external bind mount)."""
+        return os.path.isdir(path) and self.ok(["mountpoint", "-q", path])
+
     def sources(self) -> Sources:
-        return sources(self.settings, workspace_is_subvol=self.is_subvol(f"{self.settings['HOME_DIR']}/Workspace"))
+        ws = f"{self.settings['HOME_DIR']}/Workspace"
+        return sources(self.settings, workspace_is_subvol=self.is_subvol(ws) and not self.is_mountpoint(ws))
 
     def cache_args(self, src: Sources, stream: TextIO | None = None) -> CacheArgs:
         """The core's cache options, their warnings logged (on stream)."""

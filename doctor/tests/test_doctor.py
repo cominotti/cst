@@ -1459,6 +1459,64 @@ class BtrfsCompressionDoctorTest(Scratch):
         )
 
 
+class BtrfsScratchDoctorTest(Scratch):
+    """check_btrfs_scratch: silent when unconfigured; warns on flushoncommit, missing crypttab nofail, or unmounted bind."""
+
+    def _put(self, *parts: str, text: str) -> None:
+        path = os.path.join(self.root, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _set_findmnt(self, text: str) -> None:
+        with open(self.env["FIX_FINDMNT_OPTS"], "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_scratch_health_states(self) -> None:
+        self._put("etc", "fstab", text=f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n")
+        self._put("proc", "mounts", text="/dev/dm-0 /var btrfs rw,compress-force=zstd:1,flushoncommit 0 0\n")
+        self._set_findmnt(f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n")
+        silent = self.run_tool()
+        self.assertNotIn("btrfs scratch:", "\n".join(area_lines(silent.stdout, "btrfs")))
+
+        self._put(
+            "etc",
+            "fstab",
+            text=(
+                f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n"
+                "/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
+                "/dev/mapper/scratch /var/mnt/scratch btrfs subvol=scratch,noatime,compress=zstd:1,nofail 0 0\n"
+                "/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 "
+                "# managed-by: btrfs-scratch (CST) user=danilo kind=cache\n"
+            ),
+        )
+        self._put("etc", "crypttab", text="scratch UUID=abc /etc/cryptsetup-keys.d/scratch.key nofail,discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
+            "/dev/mapper/scratch /var/mnt/cache noatime,compress=zstd:1,subvol=/cache scratch-u\n"
+            "/dev/mapper/scratch /var/mnt/scratch noatime,compress=zstd:1,subvol=/scratch scratch-u\n"
+            "/dev/mapper/scratch /var/home/danilo/.cache noatime,compress=zstd:1,subvol=/cache/danilo scratch-u\n"
+        )
+        ok_r = self.run_tool()
+        self.assertIn(
+            "  ok     btrfs scratch: /var/mnt/cache, /var/mnt/scratch mounted",
+            "\n".join(area_lines(ok_r.stdout, "btrfs")),
+        )
+
+        self._put("etc", "crypttab", text="scratch UUID=abc /etc/cryptsetup-keys.d/scratch.key discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
+            "/dev/mapper/scratch /var/mnt/cache noatime,flushoncommit scratch-u\n"
+            "/dev/mapper/scratch /var/mnt/scratch noatime scratch-u\n"
+        )
+        warn_r = self.run_tool()
+        self.assertEqual(warn_r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(warn_r.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs scratch: /var/mnt/cache has 'flushoncommit'", btrfs_text)
+        self.assertIn("WARN   btrfs scratch: /etc/crypttab entry 'scratch' is missing 'nofail'", btrfs_text)
+        self.assertIn("fix: cst btrfs scratch attach --user danilo", btrfs_text)
+
+
 class SnapshotsWritableTest(Scratch):
     """check_snapshots_writable: the lists btrfs-snapshot-core keeps in
     /var/lib/btrfs-snapshot (the snapshot folder itself is root-only)."""

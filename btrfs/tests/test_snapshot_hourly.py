@@ -420,6 +420,17 @@ class HourlyTest(Base):
             [[*self.common("snapshot"), *self.sources(ws=WS_POLICY), "--exclude-caches", *PODMAN]],
         )
 
+    def test_external_mountpoint_workspace_is_not_added_as_snapshot_source(self) -> None:
+        ws = os.path.join(self.home, "Workspace")
+        os.makedirs(ws)
+        self.mark_subvol(ws)
+        self.machine(mountpoints=[ws])
+        self.assertEqual(self.run_prog("hourly").returncode, 0)
+        self.assertEqual(
+            self.core_calls(),
+            [[*self.common("snapshot"), *self.sources(), "--exclude-caches", *PODMAN]],
+        )
+
     def test_not_set_up_or_no_core(self) -> None:
         self.conf(HOME_DIR="")
         r = self.run_prog("hourly")
@@ -967,6 +978,20 @@ class WaitingTest(Base):
         self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
         self.assertFalse(os.path.exists(self.path("etc/btrfs-setup/convert-at-boot")))
         self.assertEqual(sorted(os.listdir(self.state)), ["last-ok"])
+
+    def test_external_mountpoint_cache_does_not_block_hourly_snapshots(self) -> None:
+        cache = os.path.join(self.home, ".cache")
+        uv = os.path.join(cache, "uv")
+        os.makedirs(uv)
+        self.machine(mountpoints=[cache])
+        self.write("etc/btrfs-setup/convert-plan", f"aside {uv}\ncopy {cache}\n")
+        self.write("etc/btrfs-setup/convert-at-boot", "")
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(log(5, "all planned conversions done; snapshots start"), self.lines(r.stdout))
+        self.assertTrue(os.path.isdir(uv))
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+        self.assertFalse(os.path.exists(self.path("etc/btrfs-setup/convert-at-boot")))
 
     def test_an_unfinished_move_into_bulk(self) -> None:
         self.write("var/lib/btrfs-bulk/journal-1.json", '{"id": 1}\n')

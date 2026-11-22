@@ -269,6 +269,15 @@ build-dir = "<home>/.cache/cargo-build/{workspace-path-hash}"
 rustc-wrapper = "<home>/.local/libexec/cst/rustc-wrapper"
 ```
 
+### Write-reduction tips for Rust agents & worktrees
+
+For high-churn Cargo builds (especially parallel coding agents and multi-worktree setups):
+
+- **Fast iterative checks:** run `cargo check` during edits and reserve `cargo test` / full links for milestones.
+- **Disable incremental compilation in automated agents/CI:** set `CARGO_INCREMENTAL=0` in agent/CI shells (with `sccache` or clean release/bench builds, incremental state writes gigabytes to `target/` and invalidates cache hits).
+- **Per-agent build lanes on external scratch (`~/Scratch`):** if `cst btrfs scratch` provides `~/Scratch` (`CACHEDIR.TAG`, off the root RAID1), agents can use separate `CARGO_BUILD_BUILD_DIR=~/Scratch/cargo-<agent>` lanes to avoid Cargo lock contention without consuming mirrored root TBW.
+- **Keep release/bench debuginfo lean:** only enable full debug symbols (`[profile.release] debug = true` or `[profile.bench] debug = "line-tables-only"`) when profiling; use `RUST_LEAN_DEBUGINFO=yes` for dev builds.
+
 If the file has no `[build]` table, one is appended. The new file is parsed
 again and must equal the old one plus this one key; otherwise (for example
 `build.jobs = 4` written as a dotted key) `config` prints the line to add by

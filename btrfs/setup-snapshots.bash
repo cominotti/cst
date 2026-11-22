@@ -277,15 +277,17 @@ snap_install_runtime() {
     cst_mark btrfs:snapshots
 }
 
-# State of one SNAP_EXCLUDE entry: done | todo | create | aside | absent | -.
+# State of one SNAP_EXCLUDE entry: done | mounted | todo | create | aside | absent | -.
 snap_entry_state() {   # strategy path
     local strategy="$1" path="$2"
     if [[ "${strategy}" == aside ]]; then
-        if [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")"; then
+        if [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+            ! mountpoint -q "${path}" 2>/dev/null && ! mountpoint -q "$(dirname "${path}")" 2>/dev/null; then
             echo aside
         else
             echo -
         fi
+    elif mountpoint -q "${path}" 2>/dev/null; then echo "mounted"
     elif is_subvol "${path}"; then echo "done"
     elif [[ -s "${SNAP_STATE}/skipped" ]] && cut -f1 "${SNAP_STATE}/skipped" | grep -qxF -- "${path}"; then
         printf 'skipped: %s\n' "$(P="${path}" awk -F '\t' '$1 == ENVIRON["P"] {print $2; exit}' "${SNAP_STATE}/skipped")"
@@ -304,6 +306,7 @@ snap_plan_summary() {   # home: prints the plan; sets SNAP_TODO
         state="$(snap_entry_state "${strategy}" "${home}/${rel}")"
         case "${state}" in
             done) state="done" ;;
+            mounted) state="done (external mount)" ;;
             todo) state="to convert (reflink clone)"; SNAP_TODO=$((SNAP_TODO + 1)) ;;
             create) state="absent: created empty"; SNAP_TODO=$((SNAP_TODO + 1)) ;;
             aside) state="cache: deleted before converting its parent"; SNAP_TODO=$((SNAP_TODO + 1)) ;;
@@ -644,6 +647,7 @@ snap_status() {
         state="$(snap_entry_state "${strategy}" "${home}/${rel}")"
         case "${state}" in
             done) state="ok" ;;
+            mounted) state="ok (external mount)" ;;
             todo) state="pending (busy)" ;;
             create) state="pending (create)" ;;
             aside) state="pending (delete cache)" ;;

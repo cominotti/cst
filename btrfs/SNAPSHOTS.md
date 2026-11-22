@@ -275,6 +275,15 @@ There are two kinds:
 
 > **Important:** files in these folders (except `Workspace`) are **not in any
 > snapshot and not in the NAS backup**. If you delete them, they are gone.
+>
+> **External mounts (`cst btrfs scratch`):** if `~/.cache` (or `~/Workspace`) is
+> an explicit mountpoint (`mountpoint -q`, for example a bind mount from a
+> dedicated scratch/cache NVMe drive via `cst btrfs scratch`), `snapshots plan`
+> and `snapshots status` show it as `done (external mount)` /
+> `ok (external mount)`, `put_aside` leaves its child caches (such as
+> `~/.cache/uv`) untouched, `planned_left` does not block snapshots waiting for
+> conversion, and the runtime never tries to snapshot an externally mounted
+> `~/Workspace` as a local subvolume.
 
 **What stays in /home snapshots** (examples): your documents, `Downloads`
 (except `Downloads/iso`, which is a link into `~/Bulk`), `Videos`,

@@ -1871,7 +1871,11 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
 
     def test_btrfs_setup_dispatches_compress_and_commit_help(self) -> None:
-        for cmd, needle in (("compress-force", "revert"), ("commit-interval", "commit=SECONDS")):
+        for cmd, needle in (
+            ("compress-force", "revert"),
+            ("commit-interval", "commit=SECONDS"),
+            ("scratch", "--allow-nonempty"),
+        ):
             r = subprocess.run(
                 ["bash", SETUP, cmd, "--help"],
                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
