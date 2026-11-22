@@ -18,7 +18,7 @@ from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
-from cpu.game.domain import RUN_LOCK_WAIT_S, held_sys_paths, parse_cstate_limit_us
+from cpu.game.domain import RUN_LOCK_WAIT_S, held_sys_paths, parse_cstate_limit_us, run_lock
 from cpu.power.domain import (
     CSTATE_OFF,
     CSTATE_ON,
@@ -63,7 +63,7 @@ class PowerPaths:
     def lock_file(self) -> str:
         """The run lock cpu-game-profile's on, off and tick hold (/run/cpu-setup/lock): apply and revert
         take it too, so a udev hotplug run or the unit never writes GPU and C-state files meanwhile."""
-        return f"{self.run}/lock"
+        return run_lock(self.run)
 
     @property
     def gpu_managed_file(self) -> str:

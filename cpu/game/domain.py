@@ -83,6 +83,12 @@ def _in(folder: str, name: str) -> str:
     return posixpath.join(folder, name)
 
 
+def run_lock(run: str) -> str:
+    """The run folder's lock: cpu-game-profile's on, off and tick, and cpu-power's apply and revert, hold
+    it, so they never write GPU and C-state files at the same time."""
+    return _in(run, "lock")
+
+
 @dataclass(frozen=True, slots=True)
 class GamePaths:
     """Where the profile reads and writes (tests point them into a folder of their own)."""
@@ -122,8 +128,8 @@ class GamePaths:
 
     @property
     def lock(self) -> str:
-        """on, off and tick never interleave."""
-        return _in(self.run, "lock")
+        """on, off and tick never interleave (run_lock)."""
+        return run_lock(self.run)
 
     def epp(self, cpu: str) -> str:
         """The energy/performance preference of one CPU."""
