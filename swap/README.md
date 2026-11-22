@@ -240,10 +240,14 @@ backup of a pre-existing file that is not CST's as
 when active, if it rewrote the file **or** the live `user.slice memory.min`
 differs from what the file asks (uresourced started before the file, or did not
 apply it); `systemctl --user daemon-reload` or a new login propagates the
-drop-in to a live `session.slice`. `user.slice memory.min` is inactive (`-`),
-not a difference, when uresourced is not active, and when it reads 0 while no
-session is in a seat's foreground (logind's `/run/systemd/seats`: a server, an
-ssh login), since uresourced protects only that session's user.
+drop-in to a live `session.slice`. What the file asks is `[ActiveUser]
+MemoryMin` for each user with a session in a seat's foreground (logind's
+`/run/systemd/seats`, `ACTIVE_UID`; one user in front of two seats counts
+once), capped in total by `[Global] MaxMemoryMin`, as uresourced computes it.
+A greeter (the login screen, a uid below 1000) is no such user.
+`user.slice memory.min` is inactive (`-`), not a difference, when uresourced
+is not active, and when it reads 0 while no such user is in front of a seat (a
+server, an ssh login, the login screen), since uresourced then protects nobody.
 
 ---
 

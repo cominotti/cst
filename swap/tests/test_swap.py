@@ -3010,6 +3010,56 @@ class Phase1MemoryTuningTest(_SwapScratch):
         self.assertEqual(rc, 0, out)
         self.assertNotIn(("restart", "uresourced.service"), sd.calls)
 
+    def _seats(self, **seats: str) -> None:
+        for name in os.listdir(self.env.seats_dir):
+            os.remove(os.path.join(self.env.seats_dir, name))
+        for name, text in seats.items():
+            with open(os.path.join(self.env.seats_dir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    def test_a_greeter_in_front_is_no_active_user(self) -> None:
+        # The login screen (GDM's greeter, a system uid) in seat0's foreground: uresourced protects nobody,
+        # so a live 0 is inactive, not a difference apply restarts uresourced for.
+        self._uresourced_case(str(2**30))
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)  # writes /etc/uresourced.conf
+        self._seats(seat0="IS_SEAT0=1\nACTIVE=c1\nACTIVE_UID=42\nSESSIONS=c1\nUIDS=42\n")
+        self._uresourced_case("0")
+        rc, out, sd = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no active seat session", out)
+        self.assertNotRegex(out, r"DIFF +user\.slice memory\.min")
+        self.assertNotIn(("restart", "uresourced.service"), sd.calls)
+
+    def test_the_floor_counts_each_active_user_once(self) -> None:
+        # Two users in front of two seats: uresourced gives user.slice MemoryMin for each (2G), and that is
+        # no drift; the same user in front of both seats counts once (1G).
+        one_g = 2**30
+        for seats, live in (
+            ({"seat0": "ACTIVE=3\nACTIVE_UID=1000\n", "seat1": "ACTIVE=7\nACTIVE_UID=1001\n"}, 2 * one_g),
+            ({"seat0": "ACTIVE=3\nACTIVE_UID=1000\n", "seat1": "ACTIVE=7\nACTIVE_UID=1000\n"}, one_g),
+            # A seat file without ACTIVE_UID still counts its foreground user.
+            ({"seat0": "ACTIVE=3\nACTIVE_UID=1000\n", "seat1": "ACTIVE=7\n"}, 2 * one_g),
+        ):
+            with self.subTest(seats=seats):
+                self._uresourced_case(str(one_g))
+                rc, out, _ = self._apply_with_uresourced()  # the file in place first
+                self._seats(**seats)
+                self._uresourced_case(str(live))
+                rc, out, sd = self._apply_with_uresourced()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("  ok      user.slice memory.min", out)
+                self.assertNotIn(("restart", "uresourced.service"), sd.calls)
+
+    def test_max_memory_min_caps_the_total_of_the_active_users(self) -> None:
+        text = "[Global]\nMaxMemoryMin=10%\n[ActiveUser]\nMemoryMin=1G\n"
+        one_g = 2**30
+        self.assertEqual(effective_uresourced_memory_min(text, 64 * one_g, active_users=2), (2 * one_g, False))
+        self.assertEqual(effective_uresourced_memory_min(text, 64 * one_g, active_users=0), (one_g, False))
+        cap = 16 * one_g * 10 // 100 // 4096 * 4096  # 1.6G: below 2G, above 1G
+        self.assertEqual(effective_uresourced_memory_min(text, 16 * one_g, active_users=2), (cap, True))
+        self.assertEqual(effective_uresourced_memory_min(text, 16 * one_g, active_users=1), (one_g, False))
+
 
 if __name__ == "__main__":
     unittest.main()
