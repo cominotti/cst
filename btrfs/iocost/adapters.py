@@ -20,7 +20,7 @@ from cst_core.adapters.runtime import (
 )
 from cst_core.domain.install import Component
 from cst_core.domain.text import group
-from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
+from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
     IOCOST_MANAGED_FILE,
@@ -28,6 +28,7 @@ from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
     IOCOST_RULE_DEST,
     IOCOST_SERVICE,
+    UDEV_CONTROL,
     BlockDisk,
     IocostAction,
     IocostParsedArgs,
@@ -55,6 +56,7 @@ class IocostPaths:
     managed_file: str = IOCOST_MANAGED_FILE
     rule_dest: str = IOCOST_RULE_DEST
     installer_script: str = ""
+    udev_control: str = UDEV_CONTROL
 
 
 def iocost_paths_for(
@@ -149,18 +151,24 @@ def collect_iocost_snapshot(paths: IocostPaths, *, runner: CommandRunnerPort | N
     )
 
 
-def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan) -> list[str]:
+def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan) -> tuple[int, list[str]]:
+    """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write failed, lines)."""
     if not snap.qos_exists:
-        return [f"skipped:   {paths.qos_path} unavailable"]
+        if plan.revert_mode:
+            # No blk-iocost here: nothing to reset, and nothing stays CST's.
+            _save_managed_devnos(paths.managed_file, frozenset())
+        return 0, [f"skipped:   {paths.qos_path} unavailable"]
     managed = set(plan.next_managed)
     out: list[str] = []
+    rc = 0
     verb = "reverted:" if plan.revert_mode else "set:"
     for op in plan.writes:
         err = _write_qos_line(paths.qos_path, op.line)
         if err is None:
             out.append(f"{verb:<10} {paths.qos_path} <- '{op.line}' ({op.device_name})")
             continue
-        out.append(f"skipped:   {paths.qos_path} {op.device_name} (not writable: {err.strerror or err})")
+        rc = 1
+        out.append(f"ERROR: {paths.qos_path} {op.device_name}: {err.strerror or err}")
         if plan.revert_mode:
             managed.add(op.devno)
         else:
@@ -168,34 +176,36 @@ def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan
     out.extend(f"unchanged: {item}" for item in plan.unchanged)
     out.extend(f"kept:      {item}" for item in plan.preexisting)
     _save_managed_devnos(paths.managed_file, frozenset(managed))
-    return out
+    return rc, out
 
 
-def _install_iocost_component(runner: CommandRunnerPort, script: str) -> tuple[int, list[str]]:
-    out: list[str] = []
-    for subargs in (
-        ["install", "--component", Component.BTRFS_IOCOST.value],
-        ["mark", "--component", Component.BTRFS_IOCOST.value, "done"],
-    ):
-        rc, lines, err = run_installer(runner, script, subargs)
-        out.extend(lines)
-        if err:
-            out.append(err)
-        if rc != 0:
-            return rc, out
-    return 0, out
+def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) -> tuple[int, list[str]]:
+    rc, lines, err = run_installer(runner, script, subargs)
+    return rc, [*lines, *([err] if err else [])]
 
 
-def _enable_iocost_service(runner: CommandRunnerPort) -> tuple[int, list[str]]:
+def _failed(what: str, result: CommandResult) -> tuple[int, list[str]]:
+    return (result.returncode or 1), [f"ERROR: {what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"]
+
+
+def _reload_udev_rules(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
+    """`udevadm control --reload-rules` when udevd runs; without it there is nothing to reload."""
+    if not os.path.exists(paths.udev_control):
+        return 0, ["note:      udevd not running; rules are read when it starts"]
+    res = runner.run(["udevadm", "control", "--reload-rules"], output=OutputMode.CAPTURE)
+    return _failed("udevadm control --reload-rules", res) if res.returncode != 0 else (0, [])
+
+
+def _enable_iocost_service(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
     systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
     dr = systemd.daemon_reload_result()
     if dr.returncode != 0:
-        return dr.returncode, [dr.stderr.strip() or "systemctl daemon-reload failed"]
+        return _failed("systemctl daemon-reload", dr)
     en = systemd.enable(IOCOST_SERVICE, now=True)
     if en.returncode != 0:
-        return en.returncode, [en.stderr.strip() or f"systemctl enable --now {IOCOST_SERVICE} failed"]
-    runner.run(["udevadm", "control", "--reload-rules"], output=OutputMode.CAPTURE)
-    return 0, [f"enabled:   {IOCOST_SERVICE}"]
+        return _failed(f"systemctl enable --now {IOCOST_SERVICE}", en)
+    rc_u, lines_u = _reload_udev_rules(runner, paths)
+    return rc_u, [f"enabled:   {IOCOST_SERVICE}", *lines_u]
 
 
 def apply_iocost(
@@ -205,7 +215,10 @@ def apply_iocost(
     live_only: bool = False,
     target_device: str | None = None,
 ) -> tuple[int, list[str]]:
-    """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence."""
+    """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence.
+
+    Not live-only: install btrfs:iocost, write, daemon-reload, enable --now, reload the udev rules, and
+    only then mark the component done; the first step that fails stops there (rc != 0, still pending)."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     snap = collect_iocost_snapshot(paths, runner=cmd_runner)
     plan = plan_iocost_apply(snap, target_device=target_device)
@@ -217,44 +230,69 @@ def apply_iocost(
         )
 
     out: list[str] = []
+    component = Component.BTRFS_IOCOST.value
     if not live_only:
-        rc_i, lines_i = _install_iocost_component(cmd_runner, paths.installer_script)
+        rc_i, lines_i = _installer_step(cmd_runner, paths.installer_script, ["install", "--component", component])
         out.extend(lines_i)
         if rc_i != 0:
             return rc_i, out
 
-    out.extend(_apply_qos_writes(paths, snap, plan))
-    if not live_only:
-        rc_s, lines_s = _enable_iocost_service(cmd_runner)
+    rc_w, lines_w = _apply_qos_writes(paths, snap, plan)
+    out.extend(lines_w)
+    if rc_w != 0 or live_only:
+        return rc_w, out
+    for step in (
+        lambda: _enable_iocost_service(cmd_runner, paths),
+        lambda: _installer_step(cmd_runner, paths.installer_script, ["mark", "--component", component, "done"]),
+    ):
+        rc_s, lines_s = step()
         out.extend(lines_s)
-        return rc_s, out
+        if rc_s != 0:
+            return rc_s, out
     return 0, out
+
+
+def _remove_iocost_component(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
+    """Stop the service, remove btrfs:iocost and reload systemd and udev; the first failure stops there."""
+    systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
+    out: list[str] = []
+    present, _, _ = probe_systemd_unit(runner, IOCOST_SERVICE)
+    if present:
+        dis = systemd.disable(IOCOST_SERVICE, now=True)
+        if dis.returncode != 0:
+            rc_d, lines_d = _failed(f"systemctl disable --now {IOCOST_SERVICE}", dis)
+            return rc_d, [*lines_d, "nothing was removed"]
+        out.append(f"disabled:  {IOCOST_SERVICE}")
+    rc_r, lines_r = _installer_step(
+        runner, paths.installer_script, ["remove", "--component", Component.BTRFS_IOCOST.value]
+    )
+    out.extend(lines_r)
+    if rc_r != 0:
+        return rc_r, out
+    dr = systemd.daemon_reload_result()
+    if dr.returncode != 0:
+        rc_dr, lines_dr = _failed("systemctl daemon-reload", dr)
+        return rc_dr, [*out, *lines_dr]
+    rc_u, lines_u = _reload_udev_rules(runner, paths)
+    return rc_u, [*out, *lines_u]
 
 
 def revert_iocost(
     paths: IocostPaths, *, live_only: bool = False, runner: CommandRunnerPort | None = None
 ) -> tuple[int, list[str]]:
-    """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule."""
-    cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    snap = collect_iocost_snapshot(paths, runner=cmd_runner)
-    out = _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
-    if live_only:
-        return 0, out
+    """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule.
 
-    systemd = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL)
-    if snap.service_present:
-        systemd.disable(IOCOST_SERVICE, now=True)
-    rc_r, lines_r, err_r = run_installer(
-        cmd_runner, paths.installer_script, ["remove", "--component", Component.BTRFS_IOCOST.value]
-    )
-    out.extend(lines_r)
-    if err_r:
-        out.append(err_r)
-    if rc_r != 0:
-        return rc_r, out
-    systemd.daemon_reload_result()
-    cmd_runner.run(["udevadm", "control", "--reload-rules"], output=OutputMode.CAPTURE)
-    return 0, out
+    Not live-only, the service and the rule go first (so no udev event enables a disk again after its
+    reset), then the managed devices are reset."""
+    cmd_runner = SubprocessCommandRunner() if runner is None else runner
+    out: list[str] = []
+    if not live_only:
+        rc_c, out = _remove_iocost_component(cmd_runner, paths)
+        if rc_c != 0:
+            return rc_c, out
+    snap = collect_iocost_snapshot(paths, runner=cmd_runner)
+    rc_w, lines_w = _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
+    return rc_w, [*out, *lines_w]
 
 
 def dispatch_iocost_cli_action(

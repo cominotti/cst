@@ -1436,9 +1436,20 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   limits the write to one whole disk and is accepted only together with
   `--live-only` (for `apply` and `plan`): a one-disk request never installs
   the service, whose next boot would write every disk;
-- **`revert`** disables only `MAJ:MIN` devices tracked in
-  `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`), stops and disables
-  `cst-btrfs-iocost.service`, and removes `btrfs:iocost`.
+- marks `btrfs:iocost` done in the install record only after the writes,
+  `daemon-reload`, `enable --now` and the udev rules' reload worked. The first
+  step that fails stops `apply` with an `ERROR:` line and a non-zero exit, and
+  the component stays pending (`cst doctor` shows it). A write that
+  `io.cost.qos` refuses is such an error, also for `--live-only` (the boot
+  service then fails visibly in `systemctl --failed`); a kernel without
+  `io.cost.qos` is only `skipped:` (exit 0). Without a running udevd (a
+  container) the rules' reload is skipped with a `note:`;
+- **`revert`** first stops and disables `cst-btrfs-iocost.service` (when that
+  fails, nothing is removed), removes `btrfs:iocost`, reloads systemd and the
+  udev rules (a failure is an error), and only then resets the `MAJ:MIN`
+  devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
+  so no udev event enables a disk again after its reset. The tracking file is
+  removed, also on a kernel without `io.cost.qos` (nothing to reset there).
 
 ### 9.3 `commit-interval`: coherent `commit=60` across root btrfs layers
 

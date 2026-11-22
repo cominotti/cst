@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import io
 import os
 import shutil
@@ -64,15 +64,25 @@ class _FakeCtx:
 
 
 class _FakeRunner:
+    """systemctl, udevadm and installer.py calls, recorded; fail_on: a part of the command line (such as
+    "installer.py mark" or "systemctl enable") whose call answers exit 1; on_call sees each command first."""
+
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.load_state = "not-found"
         self.active_state = "inactive"
         self.enabled_state = "disabled"
+        self.fail_on: set[str] = set()
+        self.on_call: Callable[[list[str]], None] | None = None
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)
+        if self.on_call is not None:
+            self.on_call(cmd)
+        line = " ".join(cmd)
+        if any(part in line for part in self.fail_on):
+            return CommandResult(1, "", f"{line}: failed", argv=tuple(cmd))
         if cmd[:2] == ["systemctl", "show"]:
             return CommandResult(
                 0,
@@ -85,6 +95,15 @@ class _FakeRunner:
         elif cmd[:3] == ["systemctl", "disable", "--now"]:
             self.active_state, self.enabled_state = "inactive", "disabled"
         return CommandResult(0, "", "", argv=tuple(cmd))
+
+
+def _steps(calls: list[list[str]]) -> list[str]:
+    """The commands that change something, in order: "installer WORD" or the first two words."""
+    return [
+        f"installer {c[4]}" if len(c) > 4 and c[3].endswith("installer.py") else " ".join(c[:2])
+        for c in calls
+        if c[:2] != ["systemctl", "show"]
+    ]
 
 
 class BtrfsIocostDomainTest(unittest.TestCase):
@@ -145,6 +164,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             managed_file=os.path.join(self.tmp, "run", "btrfs-setup", "iocost-managed"),
             rule_dest=os.path.join(self.tmp, "etc", "udev", "rules.d", "91-cst-iocost.rules"),
             installer_script="/opt/fake/cst_core/installer.py",
+            udev_control=os.path.join(self.tmp, "run", "udev", "control"),
         )
         self._write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
         self._write(self.paths.qos_path, "259:2 enable=1 ctrl=user rpct=95.00\n")
@@ -229,12 +249,12 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertTrue(any("non-CST enable=1 kept" in line for line in out_rev))
         self.assertTrue(any("remove" in c and "btrfs:iocost" in c for c in self.runner.calls))
 
-    def test_unwritable_qos_graceful_skip_and_refusals(self) -> None:
+    def test_unwritable_qos_fails_and_refusals(self) -> None:
         os.chmod(self.paths.qos_path, 0o444)
         self.addCleanup(os.chmod, self.paths.qos_path, 0o644)
         rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)
-        self.assertEqual(rc, 0)
-        self.assertTrue(any("not writable" in line for line in out))
+        self.assertEqual(rc, 1)
+        self.assertIn(f"ERROR: {self.paths.qos_path} nvme0n1: Permission denied", out)
         self.assertFalse(os.path.exists(self.paths.managed_file))
 
         out_s, err_s = io.StringIO(), io.StringIO()
@@ -271,6 +291,100 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(mapped.qos_path, f"/run/host{IOCOST_QOS_PATH}")
         self.assertEqual(mapped.sys_block, "/run/host/sys/block")
+
+    def _installer_words(self) -> list[str]:
+        """The installer commands run, in order (install, mark, remove)."""
+        return [s.removeprefix("installer ") for s in _steps(self.runner.calls) if s.startswith("installer ")]
+
+    def _ran(self, *words: str) -> bool:
+        return any(c[: len(words)] == list(words) for c in self.runner.calls)
+
+    def test_apply_marks_done_last_after_the_writes_and_the_service(self) -> None:
+        rc, out = apply_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(
+            _steps(self.runner.calls),
+            ["installer install", "systemctl daemon-reload", "systemctl enable", "installer mark"],
+        )
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertIn("259:1 enable=1 ctrl=auto", fh.read())
+        self.assertIn("note:      udevd not running; rules are read when it starts", out)
+
+    def test_apply_failures_leave_the_component_pending(self) -> None:
+        for fail in ("systemctl daemon-reload", "systemctl enable", "udevadm control", "installer.py install"):
+            with self.subTest(fail=fail):
+                self.runner = _FakeRunner()
+                self.runner.fail_on = {fail}
+                self._write(self.paths.udev_control, "")
+                rc, out = apply_iocost(self.paths, runner=self.runner)
+                self.assertNotEqual(rc, 0)
+                self.assertNotIn("mark", self._installer_words())
+                if fail != "installer.py install":
+                    self.assertTrue(any(line.startswith("ERROR:") and fail in line for line in out), out)
+
+    def test_a_failed_qos_write_stops_apply_before_the_service(self) -> None:
+        os.chmod(self.paths.qos_path, 0o444)
+        self.addCleanup(os.chmod, self.paths.qos_path, 0o644)
+        rc, out = apply_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"ERROR: {self.paths.qos_path} nvme0n1: Permission denied", out)
+        self.assertEqual(self._installer_words(), ["install"])
+        self.assertFalse(self._ran("systemctl", "enable"))
+        self.assertFalse(os.path.exists(self.paths.managed_file))
+
+    def test_revert_removes_nothing_when_disable_fails(self) -> None:
+        self.runner.load_state = "loaded"
+        self.runner.fail_on = {"systemctl disable"}
+        self._write(self.paths.managed_file, "259:1\n")
+        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=auto\n")
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("nothing was removed", out)
+        self.assertEqual(self._installer_words(), [])
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=1 ctrl=auto\n")
+
+    def test_revert_resets_the_disks_after_the_rule_is_gone(self) -> None:
+        self.runner.load_state = "loaded"
+        self._write(self.paths.udev_control, "")
+        self._write(self.paths.managed_file, "259:1\n")
+        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=auto\n")
+        qos_at_reload: list[str] = []
+
+        def seen(cmd: list[str]) -> None:
+            if cmd[:2] == ["udevadm", "control"]:
+                with open(self.paths.qos_path, encoding="utf-8") as fh:
+                    qos_at_reload.append(fh.read())
+
+        self.runner.on_call = seen
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(qos_at_reload, ["259:1 enable=1 ctrl=auto\n"])
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=0 ctrl=auto\n")
+        self.assertEqual(
+            _steps(self.runner.calls),
+            ["systemctl disable", "installer remove", "systemctl daemon-reload", "udevadm control"],
+        )
+        self.assertFalse(os.path.exists(self.paths.managed_file))
+
+    def test_revert_failures_after_the_removal_are_errors(self) -> None:
+        for fail in ("systemctl daemon-reload", "udevadm control", "installer.py remove"):
+            with self.subTest(fail=fail):
+                self.runner = _FakeRunner()
+                self.runner.fail_on = {fail}
+                self._write(self.paths.udev_control, "")
+                self._write(self.paths.managed_file, "259:1\n")
+                rc, _out = revert_iocost(self.paths, runner=self.runner)
+                self.assertNotEqual(rc, 0)
+                self.assertTrue(os.path.exists(self.paths.managed_file))
+
+    def test_revert_without_io_cost_qos_forgets_the_managed_disks(self) -> None:
+        os.unlink(self.paths.qos_path)
+        self._write(self.paths.managed_file, "259:1\n")
+        rc, out = revert_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.exists(self.paths.managed_file))
 
     def test_entrypoint_help_direct_subprocess(self) -> None:
         p = subprocess.run(

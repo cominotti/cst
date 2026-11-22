@@ -17,6 +17,7 @@ CGROUP_CONTROLLERS_PATH: Final = "/sys/fs/cgroup/cgroup.controllers"
 IOCOST_MANAGED_FILE: Final = "/run/btrfs-setup/iocost-managed"
 IOCOST_SERVICE: Final = "cst-btrfs-iocost.service"
 IOCOST_RULE_DEST: Final = "/etc/udev/rules.d/91-cst-iocost.rules"
+UDEV_CONTROL: Final = "/run/udev/control"  # udevd's control socket: there only while udevd runs
 IOCOST_ENABLE_CTRL_AUTO: Final = "enable=1 ctrl=auto"
 IOCOST_DISABLE_CTRL_AUTO: Final = "enable=0 ctrl=auto"
 
