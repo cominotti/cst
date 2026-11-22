@@ -3051,6 +3051,17 @@ class Phase1MemoryTuningTest(_SwapScratch):
                 self.assertIn("  ok      user.slice memory.min", out)
                 self.assertNotIn(("restart", "uresourced.service"), sd.calls)
 
+    def test_memtotal_is_read_as_swaps_other_meminfo_readers_read_it(self) -> None:
+        # MemTotal through swap.domain.parse_meminfo, as the zswap summary reads it: a value without
+        # "kB" is bytes. 8 GiB written so: MaxMemoryMin=10% caps the floor to 10% of 8 GiB.
+        capped = 8 * 2**30 * 10 // 100 // 4096 * 4096
+        self._uresourced_case(str(capped))
+        with open(os.path.join(self.env.proc_dir, "meminfo"), "w", encoding="utf-8") as fh:
+            fh.write(f"MemTotal:       {8 * 2**30}\nMemAvailable:   {4 * 2**30}\n")
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("  ok      user.slice memory.min", out)
+
     def test_max_memory_min_caps_the_total_of_the_active_users(self) -> None:
         text = "[Global]\nMaxMemoryMin=10%\n[ActiveUser]\nMemoryMin=1G\n"
         one_g = 2**30

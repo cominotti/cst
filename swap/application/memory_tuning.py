@@ -11,8 +11,8 @@ from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.text import group
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandResult, FileSystemPort, SystemdPort, UnitName
-from perf.domain.models import HUMAN_UID_MIN, KIB, PerfPathKey, PerfRootKind, perf_path_spec
-from perf.domain.parsers import parse_bracket_choice, parse_proc_kib_table, parse_sysfs_tmpfiles_writes
+from perf.domain.models import HUMAN_UID_MIN, PerfPathKey, PerfRootKind, perf_path_spec
+from perf.domain.parsers import parse_bracket_choice, parse_sysfs_tmpfiles_writes
 from swap.domain import (
     ActiveState,
     ApplyEvent,
@@ -20,6 +20,7 @@ from swap.domain import (
     SettingCheckRow,
     PAGE,
     SettingState,
+    parse_meminfo,
     parse_size,
 )
 
@@ -192,8 +193,7 @@ def effective_uresourced_memory_min(
 
 
 def _mem_total_bytes(fs: FileSystemPort, proc_dir: str) -> int | None:
-    mem = parse_proc_kib_table(fs.read_text(posixpath.join(proc_dir, "meminfo")))
-    return mem["MemTotal"] * KIB if "MemTotal" in mem else None
+    return parse_meminfo(fs.read_text(posixpath.join(proc_dir, "meminfo")) or "").get("MemTotal")
 
 
 def _floor_matches(raw: str | None, want: int, *, capped: bool) -> bool:
