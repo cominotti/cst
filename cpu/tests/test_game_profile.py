@@ -2252,6 +2252,21 @@ class GameProfilePowerTest(GameProfileCase):
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
 
+    def test_steam_shader_and_driver_helpers_do_not_pick_the_game_gpu(self) -> None:
+        # While a game loads, Steam's fossilize_replay and its driver probes hold the iGPU's render node
+        # in the Steam scope: they are the client, not the game; the connected dGPU (card3) is the one.
+        pci1, pci3 = self._setup_gpus()
+        for pid, comm in (("1", "fossilize_repla"), ("2", "vulkandriverque"), ("3", "gldriverquery")):
+            fd_dir = os.path.join(self.paths.proc, pid, "fd")
+            os.makedirs(fd_dir, exist_ok=True)
+            os.symlink("/dev/dri/renderD128", os.path.join(fd_dir, "9"))
+            self.write(os.path.join(self.paths.proc, pid, "comm"), comm + "\n")
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
     def test_connected_amd_fallback_3d_fullscreen_and_strict_write_order(self) -> None:
         _, pci3 = self._setup_gpus()
         writes: list[tuple[str, str]] = []

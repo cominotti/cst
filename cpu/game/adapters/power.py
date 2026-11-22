@@ -32,9 +32,12 @@ _DPM_MANUAL: Final = "manual"
 _CSTATE_ENABLE: Final = "0"
 _CSTATE_DISABLE: Final = "1"
 _CONNECTED_STATE: Final = "connected"
-# The Steam client's own processes (their /proc/PID/comm): the client UI renders on some GPU too, which
-# says nothing about the GPU the game runs on.
-_STEAM_CLIENT_COMMS: Final = frozenset({"steam", "steamwebhelper"})
+# The Steam client's own processes (their /proc/PID/comm, which the kernel cuts to 15 bytes): the client
+# UI, its shader pre-compiler (fossilize_replay) and its driver probes (vulkandriverquery[64],
+# gldriverquery[64]) open render nodes too, which says nothing about the GPU the game runs on.
+_STEAM_CLIENT_COMMS: Final = frozenset(
+    {"steam", "steamwebhelper", "fossilize_repla", "vulkandriverque", "gldriverquery", "gldriverquery64"}
+)
 
 
 def _suffix_num(name: str, pattern: re.Pattern[str]) -> int:
@@ -155,7 +158,7 @@ def _connected_cards(sys_drm: str, cards: list[str]) -> list[str]:
 
 def active_game_gpu_cards(profile: GameProfile) -> list[str]:
     """Return sorted DRM `cardN` names the game's processes render on; without any, the connected display
-    cards; without those, the cards the Steam client's own processes (steam, steamwebhelper) hold."""
+    cards; without those, the cards the Steam client's own processes (_STEAM_CLIENT_COMMS) hold."""
     sys_drm = profile.paths.sys_drm
     dev_to_card, cards = _drm_device_map(sys_drm)
     if not cards:
