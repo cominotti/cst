@@ -941,6 +941,9 @@ class _FakeContext:
     def is_root(self) -> bool:
         return self._root
 
+    def path(self, host_path: str) -> str:
+        return f"/run/host/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
+
     def etc_dir(self) -> str:
         return self._etc_dir
 
@@ -2732,7 +2735,7 @@ class SwapStatusDiagnosisTest(_SwapScratch):
         text = out.getvalue()
         self.assertIn("== diagnosis", text)
         self.assertIn("zswap is disabled", text)
-        self.assertIn("fix: sudo cst swap apply", text)
+        self.assertIn("fix: cst swap apply", text)
 
         only_out = io.StringIO()
         render_status(svc.status_report(settings_only=True, include_config=False), out=only_out)

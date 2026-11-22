@@ -7434,9 +7434,10 @@ EOF
         perf_res = as_tester_bash(c, "/opt/cst-rw/cst perf --json", check=False)
         self.assertIn(perf_res.returncode, (0, 1), perf_res.stdout + perf_res.stderr)
         payload = json.loads(perf_res.stdout)
-        self.assertIn(payload["verdict"], {"OPTIMIZED", "ATTENTION", "BOTTLENECK", "SKIP"})
+        self.assertIn(payload["verdict"], {"OPTIMIZED", "ATTENTION", "BOTTLENECK"})
         axis_names = {entry["axis"] for entry in payload["axes"]}
         self.assertEqual(axis_names, {"memory", "cpu", "io", "gpu"})
+        self.assertNotEqual(next(a["verdict"] for a in payload["axes"] if a["axis"] == "memory"), "SKIP")
 
         clean = as_tester_bash(c, "/opt/cst-rw/cst doctor")
         self.assertIn("0 ERROR, 0 WARN", clean.stdout)
@@ -7450,7 +7451,7 @@ EOF
                      "$stage/sys/block/nvme0n1/queue" "$stage/sys/fs/cgroup/builds.slice"
             printf "BUILD_CPUS='12-23'\\n" >"$stage/etc/cpu-setup/cpu-setup.conf"
             printf 'vm.dirty_bytes = 268435456\\n' >"$stage/etc/sysctl.d/90-btrfs-writeback.conf"
-            printf '1\\n' >"$stage/run/systemd/units/invocation:irqbalance.service"
+            ln -s deadbeef00112233445566778899aabb "$stage/run/systemd/units/invocation:irqbalance.service"
             printf '[none]\\n' >"$stage/sys/block/nvme0n1/queue/scheduler"
             printf '0\\n' >"$stage/sys/block/nvme0n1/queue/rotational"
             : >"$stage/sys/fs/cgroup/io.cost.qos"
@@ -7458,8 +7459,11 @@ EOF
             CST_DOCTOR_ROOT="$stage" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true
             """,
         ).stdout
-        self.assertIn("fix: sudo cst cpu irq apply", doc_out)
-        self.assertIn("fix: sudo cst btrfs iocost apply", doc_out)
+        self.assertNotIn("irqbalance service is inactive", doc_out)
+        self.assertIn("irqbalance is active without banning BUILD_CPUS", doc_out)
+        self.assertIn("fix: cst cpu irq apply", doc_out)
+        self.assertIn("fix: cst btrfs iocost apply", doc_out)
+        self.assertNotIn("fix: sudo cst ", doc_out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:

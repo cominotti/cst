@@ -67,6 +67,9 @@ class _FakeCtx:
     def is_root(self) -> bool:
         return self._root
 
+    def path(self, host_path: str) -> str:
+        return f"/run/host/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
+
     def etc_dir(self) -> str:
         return "/run/host/etc" if self._container else "/etc"
 

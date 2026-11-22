@@ -2481,6 +2481,126 @@ class ManagedRuntimeHelpersTest(unittest.TestCase):
         code = run_managed_cli(["status"], spec, ManagedCliEnv(env={}, out=out_s, err=err_s))
         self.assertEqual((code, out_s.getvalue(), err_s.getvalue()), (0, "ok ro=True\n", ""))
 
+    def test_host_view_enforce_root_and_managed_cli_edges(self) -> None:
+        from cst_core.adapters.runtime import (
+            ManagedCliEnv,
+            ManagedCliSpec,
+            RootElevation,
+            enforce_host_root,
+            host_view_path,
+            run_managed_cli,
+        )
+        from cst_core.domain.text import parse_subcommand_head
+        from enum import StrEnum
+        from typing import NoReturn
+
+        class _Ctx:
+            def __init__(self, *, container: bool, root: bool, prefix: str = "/custom-host") -> None:
+                self._c = container
+                self._r = root
+                self._p = prefix
+
+            def is_container(self) -> bool:
+                return self._c
+
+            def is_root(self) -> bool:
+                return self._r
+
+            def path(self, host_path: str) -> str:
+                return f"{self._p}/{host_path.lstrip('/')}" if self._c else host_path
+
+            def etc_dir(self) -> str:
+                return f"{self._p}/etc" if self._c else "/etc"
+
+            def host_run_dir(self, subpath: str) -> str:
+                return f"{self._p}/run/{subpath}" if self._c else f"/run/{subpath}"
+
+        self.assertEqual(host_view_path(_Ctx(container=True, root=False), "/etc/fstab"), "/custom-host/etc/fstab")
+        self.assertEqual(host_view_path(_Ctx(container=False, root=True), "/etc/fstab"), "/etc/fstab")
+
+        # Empty entry_file refuses without running sudo.
+        req_empty = RootElevation("cst foo", "apply", ("apply",), "", "writes config")
+        msg = enforce_host_root(req_empty, ctx=_Ctx(container=False, root=False))
+        self.assertIsNotNone(msg)
+        self.assertIn("entry script path", msg or "")
+
+        class _ElevatedError(RuntimeError):
+            def __init__(self, argv: list[str]) -> None:
+                super().__init__("elevated")
+                self.argv = argv
+
+        def _fake_elevate(argv: list[str]) -> NoReturn:
+            raise _ElevatedError(argv)
+
+        class _Cmd(StrEnum):
+            STATUS = "status"
+            APPLY = "apply"
+            HELP = "help"
+
+        def _make_spec(rc: int, lines: list[str]) -> ManagedCliSpec[tuple[_Cmd, Sequence[str], str | None]]:
+            def _exec(
+                _parsed: tuple[_Cmd, Sequence[str], str | None], _env: ManagedCliEnv, *, read_only: bool
+            ) -> tuple[int, list[str]]:
+                del read_only
+                return rc, lines
+
+            return ManagedCliSpec(
+                default_prog="cst foo",
+                parse=lambda a: parse_subcommand_head(a, _Cmd, default=_Cmd.STATUS, help_action=_Cmd.HELP),
+                format_usage=lambda p: f"usage: {p}\n",
+                is_help=lambda t: t[0] == _Cmd.HELP,
+                parse_error=lambda t: None if t[2] is None else (2, t[2]),
+                write_action=lambda t: t[0].value if t[0] == _Cmd.APPLY else None,
+                elevation_reason="writes config",
+                execute=_exec,
+            )
+
+        # Help and parse errors
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_ok = _make_spec(0, ["ok"])
+        self.assertEqual(run_managed_cli(["--help"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s)), 0)
+        self.assertEqual(out_s.getvalue(), "usage: cst foo\n")
+        out_s, err_s = io.StringIO(), io.StringIO()
+        self.assertEqual(run_managed_cli(["bogus"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s)), 2)
+        self.assertIn("unknown subcommand", err_s.getvalue())
+
+        # Container refusal & elevation hook
+        out_s, err_s = io.StringIO(), io.StringIO()
+        rc_c = run_managed_cli(
+            ["apply"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s, ctx=_Ctx(container=True, root=False))
+        )
+        self.assertEqual(rc_c, 1)
+        self.assertIn("not inside a toolbox/container", err_s.getvalue())
+        with self.assertRaises(_ElevatedError) as exc_info:
+            run_managed_cli(
+                ["apply"],
+                spec_ok,
+                ManagedCliEnv(
+                    entry_file="/tmp/fake-entry",
+                    env={},
+                    ctx=_Ctx(container=False, root=False),
+                    elevate=_fake_elevate,
+                ),
+            )
+        self.assertEqual(exc_info.exception.argv[0], "sudo")
+        self.assertIn("/tmp/fake-entry", exc_info.exception.argv)
+
+        # Stderr routing: unprefixed failure -> stderr; explicit ERROR: -> ERROR to stderr, progress to stdout; Aborted -> stdout
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_unprefixed = _make_spec(1, ["systemctl enable failed"])
+        self.assertEqual(run_managed_cli(["status"], spec_unprefixed, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("", "systemctl enable failed\n"))
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_mixed = _make_spec(1, ["written: /etc/foo", "ERROR: boom"])
+        self.assertEqual(run_managed_cli(["status"], spec_mixed, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("written: /etc/foo\n", "ERROR: boom\n"))
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_abort = _make_spec(1, ["Aborted; nothing changed."])
+        self.assertEqual(run_managed_cli(["status"], spec_abort, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("Aborted; nothing changed.\n", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

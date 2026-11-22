@@ -31,6 +31,8 @@ from perf.domain.models import (
 _BRACKET_RE: Final = re.compile(r"\[([^\]]+)\]")
 _AMD_PROFILE_ACTIVE_RE: Final = re.compile(r"^\s*\d+\s+([A-Za-z0-9_-]+)\*\s*:?")
 _PREEMPT_TOKEN_RE: Final = re.compile(r"\bpreempt=([a-z]+)\b")
+_ASCII_INT_RE: Final = re.compile(r"-?[0-9]+")
+_ASCII_UINT_RE: Final = re.compile(r"[0-9]+")
 _ALLOCSTALL_PREFIX: Final = "allocstall_"
 _FLUSHONCOMMIT_OPT: Final = "flushoncommit"
 _DEFAULT_BTRFS_COMMIT_S: Final = 30
@@ -116,7 +118,7 @@ def parse_proc_kib_table(text: str | None) -> dict[str, int]:
             continue
         key, rest = line.split(_COLON, 1)
         fields = rest.split()
-        if fields and fields[0].isdigit():
+        if fields and _ASCII_UINT_RE.fullmatch(fields[0]) is not None:
             result[key.strip()] = int(fields[0])
     return result
 
@@ -128,7 +130,7 @@ def parse_proc_space_kv(text: str | None) -> dict[str, int]:
         return result
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == PAIR_LEN and parts[1].lstrip("-").isdigit():
+        if len(parts) == PAIR_LEN and _ASCII_INT_RE.fullmatch(parts[1]) is not None:
             result[parts[0]] = int(parts[1])
     return result
 
@@ -259,7 +261,7 @@ def _parse_interrupt_line(line: str, cpu_indices: Sequence[int]) -> IrqLineSampl
         return None
     counts: dict[int, int] = {}
     for idx, cpu in enumerate(cpu_indices):
-        if not fields[idx].isdigit():
+        if _ASCII_UINT_RE.fullmatch(fields[idx]) is None:
             return None
         val = int(fields[idx])
         if val:
@@ -284,7 +286,7 @@ def parse_uevent_fields(text: str | None) -> tuple[str | None, str | None]:
 def parse_optional_int(text: str | None) -> int | None:
     """Parse trimmed integer sysfs/procfs text, returning `None` if absent/invalid."""
     stripped = clean_opt_str(text)
-    if stripped is None or not stripped.lstrip("-").isdigit():
+    if stripped is None or _ASCII_INT_RE.fullmatch(stripped) is None:
         return None
     return int(stripped)
 
@@ -394,6 +396,7 @@ def assemble_cpu_probe(
         ntsync_present=meta.ntsync_present,
         build_cpus=meta.build_cpus,
         p_cores=meta.p_cores,
+        online_cpus=meta.online_cpus,
         irqbalance_active=meta.irqbalance_active,
         irqbalance_banned_cpus=meta.irqbalance_banned_cpus,
         irq_lines=parse_proc_interrupts(files.get(PerfPathKey.INTERRUPTS)),
@@ -424,9 +427,11 @@ def _parse_root_btrfs_opts(proc_mounts_text: str) -> tuple[int, bool, bool] | No
     if raw_opts is None:
         return None
     commit_vals = [
-        int(val)
+        parsed
         for tok in raw_opts.split(",")
-        if tok.startswith(_COMMIT_OPT_PREFIX) and (val := tok.removeprefix(_COMMIT_OPT_PREFIX)).isdigit()
+        if tok.startswith(_COMMIT_OPT_PREFIX)
+        and _ASCII_UINT_RE.fullmatch(val := tok.removeprefix(_COMMIT_OPT_PREFIX)) is not None
+        and (parsed := int(val)) > 0
     ]
     explicit = bool(commit_vals)
     commit_s = commit_vals[-1] if explicit else _DEFAULT_BTRFS_COMMIT_S

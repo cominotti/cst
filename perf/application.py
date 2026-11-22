@@ -64,11 +64,13 @@ _SLICE_SUFFIX: Final = ".slice"
 _STATE_PREFIX: Final = "state"
 _BLOCK_SKIP_PREFIXES: Final[tuple[str, ...]] = ("loop", "zram", "dm-", "md", "ram", "sr")
 _IRQBALANCE_INVOCATION: Final = "systemd/units/invocation:irqbalance.service"
+_IRQBALANCE_CST_DROPIN: Final = "systemd/system/irqbalance.service.d/10-cst-ban.conf"
 _SYSTEMD_UNITS_DIR: Final = "systemd/units"
 _NTSYNC_DEV: Final = "ntsync"
 _NTSYNC_CLASS: Final = "class/misc/ntsync"
 _NTSYNC_MODULE: Final = "module/ntsync"
 _GAME_STATE_RUN: Final = "cpu-setup/game.state"
+_GAME_MANUAL_RUN: Final = "cpu-setup/manual"
 
 
 def build_perf_report(
@@ -119,6 +121,7 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
                     min_bytes=sess_min,
                     low_bytes=sess_low or 0,
                     parent_min_bytes=parent_min,
+                    uid=int(uid_part),
                 )
             )
     machine_low = parse_optional_int(
@@ -160,7 +163,8 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
         build_cpus = parse_optional_cpuset(assigned.get("BUILD_CPUS"))
         p_cores = parse_optional_cpuset(assigned.get("P_CORES"))
     banned_cpus = None
-    cst_irq_env = files.get(PerfPathKey.IRQBALANCE_CST_ENV)
+    cst_dropin_present = reader.exists_rel(PerfRootKind.ETC, _IRQBALANCE_CST_DROPIN)
+    cst_irq_env = files.get(PerfPathKey.IRQBALANCE_CST_ENV) if cst_dropin_present else None
     cst_assigned = parse_shell_assignments(cst_irq_env).values if cst_irq_env is not None else {}
     if "IRQBALANCE_BANNED_CPULIST" in cst_assigned:
         banned_cpus = parse_optional_cpuset(cst_assigned.get("IRQBALANCE_BANNED_CPULIST"))
@@ -170,6 +174,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             banned_cpus = parse_optional_cpuset(
                 parse_shell_assignments(irq_sysconf).values.get("IRQBALANCE_BANNED_CPULIST")
             )
+    online_cpus = parse_optional_cpuset(files.get(PerfPathKey.CPU_ONLINE))
     irqbalance_active: bool | None = None
     if reader.is_dir_rel(PerfRootKind.RUN, _SYSTEMD_UNITS_DIR):
         irqbalance_active = reader.exists_rel(PerfRootKind.RUN, _IRQBALANCE_INVOCATION)
@@ -188,6 +193,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             ntsync_present=ntsync_present,
             build_cpus=build_cpus,
             p_cores=p_cores,
+            online_cpus=online_cpus,
             irqbalance_active=irqbalance_active,
             irqbalance_banned_cpus=banned_cpus,
         ),
@@ -291,9 +297,22 @@ def collect_gpu_from_reader(reader: PerfFsReader) -> GpuProbeSnapshot:
             )
         )
     game_active: bool | None = None
+    game_manual = False
     if reader.is_dir_rel(PerfRootKind.RUN, "cpu-setup"):
         game_active = reader.exists_rel(PerfRootKind.RUN, _GAME_STATE_RUN)
-    return GpuProbeSnapshot(gpus=tuple(gpus), game_profile_active=game_active)
+        game_manual = reader.exists_rel(PerfRootKind.RUN, _GAME_MANUAL_RUN)
+    gpu_pm_mode: str | None = None
+    conf_text = reader.read_key(PerfPathKey.CPU_CONF)
+    if conf_text is not None:
+        raw_mode = clean_opt_str(parse_shell_assignments(conf_text).values.get("GPU_PM_MODE"))
+        if raw_mode is not None:
+            gpu_pm_mode = raw_mode.lower()
+    return GpuProbeSnapshot(
+        gpus=tuple(gpus),
+        game_profile_active=game_active,
+        gpu_pm_mode=gpu_pm_mode,
+        game_profile_manual=game_manual,
+    )
 
 
 def collect_snapshot_from_reader(

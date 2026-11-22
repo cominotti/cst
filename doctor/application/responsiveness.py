@@ -12,6 +12,8 @@ from doctor.domain import (
     IO_RESPONSIVENESS_MARKERS,
     MEMORY_RESPONSIVENESS_MARKERS,
     OK,
+    URESOURCED_CONF,
+    URESOURCED_CST_MARKER,
     ViewPath,
     WARN,
     Result,
@@ -84,19 +86,37 @@ class _DoctorPerfReader:
             return ()
 
     def exists_rel(self, root: PerfRootKind, rel: str) -> bool:
-        """Return True when `root/rel` exists."""
-        return self._host.exists(self._vp(root, rel))
+        """Return True when `root/rel` exists (including dangling systemd invocation symlinks)."""
+        vp = self._vp(root, rel)
+        return self._host.exists(vp) or self._host.islink(vp)
 
     def is_dir_rel(self, root: PerfRootKind, rel: str) -> bool:
         """Return True when `root/rel` is a directory."""
         return self._host.isdir(self._vp(root, rel))
 
 
+def _has_cst_uresourced(host: DoctorHostPort) -> bool:
+    try:
+        with host.open_text(host.path(URESOURCED_CONF)) as fh:
+            return URESOURCED_CST_MARKER in fh.read(4096)
+    except OSError:
+        return False
+
+
 def _active_axes(host: DoctorHostPort) -> tuple[PerfAxis, ...]:
     """Return responsiveness axes whose CST module is installed or configured on the host."""
     return tuple(
-        axis for axis in ALL_PERF_AXES if any(host.exists(host.path(marker)) for marker in _AXIS_MARKERS[axis])
+        axis
+        for axis in ALL_PERF_AXES
+        if any(host.exists(host.path(marker)) for marker in _AXIS_MARKERS[axis])
+        or (axis is PerfAxis.MEMORY and _has_cst_uresourced(host))
     )
+
+
+def _rewrite_fix_cmd(host: DoctorHostPort, cmd: str) -> str:
+    if not cmd:
+        return ""
+    return " && ".join(f"{host.cst} {part[4:]}" if part.startswith("cst ") else part for part in cmd.split(" && "))
 
 
 @check(CHECKS, "responsiveness")
@@ -117,7 +137,7 @@ def check_responsiveness(host: DoctorHostPort) -> Iterable[Result]:
     for f in findings:
         msg = f"{f.axis.value}: {f.summary}"
         if f.verdict is PerfVerdict.BOTTLENECK or f.fix_command:
-            results.append(Result(WARN, msg, f.fix_command))
+            results.append(Result(WARN, msg, _rewrite_fix_cmd(host, f.fix_command)))
         else:
             detail = f"{msg} — {f.recommendation}" if f.recommendation else msg
             results.append(Result(INFO, detail))

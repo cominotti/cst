@@ -11,7 +11,6 @@ import time
 from typing import Final, NamedTuple
 
 from btrfs.commit.domain import (
-    CommitCoherenceReport,
     DEFAULT_TARGET_COMMIT_S,
     ROOTFLAGS_PREFIX as COMMIT_ROOTFLAGS_PREFIX,
     assess_commit_coherence,
@@ -35,7 +34,7 @@ from btrfs.compress.domain import (
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
 from btrfs.scratch.domain import ScratchFindingSeverity, assess_scratch_health
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import ShellAssignments, parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.application.shared import (
     check,
@@ -602,6 +601,11 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(INFO, f"{msg}; tried again at the next boot")
 
 
+def _findmnt_to_octal_field(field: str) -> str:
+    """Convert `findmnt` hex escapes (`\\x20`) to `/proc/mounts` octal escapes (`\\040`)."""
+    return re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: f"\\{int(group(m, 1), 16):03o}", field)
+
+
 def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
     rc, out, _ = host.run(["findmnt", "-rn", "-t", "btrfs", "-o", "SOURCE,TARGET,OPTIONS,UUID"], timeout=15)
     if rc != 0 or not out.strip():
@@ -611,12 +615,26 @@ def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
     for raw in out.splitlines():
         match raw.strip().split(None, 3):
             case [src, tgt, opts, uuid]:
-                lines.append(f"{src} {tgt} btrfs {opts} 0 0\n")
+                esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
+                lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
                 if not root_uuid and tgt in ROOT_TARGETS:
                     root_uuid = uuid
             case [src, tgt, opts]:
-                lines.append(f"{src} {tgt} btrfs {opts} 0 0\n")
+                esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
+                lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
     return ("".join(lines) or None), root_uuid
+
+
+def _findmnt_all_mounts(host: DoctorHostPort) -> str | None:
+    rc, out, _ = host.run(["findmnt", "-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"], timeout=15)
+    if rc != 0 or not out.strip():
+        return None
+    lines: list[str] = []
+    for raw in out.splitlines():
+        match raw.strip().split(None, 3):
+            case [src, tgt, fstype, opts]:
+                lines.append(f"{_findmnt_to_octal_field(src)} {_findmnt_to_octal_field(tgt)} {fstype} {opts} 0 0\n")
+    return "".join(lines) or None
 
 
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"
@@ -696,7 +714,7 @@ def check_btrfs_compression(host: DoctorHostPort) -> Iterator[Result]:
         yield res
 
 
-def _commit_fix_subcmd(snap: CompressSnapshot, report: CommitCoherenceReport) -> str:
+def _commit_fix_subcmd(snap: CompressSnapshot) -> str:
     custom_secs: list[int] = [
         effective_commit_seconds(m.options) for m in parse_fstab_root_entries(snap.fstab_text or "", snap.root_uuid)
     ]
@@ -708,9 +726,7 @@ def _commit_fix_subcmd(snap: CompressSnapshot, report: CommitCoherenceReport) ->
     non_default = sorted({s for s in custom_secs if s not in {DEFAULT_TARGET_COMMIT_S, 30}})
     if len(non_default) == 1:
         return f"apply {non_default[0]}"
-    if report.is_custom:
-        return "apply"
-    return "revert"
+    return "apply"
 
 
 @check(CHECKS, "btrfs")
@@ -725,7 +741,7 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(
             WARN,
             f"{_COMMIT_INTERVAL_LABEL}: {report.summary}",
-            f"{host.cst} btrfs commit-interval {_commit_fix_subcmd(snap, report)}",
+            f"{host.cst} btrfs commit-interval {_commit_fix_subcmd(snap)}",
         )
     elif report.is_custom:
         yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")
@@ -740,8 +756,16 @@ def check_btrfs_scratch(host: DoctorHostPort) -> Iterator[Result]:
     has_hints = any(k in hint_text for k in ("/var/mnt/cache", "/var/mnt/scratch", "btrfs-scratch"))
     if not (has_hints or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
         return
-    crypttab_raw = read_text(host, host.path(HostPath("/etc/crypttab")), 65536)
-    live_findmnt, _ = _findmnt_root_btrfs_info(host)
+    crypttab_path = host.path(HostPath("/etc/crypttab"))
+    crypttab_raw, crypttab_unreadable = "", False
+    try:
+        with host.open_text(crypttab_path) as fh:
+            crypttab_raw = fh.read(65536)
+    except PermissionError:
+        crypttab_unreadable = True
+    except OSError:
+        pass
+    live_findmnt = _findmnt_all_mounts(host)
     mounts_text = f"{proc_raw}\n{live_findmnt}" if live_findmnt is not None else proc_raw
     sev_map = {
         ScratchFindingSeverity.OK: OK,
@@ -751,3 +775,5 @@ def check_btrfs_scratch(host: DoctorHostPort) -> Iterator[Result]:
     for finding in assess_scratch_health(fstab_raw or None, mounts_text or None, crypttab_raw or None):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs scratch: {finding.message}", fix_cmd)
+    if crypttab_unreadable and has_hints:
+        yield Result(INFO, "btrfs scratch: /etc/crypttab is not readable as this user (nofail not checked)")

@@ -163,6 +163,9 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
 CPU_CONF = HostPath(CPU_SETTINGS)
+URESOURCED_CONF = HostPath(_BY_SRC["swap/units/uresourced.conf"].dest)
+URESOURCED_CONF_BAK = HostPath(f"{URESOURCED_CONF}.pre-swap-config.bak")
+URESOURCED_CST_MARKER = "Managed by swap-setup.sh (CST)"
 # Host markers showing which CST modules are installed or configured for `doctor`'s responsiveness area.
 MEMORY_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
     SWAP_CONF,
@@ -170,7 +173,7 @@ MEMORY_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
     MM_RESPONSIVENESS_CONF,
     SWAP_DROPIN,
     HostPath(_BY_SRC["swap/sysctl/99-swap-tuning.conf"].dest),
-    HostPath("/etc/uresourced.conf.d/10-cst-memory-min.conf"),
+    URESOURCED_CONF_BAK,
 )
 CPU_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
     CPU_CONF,

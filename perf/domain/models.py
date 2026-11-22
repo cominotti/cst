@@ -28,11 +28,15 @@ MGLRU_RECOMMENDED_MIN_TTL_MS: Final = 1000
 SESSION_MIN_RECOMMENDED_BYTES: Final = 512 * MIB
 SESSION_FLOOR_HEADROOM_NUM: Final = 12
 SESSION_FLOOR_HEADROOM_DEN: Final = 10
+HUMAN_UID_MIN: Final = 1000
 
 CSTATE_DEEP_LATENCY_US: Final = 200
 IRQ_ACTIVE_MIN_COUNT: Final = 100_000
 IRQ_DOMINANT_SHARE: Final = 0.5
+IRQ_MIN_UNBANNED_CPUS: Final = 2
 TOP_IRQ_DISPLAY_LIMIT: Final = 3
+GPU_PM_MODE_ALWAYS: Final = "always"
+GPU_PM_MODE_GAME: Final = "game"
 
 NVME_PS_MAX_LATENCY_WARN_US: Final = 50_000
 ROOT_BTRFS_TARGET_COMMIT_S: Final = 60
@@ -62,6 +66,11 @@ PERF_USAGE_TEXT: Final = (
     "  --json        Emit machine-readable JSON report\n"
     "  -h, --help    Show this help message\n"
 )
+
+
+def format_perf_usage(prog: str = "cst perf") -> str:
+    """Return `cst perf` usage text adapted to `prog` (`CST_PROG`)."""
+    return PERF_USAGE_TEXT.replace("cst perf", prog, 1)
 
 
 class PerfCliFlag(StrEnum):
@@ -136,6 +145,7 @@ class PerfPathKey(StrEnum):
     ZSWAP_MAX_POOL = "zswap_params/max_pool_percent"
     ZSWAP_COMPRESSOR = "zswap_params/compressor"
     CPUIDLE_DRIVER = "sys/devices/system/cpu/cpuidle/current_driver"
+    CPU_ONLINE = "sys/devices/system/cpu/online"
     SCHED_PREEMPT = "sys/kernel/debug/sched/preempt"
     CMDLINE = "proc/cmdline"
     SCHED_EXT_STATE = "sys/kernel/sched_ext/state"
@@ -181,6 +191,7 @@ CPU_FILE_KEYS: Final[tuple[PerfPathKey, ...]] = tuple(
     PerfPathKey(p)
     for p in (
         "sys/devices/system/cpu/cpuidle/current_driver",
+        "sys/devices/system/cpu/online",
         "sys/kernel/debug/sched/preempt",
         "proc/cmdline",
         "sys/kernel/sched_ext/state",
@@ -268,6 +279,7 @@ class CgroupMemorySlice:
     min_bytes: int
     low_bytes: int
     parent_min_bytes: int | None = None
+    uid: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +343,7 @@ class CpuProbeExtra:
     ntsync_present: bool | None = None
     build_cpus: CpuSet | None = None
     p_cores: CpuSet | None = None
+    online_cpus: CpuSet | None = None
     irqbalance_active: bool | None = None
     irqbalance_banned_cpus: CpuSet | None = None
 
@@ -348,6 +361,7 @@ class CpuProbeSnapshot:
     ntsync_present: bool | None = None
     build_cpus: CpuSet | None = None
     p_cores: CpuSet | None = None
+    online_cpus: CpuSet | None = None
     irqbalance_active: bool | None = None
     irqbalance_banned_cpus: CpuSet | None = None
     irq_lines: tuple[IrqLineSample, ...] = ()
@@ -415,6 +429,8 @@ class GpuProbeSnapshot:
 
     gpus: tuple[GpuDeviceSample, ...] = ()
     game_profile_active: bool | None = None
+    gpu_pm_mode: str | None = None
+    game_profile_manual: bool = False
 
 
 @dataclass(frozen=True, slots=True)

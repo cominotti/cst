@@ -41,11 +41,7 @@ class RootElevation:
 
 def host_view_path(exec_ctx: ExecutionContextPort, host_path: str) -> str:
     """Map an absolute host path through `/run/host` (or container prefix) inside a container."""
-    if not exec_ctx.is_container():
-        return host_path
-    etc = exec_ctx.etc_dir().rstrip("/")
-    prefix = etc[: -len("/etc")] if etc.endswith("/etc") else "/run/host"
-    return f"{prefix}/{host_path.lstrip('/')}"
+    return exec_ctx.path(host_path)
 
 
 def enforce_host_root(
@@ -59,6 +55,8 @@ def enforce_host_root(
     if exec_ctx.is_container():
         return f"'{req.prog} {req.action}' must run on the host, not inside a toolbox/container ({req.reason})."
     if not exec_ctx.is_root():
+        if not req.entry_file:
+            return f"'{req.prog} {req.action}' cannot elevate through sudo without an entry script path."
         argv = [
             "sudo",
             "--",
@@ -343,6 +341,7 @@ class ManagedCliEnv:
     ctx: ExecutionContextPort | None = None
     runner: CommandRunnerPort | None = None
     fallback_root: str = ""
+    elevate: Callable[[list[str]], NoReturn] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,12 +382,18 @@ def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: Manage
     writes = action is not None
     if action is not None:
         req = RootElevation(prog, action, tuple(args), cfg.entry_file, spec.elevation_reason)
-        if (refusal := enforce_host_root(req, ctx=cfg.ctx)) is not None:
+        if (refusal := enforce_host_root(req, ctx=cfg.ctx, elevate=cfg.elevate)) is not None:
             err_fh.write(f"{refusal}\n")
             return 1
 
     rc, output_lines = spec.execute(parsed, cfg, read_only=not writes)
-    err_pred = spec.is_err_line or (lambda code, line: code != 0 and line.startswith("ERROR:"))
+    has_explicit_err = rc != 0 and any(line.startswith("ERROR:") for line in output_lines)
+    default_err_pred: Callable[[int, str], bool] = (
+        (lambda code, line: code != 0 and line.startswith("ERROR:"))
+        if has_explicit_err
+        else (lambda code, line: code != 0 and not line.startswith("Aborted;"))
+    )
+    err_pred = spec.is_err_line or default_err_pred
     for line in output_lines:
         target = err_fh if err_pred(rc, line) else out_fh
         target.write(f"{line}\n")

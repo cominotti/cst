@@ -47,10 +47,12 @@ from perf.domain.models import (
     PerfVerdict,
 )
 from perf.domain.parsers import (
+    assemble_io_probe,
     parse_amd_active_dpm_profile,
     parse_bracket_choice,
     parse_btrfs_commit_stats,
     parse_optional_cpuset,
+    parse_optional_int,
     parse_perf_args,
     parse_preempt_mode,
     parse_proc_interrupts,
@@ -90,8 +92,22 @@ class PerfParserTest(unittest.TestCase):
             parse_perf_args(["--bogus"])
 
     def test_proc_and_sys_parsers(self) -> None:
-        self.assertEqual(parse_proc_kib_table("MemTotal:   1024 kB\nFoo: bar\n")["MemTotal"], 1024)
-        self.assertEqual(parse_proc_space_kv("compact_stall 42\nbad\n"), {"compact_stall": 42})
+        self.assertEqual(parse_proc_kib_table("MemTotal:   1024 kB\nFoo: bar\nBad: ² kB\n")["MemTotal"], 1024)
+        self.assertNotIn("Bad", parse_proc_kib_table("Bad: ² kB\n"))
+        self.assertEqual(
+            parse_proc_space_kv("compact_stall 42\nneg -5\nbad --1\nuni ²\nbad\n"), {"compact_stall": 42, "neg": -5}
+        )
+        self.assertIsNone(parse_optional_int("--1"))
+        self.assertIsNone(parse_optional_int("²"))
+        self.assertIsNone(parse_optional_int("-²"))
+        self.assertEqual(parse_optional_int("-42"), -42)
+        from perf.domain.models import PerfPathKey
+
+        zero_commit = assemble_io_probe(
+            {PerfPathKey.PROC_MOUNTS: "/dev/dm-0 /var btrfs rw,commit=0,flushoncommit 0 0\n"}
+        )
+        self.assertEqual(zero_commit.root_btrfs_commit_s, 30)
+        self.assertFalse(zero_commit.root_btrfs_commit_explicit)
         self.assertEqual(parse_bracket_choice("always defer [madvise] never\n"), "madvise")
         self.assertEqual(parse_bracket_choice("none\n"), "none")
         self.assertIsNone(parse_bracket_choice("   "))
@@ -207,10 +223,37 @@ class PerfEvaluatorTest(unittest.TestCase):
             },
         )
         zswap_f = next(f for f in sick_rep.findings if f.finding_id == "memory-zswap-disabled")
-        self.assertEqual(zswap_f.fix_command, "sudo cst swap apply")
+        self.assertEqual(zswap_f.fix_command, "cst swap apply")
         for fid in ("memory-min-free", "memory-thp-defrag", "memory-mglru-min-ttl", "memory-session-floor"):
             match_f = next(f for f in sick_rep.findings if f.finding_id == fid)
-            self.assertEqual(match_f.fix_command, "sudo cst swap apply", fid)
+            self.assertEqual(match_f.fix_command, "cst swap apply", fid)
+
+        # GDM greeter (uid < 1000) and inactive secondary human sessions do not trigger false positives.
+        multi_user = MemoryProbeSnapshot(
+            session_slices=(
+                CgroupMemorySlice("user-42.slice/session.slice", 120 * MIB, 0, 0, parent_min_bytes=0, uid=42),
+                CgroupMemorySlice(
+                    "user-1000.slice/session.slice", 600 * MIB, 1024 * MIB, 0, parent_min_bytes=1024 * MIB, uid=1000
+                ),
+                CgroupMemorySlice("user-1001.slice/session.slice", 40 * MIB, 0, 0, parent_min_bytes=0, uid=1001),
+            ),
+        )
+        self.assertEqual(evaluate_perf_memory(multi_user).verdict, PerfVerdict.OPTIMIZED)
+        gdm_only = MemoryProbeSnapshot(
+            session_slices=(
+                CgroupMemorySlice("user-42.slice/session.slice", 120 * MIB, 0, 0, parent_min_bytes=0, uid=42),
+            )
+        )
+        self.assertEqual(evaluate_perf_memory(gdm_only).verdict, PerfVerdict.OPTIMIZED)
+        unprotected = MemoryProbeSnapshot(
+            session_slices=(
+                CgroupMemorySlice("user-42.slice/session.slice", 120 * MIB, 0, 0, parent_min_bytes=0, uid=42),
+                CgroupMemorySlice("user-1000.slice/session.slice", 500 * MIB, 0, 0, parent_min_bytes=0, uid=1000),
+            ),
+        )
+        unprot_rep = evaluate_perf_memory(unprotected)
+        self.assertEqual([f.finding_id for f in unprot_rep.findings], ["memory-session-floor-unset"])
+        self.assertIn("user-1000.slice", unprot_rep.findings[0].summary)
 
     def test_cpu_evaluation(self) -> None:
         ok_cpu = CpuProbeSnapshot(
@@ -247,13 +290,13 @@ class PerfEvaluatorTest(unittest.TestCase):
             },
         )
         cstate_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-deep-cstates")
-        self.assertEqual(cstate_f.fix_command, "sudo cst cpu install")
+        self.assertEqual(cstate_f.fix_command, "cst cpu install")
         ntsync_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-ntsync-absent")
-        self.assertEqual(ntsync_f.fix_command, "sudo cst cpu install")
+        self.assertEqual(ntsync_f.fix_command, "cst cpu install")
         irq_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-irqbalance-inactive")
-        self.assertEqual(irq_f.fix_command, "sudo cst cpu irq apply")
+        self.assertEqual(irq_f.fix_command, "cst cpu irq apply")
         ov_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-irq-build-overlap")
-        self.assertEqual(ov_f.fix_command, "sudo cst cpu irq apply")
+        self.assertEqual(ov_f.fix_command, "cst cpu irq apply")
 
         # Active irqbalance without BUILD_CPUS banned -> cpu-irqbalance-ban-missing
         missing_ban = CpuProbeSnapshot(
@@ -274,7 +317,25 @@ class PerfEvaluatorTest(unittest.TestCase):
         )
         miss_rep = evaluate_perf_cpu(missing_ban)
         self.assertEqual([f.finding_id for f in miss_rep.findings], ["cpu-irqbalance-ban-missing"])
-        self.assertEqual(miss_rep.findings[0].fix_command, "sudo cst cpu irq apply")
+        self.assertEqual(miss_rep.findings[0].fix_command, "cst cpu irq apply")
+
+        # Partial BUILD_CPUS ban (8-23 configured, only 12-23 banned) must still warn; 2-CPU host expects no ban.
+        partial_ban = CpuProbeSnapshot(
+            irqbalance_active=True,
+            irqbalance_banned_cpus=parse_optional_cpuset("12-23"),
+            build_cpus=parse_optional_cpuset("8-23"),
+            online_cpus=parse_optional_cpuset("0-23"),
+        )
+        self.assertEqual(
+            [f.finding_id for f in evaluate_perf_cpu(partial_ban).findings], ["cpu-irqbalance-ban-missing"]
+        )
+        tiny_host = CpuProbeSnapshot(
+            irqbalance_active=True,
+            irqbalance_banned_cpus=None,
+            build_cpus=parse_optional_cpuset("1"),
+            online_cpus=parse_optional_cpuset("0-1"),
+        )
+        self.assertEqual(evaluate_perf_cpu(tiny_host).verdict, PerfVerdict.OPTIMIZED)
 
         # Live effective_affinity hitting BUILD_CPUS and nvme0q0 admin queue
         live_hit = CpuProbeSnapshot(
@@ -314,11 +375,13 @@ class PerfEvaluatorTest(unittest.TestCase):
             },
         )
         nvme_f = next(f for f in io_rep.findings if f.finding_id == "io-nvme-apst")
-        self.assertEqual(nvme_f.fix_command, "sudo cst btrfs install")
+        self.assertEqual(nvme_f.fix_command, "cst btrfs install")
+        dirty_f = next(f for f in io_rep.findings if f.finding_id == "io-dirty-bytes-unbounded")
+        self.assertEqual(dirty_f.fix_command, "cst btrfs install")
         scrub_f = next(f for f in io_rep.findings if f.finding_id == "io-btrfs-scrub-limit")
-        self.assertEqual(scrub_f.fix_command, "sudo cst btrfs scrub-limit set 500M")
+        self.assertEqual(scrub_f.fix_command, "cst btrfs scrub-limit set 500M")
         iocost_f = next(f for f in io_rep.findings if f.finding_id == "io-weight-no-iocost")
-        self.assertEqual(iocost_f.fix_command, "sudo cst btrfs iocost apply")
+        self.assertEqual(iocost_f.fix_command, "cst btrfs iocost apply")
 
         # Short 30s commit with flushoncommit + expire < commit flagged; coherent 60s + 60s expire is clean.
         short_commit = IoProbeSnapshot(
@@ -374,9 +437,33 @@ class PerfEvaluatorTest(unittest.TestCase):
             {"gpu-runtime-pm-card3", "gpu-game-profile-card3"},
         )
         pm_f = next(f for f in gpu_rep.findings if f.finding_id == "gpu-runtime-pm-card3")
-        self.assertEqual(pm_f.fix_command, "sudo cst cpu install")
+        self.assertEqual(pm_f.fix_command, "cst cpu install")
         prof_f = next(f for f in gpu_rep.findings if f.finding_id == "gpu-game-profile-card3")
         self.assertEqual(prof_f.fix_command, "sudo systemctl restart cpu-game.service")
+
+        # GPU_PM_MODE=game outside game mode suppresses gpu-runtime-pm; manual game mode emits game off && game on.
+        game_mode_idle = evaluate_perf_gpu(
+            GpuProbeSnapshot(
+                gpus=(GpuDeviceSample("card3", "amdgpu", "0000:84:00.0", ("DP-7",), "auto", "active"),),
+                game_profile_active=False,
+                gpu_pm_mode="game",
+            )
+        )
+        self.assertEqual(game_mode_idle.verdict, PerfVerdict.OPTIMIZED)
+        manual_game = evaluate_perf_gpu(
+            GpuProbeSnapshot(
+                gpus=(
+                    GpuDeviceSample(
+                        "card3", "amdgpu", "0000:84:00.0", ("DP-7",), "on", "active", "auto", "BOOTUP_DEFAULT"
+                    ),
+                ),
+                game_profile_active=True,
+                gpu_pm_mode="always",
+                game_profile_manual=True,
+            )
+        )
+        self.assertEqual([f.finding_id for f in manual_game.findings], ["gpu-game-profile-card3"])
+        self.assertEqual(manual_game.findings[0].fix_command, "cst cpu game off && cst cpu game on")
 
 
 class PerfScratchIntegrationTest(unittest.TestCase):
@@ -472,15 +559,32 @@ class PerfScratchIntegrationTest(unittest.TestCase):
 
         bad = io.StringIO()
         ok = io.StringIO()
-        self.assertEqual(perf_cli_main(["--help"], out=ok, err=bad), EXIT_PERF_OK)
-        self.assertIn("Usage: cst perf", ok.getvalue())
-        self.assertEqual(perf_cli_main(["--unknown"], out=ok, err=bad), EXIT_PERF_USAGE)
-        self.assertIn("error:", bad.getvalue())
+        with mock.patch.dict(os.environ, {"CST_PROG": "./cst perf"}, clear=True):
+            self.assertEqual(perf_cli_main(["--help"], out=ok, err=bad), EXIT_PERF_OK)
+            self.assertIn("Usage: ./cst perf", ok.getvalue())
+            self.assertEqual(perf_cli_main(["--unknown"], out=ok, err=bad), EXIT_PERF_USAGE)
+            self.assertIn("./cst perf: error:", bad.getvalue())
 
     def test_probe_defaults_without_root_env(self) -> None:
+        from cst_core.adapters.runner import HostExecutionContext
+
         with mock.patch.dict(os.environ, {}, clear=True):
             paths = perf_paths_from_env()
         self.assertTrue(paths.proc_dir.endswith("/proc"))
+        # Container without /run/host/proc falls back to local /proc rather than empty /run/host/*.
+        missing_host = os.path.join(self.tmp, "missing-host")
+        container_no_host = HostExecutionContext(exists=lambda p: p == "/.dockerenv", host_root=missing_host)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            local_paths = perf_paths_from_env(ctx=container_no_host)
+        self.assertEqual(local_paths.proc_dir, "/proc")
+        # Container with mounted host_root/proc and host_root/etc uses host view.
+        present_host = os.path.join(self.tmp, "present-host")
+        os.makedirs(os.path.join(present_host, "proc"), exist_ok=True)
+        os.makedirs(os.path.join(present_host, "etc"), exist_ok=True)
+        container_with_host = HostExecutionContext(exists=lambda p: p == "/run/.containerenv", host_root=present_host)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            host_paths = perf_paths_from_env(ctx=container_with_host)
+        self.assertEqual(host_paths.proc_dir, f"{present_host}/proc")
         probe = LinuxPerfProbe(
             PerfPaths(
                 proc_dir=self.tmp,
@@ -511,19 +615,32 @@ class PerfScratchIntegrationTest(unittest.TestCase):
 
     def test_irqbalance_env_precedence_effective_affinity_and_iocost_enable_zero(self) -> None:
         self._populate_healthy_tree()
-        self._write("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\n")
+        self._write("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\nGPU_PM_MODE='game'\n")
         self._write("etc/sysconfig/irqbalance", "IRQBALANCE_BANNED_CPULIST=0\n")
         self._write("etc/cpu-setup/irqbalance.env", "IRQBALANCE_BANNED_CPULIST=12-23\n")
         self._write("proc/interrupts", "           CPU0       CPU20\n  246:      100    500000   IR-PCI-MSIX amdgpu\n")
         self._write("proc/irq/246/effective_affinity_list", "2\n")
         self._write("sys/fs/cgroup/io.cost.qos", "259:1 enable=0 ctrl=auto\n")
+        # Without 10-cst-ban.conf drop-in, irqbalance.env is not active and sysconfig (=0) fails BUILD_CPUS coverage.
         with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
-            rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.CPU, PerfAxis.IO))
+            no_dropin = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.CPU,))
+        self.assertEqual([f.finding_id for f in no_dropin.axes[0].findings], ["cpu-irqbalance-ban-missing"])
+
+        self._write(
+            "etc/systemd/system/irqbalance.service.d/10-cst-ban.conf",
+            "[Service]\nEnvironmentFile=-/etc/cpu-setup/irqbalance.env\n",
+        )
+        self._write("sys/class/drm/card0/device/power/control", "auto\n")
+        self._write("run/cpu-setup/manual", "1\n")
+        with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+            rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.CPU, PerfAxis.IO, PerfAxis.GPU))
         cpu_rep = next(ax for ax in rep.axes if ax.axis == PerfAxis.CPU)
         io_rep = next(ax for ax in rep.axes if ax.axis == PerfAxis.IO)
+        gpu_rep = next(ax for ax in rep.axes if ax.axis == PerfAxis.GPU)
         self.assertEqual(cpu_rep.verdict, PerfVerdict.OPTIMIZED)
         self.assertEqual([f.finding_id for f in io_rep.findings], ["io-weight-no-iocost"])
-        self.assertEqual(io_rep.findings[0].fix_command, "sudo cst btrfs iocost apply")
+        self.assertEqual(io_rep.findings[0].fix_command, "cst btrfs iocost apply")
+        self.assertEqual(gpu_rep.verdict, PerfVerdict.OPTIMIZED)
 
 
 if __name__ == "__main__":

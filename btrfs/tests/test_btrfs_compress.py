@@ -108,6 +108,9 @@ class _FakeCtx:
     def is_root(self) -> bool:
         return self._root
 
+    def path(self, host_path: str) -> str:
+        return os.path.join(self._host_root, host_path.lstrip("/")) if self._host_root else host_path
+
     def etc_dir(self) -> str:
         return os.path.join(self._host_root, "etc") if self._host_root else "/etc"
 

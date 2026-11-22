@@ -42,6 +42,11 @@ class _FakePowerCtx:
     def is_root(self) -> bool:
         return self._root
 
+    def path(self, host_path: str) -> str:
+        return (
+            f"{self._host_root}/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
+        )
+
     def etc_dir(self) -> str:
         return f"{self._host_root}/etc" if self._container else "/etc"
 

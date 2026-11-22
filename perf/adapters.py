@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 
 from cst_core.adapters.files import read_text
+from cst_core.ports import ExecutionContextPort
 from perf.application import collect_snapshot_from_reader
 from perf.domain.models import (
     ALL_PERF_AXES,
@@ -32,6 +33,21 @@ class PerfPaths:
     btrfs_conf_path: str | None = None
     preempt_path: str | None = None
     sched_ext_path: str | None = None
+
+
+def resolve_host_perf_paths(exec_ctx: ExecutionContextPort) -> PerfPaths:
+    """Map host procfs/sysfs roots through `exec_ctx` only when the container exposes them."""
+    if exec_ctx.is_container() and os.path.isdir(exec_ctx.path("/proc")) and os.path.isdir(exec_ctx.etc_dir()):
+        return PerfPaths(
+            proc_dir=exec_ctx.path("/proc"),
+            sys_dir=exec_ctx.path("/sys"),
+            cgroup_dir=exec_ctx.path("/sys/fs/cgroup"),
+            etc_dir=exec_ctx.etc_dir(),
+            run_dir=exec_ctx.path("/run"),
+            dev_dir=exec_ctx.path("/dev"),
+            zswap_params_dir=exec_ctx.path("/sys/module/zswap/parameters"),
+        )
+    return PerfPaths()
 
 
 def _safe_read_optional(path: str) -> tuple[str | None, bool]:
