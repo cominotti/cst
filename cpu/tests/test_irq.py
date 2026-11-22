@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import dataclasses
 import io
 import os
 import shutil
@@ -13,7 +14,10 @@ import tempfile
 from typing import NoReturn, override
 import unittest
 
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import RootElevation, enforce_host_root
+from cst_core.domain.install import Component
+from cst_core.domain.record import ComponentState
 from cst_core.domain.values import CpuSet
 from cst_core.ports import CommandResult
 from cpu.irq.adapters import IrqPaths, apply_irq_policy, collect_irq_snapshot, irq_paths_for, revert_irq_policy
@@ -63,6 +67,7 @@ class _FakeRunner:
         self.active_state = "inactive"
         self.enabled_state = "disabled"
         self.install_rpm_succeeds = True
+        self.restart_rc = 0
 
     def _run_systemctl(self, cmd: list[str]) -> CommandResult:
         if cmd[:2] == ["systemctl", "show"]:
@@ -71,29 +76,9 @@ class _FakeRunner:
         if cmd == ["systemctl", "enable", "irqbalance.service"]:
             self.enabled_state = "enabled"
         elif cmd == ["systemctl", "restart", "irqbalance.service"]:
+            if self.restart_rc != 0:
+                return CommandResult(self.restart_rc, "", "restart failed", argv=tuple(cmd))
             self.active_state = "active"
-        return CommandResult(0, "", "", argv=tuple(cmd))
-
-    def _run_installer_fake(self, cmd: list[str], input_text: str | None) -> CommandResult:
-        if "text" in cmd:
-            dest = cmd[cmd.index("text") + 1]
-            prev: str | None = None
-            if os.path.exists(dest):
-                with open(dest, encoding="utf-8") as fh:
-                    prev = fh.read()
-            if prev == input_text:
-                return CommandResult(0, f"unchanged: {dest}\n", "", argv=tuple(cmd))
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(input_text or "")
-            return CommandResult(0, f"written:   {dest}\n", "", argv=tuple(cmd))
-        if "remove-text" in cmd:
-            lines: list[str] = []
-            for dest in cmd[cmd.index("remove-text") + 1 :]:
-                if os.path.exists(dest):
-                    os.remove(dest)
-                    lines.append(f"removed:   {dest}")
-            return CommandResult(0, ("\n".join(lines) + "\n") if lines else "", "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
 
     def run(
@@ -103,6 +88,7 @@ class _FakeRunner:
         input_text: str | None = None,
         **_kw: object,
     ) -> CommandResult:
+        del input_text
         cmd = list(argv)
         self.calls.append(cmd)
         if cmd and cmd[0] == "systemctl":
@@ -112,8 +98,6 @@ class _FakeRunner:
                 return CommandResult(1, "", "error: network unreachable", argv=tuple(cmd))
             self.load_state, self.active_state, self.enabled_state = "loaded", "inactive", "disabled"
             return CommandResult(0, "Checking out tree... done\n", "", argv=tuple(cmd))
-        if "installer.py" in " ".join(cmd):
-            return self._run_installer_fake(cmd, input_text)
         return CommandResult(0, "", "", argv=tuple(cmd))
 
 
@@ -155,7 +139,8 @@ class CpuIrqLifecycleTest(unittest.TestCase):
             env_path=os.path.join(self.tmp, "etc", "cpu-setup", "irqbalance.env"),
             sysconfig_path=os.path.join(self.tmp, "etc", "sysconfig", "irqbalance"),
             dropin_path=os.path.join(self.tmp, "etc", "systemd", "system", "irqbalance.service.d", "10-cst-ban.conf"),
-            installer_script="/opt/fake/cst_core/installer.py",
+            rpm_ostree_path=os.path.join(self.tmp, "usr", "bin", "rpm-ostree"),
+            record_path=os.path.join(self.tmp, "var", "lib", "cst", "installed.json"),
         )
         self._write(self.paths.conf, "BUILD_CPUS='12-23'\n")
         self._write(self.paths.online_cpus, "0-23\n")
@@ -164,6 +149,10 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
+
+    def _irq_state(self) -> str | None:
+        rec = JsonInstallRecord().read(self.paths.record_path)
+        return None if rec is None else rec.components.get(Component.CPU_IRQ)
 
     def _read(self, path: str) -> str:
         with open(path, encoding="utf-8") as fh:
@@ -226,6 +215,7 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         self.assertTrue(any("--no-pkg" in line for line in out_nopkg))
         self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
         self.assertEqual(self._read(self.paths.dropin_path), render_irq_dropin())
+        self.assertEqual(self._irq_state(), ComponentState.DONE)
 
         rc_apply, out_apply = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
         self.assertEqual(rc_apply, 0)
@@ -244,6 +234,77 @@ class CpuIrqLifecycleTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.paths.dropin_path))
         self.assertFalse(os.path.exists(os.path.dirname(self.paths.dropin_path)))
         self.assertTrue(any("restarted: irqbalance.service (CST ban-list removed)" in line for line in out_rev))
+
+    def test_installed_zipapp_writes_through_the_installer_service(self) -> None:
+        # /usr/local/sbin/cpu-irq is a zipapp: no checkout, so no cst_core/installer.py beside it.
+        # apply and revert write and remove through InstallService in this process, run no installer.
+        zipapp = os.path.join(self.tmp, "usr", "local", "sbin", "cpu-irq")
+        self._write(zipapp, "PK\x03\x04")
+        paths = dataclasses.replace(
+            irq_paths_for(zipapp, ctx=_FakeCtx(container=False, root=True), read_only=False),
+            conf=self.paths.conf,
+            online_cpus=self.paths.online_cpus,
+            env_path=self.paths.env_path,
+            sysconfig_path=self.paths.sysconfig_path,
+            dropin_path=self.paths.dropin_path,
+            rpm_ostree_path=self.paths.rpm_ostree_path,
+            record_path=self.paths.record_path,
+        )
+        rc, out = apply_irq_policy(paths, no_pkg=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._read(self.paths.env_path), render_irq_env("12-23"))
+        self.assertEqual(self._read(self.paths.dropin_path), render_irq_dropin())
+        self.assertIn(f"written:   {self.paths.env_path}", out)
+        self.assertEqual(self._irq_state(), ComponentState.DONE)
+        rec = JsonInstallRecord().read(self.paths.record_path)
+        assert rec is not None
+        self.assertEqual(
+            sorted(rec.files),
+            ["/etc/cpu-setup/irqbalance.env", "/etc/systemd/system/irqbalance.service.d/10-cst-ban.conf"],
+        )
+        self.assertFalse(any(c[0].endswith("python3") for c in self.runner.calls), self.runner.calls)
+
+        rc_rev, out_rev = revert_irq_policy(paths, runner=self.runner)
+        self.assertEqual(rc_rev, 0, out_rev)
+        self.assertFalse(os.path.exists(self.paths.env_path))
+        self.assertFalse(os.path.exists(self.paths.dropin_path))
+        rec = JsonInstallRecord().read(self.paths.record_path)
+        assert rec is not None
+        self.assertEqual(dict(rec.files), {})
+
+    def test_rpm_ostree_probe_reads_the_host_view(self) -> None:
+        # In a toolbox, rpm-ostree is the host's (/run/host/usr/bin/rpm-ostree), not the container's PATH.
+        mapped = irq_paths_for(
+            os.path.join(REPO, "cpu", "cpu-irq"),
+            ctx=_FakeCtx(container=True, root=False, host_root=self.tmp),
+            read_only=True,
+        )
+        self.assertEqual(mapped.rpm_ostree_path, f"{self.tmp}/usr/bin/rpm-ostree")
+        self.assertFalse(collect_irq_snapshot(self.paths, runner=self.runner).rpm_ostree_present)
+        self._write(self.paths.rpm_ostree_path, "#!/bin/sh\n")
+        self.assertTrue(collect_irq_snapshot(self.paths, runner=self.runner).rpm_ostree_present)
+
+    def test_package_before_files_and_done_after_the_service(self) -> None:
+        # A failed rpm-ostree install writes no file and records nothing.
+        self.runner.install_rpm_succeeds = False
+        rc_fail, out_fail = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
+        self.assertEqual(rc_fail, 1)
+        self.assertIn("error: network unreachable", out_fail)
+        self.assertFalse(os.path.exists(self.paths.env_path))
+        self.assertFalse(os.path.exists(self.paths.dropin_path))
+        self.assertFalse(os.path.exists(self.paths.record_path))
+
+        # A failed restart of irqbalance leaves cpu:irq pending; the next good apply marks it done.
+        self.runner.install_rpm_succeeds = True
+        self.runner.restart_rc = 1
+        rc_rs, out_rs = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
+        self.assertEqual(rc_rs, 1, out_rs)
+        self.assertIn("restart failed", out_rs)
+        self.assertEqual(self._irq_state(), ComponentState.PENDING)
+        self.runner.restart_rc = 0
+        rc_ok, out_ok = apply_irq_policy(self.paths, no_pkg=False, runner=self.runner, has_rpm_ostree=True)
+        self.assertEqual(rc_ok, 0, out_ok)
+        self.assertEqual(self._irq_state(), ComponentState.DONE)
 
     def test_bad_build_cpus_or_settings_refuse_apply_and_keep_files(self) -> None:
         # An empty ban-list would remove the files; a bad BUILD_CPUS must refuse instead (exit 1),

@@ -5494,8 +5494,9 @@ PY
             exec_bash,
             self.SYSTEMD_CONTAINER,
             f"""
+            /usr/bin/python3 -I -B /opt/cst-rw/cpu/cpu-irq revert >/dev/null 2>&1
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
-            rm -f /etc/cpu-setup/cpu-setup.conf
+            rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf
             if [[ -e /tmp/e2e-84-conf.bak ]]; then mv /tmp/e2e-84-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rm -rf {old}
             systemctl daemon-reload
@@ -5549,6 +5550,21 @@ PY
             # A second install writes nothing.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
+            # The installed cpu-irq is a zipapp with no checkout beside it: apply and revert write and remove
+            # through the installer's use case in the program itself, and record cpu:irq.
+            last_cpu="$(( $(nproc) - 1 ))"
+            if (( last_cpu >= 2 )); then
+                cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf
+                sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='$last_cpu'/" /etc/cpu-setup/cpu-setup.conf
+                /usr/local/sbin/cpu-irq apply --no-pkg
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                irq_lines="$(/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json cpu:irq)"
+                [[ "$irq_lines" == "/etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf done" ]] \
+                    || {{ echo "root's record for cpu:irq: $irq_lines" >&2; exit 1; }}
+                /usr/local/sbin/cpu-irq revert
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                mv /tmp/e2e-84-irq.conf /etc/cpu-setup/cpu-setup.conf
+            fi
             # uninstall, twice.
             as_root /opt/cst-rw/cst cpu uninstall
             for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
