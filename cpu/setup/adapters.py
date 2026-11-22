@@ -35,6 +35,7 @@ from perf.domain.models import PerfAxis
 from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
+from cpu.power.adapters import read_cpu_topology
 from cpu.setup.domain import (
     CORE_COMPONENT,
     CPU_POWER_SERVICE,
@@ -51,12 +52,12 @@ from cpu.setup.domain import (
     DockerSliceAction,
     Halt,
     SetupPaths,
-    conf_lines,
     cgroup_parent_shown,
     current_choice,
     docker_slice_status,
     experiment_line,
     first_arg,
+    first_conf_lines,
     first_four_and_last,
     gamemode_ini,
     helper_dropin,
@@ -328,7 +329,7 @@ class CpuSetup:
                 raise Halt(1, f"{self.root}/{f}: syntax error")
         _make_run_dir(os.path.dirname(p.conf))
         if not os.path.exists(p.conf):
-            self.install_text(p.conf, conf_lines(user))
+            self.install_text(p.conf, first_conf_lines(user, read_cpu_topology(p.sys_dir, p.p_cores, p.e_cores)))
         self.installer("install", "--set", f"USER={user}", "--component", CORE_COMPONENT)
         if os.access(p.hwp_boost, os.W_OK):
             self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost), component=CORE_COMPONENT)

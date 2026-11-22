@@ -237,6 +237,28 @@ class CpuPowerLifecycleTest(unittest.TestCase):
         self.assertEqual((r_help.returncode, r_help.stderr), (0, ""))
         self.assertIn("Usage: cst cpu power", r_help.stdout)
 
+    def test_cstate_cap_default_follows_the_cpuidle_driver(self) -> None:
+        driver = os.path.join(self.paths.sys_cpu, "cpuidle", "current_driver")
+        cases = (
+            # This host (intel_idle) and an unreadable driver: the 200 us default, as before.
+            ("intel_idle", "GPU_PM_MODE='always'\n", 200),
+            (None, "GPU_PM_MODE='always'\n", 200),
+            # AMD (acpi_idle) without the setting: no cap; a value the file sets always counts.
+            ("acpi_idle", "GPU_PM_MODE='always'\n", None),
+            ("acpi_idle", "GPU_PM_MODE='always'\nCPU_CSTATE_MAX_LATENCY_US='200'\n", 200),
+            ("acpi_idle", "CPU_CSTATE_MAX_LATENCY_US='off'\n", None),
+            ("intel_idle", "CPU_CSTATE_MAX_LATENCY_US='off'\n", None),
+        )
+        for drv, conf, want in cases:
+            with self.subTest(driver=drv, conf=conf):
+                if drv is None:
+                    if os.path.exists(driver):
+                        os.remove(driver)
+                else:
+                    self._write(driver, drv + "\n")
+                self._write(self.paths.conf, conf)
+                self.assertEqual(collect_power_snapshot(self.paths).cstate_limit_us, want)
+
     def test_apply_and_revert_wait_for_the_run_lock(self) -> None:
         # cpu-game-profile holds /run/cpu-setup/lock while it switches; apply and revert wait for it
         # and change nothing when it stays held. status and plan never wait.

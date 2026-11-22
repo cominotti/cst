@@ -14,22 +14,25 @@ from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.runtime import host_view_path, undo_python_start
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
+from cst_core.domain.text import parse_shell_assignments
+from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import ExecutionContextPort
 from cpu.game.adapters.host import read_settings, read_stripped, write_sysfs_line
 from cpu.game.domain import held_sys_paths, parse_cstate_limit_us
 from cpu.power.domain import (
     CSTATE_OFF,
     CSTATE_ON,
-    DEFAULT_CPU_CSTATE_US,
     DEFAULT_GAME_CSTATE_US,
     PM_ON,
     CpuIdleEntry,
+    CpuTopology,
     GpuPowerCard,
     PowerAction,
     PowerParsedArgs,
     PowerPlan,
     PowerSnapshot,
     SysfsChange,
+    boot_cstate_limit_us,
     format_power_plan,
     format_power_status,
     parse_gpu_pm_mode,
@@ -41,6 +44,7 @@ _CARD_RE: Final = re.compile(r"^card([0-9]+)$")
 _CPU_RE: Final = re.compile(r"^cpu([0-9]+)$")
 _STATE_RE: Final = re.compile(r"^state([0-9]+)$")
 _CONNECTED_VALUE: Final = "connected"
+_CSTATE_SETTING: Final = "CPU_CSTATE_MAX_LATENCY_US"
 # As long as cpu-game-profile waits for the same lock.
 _POWER_LOCK_TIMEOUT_S: Final = 60
 
@@ -172,6 +176,30 @@ def _write_managed_set(path: str, keys: list[str]) -> None:
     write_atomic(path, "".join(f"{k}\n" for k in unique), mode=0o644, durable=False, relabel=False)
 
 
+def _cpuidle_driver(sys_cpu: str) -> str:
+    return read_stripped(os.path.join(sys_cpu, "cpuidle", "current_driver")) or ""
+
+
+def read_cpu_topology(sys_dir: str, p_cores: str, e_cores: str) -> CpuTopology:
+    """The host's CPU topology under sys_dir (/sys), p_cores and e_cores being the hybrid CPU's
+    cpu_core/cpus and cpu_atom/cpus files: for cpu-setup.conf's first defaults (cst cpu install)."""
+    sys_cpu = os.path.join(sys_dir, "devices", "system", "cpu")
+    online = read_stripped(os.path.join(sys_cpu, "online")) or ""
+    try:
+        cpus = CpuSet.parse(online).sorted_cpus() if online else ()
+    except DomainValidationError:
+        cpus = ()
+    return CpuTopology(
+        p_cores=read_stripped(p_cores) or "",
+        e_cores=read_stripped(e_cores) or "",
+        online=online,
+        siblings=tuple(
+            read_stripped(os.path.join(sys_cpu, f"cpu{c}", "topology", "thread_siblings_list")) or "" for c in cpus
+        ),
+        cpuidle_driver=_cpuidle_driver(sys_cpu),
+    )
+
+
 def collect_power_snapshot(paths: PowerPaths) -> PowerSnapshot:
     """Collect configuration and live sysfs state into a pure `PowerSnapshot`."""
     settings, problems = read_settings(paths.conf)
@@ -179,7 +207,10 @@ def collect_power_snapshot(paths: PowerPaths) -> PowerSnapshot:
     gpu_mode, gpu_err = parse_gpu_pm_mode(settings.gpu_pm_mode)
     if gpu_err is not None:
         warnings.append(gpu_err)
-    cstate_limit, cs_err = parse_cstate_limit_us(settings.cpu_cstate_max_latency_us, default_us=DEFAULT_CPU_CSTATE_US)
+    explicit = bool((parse_shell_assignments(read_text(paths.conf) or "").values.get(_CSTATE_SETTING) or "").strip())
+    cstate_limit, cs_err = boot_cstate_limit_us(
+        settings.cpu_cstate_max_latency_us, explicit=explicit, cpuidle_driver=_cpuidle_driver(paths.sys_cpu)
+    )
     if cs_err is not None:
         warnings.append(f"CPU_CSTATE_MAX_LATENCY_US: {cs_err}")
     game_limit, gs_err = parse_cstate_limit_us(settings.game_cstate_max_latency_us, default_us=DEFAULT_GAME_CSTATE_US)

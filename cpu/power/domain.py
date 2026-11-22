@@ -10,8 +10,11 @@ from enum import StrEnum
 from typing import Final
 
 from cst_core.domain.text import HELP_WORDS, enum_member
+from cpu.game.domain import parse_cstate_limit_us
 
 DEFAULT_CPU_CSTATE_US: Final = 200
+# The cpuidle driver whose C-states the 200 us default was measured on (Intel); AMD hosts use acpi_idle.
+INTEL_IDLE_DRIVER: Final = "intel_idle"
 DEFAULT_GAME_CSTATE_US: Final = 50
 PM_ON: Final = "on"
 PM_AUTO: Final = "auto"
@@ -20,6 +23,27 @@ CSTATE_OFF: Final = "1"
 _KIND_GPU: Final = "gpu"
 _KIND_CSTATE: Final = "cstate"
 _GPU_ONLY_FLAG: Final = "--gpu-only"
+
+
+@dataclass(frozen=True, slots=True)
+class CpuTopology:
+    """What the host's sysfs says about its CPUs, for cpu-setup.conf's first defaults ("" when unreadable)."""
+
+    p_cores: str = ""  # /sys/devices/cpu_core/cpus (hybrid Intel only)
+    e_cores: str = ""  # /sys/devices/cpu_atom/cpus (hybrid Intel only)
+    online: str = ""  # /sys/devices/system/cpu/online
+    # Each online CPU's topology/thread_siblings_list (the CPUs of its physical core).
+    siblings: tuple[str, ...] = ()
+    cpuidle_driver: str = ""  # /sys/devices/system/cpu/cpuidle/current_driver
+
+
+def boot_cstate_limit_us(raw: str, *, explicit: bool, cpuidle_driver: str) -> tuple[int | None, str | None]:
+    """CPU_CSTATE_MAX_LATENCY_US as cpu-power applies it, `(limit_us_or_None, error)`: a value
+    cpu-setup.conf sets always counts; without one, the 200 us default applies with intel_idle (or a
+    driver that cannot be read) and the cap is off with any other driver (AMD's acpi_idle)."""
+    if not explicit and cpuidle_driver and cpuidle_driver != INTEL_IDLE_DRIVER:
+        return None, None
+    return parse_cstate_limit_us(raw, default_us=DEFAULT_CPU_CSTATE_US)
 
 
 class GpuPmMode(StrEnum):

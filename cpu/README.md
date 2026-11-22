@@ -299,7 +299,8 @@ CST installed is adopted by the next `install`, without being written again.
 
 ### 6.2 Settings file
 
-`/etc/cpu-setup/cpu-setup.conf`, exactly as `install` writes it:
+`/etc/cpu-setup/cpu-setup.conf`, exactly as `install` writes it on this
+machine (a Core Ultra 9 285K: P-cores 0-7, E-cores 8-23, `intel_idle`):
 
 ```
 # Managed by cpu-setup.sh (CST); values may be edited.
@@ -316,6 +317,22 @@ GPU_PM_MODE='always'
 CPU_CSTATE_MAX_LATENCY_US='200'
 GAME_CSTATE_MAX_LATENCY_US='50'
 ```
+
+`install` writes the file only when it is missing, and reads three values
+from the machine's sysfs for it:
+
+- `BUILD_CPUS` and `P_CORES`: on a hybrid Intel CPU (`/sys/devices/cpu_atom/cpus`),
+  `P_CORES` is `/sys/devices/cpu_core/cpus` (or the online CPUs that are not
+  E-cores) and `BUILD_CPUS` the E-cores, without the first four when there are
+  12 or more (the 285K: `12-23`). On any other CPU (AMD, older Intel), the
+  physical cores in order, each with its SMT sibling
+  (`topology/thread_siblings_list`): the first half is `P_CORES`, the second
+  `BUILD_CPUS` (on a two-CCD Ryzen, one CCD each). With one core, or nothing
+  readable, the values above.
+- `CPU_CSTATE_MAX_LATENCY_US`: `200` with the `intel_idle` cpuidle driver (or
+  when it cannot be read), `off` with any other (AMD's `acpi_idle`, whose
+  states the 200 µs was not chosen for). `cpu-power` applies the same rule
+  when the file has no such line; a value the file sets always counts.
 
 (Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
 uses the same five names as its default.) A byte that is not UTF-8 in this
@@ -377,7 +394,7 @@ can be slow).
 | `VM_VCPUS` | Number of virtual CPUs `vm-pin` gives the VM. | `vm-pin` |
 | `VM_CPU_DISABLE` | CPU features `vm-pin` keeps switched off for a VM with `<cpu mode='host-passthrough'>` (section 8.1). Empty (`VM_CPU_DISABLE=''`): `vm-pin` leaves the CPU features alone. Missing: the default list. | `vm-pin`, `cst doctor`, `cst vm status` |
 | `GPU_PM_MODE` | `always` (default): force `power/control=on` on every GPU with connected monitors and track hotplug via udev; `game`: only boost active game GPUs during the game profile; `off`: never modify GPU runtime PM. | `cst cpu power`, `cst-cpu-power.service`, game profile |
-| `CPU_CSTATE_MAX_LATENCY_US` | Baseline `cpuidle` exit-latency ceiling in microseconds (`200` default disables states with `latency >= 200` such as `C3_ACPI`; `off`/`0` leaves all C-states enabled). | `cst cpu power`, `cst-cpu-power.service` |
+| `CPU_CSTATE_MAX_LATENCY_US` | Baseline `cpuidle` exit-latency ceiling in microseconds (`200` default disables states with `latency >= 200` such as `C3_ACPI`; `off`/`0` leaves all C-states enabled; without the line, `off` unless the cpuidle driver is `intel_idle`, 6.2). | `cst cpu power`, `cst-cpu-power.service` |
 | `GAME_CSTATE_MAX_LATENCY_US` | Per-game `cpuidle` ceiling on `P_CORES` while the game profile runs (`50` default disables `C2_ACPI` `127 µs` on P-cores while preserving baseline-disabled states across `off`; `off`/`0` disables). | game profile |
 
 You may edit the values. Rules:
@@ -1624,7 +1641,7 @@ this is harmless.
 | File | Installed as / used by |
 |------|------------------------|
 | `cpu-setup` | What `cpu-setup.sh` runs (checkout only): `cli.main` of `setup/` |
-| `setup/domain.py` | `cst cpu`'s rules, no I/O: its commands and where each goes, the paths it uses, the lines it writes (`cpu-setup.conf`, the drop-ins, the HWP tmpfiles line), how `status` reads what it shows, the `daemon.json` edit, the memory experiments |
+| `setup/domain.py` | `cst cpu`'s rules, no I/O: its commands and where each goes, the paths it uses, the lines it writes (`cpu-setup.conf` and its first values from the CPU topology, the drop-ins, the HWP tmpfiles line), how `status` reads what it shows, the `daemon.json` edit, the memory experiments |
 | `setup/adapters.py` | `CpuSetup`: install, status, uninstall, game, vm-pin, docker-slice and experiment on the machine, through the installer (`cst_core/installer.py`, as the user through runuser for the home's files), systemctl and the checkout's programs; a step that failed ends the command with its exit status, as under `set -e` |
 | `setup/wiring.py` | What the shim hands over (`CST_SELF`, `CST_ARG0`), the environment, the command lines it execs (cpu-watch, flatpak-spawn from a toolbox, sudo) and `CpuSetup` over the real adapters |
 | `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
@@ -1637,7 +1654,7 @@ this is harmless.
 | `cpu-irq` | `/usr/local/sbin/cpu-irq`: a zipapp of this entry point with `cpu.irq`, `cpu.game`, and `cst_core`; `cst cpu irq` runs the checkout's copy |
 | `irq/domain.py`, `irq/adapters.py`, `irq/cli.py` | Adaptive `irqbalance` ban-list calculation (`BUILD_CPUS` intersected with online CPUs, keeping `>= 2` unbanned CPUs), `/etc/cpu-setup/irqbalance.env`, drop-in, and RPM handling |
 | `cpu-power` | `/usr/local/sbin/cpu-power`: a zipapp of this entry point with the `cpu.power`, `cpu.game`, and `cst_core` packages; `cst cpu power` runs the checkout's copy |
-| `power/domain.py`, `power/adapters.py`, `power/cli.py` | Baseline and hotplug GPU runtime PM (`GPU_PM_MODE`) plus baseline CPU `cpuidle` latency ceiling (`CPU_CSTATE_MAX_LATENCY_US`) |
+| `power/domain.py`, `power/adapters.py`, `power/cli.py` | Baseline and hotplug GPU runtime PM (`GPU_PM_MODE`) plus baseline CPU `cpuidle` latency ceiling (`CPU_CSTATE_MAX_LATENCY_US`, by default only with `intel_idle`); the sysfs CPU topology `install` reads for `cpu-setup.conf`'s first values |
 | `vm-pin` | `/usr/local/sbin/cpu-vm-pin`: a zipapp of this entry point with the `cpu` and `cst_core` packages |
 | `cpu-watch` | `/usr/local/bin/cpu-watch`: a zipapp, as `vm-pin` |
 | `domain.py` | The rules, no I/O: the domain definition rewrite of `vm-pin` (`pinned`, the CPU features list `CPU_DISABLE_DEFAULT`, which `cst vm` and `cst doctor` import), the numbers of `cpu-watch` (the columns of `samples.csv`, frame lows, the `quiet` tests and limits) |

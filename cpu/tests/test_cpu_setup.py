@@ -21,7 +21,9 @@ import unittest.mock
 from cpu import domain as cpu_domain
 from cpu.setup import cli as setup_cli, wiring as setup_wiring
 from cpu.setup.adapters import CpuSetup, target_user
+from cpu.power.domain import CpuTopology
 from cpu.setup.domain import (
+    default_settings,
     DROPIN_NAME,
     OLD_DROPIN_NAME,
     QUIET_ENV,
@@ -413,6 +415,7 @@ class CpuSetupCase(unittest.TestCase):
             ntsync_modules_load=f"{t}/etc/modules-load.d/cst-ntsync.conf",
             ntsync_dev=f"{t}/dev/ntsync",
             e_cores=f"{t}/sys/cpu_atom/cpus",
+            p_cores=f"{t}/sys/cpu_core/cpus",
             unit_runtime=f"{t}/run/systemd/system",
             run=f"{t}/run/cpu-setup",
             cgroot=f"{t}/sys/fs/cgroup",
@@ -553,6 +556,77 @@ class InstallTest(CpuSetupCase):
         )
         self.assertIn("loaded:    ntsync kernel module\n", out)
         self.assertEqual(os.stat(os.path.dirname(self.paths.conf)).st_mode & 0o777, 0o755)
+
+    def _write_topology(
+        self, *, p_cores: str, e_cores: str, online: str, siblings: Mapping[int, str], driver: str
+    ) -> None:
+        cpu_dir = f"{self.paths.sys_dir}/devices/system/cpu"
+        for path, text in ((self.paths.p_cores, p_cores), (self.paths.e_cores, e_cores)):
+            if text:
+                self.write(path, text + "\n")
+            elif os.path.exists(path):
+                os.remove(path)
+        self.write(f"{cpu_dir}/online", online + "\n")
+        for cpu, sib in siblings.items():
+            self.write(f"{cpu_dir}/cpu{cpu}/topology/thread_siblings_list", sib + "\n")
+        self.write(f"{cpu_dir}/cpuidle/current_driver", driver + "\n")
+
+    def test_first_settings_on_this_hybrid_host_are_the_fixed_ones(self) -> None:
+        # The Core Ultra 9 285K these defaults were chosen on (P-cores 0-7, E-cores 8-23, no SMT, intel_idle)
+        # gets cpu-setup.conf exactly as before the topology was read.
+        self._write_topology(
+            p_cores="0-7", e_cores="8-23", online="0-23", siblings={c: str(c) for c in range(24)}, driver="intel_idle"
+        )
+        self.command("install")
+        self.assertEqual(
+            self.runner.inputs[self.paths.conf],
+            "# Managed by cpu-setup.sh (CST); values may be edited.\n"
+            "TARGET_USER='tester'\n"
+            "BUILD_CPUS='12-23'\n"
+            "P_CORES='0-7'\n"
+            "VM_WEIGHT=10\n"
+            "GAME_MEMORY_LOW='16G'\n"
+            "GAME_ZSWAP_WRITEBACK='no'\n"
+            "VM_NAME='win11-devbox'\n"
+            "VM_VCPUS=12\n"
+            "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'\n"
+            "GPU_PM_MODE='always'\n"
+            "CPU_CSTATE_MAX_LATENCY_US='200'\n"
+            "GAME_CSTATE_MAX_LATENCY_US='50'\n",
+        )
+
+    def test_first_settings_on_an_amd_host_follow_its_topology(self) -> None:
+        # A 16-core Ryzen with SMT (CPU c and c+16 share a core) and acpi_idle: the first 8 cores (one CCD)
+        # with their siblings for the game, the other 8 for builds, and no C-state cap.
+        self._write_topology(
+            p_cores="",
+            e_cores="",
+            online="0-31",
+            siblings={c: f"{c % 16},{c % 16 + 16}" for c in range(32)},
+            driver="acpi_idle",
+        )
+        self.command("install")
+        conf = str(self.runner.inputs[self.paths.conf])
+        self.assertIn("BUILD_CPUS='8-15,24-31'\n", conf)
+        self.assertIn("P_CORES='0-7,16-23'\n", conf)
+        self.assertIn("CPU_CSTATE_MAX_LATENCY_US='off'\n", conf)
+
+    def test_default_settings_for_other_topologies(self) -> None:
+        cases = (
+            # i9-13900K: 8 P-cores with SMT (0-15), 16 E-cores: the first 4 E-cores stay out of BUILD_CPUS.
+            (CpuTopology("0-15", "16-31", "0-31", (), "intel_idle"), ("20-31", "0-15", "200")),
+            # i5 with 4 E-cores: BUILD_CPUS is all of them; P_CORES from online when cpu_core is missing.
+            (CpuTopology("", "12-15", "0-15", (), "intel_idle"), ("12-15", "0-11", "200")),
+            # 8 cores, no SMT, siblings unreadable: the online CPUs split in half.
+            (CpuTopology("", "", "0-7", (), "acpi_idle"), ("4-7", "0-3", "off")),
+            # One core, or nothing readable: the fixed defaults; an unknown driver keeps the 200 us cap.
+            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), ("12-23", "0-7", "200")),
+            (CpuTopology(), ("12-23", "0-7", "200")),
+            (CpuTopology("", "", "0-x", (), "intel_idle"), ("12-23", "0-7", "200")),
+        )
+        for topo, want in cases:
+            with self.subTest(topo=topo):
+                self.assertEqual(default_settings(topo), want)
 
     def test_what_install_hands_the_installer(self) -> None:
         self.command("install")
