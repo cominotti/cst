@@ -33,14 +33,14 @@ Exit codes:
 2. **cpu** (`cpuidle`, `preempt`, `sched_ext`, `/dev/ntsync`, `irqbalance`, `/proc/interrupts`, `BUILD_CPUS`):
    - `cpuidle`: flags enabled C-states on `cpu0` with exit latency `>= 200 µs`.
    - Preemption mode (`sched/preempt` or kernel cmdline `preempt=`): expects `lazy` or `full`.
-   - `ntsync`: checks `/dev/ntsync`, `/sys/class/misc/ntsync`, and `/sys/module/ntsync`.
+   - `ntsync`: checks `/dev/ntsync`, `/sys/class/misc/ntsync`, and `/sys/module/ntsync` (`fix: sudo cst cpu install`).
    - `irqbalance` & `BUILD_CPUS`: checks systemd unit runtime marker (`/run/systemd/units/invocation:irqbalance.service`) and detects high-volume latency-sensitive IRQs (`nvme`, GPUs, NICs, `xhci`, audio, `kvm`) whose interrupts land predominantly on `BUILD_CPUS`.
 
 3. **io** (`block/*/queue/scheduler`, `io.cost.qos`, `io.weight`, `nvme_core`, dirty writeback, btrfs `commit_stats` & `SCRUB_LIMIT`):
    - Flags non-default slice `io.weight` (other than `100`) when `io.cost.qos` is empty and NVMe queues use `none`.
-   - Flags `nvme_core.default_ps_max_latency_us > 50000` (deep APST sleep states).
+   - Flags `nvme_core.default_ps_max_latency_us > 50000` (deep APST sleep states; `fix: sudo cst btrfs install`).
    - Flags both `vm.dirty_background_bytes` and `vm.dirty_bytes` set to `0` (unbounded percentage-based dirty cache).
-   - Flags unset `SCRUB_LIMIT` in `/etc/cst/btrfs-snapshots.conf` when btrfs filesystems exist.
+   - Flags unset `SCRUB_LIMIT` in `/etc/btrfs-setup/snapshots.conf` when btrfs filesystems exist (`fix: sudo cst btrfs scrub-limit set 500M`).
    - Evaluates `/sys/fs/btrfs/*/commit_stats` (`avg >= 25 ms` or `max >= 500 ms` -> `ATTENTION`; `avg >= 100 ms` or `max >= 2000 ms` -> `BOTTLENECK`).
 
 4. **gpu** (`/sys/class/drm/card*`, `device/power/control`, `power_dpm_force_performance_level`, `pp_power_profile_mode`):

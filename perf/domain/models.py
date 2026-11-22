@@ -139,7 +139,7 @@ class PerfPathKey(StrEnum):
     NVME_APST_LATENCY = "sys/module/nvme_core/parameters/default_ps_max_latency_us"
     IO_COST_QOS = "cgroup/io.cost.qos"
     CPU_CONF = "etc/cpu-setup/cpu-setup.conf"
-    BTRFS_CONF = "etc/cst/btrfs-snapshots.conf"
+    BTRFS_CONF = "etc/btrfs-setup/snapshots.conf"
     IRQBALANCE_SYSCONFIG = "etc/sysconfig/irqbalance"
 
 
@@ -192,7 +192,7 @@ IO_FILE_KEYS: Final[tuple[PerfPathKey, ...]] = tuple(
         "proc/sys/vm/dirty_background_bytes",
         "proc/sys/vm/dirty_bytes",
         "cgroup/io.cost.qos",
-        "etc/cst/btrfs-snapshots.conf",
+        "etc/btrfs-setup/snapshots.conf",
     )
 )
 

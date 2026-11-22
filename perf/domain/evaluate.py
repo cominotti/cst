@@ -143,6 +143,12 @@ class _AxisCollector:
     def warn(self, finding_id: str, summary: str, detail: str, recommendation: str = "") -> None:
         self.findings.append(PerfFinding(finding_id, self.axis, PerfVerdict.ATTENTION, summary, detail, recommendation))
 
+    def warn_fix(self, finding_id: str, summary: str, detail: str, guidance: tuple[str, str]) -> None:
+        recommendation, fix_command = guidance
+        self.findings.append(
+            PerfFinding(finding_id, self.axis, PerfVerdict.ATTENTION, summary, detail, recommendation, fix_command)
+        )
+
     def add(self, finding: PerfFinding) -> None:
         self.findings.append(finding)
 
@@ -218,16 +224,11 @@ def _eval_memory_headroom(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None
                 else MEM_MIN_FREE_SMALL_RAM_BYTES
             )
             if mem.min_free_bytes < target:
-                col.add(
-                    PerfFinding(
-                        finding_id="memory-min-free",
-                        axis=PerfAxis.MEMORY,
-                        verdict=PerfVerdict.ATTENTION,
-                        summary=f"vm.min_free_kbytes is low ({format_bytes_human(mem.min_free_bytes)}) for host RAM",
-                        detail=f"Current free reserve is below {format_bytes_human(target)} headroom.",
-                        recommendation="Apply CST swap tuning to set vm.min_free_kbytes = 256 MiB.",
-                        fix_command="sudo cst swap apply",
-                    )
+                col.warn_fix(
+                    "memory-min-free",
+                    f"vm.min_free_kbytes is low ({format_bytes_human(mem.min_free_bytes)}) for host RAM",
+                    f"Current free reserve is below {format_bytes_human(target)} headroom.",
+                    ("Apply CST swap tuning to set vm.min_free_kbytes = 256 MiB.", "sudo cst swap apply"),
                 )
     if mem.watermark_scale_factor is not None:
         col.metric("vm.watermark_scale_factor", str(mem.watermark_scale_factor))
@@ -263,16 +264,11 @@ def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> Non
     if mem.thp_enabled is not None or mem.thp_defrag is not None:
         col.metric("THP", f"enabled={mem.thp_enabled or '?'} defrag={mem.thp_defrag or '?'}")
         if mem.thp_defrag in _THP_DEFRAG_PAUSE_MODES:
-            col.add(
-                PerfFinding(
-                    finding_id="memory-thp-defrag",
-                    axis=PerfAxis.MEMORY,
-                    verdict=PerfVerdict.ATTENTION,
-                    summary=f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
-                    detail="Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
-                    recommendation="Switch THP defrag to defer+madvise so kcompactd compacts in background.",
-                    fix_command="sudo cst swap apply",
-                )
+            col.warn_fix(
+                "memory-thp-defrag",
+                f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
+                "Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
+                ("Switch THP defrag to defer+madvise so kcompactd compacts in background.", "sudo cst swap apply"),
             )
     if mem.lru_gen_enabled is not None:
         ttl_str = f"{mem.lru_gen_min_ttl_ms} ms" if mem.lru_gen_min_ttl_ms is not None else "?"
@@ -285,16 +281,11 @@ def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> Non
                 "Enable /sys/kernel/mm/lru_gen/enabled (7) and set min_ttl_ms >= 1000.",
             )
         elif mem.lru_gen_min_ttl_ms is not None and mem.lru_gen_min_ttl_ms == 0:
-            col.add(
-                PerfFinding(
-                    finding_id="memory-mglru-min-ttl",
-                    axis=PerfAxis.MEMORY,
-                    verdict=PerfVerdict.ATTENTION,
-                    summary="MGLRU min_ttl_ms is 0 (no thrashing floor)",
-                    detail="Newly faulted working-set pages can be evicted immediately during bursts.",
-                    recommendation=f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.",
-                    fix_command="sudo cst swap apply",
-                )
+            col.warn_fix(
+                "memory-mglru-min-ttl",
+                "MGLRU min_ttl_ms is 0 (no thrashing floor)",
+                "Newly faulted working-set pages can be evicted immediately during bursts.",
+                (f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.", "sudo cst swap apply"),
             )
 
 
@@ -305,16 +296,11 @@ def _eval_memory_zswap_and_psi(col: _AxisCollector, mem: MemoryProbeSnapshot) ->
         z_pool = f", max_pool={mem.zswap_max_pool_percent}%" if mem.zswap_max_pool_percent is not None else ""
         col.metric("zswap", f"{z_state}{z_extra}{z_pool}")
         if mem.zswap_enabled is False:
-            col.add(
-                PerfFinding(
-                    finding_id="memory-zswap-disabled",
-                    axis=PerfAxis.MEMORY,
-                    verdict=PerfVerdict.ATTENTION,
-                    summary="zswap is disabled",
-                    detail="Anonymous pages swap straight to disk instead of fast compressed RAM pool.",
-                    recommendation="Apply CST swap profile to enable zswap + encrypted swap0.",
-                    fix_command="sudo cst swap apply",
-                )
+            col.warn_fix(
+                "memory-zswap-disabled",
+                "zswap is disabled",
+                "Anonymous pages swap straight to disk instead of fast compressed RAM pool.",
+                ("Apply CST swap profile to enable zswap + encrypted swap0.", "sudo cst swap apply"),
             )
     if mem.psi_some_avg60 is not None or mem.psi_full_avg60 is not None:
         some_s = f"{mem.psi_some_avg60:.2f}%" if mem.psi_some_avg60 is not None else "?"
@@ -352,31 +338,21 @@ def _eval_memory_cgroups(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
         )
         headroom_cap = eff_min * SESSION_FLOOR_HEADROOM_NUM // SESSION_FLOOR_HEADROOM_DEN
         if eff_min == 0:
-            col.add(
-                PerfFinding(
-                    finding_id="memory-session-floor-unset",
-                    axis=PerfAxis.MEMORY,
-                    verdict=PerfVerdict.ATTENTION,
-                    summary=f"{sslice.name} has effective memory.min=0",
-                    detail="Desktop compositor/shell lacks hard reclaim protection under pressure.",
-                    recommendation="Configure a hard MemoryMin floor on user/session slices via uresourced.",
-                    fix_command="sudo cst swap apply",
-                )
+            col.warn_fix(
+                "memory-session-floor-unset",
+                f"{sslice.name} has effective memory.min=0",
+                "Desktop compositor/shell lacks hard reclaim protection under pressure.",
+                ("Configure a hard MemoryMin floor on user/session slices via uresourced.", "sudo cst swap apply"),
             )
         elif sslice.current_bytes > headroom_cap and eff_min < SESSION_MIN_RECOMMENDED_BYTES:
-            col.add(
-                PerfFinding(
-                    finding_id="memory-session-floor",
-                    axis=PerfAxis.MEMORY,
-                    verdict=PerfVerdict.ATTENTION,
-                    summary=(
-                        f"{sslice.name} current ({format_bytes_human(sslice.current_bytes)}) exceeds "
-                        f"effective memory.min ({format_bytes_human(eff_min)})"
-                    ),
-                    detail="Effective session protection is capped below active Shell/compositor working set.",
-                    recommendation="Raise uresourced MemoryMin above active compositor footprint (1G).",
-                    fix_command="sudo cst swap apply",
-                )
+            col.warn_fix(
+                "memory-session-floor",
+                (
+                    f"{sslice.name} current ({format_bytes_human(sslice.current_bytes)}) exceeds "
+                    f"effective memory.min ({format_bytes_human(eff_min)})"
+                ),
+                "Effective session protection is capped below active Shell/compositor working set.",
+                ("Raise uresourced MemoryMin above active compositor footprint (1G).", "sudo cst swap apply"),
             )
 
 
@@ -444,11 +420,11 @@ def _eval_cpu_kernel(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
     if cpu.ntsync_present is not None:
         col.metric("ntsync", "present" if cpu.ntsync_present else "absent")
         if cpu.ntsync_present is False:
-            col.warn(
+            col.warn_fix(
                 "cpu-ntsync-absent",
                 "/dev/ntsync is not active",
                 "Wine/Proton falls back to higher-overhead fsync/esync syscall emulation.",
-                "Load/autoload the `ntsync` kernel module via modules-load.d.",
+                ("Load/autoload the `ntsync` kernel module via modules-load.d.", "sudo cst cpu install"),
             )
 
 
@@ -517,11 +493,14 @@ def _eval_io_nvme_and_dirty(col: _AxisCollector, io: IoProbeSnapshot) -> None:
     if io.nvme_ps_max_latency_us is not None:
         col.metric("nvme APST max latency", f"{io.nvme_ps_max_latency_us} µs")
         if io.nvme_ps_max_latency_us > NVME_PS_MAX_LATENCY_WARN_US:
-            col.warn(
+            col.warn_fix(
                 "io-nvme-apst",
                 f"nvme_core default_ps_max_latency_us={io.nvme_ps_max_latency_us} µs",
                 "Allows deep NVMe Autonomous Power State Transitions with multi-ms wakeup pauses.",
-                "Tighten nvme_core.default_ps_max_latency_us (e.g. <= 10000 µs or 0 on desktop).",
+                (
+                    "Tighten nvme_core.default_ps_max_latency_us (e.g. <= 10000 µs or 0 on desktop).",
+                    "sudo cst btrfs install",
+                ),
             )
     if io.dirty_background_bytes is not None and io.dirty_bytes is not None:
         bg_txt = format_bytes_human(io.dirty_background_bytes) if io.dirty_background_bytes else "0 (ratio)"
@@ -540,11 +519,14 @@ def _eval_io_btrfs(col: _AxisCollector, io: IoProbeSnapshot) -> None:
     if io.btrfs_conf_present and io.btrfs_commits:
         col.metric("btrfs SCRUB_LIMIT", io.btrfs_scrub_limit if io.btrfs_scrub_limit is not None else "unset")
         if io.btrfs_scrub_limit is None or not io.btrfs_scrub_limit:
-            col.warn(
+            col.warn_fix(
                 "io-btrfs-scrub-limit",
                 "btrfs SCRUB_LIMIT is unset",
                 "Scheduled scrub runs at unthrottled NVMe bandwidth, starving interactive I/O.",
-                "Set SCRUB_LIMIT (e.g. '100M') in /etc/cst/btrfs-snapshots.conf.",
+                (
+                    "Set SCRUB_LIMIT (e.g. '500M') in /etc/btrfs-setup/snapshots.conf via cst btrfs scrub-limit.",
+                    "sudo cst btrfs scrub-limit set 500M",
+                ),
             )
     for fs in io.btrfs_commits:
         avg_ms = fs.total_commit_ms / fs.commits if fs.commits > 0 else 0.0

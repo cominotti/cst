@@ -155,6 +155,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
     "btrfs/pending_alerts/cli.py": 74,
+    "btrfs/scrub_limit/cli.py": 52,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/snapshot_runtime/cli.py": 13,
     "btrfs/stall_monitord/cli.py": 11,

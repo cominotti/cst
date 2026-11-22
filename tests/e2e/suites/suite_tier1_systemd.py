@@ -1062,6 +1062,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             ([], "/opt/cst/cst btrfs install --no-below"),
             ([], "/opt/cst/cst btrfs compress-force apply --yes"),
             ([], "/opt/cst/cst btrfs compress-force revert --yes"),
+            ([], "/opt/cst/cst btrfs scrub-limit set 500M"),
             ([], "/opt/cst/cst swap apply"),
             (["--user", "tester"], "/opt/cst/cst bluetooth apply --no-restart --yes"),
         ):
@@ -4144,6 +4145,60 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_126_btrfs_scrub_limit_and_nvme_apst_cycle(self) -> None:
+        """`cst btrfs scrub-limit plan/set/status/off` against the real /etc and systemd on the container,
+        plus verification that `cst-nvme-apst.conf` and `65-cst-nvme-apst.rules` install under `btrfs:core`."""
+        c = self.SYSTEMD_CONTAINER
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        rec = "/var/lib/cst/installed.json"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -f {conf} {dropin}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
+            install -d -m 0755 /etc/btrfs-setup
+            printf "HOME_SUBVOL='home'\\n" > {conf}
+            /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
+            [[ ! -e {dropin} ]] || {{ echo "plan wrote {dropin}" >&2; exit 1; }}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            ! grep -qF "SCRUB_LIMIT" {conf}
+            /opt/cst-rw/cst btrfs scrub-limit set 500M
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            [[ -f {dropin} ]]
+            grep -qF '"{dropin}"' {rec}
+            systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 500M /var"
+            systemctl show -p ExecStopPost btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 0 /var"
+            again="$(/opt/cst-rw/cst btrfs scrub-limit set 500M)"
+            grep -qxF "unchanged: {conf}" <<<"$again"
+            grep -qxF "unchanged: {dropin}" <<<"$again"
+            st="$(/opt/cst-rw/cst btrfs scrub-limit status)"
+            grep -qF "service: 500M, as set" <<<"$st"
+            /opt/cst-rw/cst btrfs scrub-limit off
+            [[ ! -e {dropin} ]]
+            ! grep -qF "SCRUB_LIMIT" {conf}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            ! grep -qF '"{dropin}"' {rec}
+            [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"
+            echo E2E-SCRUB-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-SCRUB-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:

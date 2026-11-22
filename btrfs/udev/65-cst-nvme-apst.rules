@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: MPL-2.0
+# Managed by btrfs-setup.sh (CST): keep NVMe APST latency tolerance at 0 us (PS0 active).
+ACTION=="add|change", SUBSYSTEM=="nvme", TEST=="power/pm_qos_latency_tolerance_us", ATTR{power/pm_qos_latency_tolerance_us}="0"

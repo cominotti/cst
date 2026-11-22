@@ -102,6 +102,8 @@ class SetupPaths:
     # many fsyncs, a game loading assets). Applied at boot by systemd-tmpfiles, and at once by install.
     hwp_boost: str = "/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost"
     hwp_tmpfiles: str = "/etc/tmpfiles.d/cpu-setup-hwp-boost.conf"
+    ntsync_modules_load: str = "/etc/modules-load.d/cst-ntsync.conf"
+    ntsync_dev: str = "/dev/ntsync"
     e_cores: str = "/sys/devices/cpu_atom/cpus"
     unit_runtime: str = "/run/systemd/system"
     run: str = "/run/cpu-setup"
@@ -179,6 +181,15 @@ def conf_lines(target_user: str) -> str:
 def hwp_tmpfiles_text(hwp_boost: str) -> str:
     """The tmpfiles.d line that sets HWP dynamic boost at boot."""
     return f"# Managed by cpu-setup.sh (CST): intel_pstate HWP dynamic boost on.\nw {hwp_boost} - - - - 1\n"
+
+
+def ntsync_modules_load_text() -> str:
+    """The modules-load.d file that autoloads `ntsync` at boot."""
+    return (
+        "# SPDX-License-Identifier: MPL-2.0\n"
+        "# Managed by cpu-setup.sh (CST): load ntsync at boot for Wine/Proton NT sync primitives.\n"
+        "ntsync\n"
+    )
 
 
 def toolbox_dropin_text(e_cores: str) -> str:

@@ -26,6 +26,7 @@
 #         (rpm-ostree layered), queried with `report`
 #       * automatic block-group reclaim (dynamic + periodic, data)
 #       * writeback limits vm.dirty_bytes 2 GiB / background 512 MiB
+#       * NVMe APST latency cap 0 us (cst-nvme-apst.conf + udev rule: no sleep pauses)
 #       * desktop alerts (btrfs-notify) for every component; one raised while
 #         no graphical session can show it (at boot, nobody logged in) is kept
 #         in /var/lib/cst-alerts/pending (7 days) and shown at the next login
@@ -153,6 +154,12 @@
 #                          `status` and `plan` work as your user (also inside a
 #                          toolbox); `apply` and `revert` need root on the host.
 #                          Never runs automatic `btrfs filesystem defragment`.
+#   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
+#                          per-device weekly scrub speed limit (SCRUB_LIMIT in
+#                          /etc/btrfs-setup/snapshots.conf + service drop-in).
+#                          Default SIZE is 500M. `status` and `plan` work as
+#                          your user (also in a toolbox); `set` and `off` need
+#                          root on the host.
 #   help
 #
 # Without a command it only prints this help and changes nothing; `install`
@@ -171,6 +178,8 @@ SYSCTL_FILE="/etc/sysctl.d/90-btrfs-writeback.conf"
 SYSCTL_SRC=btrfs/sysctl/90-btrfs-writeback.conf
 RECLAIM_FILE="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
 RECLAIM_SRC=btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in
+NVME_APST_FILE="/etc/tmpfiles.d/cst-nvme-apst.conf"
+NVME_APST_PARAM="/sys/module/nvme_core/parameters/default_ps_max_latency_us"
 BELOW_DROPIN="${UNIT_DIR}/below.service.d/10-cst.conf"
 DATA_DIR="/var/log/btrfs-stall-monitor"
 DEGRADED="${SRC}/btrfs-degraded-boot-setup.sh"
@@ -249,6 +258,12 @@ case "${cmd}" in
         ;;
     compress-force)
         CST_PROG="${PROG} compress-force" exec python3 -I -B "${SRC}/btrfs-compress" "$@"
+        ;;
+    scrub-limit)
+        case "${1:-status}" in
+            set|off) ;;
+            *) CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@" ;;
+        esac
         ;;
     install|status|uninstall|test-alert|degraded-boot|crypt-perf|snapshots|bulk|docker-gc)
         ;;
@@ -651,6 +666,18 @@ status_mounts() {
             printf '  vm.%-22s %s DRIFT (expected %s; run install)\n' "${o}" "${have}" "${want}"
         fi
     done
+    local nvme_param="${NVME_APST_PARAM:-/sys/module/nvme_core/parameters/default_ps_max_latency_us}"
+    local nvme_file="${NVME_APST_FILE:-/etc/tmpfiles.d/cst-nvme-apst.conf}"
+    if [[ -r "${nvme_param}" ]]; then
+        have="$(<"${nvme_param}")"
+        if [[ ! -e "${nvme_file}" ]]; then
+            printf '  %-25s %s us (not managed: run install)\n' "nvme default_ps_latency" "${have}"
+        elif [[ "${have}" == "0" ]]; then
+            printf '  %-25s %s us ok\n' "nvme default_ps_latency" "${have}"
+        else
+            printf '  %-25s %s us DRIFT (expected 0; run install)\n' "nvme default_ps_latency" "${have}"
+        fi
+    fi
 }
 
 status() (
@@ -985,6 +1012,15 @@ uninstall() {
     cst_remove --component btrfs:below
     rm -fv "${OLD_BELOW_DROPIN}"
     remove_tuning_files
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+    fi
+    if [[ -w "${NVME_APST_PARAM}" ]]; then
+        printf '100000\n' > "${NVME_APST_PARAM}" 2>/dev/null || true
+    fi
+    for qos in /sys/class/nvme/nvme*/power/pm_qos_latency_tolerance_us; do
+        [[ -w "${qos}" ]] && printf '100000\n' > "${qos}" 2>/dev/null || true
+    done
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
     remove_report_launcher
@@ -1026,6 +1062,11 @@ install_all() {
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
     systemd-tmpfiles --create "${RECLAIM_FILE}"
+    systemd-tmpfiles --create "${NVME_APST_FILE}" 2>/dev/null || true
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+        udevadm trigger --subsystem-match=nvme --action=change || true
+    fi
     install_report_launcher
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"
@@ -1118,6 +1159,7 @@ case "${cmd}" in
             "Notifications from btrfs-health-check and btrfs-stall-monitor are working."
         ;;
     crypt-perf) crypt_perf "$@" ;;
+    scrub-limit) CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@" ;;
     docker-gc) docker_gc "$@" ;;
     snapshots)
         # shellcheck source=btrfs/setup-snapshots.bash

@@ -396,6 +396,8 @@ class CpuSetupCase(unittest.TestCase):
             daemon_json=f"{t}/etc/docker/daemon.json",
             hwp_boost=f"{t}/sys/hwp_dynamic_boost",
             hwp_tmpfiles=f"{t}/etc/tmpfiles.d/cpu-setup-hwp-boost.conf",
+            ntsync_modules_load=f"{t}/etc/modules-load.d/cst-ntsync.conf",
+            ntsync_dev=f"{t}/dev/ntsync",
             e_cores=f"{t}/sys/cpu_atom/cpus",
             unit_runtime=f"{t}/run/systemd/system",
             run=f"{t}/run/cpu-setup",
@@ -499,6 +501,9 @@ class InstallTest(CpuSetupCase):
             f"{inst} text {self.paths.conf} 0644",
             f"{inst} install --set USER=tester --component cpu:core",
             f"{inst} text {self.paths.hwp_tmpfiles} 0644 --component cpu:core",
+            "modinfo ntsync",
+            f"{inst} text {self.paths.ntsync_modules_load} 0644 --component cpu:core",
+            "modprobe ntsync",
             f"{runuser} text {toolbox_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} text {helper_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} install --home {self.home} --component cpu:gamemode",
@@ -530,6 +535,7 @@ class InstallTest(CpuSetupCase):
         self.assertTrue(
             out.endswith("  - measure: cst cpu watch -l baseline --game dota2 --seconds 300   (while a build runs)\n")
         )
+        self.assertIn("loaded:    ntsync kernel module\n", out)
         self.assertEqual(os.stat(os.path.dirname(self.paths.conf)).st_mode & 0o777, 0o755)
 
     def test_what_install_hands_the_installer(self) -> None:
@@ -537,6 +543,7 @@ class InstallTest(CpuSetupCase):
         texts = self.runner.inputs
         self.assertEqual(texts[self.paths.conf], conf_lines("tester"))
         self.assertIn("TARGET_USER='tester'\n", conf_lines("tester"))
+        self.assertTrue(str(texts[self.paths.ntsync_modules_load]).endswith("\nntsync\n"))
         self.assertTrue(str(texts[toolbox_dropin(self.home)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
         self.assertTrue(str(texts[helper_dropin(self.home)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
         # Every installer call hands over the caller's LC_CTYPE, as cst-install.bash did.
@@ -550,13 +557,17 @@ class InstallTest(CpuSetupCase):
         self.write(gamemode_ini(self.home), "[general]\n")
         self.write(helper_dropin(self.home), "x")
         self.write(self.paths.conf, "TARGET_USER='tester'\n")
-        self.runner.answers = [("id -nG tester", CommandResult(0, "tester gamemode\n", ""))]
+        self.runner.answers = [
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+            ("modinfo ntsync", CommandResult(1, "", "ERROR: Module ntsync not found.")),
+        ]
         rc, out, err = self.command("install")
         self.assertEqual(rc, 0, err)
         self.assertIn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped", err)
         self.assertIn(
             f"NOTE: {self.paths.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped", err
         )
+        self.assertIn("NOTE: ntsync kernel module not available on this kernel: autoload skipped", err)
         self.assertIn(
             f"NOTE: {gamemode_ini(self.home)} is your own: add [custom] start/end from {REPO}/cpu/gamemode.ini by hand",
             err,
@@ -646,7 +657,15 @@ class UninstallTest(CpuSetupCase):
             os.path.join(self.paths.unit_dir, "machine.slice.d", OLD_DROPIN_NAME),
             toolbox_dropin(self.home, OLD_DROPIN_NAME),
         ]
-        for f in [*left, *old, keep, self.paths.hwp_tmpfiles, toolbox_dropin(self.home), helper_dropin(self.home)]:
+        for f in [
+            *left,
+            *old,
+            keep,
+            self.paths.hwp_tmpfiles,
+            self.paths.ntsync_modules_load,
+            toolbox_dropin(self.home),
+            helper_dropin(self.home),
+        ]:
             self.write(f, "")
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
         self.runner.on_call = remove_text_files
@@ -674,6 +693,8 @@ class UninstallTest(CpuSetupCase):
                 f"{inst} remove --component cpu:core",
                 # Through the installer, with their install record lines (the hwp file also when gone).
                 f"{inst} remove-text {self.paths.hwp_tmpfiles}",
+                f"{inst} remove-text {self.paths.ntsync_modules_load}",
+                "modprobe -r ntsync",
                 f"runuser -u tester -- {inst} remove-text --home {self.home} {dropins}",
                 f"runuser -u tester -- {inst} remove --home {self.home} --component cpu:gamemode",
                 "systemctl --user -M tester@ daemon-reload",
@@ -976,6 +997,7 @@ class StatusTest(CpuSetupCase):
             "\n== game profile\n  game profile: off\n    x\n  watchdog timer: active\n"
             "\n== GameMode\n  group: member; ini: managed; gamemoded: active\n"
             f"  HWP dynamic boost: 0 (kept at boot by {self.paths.hwp_tmpfiles})\n"
+            "  ntsync: inactive (not managed)\n"
             "\n== baseline weights\n  machine.slice 50, toolboxes 30, app.slice , background.slice \n"
             "\n== E-cores for toolboxes and host commands\n"
             "  cpuset delegated: yes; toolboxes AllowedCPUs=8-23; flatpak-spawn --host AllowedCPUs=\n"
@@ -994,7 +1016,7 @@ class StatusTest(CpuSetupCase):
     def test_without_a_target_user_the_user_parts_are_left_out_and_it_exits_1(self) -> None:
         rc, out, _ = self.command("status", user="")
         self.assertEqual(rc, 1)
-        self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n", out)
+        self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n  ntsync: inactive (not managed)\n", out)
         self.assertIn("\n== E-cores for toolboxes and host commands\n\n== VM\n", out)
         self.assertTrue(out.endswith("\n== last measurements\n"))
         self.assertFalse([c for c in self.runner.joined() if c.startswith("runuser")])
@@ -1048,6 +1070,21 @@ class BaselineDropinTest(unittest.TestCase):
         self.assertEqual(
             helper_dropin("/home/u"), "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
         )
+
+
+class NtsyncInstallTest(CpuSetupCase):
+    def test_builtin_ntsync_skips_modules_load_and_cleans_old_conf(self) -> None:
+        self.write(self.paths.ntsync_dev, "")
+        self.runner.answers = [
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+            ("modinfo ntsync", CommandResult(0, "name:           ntsync\nfilename:       (builtin)\n", "")),
+        ]
+        rc, _, err = self.command("install")
+        self.assertEqual((rc, err), (0, ""))
+        calls = self.runner.joined()
+        inst = " ".join(INSTALLER)
+        self.assertIn(f"{inst} remove-text {self.paths.ntsync_modules_load}", calls)
+        self.assertNotIn("modprobe ntsync", calls)
 
 
 class StatusDiagnosisTest(CpuSetupCase):

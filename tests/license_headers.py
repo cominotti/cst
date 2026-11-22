@@ -111,9 +111,12 @@ def comment_syntax(rel: str, first_line: str) -> tuple[str, str] | None:
     """The one-line comment syntax of a file, None for a kind these rules do not know.
 
     A template (`x.rules.in`) has the syntax of what it renders (`x.rules`).
+    udev `.rules` files use `#`; polkit `.rules` files use `//`.
     An extensionless program is known by its shebang.
     """
     name = os.path.basename(rel).removesuffix(".in")
+    if name.endswith(".rules") and "/udev/" in f"/{rel}":
+        return _HASH
     for suffix, syntax in _BY_SUFFIX.items():
         if name.endswith(suffix):
             return syntax

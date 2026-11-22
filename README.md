@@ -375,6 +375,7 @@ swap and memory, with counters since boot.
 | Degraded boot | `cst btrfs degraded-boot uninstall`, then reboot | [btrfs/README.md, section 8](btrfs/README.md#8-degraded-boot-start-the-pc-with-one-disk-dead) |
 | Faster encryption | `cst btrfs crypt-perf disable` | [btrfs/README.md, section 9](btrfs/README.md#9-crypt-perf-faster-encryption-path) |
 | Forced zstd compression | `cst btrfs compress-force revert` | [btrfs/README.md, section 9.1](btrfs/README.md#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator) |
+| Weekly btrfs scrub limit | `cst btrfs scrub-limit off` | [btrfs/README.md, section 4.3](btrfs/README.md#43-weekly-scrub) |
 | Snapshots and NAS backup | `cst btrfs snapshots disable` (add `--purge` to delete the snapshots) | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#12-how-to-undo) |
 | One `~/Bulk` link | `cst btrfs bulk keep ID`, then remove the link and move the folder back by hand | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#undo-one-bulk-link) |
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |

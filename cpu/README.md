@@ -242,6 +242,7 @@ Rules:
 | `/etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf` | `Delegate=cpuset` for user managers (6.3). |
 | `/etc/polkit-1/rules.d/50-cpu-setup-game.rules` | Lets your session start/stop only `cpu-game.service`. |
 | `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` | Turns on intel_pstate's HWP dynamic boost at every boot (6.3). |
+| `/etc/modules-load.d/cst-ntsync.conf` | Autoloads `ntsync` at boot (and via `modprobe ntsync` during `install`) when built as a kernel module, exposing `/dev/ntsync` for Wine/Proton. |
 | `~/.config/systemd/user/user.slice.d/10-cpu-setup.conf` | Toolboxes: `CPUWeight=30`, `AllowedCPUs=8-23`. |
 | `~/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf` | Host commands of toolboxes: `AllowedCPUs=8-23`. |
 | `~/.config/gamemode.ini` | GameMode config (only if you do not have your own). |
@@ -1419,6 +1420,7 @@ cst cpu uninstall
   and `~/.config/gamemode.ini` (only if it is the script's file);
 - removes `/etc/tmpfiles.d/cpu-setup-hwp-boost.conf` and sets HWP dynamic
   boost back to `0` (only when the file was there);
+- removes `/etc/modules-load.d/cst-ntsync.conf` and unloads `ntsync` (`modprobe -r`, best-effort) when it was installed;
 - drops the install record lines of what it removed (`removed:   PATH` for
   each file the installer removed), also of a file deleted by hand; when the
   installer cannot change your record (one written by a newer CST), the two

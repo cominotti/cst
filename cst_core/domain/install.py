@@ -151,6 +151,8 @@ btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-
 btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root   btrfs:top-mount
 btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root   btrfs:core
 btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root   btrfs:core
+btrfs/tmpfiles/cst-nvme-apst.conf                   /etc/tmpfiles.d/cst-nvme-apst.conf                            644  root  data          root   btrfs:core
+btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvme-apst.rules                      644  root  data          root   btrfs:core
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
 cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
@@ -243,6 +245,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "bluetooth/bt-helper",
         "bluetooth/bt-setup",
         "btrfs/btrfs-compress",
+        "btrfs/btrfs-scrub-limit",
         "btrfs/btrfs-stall-watch",
         "btrfs/chrome-cache",
         "btrfs/tests/realbtrfs-snapshot-core.sh",

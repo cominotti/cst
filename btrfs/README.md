@@ -132,6 +132,7 @@ cst btrfs help
 | `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
+| `scrub-limit [status\|plan [SIZE\|off]\|set [SIZE]\|off]` | user / root | Inspect or configure `SCRUB_LIMIT` (default `500M`) and `10-cst-limit.conf` (section 4.3): `status` and `plan` work as your user and in a toolbox; `set` and `off` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
 | `bulk steam plan\|apply [--app ID] [--copy]` | root | Moves your installed Steam games into the `~/Bulk/steam` library, with Steam closed (section 10.1). `plan` is a dry run. `apply` also installs the boot step that repairs an interrupted move. `--copy` allows a real copy of NOCOW game data (it cannot be reflinked). |
@@ -187,6 +188,7 @@ Unit files go to `/etc/systemd/system/`.
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
 | Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
+| NVMe APST latency cap | `/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules` | at every boot, NVMe udev events, and at `install` |
 | Stall monitor (4.7) | `/usr/local/sbin/btrfs-stall-monitord`, `btrfs-stall-monitor.service` | always |
 | Stall report (section 7) | `/usr/local/bin/btrfs-stall-report`, and a small launcher `~/.local/bin/btrfs-stall-report` | when you run it |
 | The `cst` command | the link `~/.local/bin/cst` -> the `cst` of the CST folder, only if nothing else is there, so the hints of alerts and logs (`cst btrfs ...`) work as typed ([README.md, The `cst` command](../README.md#the-cst-command)) | when you run it |
@@ -325,7 +327,16 @@ any IO scheduler. Set it in `/etc/btrfs-setup/snapshots.conf` (create the
 file if it is not there; other keys can stay out) and run `cst btrfs install`:
 
 ```
-SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limit
+SCRUB_LIMIT=500M    # per second, per device; e.g. 500M, 1G, 2G; empty or 0 = no limit
+```
+
+Or manage both `/etc/btrfs-setup/snapshots.conf` and the drop-in directly with `cst btrfs scrub-limit` (default `500M`, dry-run with `plan`, undo with `off`):
+
+```
+cst btrfs scrub-limit plan 500M
+cst btrfs scrub-limit set 500M
+cst btrfs scrub-limit status
+cst btrfs scrub-limit off
 ```
 
 - The default is **no limit**: choose the number after measuring (for
@@ -914,7 +925,7 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   record, CST's launcher still goes, with a warning, and uninstall goes on);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
-- the writeback file. Then it restarts `tuned` so its own values come back. If
+- the writeback file and the NVMe APST latency cap (`/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules`). Then it restarts `tuned` so its own values come back, reloads udev rules, and restores NVMe APST latency tolerance to `100000` us (default power-saving returns at the next boot if not writable). If
   tuned is not running, the old values come back at the next boot;
 - the reclaim file, **only if this script created it**. The switches stay on in
   the running kernel until the next reboot;

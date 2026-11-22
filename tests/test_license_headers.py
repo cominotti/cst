@@ -145,6 +145,8 @@ class RulesTest(unittest.TestCase):
             ("tests/e2e/images/nas.Dockerfile", "FROM x"): "# " + IDENTIFIER,
             (".gitignore", "*.pyc"): "# " + IDENTIFIER,
             ("cpu/cpu-game.rules.in", "polkit.addRule(...);"): "// " + IDENTIFIER,
+            ("btrfs/udev/65-cst-nvme-apst.rules", 'ACTION=="add"'): "# " + IDENTIFIER,
+            ("/etc/udev/rules.d/65-cst-nvme-apst.rules", 'ACTION=="add"'): "# " + IDENTIFIER,
             ("cst.invowkmod/invowkfile.cue", 'workdir: ".."'): "// " + IDENTIFIER,
             ("cpu/gamemode.ini", "[custom]"): "; " + IDENTIFIER,
             ("README.md", "# CST"): "<!-- " + IDENTIFIER + " -->",

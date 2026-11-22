@@ -66,6 +66,7 @@ from cpu.setup.domain import (
     is_daemon_json,
     json_text,
     last_lines,
+    ntsync_modules_load_text,
     preempt_modes,
     target_user_in,
     toolbox_dropin,
@@ -334,6 +335,7 @@ class CpuSetup:
                 self.say(f"set:       {p.hwp_boost} = 1")
         else:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
+        self._install_ntsync()
         ecores = self.e_cores()
         if ecores:
             self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
@@ -358,6 +360,29 @@ class CpuSetup:
         for line in install_done_lines(self.prog):
             self.say(line)
         return 0
+
+    def _ntsync_active(self) -> bool:
+        p = self.paths
+        return (
+            os.path.exists(p.ntsync_dev)
+            or os.path.isdir(os.path.join(p.sys_dir, "class", "misc", "ntsync"))
+            or os.path.isdir(os.path.join(p.sys_dir, "module", "ntsync"))
+        )
+
+    def _install_ntsync(self) -> None:
+        p = self.paths
+        info = self.run(["modinfo", "ntsync"], check=False, quiet=True, capture=True)
+        if info.returncode == 0 and "(builtin)" not in info.stdout:
+            self.install_text(p.ntsync_modules_load, ntsync_modules_load_text(), component=CORE_COMPONENT)
+            if not self._ntsync_active():
+                if self.run(["modprobe", "ntsync"], check=False, quiet=True).returncode == 0:
+                    self.say("loaded:    ntsync kernel module")
+                else:
+                    self.warn("NOTE: modprobe ntsync failed: autoload file written for next boot")
+        elif self._ntsync_active():
+            self.installer("remove-text", p.ntsync_modules_load)
+        else:
+            self.warn("NOTE: ntsync kernel module not available on this kernel: autoload skipped")
 
     def _echo_to(self, path: str, value: str) -> bool:
         """echo VALUE >PATH; bash's message on stderr when it fails."""
@@ -419,6 +444,10 @@ class CpuSetup:
         self.installer("remove-text", p.hwp_tmpfiles)
         if had_hwp and os.access(p.hwp_boost, os.W_OK) and self._echo_to(p.hwp_boost, "0"):
             self.say(f"set:       {p.hwp_boost} = 0")
+        had_ntsync = os.path.isfile(p.ntsync_modules_load)
+        self.installer("remove-text", p.ntsync_modules_load)
+        if had_ntsync:
+            self.run(["modprobe", "-r", "ntsync"], check=False, quiet=True)
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
             dropins = (self.toolbox_dropin(), self.helper_dropin())
@@ -672,6 +701,9 @@ class CpuSetup:
         boost = read_stripped(p.hwp_boost)
         kept = f"kept at boot by {p.hwp_tmpfiles}" if os.path.isfile(p.hwp_tmpfiles) else "not managed"
         self.say(f"  HWP dynamic boost: {'n/a' if boost is None else boost} ({kept})")
+        nt_state = "active" if self._ntsync_active() else "inactive"
+        nt_kept = f"autoloaded by {p.ntsync_modules_load}" if os.path.isfile(p.ntsync_modules_load) else "not managed"
+        self.say(f"  ntsync: {nt_state} ({nt_kept})")
         self.section("baseline weights")
         machine = self.run(["systemctl", "show", "-P", "CPUWeight", "machine.slice"], check=False, capture=True)
         weights = [

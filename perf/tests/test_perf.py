@@ -245,6 +245,8 @@ class PerfEvaluatorTest(unittest.TestCase):
                 "cpu-irq-build-overlap",
             },
         )
+        ntsync_f = next(f for f in bad_rep.findings if f.finding_id == "cpu-ntsync-absent")
+        self.assertEqual(ntsync_f.fix_command, "sudo cst cpu install")
 
     def test_io_and_gpu_evaluation(self) -> None:
         bad_io = IoProbeSnapshot(
@@ -270,6 +272,10 @@ class PerfEvaluatorTest(unittest.TestCase):
                 "io-btrfs-commit-latency",
             },
         )
+        nvme_f = next(f for f in io_rep.findings if f.finding_id == "io-nvme-apst")
+        self.assertEqual(nvme_f.fix_command, "sudo cst btrfs install")
+        scrub_f = next(f for f in io_rep.findings if f.finding_id == "io-btrfs-scrub-limit")
+        self.assertEqual(scrub_f.fix_command, "sudo cst btrfs scrub-limit set 500M")
 
         gpu_rep = evaluate_perf_gpu(
             GpuProbeSnapshot(
@@ -332,7 +338,7 @@ class PerfScratchIntegrationTest(unittest.TestCase):
         self._write("sys/fs/cgroup/io.cost.qos", "259:0 enable=1\n")
         self._write("sys/fs/cgroup/builds.slice/io.weight", "default 20\n")
         self._write("sys/fs/btrfs/12345678-aaaa/commit_stats", "commits 100\nmax_commit_ms 40\ntotal_commit_ms 500\n")
-        self._write("etc/cst/btrfs-snapshots.conf", "SCRUB_LIMIT='100M'\n")
+        self._write("etc/btrfs-setup/snapshots.conf", "SCRUB_LIMIT='100M'\n")
         self._write("sys/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
         self._write("sys/class/drm/card0/card0-DP-1/status", "connected\n")
         self._write("sys/class/drm/card0/device/power/control", "on\n")

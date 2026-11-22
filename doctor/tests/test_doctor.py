@@ -4365,11 +4365,17 @@ class ResponsivenessAreaTest(Scratch):
         self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
         self.assertIn("responsiveness: 1 axes checked, no bottlenecks", ok_res.stdout)
 
-        # Advisory io item -> info (no fix command); MGLRU ttl=0 & zswap disabled -> WARN with fix command.
-        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
+        # Advisory cpu item -> info (no fix command); NVMe APST / MGLRU / zswap -> WARN with fix command.
+        self._write_host("proc/cmdline", "quiet preempt=voluntary\n")
         info_res = self.run_tool()
         self.assertEqual(info_res.returncode, 0, info_res.stdout + info_res.stderr)
-        self.assertIn("info   io: nvme_core default_ps_max_latency_us=100000", info_res.stdout)
+        self.assertIn("info   cpu: Kernel preemption is 'voluntary'", info_res.stdout)
+
+        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
+        nvme_res = self.run_tool()
+        self.assertEqual(nvme_res.returncode, 1, nvme_res.stdout + nvme_res.stderr)
+        self.assertIn("WARN   io: nvme_core default_ps_max_latency_us=100000", nvme_res.stdout)
+        self.assertIn("fix: sudo cst btrfs install", nvme_res.stdout)
 
         self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
         mglru_res = self.run_tool()

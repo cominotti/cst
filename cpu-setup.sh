@@ -31,6 +31,8 @@
 #         jobs (app.slice, or a slice of their own unless it is named
 #         user-NAME.slice) and Docker without docker-slice (dockerd is a
 #         system service)
+#       * HWP dynamic boost (/sys/.../hwp_dynamic_boost=1) and /etc/modules-load.d/cst-ntsync.conf
+#         (loads ntsync at boot and via modprobe for Wine/Proton NT sync)
 #       * GameMode: ~/.config/gamemode.ini (only triggers the profile and
 #         disables the split-lock penalty during games), your user in the
 #         'gamemode' group (copied from /usr/lib/group; next login)
