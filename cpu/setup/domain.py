@@ -20,7 +20,7 @@ from cst_core.domain.text import file_lines
 from cst_core.domain.values import CpuSet, DomainValidationError, Json
 from cpu.game.domain import BUILDS_SLICE
 from cpu.irq.domain import IrqAction, format_cpulist
-from cpu.power.domain import INTEL_IDLE_DRIVER, CpuTopology, PowerAction
+from cpu.power.domain import CpuTopology, PowerAction, default_cstate_cap_off
 
 
 class CpuRoute(StrEnum):
@@ -216,8 +216,7 @@ def default_settings(topo: CpuTopology) -> tuple[str, str, str]:
     except DomainValidationError:
         split = None
     build, p_cores = split or (DEFAULT_BUILD_CPUS, DEFAULT_P_CORES)
-    off = topo.cpuidle_driver and topo.cpuidle_driver != INTEL_IDLE_DRIVER
-    return build, p_cores, "off" if off else DEFAULT_CPU_CSTATE
+    return build, p_cores, "off" if default_cstate_cap_off(topo.cpuidle_driver) else DEFAULT_CPU_CSTATE
 
 
 def conf_lines(

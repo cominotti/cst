@@ -37,11 +37,17 @@ class CpuTopology:
     cpuidle_driver: str = ""  # /sys/devices/system/cpu/cpuidle/current_driver
 
 
+def default_cstate_cap_off(cpuidle_driver: str) -> bool:
+    """Whether CPU_CSTATE_MAX_LATENCY_US's 200 us default is off on this driver: on with intel_idle or a
+    driver that cannot be read (""), off with any other (AMD's acpi_idle)."""
+    return bool(cpuidle_driver) and cpuidle_driver != INTEL_IDLE_DRIVER
+
+
 def boot_cstate_limit_us(raw: str, *, explicit: bool, cpuidle_driver: str) -> tuple[int | None, str | None]:
     """CPU_CSTATE_MAX_LATENCY_US as cpu-power applies it, `(limit_us_or_None, error)`: a value
     cpu-setup.conf sets always counts; without one, the 200 us default applies with intel_idle (or a
     driver that cannot be read) and the cap is off with any other driver (AMD's acpi_idle)."""
-    if not explicit and cpuidle_driver and cpuidle_driver != INTEL_IDLE_DRIVER:
+    if not explicit and default_cstate_cap_off(cpuidle_driver):
         return None, None
     return parse_cstate_limit_us(raw, default_us=DEFAULT_CPU_CSTATE_US)
 
