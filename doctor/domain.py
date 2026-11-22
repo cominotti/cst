@@ -132,8 +132,9 @@ _SCRUB_SIZE = re.compile(r"[0-9]+[KkMmGgTt]?")
 _SCRUB_LIMIT_LINE = re.compile(r"[ \t]*(?:export[ \t]+)?SCRUB_LIMIT(?![A-Za-z0-9_])")
 _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.MULTILINE)
 
-# swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
+# swap's zswap and memory responsiveness settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
+MM_RESPONSIVENESS_CONF = HostPath("/etc/tmpfiles.d/cst-mm-responsiveness.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 # The partition swap manages (swap/domain.py, SETTINGS_REL), and the files an older CST marked a line in.
 SWAP_CONF = HostPath("/etc/" + SETTINGS_REL)

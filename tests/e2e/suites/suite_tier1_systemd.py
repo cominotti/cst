@@ -185,12 +185,13 @@ swap_setup() {
     cpu_dropin_added=""
     rm -rf "$W"
     mkdir -p "$W/bin" "$W/orig" "$W/proc/sys/vm" "$W/proc/pressure" "$W/sys/module/zswap/parameters" \
+        "$W/sys/kernel/mm/transparent_hugepage" "$W/sys/kernel/mm/lru_gen" \
         "$W/sys/class/block/e2e-swap0" "$W/sys/class/block/e2e-dm0/dm"
     # 1. The checks.
     [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
     [[ ! -e /etc/cst/swap.conf ]]
     # 2. What swap_cleanup puts back.
-    for f in /etc/crypttab /etc/fstab "$REC"; do
+    for f in /etc/crypttab /etc/fstab /etc/uresourced.conf "$REC"; do
         if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
     done
     if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
@@ -208,7 +209,9 @@ swap_setup() {
     for p in $(sed -n 's|^w /sys/module/zswap/parameters/\([^ ]*\) .*|\1|p' "$SRC/tmpfiles/zswap.conf"); do
         echo N >"$W/sys/module/zswap/parameters/$p"
     done
-    for k in swappiness page-cluster watermark_boost_factor watermark_scale_factor; do echo 7 >"$W/proc/sys/vm/$k"; done
+    for k in swappiness page-cluster watermark_boost_factor watermark_scale_factor min_free_kbytes; do echo 7 >"$W/proc/sys/vm/$k"; done
+    echo "always defer [madvise] never" >"$W/sys/kernel/mm/transparent_hugepage/defrag"
+    echo 0 >"$W/sys/kernel/mm/lru_gen/min_ttl_ms"
     echo $((SIZE / 512)) >"$W/sys/class/block/e2e-swap0/size"
     echo swap0 >"$W/sys/class/block/e2e-dm0/dm/name"
     mkdir -p /dev/disk/by-partuuid /dev/mapper
@@ -266,11 +269,13 @@ swap_cleanup() {
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
     done
     if [[ -e "$W/orig/installed.json" ]]; then cp -a "$W/orig/installed.json" "$REC"; else rm -f "$REC"; fi
+    rm -f /etc/uresourced.conf /etc/uresourced.conf.pre-swap-config.bak
+    if [[ -e "$W/orig/uresourced.conf" ]]; then cp -a "$W/orig/uresourced.conf" /etc/uresourced.conf; fi
     rm -f /etc/systemd/zram-generator.conf
     if [[ -e "$W/orig/zram-generator.conf" || -L "$W/orig/zram-generator.conf" ]]; then
         cp -a "$W/orig/zram-generator.conf" /etc/systemd/
     fi
-    rm -f /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf /etc/cst/swap.conf \
+    rm -f /etc/tmpfiles.d/zswap.conf /etc/tmpfiles.d/cst-mm-responsiveness.conf /etc/sysctl.d/99-swap-tuning.conf /etc/cst/swap.conf \
         "$DROPIN_DIR/10-swap-memory-low.conf" "$DROPIN_DIR/50-memory-low.conf" \
         /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
     rmdir /etc/cst 2>/dev/null || true
@@ -1571,16 +1576,27 @@ grep -qxF "swap0 /dev/disk/by-partuuid/$PU /dev/urandom swap,cipher=aes-xts-plai
 [[ "$(stat -c %a /etc/crypttab)" == 600 ]]
 grep -qxF "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)" /etc/fstab
 cmp "$SRC/tmpfiles/zswap.conf" /etc/tmpfiles.d/zswap.conf
+cmp "$SRC/tmpfiles/cst-mm-responsiveness.conf" /etc/tmpfiles.d/cst-mm-responsiveness.conf
 cmp "$SRC/sysctl/99-swap-tuning.conf" /etc/sysctl.d/99-swap-tuning.conf
+cmp "$SRC/units/uresourced.conf" /etc/uresourced.conf
 cmp "$SRC/units/machine.slice.d-10-swap-memory-low.conf" "$DROPIN_DIR/10-swap-memory-low.conf"
 [[ "$(readlink /etc/systemd/zram-generator.conf)" == /dev/null ]]
 [[ "$(cat "$W/sys/module/zswap/parameters/compressor")" == zstd ]]
 [[ "$(cat "$W/proc/sys/vm/swappiness")" == 100 ]]
+[[ "$(cat "$W/proc/sys/vm/min_free_kbytes")" == 262144 ]]
+[[ "$(cat "$W/sys/kernel/mm/transparent_hugepage/defrag")" == defer+madvise ]]
+[[ "$(cat "$W/sys/kernel/mm/lru_gen/min_ttl_ms")" == 1000 ]]
 python3 -I - "$REC" <<'PY'
 import json, sys
 rec = json.load(open(sys.argv[1]))
 d = "/etc/systemd/system/machine.slice.d/"
-want = {"/etc/sysctl.d/99-swap-tuning.conf", d + "10-swap-memory-low.conf", "/etc/tmpfiles.d/zswap.conf"}
+want = {
+    "/etc/sysctl.d/99-swap-tuning.conf",
+    d + "10-swap-memory-low.conf",
+    "/etc/tmpfiles.d/cst-mm-responsiveness.conf",
+    "/etc/tmpfiles.d/zswap.conf",
+    "/etc/uresourced.conf",
+}
 assert want <= set(rec["files"]), sorted(rec["files"])
 assert d + "50-memory-low.conf" not in rec["files"]
 assert rec["components"]["swap:core"] == "done", rec["components"]
@@ -1599,7 +1615,8 @@ low=/sys/fs/cgroup/machine.slice/memory.low
 swap_run status
 [[ $rc == 0 ]] || fail "status"
 for row in "crypttab: swap0 line" "fstab: /dev/mapper/swap0 line" "machine.slice.d/10-swap-memory-low.conf" \
-    "tmpfiles.d/zswap.conf" "sysctl.d/99-swap-tuning.conf" "swap0 " "zram0 "; do
+    "tmpfiles.d/cst-mm-responsiveness.conf" "tmpfiles.d/zswap.conf" "sysctl.d/99-swap-tuning.conf" \
+    "uresourced.conf" "swap0 " "zram0 "; do
     grep -qF "  ok        $row" <<<"$out" || fail "status row $row"
 done
 [[ "$out" != *"  DIFF "* && "$out" != *"  REFUSE"* ]] || fail "status differs"

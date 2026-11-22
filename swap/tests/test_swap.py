@@ -637,13 +637,21 @@ class MarkerTest(unittest.TestCase):
 
     def test_sysctl_payload_matches_old_script(self) -> None:
         src = os.path.join(SWAP, "sysctl", "99-swap-tuning.conf")
-        old = self.path(
-            "s",
+        old_four_key = self.path(
+            "s4",
             "# Managed by apply-swap-config.sh — VM tunables\n"
             "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
             "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n",
         )
-        self.assertEqual(self.file_state(src, old), "adopt")
+        self.assertEqual(self.file_state(src, old_four_key), "change")
+        old_five_key = self.path(
+            "s5",
+            "# Managed by apply-swap-config.sh — VM tunables\n"
+            "vm.swappiness = 100\n\nvm.page-cluster = 0\n"
+            "vm.watermark_boost_factor = 0\nvm.watermark_scale_factor = 125\n"
+            "vm.min_free_kbytes = 262144\n",
+        )
+        self.assertEqual(self.file_state(src, old_five_key), "adopt")
 
 
 class _FakeTempFileSystem(LocalFileSystemAdapter):
@@ -774,9 +782,11 @@ class _FakeSystemd(NoUnitQueries):
         fail_result: CommandResult | None = None,
         on_call: Callable[[str, str], object] | None = None,
         shown: Mapping[str, str] | None = None,
+        unit_shown: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.shown = {} if shown is None else dict(shown)  # what `systemctl show machine.slice` says ({}: no answer)
+        self._unit_shown = {} if unit_shown is None else {k: dict(v) for k, v in unit_shown.items()}
         self._fail_result = CommandResult(1, "", "") if fail_result is None else fail_result
         self._on_call = on_call
         self.daemon_reloads = 0
@@ -846,6 +856,8 @@ class _FakeSystemd(NoUnitQueries):
 
     def show(self, unit: UnitName, props: Sequence[str], *, on_host: bool = True, user: bool = False) -> dict[str, str]:
         del on_host, user
+        if unit in self._unit_shown:
+            return {k: v for k, v in self._unit_shown[unit].items() if k in props}
         return {k: v for k, v in self.shown.items() if k in props} if unit == "machine.slice" else {}
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
@@ -865,6 +877,7 @@ class _FakeSwapSystem:
         swapon_text: str = "NAME TYPE SIZE USED PRIO\n/dev/dm-0 partition 128G 0B -2\n",
         sysctl_result: CommandResult | None = None,
         swapon_result: CommandResult | None = None,
+        on_sleep: Callable[[float], object] | None = None,
     ) -> None:
         self._sysctl_result = CommandResult(0, "", "") if sysctl_result is None else sysctl_result
         self._swapon_result = CommandResult(0, swapon_text, "") if swapon_result is None else swapon_result
@@ -872,9 +885,11 @@ class _FakeSwapSystem:
         self._size_bytes = size_bytes
         self._part_type = part_type
         self._swapon_text = swapon_text
+        self._on_sleep = on_sleep
         self.modprobes: list[str] = []
         self.sysctl_calls: list[tuple[str, str | None]] = []
         self.zram_resets = 0
+        self.sleeps: list[float] = []
 
     def blockdev_size(self, dev_path: str) -> str:
         del dev_path
@@ -906,6 +921,11 @@ class _FakeSwapSystem:
 
     def swapon_show(self) -> CommandResult:
         return self._swapon_result
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        if self._on_sleep is not None:
+            self._on_sleep(seconds)
 
 
 class _FakeContext:
@@ -1079,7 +1099,9 @@ class SwapApplicationTest(_SwapScratch):
             [
                 "/etc/sysctl.d/99-swap-tuning.conf",
                 "/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf",
+                "/etc/tmpfiles.d/cst-mm-responsiveness.conf",
                 "/etc/tmpfiles.d/zswap.conf",
+                "/etc/uresourced.conf",
             ],
         )
         self.assertEqual(rec["components"], {"swap:core": "done"})
@@ -2616,7 +2638,10 @@ class SwapWiringTest(unittest.TestCase):
         self.assertRegex(out.getvalue(), r"DIFF    vm\.swappiness +77 ")
         self.assertEqual(
             runner.calls,
-            [["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "-p", "ActiveState", "machine.slice"]],
+            [
+                ["systemctl", "show", "-p", "ActiveState", "uresourced.service"],
+                ["systemctl", "show", "-p", "MemoryLow", "-p", "DropInPaths", "-p", "ActiveState", "machine.slice"],
+            ],
         )
 
     def _seam_output(self, cmd: RunCommand, env: Mapping[str, str]) -> str:
@@ -2723,6 +2748,145 @@ class SwapStatusDiagnosisTest(_SwapScratch):
         text = out.getvalue()
         self.assertIn("== diagnosis", text)
         self.assertIn("[OPTIMIZED]", text)
+
+
+class Phase1MemoryTuningTest(_SwapScratch):
+    """Phase 1: min_free_kbytes, THP defrag, MGLRU min_ttl_ms, and uresourced MemoryMin."""
+
+    def _populate_mm_nodes(self, *, defrag: str = "always defer [madvise] never", min_ttl: str = "0") -> None:
+        thp = os.path.join(self.env.sys_dir, "kernel", "mm", "transparent_hugepage", "defrag")
+        ttl = os.path.join(self.env.sys_dir, "kernel", "mm", "lru_gen", "min_ttl_ms")
+        user_min = os.path.join(self.env.cgroup_dir, "user.slice", "memory.min")
+        for p, val in ((thp, defrag), (ttl, min_ttl), (user_min, "262144000")):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(val + "\n")
+
+    def _service_with(
+        self,
+        *,
+        unit_shown: Mapping[str, Mapping[str, str]] | None = None,
+        mapper_present: bool = False,
+        on_call: Callable[[str, str], object] | None = None,
+        system: _FakeSwapSystem | None = None,
+    ) -> tuple[SwapApplicationService, _FakeSystemd]:
+        fs = self._fs(mapper_present=mapper_present)
+        systemd = _FakeSystemd(
+            os.path.join(self.env.proc_dir, "swaps"),
+            "/dev/dm-0",
+            fs=fs,
+            unit_shown=unit_shown,
+            on_call=on_call,
+        )
+        swap_system = (
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes) if system is None else system
+        )
+        return SwapApplicationService(self.env, fs, systemd, swap_system, installer=_installer()), systemd
+
+    def test_plan_apply_backup_restart_and_idempotency(self) -> None:
+        self._populate_mm_nodes()
+        ures_dest = os.path.join(self.env.etc_dir, "uresourced.conf")
+        mm_dest = os.path.join(self.env.etc_dir, "tmpfiles.d", "cst-mm-responsiveness.conf")
+        vendor_uresourced = "[Global]\nMaxMemoryMin=10%\n\n[ActiveUser]\nMemoryMin=250M\n"
+        with open(ures_dest, "w", encoding="utf-8") as fh:
+            fh.write(vendor_uresourced)
+
+        user_min_path = os.path.join(self.env.cgroup_dir, "user.slice", "memory.min")
+
+        def _simulate_uresourced(verb: str, unit: str) -> None:
+            if verb == "restart" and unit == "uresourced.service":
+                with open(user_min_path, "w", encoding="utf-8") as fh:
+                    fh.write(f"{1024**3}\n")
+
+        svc1, sd1 = self._service_with(
+            unit_shown={"uresourced.service": {"ActiveState": "active"}},
+            on_call=_simulate_uresourced,
+        )
+        plan_out = io.StringIO()
+        render_plan(svc1.plan_report(), out=plan_out)
+        plan_txt = plan_out.getvalue()
+        self.assertIn("cst-mm-responsiveness.conf", plan_txt)
+        self.assertIn("uresourced.conf", plan_txt)
+        self.assertIn("THP defrag", plan_txt)
+        self.assertIn("MGLRU min_ttl_ms", plan_txt)
+        self.assertIn("user.slice memory.min", plan_txt)
+        self.assertIn("desired 262144", plan_txt)
+        with open(ures_dest, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), vendor_uresourced, "plan must leave /etc/uresourced.conf untouched")
+
+        apply_out, apply_err = io.StringIO(), io.StringIO()
+        rc = render_apply(svc1.apply_changes(), out=apply_out, err=apply_err)
+        self.assertEqual(rc, 0, apply_err.getvalue())
+        self.assertIn("== memory responsiveness", apply_out.getvalue())
+        self.assertIn("set:       THP defrag = defer+madvise (was madvise)", apply_out.getvalue())
+        self.assertIn("set:       MGLRU min_ttl_ms = 1000 (was 0)", apply_out.getvalue())
+        self.assertIn("restarted: uresourced.service", apply_out.getvalue())
+        self.assertIn(("restart", "uresourced.service"), sd1.calls)
+        with open(ures_dest + ".pre-swap-config.bak", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), vendor_uresourced)
+        with open(os.path.join(self.env.proc_dir, "sys", "vm", "min_free_kbytes"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), "262144")
+
+        # Second apply sees matching files and live values: zero restarts.
+        svc2, sd2 = self._service_with(
+            unit_shown={"uresourced.service": {"ActiveState": "active"}}, mapper_present=True
+        )
+        out2, err2 = io.StringIO(), io.StringIO()
+        self.assertEqual(render_apply(svc2.apply_changes(), out=out2, err=err2), 0, err2.getvalue())
+        self.assertNotIn("restart", [c[0] for c in sd2.calls])
+        self.assertIn("unchanged: " + mm_dest, out2.getvalue())
+        self.assertIn("unchanged: " + ures_dest, out2.getvalue())
+
+        status_out = io.StringIO()
+        render_status(svc2.status_report(include_config=True), out=status_out)
+        self.assertIn("  ok      user.slice memory.min", status_out.getvalue())
+        self.assertIn("  ok      THP defrag", status_out.getvalue())
+        self.assertIn("  ok      MGLRU min_ttl_ms", status_out.getvalue())
+
+    def test_thp_experiment_override_and_missing_kernel_knob(self) -> None:
+        self._populate_mm_nodes(defrag="always [defer] defer+madvise madvise never", min_ttl="1000")
+        os.remove(os.path.join(self.env.sys_dir, "kernel", "mm", "lru_gen", "min_ttl_ms"))
+        with open(os.path.join(self.env.cpu_run_dir, "exp-thp-defer"), "w", encoding="utf-8") as fh:
+            fh.write("madvise\n")
+        svc, sd = self._service_with()
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(render_apply(svc.apply_changes(), out=out, err=err), 0, err.getvalue())
+        self.assertIn("kept:      THP defrag = defer", out.getvalue())
+        self.assertIn("skipped:   MGLRU min_ttl_ms", out.getvalue())
+        self.assertNotIn(("restart", "uresourced.service"), sd.calls)
+        st_out = io.StringIO()
+        render_status(svc.status_report(include_config=False), out=st_out)
+        self.assertIn("  exp     THP defrag", st_out.getvalue())
+        self.assertIn("cst cpu experiment off thp-defer", st_out.getvalue())
+
+    def test_apply_waits_for_uresourced_async_memory_min_update(self) -> None:
+        self._populate_mm_nodes()
+        with open(os.path.join(self.env.etc_dir, "uresourced.conf"), "w", encoding="utf-8") as fh:
+            fh.write("[Global]\nMaxMemoryMin=10%\n\n[ActiveUser]\nMemoryMin=250M\n")
+
+        user_min_path = os.path.join(self.env.cgroup_dir, "user.slice", "memory.min")
+        sleep_calls = 0
+
+        def _delayed_uresourced_update(_seconds: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 2:
+                with open(user_min_path, "w", encoding="utf-8") as fh:
+                    fh.write(f"{1024**3}\n")
+
+        system = _FakeSwapSystem(
+            self.env.proc_dir,
+            size_bytes=self.spec.expected_size_bytes,
+            on_sleep=_delayed_uresourced_update,
+        )
+        svc, sd = self._service_with(
+            unit_shown={"uresourced.service": {"ActiveState": "active"}},
+            system=system,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(render_apply(svc.apply_changes(), out=out, err=err), 0, err.getvalue())
+        self.assertIn(("restart", "uresourced.service"), sd.calls)
+        self.assertEqual(len(system.sleeps), 2)
 
 
 if __name__ == "__main__":

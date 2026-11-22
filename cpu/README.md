@@ -1389,13 +1389,13 @@ cst cpu experiment off wsf-300
 - `uninstall` does **not** switch experiments off. Use `off` or reboot.
 
 A **winner** is a setting that gives lower `mem stall` and a better `1% low`
-across a few runs, compared with runs without it. To keep a winner after a
-reboot, add it by hand to `swap/sysctl/99-swap-tuning.conf` (for `wsf-300`,
-change the `vm.watermark_scale_factor` line already there), then run
-`cst swap plan` and `cst swap apply`. The `swap` module owns the memory
-settings that apply at boot; see [../swap/README.md](../swap/README.md).
-`thp-defer` is not a sysctl (it lives in `/sys/kernel/mm`), so it has no place
-there yet.
+across a few runs, compared with runs without it. `minfree-256m` is now enabled
+by default in `swap/sysctl/99-swap-tuning.conf`, and `swap/tmpfiles/cst-mm-responsiveness.conf`
+sets THP `defrag` to `defer+madvise` (while `thp-defer` is active, `cst swap`
+shows it as `exp` and leaves `defer` alone). To keep another sysctl tweak after
+a reboot, edit `swap/sysctl/99-swap-tuning.conf`, then run `cst swap plan` and
+`cst swap apply`. The `swap` module owns the boot-persistent memory settings;
+see [../swap/README.md](../swap/README.md).
 
 ---
 

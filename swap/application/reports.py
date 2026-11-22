@@ -15,7 +15,15 @@ from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from perf.application import collect_memory_from_reader
 from perf.domain.evaluate import evaluate_perf_memory
-from perf.domain.models import PerfPathKey, PerfRootKind, PerfVerdict, perf_path_spec
+from perf.domain.models import PerfRootKind, PerfVerdict
+from swap.application.memory_tuning import (
+    MM_TMPFILES_ENTRY,
+    THP_EXPERIMENT,
+    URESOURCED_ENTRY,
+    SwapPerfReader,
+    mm_settings_rows,
+    uresourced_settings_row,
+)
 from swap.domain import (
     MACHINE_SLICE,
     WSF_EXPERIMENT,
@@ -112,6 +120,14 @@ class SwapEnvironment:
         """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
         root = self.etc_dir.rstrip("/").removesuffix("/etc")
         return root + host_path
+
+    def etc_path(self, entry: InstallEntry) -> str:
+        """Where `entry` is installed under this environment's `etc_dir`."""
+        return _under(self.etc_dir, entry.dest, _ETC_PREFIX)
+
+    def src_path(self, entry: InstallEntry) -> str:
+        """Where `entry`'s source template lives under `src_dir`."""
+        return _under(self.src_dir, entry.src, _SWAP_SRC_PREFIX)
 
     @property
     def settings_path(self) -> str:
@@ -215,57 +231,6 @@ class _FileSettingsFacts:
     def partition_size(self, device_path: str) -> int | None:
         part = self._partition(device_path)
         return None if part is None else part[1]
-
-
-class _SwapPerfReader:
-    """Adapt swap's `FileSystemPort` and `SwapEnvironment` to `PerfFsReader`."""
-
-    def __init__(self, fs: FileSystemPort, env: SwapEnvironment) -> None:
-        self._fs = fs
-        self._roots = {
-            PerfRootKind.PROC: env.proc_dir,
-            PerfRootKind.SYS: env.sys_dir,
-            PerfRootKind.CGROUP: env.cgroup_dir,
-            PerfRootKind.ETC: env.etc_dir,
-            PerfRootKind.ZSWAP_PARAMS: env.zswap_params_dir,
-        }
-
-    def _path(self, root: PerfRootKind, rel: str) -> str | None:
-        base = self._roots.get(root)
-        return posixpath.join(base, rel) if base is not None else None
-
-    def read_key(self, key: PerfPathKey) -> str | None:
-        """Read `PerfPathKey` under swap's configured root dirs."""
-        return self.read_rel(*perf_path_spec(key))
-
-    def read_preempt(self) -> tuple[str | None, bool]:
-        """Swap reports do not inspect sched debugfs."""
-        return (None, False)
-
-    def read_rel(self, root: PerfRootKind, rel: str) -> str | None:
-        """Read relative path under `root`, or `None` if absent."""
-        target = self._path(root, rel)
-        return self._fs.read_text(target) if target is not None else None
-
-    def list_rel(self, root: PerfRootKind, rel: str) -> tuple[str, ...]:
-        """List directory entries under `root/rel`."""
-        target = self._path(root, rel)
-        if target is None or not self._fs.is_dir(target):
-            return ()
-        try:
-            return tuple(sorted(self._fs.list_dir(target)))
-        except OSError:
-            return ()
-
-    def exists_rel(self, root: PerfRootKind, rel: str) -> bool:
-        """Return True when `root/rel` exists."""
-        target = self._path(root, rel)
-        return target is not None and self._fs.exists(target)
-
-    def is_dir_rel(self, root: PerfRootKind, rel: str) -> bool:
-        """Return True when `root/rel` is a directory."""
-        target = self._path(root, rel)
-        return target is not None and self._fs.is_dir(target)
 
 
 class SwapReports:
@@ -502,7 +467,9 @@ class SwapReports:
 
         for src, dest in (
             (env.src_tmpfiles, env.tmpfiles_conf),
+            (env.src_path(MM_TMPFILES_ENTRY), env.etc_path(MM_TMPFILES_ENTRY)),
             (env.src_sysctl, env.sysctl_conf),
+            (env.src_path(URESOURCED_ENTRY), env.etc_path(URESOURCED_ENTRY)),
             (env.src_dropin, env.slice_dropin),
         ):
             st = self._inspect_file(src, dest)
@@ -575,16 +542,38 @@ class SwapReports:
                 )
         exp_name, exp_key = WSF_EXPERIMENT
         exp_on = self._fs.exists(posixpath.join(self._env.cpu_run_dir, "exp-" + exp_name))
+        wsf_overridden = False
         for key, want in parse_sysctl(self._desired_text(self._env.src_sysctl)):
             live = self._read_first(posixpath.join(self._env.proc_dir, "sys", key.replace(".", "/")), "?")
             state = SettingState.OK if live == want else SettingState.DIFF
             if state == SettingState.DIFF and key == exp_key and exp_on:
                 state = SettingState.EXP
+                wsf_overridden = True
             rows.append(SettingCheckRow(state, key, live, want))
+        mm_rows, thp_overridden = mm_settings_rows(
+            self._fs,
+            sys_dir=self._env.sys_dir,
+            cpu_run_dir=self._env.cpu_run_dir,
+            mm_text=self._desired_text(self._env.src_path(MM_TMPFILES_ENTRY)),
+        )
+        rows.extend(mm_rows)
+        ures_row = uresourced_settings_row(
+            self._fs,
+            self._systemd,
+            cgroup_dir=self._env.cgroup_dir,
+            uresourced_text=self._desired_text(self._env.src_path(URESOURCED_ENTRY)),
+        )
+        if ures_row is not None:
+            rows.append(ures_row)
         row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
         rows.append(row)
+        active_exp_name, active_exp_key = THP_EXPERIMENT if (thp_overridden and not wsf_overridden) else WSF_EXPERIMENT
         return SettingsReport(
-            rows=tuple(rows), exp_name=exp_name, exp_key=exp_key, override_source=source, cst_dropin=DROPIN_ENTRY.dest
+            rows=tuple(rows),
+            exp_name=active_exp_name,
+            exp_key=active_exp_key,
+            override_source=source,
+            cst_dropin=DROPIN_ENTRY.dest,
         )
 
     def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
@@ -720,7 +709,14 @@ class SwapReports:
         devices = self._build_devices()
         cgroups = self._build_cgroup_rows()
         psi_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "pressure", "memory")) or "  not available\n"
-        mem_diag = evaluate_perf_memory(collect_memory_from_reader(_SwapPerfReader(self._fs, self._env)))
+        perf_roots = {
+            PerfRootKind.PROC: self._env.proc_dir,
+            PerfRootKind.SYS: self._env.sys_dir,
+            PerfRootKind.CGROUP: self._env.cgroup_dir,
+            PerfRootKind.ETC: self._env.etc_dir,
+            PerfRootKind.ZSWAP_PARAMS: self._env.zswap_params_dir,
+        }
+        mem_diag = evaluate_perf_memory(collect_memory_from_reader(SwapPerfReader(self._fs, perf_roots)))
         diagnosis = mem_diag.findings if mem_diag.verdict is not PerfVerdict.SKIP else None
         return SwapStatusReport(
             config=config,

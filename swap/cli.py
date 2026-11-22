@@ -28,11 +28,9 @@ _HELP_TEXT = """\
 swap-setup.sh  (the `swap` module of CST: run it as `cst swap ...`)
 
 Swap and memory of this workstation (93 GiB RAM, a 48 GiB Windows VM):
-zswap, a compressed cache in RAM, in front of an encrypted swap partition
-on NVMe (swap0), zram off, swap-friendly VM sysctls, and a memory floor for
-the VM. Replaces the standalone apply-swap-config.sh; what that script
-wrote is recognised and adopted. Desired files live in ./swap/; the
-rationale is in swap/README.md.
+zswap (compressed cache in RAM) over encrypted NVMe swap (swap0), zram off,
+VM/reclaim tuning, and memory floors. Adopts apply-swap-config.sh output;
+desired files live in ./swap/, rationale in swap/README.md.
 
 Commands:
   plan [--root]          what apply would change (dry run). Works as your
@@ -45,8 +43,9 @@ Commands:
         of RAM, shrinker on), also set live
       * zram off: vendor zram-generator.conf masked; zram0 swapped off now
         only when free RAM can take its contents
-      * /etc/sysctl.d/99-swap-tuning.conf (swappiness 100, page-cluster 0,
-        watermarks), applied live
+      * 99-swap-tuning.conf (swappiness=100, min_free_kbytes=256M) &
+        cst-mm-responsiveness.conf (THP defer+madvise, MGLRU min_ttl_ms=1000)
+      * /etc/uresourced.conf (MemoryMin=1G, backup kept, uresourced restarted)
       * machine.slice MemoryLow=48G (drop-in 10-swap-memory-low.conf, next to
         cpu's 10-cpu-setup.conf; set-property still wins; old 50- name removed)
       * verification at the end

@@ -84,6 +84,9 @@ def _read_key_map(reader: PerfFsReader, keys: Sequence[PerfPathKey]) -> dict[Per
 def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
     """Collect memory, reclaim, THP, MGLRU, zswap, PSI, and cgroup metrics cleanly."""
     files = _read_key_map(reader, MEMORY_FILE_KEYS)
+    user_base_min = parse_optional_int(
+        reader.read_rel(PerfRootKind.CGROUP, posixpath.join(_CG_USER_SLICE, "memory.min"))
+    )
     session_slices: list[CgroupMemorySlice] = []
     for entry in reader.list_rel(PerfRootKind.CGROUP, _CG_USER_SLICE):
         if not (entry.startswith(_USER_UID_PREFIX) and entry.endswith(_SLICE_SUFFIX)):
@@ -92,13 +95,19 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
         if not uid_part.isdigit():
             continue
         user_rel = posixpath.join(_CG_USER_SLICE, entry)
-        sess_rel = posixpath.join(user_rel, _USER_SERVICE_FMT.format(uid=uid_part), _CG_SESSION_SLICE)
+        service_rel = posixpath.join(user_rel, _USER_SERVICE_FMT.format(uid=uid_part))
+        sess_rel = posixpath.join(service_rel, _CG_SESSION_SLICE)
         if not reader.is_dir_rel(PerfRootKind.CGROUP, sess_rel):
             continue
         sess_cur = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.current")))
         sess_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.min")))
         sess_low = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.low")))
-        parent_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(user_rel, "memory.min")))
+        user_uid_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(user_rel, "memory.min")))
+        service_min = parse_optional_int(
+            reader.read_rel(PerfRootKind.CGROUP, posixpath.join(service_rel, "memory.min"))
+        )
+        ancestors = [val for val in (user_base_min, user_uid_min, service_min) if val is not None]
+        parent_min = min(ancestors) if ancestors else None
         if sess_cur is not None and sess_min is not None:
             session_slices.append(
                 CgroupMemorySlice(

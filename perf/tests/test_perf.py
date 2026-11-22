@@ -208,6 +208,9 @@ class PerfEvaluatorTest(unittest.TestCase):
         )
         zswap_f = next(f for f in sick_rep.findings if f.finding_id == "memory-zswap-disabled")
         self.assertEqual(zswap_f.fix_command, "sudo cst swap apply")
+        for fid in ("memory-min-free", "memory-thp-defrag", "memory-mglru-min-ttl", "memory-session-floor"):
+            match_f = next(f for f in sick_rep.findings if f.finding_id == fid)
+            self.assertEqual(match_f.fix_command, "sudo cst swap apply", fid)
 
     def test_cpu_evaluation(self) -> None:
         ok_cpu = CpuProbeSnapshot(
@@ -400,6 +403,21 @@ class PerfScratchIntegrationTest(unittest.TestCase):
             )
         )
         self.assertEqual(evaluate_perf_snapshot(probe.collect_snapshot()).verdict, PerfVerdict.SKIP)
+
+    def test_session_slice_clamped_by_root_user_slice_ancestor(self) -> None:
+        self._populate_healthy_tree()
+        self._write("sys/fs/cgroup/user.slice/memory.min", f"{250 * MIB}\n")
+        self._write("sys/fs/cgroup/user.slice/user-1000.slice/memory.min", f"{1024 * MIB}\n")
+        self._write("sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/memory.min", f"{1024 * MIB}\n")
+        sess = "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/session.slice"
+        self._write(f"{sess}/memory.min", f"{1024 * MIB}\n")
+        self._write(f"{sess}/memory.low", "0\n")
+        self._write(f"{sess}/memory.current", f"{600 * MIB}\n")
+
+        with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+            rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.MEMORY,))
+        self.assertEqual(rep.verdict, PerfVerdict.ATTENTION)
+        self.assertTrue(any(f.finding_id == "memory-session-floor" for f in rep.axes[0].findings))
 
 
 if __name__ == "__main__":

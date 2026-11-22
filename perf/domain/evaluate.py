@@ -218,11 +218,16 @@ def _eval_memory_headroom(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None
                 else MEM_MIN_FREE_SMALL_RAM_BYTES
             )
             if mem.min_free_bytes < target:
-                col.warn(
-                    "memory-min-free",
-                    f"vm.min_free_kbytes is low ({format_bytes_human(mem.min_free_bytes)}) for host RAM",
-                    f"Current free reserve is below {format_bytes_human(target)} headroom.",
-                    "Increase vm.min_free_kbytes (e.g. 256 MiB via sysctl / cst cpu experiment).",
+                col.add(
+                    PerfFinding(
+                        finding_id="memory-min-free",
+                        axis=PerfAxis.MEMORY,
+                        verdict=PerfVerdict.ATTENTION,
+                        summary=f"vm.min_free_kbytes is low ({format_bytes_human(mem.min_free_bytes)}) for host RAM",
+                        detail=f"Current free reserve is below {format_bytes_human(target)} headroom.",
+                        recommendation="Apply CST swap tuning to set vm.min_free_kbytes = 256 MiB.",
+                        fix_command="sudo cst swap apply",
+                    )
                 )
     if mem.watermark_scale_factor is not None:
         col.metric("vm.watermark_scale_factor", str(mem.watermark_scale_factor))
@@ -258,11 +263,16 @@ def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> Non
     if mem.thp_enabled is not None or mem.thp_defrag is not None:
         col.metric("THP", f"enabled={mem.thp_enabled or '?'} defrag={mem.thp_defrag or '?'}")
         if mem.thp_defrag in _THP_DEFRAG_PAUSE_MODES:
-            col.warn(
-                "memory-thp-defrag",
-                f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
-                "Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
-                "Switch THP defrag to defer+madvise so kcompactd compacts in background.",
+            col.add(
+                PerfFinding(
+                    finding_id="memory-thp-defrag",
+                    axis=PerfAxis.MEMORY,
+                    verdict=PerfVerdict.ATTENTION,
+                    summary=f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
+                    detail="Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
+                    recommendation="Switch THP defrag to defer+madvise so kcompactd compacts in background.",
+                    fix_command="sudo cst swap apply",
+                )
             )
     if mem.lru_gen_enabled is not None:
         ttl_str = f"{mem.lru_gen_min_ttl_ms} ms" if mem.lru_gen_min_ttl_ms is not None else "?"
@@ -275,11 +285,16 @@ def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> Non
                 "Enable /sys/kernel/mm/lru_gen/enabled (7) and set min_ttl_ms >= 1000.",
             )
         elif mem.lru_gen_min_ttl_ms is not None and mem.lru_gen_min_ttl_ms == 0:
-            col.warn(
-                "memory-mglru-min-ttl",
-                "MGLRU min_ttl_ms is 0 (no thrashing floor)",
-                "Newly faulted working-set pages can be evicted immediately during bursts.",
-                f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.",
+            col.add(
+                PerfFinding(
+                    finding_id="memory-mglru-min-ttl",
+                    axis=PerfAxis.MEMORY,
+                    verdict=PerfVerdict.ATTENTION,
+                    summary="MGLRU min_ttl_ms is 0 (no thrashing floor)",
+                    detail="Newly faulted working-set pages can be evicted immediately during bursts.",
+                    recommendation=f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.",
+                    fix_command="sudo cst swap apply",
+                )
             )
 
 
@@ -337,21 +352,31 @@ def _eval_memory_cgroups(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
         )
         headroom_cap = eff_min * SESSION_FLOOR_HEADROOM_NUM // SESSION_FLOOR_HEADROOM_DEN
         if eff_min == 0:
-            col.warn(
-                "memory-session-floor-unset",
-                f"{sslice.name} has effective memory.min=0",
-                "Desktop compositor/shell lacks hard reclaim protection under pressure.",
-                "Configure a hard MemoryMin floor on user/session slices.",
+            col.add(
+                PerfFinding(
+                    finding_id="memory-session-floor-unset",
+                    axis=PerfAxis.MEMORY,
+                    verdict=PerfVerdict.ATTENTION,
+                    summary=f"{sslice.name} has effective memory.min=0",
+                    detail="Desktop compositor/shell lacks hard reclaim protection under pressure.",
+                    recommendation="Configure a hard MemoryMin floor on user/session slices via uresourced.",
+                    fix_command="sudo cst swap apply",
+                )
             )
         elif sslice.current_bytes > headroom_cap and eff_min < SESSION_MIN_RECOMMENDED_BYTES:
-            col.warn(
-                "memory-session-floor",
-                (
-                    f"{sslice.name} current ({format_bytes_human(sslice.current_bytes)}) exceeds "
-                    f"effective memory.min ({format_bytes_human(eff_min)})"
-                ),
-                "Effective session protection is capped below active Shell/compositor working set.",
-                "Raise both user slice and session.slice MemoryMin above session footprint.",
+            col.add(
+                PerfFinding(
+                    finding_id="memory-session-floor",
+                    axis=PerfAxis.MEMORY,
+                    verdict=PerfVerdict.ATTENTION,
+                    summary=(
+                        f"{sslice.name} current ({format_bytes_human(sslice.current_bytes)}) exceeds "
+                        f"effective memory.min ({format_bytes_human(eff_min)})"
+                    ),
+                    detail="Effective session protection is capped below active Shell/compositor working set.",
+                    recommendation="Raise uresourced MemoryMin above active compositor footprint (1G).",
+                    fix_command="sudo cst swap apply",
+                )
             )
 
 

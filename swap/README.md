@@ -147,13 +147,23 @@ compressor later creates a second pool that lives until the old one drains).
 | `vm.page-cluster` | 0 | Read one page per swap fault. Read-ahead helps spinning disks only; on zswap and NVMe it just adds latency. |
 | `vm.watermark_boost_factor` | 0 | No extra reclaim bursts after memory fragmentation events. |
 | `vm.watermark_scale_factor` | 125 | Background reclaim (`kswapd`) wakes earlier (1.25 % of memory between the watermarks), so it works smoothly instead of in stalls. |
+| `vm.min_free_kbytes` | 262144 | Emergency free memory reserve (256 MiB) so sudden allocation bursts on large-RAM hosts do not fall into synchronous direct reclaim (`allocstall`). |
 
-The `cpu` module's memory experiment `wsf-300` changes the last one at
-runtime (to 300). While it is on, `plan` and `status` show that row as `exp`
-(not `DIFF`) with a note, also inside a toolbox, and `apply` leaves that one
-setting alone (it says `kept:`), so it does not end a measurement silently.
-After `cst cpu experiment off wsf-300` the old value is back; `apply` sets
-125 if it was something else.
+Two more kernel reclaim knobs persist via `/etc/tmpfiles.d/cst-mm-responsiveness.conf` and apply live in `apply`:
+
+| Knob | Value | Why |
+|---|---|---|
+| `/sys/kernel/mm/transparent_hugepage/defrag` | `defer+madvise` | Avoids synchronous page-fault compaction pauses on `MADV_HUGEPAGE` callers (browsers, VMs, games, toolchains) while keeping `kcompactd` active in the background. |
+| `/sys/kernel/mm/lru_gen/min_ttl_ms` | 1000 | Sets a 1-second Multi-Gen LRU working-set protection floor so transient cache bursts cannot immediately evict newly faulted desktop pages. |
+
+The `cpu` module's memory experiments `wsf-300` (changes
+`vm.watermark_scale_factor` to 300) and `thp-defer` (changes THP `defrag` to
+`defer`) change those two knobs at runtime. While either is on, `plan` and
+`status` show its row as `exp` (not `DIFF`) with a note, also inside a toolbox,
+and `apply` leaves that setting alone (it says `kept:`), so it does not end a
+measurement silently. After `cst cpu experiment off NAME` the old value is
+back; `apply` sets CST's default if it was something else (`minfree-256m` matches
+the `vm.min_free_kbytes = 262144` default already).
 
 ### 2.5 `MemoryLow=48G` for the VM
 
@@ -206,6 +216,24 @@ it does not make this row `over`. `cst doctor` gives the same answer (an
 virtio memballoon of the `win11-devbox` VM, which lets the guest hand freed
 memory back to the host.
 
+### 2.6 `MemoryMin=1G` for the active session (`uresourced`)
+
+Fedora's `uresourced` sets `MemoryMin=250M` by default across `user.slice ->
+user-<uid>.slice -> user@<uid>.service -> session.slice`, which is smaller than a
+modern GNOME Shell / compositor working set. In Linux cgroup v2, effective
+`memory.min` is capped by every ancestor slice along that chain, so raising
+`session.slice` alone would be clamped at `user.slice` / `user-<uid>.slice`.
+
+`units/uresourced.conf` installs `/etc/uresourced.conf` preserving Fedora's
+defaults (`MaxMemoryMin=10%`, `IOWeight=500`, `CPUWeight=500`, `AppBoost`
+weights, and no `MemoryLow` so `cpu/game-profile` owns soft protection) while
+raising `[ActiveUser] MemoryMin=1G`. When `apply` rewrites `/etc/uresourced.conf`,
+it saves a one-time backup of the pre-existing file as
+`/etc/uresourced.conf.pre-swap-config.bak` and restarts `uresourced.service` if
+active (`systemctl --user daemon-reload` or a new login propagates the drop-in to
+live `session.slice`). On systems without `uresourced`, `apply` writes the file
+only if managed and `status` marks `user.slice memory.min` as inactive (`-`).
+
 ---
 
 ## 3. Quick start
@@ -228,10 +256,11 @@ the swap part shows everything there.
 
 No reboot is needed: `apply` also sets everything live.
 
-`apply` writes its three files (`zswap.conf`, `99-swap-tuning.conf`,
-`10-swap-memory-low.conf`) through CST's installer and lists them in the install
-record `/var/lib/cst/installed.json` (component `swap:core`), where `cst doctor`
-checks them.
+`apply` writes its five files (`zswap.conf`, `cst-mm-responsiveness.conf`,
+`99-swap-tuning.conf`, `uresourced.conf`, and `10-swap-memory-low.conf`) through
+CST's installer and lists them in the install record
+`/var/lib/cst/installed.json` (component `swap:core`), where `cst doctor` checks
+them.
 
 ---
 
@@ -497,12 +526,15 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 2. Delete the line ending in `# managed-by: swap-setup.sh (CST)` from
    `/etc/crypttab` and from `/etc/fstab` (`<file>.pre-swap-config.bak` is the
    version before the first change).
-3. `rm /etc/cst/swap.conf /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf
-   /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf`
+3. `rm /etc/cst/swap.conf /etc/tmpfiles.d/zswap.conf /etc/tmpfiles.d/cst-mm-responsiveness.conf
+   /etc/sysctl.d/99-swap-tuning.conf /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf`
+   and, if `/etc/uresourced.conf.pre-swap-config.bak` exists, restore it:
+   `mv /etc/uresourced.conf.pre-swap-config.bak /etc/uresourced.conf` (else
+   `rm /etc/uresourced.conf`). Restart `uresourced` if active (`systemctl restart uresourced`).
 4. To get Fedora's zram back: `rm /etc/systemd/zram-generator.conf` (the
    `/dev/null` symlink).
-5. `systemctl daemon-reload`, then reboot (zswap and the sysctls return to
-   the kernel defaults at boot).
+5. `systemctl daemon-reload`, then reboot (zswap and the sysctls/sysfs knobs
+   return to kernel defaults at boot).
 
 ---
 
@@ -511,11 +543,13 @@ a step to do on purpose, at a quiet moment. As root, on the host:
 | File | Installed as / used by |
 |---|---|
 | `tmpfiles/zswap.conf` | `/etc/tmpfiles.d/zswap.conf` |
+| `tmpfiles/cst-mm-responsiveness.conf` | `/etc/tmpfiles.d/cst-mm-responsiveness.conf` |
 | `sysctl/99-swap-tuning.conf` | `/etc/sysctl.d/99-swap-tuning.conf` |
+| `units/uresourced.conf` | `/etc/uresourced.conf` |
 | `units/machine.slice.d-10-swap-memory-low.conf` | `/etc/systemd/system/machine.slice.d/10-swap-memory-low.conf` |
 | `domain.py` | pure swap domain model, the partition (`SwapHardwareSpec`, read from `/etc/cst/swap.conf`), parsing, and metrics |
 | `ports.py` / `adapters.py` | Linux system ports (`SwapSystemPort`) and adapters over `blockdev`, `blkid`, `modprobe`, `sysctl`, `zramctl`, `swapon` |
-| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
+| `application/` / `presenter.py` / `cli.py` | pure use cases: `plan` and `status` in `application/reports.py`, memory reclaim and `uresourced` helpers in `application/memory_tuning.py`, `apply` in `application/apply.py` (apply hands each event to a callback as it happens), the command line's words and where it stops (help, a wrong argument) in `application/command_line.py`; the report renderer and `run_command` (prints apply's steps as they run, turns a failed command into its message and exit status); and the CLI entrypoint (called by the thin `../swap-setup.sh` shim) |
 | `wiring.py` | the composition root: the environment, the sudo re-run of `cli.py` (with `CST_PROG` and the caller's `LC_CTYPE`), and the use cases built over the real adapters. `CST_SWAP_PROC` and `CST_SWAP_SYS` move where `/proc` and `/sys` are read and written (the cgroup tree stays `/sys/fs/cgroup`): for the tier 1 E2E test only, whose container has a read-only `/proc/sys` and `/sys` of the host's kernel. When either is set, `plan`, `status` and `apply` say so on their first line (`test seam (...)`), so a stale export in a root shell cannot pass for the kernel's state; the line also says that `/etc` is the real one and that `apply`'s `sysctl`, `modprobe` and `zramctl` are the ones on `PATH` (the tier 1 test puts stand-ins there) |
 | `tests/test_swap.py` | unit tests: `python3 -I -B -m unittest discover -s swap/tests -t .` from the repository folder runs this module's tests; all of CST goes through `python3 -I -B tests/run_unit.py` ([AGENTS.md, "Commands"](../AGENTS.md#commands)) |
 

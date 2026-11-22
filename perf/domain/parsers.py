@@ -42,6 +42,7 @@ _DRIVER_KEY: Final = "DRIVER"
 _PCI_SLOT_KEY: Final = "PCI_SLOT_NAME"
 _CARD_PREFIX: Final = "card"
 _DRM_CONNECTED: Final = "connected"
+_TMPFILES_SYS_WRITE_RE: Final = re.compile(r"^w\s+(/sys/\S+)\s+(?:\S+\s+){4}(\S+)")
 
 
 def clean_opt_str(text: str | None) -> str | None:
@@ -311,6 +312,16 @@ def parse_kib_sysctl(text: str | None) -> int | None:
     """Parse a `/proc/sys/vm/*` KiB integer into bytes."""
     kib = parse_optional_int(text)
     return kib * KIB if kib is not None else None
+
+
+def parse_sysfs_tmpfiles_writes(text: str) -> list[tuple[str, str]]:
+    """Extract `(/sys/..., value)` pairs from a systemd-tmpfiles `w` snippet."""
+    out: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        match = _TMPFILES_SYS_WRITE_RE.match(line.strip())
+        if match is not None:
+            out.append((group(match, 1), group(match, 2)))
+    return out
 
 
 def is_drm_card_name(name: str) -> bool:

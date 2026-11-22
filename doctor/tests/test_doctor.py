@@ -1566,6 +1566,52 @@ class ZswapParamsTest(Scratch):
         )
 
 
+class MmResponsivenessDoctorTest(Scratch):
+    """check_mm_responsiveness_params: sysfs knobs cst-mm-responsiveness.conf sets."""
+
+    def install_conf(self) -> None:
+        d = os.path.join(self.root, "etc", "tmpfiles.d")
+        os.makedirs(d, exist_ok=True)
+        shutil.copy(
+            os.path.join(REPO, "swap", "tmpfiles", "cst-mm-responsiveness.conf"),
+            os.path.join(d, "cst-mm-responsiveness.conf"),
+        )
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "mm responsiveness" in ln]
+
+    def test_nothing_without_file_ok_when_present_warn_when_missing(self) -> None:
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+        self.install_conf()
+        defrag = os.path.join(self.root, "sys", "kernel", "mm", "transparent_hugepage", "defrag")
+        os.makedirs(os.path.dirname(defrag), exist_ok=True)
+        with open(defrag, "w", encoding="utf-8") as f:
+            f.write("defer+madvise\n")
+        r_missing = self.run_tool()
+        self.assertEqual(r_missing.returncode, 1, r_missing.stdout)
+        self.assertEqual(
+            self.lines(r_missing.stdout),
+            [
+                (
+                    "  WARN   mm responsiveness /sys/kernel/mm/lru_gen/min_ttl_ms: this kernel lacks this knob; "
+                    "/etc/tmpfiles.d/cst-mm-responsiveness.conf skips it at boot without a word"
+                )
+            ],
+        )
+        min_ttl = os.path.join(self.root, "sys", "kernel", "mm", "lru_gen", "min_ttl_ms")
+        os.makedirs(os.path.dirname(min_ttl), exist_ok=True)
+        with open(min_ttl, "w", encoding="utf-8") as f:
+            f.write("1000\n")
+        r_ok = self.run_tool()
+        self.assertEqual(r_ok.returncode, 0, r_ok.stdout)
+        self.assertEqual(
+            self.lines(r_ok.stdout),
+            [
+                "  ok     mm responsiveness: every sysfs knob /etc/tmpfiles.d/cst-mm-responsiveness.conf sets is in this kernel"
+            ],
+        )
+
+
 # What an older CST's apply left in /etc/fstab and /etc/crypttab (swap's marker), and doctor's rows.
 SWAP_PU = "612551b1-ca02-4514-86ad-7d8902e612dc"
 SWAP_FSTAB = (
@@ -4319,11 +4365,17 @@ class ResponsivenessAreaTest(Scratch):
         self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
         self.assertIn("responsiveness: 1 axes checked, no bottlenecks", ok_res.stdout)
 
-        # Unhealthy MGLRU ttl=0 -> info (no fix command yet); zswap disabled -> WARN with fix command.
-        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        # Advisory io item -> info (no fix command); MGLRU ttl=0 & zswap disabled -> WARN with fix command.
+        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
         info_res = self.run_tool()
         self.assertEqual(info_res.returncode, 0, info_res.stdout + info_res.stderr)
-        self.assertIn("memory: MGLRU min_ttl_ms is 0", info_res.stdout)
+        self.assertIn("info   io: nvme_core default_ps_max_latency_us=100000", info_res.stdout)
+
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        mglru_res = self.run_tool()
+        self.assertEqual(mglru_res.returncode, 1, mglru_res.stdout + mglru_res.stderr)
+        self.assertIn("WARN   memory: MGLRU min_ttl_ms is 0", mglru_res.stdout)
+        self.assertIn("fix: sudo cst swap apply", mglru_res.stdout)
 
         self._write_host("sys/module/zswap/parameters/enabled", "N\n")
         warn_res = self.run_tool()

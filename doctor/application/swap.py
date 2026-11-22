@@ -11,6 +11,7 @@ from doctor.application.shared import check, read_text
 from doctor.domain import (
     CRYPTTAB,
     FSTAB,
+    MM_RESPONSIVENESS_CONF,
     HostPath,
     INFO,
     OK,
@@ -23,6 +24,7 @@ from doctor.domain import (
     ViewPath,
 )
 from doctor.ports import CheckFn, DoctorHostPort
+from perf.domain.parsers import parse_sysfs_tmpfiles_writes
 from swap.domain import (
     SwapSpecState,
     human_size,
@@ -73,6 +75,30 @@ def check_zswap_params(host: DoctorHostPort) -> Iterator[Result]:
         )
     if not missing:
         yield Result(OK, f"zswap: every parameter {ZSWAP_CONF} sets is in this kernel")
+
+
+@check(CHECKS, "swap")
+def check_mm_responsiveness_params(host: DoctorHostPort) -> Iterator[Result]:
+    """WARN for each sysfs memory knob cst-mm-responsiveness.conf sets that this kernel lacks."""
+    try:
+        with host.open_text(host.path(MM_RESPONSIVENESS_CONF)) as f:
+            wanted = [path for path, _ in parse_sysfs_tmpfiles_writes(f.read(SETTINGS_READ_LIMIT))]
+    except FileNotFoundError:
+        return
+    except OSError:
+        yield Result(INFO, f"mm responsiveness: cannot read {MM_RESPONSIVENESS_CONF}")
+        return
+    if not wanted:
+        return
+    missing = [sysfs_path for sysfs_path in wanted if not host.exists(host.path(HostPath(sysfs_path)))]
+    for sysfs_path in missing:
+        yield Result(
+            WARN,
+            f"mm responsiveness {sysfs_path}: this kernel lacks this knob; {MM_RESPONSIVENESS_CONF} "
+            "skips it at boot without a word",
+        )
+    if not missing:
+        yield Result(OK, f"mm responsiveness: every sysfs knob {MM_RESPONSIVENESS_CONF} sets is in this kernel")
 
 
 class _HostSettingsFacts:

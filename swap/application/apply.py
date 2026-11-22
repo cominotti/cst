@@ -9,6 +9,14 @@ from cst_core.application.install import Placement
 from cst_core.domain.files import MarkedLineSpec, OwnedState
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
+from swap.application.memory_tuning import (
+    MM_TMPFILES_ENTRY,
+    URESOURCED_BAK_SUFFIX,
+    URESOURCED_ENTRY,
+    apply_mm_knobs,
+    maybe_restart_uresourced,
+    wait_for_uresourced_floor,
+)
 from swap.application.reports import (
     DROPIN_ENTRY,
     OLD_DROPIN_ENTRY,
@@ -256,6 +264,10 @@ class SwapApplicationService(SwapReports):
         rc = self._apply_sysctl(events)
         if rc != 0:
             return self._stopped(rc, events)
+        self._apply_mm_responsiveness(events)
+        rc = self._apply_uresourced(events)
+        if rc != 0:
+            return self._stopped(rc, events)
         self._apply_slice(events)
         return self._verified(spec, events)
 
@@ -438,6 +450,47 @@ class SwapApplicationService(SwapReports):
             sysctl = self._system.apply_sysctl_file(env.sysctl_conf)
         _show_output(sysctl, events, self._env.prog)
         return sysctl.returncode
+
+    def _apply_mm_responsiveness(self, events: list[ApplyEvent]) -> None:
+        """Install `cst-mm-responsiveness.conf` and apply THP/MGLRU sysfs knobs live."""
+        env = self._env
+        src = env.src_path(MM_TMPFILES_ENTRY)
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== memory responsiveness"))
+        self._apply_managed_file(MM_TMPFILES_ENTRY, src, env.etc_path(MM_TMPFILES_ENTRY), events)
+        apply_mm_knobs(
+            self._fs,
+            sys_dir=env.sys_dir,
+            cpu_run_dir=env.cpu_run_dir,
+            mm_text=self._desired_text(src),
+            events=events,
+        )
+
+    def _apply_uresourced(self, events: list[ApplyEvent]) -> int:
+        """Install `/etc/uresourced.conf` (preserving pre-CST backup) and restart `uresourced` if active."""
+        env = self._env
+        src = env.src_path(URESOURCED_ENTRY)
+        dest = env.etc_path(URESOURCED_ENTRY)
+        events.append(ApplyEvent("out", ApplyEventKind.SECTION, "== session memory floor (uresourced)"))
+        if self._fs.exists(dest) and self._inspect_file(src, dest) not in (
+            OwnedState.OK,
+            OwnedState.ADOPT,
+        ):
+            self._fs.copy_if_absent(dest, dest + URESOURCED_BAK_SUFFIX)
+        written = self._apply_managed_file(URESOURCED_ENTRY, src, dest, events)
+        rc, restarted = maybe_restart_uresourced(
+            self._systemd,
+            written=written,
+            events=events,
+            show_result=lambda res: _show_output(res, events, env.prog),
+        )
+        if rc == 0 and restarted:
+            wait_for_uresourced_floor(
+                self._fs,
+                cgroup_dir=env.cgroup_dir,
+                uresourced_text=self._desired_text(src),
+                sleep=self._system.sleep,
+            )
+        return rc
 
     def _apply_slice(self, events: list[ApplyEvent]) -> None:
         """The "machine.slice" section: the MemoryLow drop-in (the old name removed), then the install

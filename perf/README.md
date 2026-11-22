@@ -22,13 +22,13 @@ Exit codes:
 ## 2. Axes and objective thresholds
 
 1. **memory** (`/proc/meminfo`, `/proc/vmstat`, `/proc/pressure/memory`, `/proc/sys/vm/*`, `/sys/kernel/mm/*`, `/sys/module/zswap/parameters/*`, cgroup `session.slice` / `user-*.slice`):
-   - `vm.min_free_kbytes`: expects at least `192 MiB` headroom on hosts with `>= 32 GiB` RAM (`32 MiB` on smaller hosts).
+   - `vm.min_free_kbytes`: expects at least `192 MiB` headroom on hosts with `>= 32 GiB` RAM (`32 MiB` on smaller hosts); emits `fix: sudo cst swap apply` when low.
    - Direct reclaim & compaction stalls (`allocstall_*`, `compact_stall`): computes hourly rates once uptime exceeds 10 minutes (`>= 5/h` `allocstall` or `>= 10/h` `compact_stall` -> `ATTENTION`; `>= 30/h` or `>= 60/h` -> `BOTTLENECK`).
-   - THP (`transparent_hugepage/defrag`): flags `always` and `madvise` (synchronous page-fault compaction pauses) in favor of `defer+madvise`.
-   - MGLRU (`lru_gen/enabled`, `lru_gen/min_ttl_ms`): flags disabled MGLRU or `min_ttl_ms = 0` (no thrashing protection window).
+   - THP (`transparent_hugepage/defrag`): flags `always` and `madvise` (synchronous page-fault compaction pauses) in favor of `defer+madvise` (`fix: sudo cst swap apply`).
+   - MGLRU (`lru_gen/enabled`, `lru_gen/min_ttl_ms`): flags disabled MGLRU or `min_ttl_ms = 0` (`fix: sudo cst swap apply`).
    - `zswap`: flags disabled `zswap` with `fix: sudo cst swap apply`.
    - Memory PSI (`avg60`): flags `some >= 1%` (`ATTENTION`), `some >= 5%` or `full >= 1%` (`BOTTLENECK`).
-   - Session memory floor (`user-*.slice/user@*.service/session.slice`): computes effective `min(session.memory.min, user.memory.min)` and flags unset floors or active working sets above the protected floor.
+   - Session memory floor (`user-*.slice/user@*.service/session.slice`): computes effective `min(session.memory.min, user.slice.memory.min, user-<uid>.slice.memory.min, user@<uid>.service.memory.min)` and flags unset floors or active working sets above the protected floor (`fix: sudo cst swap apply`).
 
 2. **cpu** (`cpuidle`, `preempt`, `sched_ext`, `/dev/ntsync`, `irqbalance`, `/proc/interrupts`, `BUILD_CPUS`):
    - `cpuidle`: flags enabled C-states on `cpu0` with exit latency `>= 200 µs`.
