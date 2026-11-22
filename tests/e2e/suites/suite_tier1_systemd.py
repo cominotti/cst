@@ -11,6 +11,8 @@ from typing import ClassVar, override
 import time
 import unittest
 
+from tests.e2e.selection import E2ETag, e2e_tags
+
 
 def docker_exec(
     container: str,
@@ -1023,16 +1025,21 @@ stop_server() {
 
 
 class Tier1SystemdE2ETest(unittest.TestCase):
-    SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
-    NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
-    IMAGE = os.environ["CST_E2E_SYSTEMD_IMAGE"]
-    CST_ROOT_MOUNT = os.environ["CST_E2E_REPO_ROOT"]
+    SYSTEMD_CONTAINER: ClassVar[str] = ""
+    NAS_CONTAINER: ClassVar[str] = ""
+    IMAGE: ClassVar[str] = ""
+    CST_ROOT_MOUNT: ClassVar[str] = ""
     # run.py's host_lsm_security_opts (label=disable where SELinux is on), for the containers test_01 starts.
-    SECURITY_OPTS = os.environ.get("CST_E2E_SECURITY_OPTS", "").split()
+    SECURITY_OPTS: ClassVar[list[str]] = []
 
     @classmethod
     @override
     def setUpClass(cls) -> None:
+        cls.SYSTEMD_CONTAINER = os.environ["CST_E2E_SYSTEMD_CONTAINER"]
+        cls.NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
+        cls.IMAGE = os.environ["CST_E2E_SYSTEMD_IMAGE"]
+        cls.CST_ROOT_MOUNT = os.environ["CST_E2E_REPO_ROOT"]
+        cls.SECURITY_OPTS = os.environ.get("CST_E2E_SECURITY_OPTS", "").split()
         # Provide a working writable copy of CST inside the container so symlink tests
         # and user-owned operations do not rely on mutating the read-only host repo.
         exec_bash(
@@ -1040,6 +1047,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             "rm -rf /opt/cst-rw && cp -a /opt/cst /opt/cst-rw && chmod -R a+rX /opt/cst-rw",
         )
 
+    @e2e_tags(E2ETag.SMOKE, E2ETag.BTRFS, E2ETag.CPU, E2ETag.SWAP, E2ETag.BLUETOOTH)
     def test_01_in_container_guardrail_blocks_mutations(self) -> None:
         """When /.dockerenv is present, install/apply commands must refuse cleanly."""
         repo = self.CST_ROOT_MOUNT
@@ -1080,6 +1088,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
                 f"expected container refusal message for {subcmd}, got: {combined}",
             )
 
+    @e2e_tags(E2ETag.SMOKE)
     def test_02_systemd_and_user_dbus_healthy(self) -> None:
         """systemd PID 1, system dbus-broker and user@1000.service run without --privileged."""
         st = exec_bash(self.SYSTEMD_CONTAINER, "systemctl is-system-running").stdout.strip()
@@ -1092,6 +1101,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(docker_env_check, "OK")
 
+    @e2e_tags(E2ETag.SMOKE, E2ETag.DOCTOR)
     def test_03_cst_root_link_status_and_doctor(self) -> None:
         """cst dispatch, ~/.local/bin/cst symlink, cst status and cst doctor work live."""
         as_tester_bash(
@@ -1128,6 +1138,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         # Reset any hardwareless bluetooth.service D-Bus activation failure inside the container
         exec_bash(self.SYSTEMD_CONTAINER, "systemctl reset-failed bluetooth.service 2>/dev/null || true")
 
+    @e2e_tags(E2ETag.TOOLCHAINS)
     def test_04_toolchains_e2e_timer_config_and_prune(self) -> None:
         """toolchains config apply, hourly systemd --user timer, service run, and auto off."""
         # Configure cargo/uv settings & create stale cache under ~/.cache/cargo-build (cst-toolchains layout)
@@ -1278,6 +1289,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         self.assertIn("stopped:   cst-toolchains-prune.timer", res.stdout)
         self.assertIn("removed:   ~/.config/systemd/user/timers.target.wants/cst-toolchains-prune.timer", res.stdout)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_05_bluetooth_config_wp_roles_and_ldac_unit(self) -> None:
         """bluetooth plan, apply --no-restart, real libwireplumber wp-roles validation, and revert."""
         exec_bash(
@@ -1361,6 +1373,7 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         )
         self.assertNotEqual(ldac_enabled.returncode, 0, "cst-bt-ldac48.service still enabled after revert")
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.NAS)
     def test_06_btrfs_notify_pending_alerts_and_sftp_restic_nas(self) -> None:
         """btrfs-notify queue -> cst-pending-alerts delivery + doctor detection + real restic over SFTP."""
         # 1. Queue pending alert, detect via cst doctor, deliver via cst-pending-alerts
@@ -1431,6 +1444,7 @@ EOF
             """,
         )
 
+    @e2e_tags(E2ETag.CPU)
     def test_07_cpu_baseline_dropin_loses_to_runtime_overrides_after_reload(self) -> None:
         """systemd's real drop-in order: a `set-property --runtime` value (the game
         profile) must survive a daemon-reload next to CST's baseline drop-in,
@@ -1486,6 +1500,7 @@ EOF
             """,
         )
 
+    @e2e_tags(E2ETag.SWAP)
     def test_88_swap_plan_apply_status_second_apply_on_the_real_etc_and_systemd(self) -> None:
         """cst swap as root on the container's /etc and systemd (the kernel's side in a
         scratch tree, see SWAP_E2E_LIB). Not configured: plan says so and apply refuses,
@@ -1631,6 +1646,7 @@ echo E2E-OK
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
 
+    @e2e_tags(E2ETag.SWAP, E2ETag.DOCTOR)
     def test_90_swap_upgrade_from_an_install_with_the_partition_in_the_code(self) -> None:
         """cst swap apply on what an older CST's apply left: its marked crypttab and fstab
         lines, the drop-in under its old name 50-memory-low.conf (and its install-record
@@ -1845,6 +1861,7 @@ echo E2E-OK
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
 
+    @e2e_tags(E2ETag.SWAP)
     def test_89_swap_dropin_loses_to_a_runtime_memory_low_after_reload(self) -> None:
         """systemd's real drop-in order for swap's machine.slice floor, next to cpu's
         10-cpu-setup.conf (both shipped files, on a slice of their own): both
@@ -1887,6 +1904,7 @@ echo E2E-OK
             """,
         )
 
+    @e2e_tags(E2ETag.SWAP)
     def test_125_swap_e2e_setup_that_fails_before_saving_leaves_etc_alone(self) -> None:
         """The swap E2E harness itself (SWAP_E2E_LIB, as test_88 and test_90 use it: the cleanup
         trap set before swap_setup). A swap_setup whose own check fails, here on an
@@ -1935,6 +1953,7 @@ echo E2E-OK
         self.assertNotIn("SETUP-RAN", r.stdout)
         self.assertEqual(exec_bash(self.SYSTEMD_CONTAINER, state).stdout, before, r.stdout + r.stderr)
 
+    @e2e_tags(E2ETag.CPU, E2ETag.DOCTOR)
     def test_08_cpu_game_profile_idles_escaped_user_boxes_and_pins_memory_low(self) -> None:
         """The real game profile (cpu/game-profile on/tick/off) with the real
         system and user managers: a top-level user slice of its own and a
@@ -2091,6 +2110,7 @@ echo E2E-OK
                 check=False,
             )
 
+    @e2e_tags(E2ETag.TOOLCHAINS)
     def test_09_sccache_wrapper_keeps_local_crates_out_when_asked(self) -> None:
         """The real rustc wrapper, installed by `cst toolchains config apply
         --sccache`, under real cargo (offline: no network in the container), with
@@ -2228,6 +2248,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_10_cpu_quiet_reads_the_real_proc_files(self) -> None:
         """`cst cpu quiet` against the real kernel files (/proc/stat, /proc/vmstat,
         /proc/pressure/*) and the real game profile flag: a plain run exits 0 or
@@ -2328,6 +2349,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
     def test_11_manifest_installs_and_every_entry_runs_from_root(self) -> None:
         """The real installer writes the whole INSTALL_MANIFEST (staged under
         /var/tmp/e2e-dist, so the other tests see no change): root files as
@@ -2497,6 +2519,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "btrfs:docker-gc": {"/etc/cst/docker-gc.conf": "DOCKER_GC_PROTECT=\n"}
     }
 
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
     def test_19_every_component_full_cycle_on_the_container_root(self) -> None:
         """Each component of the manifest, installed for real on the container's / (root's as root,
         the user's as tester): plan changes nothing; install over a plain-script copy of each of its
@@ -2601,6 +2624,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         for need in made_needs:
             exec_bash(c, f"{installer} remove --component {need} >/dev/null")
 
+    @e2e_tags(E2ETag.INSTALL, E2ETag.BTRFS)
     def test_20_units_are_verified_before_they_replace_the_installed_ones(self) -> None:
         """As root on the container's /, the installer runs the real `systemd-analyze verify
         --recursive-errors=no` on the units an install changes, after their programs and before any of
@@ -2643,6 +2667,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-VERIFY-OK", out)
 
+    @e2e_tags(E2ETag.VM)
     def test_12_vm_backup_timer_installs_the_zipapp(self) -> None:
         """`cst vm backup-timer on` with the real systemd: it installs cst-vm
         as the zipapp `install` builds (replacing the plain-script copy an
@@ -2724,6 +2749,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_13_degraded_boot_install_cycle(self) -> None:
         """`cst btrfs degraded-boot` with the real systemd and the real udevadm
         verify: `plan` first says what install would write and run and changes
@@ -2961,6 +2987,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "docker-volumes-nocow.service": 94,
     }
 
+    @e2e_tags(E2ETag.INSTALL)
     def test_16_units_pass_systemd_analyze_verify_and_security(self) -> None:
         """Every unit CST installs (the manifest, staged by the real installer
         as in test_11) or generates (tests/unit_files.py: cst-vm, cst-toolchains,
@@ -3085,6 +3112,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
                 )
                 self.assertEqual(s.returncode, 0, f"exposure above {ceiling / 10}:\n{s.stdout[-600:]}")
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_14_stall_monitor_unit_keeps_queued_alerts_across_a_restart(self) -> None:
         """btrfs-stall-monitor.service as shipped (read from the checkout), only
         its daemon swapped for a stand-in that says READY=1 (NOTIFY_STUB) and
@@ -3135,6 +3163,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_104_stall_monitor_unit_is_active_only_after_ready(self) -> None:
         """btrfs-stall-monitor.service as shipped (Type=notify, WatchdogSec=), as e2e-stall-notify.service
         with Nice=-5 dropped and folders of its own (stall_monitor_e2e_unit), and three main processes:
@@ -3209,6 +3238,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_105_stall_monitor_is_restarted_when_its_pings_stop(self) -> None:
         """This checkout's btrfs-stall-monitord under the shipped unit (as in test_104), with a drop-in
         that shortens WatchdogSec= to 3 s and RestartSec= to 1 s: its pings keep it running past two
@@ -3265,6 +3295,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_112_stall_monitor_with_a_duration_of_zero_stops_at_once(self) -> None:
         """This checkout's btrfs-stall-monitord, as its installer builds it, with --duration 0 ("stop after
         0 seconds"): it ends before its first sample with exit 0. The daemon before took 0 as no limit and
@@ -3291,6 +3322,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_106_stall_monitor_upgrade_installs_the_program_before_the_unit(self) -> None:
         """The upgrade from main (1c43979: tests/fixtures/legacy put back in a copy of the checkout)
         with the real installers on the container's /, btrfs-stall-monitord and its unit only, and a
@@ -3417,6 +3449,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         if old:
             docker_exec(c, ["bash", "-c", f"cat >{NOTIFY_STUB_PATH}"], input_text=NOTIFY_STUB)
 
+    @e2e_tags(E2ETag.TOOLCHAINS)
     def test_15_toolchains_auto_off_forgets_the_timer_stamp(self) -> None:
         """systemd keeps the last run of a Persistent= timer (for a user timer
         ~/.local/share/systemd/timers/stamp-NAME; made when the timer starts,
@@ -3494,6 +3527,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_17_snapshots_conf_written_by_an_older_cst_is_rewritten_in_quotes(self) -> None:
         """An older CST wrote snapshots.conf values with printf %q (a backslash
         before a blank, $'...').
@@ -3579,6 +3613,7 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_18_a_masked_unit_stays_masked(self) -> None:
         """`systemctl mask` leaves a link to /dev/null where the unit file goes.
         `cst vm backup-timer on` (root, the system manager) and `cst toolchains
@@ -3655,6 +3690,7 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
         ).stdout
         self.assertIn("E2E-OK-TOOLCHAINS", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_25_snapshots_chrome_cache_apply_and_off(self) -> None:
         """`cst btrfs snapshots chrome-cache` (as root through sudo's
         variables, the tool itself run as the user by runuser) on Chrome's
@@ -3767,6 +3803,7 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_26_btrfs_watch_saves_the_report_of_a_run(self) -> None:
         """`cst btrfs watch` as the user, with the installed btrfs-stall-report
         and an empty recording folder (a recorder that wrote nothing yet):
@@ -3862,6 +3899,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_35_disable_timers_one_missing_unit_does_not_keep_the_others(self) -> None:
         """btrfs-setup.sh's disable_timers (the snapshots, NAS and docker-gc
         disable paths, and uninstall) with the real systemd: a Persistent=
@@ -3933,6 +3971,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_118_btrfs_uninstall_keeps_a_reclaim_file_it_did_not_create_and_forgets_it(self) -> None:
         """btrfs-setup.sh's remove_tuning_files as root on the container's /, with the real installer,
         record and cst doctor: the writeback and reclaim files installed and recorded, the reclaim file
@@ -4007,6 +4046,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_119_btrfs_scrub_dropin_and_stall_report_launcher_recorded_and_removed(self) -> None:
         """btrfs-setup.sh's install_scrub_limit, install_report_launcher and remove_report_launcher as
         root on the container's /, the launcher written for tester through the real runuser. Over the
@@ -4081,6 +4121,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and
         libwireplumber. `apply --no-restart` writes main.conf, the LDAC rule,
@@ -4121,6 +4162,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_SECOND_APPLY_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one(self) -> None:
         """CST ships no headset (DEVICE in bluetooth/bluetooth.conf is empty). The upgrade from
         main's install (535aea1), as tester with the real user manager and WirePlumber: its LDAC
@@ -4150,6 +4192,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         out = as_tester_bash(self.SYSTEMD_CONTAINER, BT_HEADSET_SCRIPT).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_96_bluetooth_as_root_drops_the_test_overrides(self) -> None:
         """Run as root with SUDO_USER, `cst bluetooth` runs again as that user without the
         unit tests' overrides CST_BT_ROOT, CST_BT_CONTAINER and CST_BT_LIBWP (sudo -E or a root
@@ -4184,6 +4227,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.assertEqual(len(roles), 1, r.stdout)
         self.assertNotIn("could not be read", roles[0], r.stdout)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_102_docker_gc_enable_keeps_the_registry_of_mains_install(self) -> None:
         """docker-gc's protected registries move from the program into /etc/cst/docker-gc.conf.
         The upgrade from main's install (654bbda): /usr/local/sbin/docker-gc a zipapp whose
@@ -4298,6 +4342,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_103_docker_gc_installer_keeps_the_registry_of_mains_install(self) -> None:
         """Every install path writes docker-gc's settings before it replaces the program, not only
         `enable`. Staged under /var/tmp/e2e-gc-manifest: main's install (654bbda; its zipapp with the
@@ -4373,6 +4418,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_145_docker_gc_stops_on_a_record_without_a_key_the_plan_needs(self) -> None:
         """The installed docker-gc (the whole manifest of root, staged under /var/tmp/e2e-gc-hole) with
         a fake docker whose container record lacks "Image": run --dry-run and status exit 76 naming the
@@ -4401,6 +4447,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.VM)
     def test_113_cst_vm_refuses_a_damaged_index_and_leaves_it(self) -> None:
         """cst vm (the checkout's program; the index a scratch file, CST_VM_INDEX) with an index that is
         not JSON, then one without a "backups" list: list exits 1 naming the file and the way out, twice,
@@ -4433,6 +4480,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.VM, E2ETag.NAS)
     def test_151_cst_vm_forgets_torn_nas_snapshots_with_the_real_restic(self) -> None:
         """cst vm's torn NAS snapshots against the real restic over SFTP (the NAS container): a record
         naming two snapshots of the VM (a full ID and a short one, the newest of them a torn one that
@@ -4517,6 +4565,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.NAS)
     def test_155_nas_image_holds_no_ssh_host_keys(self) -> None:
         """The NAS image holds no SSH host key: the container makes its own when it starts
         (ssh-keygen of the ed25519 key only, then sshd as PID 1). The image of the running NAS
@@ -4558,6 +4607,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         keys = exec_bash(self.NAS_CONTAINER, "ls /etc/ssh/ssh_host_*").stdout.split()
         self.assertEqual(keys, ["/etc/ssh/ssh_host_ed25519_key", "/etc/ssh/ssh_host_ed25519_key.pub"], stale)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_114_docker_volumes_nocow_waits_for_a_daemon_json_it_cannot_read(self) -> None:
         """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
         requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
@@ -4610,6 +4660,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
         the way `snapshots setup` runs them, with what sudo can hand root (its own
@@ -4654,6 +4705,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.SMOKE, E2ETag.INSTALL)
     def test_115_cst_as_user_gives_the_command_the_users_session(self) -> None:
         """cst_as_user (cst-install.bash), as root with what sudo hands root (SUDO_USER, its own
         XDG_RUNTIME_DIR and bus): the real runuser runs the command as tester with HOME, USER,
@@ -4689,6 +4741,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_116_btrfs_snapshot_reads_the_real_kernels_and_findmnts_escapes(self) -> None:
         """btrfs/btrfs-snapshot against the real kernel's mountinfo and the real findmnt, as root.
         A tmpfs stands in for the home subvolume (its folder "home" bind-mounted at a HOME_MOUNT
@@ -4782,6 +4835,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.TOOLCHAINS)
     def test_82_toolchains_auto_on_reaches_the_users_manager_with_roots_variables(self) -> None:
         """`cst toolchains auto on` run as tester directly (not through snapshots setup), with
         the XDG_RUNTIME_DIR and bus of root that sudo and runuser can pass on: the program's
@@ -4823,6 +4877,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_95_bluetooth_python_program_with_the_bash_one_runuser_and_le_audio(self) -> None:
         """`cst bluetooth` after its port to Python (bluetooth/bt-setup), with the real user
         manager and WirePlumber. Mixed versions share the record of restarts still owed and
@@ -4918,6 +4973,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn("ERROR: run it from your user account (needs SUDO_USER)", refused.stderr)
 
+    @e2e_tags(E2ETag.TOOLCHAINS)
     def test_83_sccache_server_starts_in_its_own_scope_from_a_capped_compile(self) -> None:
         """The real rustc wrapper (installed by `cst toolchains config apply
         --sccache`), real cargo and the real user manager, with a fake sccache
@@ -5041,6 +5097,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.TOOLCHAINS, E2ETag.DOCTOR, E2ETag.CPU)
     def test_133_sccache_host_server_starts_in_sccache_slice_scope(self) -> None:
         """The host branch of the real rustc wrapper (test_83 covers a toolbox's): with no
         container file (CST_SCCACHE_CONTAINERENV names a file that is not there) the wrapper's
@@ -5212,6 +5269,7 @@ PY
         )
         return d
 
+    @e2e_tags(E2ETag.CPU, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_84_cpu_install_cycle_over_the_bash_version(self) -> None:
         """`cst cpu install` as root for tester with the real systemd, over what the bash
         cpu-setup.sh (main before the port) installed: only the programs are written again (the game
@@ -5300,6 +5358,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_85_cpu_game_profile_bash_and_python_copies_share_their_state_and_lock(self) -> None:
         """The game profile of an older CST (bash) and this one (Python) with the real system and
         user managers, both ways: one switches it on, the other's tick adds nothing and its state
@@ -5373,6 +5432,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_107_cpu_game_profile_on_with_a_full_run_folder_leaves_the_unit_active(self) -> None:
         """'on' with /run/cpu-setup full (a tmpfs mounted over it, filled to its last page): the
         records cannot be written, so 'on' changes nothing it could not undo, logs why and exits 0.
@@ -5436,6 +5496,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_86_cpu_game_profile_refuses_a_settings_line_bash_would_run(self) -> None:
         """With a line in cpu-setup.conf that bash would expand (`BUILD_CPUS=$(nproc)`), the real
         game profile does not switch on: exit 1, the line in its output, no game.state, machine.slice's
@@ -5528,6 +5589,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_87_cpu_game_profile_off_skips_a_cut_record_and_acts_for_the_user_on_acted_for(self) -> None:
         """'off' with the real system and user managers, after 'on' for tester: a last line of
         game.state cut short (no newline, "existed 1") is named and not undone (machine.slice's
@@ -5583,6 +5645,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_130_cpu_game_profile_off_acts_for_the_recorded_user_when_target_user_names_another(self) -> None:
         """'off' with the real system and user managers, after 'on' for tester, with TARGET_USER
         changed to another account that exists (e2e130, made here, with no user manager of its own):
@@ -5640,6 +5703,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_128_cpu_game_profile_drift_it_does_not_repair(self) -> None:
         """The real game profile, on for tester. With machine.slice's records gone from game.state and
         its overrides removed (then a daemon-reload), the tick does not set it again (off could not undo
@@ -5707,6 +5771,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_129_cpu_game_profile_record_after_a_cut_line(self) -> None:
         """The real game profile, on for tester: game.state's first record is user@UID.service's MemoryLow
         (it names the user). With a last line of game.state cut short (no newline,
@@ -5768,6 +5833,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_153_cpu_game_profile_on_refuses_a_target_user_without_an_account(self) -> None:
         """With a TARGET_USER that names no account, the real game profile does not switch on: exit 1,
         its output names the user and holds no "id: ...: no such user" line, no game.state, no
@@ -5867,6 +5933,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_154_cpu_game_profile_tick_sets_a_box_whose_record_was_cut_short(self) -> None:
         """The real game profile, on for tester, then a box next to the game (a slice of the user
         manager's own, made by systemd-run --user) whose record is the last line of game.state, cut
@@ -5932,6 +5999,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
     def test_156_cpu_game_profile_tick_sets_a_box_whose_record_bash_cannot_read(self) -> None:
         """The real game profile, on for tester, then a box next to the game (a slice of the user
         manager's own, made by systemd-run --user) whose only record in game.state is a whole line that
@@ -5989,6 +6057,7 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a
         scratch copy with fake programs: vm runs its program directly as root with CST_PROG;
@@ -6136,6 +6205,7 @@ systemctl daemon-reload
         self.addCleanup(exec_bash, self.SYSTEMD_CONTAINER, self.BULK_BOOT_CLEANUP, check=False)
         return exec_bash(self.SYSTEMD_CONTAINER, self.BULK_BOOT_SETUP + script).stdout
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_76_bulk_boot_leaves_a_journal_of_a_newer_btrfs_bulk_alone(self) -> None:
         """btrfs-bulk-boot.service (real systemd) finds a journal of an interrupted move written by a
         newer btrfs-bulk ("v" above this checkout's bulk-journal format): the unit runs (the glob
@@ -6160,6 +6230,7 @@ echo E2E-OK
         )
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_77_bulk_boot_refusal_reaches_doctor_without_btrfs_notify(self) -> None:
         """A bad bulk.conf line at boot with btrfs-notify missing (moved aside): the unit exits 78
         and is failed; the refusal's alert is kept in /var/lib/cst-alerts/pending in btrfs-notify's
@@ -6194,6 +6265,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("btrfs-bulk: ~/Bulk: nothing moved at boot", listed)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_122_bulk_boot_failures_are_failed_units(self) -> None:
         """btrfs-bulk-boot.service (real systemd) with the boot flag. A BULK_USER that names no
         account is a bulk.conf the boot step refuses: the unit exits 78 and is failed, its journal
@@ -6233,6 +6305,7 @@ echo E2E-OK
         )
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc(self) -> None:
         """docker-gc-recorder.service as shipped (read from the checkout; only ExecStart points at this
         checkout's docker-gc, under a name of its own; a stub docker.service when the container has
@@ -6395,6 +6468,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_108_btrfs_snapshot_as_root_ignores_its_test_seam_and_runs_no_settings_line(self) -> None:
         """btrfs/btrfs-snapshot as install writes it, run as real root: CST_SNAPSHOT_ROOT (the test seam
         of its unit tests) is ignored, so the state folder is the real /var/lib/btrfs-snapshot and
@@ -6436,6 +6510,7 @@ echo test_108-ok
         ).stdout
         self.assertIn("test_108-ok", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_109_btrfs_snapshot_runtime_installed_runs_as_root(self) -> None:
         """btrfs-snapshot and btrfs-snapshot-runtime as install writes them (the runtime a zipapp in
         /usr/local/sbin, next to the bash front), run as real root, as tier 2's test_03, test_03a and
@@ -6518,6 +6593,7 @@ echo test_109-ok
         ).stdout
         self.assertIn("test_109-ok", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_110_btrfs_snapshot_hourly_as_a_unit_hands_sigpipe_on_and_keeps_its_alert_as_root(self) -> None:
         """btrfs-snapshot and its runtime as install writes them, run as real root with a fake
         btrfs (10 GiB free: the emergency purge) and a fake btrfs-snapshot-core that records its own
@@ -6635,6 +6711,7 @@ echo test_110-ok
         ).stdout
         self.assertIn("test_110-ok", out)
 
+    @e2e_tags(E2ETag.BTRFS)
     def test_111_snapshots_status_reads_snapshots_conf_through_settings_lines(self) -> None:
         """cst btrfs snapshots status as root on the container's root, with a snapshots.conf that has
         a command line and a $(...) value next to plain settings: it reads the file through
@@ -6675,6 +6752,7 @@ echo test_111-ok
         ).stdout
         self.assertIn("test_111-ok", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_99_installed_health_check_and_pending_alerts_zipapps(self) -> None:
         """The installed forms of the two Python ports, under real systemd: btrfs-health-check and
         cst-pending-alerts as install writes them (zipapps from installer.py payload). The health
@@ -6787,6 +6865,7 @@ echo E2E-OK
             r"(?m)^.*  critical btrfs-health-check: Disk health: problems detected  \[NOT shown to you yet: next login\]$",
         )
 
+    @e2e_tags(E2ETag.VM)
     def test_74_vm_root_commands_refuse_in_a_real_container(self) -> None:
         """In a container with /.dockerenv (no override), cst vm's commands that change the
         host refuse before sudo, with the host command to type (cst is not on PATH there:
@@ -6821,6 +6900,7 @@ echo E2E-OK
                 f"In a host terminal: /opt/cst/cst vm {subcmd}\n",
             )
 
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR, E2ETag.CPU)
     def test_149_installer_generated_components_refused_and_plan_names_unrecorded_files(self) -> None:
         """installer.py on the container's real / and its real install records. remove --component and
         forget --component of each component of GENERATED_COMPONENTS (root's as root, the user's as
@@ -6921,6 +7001,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_150_stall_report_launcher_written_while_its_record_cannot_be_written(self) -> None:
         """btrfs-setup.sh's install_report_launcher as root on the container's /, the launcher written for
         tester through the real runuser. Installed and marked once, then replaced by an older text that
@@ -6998,6 +7079,7 @@ echo E2E-OK
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_157_btrfs_compress_force_plan_apply_revert_and_doctor(self) -> None:
         """`cst btrfs compress-force` updates real /etc/fstab, real btrfs:top-mount (verified by
         systemd-analyze verify + recorded in installed.json + reloaded by PID 1 systemd), kargs/mount

@@ -18,6 +18,20 @@ import time
 import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tests.e2e.selection import (
+    E2ETag,
+    SuiteSelection,
+    build_suite,
+    format_case_line,
+    iter_cases,
+    parse_patterns,
+    parse_tags,
+    select_cases,
+)
+
 E2E_DIR = Path(__file__).resolve().parent
 SUITES_DIR = E2E_DIR / "suites"
 ARTIFACTS_BASE = E2E_DIR / ".artifacts"
@@ -273,6 +287,12 @@ def dump_logs(containers: Sequence[str], out_dir: Path) -> None:
             )
 
 
+SUITE_FILES: Mapping[int, str] = {
+    1: "suite_tier1_systemd.py",
+    2: "suite_tier2_storage_cpu.py",
+}
+
+
 def load_suite(filename: str) -> unittest.TestSuite:
     import importlib.util
 
@@ -285,7 +305,30 @@ def load_suite(filename: str) -> unittest.TestSuite:
     return unittest.defaultTestLoader.loadTestsFromModule(mod)
 
 
-def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
+def _selected_suite(tier: int, selection: SuiteSelection) -> unittest.TestSuite | None:
+    suite = load_suite(SUITE_FILES[tier])
+    scoped = selection.for_tier(tier)
+    if not scoped.active:
+        return suite
+    selected = select_cases(iter_cases(suite), patterns=scoped.patterns, tags=scoped.tags)
+    if not selected:
+        return None
+    return build_suite(selected)
+
+
+def run_tier1(
+    run_id: str,
+    artifact_dir: Path,
+    *,
+    rebuild: bool = False,
+    keep_logs: bool = False,
+    selection: SuiteSelection | None = None,
+) -> bool:
+    suite = _selected_suite(1, selection or SuiteSelection())
+    if suite is None:
+        print("[e2e] tier 1: no tests matched selection", file=sys.stderr)
+        return False
+
     docker_build(
         IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
     )
@@ -331,7 +374,6 @@ def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         # test_01 starts containers of its own on the checkout: the same options.
         os.environ["CST_E2E_SECURITY_OPTS"] = " ".join(host_lsm_security_opts())
 
-        suite = load_suite("suite_tier1_systemd.py")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         ok = result.wasSuccessful()
         return ok
@@ -343,7 +385,19 @@ def run_tier1(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         run(["docker", "network", "rm", net], check=False, capture=True)
 
 
-def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_logs: bool = False) -> bool:
+def run_tier2(
+    run_id: str,
+    artifact_dir: Path,
+    *,
+    rebuild: bool = False,
+    keep_logs: bool = False,
+    selection: SuiteSelection | None = None,
+) -> bool:
+    suite = _selected_suite(2, selection or SuiteSelection())
+    if suite is None:
+        print("[e2e] tier 2: no tests matched selection", file=sys.stderr)
+        return False
+
     docker_build(
         IMG_SYSTEMD, E2E_DIR / "images" / "systemd.Dockerfile", digest=sources_digest("systemd"), force=rebuild
     )
@@ -387,7 +441,6 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
         os.environ["CST_E2E_NAS_CONTAINER"] = nas
         os.environ["CST_E2E_REPO_ROOT"] = str(REPO_ROOT)
 
-        suite = load_suite("suite_tier2_storage_cpu.py")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         ok = result.wasSuccessful()
         return ok
@@ -435,26 +488,34 @@ def run_tier2(run_id: str, artifact_dir: Path, *, rebuild: bool = False, keep_lo
             raise RuntimeError(f"Tier 2 loop device(s) leaked on host: {leaked}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="CST Docker E2E test runner")
-    parser.add_argument("--tier", action="append", type=int, choices=(1, 2), required=True)
-    parser.add_argument("--keep-logs", action="store_true")
-    parser.add_argument("--rebuild", action="store_true")
-    parser.add_argument(
-        "--allow-privileged",
-        action="store_true",
-        help=f"allow tier 2 (a --privileged container) to run; same as {PRIVILEGED_OPT_IN_ENV}=1",
-    )
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="only check that the requested tiers may run (opt-in for tier 2), then exit",
-    )
-    args = parser.parse_args(argv)
+def _validate_filters(
+    tiers: Sequence[int], raw_match: Sequence[str] | None, raw_tag: Sequence[str] | None
+) -> SuiteSelection:
+    if raw_tag is not None and 2 in tiers:
+        raise ValueError("--tag is only supported for tier 1")
+    patterns = parse_patterns(raw_match) if raw_match is not None else ()
+    tags = parse_tags(raw_tag) if raw_tag is not None else frozenset()
+    return SuiteSelection(patterns=patterns, tags=tags)
 
-    if 2 in args.tier and not privileged_allowed(args.allow_privileged):
-        print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
+
+def _list_tier_tests(tier: int, selection: SuiteSelection) -> int:
+    suite = _selected_suite(tier, selection)
+    if suite is None:
+        print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
         return 2
+    cases = iter_cases(suite)
+    print(f"Tier {tier} ({len(cases)} tests):")
+    for case in cases:
+        print(f"  {format_case_line(case)}")
+    return 0
+
+
+def _run_selected_tiers(tiers: Sequence[int], args: argparse.Namespace, selection: SuiteSelection) -> int:
+    if selection.active:
+        for tier in tiers:
+            if _selected_suite(tier, selection) is None:
+                print(f"[e2e] tier {tier}: no tests matched selection", file=sys.stderr)
+                return 2
     problem = checkout_preflight()
     if problem is not None:
         print(problem, file=sys.stderr, end="")
@@ -466,12 +527,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     artifact_dir = ARTIFACTS_BASE / run_id
     all_ok = True
     try:
-        for tier in sorted(set(args.tier)):
+        for tier in tiers:
             print(f"\n=== CST E2E LAYER {tier} (run_id={run_id}) ===", flush=True)
             if tier == 1:
-                ok = run_tier1(run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs)
+                ok = run_tier1(
+                    run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs, selection=selection
+                )
             else:
-                ok = run_tier2(run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs)
+                ok = run_tier2(
+                    run_id, artifact_dir, rebuild=args.rebuild, keep_logs=args.keep_logs, selection=selection
+                )
             all_ok = all_ok and ok
     finally:
         if all_ok and not args.keep_logs and artifact_dir.exists():
@@ -480,6 +545,59 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[e2e] logs preserved at {artifact_dir}", file=sys.stderr)
 
     return 0 if all_ok else 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="CST Docker E2E test runner")
+    parser.add_argument("--tier", action="append", type=int, choices=(1, 2), required=True)
+    parser.add_argument("--keep-logs", action="store_true")
+    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument(
+        "-k",
+        "--match",
+        action="append",
+        help="filter tests by substring or glob pattern (repeatable or comma-separated)",
+    )
+    parser.add_argument(
+        "--tag",
+        action="append",
+        help=f"filter tier 1 tests by domain tag ({', '.join(t.value for t in E2ETag)}; repeatable or comma-separated)",
+    )
+    parser.add_argument(
+        "--list-tests",
+        action="store_true",
+        help="list selected tests and exit without starting Docker",
+    )
+    parser.add_argument(
+        "--allow-privileged",
+        action="store_true",
+        help=f"allow tier 2 (a --privileged container) to run; same as {PRIVILEGED_OPT_IN_ENV}=1",
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="only check that the requested tiers may run (opt-in for tier 2), then exit",
+    )
+    args = parser.parse_args(argv)
+    tiers = sorted(set(args.tier))
+
+    if 2 in tiers and not privileged_allowed(args.allow_privileged):
+        print(PRIVILEGED_REFUSAL, file=sys.stderr, end="")
+        return 2
+    try:
+        selection = _validate_filters(tiers, args.match, args.tag)
+    except ValueError as exc:
+        print(f"[e2e] {exc}", file=sys.stderr)
+        return 2
+
+    if args.list_tests:
+        for tier in tiers:
+            rc = _list_tier_tests(tier, selection)
+            if rc != 0:
+                return rc
+        return 0
+
+    return _run_selected_tiers(tiers, args, selection)
 
 
 if __name__ == "__main__":

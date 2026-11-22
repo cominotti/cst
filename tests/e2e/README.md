@@ -110,6 +110,20 @@ Both commands take `--keep_logs` (keep the systemd, full boot journal and
 docker logs in `tests/e2e/.artifacts/` even on success; CI and nightly upload
 them from there with `include-hidden-files: true`) and `--rebuild` (rebuild
 the images).
+
+For focused local runs, Tier 1 (`tests/e2e/run.py` and `invowk cmd test e2e tier1`)
+also supports filtering and dry listing without starting containers:
+
+- `--match` / `-k PATTERN` (`invowk cmd test e2e tier1 --match PATTERN`): filter
+  tests by substring or glob (`*`, `?`), repeatable or comma-separated
+  (for example `--match test_02,test_157` or `-k "*bluetooth*"`).
+- `--tag TAG` (`invowk cmd test e2e tier1 --tag TAG`): filter Tier 1 tests by
+  semantic domain tag (`smoke`, `btrfs`, `cpu`, `bluetooth`, `swap`,
+  `toolchains`, `vm`, `doctor`, `install`, `nas`), repeatable or
+  comma-separated; when both `--tag` and `--match` are passed, both must match.
+- `--list_tests` (`run.py --list-tests`): list matching test names and tags and
+  exit without building or starting Docker containers (`run.py` also supports
+  `--match` and `--list-tests` with `--tier 2`).
 Without `--rebuild`, `run.py` uses a local image only when its label
 `org.cst.e2e.sources` is the digest of this checkout's sources
 (`tests/e2e/image_digest.py`: the image's Dockerfile, every file under

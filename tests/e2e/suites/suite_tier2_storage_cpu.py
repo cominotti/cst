@@ -829,13 +829,15 @@ def read_host_guard_snapshot() -> dict[str, str]:
 
 
 class Tier2StorageCpuE2ETest(unittest.TestCase):
-    PRIV_CONTAINER = os.environ["CST_E2E_PRIV_CONTAINER"]
-    NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
+    PRIV_CONTAINER: ClassVar[str] = ""
+    NAS_CONTAINER: ClassVar[str] = ""
     HOST_GUARD_BEFORE: ClassVar[dict[str, str]] = {}
 
     @classmethod
     @override
     def setUpClass(cls) -> None:
+        cls.PRIV_CONTAINER = os.environ["CST_E2E_PRIV_CONTAINER"]
+        cls.NAS_CONTAINER = os.environ["CST_E2E_NAS_CONTAINER"]
         cls.HOST_GUARD_BEFORE = read_host_guard_snapshot()
         exec_bash(
             cls.PRIV_CONTAINER,
