@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Mapping, Sequence
 import contextlib
 import fcntl
+import io
 import json
 import os
 import pty
@@ -32,9 +33,11 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 from typing import Any, override
 import unittest
+from unittest import mock
 
 # Run directly (python3 -I -B vm/tests/test_vm_nas.py): the checkout root holds the tests package.
 _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,7 +50,7 @@ from cst_core.domain.shapes import items_of
 from btrfs.tests.snapshot_fakes import RuntimeTest
 from cst_core.ports import ClockPort
 from vm import domain as vm_domain
-from vm.adapters import backup as vm_adapters_backup
+from vm.adapters import backup as vm_adapters_backup, restic as vm_adapters_restic
 from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
 from vm.ports import ProgressPort
@@ -2725,6 +2728,53 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertEqual(store2.removed, [overlay_a])
         commits = [c[0][2] for c in commands2.virsh_log if c[0][0] == "blockcommit"]
         self.assertEqual(commits, ["vda"])
+
+
+class _LingeringTimer(threading.Timer):
+    """A Timer whose thread goes on a while after cancel(), as a thread can under load."""
+
+    @override
+    def run(self) -> None:
+        super().run()
+        time.sleep(0.5)
+
+
+class ResticBackupThreadTest(unittest.TestCase):
+    """Restic.backup's timeout timer is a thread: none may outlive the backup, since a stop signal can go
+    to any thread that does not block it, and signals_held (the record of a torn snapshot) blocks it
+    only in the main thread."""
+
+    def test_no_thread_of_the_backup_outlives_it(self) -> None:
+        made: list[threading.Timer] = []
+
+        def lingering(interval: float, function: Callable[[], object]) -> threading.Timer:
+            made.append(_LingeringTimer(interval, function))
+            return made[-1]
+
+        class _Out:
+            def say(self, text: str, *, flush: bool = False) -> None:
+                pass
+
+            def warn(self, text: str) -> None:
+                pass
+
+        class _Child:  # restic backup --json that printed its summary and exited 0
+            stdout = io.StringIO('{"message_type": "summary", "snapshot_id": "abc"}\n')
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None:
+                pass
+
+        with (
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", lambda *_a, **_k: _Child()),
+            mock.patch.object(vm_adapters_restic.threading, "Timer", lingering),
+        ):
+            rc, summary = vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, _Out())
+        self.assertEqual((rc, summary.get("snapshot_id")), (0, "abc"))
+        self.assertEqual(len(made), 1)
+        self.assertFalse(made[0].is_alive(), "the timer's thread is still running")
 
 
 if __name__ == "__main__":
