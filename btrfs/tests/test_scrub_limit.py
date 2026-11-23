@@ -255,6 +255,8 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             dropin_path=self.dropin,
             btrfs_sysfs=self.sysfs,
             installer_script=os.path.join(REPO, "cst_core", "installer.py"),
+            # never the real /var/lib/cst/installed.json: apply reads btrfs:core's state there
+            record_path=os.path.join(self.tmp, "installed.json"),
         )
 
     def test_plan_set_idempotent_status_and_off_cycle(self) -> None:
