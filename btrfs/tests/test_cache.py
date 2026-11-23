@@ -587,6 +587,45 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
         self.assertEqual(self._fstab(), before)
 
+    def test_the_tags_owner_is_never_given_through_a_link(self) -> None:
+        # The user owns /var/mnt/scratchpad/<user> by then: a CACHEDIR.TAG swapped for a link right
+        # after the rename must not hand the link's target to the user (os.chown by path followed it).
+        victim = os.path.join(self.tmp, "victim")
+        with open(victim, "w", encoding="utf-8") as fh:
+            fh.write("secret\n")
+        tag = os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo", CACHE_TAG)
+        real_replace = os.replace
+        chowned: list[tuple[str, int, int]] = []
+
+        def replace_then_swap(src: str, dst: str) -> None:
+            real_replace(src, dst)
+            if dst == tag:
+                os.rename(tag, f"{tag}.moved")
+                os.symlink(victim, tag)
+
+        def fchown(fd: int, uid: int, gid: int) -> None:
+            chowned.append((os.readlink(f"/proc/self/fd/{fd}"), uid, gid))
+
+        def chown(path: str, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+            chowned.append((os.path.realpath(path) if follow_symlinks else path, uid, gid))
+
+        with (
+            unittest.mock.patch("os.geteuid", return_value=0),
+            unittest.mock.patch("os.replace", side_effect=replace_then_swap),
+            unittest.mock.patch("os.fchown", side_effect=fchown),
+            unittest.mock.patch("os.chown", side_effect=chown),
+            unittest.mock.patch("shutil.which", return_value=None),
+        ):
+            rc, _, err = self._run(["attach", "--no-cache"])
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(victim, [path for path, _, _ in chowned])
+        tag_tmp = [
+            (uid, gid)
+            for path, uid, gid in chowned
+            if os.path.dirname(path) == os.path.dirname(tag) and os.path.basename(path).startswith(f".{CACHE_TAG}.")
+        ]
+        self.assertEqual(tag_tmp, [(1000, 1000)])
+
     def _mounted(self) -> list[str]:
         return [str(m["target"]) for m in self.runner.mounts if str(m["target"]).startswith("/var/home/")]
 

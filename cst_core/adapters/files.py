@@ -373,7 +373,7 @@ def write_atomic(
     *,
     mode: int | Literal["umask"],
     durable: bool | Literal["file"] = True,
-    owner: FileOwner = FileOwner.CALLER,
+    owner: FileOwner | tuple[int, int] = FileOwner.CALLER,
     relabel: bool = True,
 ) -> None:
     """Replace the file at path with data, atomically: path holds the old or the new file, never a part.
@@ -390,7 +390,10 @@ def write_atomic(
       file only (after a power loss the folder may still name the old file,
       never a part of the new one). False: no fsync.
     - owner: "caller" leaves the file to whoever writes it; "root" also makes
-      it 0:0 when running as root (the installer's files).
+      it 0:0 when running as root (the installer's files); a (uid, gid) pair
+      makes it that user's when running as root. The owner is set on the
+      temporary file before the rename, never by path, so a link someone puts
+      at path meanwhile is not followed.
     - relabel (the default): as root, the file is relabelled (restorecon); a
       failure is reported on stderr, not raised. False: the file keeps the
       label it gets from its folder, and no program is started.
@@ -406,8 +409,11 @@ def write_atomic(
     try:
         try:
             os.fchmod(fd, bits)
-            if owner == FileOwner.ROOT and os.geteuid() == 0:
-                os.fchown(fd, 0, 0)
+            if os.geteuid() == 0:
+                if isinstance(owner, tuple):
+                    os.fchown(fd, *owner)
+                elif owner == FileOwner.ROOT:
+                    os.fchown(fd, 0, 0)
             view = memoryview(content)
             while view:
                 view = view[os.write(fd, view) :]

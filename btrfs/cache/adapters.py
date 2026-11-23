@@ -276,9 +276,7 @@ def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
     if os.path.lexists(tag_path):
         return
     payload = CACHE_SIGNATURE + b"\n# Directory tag written by cst btrfs cache (excluded from backups).\n"
-    write_atomic(tag_path, payload, mode=FILE_MODE_TAG)
-    if os.geteuid() == 0:
-        os.chown(tag_path, user.uid, user.gid)
+    write_atomic(tag_path, payload, mode=FILE_MODE_TAG, owner=(user.uid, user.gid))
 
 
 def _run_mount(rt: _CacheMountRuntime, argv: list[str], what: str) -> str | None:

@@ -891,6 +891,29 @@ class WriteAtomicTest(unittest.TestCase):
                 if calls:
                     self.assertEqual(fchown.call_args.args[1:], (0, 0))
 
+    def test_owner_ids_go_on_the_temporary_file_as_root(self) -> None:
+        # owner=(uid, gid): fchown of the file written, before the rename (a link put at dest
+        # meanwhile is never followed); not as another user.
+        seen: list[tuple[int, int, bool]] = []
+
+        def fchown(_fd: int, uid: int, gid: int) -> None:
+            seen.append((uid, gid, os.path.lexists(self.dest)))
+
+        for euid, calls in ((0, [(1234, 5678, False)]), (1000, [])):
+            seen.clear()
+            with (
+                self.subTest(euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.os, "fchown", side_effect=fchown),
+                mock.patch.object(core_files.shutil, "which", return_value=None),
+            ):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.dest)
+                core_files.write_atomic(self.dest, b"x", mode=0o644, owner=(1234, 5678))
+                self.assertEqual(seen, calls)
+                with open(self.dest, "rb") as fh:
+                    self.assertEqual(fh.read(), b"x")
+
     def test_a_link_at_dest_is_replaced_not_followed(self) -> None:
         target = os.path.join(self.tmp, "target")
         with open(target, "w") as fh:
