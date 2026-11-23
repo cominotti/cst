@@ -501,7 +501,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn(f"-> {tgt} [mounted (not in fstab)]", out)
         self.runner.add_mount("tmpfs", tgt, fsroot="/", uuid=None)
         _, out, _ = self._run(["status"])
-        self.assertIn(f"-> {tgt} [mounted (other source!)]", out)
+        self.assertIn(f"-> {tgt} [mounted (other source on top of CST's bind!)]", out)
 
     def test_a_home_with_a_space_matches_its_escaped_fstab_line(self) -> None:
         with open(os.path.join(self.tmp, "etc", "passwd"), "a", encoding="utf-8") as fh:
@@ -702,14 +702,56 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
 
     def test_detach_keeps_a_mount_cst_did_not_make(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)
+        cache_tgt = os.path.join(self.tmp, "var/home/danilo/.cache")
+        self.runner.run(["umount", cache_tgt])
         self.runner.add_mount("tmpfs", "/var/home/danilo/.cache", fsroot="/", uuid=None)
         self.runner.calls.clear()
         rc, out, err = self._run(["detach"])
         self.assertEqual(rc, 0, err)
         self.assertIn("kept: /var/home/danilo/.cache has a mount CST did not make", out)
-        self.assertNotIn(["umount", os.path.join(self.tmp, "var/home/danilo/.cache")], self.runner.calls)
+        self.assertNotIn(["umount", cache_tgt], self.runner.calls)
         self.assertIn(["umount", os.path.join(self.tmp, "var/home/danilo/Scratchpad")], self.runner.calls)
         self.assertNotIn("user=danilo", self._fstab())
+
+    def test_detach_refuses_when_another_mount_hides_csts_bind(self) -> None:
+        # Only the top mount was looked at: detach said "kept", dropped the managed line and left CST's
+        # bind mounted under the tmpfs, where no status could see it.
+        self.assertEqual(self._run(["attach"])[0], 0)
+        attached = self._fstab()
+        self.runner.add_mount("tmpfs", "/var/home/danilo/.cache", fsroot="/", uuid=None)
+        _, out_s, _ = self._run(["status"])
+        self.assertIn("-> /var/home/danilo/.cache [mounted (other source on top of CST's bind!)]", out_s)
+        self.runner.calls.clear()
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: /var/home/danilo/.cache has a mount CST did not make on top of CST's bind of "
+            "/var/mnt/cache/danilo; unmount that one first, then run detach again",
+            err,
+        )
+        self.assertEqual(self._fstab(), attached)
+        self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
+
+    def test_detach_refuses_while_the_base_is_not_mounted(self) -> None:
+        # With /var/mnt/cache unmounted, CST's own bind was "a mount CST did not make": detach kept it
+        # mounted and still removed its managed line.
+        self.assertEqual(self._run(["attach"])[0], 0)
+        attached = self._fstab()
+        self.runner.mounts = [m for m in self.runner.mounts if m["target"] != CACHE_BASE]
+        _, out_s, _ = self._run(["status"])
+        self.assertIn("-> /var/home/danilo/.cache [mounted (source not checked: base not mounted)]", out_s)
+        self.runner.calls.clear()
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: /var/home/danilo/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot "
+            "tell whether it is its bind; mount /var/mnt/cache and run detach again",
+            err,
+        )
+        self.assertEqual(self._fstab(), attached)
+        self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
+        rc_s, _, err_s = self._run(["detach", "--no-cache"])
+        self.assertEqual(rc_s, 0, err_s)
 
     def test_a_failed_detach_mounts_again_what_it_unmounted(self) -> None:
         self.assertEqual(self._run(["attach"])[0], 0)

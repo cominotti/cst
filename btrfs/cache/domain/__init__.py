@@ -181,6 +181,10 @@ class BindingProbe:
     fstab_unmanaged: bool = False
     source_is_symlink: bool = False
     target_not_dir: bool = False
+    source_unchecked: bool = False
+    """A mount is at the target, but the base is not mounted: whether it is CST's bind cannot be told."""
+    bind_below: bool = False
+    """The mount on top is not CST's, and CST's bind is below it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +290,14 @@ def parse_findmnt_mounts(text: str) -> tuple[LiveMount, ...] | None:
 def mounts_by_target(mounts: Sequence[LiveMount]) -> dict[str, LiveMount]:
     """The mount on top at each target: of mounts stacked on one target, findmnt lists the top one last."""
     return {m.target: m for m in mounts}
+
+
+def mount_stacks(mounts: Sequence[LiveMount]) -> dict[str, tuple[LiveMount, ...]]:
+    """Every mount at each target, bottom first (findmnt lists the top one last)."""
+    stacks: dict[str, list[LiveMount]] = {}
+    for m in mounts:
+        stacks.setdefault(m.target, []).append(m)
+    return {target: tuple(stack) for target, stack in stacks.items()}
 
 
 def mount_holding(mounts: Sequence[LiveMount], path: str) -> LiveMount | None:
@@ -513,6 +525,25 @@ def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKi
     return "\n".join(out_lines) + "\n" if out_lines else ""
 
 
+def detach_blockers(snap: CacheMountSnapshot) -> list[str]:
+    """Why detach must change nothing: a target whose mount it cannot tell (its base not mounted), or
+    one where CST's bind is under a mount CST did not make (umount would take that one away)."""
+    errors: list[str] = []
+    for probe in snap.bindings:
+        b = probe.binding
+        if probe.source_unchecked:
+            errors.append(
+                f"{b.target} has a mount and {b.base} is not mounted, so CST cannot tell whether it is its "
+                f"bind; mount {b.base} and run detach again"
+            )
+        elif probe.bind_below:
+            errors.append(
+                f"{b.target} has a mount CST did not make on top of CST's bind of {b.source}; "
+                "unmount that one first, then run detach again"
+            )
+    return errors
+
+
 def _base_blockers(base: BaseMountInfo | None, base_path: str, home_uuid: str) -> list[str]:
     if base is None or not base.mounted:
         return [f"{base_path} is not mounted (provision & mount the cache drive's btrfs subvolumes first)"]
@@ -593,6 +624,8 @@ def _binding_state_label(probe: BindingProbe) -> str:
     if probe.mounted_from_source:
         return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
     states = (
+        (probe.source_unchecked, "mounted (source not checked: base not mounted)"),
+        (probe.bind_below, "mounted (other source on top of CST's bind!)"),
         (probe.mounted_other, "mounted (other source!)"),
         (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
         (probe.in_fstab, "in fstab (not mounted)"),

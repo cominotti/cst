@@ -1604,7 +1604,13 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   with what it could not undo. `detach` unmounts only the binds CST made
   (`kept: TARGET has a mount CST did not make` for any other) and removes
   the user's managed lines; when that fails, it mounts again what it
-  unmounted.
+  unmounted. It changes nothing, and says why, when it cannot tell CST's
+  bind from another mount (the base folder, `/var/mnt/cache` or
+  `/var/mnt/scratchpad`, is not mounted) or when another mount sits on top
+  of CST's bind (unmounting the target would take that one away instead):
+  mount the base, or unmount the other mount, and run `detach` again.
+  `status` shows these two as `mounted (source not checked: base not
+  mounted)` and `mounted (other source on top of CST's bind!)`.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

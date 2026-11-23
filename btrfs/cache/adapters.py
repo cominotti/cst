@@ -33,7 +33,9 @@ from btrfs.cache.domain import (
     format_cache_mount_status,
     has_managed_line,
     is_bind_from,
+    detach_blockers,
     mount_holding,
+    mount_stacks,
     mounts_by_target,
     parse_all_mounts,
     parse_findmnt_mounts,
@@ -73,6 +75,7 @@ class _CacheMountRuntime:
 @dataclass(frozen=True, slots=True)
 class _MountTables:
     live: dict[str, LiveMount]
+    stacks: dict[str, tuple[LiveMount, ...]]
     fstab: dict[str, MountEntry]
     managed: tuple[ManagedFstabEntry, ...]
     unmanaged_targets: frozenset[str]
@@ -205,16 +208,19 @@ def _probe_binding(
     )[0]
     mapped_src = _map_path(binding.source, rt, read_only=True)
     mapped_tgt = _map_path(binding.target, rt, read_only=True)
-    live = tables.live.get(binding.target)
+    stack = tables.stacks.get(binding.target, ())
+    live = stack[-1] if stack else None
     is_link = os.path.islink(mapped_tgt)
     exists = os.path.lexists(mapped_tgt)
     nonempty = False if is_link else _dir_is_nonempty(mapped_tgt)
     from_source = live is not None and is_bind_from(live, base_info, user.name)
+    # Without its base mounted, no mount at the target can be told to be CST's bind or another one.
+    mounted_other = live is not None and base_info.mounted and not from_source
     return BindingProbe(
         binding,
         has_managed_line(tables.managed, binding),
         from_source,
-        live is not None and not from_source,
+        mounted_other,
         is_link,
         exists,
         nonempty,
@@ -222,6 +228,8 @@ def _probe_binding(
         fstab_unmanaged=binding.target in tables.unmanaged_targets,
         source_is_symlink=os.path.islink(mapped_src),
         target_not_dir=exists and not is_link and not os.path.isdir(mapped_tgt),
+        source_unchecked=live is not None and not base_info.mounted,
+        bind_below=mounted_other and any(is_bind_from(m, base_info, user.name) for m in stack[:-1]),
     )
 
 
@@ -243,6 +251,7 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> Cac
     managed = parse_managed_fstab_entries(fstab_text or "")
     tables = _MountTables(
         live=mounts_by_target(mounts),
+        stacks=mount_stacks(mounts),
         fstab={m.target: m for m in parse_all_mounts(fstab_text or "")},
         managed=managed,
         unmanaged_targets=unmanaged_fstab_targets(fstab_text or ""),
@@ -389,7 +398,9 @@ def _apply_detach(
     snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, rt: _CacheMountRuntime
 ) -> tuple[int, list[str]]:
     """Unmount only the binds CST made, then drop the user's managed lines; a failure mounts again
-    what this run unmounted. A mount CST did not make stays (its managed line still goes)."""
+    what this run unmounted. A mount CST did not make stays (its managed line still goes); a target
+    whose mount cannot be told (base not mounted) or that hides CST's bind under another mount makes
+    detach change nothing."""
     if snap.user is None:
         return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
     if snap.mounts_error is not None:
@@ -399,6 +410,9 @@ def _apply_detach(
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     lines = cache_seam_lines(rt.seam_root)
+    blockers = detach_blockers(snap)
+    if blockers:
+        return 1, [*lines, *(f"ERROR: {msg}" for msg in blockers)]
 
     unmounted: list[CacheMountBinding] = []
     for probe in snap.bindings:
