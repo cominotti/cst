@@ -149,10 +149,11 @@ def _is_cst_bind(live: MountEntry, base_live: MountEntry | None, user: str) -> b
         return True
     if mount_device(live.source) != mount_device(base_live.source):
         return False
-    root, base_root = source_fsroot(live.source), source_fsroot(base_live.source)
-    if root is not None and base_root is None:
-        base_root = "/"
-    return root is None or base_root is None or root == posixpath.join(base_root, user)
+    root = source_fsroot(live.source)
+    if root is None:
+        return True
+    base_root = source_fsroot(base_live.source)
+    return root == posixpath.join("/" if base_root is None else base_root, user)
 
 
 def assess_cache_mount_health(
