@@ -14,6 +14,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_btrfs_setup -v
 """
 
+from collections.abc import Sequence
 import json
 import os
 from pathlib import Path
@@ -1871,8 +1872,13 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
 
-    def _nvme_lines(self, param: str | None, *, managed: bool) -> list[str]:
-        """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file)."""
+    def _nvme_lines(self, param: str | None, *, managed: bool, tolerances: Sequence[str] = ()) -> list[str]:
+        """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file) and
+        controllers nvme0, nvme1, ... whose latency tolerance holds each of TOLERANCES."""
+        for i, value in enumerate(tolerances):
+            qos = Path(self.tmp, "class", f"nvme{i}", "power", "pm_qos_latency_tolerance_us")
+            qos.parent.mkdir(parents=True, exist_ok=True)
+            qos.write_text(f"{value}\n", encoding="utf-8")
         param_path = os.path.join(self.tmp, "default_ps_max_latency_us")
         managed_path = os.path.join(self.tmp, "cst-nvme-apst.conf")
         if param is not None:
@@ -1885,6 +1891,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
             "    *) ;;",
             f'NVME_APST_PARAM="{param_path}"',
             f'NVME_APST_FILE="{managed_path}"',
+            f'NVME_QOS_GLOB="{self.tmp}/class/nvme*/power/pm_qos_latency_tolerance_us"',
         )
         return [line for line in out.splitlines() if "nvme" in line]
 
@@ -1898,6 +1905,24 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.assertEqual(
             self._nvme_lines("100000", managed=False),
             ["  nvme default_ps_latency   100000 us (not managed: run install)"],
+        )
+
+    def test_nvme_latency_tolerance_per_controller(self) -> None:
+        self.assertEqual(
+            self._nvme_lines("0", managed=True, tolerances=("0", "100000")),
+            [
+                "  nvme default_ps_latency   0 us ok",
+                "  nvme0 latency tolerance   0 us ok",
+                "  nvme1 latency tolerance   100000 us DRIFT (expected 0; run install)",
+            ],
+        )
+        os.unlink(os.path.join(self.tmp, "cst-nvme-apst.conf"))
+        self.assertEqual(
+            self._nvme_lines("0", managed=False)[1:],
+            [
+                "  nvme0 latency tolerance   0 us (not managed: run install)",
+                "  nvme1 latency tolerance   100000 us (not managed: run install)",
+            ],
         )
 
     def test_nvme_without_the_kernel_parameter_prints_no_line(self) -> None:

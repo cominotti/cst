@@ -707,6 +707,22 @@ status_mounts() {
             printf '  %-25s %s us DRIFT (expected 0; run install)\n' "nvme default_ps_latency" "${have}"
         fi
     fi
+    # The same file (and 65-cst-nvme-apst.rules) sets each controller's latency tolerance to 0.
+    local qos_glob="${NVME_QOS_GLOB:-/sys/class/nvme/nvme*/power/pm_qos_latency_tolerance_us}"
+    local qos ctrl
+    for qos in ${qos_glob}; do
+        [[ -r "${qos}" ]] || continue
+        ctrl="${qos%/power/pm_qos_latency_tolerance_us}"
+        ctrl="${ctrl##*/}"
+        have="$(<"${qos}")"
+        if [[ ! -e "${nvme_file}" ]]; then
+            printf '  %-25s %s us (not managed: run install)\n' "${ctrl} latency tolerance" "${have}"
+        elif [[ "${have}" == "0" ]]; then
+            printf '  %-25s %s us ok\n' "${ctrl} latency tolerance" "${have}"
+        else
+            printf '  %-25s %s us DRIFT (expected 0; run install)\n' "${ctrl} latency tolerance" "${have}"
+        fi
+    done
 }
 
 status() (
