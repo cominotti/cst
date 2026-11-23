@@ -3,10 +3,11 @@
 
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import IO, Final, NamedTuple
 import glob
 import gzip
+import math
 import os
 import re
 import shutil
@@ -276,39 +277,42 @@ def _pick(row: dict[str, object], *cands: str) -> object:
 
 
 def _rate_number(v: object) -> float:
-    """A rate of below's: a number, or the number a text starts with ("300.5 B/s"); else 0."""
+    """A rate of below's: a number, or the number a text starts with ("300.5 B/s"); else 0 (also for a
+    JSON NaN or Infinity, which parse_json accepts and which would make the whole total NaN)."""
     if isinstance(v, (int, float)):
-        return float(v)
+        return float(v) if math.isfinite(v) else 0.0
     m = re.match(r"\s*([\d.]+)", str(v or ""))
     return float(group(m, 1)) if m else 0.0
 
 
-_DEFAULT_BELOW_INTERVAL_S: Final = 5.0
+# below records every 15 s (--interval 15, btrfs/units/below.service.d/10-cst.conf): a row without a
+# usable time counts that long.
+_DEFAULT_BELOW_INTERVAL_S: Final = 15.0
 _MIN_BELOW_INTERVAL_S: Final = 1.0
 _MAX_BELOW_INTERVAL_S: Final = 300.0
 _MIN_TIMESTAMPS_FOR_DELTA: Final = 2
 
 
 def _parse_below_timestamp(v: object) -> float | None:
-    """Parse numeric epoch or ISO datetime string from a `below dump` row."""
+    """Parse numeric epoch or ISO datetime string from a `below dump` row (None: no usable time, also
+    NaN or an infinity). An ISO time without a zone is local time, as below prints it."""
     if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return float(v)
+        return float(v) if math.isfinite(v) else None
     if not isinstance(v, str):
         return None
     text = v.strip()
     if not text:
         return None
     try:
-        return float(text)
+        num = float(text)
     except ValueError:
         pass
+    else:
+        return num if math.isfinite(num) else None
     try:
-        dt_obj = datetime.fromisoformat(text)
-    except ValueError:
+        return datetime.fromisoformat(text).timestamp()
+    except (ValueError, OverflowError, OSError):
         return None
-    if dt_obj.tzinfo is None:
-        dt_obj = dt_obj.replace(tzinfo=UTC)
-    return dt_obj.timestamp()
 
 
 def _below_sample_intervals(row_ts: Sequence[float | None]) -> tuple[dict[float, float], float]:

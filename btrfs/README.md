@@ -588,6 +588,15 @@ every 15 minutes.
 each process and cgroup read and wrote (reduced from 5 s to cut continuous metadata write amplification by 3x while `btrfs-stall-monitord` keeps sampling every 5 s / 1 s in RAM, and `btrfs-stall-report` integrates `below` samples using actual timestamp deltas). The stall monitor knows *that* the disk
 was busy; below knows *who* did it.
 
+How `btrfs-stall-report` counts below's bytes: each sample's rate times the
+time since the sample before it, counted in full up to 300 s (a sample written
+late, during the stall the report is about, covers that whole time). A row
+without a usable time (none, a time that is not a number or a date, NaN or an
+infinity), the first sample, and gaps outside 1..300 s count the typical gap
+of the window, or 15 s (the recording interval) when there is none. A time
+without a zone is local time, as below prints it. A rate that is not a finite
+number counts 0.
+
 `install` adds it with `rpm-ostree install --apply-live below`. **rpm-ostree** is
 the tool that manages the Silverblue system image. Extra packages are
 "layered" on top of the read-only image. If another system update is already

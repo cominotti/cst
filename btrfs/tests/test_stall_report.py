@@ -1974,8 +1974,8 @@ class ReportCommandsTest(unittest.TestCase):
         self.assertEqual(
             items,
             [
-                {"comm": "cp", "cgroup": "user.slice", "bytes": 1502},
-                {"comm": "dd", "cgroup": "a.service", "bytes": 750},
+                {"comm": "cp", "cgroup": "user.slice", "bytes": 4507},  # rows without a time: 15 s each
+                {"comm": "dd", "cgroup": "a.service", "bytes": 2250},
             ],
         )
         self.assertEqual(
@@ -2005,16 +2005,72 @@ class ReportCommandsTest(unittest.TestCase):
             rp_adapters.below_top(1, 2, "io.rbytes_per_sec"),
             (
                 [
-                    {"comm": "b", "cgroup": "", "bytes": 20},
-                    {"comm": "?", "cgroup": "", "bytes": 15},
-                    {"comm": "a", "cgroup": "y.service", "bytes": 10},
-                    {"comm": "c", "cgroup": "z", "bytes": 5},
+                    {"comm": "b", "cgroup": "", "bytes": 60},
+                    {"comm": "?", "cgroup": "", "bytes": 45},
+                    {"comm": "a", "cgroup": "y.service", "bytes": 30},
+                    {"comm": "c", "cgroup": "z", "bytes": 15},
                 ],
                 None,
             ),
         )
         self.fake("below", b"")
         self.assertEqual(rp_adapters.below_top(1, 2, "io.rbytes_per_sec"), ([], None))
+
+    def _below_bytes(self, *rows: str) -> list[rp_records.BelowItem] | None:
+        self.fake("below", ("[" + ", ".join(rows) + "]").encode())
+        items, err = rp_adapters.below_top(1, 2, "io.rbytes_per_sec")
+        self.assertIsNone(err)
+        return items
+
+    def test_a_row_without_a_time_counts_below_s_15_s_interval(self) -> None:
+        self.assertEqual(
+            self._below_bytes('{"comm": "a", "io.rbytes_per_sec": 10}'), [{"comm": "a", "cgroup": "", "bytes": 150}]
+        )
+
+    def test_non_finite_rates_count_zero_and_non_finite_times_are_no_time(self) -> None:
+        # parse_json reads NaN and Infinity; a NaN rate made the total NaN, and int() of it raised.
+        self.assertEqual(
+            self._below_bytes(
+                '{"comm": "a", "io.rbytes_per_sec": NaN}',
+                '{"comm": "b", "io.rbytes_per_sec": Infinity}',
+                '{"comm": "c", "io.rbytes_per_sec": 2}',
+            ),
+            [{"comm": "c", "cgroup": "", "bytes": 30}],
+        )
+        self.assertEqual(
+            self._below_bytes(
+                '{"comm": "a", "timestamp": 1000, "io.rbytes_per_sec": 1}',
+                '{"comm": "a", "timestamp": 1030, "io.rbytes_per_sec": 1}',
+                '{"comm": "a", "timestamp": NaN, "io.rbytes_per_sec": 1}',
+                '{"comm": "a", "timestamp": "inf", "io.rbytes_per_sec": 1}',
+            ),
+            [{"comm": "a", "cgroup": "", "bytes": 120}],  # 30 s each: the typical gap of the usable times
+        )
+
+    def test_a_time_without_a_zone_is_local_time(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"PATH": self.bin, "TZ": "UTC+3"})  # local time is UTC-3
+        patcher.start()
+        self.addCleanup(time.tzset)
+        self.addCleanup(patcher.stop)
+        time.tzset()
+        # 10:00:00-03:00 and 10:00:15 local are 15 s apart (read as UTC, 3 h minus 15 s: no usable gap).
+        self.assertEqual(
+            self._below_bytes(
+                '{"comm": "a", "timestamp": "2026-11-22T10:00:00-03:00", "io.rbytes_per_sec": 1}',
+                '{"comm": "a", "timestamp": "2026-11-22T10:00:15", "io.rbytes_per_sec": 1}',
+            ),
+            [{"comm": "a", "cgroup": "", "bytes": 30}],
+        )
+
+    def test_a_late_sample_counts_its_whole_gap(self) -> None:
+        # below's rates of a sample cover the time since the one before: a gap up to 300 s counts in full
+        # (a sample written late during a stall is where the IO was); longer gaps count the typical one.
+        self.assertEqual(
+            self._below_bytes(
+                *(f'{{"comm": "a", "timestamp": {ts}, "io.rbytes_per_sec": 1}}' for ts in (1000, 1015, 1030, 1150, 2000))
+            ),
+            [{"comm": "a", "cgroup": "", "bytes": 15 + 15 + 15 + 120 + 15}],
+        )
 
     def test_a_failed_below_is_the_error_of_the_section(self) -> None:
         self.fake("below", b"ignored", err="x\n", rc=1)
@@ -2034,7 +2090,7 @@ class ReportCommandsTest(unittest.TestCase):
         self.fake("below", b'[{"comm": "a\xffb", "cgroup": "/system.slice/a.service", "io.rbytes_per_sec": 2}]')
         self.assertEqual(
             rp_adapters.below_top(1, 2, "io.rbytes_per_sec"),
-            ([{"comm": "a\ufffdb", "cgroup": "a.service", "bytes": 10}], None),
+            ([{"comm": "a\ufffdb", "cgroup": "a.service", "bytes": 30}], None),
         )
         self.fake("docker", b"0123456789abcdef\tw\xffeb\n")
         self.assertEqual(rp_adapters.container_names(), {"docker-0123456789ab": "w\ufffdeb"})
