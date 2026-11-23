@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -600,6 +601,10 @@ class PerfScratchIntegrationTest(unittest.TestCase):
 
         bad = io.StringIO()
         ok = io.StringIO()
+        # main() puts SIGPIPE and SIGXFSZ back at their default: in-process, the rest of this worker's tests
+        # would inherit that (a closed-stdout test then died of SIGPIPE).
+        for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
         with mock.patch.dict(os.environ, {"CST_PROG": "./cst perf"}, clear=True):
             self.assertEqual(perf_cli_main(["--help"], out=ok, err=bad), EXIT_PERF_OK)
             self.assertIn("Usage: ./cst perf", ok.getvalue())

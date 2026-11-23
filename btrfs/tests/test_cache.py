@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import posixpath
 import shutil
+import signal
 import stat
 import tempfile
 from typing import override
@@ -977,4 +978,8 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             rc_box, _, err_box = self._run(["attach"], container=True, root=False)
         self.assertEqual(rc_box, 1)
         self.assertIn("toolbox/container", err_box)
+        # main() puts SIGPIPE and SIGXFSZ back at their default (undo_python_start): in-process, the rest of
+        # this worker's tests would inherit that (a closed-stdout test then died of SIGPIPE).
+        for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
         self.assertEqual(cache_mount_main(["--help"]), 0)
