@@ -24,6 +24,13 @@ TOP_MOUNT_UNIT_PATH: Final[str] = r"/etc/systemd/system/var-mnt-btrfs\x2dtop.mou
 TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
 
 ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var", "/var/home", "/home"})
+# fstab: without a UUID=<root uuid> to compare, these targets are the root filesystem's; /home and
+# /var/home are its only when they name the same source as one of them (a separate btrfs /home is another
+# filesystem, never changed).
+_PRIMARY_ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var"})
+_HOME_TARGETS: Final[frozenset[str]] = ROOT_TARGETS - _PRIMARY_ROOT_TARGETS
+_UUID_PREFIX: Final = "UUID="
+_SUBVOL_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 ROOTFLAGS_PREFIX: Final[str] = "rootflags="
 _BTRFS_FSTYPE: Final[str] = "btrfs"
 _ZSTD_ALGO: Final[str] = "zstd"
@@ -363,10 +370,30 @@ def _unescape_fstab(field: str) -> str:
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
 
 
-def _is_root_btrfs_entry(source: str, target: str, root_uuid: str) -> bool:
-    if target in ROOT_TARGETS:
+def _fstab_uuid(source: str) -> str | None:
+    """The UUID of a `UUID=...` fstab source (lower case), or None for another kind of source."""
+    return source[len(_UUID_PREFIX) :].lower() if source[: len(_UUID_PREFIX)].upper() == _UUID_PREFIX else None
+
+
+def _is_primary_root_entry(source: str, target: str, root_uuid: str) -> bool:
+    """An fstab line of the root filesystem on its own: UUID=<root_uuid> on any target (another UUID= is
+    another filesystem, whatever its target); without a UUID to compare, a target of /, /sysroot or /var."""
+    uuid = _fstab_uuid(source)
+    if uuid is not None and root_uuid:
+        return uuid == root_uuid.lower()
+    return target in _PRIMARY_ROOT_TARGETS
+
+
+def _root_fstab_sources(entries: Sequence[MountEntry], root_uuid: str) -> frozenset[str]:
+    return frozenset(e.source for e in entries if _is_primary_root_entry(e.source, e.target, root_uuid))
+
+
+def _is_root_btrfs_entry(source: str, target: str, root_uuid: str, root_sources: frozenset[str]) -> bool:
+    """/home and /var/home are the root filesystem's only when their source names it (Fedora's default:
+    a subvolume of it); a separate btrfs /home is never one."""
+    if _is_primary_root_entry(source, target, root_uuid):
         return True
-    return bool(root_uuid and source == f"UUID={root_uuid}")
+    return target in _HOME_TARGETS and source in root_sources
 
 
 def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
@@ -390,13 +417,14 @@ def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
 
 def parse_fstab_root_entries(fstab_text: str, root_uuid: str = "") -> tuple[MountEntry, ...]:
     """Return btrfs entries in `/etc/fstab` belonging to the root filesystem."""
-    return tuple(
-        entry for entry in parse_proc_mounts(fstab_text) if _is_root_btrfs_entry(entry.source, entry.target, root_uuid)
-    )
+    entries = parse_proc_mounts(fstab_text)
+    sources = _root_fstab_sources(entries, root_uuid)
+    return tuple(e for e in entries if _is_root_btrfs_entry(e.source, e.target, root_uuid, sources))
 
 
 def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str], root_uuid: str = "") -> str:
     """Rewrite options on root btrfs `/etc/fstab` lines using `option_rewriter`, keeping formatting."""
+    sources = _root_fstab_sources(parse_proc_mounts(fstab_text), root_uuid)
     out_lines: list[str] = []
     for raw_line in fstab_text.splitlines(keepends=True):
         stripped = raw_line.strip()
@@ -405,7 +433,7 @@ def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str]
             continue
         match list(_NON_WS_RE.finditer(raw_line)):
             case [s_src, s_tgt, s_type, s_opt, *_] if s_type.group() == _BTRFS_FSTYPE and _is_root_btrfs_entry(
-                _unescape_fstab(s_src.group()), _unescape_fstab(s_tgt.group()), root_uuid
+                _unescape_fstab(s_src.group()), _unescape_fstab(s_tgt.group()), root_uuid, sources
             ):
                 new_opts = option_rewriter(s_opt.group())
                 out_lines.append(raw_line[: s_opt.start()] + new_opts + raw_line[s_opt.end() :])
@@ -488,9 +516,22 @@ def top_mount_options_from_var(var_options: str) -> str:
     return ",".join(["subvolid=5", *kept])
 
 
+def _mount_device(source: str) -> str:
+    """A live mount's device: findmnt's SOURCE without its "[/subvolume]" part (btrfs shows one device
+    name for every mount of a filesystem)."""
+    return _SUBVOL_SUFFIX_RE.sub("", source)
+
+
 def pick_root_mounts(mounts: Sequence[MountEntry]) -> tuple[MountEntry, ...]:
-    """Filter `/proc/mounts` btrfs entries to root workstation mounts (`/sysroot`, `/var`, `/var/home`, `/`)."""
-    return tuple(m for m in mounts if m.target in ROOT_TARGETS)
+    """Filter `/proc/mounts` btrfs entries to root workstation mounts (`/sysroot`, `/var`, `/var/home`, `/`)
+    of the root filesystem: the device of /sysroot, else /, else /var. A separate btrfs /home is left out;
+    with none of those three on btrfs, nothing is a root mount."""
+    by_target = {m.target: m for m in mounts}
+    anchor = next((by_target[t] for t in ("/sysroot", "/", "/var") if t in by_target), None)
+    if anchor is None:
+        return ()
+    device = _mount_device(anchor.source)
+    return tuple(m for m in mounts if m.target in ROOT_TARGETS and _mount_device(m.source) == device)
 
 
 def pick_remount_target(mounts: Sequence[MountEntry]) -> MountEntry | None:

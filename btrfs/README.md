@@ -1403,6 +1403,18 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
 
 On failure at any step, prior changes are rolled back so the layers never drift.
 
+**Only the root filesystem:** `apply` and `revert` (here and in
+`commit-interval`, section 9.3) change only the root btrfs filesystem's
+`/etc/fstab` lines and mounts. An fstab line is the root's when its source is
+`UUID=` of the root filesystem; a line with another `UUID=` is another
+filesystem, whatever its mount point. Without a UUID to compare (`LABEL=`,
+`/dev/...`), `/`, `/sysroot` and `/var` are the root's, and `/home` or
+`/var/home` only when its source is the same as theirs. A live mount is the
+root's when it is on the device of `/sysroot` (else `/`, else `/var`). So
+Fedora's default `/home` (a subvolume of the root filesystem) follows the
+setting, and a separate btrfs `/home` or `/var/home` is never changed or
+remounted.
+
 **What it does not touch:** the live remount takes effect immediately for new
 writes without rebooting. Existing files keep their current extents until rewritten
 or updated: CST never runs `btrfs filesystem defragment -r` automatically, because
@@ -1494,7 +1506,9 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 - Spaces periodic btrfs transaction commits from the 30 s default to **60 s**
   (allowed range `15..300` s) across all four layers (`/etc/fstab`, next-boot
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
-  partial error.
+  partial error. Like `compress-force`, it changes only the root filesystem's
+  fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
+  touched (section 9.1, "Only the root filesystem").
 - Keeps **`flushoncommit`** untouched on the root RAID1 filesystem so crash
   consistency is preserved while Halving periodic `flushoncommit` barriers
   (aligned with `vm.dirty_expire_centisecs = 6000` in section 4.6).

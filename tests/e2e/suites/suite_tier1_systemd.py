@@ -7408,12 +7408,16 @@ echo E2E-OK
     def test_157_btrfs_compress_force_plan_apply_revert_and_doctor(self) -> None:
         """`cst btrfs compress-force` updates real /etc/fstab, real btrfs:top-mount (verified by
         systemd-analyze verify + recorded in installed.json + reloaded by PID 1 systemd), kargs/mount
-        stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert."""
+        stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert.
+        A separate btrfs /var/home (its own UUID in fstab, dm-1 in the mounts) is never touched: its fstab
+        line stays byte for byte, its mount keeps its options and no remount names it."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-compress"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
         auto_unit = r"var-mnt-btrfs\x2dtop.automount"
         uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
+        home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
         self.addCleanup(
             exec_bash,
             c,
@@ -7446,8 +7450,8 @@ echo E2E-OK
             touch /run/ostree-booted
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
-            printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
-            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
             cp {w}/kargs {w}/proc/cmdline
 
@@ -7497,17 +7501,20 @@ for a in "$@"; do
     case "$a" in remount,*) opt="${{a#remount,}}" ;; esac
 done
 if [[ -n "$opt" ]]; then
+    # The kernel changes every mount of the remounted filesystem (its device), and only those.
     python3 -c '
 import sys
-p, opt = sys.argv[1], sys.argv[2]
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
 out = []
 for ln in lines:
     toks = ln.split()
-    toks[3] = ",".join([opt if t.startswith("compress") else t for t in toks[3].split(",")])
+    if toks[0] == dev:
+        toks[3] = ",".join([opt if t.startswith("compress") else t for t in toks[3].split(",")])
     out.append(" ".join(toks) + "\\n")
 open(p, "w").write("".join(out))
-' {w}/proc/mounts "$opt"
+' {w}/proc/mounts "$opt" "${{@: -1}}"
 fi
 EOF
             chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
@@ -7529,6 +7536,9 @@ EOF
             grep -q 'compress-force=zstd:1' {w}/kargs
             grep -q 'compress-force=zstd:1' {w}/proc/mounts
             grep -q 'Options=.*compress-force=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
             systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
 
             second_out="$(/opt/cst-rw/cst btrfs compress-force apply)"
@@ -7545,6 +7555,9 @@ EOF
             grep -q 'compress=zstd:1' {w}/kargs
             grep -q 'compress=zstd:1' {w}/proc/mounts
             grep -q 'Options=.*compress=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
             echo E2E-OK
             """,
         ).stdout
@@ -7592,13 +7605,16 @@ EOF
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
     def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:
         """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
-        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`."""
+        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`.
+        A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-commit"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
         auto_unit = r"var-mnt-btrfs\x2dtop.automount"
         journald_dest = "/etc/systemd/journald.conf.d/10-cst-write-budget.conf"
         uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
+        home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"[[ ! -e {journald_dest} ]] || echo present").stdout.strip():
             self.skipTest(f"{journald_dest} already present (another test's)")
@@ -7625,8 +7641,8 @@ EOF
             touch /run/ostree-booted
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
-            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
-            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
             cp {w}/kargs {w}/proc/cmdline
 
@@ -7661,24 +7677,28 @@ EOF
             cat >{w}/bin/mount <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+echo "mount $*" >>{w}/calls
 opt=""
 for a in "$@"; do case "$a" in remount,*) opt="${{a#remount,}}" ;; esac; done
 if [[ -n "$opt" ]]; then
+    # The kernel changes every mount of the remounted filesystem (its device), and only those.
     python3 -c '
 import sys
-p, opt = sys.argv[1], sys.argv[2]
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
 val = int(opt.split("=", 1)[1])
 lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
 out = []
 for ln in lines:
     toks = ln.split()
-    kept = [t for t in toks[3].split(",") if not t.startswith("commit=")]
-    if val != 30:
-        kept.append(opt)
-    toks[3] = ",".join(kept)
+    if toks[0] == dev:
+        kept = [t for t in toks[3].split(",") if not t.startswith("commit=")]
+        if val != 30:
+            kept.append(opt)
+        toks[3] = ",".join(kept)
     out.append(" ".join(toks) + "\\n")
 open(p, "w").write("".join(out))
-' {w}/proc/mounts "$opt"
+' {w}/proc/mounts "$opt" "${{@: -1}}"
 fi
 EOF
             chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
@@ -7707,6 +7727,8 @@ EOF
             grep -qF "commit=60" {w}/proc/mounts
             grep -qF "commit=60" "/etc/systemd/system/{top_unit}"
             systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
             /opt/cst-rw/cst btrfs commit-interval apply | grep -qF "nothing to do"
             /opt/cst-rw/cst btrfs commit-interval status | grep -qF "coherent (commit=60)"
             doc_out="$(/opt/cst-rw/cst doctor || true)"
@@ -7716,6 +7738,9 @@ EOF
             ! grep -qF "commit=" {w}/kargs
             ! grep -qF "commit=" {w}/proc/mounts
             ! grep -qF "commit=" "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi
             echo E2E-COMMIT-OK
             """,
         ).stdout

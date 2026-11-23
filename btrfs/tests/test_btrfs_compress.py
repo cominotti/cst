@@ -33,7 +33,10 @@ from btrfs.compress.domain import (
     matches_target_spec,
     parse_compress_args,
     parse_compress_spec,
+    parse_fstab_root_entries,
+    parse_proc_mounts,
     parse_top_mount_unit,
+    pick_root_mounts,
     rewrite_fstab,
     rewrite_kargs_rootflags,
     rewrite_mount_options,
@@ -181,7 +184,7 @@ class _FakeHost:
         if self.s.fail_remount is not None:
             return False, self.s.fail_remount
         if self.s.fake_remount_effect and self.s.proc_mounts is not None:
-            self.s.proc_mounts = _rewrite_fake_mounts(self.s.proc_mounts, option)
+            self.s.proc_mounts = _rewrite_fake_mounts(self.s.proc_mounts, option, target)
         return True, ""
 
     def update_top_mount(self, uuid: str, options: str) -> None:
@@ -197,11 +200,13 @@ class _FakeHost:
         return self.s.confirm_answer
 
 
-def _rewrite_fake_mounts(cur: str, option: str) -> str:
+def _rewrite_fake_mounts(cur: str, option: str, target: str = "/var") -> str:
+    """A remount of target, as the kernel applies it: every mount of that filesystem (its device) changes."""
+    device = next((ln.split()[0] for ln in cur.splitlines() if ln.split()[1:2] == [target]), None)
     updated: list[str] = []
     for ln in cur.splitlines(keepends=True):
         match ln.split():
-            case [_, _, "btrfs", opts, *_]:
+            case [src, _, "btrfs", opts, *_] if src == device:
                 updated.append(ln.replace(opts, rewrite_mount_options(opts, option), 1))
             case _:
                 updated.append(ln)
@@ -231,7 +236,7 @@ class _RecordingRunner:
             with open(mounts_path, encoding="utf-8") as fh:
                 cur = fh.read()
             with open(mounts_path, "w", encoding="utf-8") as fh:
-                fh.write(_rewrite_fake_mounts(cur, opt))
+                fh.write(_rewrite_fake_mounts(cur, opt, cmd[-1]))
             return CommandResult(0, "", "", tuple(cmd))
         return CommandResult(0, "", "", tuple(cmd))
 
@@ -379,6 +384,103 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(plan.target_option, "compress-force=zstd:1")
         self.assertEqual([lp.status for lp in plan.layers], [LayerStatus.CHANGE] * 4)
         self.assertEqual(plan.layers[0].current, "compress=zstd:1")
+
+
+OTHER_UUID = "0b5e6a1d-0000-4000-8000-00000000cafe"
+# A separate btrfs filesystem mounted at /var/home (dm-1), next to the root filesystem (dm-0).
+SEPARATE_HOME_LINE = f"UUID={OTHER_UUID} /var/home       btrfs   subvol=home,compress=zstd:3,noatime 0 0\n"
+SEPARATE_HOME_FSTAB = "".join(
+    SEPARATE_HOME_LINE if "/var/home" in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True)
+)
+SEPARATE_HOME_MOUNTS = SAMPLE_PROC_MOUNTS.replace(
+    "/dev/dm-0 /var/home btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/home",
+    "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home",
+)
+
+
+class SeparateHomeTests(unittest.TestCase):
+    """A btrfs /home or /var/home that is another filesystem is never touched (only the root's lines and
+    mounts are); /home as a subvolume of the root filesystem (Fedora's default) still is."""
+
+    def test_its_fstab_line_is_kept_byte_for_byte(self) -> None:
+        for fstab, line in (
+            (SEPARATE_HOME_FSTAB, SEPARATE_HOME_LINE),
+            (
+                SEPARATE_HOME_FSTAB.replace(" /var/home       ", " /home           "),
+                SEPARATE_HOME_LINE.replace(" /var/home       ", " /home           "),
+            ),
+        ):
+            for root_uuid in (SAMPLE_UUID, ""):
+                with self.subTest(line=line, root_uuid=root_uuid):
+                    out = rewrite_fstab(fstab, "compress-force=zstd:1", root_uuid)
+                    self.assertIn(line, out)
+                    self.assertEqual(out.count("compress-force=zstd:1"), 2)  # / and /var
+                    self.assertEqual(
+                        [e.target for e in parse_fstab_root_entries(fstab, root_uuid)], ["/", "/var"]
+                    )
+
+    def test_live_mounts_are_the_root_filesystem_s(self) -> None:
+        self.assertEqual([m.target for m in pick_root_mounts(parse_proc_mounts(SEPARATE_HOME_MOUNTS))], ["/sysroot", "/var"])
+        findmnt = (
+            "/dev/mapper/luks-a[/root] /sysroot btrfs ro,compress=zstd:1,subvol=/root 0 0\n"
+            "/dev/mapper/luks-a[/var] /var btrfs rw,compress=zstd:1,subvol=/var 0 0\n"
+            "/dev/mapper/luks-a[/home] /var/home btrfs rw,compress=zstd:1,subvol=/home 0 0\n"
+            "/dev/mapper/luks-b[/home] /home btrfs rw,compress=zstd:3,subvol=/home 0 0\n"
+        )
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(findmnt))], ["/sysroot", "/var", "/var/home"]
+        )
+
+    def test_fedora_s_default_home_subvolume_is_still_the_root_s(self) -> None:
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(SAMPLE_PROC_MOUNTS))], ["/sysroot", "/var", "/var/home"]
+        )
+        self.assertEqual(
+            [e.target for e in parse_fstab_root_entries(SAMPLE_FSTAB, SAMPLE_UUID)], ["/", "/var", "/var/home"]
+        )
+
+    def test_label_sources_match_by_their_text(self) -> None:
+        fstab = (
+            "LABEL=fedora / btrfs subvol=root,compress=zstd:1 0 0\n"
+            "LABEL=fedora /home btrfs subvol=home,compress=zstd:1 0 0\n"
+            "LABEL=data /var/home btrfs subvol=home,compress=zstd:1 0 0\n"
+        )
+        out = rewrite_fstab(fstab, "compress-force=zstd:1", SAMPLE_UUID).splitlines()
+        self.assertEqual(
+            out,
+            [
+                "LABEL=fedora / btrfs subvol=root,compress-force=zstd:1 0 0",
+                "LABEL=fedora /home btrfs subvol=home,compress-force=zstd:1 0 0",
+                "LABEL=data /var/home btrfs subvol=home,compress=zstd:1 0 0",
+            ],
+        )
+
+    def test_a_host_whose_only_btrfs_is_home_is_left_alone(self) -> None:
+        mounts = "/dev/dm-1 /home btrfs rw,compress=zstd:3,subvol=/home 0 0\n"
+        fstab = "UUID=1234 / ext4 defaults 0 1\n" + f"UUID={OTHER_UUID} /home btrfs subvol=home,compress=zstd:3 0 0\n"
+        self.assertEqual(pick_root_mounts(parse_proc_mounts(mounts)), ())
+        self.assertEqual(parse_fstab_root_entries(fstab, ""), ())
+        self.assertEqual(rewrite_fstab(fstab, "compress-force=zstd:1", ""), fstab)
+
+    def test_apply_and_revert_leave_the_separate_home_alone(self) -> None:
+        host = _FakeHost(_FakeState(fstab=SEPARATE_HOME_FSTAB, proc_mounts=SEPARATE_HOME_MOUNTS))
+        svc = CompressService(host)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertIn(SEPARATE_HOME_LINE, host.s.fstab or "")
+        self.assertIn("/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home", host.s.proc_mounts or "")
+        self.assertFalse(any(c.startswith("remount:/var/home") for c in host.calls), host.calls)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.REVERT, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertEqual(host.s.fstab, SEPARATE_HOME_FSTAB)
 
 
 class ApplicationTests(unittest.TestCase):

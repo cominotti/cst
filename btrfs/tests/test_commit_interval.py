@@ -140,9 +140,12 @@ class _FakeHost:
         if self.s.fake_remount_effect and self.s.proc_mounts is not None:
             val = int(option.removeprefix("commit="))
             target_opt = None if val == 30 else val
+            # The kernel changes every mount of the remounted filesystem (its device), and only those.
+            lines = [line.split() for line in self.s.proc_mounts.splitlines()]
+            device = next((f[0] for f in lines if f[1] == target), None)
             updated = [
-                f"{line.split()[0]} {line.split()[1]} btrfs {rewrite_commit_options(line.split()[3], target_opt)} 0 0"
-                for line in self.s.proc_mounts.splitlines()
+                f"{f[0]} {f[1]} btrfs {rewrite_commit_options(f[3], target_opt) if f[0] == device else f[3]} 0 0"
+                for f in lines
             ]
             self.s.proc_mounts = "\n".join(updated) + "\n"
         return True, ""
@@ -270,6 +273,27 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             self.assertEqual(bad_host.s.kargs_text, SAMPLE_KARGS)
             self.assertNotIn("commit=60", bad_host.s.proc_mounts or "")
             self.assertIn("previous configuration restored", "\n".join(out_b))
+
+    def test_a_separate_btrfs_home_is_left_alone(self) -> None:
+        # /var/home is another btrfs filesystem (dm-1, its own UUID): apply and revert change only the root's.
+        home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /home btrfs subvol=home,compress=zstd:3,noatime 0 0\n"
+        fstab = home_line + "".join(line for line in SAMPLE_FSTAB.splitlines(keepends=True) if " /home " not in line)
+        mounts = SAMPLE_PROC_MOUNTS.replace(
+            "/dev/dm-0 /var/home btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/home",
+            "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,subvol=/home",
+        )
+        host = _FakeHost(_FakeState(fstab=fstab, proc_mounts=mounts))
+        rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((host.s.fstab or "").startswith(home_line), host.s.fstab)
+        self.assertIn("commit=60", host.s.fstab or "")
+        self.assertIn("/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,subvol=/home 0 0", host.s.proc_mounts or "")
+        self.assertFalse(any(c.startswith("remount:/var/home") for c in host.calls), host.calls)
+        rc_r, out_r = execute_commit_change(
+            host, CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)
+        )
+        self.assertEqual(rc_r, 0, out_r)
+        self.assertEqual(host.s.fstab, fstab)
 
     def test_cli_seam_and_container_refusal(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-commit-test-")
