@@ -342,6 +342,29 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc_r, 0, out_r)
         self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", unit_opts)
 
+    def test_a_malformed_commit_in_the_top_mount_is_replaced(self) -> None:
+        # fstab, kargs and the live mounts already have the target; only the unit holds a commit= that a
+        # mount refuses (needs_top_change read only the commit= tokens it could parse).
+        unit_opts = "subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit"
+        revert = CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)
+        apply60 = CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True)
+        for opts, args, want in (
+            (unit_opts + ",commit=abc", revert, unit_opts),
+            (unit_opts + ",commit=0", revert, unit_opts),
+            ("commit=abc," + unit_opts + ",commit=60", apply60, "commit=60," + unit_opts),
+        ):
+            with self.subTest(opts=opts, action=args.action):
+                host = _FakeHost()
+                if args.action == CommitAction.APPLY:
+                    rc_on, out_on = execute_commit_change(host, apply60)
+                    self.assertEqual(rc_on, 0, out_on)
+                host.s.top_mount = TopMountInfo(installed=True, uuid=SAMPLE_UUID, options=opts)
+                host.calls.clear()
+                rc, out = execute_commit_change(host, args)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual([c.split(":", 1)[0] for c in host.calls], ["update_top_mount"])
+                self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", want)
+
     def test_cli_seam_and_container_refusal(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-commit-test-")
         self.addCleanup(shutil.rmtree, tmp)

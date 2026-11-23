@@ -132,6 +132,15 @@ def has_explicit_commit(options_str: str) -> bool:
     return bool(extract_commit_seconds(options_str))
 
 
+def has_malformed_commit(options_str: str) -> bool:
+    """True when `options_str` holds a `commit=` token that is not a positive number of seconds
+    (`commit=abc`, `commit=0`, `commit=`): a mount refuses it, and rewrite_commit_options replaces it."""
+    return any(
+        tok.startswith(_COMMIT_PREFIX) and parse_commit_token(tok) is None
+        for tok in (t.strip() for t in options_str.split(","))
+    )
+
+
 def effective_commit_seconds(options_str: str) -> int:
     """Return effective btrfs commit interval in seconds (`30` when kernel omits `commit=30`)."""
     vals = extract_commit_seconds(options_str)
@@ -262,6 +271,7 @@ def build_commit_plan(
             needs_top_change=lambda top: (
                 effective_commit_seconds(top.options) != eff_target
                 or has_explicit_commit(top.options) != (opt_target is not None)
+                or has_malformed_commit(top.options)
             ),
             fstab_absent_current="(no root btrfs)",
             kargs_absent_current="(no rootflags=)",

@@ -7764,6 +7764,16 @@ EOF
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
             if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi
+            # A commit= a mount refuses, only in the unit (fstab, kargs and the mounts are right already):
+            # plan changes nothing, revert replaces it, a second revert has nothing to do.
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=abc" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            /opt/cst-rw/cst btrfs commit-interval plan --revert >/dev/null
+            grep -qF ",commit=abc" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
             echo E2E-COMMIT-OK
             """,
         ).stdout
