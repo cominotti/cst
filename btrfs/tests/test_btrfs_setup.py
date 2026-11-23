@@ -1822,6 +1822,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
             [
                 "set -Eeuo pipefail",
                 assignment("EXPECTED_OPTS"),
+                shell_function(SETUP, "root_fs_uuid"),
                 shell_function(SETUP, "status_mounts"),
                 f'SYSCTL_FILE="{self.tmp}/sysctl.conf"',
                 f'JOURNALD_DROPIN="{self.tmp}/10-cst-write-budget.conf"',
@@ -1871,6 +1872,40 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
+
+    def test_a_separate_home_filesystem_is_named_not_judged(self) -> None:
+        # A btrfs /var/home of its own (another UUID than the root's) was judged by the root's options:
+        # "MISSING: compress=zstd/compress-force=zstd ...", though CST never sets them there.
+        full = "compress=zstd:1,flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+
+        def stub(root_uuid: str, var_uuid: str, home_uuid: str, home_opts: str = "noatime,ssd") -> str:
+            # findmnt -rn -o UUID --target /sysroot, and findmnt -rn -o OPTIONS,UUID -M MNT (or the
+            # -o OPTIONS of an older status_mounts).
+            return "\n".join(
+                [
+                    "findmnt() {",
+                    '  case "$3:$5" in',
+                    f'    UUID:/sysroot) echo "{root_uuid}" ;;',
+                    f'    OPTIONS,UUID:/var) echo "{full} {var_uuid}" ;;',
+                    f'    OPTIONS,UUID:/var/home) echo "{home_opts} {home_uuid}" ;;',
+                    f'    OPTIONS:/var) echo "{full}" ;;',
+                    f'    OPTIONS:/var/home) echo "{home_opts}" ;;',
+                    "  esac",
+                    "}",
+                ]
+            )
+
+        separate = "  /var/home  separate filesystem (not the root's): CST does not set its options"
+        out = self._run_status_mounts("", stub("uuid-a", "uuid-a", "uuid-b"))
+        self.assertIn("  /var       ok (compress=zstd:1 ", out)
+        self.assertIn(separate, out)
+        self.assertNotIn("/var/home  MISSING", out)
+        for root_uuid, home_uuid in (("uuid-a", "uuid-a"), ("", "uuid-b"), ("uuid-a", "")):
+            with self.subTest(root_uuid=root_uuid, home_uuid=home_uuid):  # the root's, or cannot tell
+                out = self._run_status_mounts("", stub(root_uuid, "uuid-a", home_uuid))
+                self.assertIn("  /var/home  MISSING: compress=zstd/compress-force=zstd", out)
+                self.assertNotIn("separate filesystem", out)
+                self.assertIn("  /var       ok (compress=zstd:1 ", out)
 
     def _nvme_lines(self, param: str | None, *, managed: bool, tolerances: Sequence[str] = ()) -> list[str]:
         """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file) and

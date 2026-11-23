@@ -655,11 +655,19 @@ status_space() {
 }
 
 status_mounts() {
-    local mnt opts o comp_opt tok missing want have
+    local mnt line opts uuid root_uuid o comp_opt tok missing want have
     local -a _toks
+    root_uuid="$(root_fs_uuid)"
     for mnt in /sysroot /var /var/home; do
-        opts="$(findmnt -rn -o OPTIONS -M "${mnt}" 2>/dev/null | head -n1)"
+        # OPTIONS never holds a blank (findmnt -r escapes it); a mount with no UUID prints none.
+        line="$(findmnt -rn -o OPTIONS,UUID -M "${mnt}" 2>/dev/null | head -n1)"
+        read -r opts uuid <<<"${line}"
         [[ -n "${opts}" ]] || continue
+        # A separate filesystem (a btrfs /var/home of its own): CST sets only the root's options.
+        if [[ -n "${uuid}" && -n "${root_uuid}" && "${uuid}" != "${root_uuid}" ]]; then
+            printf "  %-10s separate filesystem (not the root's): CST does not set its options\n" "${mnt}"
+            continue
+        fi
         missing=()
         comp_opt=""
         IFS=',' read -r -a _toks <<<"${opts}"

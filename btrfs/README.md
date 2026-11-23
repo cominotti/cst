@@ -935,7 +935,9 @@ How to read it:
   there is enough unallocated space for btrfs to reserve more.
 - `dynamic=1 periodic=1`: automatic reclaim is on. `errors` should be 0.
 - `ok` after each mount: all expected mount options are there. Otherwise you see
-  `MISSING:` and the names.
+  `MISSING:` and the names. A separate filesystem at `/var/home` (another UUID
+  than the root's) is named as such and not checked: CST sets only the root's
+  options.
 - `ok` after `vm.dirty_*`: the live values match the file. Otherwise `DRIFT`.
 
 ---
