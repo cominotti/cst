@@ -828,6 +828,27 @@ class WriteAtomicTest(unittest.TestCase):
         ):
             self.assertEqual(core_files._umask(), 0o077)
 
+    def test_ensure_dir_relabels_only_the_folders_it_creates_as_root(self) -> None:
+        existing = os.path.join(self.tmp, "existing")
+        os.mkdir(existing)
+        made = [os.path.join(existing, "a"), os.path.join(existing, "a", "b")]
+        for relabel, euid, labelled in ((True, 0, made), (False, 0, []), (True, 1000, [])):
+            shutil.rmtree(made[0], ignore_errors=True)
+            with (
+                self.subTest(relabel=relabel, euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
+                mock.patch.object(
+                    core_runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                ) as run,
+            ):
+                self.assertEqual(core_files.ensure_dir(made[1], 0o700, relabel=relabel), made)
+                self.assertEqual(core_files.ensure_dir(made[1], 0o700, relabel=relabel), [])
+                self.assertEqual(
+                    [c.args[0] for c in run.call_args_list],
+                    [["/usr/sbin/restorecon", "-F", "--", d] for d in labelled],
+                )
+
     def test_relabel_false_starts_no_restorecon_as_root(self) -> None:
         for relabel, calls in ((True, 1), (False, 0)):
             with (

@@ -91,12 +91,14 @@ def read_int(path: str, default: int | None = None) -> int | None:
     return int(text) if _INT.fullmatch(text) else default
 
 
-def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
+def ensure_dir(path: str, mode: int = 0o755, *, relabel: bool = False) -> list[str]:
     """Create the folder path and its missing parents; the folders it creates, in order.
 
     Each folder it creates gets exactly mode (chmod after mkdir: the umask
     does not reduce it, as os.makedirs's mode= is); a folder that is already
     there (or that another process creates meanwhile) is left as it is.
+    relabel=True: as root, each folder it creates gets its SELinux label
+    (restorecon, as write_atomic's relabel); an existing folder is not touched.
     """
     missing: list[str] = []
     p = os.path.abspath(path)
@@ -115,6 +117,8 @@ def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
                 continue
             raise
         os.chmod(d, mode)
+        if relabel and os.geteuid() == 0:
+            _relabel(d)
         created.append(d)
     return created
 
