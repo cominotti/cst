@@ -1592,6 +1592,16 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   not manage keep their bytes, even ones that are not UTF-8. CST writes paths into `/etc/fstab` escaped as fstab wants them (a
   space as `\040`, a tab `\011`, a newline `\012`, a backslash `\134`), and
   keeps one managed line per user and kind: a repeated one is removed.
+- **Order, and what a failure leaves:** `attach` makes the folders, then
+  mounts each bind, and writes `/etc/fstab` (and runs `systemctl
+  daemon-reload`) last. When a mount, the write or the reload fails, it
+  unmounts the binds this run mounted and puts `/etc/fstab` back as it was
+  (no file when there was none), so no line is left that would mount at the
+  next boot; it says `previous state restored.`, or `ROLLBACK INCOMPLETE`
+  with what it could not undo. `detach` unmounts only the binds CST made
+  (`kept: TARGET has a mount CST did not make` for any other) and removes
+  the user's managed lines; when that fails, it mounts again what it
+  unmounted.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import io
 import json
 import os
+from pathlib import Path
 import posixpath
 import shutil
 import stat
@@ -75,6 +76,9 @@ class _FakeMountRunner:
         self.root = root
         self.same_uuid = same_uuid
         self.findmnt_fails = False
+        self.reload_fails = False
+        self.mount_fails: set[str] = set()
+        self.fstab_at_mount: list[str | None] = []
         self.calls: list[list[str]] = []
         self.mounts: list[dict[str, str | None]] = []
         self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
@@ -116,6 +120,28 @@ class _FakeMountRunner:
             fss.append({**m, "uuid": uuid})
         return json.dumps({"filesystems": fss}, indent=3)
 
+    def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
+        fstab = os.path.join(self.root, "etc", "fstab")
+        self.fstab_at_mount.append(
+            Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.exists(fstab) else None
+        )
+        if tgt_path.removeprefix(self.root) in self.mount_fails:
+            return CommandResult(32, "", "mount: permission denied")
+        src = src_path.removeprefix(self.root)
+        held = self._holding(src)
+        rel = src.removeprefix(str(held["target"]).rstrip("/"))
+        dev = str(held["source"]).split("[", 1)[0]
+        fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
+        self.add_mount(dev, tgt_path.removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
+        return CommandResult(0, "", "")
+
+    def _unbind(self, tgt_path: str) -> None:
+        logical_tgt = tgt_path.removeprefix(self.root)
+        for i in range(len(self.mounts) - 1, -1, -1):
+            if self.mounts[i]["target"] == logical_tgt:
+                del self.mounts[i]
+                break
+
     def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)
@@ -123,21 +149,12 @@ class _FakeMountRunner:
             if self.findmnt_fails:
                 return CommandResult(1, "", "findmnt: cannot read the mount table")
             return CommandResult(0, self._findmnt_json(), "")
+        if cmd[-1:] == ["daemon-reload"] and self.reload_fails:
+            return CommandResult(1, "", "Failed to reload daemon")
         if cmd[:2] == ["mount", "--bind"]:
-            src = cmd[2].removeprefix(self.root)
-            held = self._holding(src)
-            rel = src.removeprefix(str(held["target"]).rstrip("/"))
-            dev = str(held["source"]).split("[", 1)[0]
-            fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
-            self.add_mount(dev, cmd[3].removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
-            return CommandResult(0, "", "")
-        if cmd and cmd[0] == "umount":
-            logical_tgt = cmd[1].removeprefix(self.root)
-            for i in range(len(self.mounts) - 1, -1, -1):
-                if self.mounts[i]["target"] == logical_tgt:
-                    del self.mounts[i]
-                    break
-            return CommandResult(0, "", "")
+            return self._bind(cmd[2], cmd[3])
+        if cmd[:1] == ["umount"]:
+            self._unbind(cmd[1])
         return CommandResult(0, "", "")
 
 
@@ -542,6 +559,83 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertNotIn("Traceback", out + err)
         self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
         self.assertEqual(self._fstab(), before)
+
+    def _mounted(self) -> list[str]:
+        return [str(m["target"]) for m in self.runner.mounts if str(m["target"]).startswith("/var/home/")]
+
+    def test_attach_mounts_before_it_writes_fstab(self) -> None:
+        before = self._fstab()
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.runner.fstab_at_mount, [before, before])
+        self.assertNotEqual(self._fstab(), before)
+        calls = [c[0] if c[0] != "mount" else "mount" for c in self.runner.calls if c[0] in ("mount", "systemctl")]
+        self.assertEqual(calls[-1], "systemctl")
+
+    def test_a_failed_mount_takes_back_the_binds_of_the_run(self) -> None:
+        self.runner.mount_fails.add("/var/home/danilo/Scratchpad")
+        before = self._fstab()
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: mount --bind /var/mnt/scratchpad/danilo /var/home/danilo/Scratchpad failed: "
+            "mount: permission denied; previous state restored.",
+            err,
+        )
+        self.assertEqual(self._mounted(), [])
+        self.assertIn(["umount", os.path.join(self.tmp, "var/home/danilo/.cache")], self.runner.calls)
+        self.assertEqual(self._fstab(), before)
+
+    def test_a_failed_reload_without_fstab_before_leaves_no_fstab(self) -> None:
+        os.unlink(os.path.join(self.tmp, "etc", "fstab"))
+        self.runner.reload_fails = True
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: systemctl daemon-reload failed: Failed to reload daemon; previous state restored.", err)
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "etc", "fstab")))
+        self.assertEqual(self._mounted(), [])
+
+    def test_a_failed_reload_puts_the_old_fstab_back(self) -> None:
+        self.runner.reload_fails = True
+        before = self._fstab()
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("previous state restored.", err)
+        self.assertEqual(self._fstab(), before)
+        self.assertEqual(self._mounted(), [])
+
+    def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
+        with unittest.mock.patch.object(
+            cache_adapters, "ensure_dir", side_effect=PermissionError(13, "Permission denied")
+        ):
+            rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache: Permission denied", err)
+        self.assertNotIn("Traceback", out + err)
+        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
+
+    def test_detach_keeps_a_mount_cst_did_not_make(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self.runner.add_mount("tmpfs", "/var/home/danilo/.cache", fsroot="/", uuid=None)
+        self.runner.calls.clear()
+        rc, out, err = self._run(["detach"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("kept: /var/home/danilo/.cache has a mount CST did not make", out)
+        self.assertNotIn(["umount", os.path.join(self.tmp, "var/home/danilo/.cache")], self.runner.calls)
+        self.assertIn(["umount", os.path.join(self.tmp, "var/home/danilo/Scratchpad")], self.runner.calls)
+        self.assertNotIn("user=danilo", self._fstab())
+
+    def test_a_failed_detach_mounts_again_what_it_unmounted(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        attached = self._fstab()
+        self.runner.reload_fails = True
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("previous state restored.", err)
+        self.assertEqual(self._fstab(), attached)
+        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        _, out, _ = self._run(["status"])
+        self.assertIn("-> /var/home/danilo/.cache [active (fstab + mounted)]", out)
 
     def test_findmnt_failing_blocks_every_write(self) -> None:
         self.runner.findmnt_fails = True
