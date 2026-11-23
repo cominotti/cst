@@ -4215,7 +4215,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.addCleanup(
             exec_bash,
             c,
-            f"rm -rf /var/tmp/e2e-126-tmpfiles; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
             f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
             check=False,
         )
@@ -4249,6 +4249,17 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF "unchanged: {dropin}" <<<"$again"
             st="$(/opt/cst-rw/cst btrfs scrub-limit status)"
             grep -qF "service: 500M, as set" <<<"$st"
+            # A daemon-reload that fails puts snapshots.conf and the drop-in back as they were.
+            b=/var/tmp/e2e-126-bin
+            mkdir -p "$b"
+            printf '#!/bin/bash\\n[[ "$1" != daemon-reload ]] || exit 1\\nexec /usr/bin/systemctl "$@"\\n' >"$b/systemctl"
+            chmod +x "$b/systemctl"
+            rc=0; PATH="$b:$PATH" /opt/cst-rw/btrfs/btrfs-scrub-limit set 1G >"$b/out" 2>&1 || rc=$?
+            [[ $rc == 1 ]]
+            grep -qF "previous configuration restored." "$b/out"
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            grep -qF "btrfs scrub limit -a -l 500M /var" {dropin}
+            [[ "$({core_state})" == *" done" ]]
             /opt/cst-rw/cst btrfs scrub-limit off
             [[ ! -e {dropin} ]]
             ! grep -qF "SCRUB_LIMIT" {conf}
