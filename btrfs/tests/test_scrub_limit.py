@@ -402,6 +402,50 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                 self.assertEqual(self._core_state(record), before)
                 shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
 
+    def test_a_rolled_back_change_keeps_btrfs_core_s_state(self) -> None:
+        # A failed daemon-reload puts the 500M drop-in back through the installer, a second write: a
+        # btrfs:core that was done before is marked done again; one that was pending stays pending.
+        for before in ("done", "pending"):
+            for target in ("1G", None):
+                with self.subTest(before=before, target=target):
+                    shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
+                    record = os.path.join(self.tmp, f"installed-{before}-{target}.json")
+                    paths = dataclasses.replace(self.paths, record_path=record)
+                    runner = _RecordingInstallerRunner(record)
+                    runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+                    if before == "done":
+                        runner.svc.mark(record, "btrfs:core")
+                    rc_set, set_lines = scrub_limit_apply(paths, "500M", runner=runner)
+                    self.assertEqual(rc_set, 0, set_lines)
+                    self.assertEqual(self._core_state(record), before)
+
+                    runner.fail_on = {"systemctl daemon-reload"}
+                    rc, lines = scrub_limit_apply(paths, target, runner=runner)
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(
+                        lines[-1],
+                        "ERROR: systemctl daemon-reload failed: Access denied; previous configuration restored."
+                        " (run systemctl daemon-reload once it works)",
+                    )
+                    self.assertEqual(self._read(self.dropin), render_scrub_dropin("500M"))
+                    self.assertEqual(self._core_state(record), before)
+
+    def test_a_rollback_that_cannot_mark_btrfs_core_done_says_so(self) -> None:
+        record = os.path.join(self.tmp, "installed.json")
+        paths = dataclasses.replace(self.paths, record_path=record)
+        runner = _RecordingInstallerRunner(record)
+        runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+        runner.svc.mark(record, "btrfs:core")
+        runner.fail_on = {"systemctl daemon-reload", "installer.py mark"}
+        rc, lines = scrub_limit_apply(paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: Access denied;"
+            " ROLLBACK INCOMPLETE (btrfs:core not marked done again: Access denied)",
+        )
+        self.assertIsNone(self._read(self.dropin))
+
     def test_a_failed_mark_is_an_error(self) -> None:
         record = os.path.join(self.tmp, "installed.json")
         runner = _RecordingInstallerRunner(record)

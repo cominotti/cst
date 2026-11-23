@@ -374,8 +374,10 @@ cst btrfs scrub-limit off
   Writing the drop-in sets `btrfs:core` pending in the install record; when
   `btrfs:core` was done before, `set` marks it done again once the drop-in is
   written and `daemon-reload` worked, so `cst doctor` does not ask for an
-  install that nothing needs. A `btrfs:core` that was never installed stays
-  pending.
+  install that nothing needs. A rollback after a failed `daemon-reload`
+  writes the old drop-in back, which sets `btrfs:core` pending again; it
+  marks it done again too (a mark that fails is a `ROLLBACK INCOMPLETE`).
+  A `btrfs:core` that was never installed stays pending.
 - `status` shows the setting, the limit the service sets and the value in
   sysfs now; `cst doctor` shows the same as `info` and warns when the
   setting and the service differ.

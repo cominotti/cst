@@ -197,6 +197,14 @@ def _core_done(record_path: str) -> bool:
     return rec is not None and rec.components.get(Component.BTRFS_CORE.value) == ComponentState.DONE
 
 
+def _mark_core_done(runner: CommandRunnerPort, paths: ScrubPaths) -> tuple[int, str]:
+    """btrfs:core done again in the install record: (the installer's exit status, what failed or "")."""
+    rc, _lines, err = run_installer(
+        runner, paths.installer_script, ["mark", "--component", Component.BTRFS_CORE.value, "done"]
+    )
+    return rc, (err or f"exit {rc}") if rc != 0 else ""
+
+
 def _failure(what: str, result: CommandResult) -> str:
     return f"{what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"
 
@@ -250,11 +258,13 @@ def scrub_limit_apply(
         dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
         if dr.returncode != 0:
             failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
+            if core_done and failures[-1] is None:
+                # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
+                rc_m, err_m = _mark_core_done(cmd_runner, paths)
+                failures.append(f"btrfs:core not marked done again: {err_m}" if rc_m != 0 else None)
             return 1, [*out, _rolled_back(_failure("systemctl daemon-reload", dr), failures, reload_hint=True)]
     if core_done and any(line.startswith("written:") for line in inst_lines):
-        rc_m, _lines, err_m = run_installer(
-            cmd_runner, paths.installer_script, ["mark", "--component", Component.BTRFS_CORE.value, "done"]
-        )
+        rc_m, err_m = _mark_core_done(cmd_runner, paths)
         if rc_m != 0:
-            return rc_m, [*out, f"ERROR: the installer could not mark btrfs:core done: {err_m or f'exit {rc_m}'}"]
+            return rc_m, [*out, f"ERROR: the installer could not mark btrfs:core done: {err_m}"]
     return 0, out
