@@ -4200,7 +4200,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
     def test_126_btrfs_scrub_limit_and_nvme_apst_cycle(self) -> None:
         """`cst btrfs scrub-limit plan/set/status/off` against the real /etc and systemd on the container,
         plus verification that `cst-nvme-apst.conf` and `65-cst-nvme-apst.rules` install under `btrfs:core`.
-        A btrfs:core that an install marked done stays done after `set` writes its drop-in."""
+        A btrfs:core that an install marked done stays done after `set` writes its drop-in.
+        cst-nvme-apst.conf's `w-` lines do not fail systemd-tmpfiles when a write fails (the parameter is
+        a folder under --root here); the same lines with `w`, as before, do."""
         c = self.SYSTEMD_CONTAINER
         seed = "/etc/btrfs-setup/e2e-126-core-seed"
         core_state = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json btrfs:core"
@@ -4213,7 +4215,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.addCleanup(
             exec_bash,
             c,
-            f"rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"rm -rf /var/tmp/e2e-126-tmpfiles; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
             f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
             check=False,
         )
@@ -4256,6 +4258,12 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"
+            d=/var/tmp/e2e-126-tmpfiles
+            rm -rf "$d" && mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
+            systemd-tmpfiles --create --root="$d" - </opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf
+            sed 's/^w- /w /' /opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf >"$d/old.conf"
+            rc=0; systemd-tmpfiles --create --root="$d" - <"$d/old.conf" || rc=$?
+            [[ $rc != 0 ]] || {{ echo "a failed w write did not fail systemd-tmpfiles: the test cannot bite" >&2; exit 1; }}
             echo E2E-SCRUB-OK
             """,
         ).stdout

@@ -192,7 +192,7 @@ Unit files go to `/etc/systemd/system/`.
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
 | Writeback limits & journald budget (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf`, `/etc/systemd/journald.conf.d/10-cst-write-budget.conf` | at every boot, and at every `install` |
-| NVMe APST latency cap | `/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules` | at every boot, NVMe udev events, and at `install` |
+| NVMe APST latency cap | `/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules` | at every boot, NVMe udev events, and at `install`; the boot-time lines are `w-`, so a write the kernel refuses (a read-only sysfs in a container, a value a controller rejects) does not fail `systemd-tmpfiles-setup.service` (the udev rule and `install` still set the values) |
 | Stall monitor (4.7) | `/usr/local/sbin/btrfs-stall-monitord`, `btrfs-stall-monitor.service` | always |
 | Stall report (section 7) | `/usr/local/bin/btrfs-stall-report`, and a small launcher `~/.local/bin/btrfs-stall-report` | when you run it |
 | The `cst` command | the link `~/.local/bin/cst` -> the `cst` of the CST folder, only if nothing else is there, so the hints of alerts and logs (`cst btrfs ...`) work as typed ([README.md, The `cst` command](../README.md#the-cst-command)) | when you run it |
