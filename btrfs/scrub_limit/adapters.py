@@ -20,6 +20,7 @@ from btrfs.scrub_limit.domain import (
 )
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
     host_view_path,
@@ -27,7 +28,6 @@ from cst_core.adapters.runtime import (
     run_installer,
     undo_python_start,
 )
-from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.install import Component
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort
