@@ -825,6 +825,20 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "mnt", "cache", "danilo")))
         self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
 
+    def test_a_findmnt_failure_is_worded_as_a_mount_failure(self) -> None:
+        # One wording for every failed command (CommandResult.failure): its stderr, or the exit status;
+        # findmnt's own copy also took its stdout.
+        real_run = self.runner.run
+
+        def run(argv: Sequence[str], **kwargs: object) -> CommandResult:
+            if list(argv)[:1] == ["findmnt"]:
+                return CommandResult(2, '{"filesystems": [', "")
+            return real_run(argv, **kwargs)
+
+        with unittest.mock.patch.object(self.runner, "run", side_effect=run):
+            _, out, _ = self._run(["status"])
+        self.assertIn("  cannot list mounts: findmnt failed: exit 2", out)
+
     def test_safety_guards_nonempty_symlink_uuid_and_container(self) -> None:
         cache_d = os.path.join(self.tmp, "var", "home", "danilo", ".cache")
         os.makedirs(cache_d, exist_ok=True)

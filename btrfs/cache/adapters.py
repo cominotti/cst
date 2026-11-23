@@ -154,8 +154,7 @@ def _read_live_mounts(rt: _CacheMountRuntime) -> tuple[tuple[LiveMount, ...], st
         output=OutputMode.CAPTURE,
     )
     if res.returncode != 0:
-        why = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
-        return (), f"findmnt failed: {why}"
+        return (), res.failure("findmnt")
     mounts = parse_findmnt_mounts(res.stdout)
     if mounts is None:
         return (), "findmnt's answer is not the JSON it should be"
