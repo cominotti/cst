@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Final
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.install import program_installer
+from cst_core.adapters.locks import take_lock
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
     ManagedCliEnv,
@@ -26,6 +28,8 @@ from cst_core.domain.text import group
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
+    IOCOST_LOCK,
+    IOCOST_LOCK_TIMEOUT_S,
     IOCOST_MANAGED_FILE,
     IOCOST_MODEL_PATH,
     IOCOST_QOS_PATH,
@@ -61,6 +65,8 @@ class IocostPaths:
     rule_dest: str = IOCOST_RULE_DEST
     installer_script: str = ""
     udev_control: str = UDEV_CONTROL
+    lock_path: str = IOCOST_LOCK
+    lock_timeout: float = IOCOST_LOCK_TIMEOUT_S
     # revert removes btrfs:iocost in this process (it works from the installed zipapp, which has no
     # installer.py): the files under install_root ("" = the real root), their lines in record_path.
     install_root: str = ""
@@ -189,6 +195,21 @@ def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan
     return rc, out
 
 
+def _locked(paths: IocostPaths, work: Callable[[], tuple[int, list[str]]]) -> tuple[int, list[str]]:
+    """work() while this run holds the iocost lock; an error, with nothing done, when it cannot take it."""
+    try:
+        ensure_dir(os.path.dirname(paths.lock_path), 0o755)
+        fd = take_lock(paths.lock_path, wait=True, mode=0o644, timeout=paths.lock_timeout)
+    except OSError as exc:
+        return 1, [f"ERROR: cannot take {paths.lock_path}: {exc.strerror or exc}"]
+    if fd is None:
+        return 1, [f"ERROR: another btrfs-iocost run holds {paths.lock_path}"]
+    try:
+        return work()
+    finally:
+        os.close(fd)
+
+
 def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) -> tuple[int, list[str]]:
     rc, lines, err = run_installer(runner, script, subargs)
     return rc, [*lines, *([err] if err else [])]
@@ -218,6 +239,29 @@ def _enable_iocost_service(runner: CommandRunnerPort, paths: IocostPaths) -> tup
     return rc_u, [f"enabled:   {IOCOST_SERVICE}", *lines_u]
 
 
+def _install_and_write(
+    paths: IocostPaths, runner: CommandRunnerPort, live_only: bool, target_device: str | None
+) -> tuple[int, list[str]]:
+    """Read, plan, install btrfs:iocost (not live-only) and write io.cost.qos: the part under the lock."""
+    snap = collect_iocost_snapshot(paths, runner=runner)
+    plan = plan_iocost_apply(snap, target_device=target_device)
+    if plan.error is not None:
+        return (
+            (0, [f"skipped:   {target_device} ({plan.error})"])
+            if (live_only and target_device is not None)
+            else (1, [f"ERROR: {plan.error}"])
+        )
+    out: list[str] = []
+    if not live_only:
+        component = Component.BTRFS_IOCOST.value
+        rc_i, lines_i = _installer_step(runner, paths.installer_script, ["install", "--component", component])
+        out.extend(lines_i)
+        if rc_i != 0:
+            return rc_i, out
+    rc_w, lines_w = _apply_qos_writes(paths, snap, plan)
+    return rc_w, [*out, *lines_w]
+
+
 def apply_iocost(
     paths: IocostPaths,
     *,
@@ -233,27 +277,11 @@ def apply_iocost(
         # The installed zipapp has no installer.py, unit verifier or payload to install from.
         return 1, ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"]
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    snap = collect_iocost_snapshot(paths, runner=cmd_runner)
-    plan = plan_iocost_apply(snap, target_device=target_device)
-    if plan.error is not None:
-        return (
-            (0, [f"skipped:   {target_device} ({plan.error})"])
-            if (live_only and target_device is not None)
-            else (1, [f"ERROR: {plan.error}"])
-        )
-
-    out: list[str] = []
-    component = Component.BTRFS_IOCOST.value
-    if not live_only:
-        rc_i, lines_i = _installer_step(cmd_runner, paths.installer_script, ["install", "--component", component])
-        out.extend(lines_i)
-        if rc_i != 0:
-            return rc_i, out
-
-    rc_w, lines_w = _apply_qos_writes(paths, snap, plan)
-    out.extend(lines_w)
+    rc_w, out = _locked(paths, lambda: _install_and_write(paths, cmd_runner, live_only, target_device))
     if rc_w != 0 or live_only:
         return rc_w, out
+    # The lock is free again: enable --now starts the service, which takes it.
+    component = Component.BTRFS_IOCOST.value
     for step in (
         lambda: _enable_iocost_service(cmd_runner, paths),
         lambda: _installer_step(cmd_runner, paths.installer_script, ["mark", "--component", component, "done"]),
@@ -319,8 +347,12 @@ def revert_iocost(
         rc_c, out = _remove_iocost_component(cmd_runner, svc, paths)
         if rc_c != 0:
             return rc_c, out
-    snap = collect_iocost_snapshot(paths, runner=cmd_runner)
-    rc_w, lines_w = _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
+
+    def reset() -> tuple[int, list[str]]:
+        snap = collect_iocost_snapshot(paths, runner=cmd_runner)
+        return _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
+
+    rc_w, lines_w = _locked(paths, reset)
     return rc_w, [*out, *lines_w]
 
 

@@ -34,6 +34,7 @@ from btrfs.iocost.domain import (
     parse_iocost_qos,
     plan_iocost_apply,
 )
+from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
 from cst_core.adapters.runtime import RootElevation, enforce_host_root
 from cst_core.application.install import InstallService, Placement, staged
@@ -181,6 +182,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             rule_dest=os.path.join(self.tmp, "etc", "udev", "rules.d", "91-cst-iocost.rules"),
             installer_script="/opt/fake/cst_core/installer.py",
             udev_control=os.path.join(self.tmp, "run", "udev", "control"),
+            lock_path=os.path.join(self.tmp, "run", "btrfs-setup", "iocost-managed.lock"),
             install_root=os.path.join(self.tmp, "root"),
             record_path=staged(os.path.join(self.tmp, "root"), ROOT_RECORD),
         )
@@ -424,6 +426,54 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                 if refusing is not None:
                     self.assertIn("Read-only file system", "\n".join(out))
                     self.assertFalse(self._ran("systemctl", "daemon-reload"))
+
+    def _hold_lock(self) -> int:
+        os.makedirs(os.path.dirname(self.paths.lock_path), exist_ok=True)
+        fd = take_lock(self.paths.lock_path, wait=False, mode=0o644)
+        assert fd is not None
+        return fd
+
+    def test_a_run_waits_for_the_lock_and_gives_up_with_nothing_written(self) -> None:
+        paths = dataclasses.replace(self.paths, lock_timeout=0.1)
+        self._write(self.paths.managed_file, "259:1\n")
+        fd = self._hold_lock()
+        try:
+            for name, run in (
+                ("apply --live-only", lambda: apply_iocost(paths, live_only=True, runner=self.runner)),
+                ("apply", lambda: apply_iocost(paths, runner=self.runner)),
+                ("revert --live-only", lambda: revert_iocost(paths, live_only=True, runner=self.runner)),
+            ):
+                with self.subTest(run=name):
+                    rc, out = run()
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(out, [f"ERROR: another btrfs-iocost run holds {self.paths.lock_path}"])
+                    with open(self.paths.qos_path, encoding="utf-8") as fh:
+                        self.assertEqual(fh.read(), "259:2 enable=1 ctrl=user rpct=95.00\n")
+                    with open(self.paths.managed_file, encoding="utf-8") as fh:
+                        self.assertEqual(fh.read(), "259:1\n")
+            self.assertEqual(self._installer_words(), [])
+        finally:
+            os.close(fd)
+        rc, out = apply_iocost(paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=1 ctrl=auto\n")
+        self.assertEqual(os.stat(self.paths.lock_path).st_mode & 0o777, 0o644)
+
+    def test_the_lock_is_free_when_enable_starts_the_service(self) -> None:
+        free_at_enable: list[bool] = []
+
+        def try_lock(cmd: list[str]) -> None:
+            if cmd[:2] == ["systemctl", "enable"]:
+                fd = take_lock(self.paths.lock_path, wait=False, mode=0o644)
+                free_at_enable.append(fd is not None)
+                if fd is not None:
+                    os.close(fd)
+
+        self.runner.on_call = try_lock
+        rc, out = apply_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(free_at_enable, [True])
 
     def test_the_installed_zipapp_reverts_without_an_installer(self) -> None:
         # /usr/local/sbin/btrfs-iocost is a zipapp: no checkout, so no cst_core/installer.py beside it.

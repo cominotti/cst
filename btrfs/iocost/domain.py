@@ -18,6 +18,10 @@ IOCOST_MANAGED_FILE: Final = "/run/btrfs-setup/iocost-managed"
 IOCOST_SERVICE: Final = "cst-btrfs-iocost.service"
 IOCOST_RULE_DEST: Final = "/etc/udev/rules.d/91-cst-iocost.rules"
 UDEV_CONTROL: Final = "/run/udev/control"  # udevd's control socket: there only while udevd runs
+# One run at a time (the boot service, the udev rule's per-disk runs, the commands): each holds this lock
+# from its read of io.cost.qos and the managed file to its save of the managed file.
+IOCOST_LOCK: Final = "/run/btrfs-setup/iocost-managed.lock"
+IOCOST_LOCK_TIMEOUT_S: Final = 30.0  # inside the 180 s udev gives a RUN program
 IOCOST_ENABLE_CTRL_AUTO: Final = "enable=1 ctrl=auto"
 IOCOST_DISABLE_CTRL_AUTO: Final = "enable=0 ctrl=auto"
 

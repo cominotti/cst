@@ -1436,6 +1436,12 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   limits the write to one whole disk and is accepted only together with
   `--live-only` (for `apply` and `plan`): a one-disk request never installs
   the service, whose next boot would write every disk;
+- one run at a time: the boot service, the udev rule's per-disk runs and the
+  commands hold `/run/btrfs-setup/iocost-managed.lock` from their read of
+  `io.cost.qos` to their save of `/run/btrfs-setup/iocost-managed`, so two
+  runs never lose each other's devices. A run that cannot take it within 30 s
+  stops with `ERROR: another btrfs-iocost run holds ...` and writes nothing;
+  `apply` releases it before `enable --now` starts the service;
 - marks `btrfs:iocost` done in the install record only after the writes,
   `daemon-reload`, `enable --now` and the udev rules' reload worked. The first
   step that fails stops `apply` with an `ERROR:` line and a non-zero exit, and
