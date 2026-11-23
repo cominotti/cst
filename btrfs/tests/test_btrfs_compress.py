@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 import io
 import json
@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from typing import NoReturn, override
 import unittest
+from unittest import mock
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.application import CompressService
@@ -45,9 +46,11 @@ from btrfs.compress.domain import (
 from btrfs.compress.presenter import render_compress_change, render_compress_plan, render_compress_status
 from btrfs.compress.wiring import CompressWiringOverrides
 from cst_core.adapters.files import LocalFileSystemAdapter
+from cst_core.application.install import InstallRefused, InstallRequest, InstallService
+from cst_core.domain.install import InstallEntry
 from cst_core.domain.errors import Refused
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.ports import CommandFailed, CommandResult
+from cst_core.ports import CommandFailed, CommandResult, WriteFailed
 from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -854,6 +857,58 @@ class AdapterAndCliTests(unittest.TestCase):
             top_text = fh.read()
         self.assertIn("compress=zstd:1", top_text)
         self.assertNotIn("compress-force", top_text)
+
+    # update_top_mount: a failure while installing puts the previous unit back only when the unit on
+    # disk changed, and is raised either way.
+    def _adapter(self) -> LinuxCompressHostAdapter:
+        cfg = CompressAdapterConfig(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
+            fallback_root=REPO,
+            proc_dir=os.path.join(self.tmp, "proc"),
+            host_root=self.tmp,
+        )
+        return LinuxCompressHostAdapter(
+            cfg, ctx=_FakeCtx(root=True, host_root=self.tmp), runner=_RecordingRunner(self.tmp), fs=LocalFileSystemAdapter()
+        )
+
+    def _unit(self) -> str:
+        with open(
+            os.path.join(self.tmp, "etc", "systemd", "system", r"var-mnt-btrfs\x2dtop.mount"), encoding="utf-8"
+        ) as fh:
+            return fh.read()
+
+    def test_a_failure_after_the_unit_was_written_restores_it(self) -> None:
+        # The record's lock cannot be taken: install has written the units when it fails.
+        os.makedirs(os.path.join(self.tmp, ROOT_RECORD.lstrip("/") + ".lock"))
+        adapter = self._adapter()
+        written: list[str] = []
+        real_install = InstallService.install
+
+        def spy(svc: InstallService, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
+            for line in real_install(svc, entries, req):
+                written.append(line)
+                yield line
+
+        with mock.patch.object(InstallService, "install", spy), self.assertRaises(WriteFailed):
+            adapter.update_top_mount(SAMPLE_UUID, "subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit")
+        self.assertTrue(any(line.startswith("written:") and "top.mount" in line for line in written), written)
+        self.assertIn("Options=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit\n", self._unit())
+
+    def test_a_failure_before_any_write_restores_nothing(self) -> None:
+        adapter = self._adapter()
+        calls: list[str] = []
+        real_install = InstallService.install
+
+        def refuse_first(svc: InstallService, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
+            calls.append(req.values.get("OPTIONS", "") if req.values else "")
+            if len(calls) == 1:
+                raise InstallRefused("var-mnt-btrfs\\x2dtop.mount: refused by the unit verifier")
+            return real_install(svc, entries, req)
+
+        with mock.patch.object(InstallService, "install", refuse_first), self.assertRaises(InstallRefused):
+            adapter.update_top_mount(SAMPLE_UUID, "subvolid=5,compress-force=zstd:1")
+        self.assertEqual(calls, ["subvolid=5,compress-force=zstd:1"])  # no second install: nothing to restore
+        self.assertEqual(self._unit(), SAMPLE_TOP_MOUNT)
 
 
 class AnacondaScriptTest(unittest.TestCase):

@@ -24,6 +24,7 @@ from cst_core.adapters.runtime import checkout_commit, checkout_root
 from cst_core.adapters.terminal import confirm as terminal_confirm
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService
+from cst_core.domain.errors import Refused
 from cst_core.domain.install import INSTALL_MANIFEST, Component
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import (
@@ -37,6 +38,9 @@ from cst_core.ports import (
 )
 
 _DEFAULT_PROC_DIR: Final[str] = "/proc"
+
+# What installing the top-mount unit, marking it and reloading systemd can raise.
+_TOP_MOUNT_ERRORS: Final = (CommandFailed, OSError, WriteFailed, Refused, ValueError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,12 +205,13 @@ class LinuxCompressHostAdapter:
         entries = [e for e in INSTALL_MANIFEST if e.component == Component.BTRFS_TOP_MOUNT]
         req = InstallRequest(values={"UUID": uuid, "OPTIONS": options}, as_root=True, root=self._host_root)
         rec_path = f"{self._host_root}{ROOT_RECORD}" if self._host_root else ROOT_RECORD
-        list(installer.install(entries, req))
         try:
+            list(installer.install(entries, req))
             installer.mark(rec_path, Component.BTRFS_TOP_MOUNT)
             self._systemctl.daemon_reload()
-        except CommandFailed, OSError, WriteFailed:
-            if prev_top is not None:
+        except _TOP_MOUNT_ERRORS:
+            # Put the previous unit back only when something was written (a refusal writes nothing).
+            if prev_top is not None and self.read_top_mount() != prev_top:
                 prev_req = InstallRequest(
                     values={"UUID": prev_top.uuid or uuid, "OPTIONS": prev_top.options},
                     as_root=True,
