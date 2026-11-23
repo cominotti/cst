@@ -18,6 +18,7 @@ from btrfs.commit.domain import (
     CommitAction,
     CommitParsedArgs,
     assess_commit_coherence,
+    booted_commit_diff,
     build_commit_plan,
     effective_commit_seconds,
     has_explicit_commit,
@@ -207,6 +208,25 @@ class CommitDomainTests(unittest.TestCase):
         ):
             with self.subTest(opts=opts, target=target):
                 self.assertEqual(rewrite_commit_options(opts, target), want)
+
+    def test_the_booted_diff_reads_the_last_rootflags(self) -> None:
+        head = f"ostree=/ostree/boot.1/fedora/abc/0 root=UUID={SAMPLE_UUID} rw "
+        first, last = "rootflags=subvol=root,commit=90", "rootflags=subvol=root,noatime"
+        nxt = head + f"{first} {last}\n"
+        snap = CompressSnapshot(
+            is_ostree=True,
+            root_uuid=SAMPLE_UUID,
+            fstab_text=SAMPLE_FSTAB,
+            kargs_text=nxt,
+            proc_mounts_text=SAMPLE_PROC_MOUNTS,
+            top_mount=None,
+        )
+        booted_last = head + f"{first} rootflags=subvol=root,noatime,commit=60\n"
+        self.assertEqual(
+            booted_commit_diff(snap, booted_last, kargs_ok=True), ("rootflags=subvol=root,noatime,commit=60", last)
+        )
+        booted_first = head + f"rootflags=subvol=root {last}\n"  # only the first, unused one differs
+        self.assertIsNone(booted_commit_diff(snap, booted_first, kargs_ok=True))
 
     def test_coherence_and_plan(self) -> None:
         snap = CompressSnapshot(

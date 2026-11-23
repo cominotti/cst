@@ -486,6 +486,24 @@ class SeparateHomeTests(unittest.TestCase):
         self.assertEqual(host.s.fstab, SEPARATE_HOME_FSTAB)
 
 
+class BootedKargsTests(unittest.TestCase):
+    def test_status_compares_the_last_rootflags(self) -> None:
+        # The kernel uses the last rootflags=: a difference in an earlier one is no difference.
+        head = f"ostree=/ostree/boot.1/fedora/abc/0 root=UUID={SAMPLE_UUID} rw "
+        last = "rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit"
+        nxt = head + f"rootflags=subvol=root,compress=lzo {last}\n"
+        for booted, want in (
+            (head + f"rootflags=subvol=root {last}\n", None),
+            (
+                head + "rootflags=subvol=root,compress=lzo rootflags=subvol=root,compress-force=zstd:1\n",
+                ("rootflags=subvol=root,compress-force=zstd:1", last),
+            ),
+        ):
+            with self.subTest(booted=booted):
+                host = _FakeHost(_FakeState(kargs_text=nxt, proc_cmdline=booted))
+                self.assertEqual(CompressService(host).gather_status().booted_diff, want)
+
+
 class TopMountInPlaceTests(unittest.TestCase):
     """apply rewrites only the compress option of the top-mount unit's own Options=: what only the unit has
     stays, and what the live /var has (another tool's commit=) is not copied in."""

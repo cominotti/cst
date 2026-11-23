@@ -70,8 +70,9 @@ def _booted_kargs_diff(
         return None
     boot_rf = extract_rootflags_tokens(proc_cmdline)
     next_rf = extract_rootflags_tokens(snap.kargs_text)
-    if boot_rf and next_rf and boot_rf != next_rf:
-        return (boot_rf[0], next_rf[0])
+    # The kernel uses the last rootflags= of its command line.
+    if boot_rf and next_rf and boot_rf[-1] != next_rf[-1]:
+        return (boot_rf[-1], next_rf[-1])
     return None
 
 

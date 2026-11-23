@@ -316,11 +316,12 @@ def booted_commit_diff(snap: CompressSnapshot, proc_cmdline: str | None, *, karg
     next_rf = extract_rootflags_tokens(snap.kargs_text)
     if not (boot_rf and next_rf):
         return None
-    b_sec = effective_commit_seconds(boot_rf[0].removeprefix(ROOTFLAGS_PREFIX))
-    n_sec = effective_commit_seconds(next_rf[0].removeprefix(ROOTFLAGS_PREFIX))
+    # The kernel uses the last rootflags= of its command line.
+    b_sec = effective_commit_seconds(boot_rf[-1].removeprefix(ROOTFLAGS_PREFIX))
+    n_sec = effective_commit_seconds(next_rf[-1].removeprefix(ROOTFLAGS_PREFIX))
     if b_sec == n_sec:
         return None
-    return (boot_rf[0], next_rf[0])
+    return (boot_rf[-1], next_rf[-1])
 
 
 def format_commit_usage(prog: str) -> str:
