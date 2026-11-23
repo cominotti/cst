@@ -477,6 +477,28 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         with open(self.paths.managed_file, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "259:2\n")  # nvme1n1 only: the scan claimed it, it has no solution
 
+    def test_cst_s_own_write_on_a_disk_with_a_hwdb_solution_stays_cst_s(self) -> None:
+        # An earlier run this boot wrote enable=1 ctrl=auto, and udev never replaced it: the scan keeps the
+        # disk CST's, so revert still resets it.
+        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=auto\n")
+        self._write(self.paths.managed_file, "259:1\n")
+        self.runner.udev_props["nvme0n1"] = "IOCOST_SOLUTIONS=isolation\nUSEC_INITIALIZED=1234\n"
+        self.runner.udev_props["nvme1n1"] = "DEVTYPE=disk\n"  # not processed yet: left out of this test
+        rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "unchanged: 259:1 (nvme0n1: CST's enable=1 auto from earlier this boot, kept until revert or reboot;"
+            " hwdb solution isolation)",
+            out,
+        )
+        with open(self.paths.managed_file, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1\n")
+        rc_r, out_r = revert_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc_r, 0, out_r)
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=0 ctrl=auto\n")
+        self.assertFalse(os.path.exists(self.paths.managed_file))
+
     def test_the_service_runs_after_udev_settle(self) -> None:
         with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:
             after = [line.split("=", 1)[1].split() for line in fh if line.startswith("After=")]

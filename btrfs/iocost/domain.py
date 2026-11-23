@@ -29,6 +29,7 @@ USEC_INITIALIZED_PROP: Final = "USEC_INITIALIZED"
 UDEVADM_TIMEOUT_S: Final = 10.0
 IOCOST_ENABLE_CTRL_AUTO: Final = "enable=1 ctrl=auto"
 IOCOST_DISABLE_CTRL_AUTO: Final = "enable=0 ctrl=auto"
+_CTRL_AUTO: Final = "auto"  # the ctrl CST writes; 90-iocost.rules' hwdb solutions write ctrl=user
 
 _AUTO_DISK_RE: Final = re.compile(r"^(?:nvme[0-9]+n[0-9]+|sd[a-z]+|vd[a-z]+)$")
 _LIVE_ONLY_FLAG: Final = "--live-only"
@@ -241,6 +242,19 @@ def plan_iocost_apply(snap: IocostSnapshot, *, target_device: str | None = None)
         # The scan of every disk (the boot service) leaves udev's own disks alone; one --device run is
         # the udev rule's, which only matches a disk without a hwdb solution.
         if target_device is None and disk.hwdb_solution:
+            entry = snap.qos_entries.get(disk.devno)
+            if (
+                disk.devno in snap.managed_devnos
+                and entry is not None
+                and (entry.enable, entry.ctrl) == (1, _CTRL_AUTO)
+            ):
+                # CST's own write of earlier this boot is still there (udev never replaced it): it stays
+                # CST's, so revert resets it; the next boot leaves the disk to udev.
+                unchanged.append(
+                    f"{disk.devno} ({disk.name}: CST's enable=1 auto from earlier this boot, kept until revert"
+                    f" or reboot; hwdb solution {disk.hwdb_solution})"
+                )
+                continue
             preexisting.append(f"{disk.devno} ({disk.name}: hwdb solution {disk.hwdb_solution}; left to udev)")
             next_managed.discard(disk.devno)
             continue

@@ -1473,7 +1473,9 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
 - the scan of every disk (`apply`, `plan`, `status` and the boot service)
   asks udev about each one (`udevadm info`): a disk with an `IOCOST_SOLUTIONS`
   hwdb solution is left to `90-iocost.rules` (`kept:`, and no longer listed as
-  CST's), and a disk udev has not processed yet (no `USEC_INITIALIZED`) is
+  CST's), unless CST's own `enable=1 ctrl=auto` of earlier this boot is still
+  on it (udev's solutions write `ctrl=user`): that disk stays CST's
+  (`unchanged:`), so `revert` resets it, and the next boot leaves it to udev; a disk udev has not processed yet (no `USEC_INITIALIZED`) is
   skipped with a `note:` (the udev rule writes it once udev does). Without
   `udevadm`, a disk is judged as before, with a `note:`. The service is ordered
   after `systemd-udev-settle.service` (where something pulls it in) and
