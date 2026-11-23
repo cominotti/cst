@@ -197,6 +197,17 @@ class CommitDomainTests(unittest.TestCase):
         self.assertEqual(rewrite_commit_options(rewritten, 30), base)
         self.assertEqual(rewrite_commit_options(rewritten, None), base)
 
+    def test_a_malformed_commit_token_is_replaced(self) -> None:
+        for opts, target, want in (
+            ("commit=abc,noatime", 60, "commit=60,noatime"),
+            ("commit=abc,noatime", None, "noatime"),
+            ("noatime,commit=0", 60, "noatime,commit=60"),
+            ("noatime,commit=0,flushoncommit", 30, "noatime,flushoncommit"),
+            ("commit=,noatime,commit=45", 90, "commit=90,noatime"),
+        ):
+            with self.subTest(opts=opts, target=target):
+                self.assertEqual(rewrite_commit_options(opts, target), want)
+
     def test_coherence_and_plan(self) -> None:
         snap = CompressSnapshot(
             is_ostree=True,

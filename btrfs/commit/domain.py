@@ -148,14 +148,17 @@ def format_commit_label(seconds: int | None, *, explicit: bool = False) -> str:
 
 
 def rewrite_commit_options(options_str: str, target_seconds: int | None) -> str:
-    """Rewrite or remove `commit=N` in `options_str`, keeping `flushoncommit` and other flags."""
+    """Rewrite or remove `commit=N` in `options_str`, keeping `flushoncommit` and other flags.
+
+    Every `commit=` token goes, also one that is not a number (`commit=abc`, which a mount refuses) or
+    `commit=0` (btrfs' default); the target takes the place of the first one."""
     tokens = [tok for tok in options_str.split(",") if tok]
     omit = target_seconds is None or target_seconds == KERNEL_DEFAULT_COMMIT_S
     target_tok = "" if omit else f"commit={target_seconds}"
     out: list[str] = []
     inserted = False
     for tok in tokens:
-        if parse_commit_token(tok) is not None:
+        if tok.startswith(_COMMIT_PREFIX):
             if not omit and not inserted:
                 out.append(target_tok)
                 inserted = True
