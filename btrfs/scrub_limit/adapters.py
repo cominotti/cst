@@ -18,6 +18,7 @@ from btrfs.scrub_limit.domain import (
     scrub_limit_status_lines,
     update_snapshots_conf_scrub_limit,
 )
+from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
@@ -27,7 +28,7 @@ from cst_core.adapters.runtime import (
     undo_python_start,
 )
 from cst_core.domain.install import Component
-from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
+from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
@@ -133,22 +134,83 @@ def scrub_limit_plan(paths: ScrubPaths, target_limit: str | None) -> tuple[int, 
     )
 
 
+def _write_conf(path: str, text: str) -> None:
+    ensure_dir(os.path.dirname(path), 0o755)
+    write_atomic(path, text, mode=0o644, durable=True, relabel=True)
+
+
+def _restore_conf(paths: ScrubPaths, old_text: str | None, *, made_dir: bool) -> str | None:
+    """snapshots.conf as it was before this run (removed when there was none); what failed, or None."""
+    try:
+        if old_text is not None:
+            _write_conf(paths.conf_path, old_text)
+            return None
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(paths.conf_path)
+        if made_dir:
+            with contextlib.suppress(OSError):
+                os.rmdir(os.path.dirname(paths.conf_path))
+    except OSError as exc:
+        return f"{paths.conf_path}: {exc.strerror or exc}"
+    return None
+
+
+def _write_dropin(runner: CommandRunnerPort, paths: ScrubPaths, text: str | None) -> tuple[int, list[str], str]:
+    """The drop-in through the installer: written with text, or removed (None)."""
+    if text is None:
+        return run_installer(runner, paths.installer_script, ["remove-text", paths.dropin_path])
+    return run_installer(
+        runner,
+        paths.installer_script,
+        ["text", paths.dropin_path, "0644", "--component", Component.BTRFS_CORE.value],
+        input_text=text,
+    )
+
+
+def _restore_dropin(runner: CommandRunnerPort, paths: ScrubPaths, old_text: str | None) -> str | None:
+    rc, _lines, err = _write_dropin(runner, paths, old_text)
+    if rc != 0:
+        return f"{paths.dropin_path}: {err or f'installer exit {rc}'}"
+    if old_text is None:
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(paths.dropin_path))
+    return None
+
+
+def _rolled_back(cause: str, failures: list[str | None], *, reload_hint: bool) -> str:
+    left = [f for f in failures if f is not None]
+    if left:
+        return f"ERROR: {cause}; ROLLBACK INCOMPLETE ({'; '.join(left)})"
+    hint = " (run systemctl daemon-reload once it works)" if reload_hint else ""
+    return f"ERROR: {cause}; previous configuration restored.{hint}"
+
+
+def _failure(what: str, result: CommandResult) -> str:
+    return f"{what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"
+
+
 def scrub_limit_apply(
     paths: ScrubPaths,
     target_limit: str | None,
     *,
     runner: CommandRunnerPort | None = None,
 ) -> tuple[int, list[str]]:
-    """Update `SCRUB_LIMIT` in `snapshots.conf`, update/remove `10-cst-limit.conf`, and reload systemd if needed."""
+    """Update `SCRUB_LIMIT` in `snapshots.conf`, update/remove `10-cst-limit.conf`, and reload systemd if needed.
+
+    When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     conf_text, conf_unreadable = _read_optional_strict(paths.conf_path)
     if conf_unreadable:
         return 1, [f"ERROR: cannot read {paths.conf_path}"]
+    dropin_before, dropin_unreadable = _read_optional_strict(paths.dropin_path)
+    if dropin_unreadable:
+        return 1, [f"ERROR: cannot read {paths.dropin_path}"]
     out: list[str] = []
     new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
-    if new_conf is not None and new_conf != conf_text:
-        ensure_dir(os.path.dirname(paths.conf_path), 0o755)
-        write_atomic(paths.conf_path, new_conf, mode=0o644, durable=True, relabel=True)
+    conf_changed = new_conf is not None and new_conf != conf_text
+    made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
+    if new_conf is not None and conf_changed:
+        _write_conf(paths.conf_path, new_conf)
         verb = "written:" if conf_text is None else "updated:"
         note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
         out.append(f"{verb:<10} {paths.conf_path} ({note})")
@@ -156,26 +218,23 @@ def scrub_limit_apply(
         suffix = " (absent)" if conf_text is None else ""
         out.append(f"unchanged: {paths.conf_path}{suffix}")
 
-    if target_limit is not None:
-        dropin_text = render_scrub_dropin(target_limit)
-        rc_i, inst_lines, err_i = run_installer(
-            cmd_runner,
-            paths.installer_script,
-            ["text", paths.dropin_path, "0644", "--component", Component.BTRFS_CORE.value],
-            input_text=dropin_text,
-        )
-    else:
-        rc_i, inst_lines, err_i = run_installer(cmd_runner, paths.installer_script, ["remove-text", paths.dropin_path])
+    def restore_conf() -> str | None:
+        return _restore_conf(paths, conf_text, made_dir=made_dir) if conf_changed else None
 
+    rc_i, inst_lines, err_i = _write_dropin(
+        cmd_runner, paths, render_scrub_dropin(target_limit) if target_limit is not None else None
+    )
     out.extend(inst_lines)
     if rc_i != 0:
-        if err_i:
-            out.append(err_i)
-        return rc_i, out
+        cause = f"the installer failed: {err_i or f'exit {rc_i}'}"
+        return rc_i, [*out, _rolled_back(cause, [restore_conf()], reload_hint=False)]
 
     if target_limit is None:
         with contextlib.suppress(OSError):
             os.rmdir(os.path.dirname(paths.dropin_path))
     if any(line.startswith(("written:", "removed:")) for line in inst_lines):
-        cmd_runner.run(["systemctl", "daemon-reload"], output=OutputMode.CAPTURE)
+        dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+        if dr.returncode != 0:
+            failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
+            return 1, [*out, _rolled_back(_failure("systemctl daemon-reload", dr), failures, reload_hint=True)]
     return 0, out

@@ -39,6 +39,8 @@ class _FakeRunner:
         self.calls: list[list[str]] = []
         self.inputs: list[str | None] = []
         self._installer_root = installer_root
+        # a part of the command line ("systemctl daemon-reload", "installer.py text") whose calls exit 1
+        self.fail_on: set[str] = set()
 
     def run(
         self,
@@ -50,6 +52,8 @@ class _FakeRunner:
         cmd = list(argv)
         self.calls.append(cmd)
         self.inputs.append(input_text)
+        if any(part in " ".join(cmd) for part in self.fail_on):
+            return CommandResult(1, "", "Access denied", argv=tuple(cmd))
         if "installer.py" in " ".join(cmd):
             if self._installer_root:
                 real = subprocess.run(
@@ -229,6 +233,79 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
         with open(self.conf, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "NAS_ENABLED=1\n")
+
+    def _write(self, path: str, text: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _read(self, path: str) -> str | None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+
+    def test_a_failed_daemon_reload_restores_both_files(self) -> None:
+        restored = (
+            "ERROR: systemctl daemon-reload failed: Access denied; previous configuration restored."
+            " (run systemctl daemon-reload once it works)"
+        )
+        old_dropin = render_scrub_dropin("500M")
+        for name, conf, dropin, target in (
+            ("set, both new", None, None, "500M"),
+            ("set, conf kept a key", "NAS_ENABLED=1\n", None, "500M"),
+            ("set, from 500M to 1G", "SCRUB_LIMIT='500M'\n", old_dropin, "1G"),
+            ("off", "SCRUB_LIMIT='500M'\n", old_dropin, None),
+        ):
+            with self.subTest(name=name):
+                shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
+                if conf is not None:
+                    self._write(self.conf, conf)
+                if dropin is not None:
+                    self._write(self.dropin, dropin)
+                runner = _FakeRunner()
+                runner.fail_on = {"systemctl daemon-reload"}
+                rc, lines = scrub_limit_apply(self.paths, target, runner=runner)
+                self.assertEqual(rc, 1)
+                self.assertEqual(lines[-1], restored)
+                self.assertEqual(self._read(self.conf), conf)
+                self.assertEqual(self._read(self.dropin), dropin)
+                if conf is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(self.conf)))
+                if dropin is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(self.dropin)))
+
+    def test_a_failed_installer_restores_snapshots_conf(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\nSCRUB_LIMIT='1G'\n")
+        runner = _FakeRunner()
+        runner.fail_on = {"installer.py"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines[-1], "ERROR: the installer failed: Access denied; previous configuration restored."
+        )
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\nSCRUB_LIMIT='1G'\n")
+        self.assertFalse(any(c[:2] == ["systemctl", "daemon-reload"] for c in runner.calls))
+
+    def test_a_rollback_that_fails_says_so(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner = _FakeRunner()
+        runner.fail_on = {"systemctl daemon-reload", "installer.py remove-text"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: Access denied; ROLLBACK INCOMPLETE"
+            f" ({self.dropin}: Access denied)",
+        )
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+
+    def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
+        os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=_FakeRunner())
+        self.assertEqual((rc, lines), (1, [f"ERROR: cannot read {self.dropin}"]))
+        self.assertIsNone(self._read(self.conf))
 
     def test_container_refusal_and_non_root_elevation(self) -> None:
         entry = os.path.join(REPO, "btrfs", "btrfs-scrub-limit")

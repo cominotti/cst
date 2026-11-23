@@ -362,6 +362,13 @@ cst btrfs scrub-limit off
 - If setting the limit fails (a btrfs-progs without `scrub limit`), that
   scrub does not run and the unit fails: it never runs at full speed by
   mistake. The health check alerts when the last scrub gets too old.
+- `scrub-limit set` and `off` write `snapshots.conf` first, then the drop-in
+  (through the installer), then run `daemon-reload`. When the installer or
+  `daemon-reload` fails, both files go back to what they were before (a file
+  that was not there is removed) and the command ends with
+  `ERROR: ...; previous configuration restored.`, or with
+  `ROLLBACK INCOMPLETE (...)` naming what could not be put back. A drop-in
+  that cannot be read stops the command before it writes anything.
 - `status` shows the setting, the limit the service sets and the value in
   sysfs now; `cst doctor` shows the same as `info` and warns when the
   setting and the service differ.
