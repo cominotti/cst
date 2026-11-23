@@ -67,8 +67,8 @@ def mapper_names(sources: Collection[str], dm_names: Mapping[str, str]) -> froze
         dev = mount_device(src)
         if dev.startswith(_MAPPER_PREFIX):
             names.add(dev.removeprefix(_MAPPER_PREFIX))
-        elif _DM_DEVICE_RE.fullmatch(dev) and dm_names.get(dev.removeprefix("/dev/"), ""):
-            names.add(dm_names[dev.removeprefix("/dev/")])
+        elif _DM_DEVICE_RE.fullmatch(dev) and (name := dm_names.get(dev.removeprefix("/dev/"), "")):
+            names.add(name)
     return frozenset(names)
 
 
@@ -105,22 +105,12 @@ def _collect_active_bases(
     fstab_by_target: dict[str, MountEntry],
     managed: Sequence[ManagedFstabEntry],
 ) -> tuple[str, ...]:
-    active: list[str] = []
-    for base in (CACHE_BASE, SCRATCHPAD_BASE):
-        referenced = any(e.base_match for e in _managed_for_base(managed, base))
-        if base in live_by_target or base in fstab_by_target or referenced:
-            active.append(base)
-    return tuple(active)
-
-
-@dataclass(frozen=True, slots=True)
-class _ManagedRef:
-    entry: ManagedFstabEntry
-    base_match: bool
-
-
-def _managed_for_base(managed: Sequence[ManagedFstabEntry], base: str) -> list[_ManagedRef]:
-    return [_ManagedRef(entry=m, base_match=(BASE_FOR_KIND[m.kind] == base)) for m in managed]
+    referenced = {BASE_FOR_KIND[m.kind] for m in managed}
+    return tuple(
+        base
+        for base in (CACHE_BASE, SCRATCHPAD_BASE)
+        if base in live_by_target or base in fstab_by_target or base in referenced
+    )
 
 
 def _check_base_mount(
