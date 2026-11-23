@@ -7795,10 +7795,10 @@ EOF
         self.assertIn("E2E-COMMIT-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
-    def test_160_btrfs_scratch_attach_detach_and_doctor(self) -> None:
-        """`cst btrfs scratch` attaches/detaches per-user bind mounts cleanly alongside real systemd and `cst doctor`."""
+    def test_160_btrfs_cache_attach_detach_and_doctor(self) -> None:
+        """`cst btrfs cache` attaches/detaches per-user bind mounts cleanly alongside real systemd and `cst doctor`."""
         c = self.SYSTEMD_CONTAINER
-        w = "/var/tmp/e2e-btrfs-scratch"
+        w = "/var/tmp/e2e-btrfs-cache"
         self.addCleanup(
             exec_bash,
             c,
@@ -7813,7 +7813,7 @@ EOF
             c,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}/bin {w}/etc {w}/proc {w}/var/mnt/cache {w}/var/mnt/scratch {w}/var/home/u1 {w}/var/home/u2
+            rm -rf {w} && mkdir -p {w}/bin {w}/etc {w}/proc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1 {w}/var/home/u2
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
             cat >{w}/etc/passwd <<'EOF'
@@ -7822,23 +7822,23 @@ u1:x:1000:1000:U1:/var/home/u1:/bin/bash
 u2:x:1001:1001:U2:/var/home/u2:/bin/bash
 EOF
             cat >{w}/etc/crypttab <<'EOF'
-scratch UUID=dev-u /etc/cryptsetup-keys.d/scratch.key nofail,discard
+cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard
 EOF
             cat >{w}/etc/fstab <<'EOF'
-/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0
-/dev/mapper/scratch /var/mnt/scratch btrfs subvol=scratch,noatime,compress=zstd:1,nofail 0 0
+/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0
+/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0
 EOF
             cat >{w}/proc/mounts <<'EOF'
 /dev/dm-0 /var btrfs rw,noatime,compress-force=zstd:1,flushoncommit 0 0
-/dev/mapper/scratch /var/mnt/cache btrfs rw,noatime,compress=zstd:1 0 0
-/dev/mapper/scratch /var/mnt/scratch btrfs rw,noatime,compress=zstd:1 0 0
+/dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress=zstd:1 0 0
+/dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress=zstd:1 0 0
 EOF
             cat >{w}/bin/findmnt <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ " $* " == *"SOURCE,TARGET,OPTIONS,UUID"* ]]; then
     while read -r src tgt _ opts _; do
-        printf '%s %s %s uuid-scratch-2222\\n' "$src" "$tgt" "$opts"
+        printf '%s %s %s uuid-cache-2222\\n' "$src" "$tgt" "$opts"
     done <{w}/proc/mounts
     exit 0
 fi
@@ -7850,7 +7850,7 @@ for a in "$@"; do
 done
 if [[ -n "$tgt" ]]; then
     if [[ "$tgt" == *"/var/mnt/"* ]] || grep -qF " ${{tgt#{w}}} " {w}/proc/mounts; then
-        echo "btrfs uuid-scratch-2222 /dev/mapper/scratch"
+        echo "btrfs uuid-cache-2222 /dev/mapper/cache"
     else
         echo "btrfs uuid-root-1111 /dev/dm-0"
     fi
@@ -7863,7 +7863,7 @@ EOF
 set -euo pipefail
 if [[ "${{1:-}}" == "--bind" ]]; then
     tgt="${{3#{w}}}"
-    echo "/dev/mapper/scratch $tgt btrfs rw,noatime,compress=zstd:1 0 0" >>{w}/proc/mounts
+    echo "/dev/mapper/cache $tgt btrfs rw,noatime,compress=zstd:1 0 0" >>{w}/proc/mounts
     exit 0
 fi
 exec /usr/bin/mount "$@"
@@ -7876,32 +7876,32 @@ grep -vF " $tgt " {w}/proc/mounts >{w}/proc/mounts.tmp && mv {w}/proc/mounts.tmp
 EOF
             chmod +x {w}/bin/findmnt {w}/bin/mount {w}/bin/umount
 
-            export PATH="{w}/bin:$PATH" CST_BTRFS_SCRATCH_ROOT="{w}"
-            /opt/cst-rw/cst btrfs scratch plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            /opt/cst-rw/cst btrfs cache plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
             [[ ! -e {w}/var/mnt/cache/u1 ]]
 
-            /opt/cst-rw/cst btrfs scratch attach --user u1
-            /opt/cst-rw/cst btrfs scratch attach --user u1 | grep -qF "nothing to do"
-            /opt/cst-rw/cst btrfs scratch attach --user u2
+            /opt/cst-rw/cst btrfs cache attach --user u1
+            /opt/cst-rw/cst btrfs cache attach --user u1 | grep -qF "nothing to do"
+            /opt/cst-rw/cst btrfs cache attach --user u2
             [[ -d {w}/var/mnt/cache/u1 ]]
-            [[ -f {w}/var/mnt/scratch/u1/CACHEDIR.TAG ]]
+            [[ -f {w}/var/mnt/scratchpad/u1/CACHEDIR.TAG ]]
             grep -qF "user=u1 kind=cache" {w}/etc/fstab
-            grep -qF "user=u2 kind=scratch" {w}/etc/fstab
+            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
 
             cp -a {w}/etc/fstab /etc/fstab
             cp -a {w}/etc/crypttab /etc/crypttab
             doc_out="$(/opt/cst-rw/cst doctor || true)"
-            grep -qF "ok     btrfs scratch: /var/mnt/cache, /var/mnt/scratch mounted" <<<"$doc_out"
+            grep -qF "ok     btrfs cache: /var/mnt/cache, /var/mnt/scratchpad mounted" <<<"$doc_out"
 
-            echo "keep-u1" >{w}/var/mnt/scratch/u1/data.txt
-            /opt/cst-rw/cst btrfs scratch status --user u1 | grep -qF "other fstab users  u2"
-            /opt/cst-rw/cst btrfs scratch detach --user u1
-            [[ -f {w}/var/mnt/scratch/u1/data.txt ]]
+            echo "keep-u1" >{w}/var/mnt/scratchpad/u1/data.txt
+            /opt/cst-rw/cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
+            /opt/cst-rw/cst btrfs cache detach --user u1
+            [[ -f {w}/var/mnt/scratchpad/u1/data.txt ]]
             ! grep -qF "user=u1" {w}/etc/fstab
             grep -qF "user=u2 kind=cache" {w}/etc/fstab
-            /opt/cst-rw/cst btrfs scratch detach --user u2
-            ! grep -qF "btrfs-scratch" {w}/etc/fstab
-            echo E2E-SCRATCH-OK
+            /opt/cst-rw/cst btrfs cache detach --user u2
+            ! grep -qF "btrfs-cache" {w}/etc/fstab
+            echo E2E-CACHE-OK
             """,
         ).stdout
-        self.assertIn("E2E-SCRATCH-OK", out)
+        self.assertIn("E2E-CACHE-OK", out)

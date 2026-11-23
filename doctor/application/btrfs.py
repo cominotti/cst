@@ -749,11 +749,11 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 
 @check(CHECKS, "btrfs")
 def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
-    """Check dedicated NVMe cache/scratch mounts, crypttab `nofail`, and user bind mounts."""
+    """Check the dedicated NVMe cache drive's mounts, crypttab `nofail`, and user bind mounts."""
     fstab_raw = read_text(host, host.path(FSTAB), 65536)
     proc_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
     hint_text = f"{fstab_raw}\n{proc_raw}"
-    has_hints = any(k in hint_text for k in ("/var/mnt/cache", "/var/mnt/scratch", "btrfs-scratch"))
+    has_hints = any(k in hint_text for k in ("/var/mnt/cache", "/var/mnt/scratchpad", "btrfs-cache"))
     if not (has_hints or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
         return
     crypttab_path = host.path(HostPath("/etc/crypttab"))
@@ -774,6 +774,6 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     }
     for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
-        yield Result(sev_map[finding.severity], f"btrfs scratch: {finding.message}", fix_cmd)
+        yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
     if crypttab_unreadable and has_hints:
-        yield Result(INFO, "btrfs scratch: /etc/crypttab is not readable as this user (nofail not checked)")
+        yield Result(INFO, "btrfs cache: /etc/crypttab is not readable as this user (nofail not checked)")

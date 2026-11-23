@@ -1940,7 +1940,7 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         for cmd, needle in (
             ("compress-force", "revert"),
             ("commit-interval", "commit=SECONDS"),
-            ("scratch", "--allow-nonempty"),
+            ("cache", "--allow-nonempty"),
         ):
             r = subprocess.run(
                 ["bash", SETUP, cmd, "--help"],
@@ -1953,6 +1953,19 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn(cmd, r.stdout)
             self.assertIn(needle, r.stdout)
+
+    def test_btrfs_setup_refuses_the_old_scratch_command(self) -> None:
+        """The cache helper's command is `cache`: the word it had before the rename is unknown."""
+        r = subprocess.run(
+            ["bash", SETUP, "scratch", "--help"],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("Unknown command: scratch", r.stderr)
 
 
 class WriteCommandHelpTest(unittest.TestCase):

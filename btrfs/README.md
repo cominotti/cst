@@ -33,7 +33,7 @@ the CPU side (`cst cpu`), is [../README.md](../README.md).
     - [9.1 `compress-force`: skip the cheap btrfs compressibility estimator](#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator)
     - [9.2 `iocost`: enable kernel blk-iocost QoS for slice `IOWeight`](#92-iocost-enable-kernel-blk-iocost-qos-for-slice-ioweight)
     - [9.3 `commit-interval`: coherent `commit=60` across root btrfs layers](#93-commit-interval-coherent-commit60-across-root-btrfs-layers)
-    - [9.4 Dedicated NVMe scratch/cache drive (`scratch`)](#94-dedicated-nvme-scratchcache-drive-scratch)
+    - [9.4 Dedicated NVMe cache drive (`cache`)](#94-dedicated-nvme-cache-drive-cache)
 10. [`snapshots` (summary)](#10-snapshots-summary)
     - [10.1 `bulk`: one folder for everything you can download again](#101-bulk-one-folder-for-everything-you-can-download-again)
     - [10.2 Toolchain caches: in `cst toolchains` now](#102-toolchain-caches-in-cst-toolchains-now)
@@ -136,7 +136,7 @@ cst btrfs help
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
 | `commit-interval [status\|plan\|apply\|revert]` | user / root | Keep the root Btrfs `commit=` interval aligned across the live mount, `/etc/fstab`, BLS kernel args, and top-mount drop-ins (section 9.3; default target `60`s): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
-| `scratch [status\|plan\|attach\|detach]` | user / root | Multi-user bind mounts for a dedicated NVMe scratch/cache drive (`/var/mnt/cache/<user>` -> `~/.cache`, `/var/mnt/scratch/<user>` -> `~/Scratch`; section 9.4): `status` and `plan` run in a toolbox; `attach` and `detach` need root on the host. |
+| `cache [status\|plan\|attach\|detach]` | user / root | Multi-user bind mounts from a dedicated NVMe cache drive (`/var/mnt/cache/<user>` -> `~/.cache`, `/var/mnt/scratchpad/<user>` -> `~/Scratchpad`; section 9.4): `status` and `plan` run in a toolbox; `attach` and `detach` need root on the host. |
 | `iocost [status\|plan [--live-only [--device N]]\|apply [--live-only [--device N]]\|revert [--live-only]]` | user / root | Enable kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without an upstream hwdb entry so cgroup `IOWeight=` is arbitrated across slices (section 9.2): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
 | `scrub-limit [status\|plan [SIZE\|off]\|set [SIZE]\|off]` | user / root | Inspect or configure `SCRUB_LIMIT` (default `500M`) and `10-cst-limit.conf` (section 4.3): `status` and `plan` work as your user and in a toolbox; `set` and `off` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
@@ -1546,43 +1546,60 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   every layer, the top-mount unit included, by `apply` and `revert`, even
   when the valid `commit=` next to it already has the target.
 
-### 9.4 Dedicated NVMe scratch/cache drive (`scratch`)
+### 9.4 Dedicated NVMe cache drive (`cache`)
 
 ```
-cst btrfs scratch [--user NAME]             # status (default; user + toolbox)
-cst btrfs scratch plan [--user NAME]        # dry run + safety checks (--no-cache / --no-scratch / --allow-nonempty)
-cst btrfs scratch attach [--user NAME]      # root on host: 0700 dirs, CACHEDIR.TAG, fstab bind lines, live mount
-cst btrfs scratch detach [--user NAME]      # root on host: unmount + remove fstab lines; keeps data on NVMe
+cst btrfs cache [--user NAME]             # status (default; user + toolbox)
+cst btrfs cache plan [--user NAME]        # dry run + safety checks (--no-cache / --no-scratchpad / --allow-nonempty)
+cst btrfs cache attach [--user NAME]      # root on host: 0700 folders, CACHEDIR.TAG, fstab bind lines, live mount
+cst btrfs cache detach [--user NAME]      # root on host: unmount + remove fstab lines; keeps the data on the drive
 ```
 
-Offloads heavy rewriteable caches and temporary/build scratch out of the root
-RAID1 onto a dedicated single-disk Btrfs filesystem (without RAID1 `flushoncommit`),
-reducing root TBW while keeping `~/Workspace` on the mirrored root with hourly
-snapshots and NAS backup.
+Moves caches that are rewritten all the time, and build or temporary files,
+off the root RAID1 onto a dedicated single-disk Btrfs filesystem (without
+`flushoncommit`). That saves the root disks' write endurance (TBW).
+`~/Workspace` stays on the mirrored root, with hourly snapshots and the NAS
+backup: nothing on the cache drive is in a snapshot or a backup.
 
-- **Layout:** two top-level subvolumes on the dedicated drive:
-  - `subvol=cache` mounted at `/var/mnt/cache`, with per-user `0700` subdirs
-    `/var/mnt/cache/<user>` bind-mounted to `/var/home/<user>/.cache`.
-  - `subvol=scratch` mounted at `/var/mnt/scratch`, with per-user `0700`
-    subdirs `/var/mnt/scratch/<user>` (carrying `CACHEDIR.TAG`) bind-mounted to
-    `/var/home/<user>/Scratch`.
-- **Multi-user safe:** every user runs `attach` / `detach` independently via
-  `--user NAME` (or `$SUDO_USER`); each bind line in `/etc/fstab` carries
-  `bind,nofail,x-systemd.requires-mounts-for=...` and `# managed-by: btrfs-scratch (CST) user=<name> kind=<cache|scratch>`.
-- **Recommended one-time host provisioning (LUKS2 + auto-keyfile + single-mode Btrfs):**
-  - Open on LUKS2 with an auto-unlock keyfile in `/etc/cryptsetup-keys.d/` (`0400`)
-    and `nofail,discard,no-read-workqueue,no-write-workqueue` in `/etc/crypttab`
-    so the machine still boots if the scratch NVMe is removed.
-  - Format `mkfs.btrfs -L scratch -m single -d single`, create `cache` and
-    `scratch` subvolumes, and mount with
-    `noatime,discard=async,compress=zstd:1,commit=60,nofail` (no `flushoncommit`).
-  - Move existing `~/.cache` files when desktop/builds are idle (`rsync -aHAX`),
-    clear/rename the old `~/.cache`, then run `cst btrfs scratch attach`.
-- **Undo:** `cst btrfs scratch detach [--user NAME]` unmounts the user's bind
+- **Layout:** two top-level subvolumes on the cache drive:
+  - `subvol=cache` mounted at `/var/mnt/cache`, with per-user `0700`
+    folders `/var/mnt/cache/<user>` bind-mounted to `~/.cache`.
+  - `subvol=scratchpad` mounted at `/var/mnt/scratchpad`, with per-user
+    `0700` folders `/var/mnt/scratchpad/<user>` (carrying `CACHEDIR.TAG`)
+    bind-mounted to `~/Scratchpad`.
+- **Multi-user safe:** every user runs `attach` / `detach` on their own,
+  with `--user NAME` (or `$SUDO_USER`); each bind line in `/etc/fstab`
+  carries `bind,nofail,x-systemd.requires-mounts-for=...` and the marker
+  `# managed-by: btrfs-cache (CST) user=<name> kind=<cache|scratchpad>`.
+- **Provisioning, once, on the host** (CST does not do this part):
+  - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
+    `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in
+    `/etc/crypttab`:
+    `cache UUID=<luks uuid> /etc/cryptsetup-keys.d/cache.key nofail,discard,no-read-workqueue,no-write-workqueue`.
+    `nofail` lets the PC still boot when the drive is missing.
+  - Format it: `mkfs.btrfs -f -L cache -m dup -d single /dev/mapper/cache`.
+    In plain words: `-m dup` keeps two copies of the metadata (the
+    filesystem's index of files and folders) on the one disk, so one bad
+    metadata block is repaired from its twin instead of losing the whole
+    filesystem; `-d single` keeps one copy of the data, which is cache and
+    scratch work that can be made again.
+  - Mount the drive's top level (`subvolid=5`) at
+    `/var/mnt/btrfs-cache-top`, create the subvolumes `cache` and
+    `scratchpad` there, and unmount it. Use `/var/mnt`, not `/mnt`: on
+    Silverblue `/mnt` is a link to `var/mnt`, and a systemd `.mount` unit's
+    name follows the real path (the root filesystem's own top level is
+    `/var/mnt/btrfs-top`).
+  - Mount the two subvolumes from `/etc/fstab`, for example
+    `/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,discard=async,compress=zstd:1,commit=60,nofail 0 0`
+    (and the same for `scratchpad`), without `flushoncommit`.
+  - Move the existing `~/.cache` files when the desktop and builds are idle
+    (`rsync -aHAX`), clear the old `~/.cache`, then run
+    `cst btrfs cache attach`.
+- **Undo:** `cst btrfs cache detach [--user NAME]` unmounts the user's bind
   mounts and removes only that user's managed lines from `/etc/fstab`, leaving
-  files under `/var/mnt/cache` and `/var/mnt/scratch` intact. `cst doctor` checks
-  base mounts, absence of `flushoncommit`, `nofail` in `/etc/crypttab`, and
-  live bind mounts.
+  the files under `/var/mnt/cache` and `/var/mnt/scratchpad` intact. `cst
+  doctor` checks the base mounts, the absence of `flushoncommit`, `nofail`
+  in `/etc/crypttab`, and the live bind mounts.
 
 ---
 
@@ -2564,7 +2581,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
 | `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain/args.py` (the command line: `CompressCommand`, `CompressArgs`, `parse_compress_args`); `domain/__init__.py` (`CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, which fstab lines and mounts are the root filesystem's, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
 | `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
-| `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs scratch`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratch/<user>` -> `~/Scratch` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_SCRATCH_ROOT`). |
+| `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). |
 | `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
 | `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the rollback of both files on a failure, and `btrfs:core` kept done in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |

@@ -275,7 +275,7 @@ For high-churn Cargo builds (especially parallel coding agents and multi-worktre
 
 - **Fast iterative checks:** run `cargo check` during edits and reserve `cargo test` / full links for milestones.
 - **Disable incremental compilation in automated agents/CI:** set `CARGO_INCREMENTAL=0` in agent/CI shells (with `sccache` or clean release/bench builds, incremental state writes gigabytes to `target/` and invalidates cache hits).
-- **Per-agent build lanes on external scratch (`~/Scratch`):** if `cst btrfs scratch` provides `~/Scratch` (`CACHEDIR.TAG`, off the root RAID1), agents can use separate `CARGO_BUILD_BUILD_DIR=~/Scratch/cargo-<agent>` lanes to avoid Cargo lock contention without consuming mirrored root TBW.
+- **Per-agent build lanes on the cache drive (`~/Scratchpad`):** if `cst btrfs cache` provides `~/Scratchpad` (`CACHEDIR.TAG`, off the root RAID1), agents can use separate `CARGO_BUILD_BUILD_DIR=~/Scratchpad/cargo-<agent>` lanes to avoid Cargo lock contention without consuming mirrored root TBW.
 - **Keep release/bench debuginfo lean:** only enable full debug symbols (`[profile.release] debug = true` or `[profile.bench] debug = "line-tables-only"`) when profiling; use `RUST_LEAN_DEBUGINFO=yes` for dev builds.
 
 If the file has no `[build]` table, one is appended. The new file is parsed

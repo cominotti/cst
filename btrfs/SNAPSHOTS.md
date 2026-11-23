@@ -276,9 +276,9 @@ There are two kinds:
 > **Important:** files in these folders (except `Workspace`) are **not in any
 > snapshot and not in the NAS backup**. If you delete them, they are gone.
 >
-> **External mounts (`cst btrfs scratch`):** if `~/.cache` (or `~/Workspace`) is
+> **External mounts (`cst btrfs cache`):** if `~/.cache` (or `~/Workspace`) is
 > an explicit mountpoint (`mountpoint -q`, for example a bind mount from a
-> dedicated scratch/cache NVMe drive via `cst btrfs scratch`), `snapshots plan`
+> dedicated NVMe cache drive via `cst btrfs cache`), `snapshots plan`
 > and `snapshots status` show it as `done (external mount)` /
 > `ok (external mount)`, `put_aside` leaves its child caches (such as
 > `~/.cache/uv`) untouched, `planned_left` does not block snapshots waiting for

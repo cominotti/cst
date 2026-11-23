@@ -1479,62 +1479,62 @@ class BtrfsCacheDoctorTest(Scratch):
         with open(self.env["FIX_FINDMNT_ALL"], "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def test_scratch_health_states(self) -> None:
+    def test_cache_mount_health_states(self) -> None:
         self._put("etc", "fstab", text=f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n")
         self._put("proc", "mounts", text="/dev/dm-0 /var btrfs rw,compress-force=zstd:1,flushoncommit 0 0\n")
         self._set_findmnt(f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n")
         silent = self.run_tool()
-        self.assertNotIn("btrfs scratch:", "\n".join(area_lines(silent.stdout, "btrfs")))
+        self.assertNotIn("btrfs cache:", "\n".join(area_lines(silent.stdout, "btrfs")))
 
         self._put(
             "etc",
             "fstab",
             text=(
                 f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n"
-                "/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
-                "/dev/mapper/scratch /var/mnt/scratch btrfs subvol=scratch,noatime,compress=zstd:1,nofail 0 0\n"
+                "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
+                "/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0\n"
                 "/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 "
-                "# managed-by: btrfs-scratch (CST) user=danilo kind=cache\n"
+                "# managed-by: btrfs-cache (CST) user=danilo kind=cache\n"
             ),
         )
-        self._put("etc", "crypttab", text="scratch UUID=abc /etc/cryptsetup-keys.d/scratch.key nofail,discard\n")
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
         self._set_findmnt(
             f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
-            "/dev/mapper/scratch /var/mnt/cache noatime,compress=zstd:1,subvol=/cache scratch-u\n"
-            "/dev/mapper/scratch /var/mnt/scratch noatime,compress=zstd:1,subvol=/scratch scratch-u\n"
-            "/dev/mapper/scratch /var/home/danilo/.cache noatime,compress=zstd:1,subvol=/cache/danilo scratch-u\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,compress=zstd:1,subvol=/cache cache-u\n"
+            "/dev/mapper/cache /var/mnt/scratchpad noatime,compress=zstd:1,subvol=/scratchpad cache-u\n"
+            "/dev/mapper/cache /var/home/danilo/.cache noatime,compress=zstd:1,subvol=/cache/danilo cache-u\n"
         )
         self._set_findmnt_all(
             "/dev/dm-0 /var btrfs compress-force=zstd:1,flushoncommit\n"
-            "/dev/mapper/scratch /var/mnt/cache btrfs noatime,compress=zstd:1,subvol=/cache\n"
-            "/dev/mapper/scratch /var/mnt/scratch btrfs noatime,compress=zstd:1,subvol=/scratch\n"
-            "/dev/mapper/scratch /var/home/danilo/.cache btrfs noatime,compress=zstd:1,subvol=/cache/danilo\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,compress=zstd:1,subvol=/cache\n"
+            "/dev/mapper/cache /var/mnt/scratchpad btrfs noatime,compress=zstd:1,subvol=/scratchpad\n"
+            "/dev/mapper/cache /var/home/danilo/.cache btrfs noatime,compress=zstd:1,subvol=/cache/danilo\n"
         )
         ok_r = self.run_tool()
         self.assertIn(
-            "  ok     btrfs scratch: /var/mnt/cache, /var/mnt/scratch mounted",
+            "  ok     btrfs cache: /var/mnt/cache, /var/mnt/scratchpad mounted",
             "\n".join(area_lines(ok_r.stdout, "btrfs")),
         )
 
-        self._put("etc", "crypttab", text="scratch UUID=abc /etc/cryptsetup-keys.d/scratch.key discard\n")
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key discard\n")
         self._set_findmnt(
             f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
-            "/dev/mapper/scratch /var/mnt/cache noatime,flushoncommit scratch-u\n"
-            "/dev/mapper/scratch /var/mnt/scratch noatime scratch-u\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,flushoncommit cache-u\n"
+            "/dev/mapper/cache /var/mnt/scratchpad noatime cache-u\n"
         )
         self._set_findmnt_all(
             "/dev/dm-0 /var btrfs compress-force=zstd:1,flushoncommit\n"
-            "/dev/mapper/scratch /var/mnt/cache btrfs noatime,flushoncommit\n"
-            "/dev/mapper/scratch /var/mnt/scratch btrfs noatime\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,flushoncommit\n"
+            "/dev/mapper/cache /var/mnt/scratchpad btrfs noatime\n"
         )
         warn_r = self.run_tool()
         self.assertEqual(warn_r.returncode, 1)
         btrfs_text = "\n".join(area_lines(warn_r.stdout, "btrfs"))
-        self.assertIn("WARN   btrfs scratch: /var/mnt/cache has 'flushoncommit'", btrfs_text)
-        self.assertIn("WARN   btrfs scratch: /etc/crypttab entry 'scratch' is missing 'nofail'", btrfs_text)
-        self.assertIn("fix: cst btrfs scratch attach --user danilo", btrfs_text)
+        self.assertIn("WARN   btrfs cache: /var/mnt/cache has 'flushoncommit'", btrfs_text)
+        self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
+        self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
 
-    def test_scratch_non_btrfs_via_findmnt_and_unreadable_crypttab(self) -> None:
+    def test_cache_mount_non_btrfs_via_findmnt_and_unreadable_crypttab(self) -> None:
         self._put(
             "etc",
             "fstab",
@@ -1542,16 +1542,16 @@ class BtrfsCacheDoctorTest(Scratch):
         )
         self._set_findmnt_all("/dev/nvme2n1p1 /var/mnt/cache ext4 rw,noatime\n")
         crypttab = os.path.join(self.root, "etc", "crypttab")
-        self._put("etc", "crypttab", text="scratch UUID=abc /etc/cryptsetup-keys.d/scratch.key discard\n")
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key discard\n")
         if os.geteuid() != 0:
             os.chmod(crypttab, 0o000)
             self.addCleanup(os.chmod, crypttab, 0o600)
         res = self.run_tool()
         self.assertEqual(res.returncode, 1)
         btrfs_text = "\n".join(area_lines(res.stdout, "btrfs"))
-        self.assertIn("WARN   btrfs scratch: /var/mnt/cache filesystem is ext4, expected btrfs", btrfs_text)
+        self.assertIn("WARN   btrfs cache: /var/mnt/cache filesystem is ext4, expected btrfs", btrfs_text)
         if os.geteuid() != 0:
-            self.assertIn("info   btrfs scratch: /etc/crypttab is not readable as this user", btrfs_text)
+            self.assertIn("info   btrfs cache: /etc/crypttab is not readable as this user", btrfs_text)
 
 
 class SnapshotsWritableTest(Scratch):

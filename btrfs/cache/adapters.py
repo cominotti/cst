@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Host and toolbox adapters for `cst btrfs scratch` (`btrfs/btrfs-cache`)."""
+"""Host and toolbox adapters for `cst btrfs cache` (`btrfs/btrfs-cache`)."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunn
 from cst_core.adapters.runtime import ManagedCliEnv, host_view_path
 from cst_core.ports import CommandFailed, CommandRunnerPort, ExecutionContextPort, OutputMode
 
-_SEAM_ROOT_ENV: Final = "CST_BTRFS_SCRATCH_ROOT"
+_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
 _CRYPTTAB_PATH: Final = "/etc/crypttab"
 _ACCOUNT_DB_PATH: Final = "/etc/passwd"
 _FINDMNT_TIMEOUT_S: Final = 15
@@ -280,7 +280,7 @@ def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
     tag_path = os.path.join(source_path, CACHE_TAG)
     if os.path.exists(tag_path) or os.path.islink(tag_path):
         return
-    payload = CACHE_SIGNATURE + b"\n# Directory tag written by cst btrfs scratch (excluded from backups).\n"
+    payload = CACHE_SIGNATURE + b"\n# Directory tag written by cst btrfs cache (excluded from backups).\n"
     write_atomic(tag_path, payload, mode=FILE_MODE_TAG, relabel=(os.geteuid() == 0))
     if os.geteuid() == 0:
         os.chown(tag_path, user.uid, user.gid)
@@ -304,7 +304,7 @@ def _apply_attach(
         return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
 
     user = snap.user
-    lines: list[str] = [f"test seam (CST_BTRFS_SCRATCH_ROOT): {rt.seam_root}"] if rt.seam_root else []
+    lines: list[str] = [f"test seam (CST_BTRFS_CACHE_ROOT): {rt.seam_root}"] if rt.seam_root else []
     for probe in snap.bindings:
         b = probe.binding
         h_src = _map_path(b.source, rt, read_only=False)
@@ -350,7 +350,7 @@ def _apply_detach(
         return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
-    lines: list[str] = [f"test seam (CST_BTRFS_SCRATCH_ROOT): {rt.seam_root}"] if rt.seam_root else []
+    lines: list[str] = [f"test seam (CST_BTRFS_CACHE_ROOT): {rt.seam_root}"] if rt.seam_root else []
 
     unmounted_any = False
     for probe in snap.bindings:
@@ -374,14 +374,14 @@ def _apply_detach(
     if not unmounted_any and new_fstab == cur_fstab:
         lines.append(f"Nothing attached for {user.name}; nothing to do.")
     else:
-        lines.append("Data in /var/mnt/{cache,scratch} kept untouched.")
+        lines.append("Data in /var/mnt/{cache,scratchpad} kept untouched.")
     return 0, lines
 
 
 def dispatch_cache_mount_cli_action(
     parsed: CacheMountParsedArgs, env: ManagedCliEnv, *, read_only: bool
 ) -> tuple[int, list[str]]:
-    """Resolve runtime dependencies and execute the requested `scratch` subcommand."""
+    """Resolve runtime dependencies and execute the requested `cache` subcommand."""
     del read_only
     env_map = os.environ if env.env is None else env.env
     rt = _CacheMountRuntime(
@@ -390,7 +390,7 @@ def dispatch_cache_mount_cli_action(
         runner=SubprocessCommandRunner() if env.runner is None else env.runner,
         env_map=env_map,
     )
-    prog = env_map.get("CST_PROG") or "cst btrfs scratch"
+    prog = env_map.get("CST_PROG") or "cst btrfs cache"
 
     snap = _probe_snapshot(parsed, rt)
     match parsed.action:

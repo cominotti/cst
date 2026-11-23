@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""CLI wrapper for `btrfs-cache` / `cst btrfs scratch`."""
+"""CLI wrapper for `btrfs-cache` / `cst btrfs cache`."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from btrfs.cache import adapters as cache_mount_adapters, domain as cache_mount_
 from cst_core.adapters.runtime import ManagedCliEnv, ManagedCliSpec, run_managed_cli, undo_python_start
 
 _CACHE_MOUNT_SPEC = ManagedCliSpec(
-    default_prog="cst btrfs scratch",
+    default_prog="cst btrfs cache",
     parse=cache_mount_domain.parse_cache_mount_args,
     format_usage=cache_mount_domain.format_cache_mount_usage,
     is_help=cache_mount_domain.is_cache_mount_help,
     parse_error=cache_mount_domain.cache_mount_parse_error,
     write_action=cache_mount_domain.cache_mount_write_action,
-    elevation_reason="configures per-user cache/scratch directories, /etc/fstab bind mounts, and live mounts",
+    elevation_reason="configures per-user cache and scratchpad directories, /etc/fstab bind mounts, and live mounts",
     execute=cache_mount_adapters.dispatch_cache_mount_cli_action,
     is_err_line=cache_mount_domain.is_cache_mount_err,
 )

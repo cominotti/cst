@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Pure domain logic for `cst btrfs scratch`: CLI parsing, fstab planning, safety checks, health."""
+"""Pure domain logic for `cst btrfs cache`: CLI parsing, fstab planning, safety checks, health."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from btrfs.compress.domain import MountEntry
 from cst_core.domain.text import HELP_WORDS, enum_member, parse_subcommand_head
 
 CACHE_BASE: Final = "/var/mnt/cache"
-SCRATCHPAD_BASE: Final = "/var/mnt/scratch"
+SCRATCHPAD_BASE: Final = "/var/mnt/scratchpad"
 CACHE_REL: Final = ".cache"
-SCRATCHPAD_REL: Final = "Scratch"
-CACHE_MOUNT_MARKER: Final = "# managed-by: btrfs-scratch (CST)"
+SCRATCHPAD_REL: Final = "Scratchpad"
+CACHE_MOUNT_MARKER: Final = "# managed-by: btrfs-cache (CST)"
 CACHE_MOUNT_BIND_OPTS: Final = "bind,nofail"
 
 MIN_HUMAN_UID: Final = 1000
@@ -27,6 +27,8 @@ EXIT_USAGE: Final = 2
 _BTRFS: Final = "btrfs"
 _FLUSHONCOMMIT: Final = "flushoncommit"
 _NOFAIL: Final = "nofail"
+_DEFAULT_MAPPER: Final = "cache"
+_DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
 _CRYPTTAB_MIN_FIELDS: Final = 2
 _CRYPTTAB_OPT_IDX: Final = 3
 _FSTAB_MIN_FIELDS: Final = 4
@@ -36,7 +38,7 @@ _USERNAME_RE: Final = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 
 
 class CacheMountAction(StrEnum):
-    """Supported subcommands of `cst btrfs scratch`."""
+    """Supported subcommands of `cst btrfs cache`."""
 
     STATUS = "status"
     PLAN = "plan"
@@ -46,10 +48,10 @@ class CacheMountAction(StrEnum):
 
 
 class CacheMountKind(StrEnum):
-    """Directory roles hosted on the dedicated scratch filesystem."""
+    """Directory roles hosted on the dedicated cache drive."""
 
     CACHE = "cache"
-    SCRATCHPAD = "scratch"
+    SCRATCHPAD = "scratchpad"
 
 
 class CacheMountFindingSeverity(StrEnum):
@@ -72,7 +74,7 @@ REL_FOR_KIND: Final[dict[CacheMountKind, str]] = {
 
 @dataclass(frozen=True, slots=True)
 class CacheMountParsedArgs:
-    """Validated CLI arguments for `cst btrfs scratch`."""
+    """Validated CLI arguments for `cst btrfs cache`."""
 
     action: CacheMountAction
     user: str | None = None
@@ -117,7 +119,7 @@ class ManagedFstabEntry:
 
 @dataclass(frozen=True, slots=True)
 class BaseMountInfo:
-    """Live and `/etc/fstab` state for `/var/mnt/cache` or `/var/mnt/scratch`."""
+    """Live and `/etc/fstab` state for `/var/mnt/cache` or `/var/mnt/scratchpad`."""
 
     path: str
     mounted: bool
@@ -242,7 +244,7 @@ def _step_cache_mount_flag(
         return _consume_user_flag(tok, next_tok, state)
     if tok == "--no-cache" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH):
         return replace(state, include_cache=False), None, 1
-    if tok == "--no-scratch" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH):
+    if tok == "--no-scratchpad" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH, CacheMountAction.DETACH):
         return replace(state, include_scratchpad=False), None, 1
     if tok == "--allow-nonempty" and action in (CacheMountAction.PLAN, CacheMountAction.ATTACH):
         return replace(state, allow_nonempty=True), None, 1
@@ -250,7 +252,7 @@ def _step_cache_mount_flag(
 
 
 def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
-    """Parse `cst btrfs scratch` arguments cleanly without touching I/O."""
+    """Parse `cst btrfs cache` arguments cleanly without touching I/O."""
     action, rest, head_err = parse_subcommand_head(
         argv, CacheMountAction, default=CacheMountAction.STATUS, help_action=CacheMountAction.HELP
     )
@@ -269,7 +271,9 @@ def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
         i += step
 
     if not state.include_cache and not state.include_scratchpad:
-        return CacheMountParsedArgs(action=action, error="cannot combine --no-cache and --no-scratch", code=EXIT_USAGE)
+        return CacheMountParsedArgs(
+            action=action, error="cannot combine --no-cache and --no-scratchpad", code=EXIT_USAGE
+        )
     if state.user is not None and not is_valid_username(state.user):
         return CacheMountParsedArgs(action=action, error=f"invalid username {state.user!r}", code=EXIT_USAGE)
     return CacheMountParsedArgs(
@@ -344,7 +348,7 @@ def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
 
 
 def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...]:
-    """Return every `btrfs-scratch`-managed entry in `fstab_text`."""
+    """Return every `btrfs-cache`-managed entry in `fstab_text`."""
     out: list[ManagedFstabEntry] = []
     for raw in fstab_text.splitlines():
         parsed = _parse_one_managed_line(raw)
@@ -380,7 +384,7 @@ def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKi
 
 def _base_blockers(base: BaseMountInfo | None, base_path: str, home_uuid: str) -> list[str]:
     if base is None or not base.mounted:
-        return [f"{base_path} is not mounted (provision & mount the scratch btrfs subvolumes first)"]
+        return [f"{base_path} is not mounted (provision & mount the cache drive's btrfs subvolumes first)"]
     if base.fstype != _BTRFS:
         return [f"{base_path} filesystem is {base.fstype or 'unknown'}, expected {_BTRFS}"]
     if not base.uuid or not home_uuid:
@@ -423,7 +427,7 @@ def _has_opt(options: str, needle: str) -> bool:
 
 
 def parse_crypttab_cache_issues(crypttab_text: str | None, backing_sources: Collection[str]) -> list[str]:
-    """Return missing-`nofail` warnings for any scratch dm-crypt mapping in `/etc/crypttab`."""
+    """Return missing-`nofail` warnings for any cache drive dm-crypt mapping in `/etc/crypttab`."""
     if crypttab_text is None or not crypttab_text:
         return []
     mappers = {src.removeprefix("/dev/mapper/") for src in backing_sources if src.startswith("/dev/mapper/")}
@@ -436,9 +440,7 @@ def parse_crypttab_cache_issues(crypttab_text: str | None, backing_sources: Coll
         if len(fields) < _CRYPTTAB_MIN_FIELDS:
             continue
         name = fields[0]
-        is_cache_drive = (
-            name == CacheMountKind.SCRATCHPAD or name.startswith(("scratch-", "luks-scratch")) or name in mappers
-        )
+        is_cache_drive = name == _DEFAULT_MAPPER or name.startswith(_DEFAULT_MAPPER_PREFIXES) or name in mappers
         if not is_cache_drive:
             continue
         opts = fields[_CRYPTTAB_OPT_IDX] if len(fields) > _CRYPTTAB_OPT_IDX else ""
@@ -489,7 +491,7 @@ def _check_base_mount(
         findings.append(
             CacheMountFinding(
                 CacheMountFindingSeverity.WARN,
-                f"{base} has 'flushoncommit' (disable it on dedicated scratch/cache to reduce NVMe writes)",
+                f"{base} has 'flushoncommit' (disable it on the dedicated cache drive to reduce NVMe writes)",
             )
         )
 
@@ -499,7 +501,7 @@ def assess_cache_mount_health(
     proc_mounts_text: str | None,
     crypttab_text: str | None,
 ) -> list[CacheMountFinding]:
-    """Evaluate dedicated NVMe cache/scratch mounts and crypttab for `cst doctor`."""
+    """Evaluate the dedicated NVMe cache drive's mounts and crypttab for `cst doctor`."""
     live_by_target = {m.target: m for m in parse_all_mounts(proc_mounts_text or "")}
     fstab_by_target = {m.target: m for m in parse_all_mounts(fstab_text or "")}
     managed = parse_managed_fstab_entries(fstab_text or "")
@@ -523,7 +525,7 @@ def assess_cache_mount_health(
         CacheMountFinding(
             CacheMountFindingSeverity.WARN,
             f"{entry.target} (user={entry.user}) is in /etc/fstab but not mounted",
-            fix=f"btrfs scratch attach --user {entry.user}",
+            fix=f"btrfs cache attach --user {entry.user}",
         )
         for entry in managed
         if entry.target not in live_by_target
@@ -541,9 +543,9 @@ def assess_cache_mount_health(
 
 
 def format_cache_mount_usage(prog: str) -> str:
-    """Usage and help text for `cst btrfs scratch`."""
+    """Usage and help text for `cst btrfs cache`."""
     return (
-        "Multi-user dedicated NVMe cache/scratch bind mounts (~/.cache and ~/Scratch).\n"
+        "Multi-user bind mounts from a dedicated NVMe cache drive (~/.cache and ~/Scratchpad).\n"
         "\n"
         "Commands:\n"
         "  status [--user USER]                 read-only: show base mounts, user bindings, and managed fstab\n"
@@ -556,7 +558,7 @@ def format_cache_mount_usage(prog: str) -> str:
         "Options:\n"
         "  --user NAME                          target user account (default: $SUDO_USER or current user)\n"
         "  --no-cache                           skip ~/.cache binding (/var/mnt/cache/<user>)\n"
-        "  --no-scratch                         skip ~/Scratch binding (/var/mnt/scratch/<user>)\n"
+        "  --no-scratchpad                      skip ~/Scratchpad binding (/var/mnt/scratchpad/<user>)\n"
         "  --allow-nonempty                     (plan/attach) allow bind-mounting over non-empty target directory\n"
         "\n"
         f"Usage: {prog} <status|plan|attach|detach|help> [options]\n"
@@ -578,11 +580,11 @@ def _binding_state_label(probe: BindingProbe) -> str:
 
 
 def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:
-    """Render lines for `cst btrfs scratch status`."""
+    """Render lines for `cst btrfs cache status`."""
     lines: list[str] = []
     if seam_root:
-        lines.append(f"test seam (CST_BTRFS_SCRATCH_ROOT): {seam_root}")
-    lines.append("Dedicated cache/scratch mounts:")
+        lines.append(f"test seam (CST_BTRFS_CACHE_ROOT): {seam_root}")
+    lines.append("Dedicated cache drive mounts:")
     for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
         base = snap.bases[kind]
         if base.mounted:
@@ -623,10 +625,10 @@ def _plan_binding_line(probe: BindingProbe) -> str:
 def format_cache_mount_plan(
     snap: CacheMountSnapshot, prog: str, *, allow_nonempty: bool = False, seam_root: str = ""
 ) -> list[str]:
-    """Render dry-run lines for `cst btrfs scratch plan`."""
+    """Render dry-run lines for `cst btrfs cache plan`."""
     lines: list[str] = []
     if seam_root:
-        lines.append(f"test seam (CST_BTRFS_SCRATCH_ROOT): {seam_root}")
+        lines.append(f"test seam (CST_BTRFS_CACHE_ROOT): {seam_root}")
     if snap.user is None:
         return [*lines, f"BLOCKED: {snap.user_error or 'cannot resolve target user'}"]
     lines.append(f"Target user: {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})")

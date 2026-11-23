@@ -1,6 +1,6 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-cache: manage multi-user NVMe cache/scratch bind mounts."""
+"""btrfs-cache: manage multi-user NVMe cache drive bind mounts."""
 
 import os.path as _cst_path
 import sys as _cst_sys

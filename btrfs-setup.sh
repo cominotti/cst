@@ -162,10 +162,10 @@
 #                          btrfs:top-mount (keeps flushoncommit untouched).
 #                          `status` and `plan` work in a toolbox; `apply` and
 #                          `revert` need root on the host.
-#   scratch [status|plan|attach|detach] [--user NAME] [--no-cache] [--no-scratch] [--allow-nonempty]
-#                          multi-user dedicated NVMe cache/scratch bind mounts
+#   cache [status|plan|attach|detach] [--user NAME] [--no-cache] [--no-scratchpad] [--allow-nonempty]
+#                          multi-user bind mounts from a dedicated NVMe cache drive
 #                          (/var/mnt/cache/<user> -> ~/.cache and
-#                          /var/mnt/scratch/<user> -> ~/Scratch). `status` and
+#                          /var/mnt/scratchpad/<user> -> ~/Scratchpad). `status` and
 #                          `plan` run in a toolbox; `attach` and `detach` need
 #                          root on the host.
 #   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
@@ -277,8 +277,8 @@ case "${cmd}" in
     commit-interval)
         CST_PROG="${PROG} commit-interval" exec python3 -I -B "${SRC}/btrfs-commit-interval" "$@"
         ;;
-    scratch)
-        CST_PROG="${PROG} scratch" exec python3 -I -B "${SRC}/btrfs-cache" "$@"
+    cache)
+        CST_PROG="${PROG} cache" exec python3 -I -B "${SRC}/btrfs-cache" "$@"
         ;;
     iocost)
         # Python refuses in a container and elevates through sudo itself (apply, revert).
@@ -767,9 +767,9 @@ status() (
     python3 -I -B "${SRC}/btrfs-compress" status 2>&1 | cst_indent
     section "commit interval (commit=60)"
     python3 -I -B "${SRC}/btrfs-commit-interval" status 2>&1 | cst_indent
-    if mountpoint -q /var/mnt/cache 2>/dev/null || mountpoint -q /var/mnt/scratch 2>/dev/null ||
-        grep -qE 'managed-by: btrfs-scratch|/var/mnt/(cache|scratch)' /etc/fstab 2>/dev/null; then
-        section "dedicated NVMe cache/scratch mounts"
+    if mountpoint -q /var/mnt/cache 2>/dev/null || mountpoint -q /var/mnt/scratchpad 2>/dev/null ||
+        grep -qE 'managed-by: btrfs-cache|/var/mnt/(cache|scratchpad)' /etc/fstab 2>/dev/null; then
+        section "dedicated NVMe cache drive mounts"
         python3 -I -B "${SRC}/btrfs-cache" status 2>&1 | cst_indent
     fi
     section "degraded boot"
