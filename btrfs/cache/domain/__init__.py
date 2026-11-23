@@ -637,9 +637,12 @@ def format_cache_mount_usage(prog: str) -> str:
 def _binding_state_label(probe: BindingProbe) -> str:
     if probe.mounted_from_source:
         return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
-    states = (
+    mount_states = (
         (probe.source_unchecked, "mounted (source not checked: base not mounted)"),
         (probe.bind_below, "mounted (other source on top of CST's bind!)"),
+    )
+    states = (
+        *mount_states,
         (probe.mounted_other, "mounted (other source!)"),
         (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
         (probe.in_fstab, "in fstab (not mounted)"),
