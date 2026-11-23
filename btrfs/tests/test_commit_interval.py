@@ -295,6 +295,20 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc_r, 0, out_r)
         self.assertEqual(host.s.fstab, fstab)
 
+    def test_the_top_mount_keeps_its_own_options(self) -> None:
+        # The unit's compress-force=zstd:3 is its own: commit apply changes only its commit=, and does not
+        # copy the live /var's compress-force=zstd:1 into it.
+        unit_opts = "subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit"
+        host = _FakeHost(_FakeState(top_mount=TopMountInfo(installed=True, uuid=SAMPLE_UUID, options=unit_opts)))
+        rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", unit_opts + ",commit=60")
+        rc_r, out_r = execute_commit_change(
+            host, CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)
+        )
+        self.assertEqual(rc_r, 0, out_r)
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", unit_opts)
+
     def test_cli_seam_and_container_refusal(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-commit-test-")
         self.addCleanup(shutil.rmtree, tmp)

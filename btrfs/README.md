@@ -1399,7 +1399,9 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    subvolumes),
 4. `btrfs:top-mount` (`/etc/systemd/system/var-mnt-btrfs\x2dtop.mount`, when
    `snapshots setup` installed it), rendered through CST's installer so
-   `installed.json` stays current.
+   `installed.json` stays current. Only the compress option of the unit's own
+   `Options=` changes; its other options stay as they are (the live `/var`'s
+   options are not copied in).
 
 On failure at any step, prior changes are rolled back so the layers never drift.
 
@@ -1508,7 +1510,8 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
   partial error. Like `compress-force`, it changes only the root filesystem's
   fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
-  touched (section 9.1, "Only the root filesystem").
+  touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
+  the `commit=` of the unit's own `Options=` changes.
 - Keeps **`flushoncommit`** untouched on the root RAID1 filesystem so crash
   consistency is preserved while Halving periodic `flushoncommit` barriers
   (aligned with `vm.dirty_expire_centisecs = 6000` in section 4.6).

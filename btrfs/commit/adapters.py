@@ -19,7 +19,6 @@ from btrfs.commit.domain import (
     effective_commit_seconds,
     format_commit_label,
     has_explicit_commit,
-    rewrite_commit_options,
 )
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.domain import (
@@ -30,7 +29,6 @@ from btrfs.compress.domain import (
     extract_rootflags_tokens,
     parse_proc_mounts,
     pick_root_mounts,
-    top_mount_options_from_var,
 )
 from btrfs.compress.ports import CompressHostPort
 from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines
@@ -165,16 +163,8 @@ def _step_top_mount(
     uuid = snap.top_mount.uuid or snap.root_uuid
     if not uuid:
         return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
-    live_after = pick_root_mounts(parse_proc_mounts(host.read_proc_mounts() or ""))
-    var_entry = next((m for m in live_after if m.target == "/var"), None)
-    opt_target = None if plan.target_seconds == KERNEL_DEFAULT_COMMIT_S else plan.target_seconds
-    top_opts = (
-        top_mount_options_from_var(rewrite_commit_options(var_entry.options, opt_target))
-        if var_entry is not None
-        else plan.new_top_mount_options
-    )
     try:
-        host.update_top_mount(uuid, top_opts)
+        host.update_top_mount(uuid, plan.new_top_mount_options)
     except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
         return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
     msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")

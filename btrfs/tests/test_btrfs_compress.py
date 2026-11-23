@@ -483,6 +483,39 @@ class SeparateHomeTests(unittest.TestCase):
         self.assertEqual(host.s.fstab, SEPARATE_HOME_FSTAB)
 
 
+class TopMountInPlaceTests(unittest.TestCase):
+    """apply rewrites only the compress option of the top-mount unit's own Options=: what only the unit has
+    stays, and what the live /var has (another tool's commit=) is not copied in."""
+
+    def test_apply_and_revert_keep_the_unit_s_other_options(self) -> None:
+        unit_opts = "subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120"
+        state = _FakeState(
+            top_mount=TopMountInfo(installed=True, uuid=SAMPLE_UUID, options=unit_opts),
+            proc_mounts=SAMPLE_PROC_MOUNTS.replace("subvol=/var 0 0", "commit=45,subvol=/var 0 0"),
+        )
+        host = _FakeHost(state)
+        svc = CompressService(host)
+        plan = svc.build_change_plan(CompressArgs(CompressCommand.PLAN)).plan
+        assert plan is not None
+        want = "subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,commit=120"
+        self.assertEqual(plan.new_top_mount_options, want)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertIn(f"update_top_mount:{SAMPLE_UUID}:{want}", host.calls)
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", want)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.REVERT, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", unit_opts)
+
+
 class ApplicationTests(unittest.TestCase):
     def test_plan_apply_idempotent_revert_cycle(self) -> None:
         host = _FakeHost()

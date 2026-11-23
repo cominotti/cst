@@ -643,12 +643,11 @@ def _plan_kargs(
 
 def _plan_live(
     live_roots: tuple[MountEntry, ...], ops: OptionLayerOps
-) -> tuple[LayerPlan, str | None, MountEntry | None]:
+) -> tuple[LayerPlan, str | None]:
     remount_entry = pick_remount_target(live_roots)
     if remount_entry is None:
         return (
             _layer(LayerName.LIVE, LayerStatus.ABSENT, "(not mounted)", ops.target_label, ops.live_absent_detail),
-            None,
             None,
         )
     needs_remount = ops.needs_live_change(live_roots)
@@ -660,14 +659,12 @@ def _plan_live(
         ops.target_label,
         f"live remount via {remount_entry.target}",
     )
-    return lp, (remount_entry.target if needs_remount else None), remount_entry
+    return lp, (remount_entry.target if needs_remount else None)
 
 
-def _plan_top_mount(
-    top_mount: TopMountInfo | None,
-    remount_entry: MountEntry | None,
-    ops: OptionLayerOps,
-) -> tuple[LayerPlan, str | None]:
+def _plan_top_mount(top_mount: TopMountInfo | None, ops: OptionLayerOps) -> tuple[LayerPlan, str | None]:
+    """The top-mount unit's own Options= with only this feature's option rewritten (what only the unit
+    has stays; what the live /var has at the moment is not copied in)."""
     if top_mount is None or not top_mount.installed:
         return (
             _layer(
@@ -680,8 +677,7 @@ def _plan_top_mount(
             None,
         )
     cur = ops.describe_top(top_mount.options)
-    base_opts = remount_entry.options if remount_entry is not None else top_mount.options
-    desired_top = top_mount_options_from_var(ops.rewrite_opts(base_opts))
+    desired_top = ops.rewrite_opts(top_mount.options)
     changed = ops.needs_top_change(top_mount) and desired_top != top_mount.options
     status = LayerStatus.CHANGE if changed else LayerStatus.OK
     lp = _layer(LayerName.TOP_MOUNT, status, cur, ops.target_label, r"systemd unit var-mnt-btrfs\x2dtop.mount")
@@ -697,8 +693,8 @@ def plan_root_option_layers(snapshot: CompressSnapshot, ops: OptionLayerOps) -> 
     lp_kargs, kargs_edits = _plan_kargs(
         is_ostree=snapshot.is_ostree, kargs_text=snapshot.kargs_text, rootflags_toks=rootflags_toks, ops=ops
     )
-    lp_live, remount_target, remount_entry = _plan_live(live_roots, ops)
-    lp_top, new_top_opts = _plan_top_mount(snapshot.top_mount, remount_entry, ops)
+    lp_live, remount_target = _plan_live(live_roots, ops)
+    lp_top, new_top_opts = _plan_top_mount(snapshot.top_mount, ops)
     return RootOptionLayerPlan(
         layers=(lp_fstab, lp_kargs, lp_live, lp_top),
         new_fstab_text=new_fstab,

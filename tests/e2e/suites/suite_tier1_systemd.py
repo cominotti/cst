@@ -7410,7 +7410,8 @@ echo E2E-OK
         systemd-analyze verify + recorded in installed.json + reloaded by PID 1 systemd), kargs/mount
         stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert.
         A separate btrfs /var/home (its own UUID in fstab, dm-1 in the mounts) is never touched: its fstab
-        line stays byte for byte, its mount keeps its options and no remount names it."""
+        line stays byte for byte, its mount keeps its options and no remount names it. The top-mount's
+        Options= is rewritten in place: its own commit=120 stays through apply and revert."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-compress"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
@@ -7520,7 +7521,7 @@ EOF
             chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
 
             . /opt/cst-rw/cst-install.bash
-            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120" --component btrfs:top-mount
             cst_mark btrfs:top-mount
             systemctl daemon-reload
 
@@ -7535,7 +7536,7 @@ EOF
             grep -q 'compress-force=zstd:1' /etc/fstab
             grep -q 'compress-force=zstd:1' {w}/kargs
             grep -q 'compress-force=zstd:1' {w}/proc/mounts
-            grep -q 'Options=.*compress-force=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF 'Options=subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,commit=120' "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
             if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
@@ -7554,7 +7555,7 @@ EOF
             grep -q 'compress=zstd:1' /etc/fstab
             grep -q 'compress=zstd:1' {w}/kargs
             grep -q 'compress=zstd:1' {w}/proc/mounts
-            grep -q 'Options=.*compress=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF 'Options=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120' "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
             if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
@@ -7606,7 +7607,9 @@ EOF
     def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:
         """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
         `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`.
-        A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it."""
+        A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it.
+        The top-mount's Options= is rewritten in place: its own compress-force=zstd:3 stays (the live /var
+        has zstd:1)."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-commit"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
@@ -7704,7 +7707,7 @@ EOF
             chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
 
             . /opt/cst-rw/cst-install.bash
-            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" --component btrfs:top-mount
             cst_mark btrfs:top-mount
             systemctl daemon-reload
 
@@ -7725,7 +7728,7 @@ EOF
             grep -qF "flushoncommit" /etc/fstab
             grep -qF "commit=60" {w}/kargs
             grep -qF "commit=60" {w}/proc/mounts
-            grep -qF "commit=60" "/etc/systemd/system/{top_unit}"
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=60" "/etc/systemd/system/{top_unit}"
             systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
@@ -7738,6 +7741,7 @@ EOF
             ! grep -qF "commit=" {w}/kargs
             ! grep -qF "commit=" {w}/proc/mounts
             ! grep -qF "commit=" "/etc/systemd/system/{top_unit}"
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
             if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi

@@ -24,7 +24,6 @@ from btrfs.compress.domain import (
     matches_target_spec,
     parse_proc_mounts,
     pick_root_mounts,
-    top_mount_options_from_var,
 )
 from btrfs.compress.ports import CompressHostPort
 from cst_core.domain.errors import Refused
@@ -162,13 +161,8 @@ class CompressService:
         uuid = snap.top_mount.uuid or snap.root_uuid
         if not uuid:
             return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
-        live_after = pick_root_mounts(parse_proc_mounts(self._host.read_proc_mounts() or ""))
-        var_entry = next((e for e in live_after if e.target == "/var"), None)
-        top_opts = (
-            top_mount_options_from_var(var_entry.options) if var_entry is not None else plan.new_top_mount_options
-        )
         try:
-            self._host.update_top_mount(uuid, top_opts)
+            self._host.update_top_mount(uuid, plan.new_top_mount_options)
         except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
             return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
         msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")
