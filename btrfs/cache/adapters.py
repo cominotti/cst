@@ -10,29 +10,35 @@ import pwd
 import stat
 from typing import Final
 
-from btrfs.compress.domain import FSTAB_PATH, MountEntry, PROC_MOUNTS_PATH
 from btrfs.cache.domain import (
     BASE_FOR_KIND,
     DIR_MODE_PRIVATE,
     FILE_MODE_TAG,
+    FINDMNT_COLUMNS,
     MIN_HUMAN_UID,
-    BindingProbe,
     BaseMountInfo,
+    BindingProbe,
     CacheMountAction,
     CacheMountKind,
     CacheMountParsedArgs,
     CacheMountSnapshot,
     CacheMountUser,
+    LiveMount,
     build_user_bindings,
     format_cache_mount_plan,
     format_cache_mount_status,
+    is_bind_from,
+    mount_holding,
+    mounts_by_target,
     parse_all_mounts,
+    parse_findmnt_mounts,
     parse_managed_fstab_entries,
     plan_attach_fstab,
     plan_detach_fstab,
     selected_kinds,
     validate_attach_snapshot,
 )
+from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import FileOwner, read_text, write_atomic
@@ -47,8 +53,6 @@ _FINDMNT_TIMEOUT_S: Final = 15
 _ACCOUNT_MIN_FIELDS: Final = 6
 _FSTAB_MODE: Final = 0o644
 _MOUNT_TIMEOUT_S: Final = 30
-_FINDMNT_PARTS_COUNT: Final = 3
-_MOUNT_ARGS_MIN: Final = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,9 +65,8 @@ class _CacheMountRuntime:
 
 @dataclass(frozen=True, slots=True)
 class _MountTables:
-    live: dict[str, MountEntry]
+    live: dict[str, LiveMount]
     fstab: dict[str, MountEntry]
-    home_uuid: str
 
 
 def _map_path(host_path: str, rt: _CacheMountRuntime, *, read_only: bool) -> str:
@@ -114,45 +117,23 @@ def _resolve_target_user(requested: str | None, rt: _CacheMountRuntime) -> tuple
     return record, None
 
 
-def _read_mounts_text(rt: _CacheMountRuntime) -> str:
-    if rt.seam_root:
-        return read_text(f"{rt.seam_root.rstrip('/')}{PROC_MOUNTS_PATH}", "")
+def _read_live_mounts(rt: _CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:
+    """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox); (), and why,
+    when findmnt cannot answer: nothing is guessed from another table."""
     res = rt.runner.run(
-        ["findmnt", "-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"],
-        on_host=rt.ctx.is_container(),
+        ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS],
+        on_host=(not rt.seam_root and rt.ctx.is_container()),
         timeout=_FINDMNT_TIMEOUT_S,
         locale_c=True,
         output=OutputMode.CAPTURE,
     )
-    if res.returncode == 0:
-        out_lines = []
-        for line in res.stdout.splitlines():
-            parts = line.split(None, 3)
-            if len(parts) == _MOUNT_ARGS_MIN:
-                out_lines.append(f"{parts[0]} {parts[1]} {parts[2]} {parts[3]} 0 0")
-        return "\n".join(out_lines) + ("\n" if out_lines else "")
-    return read_text(PROC_MOUNTS_PATH, "")
-
-
-def _probe_findmnt_target(
-    runner: CommandRunnerPort,
-    target_path: str,
-    *,
-    on_host: bool,
-) -> tuple[str, str, str]:
-    res = runner.run(
-        ["findmnt", "-rn", "-o", "FSTYPE,UUID,SOURCE", "--target", target_path],
-        on_host=on_host,
-        timeout=_FINDMNT_TIMEOUT_S,
-        locale_c=True,
-        output=OutputMode.CAPTURE,
-    )
-    if res.returncode != 0 or not res.stdout.strip():
-        return "", "", ""
-    parts = res.stdout.splitlines()[0].split(None, 2)
-    if len(parts) < _FINDMNT_PARTS_COUNT:
-        return (parts[0] if parts else ""), (parts[1] if len(parts) > 1 else ""), ""
-    return parts[0], parts[1], parts[2]
+    if res.returncode != 0:
+        why = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        return (), f"findmnt failed: {why}"
+    mounts = parse_findmnt_mounts(res.stdout)
+    if mounts is None:
+        return (), "findmnt's answer is not the JSON it should be"
+    return mounts, None
 
 
 def _dir_is_nonempty(path: str) -> bool:
@@ -169,28 +150,20 @@ def _dir_is_nonempty(path: str) -> bool:
         return False
 
 
-def _probe_base(kind: CacheMountKind, tables: _MountTables, rt: _CacheMountRuntime) -> BaseMountInfo:
+def _probe_base(kind: CacheMountKind, tables: _MountTables) -> BaseMountInfo:
     path = BASE_FOR_KIND[kind]
     live = tables.live.get(path)
     fst = tables.fstab.get(path)
-    mapped = _map_path(path, rt, read_only=True)
-    uuid = ""
-    fstype = live.fstype if live is not None else ""
-    if live is not None and os.path.exists(mapped):
-        q_target = mapped if rt.seam_root else path
-        f_type, uuid, _ = _probe_findmnt_target(
-            rt.runner, q_target, on_host=(not rt.seam_root and rt.ctx.is_container())
-        )
-        if not fstype:
-            fstype = f_type
     return BaseMountInfo(
-        path,
-        live is not None,
-        fstype,
-        uuid,
-        live.options if live is not None else "",
-        fst is not None,
-        fst.options if fst is not None else "",
+        path=path,
+        mounted=live is not None,
+        fstype=live.fstype if live is not None else "",
+        uuid=live.uuid if live is not None else "",
+        options=live.options if live is not None else "",
+        in_fstab=fst is not None,
+        fstab_options=fst.options if fst is not None else "",
+        source=live.source if live is not None else "",
+        fsroot=live.fsroot if live is not None else "",
     )
 
 
@@ -213,26 +186,12 @@ def _probe_binding(
     is_link = os.path.islink(mapped_tgt)
     exists = os.path.exists(mapped_tgt)
     nonempty = False if is_link else _dir_is_nonempty(mapped_tgt)
-
-    mounted_from_source = False
-    mounted_other = False
-    if live is not None:
-        if live.source in (binding.source, mapped_src):
-            mounted_from_source = True
-        elif base_info.uuid and base_info.uuid != tables.home_uuid:
-            q_tgt = mapped_tgt if rt.seam_root else binding.target
-            _, tgt_uuid, _ = _probe_findmnt_target(
-                rt.runner, q_tgt, on_host=(not rt.seam_root and rt.ctx.is_container())
-            )
-            mounted_from_source = tgt_uuid == base_info.uuid
-            mounted_other = not mounted_from_source
-        else:
-            mounted_other = True
+    from_source = live is not None and is_bind_from(live, base_info, user.name)
     return BindingProbe(
         binding,
         fst is not None,
-        mounted_from_source,
-        mounted_other,
+        from_source,
+        live is not None and not from_source,
         is_link,
         exists,
         nonempty,
@@ -243,29 +202,28 @@ def _probe_binding(
 def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> CacheMountSnapshot:
     fstab_text = read_text(_map_path(FSTAB_PATH, rt, read_only=True))
     crypttab_text = read_text(_map_path(_CRYPTTAB_PATH, rt, read_only=True))
-    proc_mounts_text = _read_mounts_text(rt)
+    mounts, mounts_error = _read_live_mounts(rt)
 
     user, user_err = _resolve_target_user(parsed.user, rt)
-    home_uuid = ""
-    if user is not None:
-        mapped_home = _map_path(user.home, rt, read_only=True)
-        q_home = mapped_home if rt.seam_root else user.home
-        if os.path.exists(mapped_home):
-            _, home_uuid, _ = _probe_findmnt_target(
-                rt.runner, q_home, on_host=(not rt.seam_root and rt.ctx.is_container())
-            )
-
+    home_mount = mount_holding(mounts, user.home) if user is not None else None
     tables = _MountTables(
-        live={m.target: m for m in parse_all_mounts(proc_mounts_text)},
+        live=mounts_by_target(mounts),
         fstab={m.target: m for m in parse_all_mounts(fstab_text or "")},
-        home_uuid=home_uuid,
     )
-    bases = {kind: _probe_base(kind, tables, rt) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)}
+    bases = {kind: _probe_base(kind, tables) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)}
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     probes = tuple(_probe_binding(k, user, bases[k], tables, rt) for k in kinds) if user is not None else ()
     managed = parse_managed_fstab_entries(fstab_text or "")
     return CacheMountSnapshot(
-        user, user_err, home_uuid, bases, probes, managed, crypttab_text, fstab_text, proc_mounts_text
+        user,
+        user_err,
+        home_mount.uuid if home_mount is not None else "",
+        bases,
+        probes,
+        managed,
+        crypttab_text,
+        fstab_text,
+        mounts_error,
     )
 
 
@@ -348,6 +306,8 @@ def _apply_detach(
 ) -> tuple[int, list[str]]:
     if snap.user is None:
         return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
+    if snap.mounts_error is not None:
+        return 1, [f"ERROR: cannot list mounts: {snap.mounts_error}"]
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     lines: list[str] = [f"test seam (CST_BTRFS_CACHE_ROOT): {rt.seam_root}"] if rt.seam_root else []

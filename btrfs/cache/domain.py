@@ -6,10 +6,12 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
+import posixpath
 import re
-from typing import Final
+from typing import Final, TypedDict, TypeIs
 
 from btrfs.compress.domain import MountEntry
+from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
 from cst_core.domain.text import HELP_WORDS, enum_member, parse_subcommand_head
 
 CACHE_BASE: Final = "/var/mnt/cache"
@@ -35,6 +37,35 @@ _FSTAB_MIN_FIELDS: Final = 4
 _MOUNTS_MIN_FIELDS: Final = 4
 _OCTAL_ESCAPE_RE: Final = re.compile(r"\\([0-7]{3})")
 _USERNAME_RE: Final = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
+_BRACKET_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
+
+FINDMNT_COLUMNS: Final = "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"
+"""The columns `findmnt -J -l -o` is asked for: one call gives every mount with its filesystem UUID
+and its root inside that filesystem (FSROOT: a bind mount's folder, a subvolume's path)."""
+
+
+class FindmntFs(TypedDict):
+    """One mount of `findmnt -J -l` (the columns of FINDMNT_COLUMNS); findmnt gives null for a value
+    it does not know (a UUID it cannot read)."""
+
+    source: str | None
+    target: str
+    fstype: str | None
+    options: str | None
+    uuid: str | None
+    fsroot: str | None
+
+
+_STR_OR_NULL: Final = (str, type(None))
+_FINDMNT_REQUIRED: KeyTypes = {
+    "target": (str,),
+    **dict.fromkeys(("source", "fstype", "options", "uuid", "fsroot"), _STR_OR_NULL),
+}
+
+
+def is_findmnt_fs(value: object) -> TypeIs[FindmntFs]:
+    """value is one mount of `findmnt -J -l -o FINDMNT_COLUMNS`."""
+    return has_shape(value, _FINDMNT_REQUIRED, {})
 
 
 class CacheMountAction(StrEnum):
@@ -118,6 +149,18 @@ class ManagedFstabEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveMount:
+    """One live mount as findmnt reports it (paths raw, no escapes; "" for a value it did not know)."""
+
+    source: str
+    target: str
+    fstype: str
+    options: str
+    uuid: str
+    fsroot: str
+
+
+@dataclass(frozen=True, slots=True)
 class BaseMountInfo:
     """Live and `/etc/fstab` state for `/var/mnt/cache` or `/var/mnt/scratchpad`."""
 
@@ -128,6 +171,8 @@ class BaseMountInfo:
     options: str
     in_fstab: bool
     fstab_options: str
+    source: str = ""
+    fsroot: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +201,7 @@ class CacheMountSnapshot:
     all_managed: tuple[ManagedFstabEntry, ...]
     crypttab_text: str | None
     fstab_text: str | None
-    proc_mounts_text: str | None
+    mounts_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +261,66 @@ def parse_all_mounts(text: str) -> tuple[MountEntry, ...]:
                 )
             )
     return tuple(entries)
+
+
+def parse_findmnt_mounts(text: str) -> tuple[LiveMount, ...] | None:
+    """The mounts of `findmnt -J -l -o FINDMNT_COLUMNS`'s answer, in its order; None when the answer
+    is not that JSON. A null value becomes ""."""
+    try:
+        doc = parse_json(text)
+    except ValueError:
+        return None
+    if not json_object(doc):
+        return None
+    filesystems = doc.get("filesystems")
+    if not list_of(filesystems, is_findmnt_fs):
+        return None
+    return tuple(
+        LiveMount(
+            source=fs["source"] or "",
+            target=fs["target"],
+            fstype=fs["fstype"] or "",
+            options=fs["options"] or "",
+            uuid=fs["uuid"] or "",
+            fsroot=fs["fsroot"] or "",
+        )
+        for fs in filesystems
+    )
+
+
+def mounts_by_target(mounts: Sequence[LiveMount]) -> dict[str, LiveMount]:
+    """The mount on top at each target: of mounts stacked on one target, findmnt lists the top one last."""
+    return {m.target: m for m in mounts}
+
+
+def mount_holding(mounts: Sequence[LiveMount], path: str) -> LiveMount | None:
+    """The mount a path is on (what `findmnt --target PATH` answers): the one whose target is the
+    longest leading folder of the path; of stacked ones, the last."""
+    best: LiveMount | None = None
+    for m in mounts:
+        tgt = m.target.rstrip("/") or "/"
+        inside = tgt in (path, "/") or path.startswith(f"{tgt}/")
+        if inside and (best is None or len(tgt) >= len(best.target.rstrip("/") or "/")):
+            best = m
+    return best
+
+
+def mount_device(source: str) -> str:
+    """findmnt's SOURCE without the `[FSROOT]` it adds for a bind mount or a subvolume."""
+    return _BRACKET_SUFFIX_RE.sub("", source)
+
+
+def is_bind_from(live: LiveMount, base: BaseMountInfo, user: str) -> bool:
+    """live is the bind mount of the base's folder for user: the same filesystem (its UUID, or its
+    device when findmnt knows no UUID) and the root `<base FSROOT>/<user>` in it."""
+    if not base.mounted:
+        return False
+    if live.uuid and base.uuid:
+        same_fs = live.uuid == base.uuid
+    else:
+        dev = mount_device(live.source)
+        same_fs = bool(dev) and dev == mount_device(base.source)
+    return same_fs and live.fsroot == posixpath.join(base.fsroot or "/", user)
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +511,7 @@ def _target_blockers(probe: BindingProbe, *, allow_nonempty: bool) -> list[str]:
     if probe.mounted_from_source:
         return []
     if probe.mounted_other:
-        return [f"{b.target} already has another mount active; unmount it first"]
+        return [f"{b.target} already has a mount CST did not make (not {b.source}); unmount it first"]
     if probe.target_nonempty and not allow_nonempty:
         return [f"{b.target} is non-empty; move existing files to {b.source} first or pass --allow-nonempty"]
     return []
@@ -416,6 +521,8 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
     """Return blocking error reasons preventing safe `attach`, or empty list when safe."""
     if snap.user is None:
         return [snap.user_error or "cannot resolve target user"]
+    if snap.mounts_error is not None:
+        return [f"cannot list mounts: {snap.mounts_error}"]
     errors: list[str] = []
     checked_bases: set[CacheMountKind] = set()
     for probe in snap.bindings:
@@ -590,6 +697,8 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     if seam_root:
         lines.append(f"test seam (CST_BTRFS_CACHE_ROOT): {seam_root}")
     lines.append("Dedicated cache drive mounts:")
+    if snap.mounts_error is not None:
+        return [*lines, f"  cannot list mounts: {snap.mounts_error}"]
     for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
         base = snap.bases[kind]
         if base.mounted:

@@ -1571,6 +1571,13 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   with `--user NAME` (or `$SUDO_USER`); each bind line in `/etc/fstab`
   carries `bind,nofail,x-systemd.requires-mounts-for=...` and the marker
   `# managed-by: btrfs-cache (CST) user=<name> kind=<cache|scratchpad>`.
+- **How it reads the mounts:** one `findmnt -J -l -o SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT`
+  call (on the host from a toolbox). A mount at `~/.cache` counts as attached
+  only when it is on the cache drive's filesystem (the same UUID) and shows
+  the folder `<user>` of the subvolume (its FSROOT is `/cache/<user>`); any
+  other mount there is "a mount CST did not make", and `attach` refuses.
+  When findmnt fails, `status` says so and `plan`, `attach` and `detach`
+  refuse: nothing is guessed from another table.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

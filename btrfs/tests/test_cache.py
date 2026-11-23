@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import io
+import json
 import os
+import posixpath
 import shutil
 import stat
 import tempfile
@@ -16,14 +18,19 @@ import unittest.mock
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
+    FINDMNT_COLUMNS,
     SCRATCHPAD_BASE,
     CACHE_MOUNT_MARKER,
     CacheMountAction,
     CacheMountFindingSeverity,
     CacheMountKind,
     CacheMountUser,
+    LiveMount,
     assess_cache_mount_health,
     build_user_bindings,
+    mount_holding,
+    mounts_by_target,
+    parse_findmnt_mounts,
     parse_managed_fstab_entries,
     parse_cache_mount_args,
     plan_attach_fstab,
@@ -60,45 +67,75 @@ class _TestCtx:
 
 
 class _FakeMountRunner:
+    """findmnt, mount and umount over a list of mounts. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the
+    real one does: a bind mount's source is "DEVICE[FSROOT]", its fsroot the folder it shows."""
+
     def __init__(self, root: str, *, same_uuid: bool = False) -> None:
         self.root = root
         self.same_uuid = same_uuid
+        self.findmnt_fails = False
         self.calls: list[list[str]] = []
-        self.mounts: list[tuple[str, str, str, str]] = []
+        self.mounts: list[dict[str, str | None]] = []
+        self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
+        self.add_mount("/dev/dm-0", "/var/home", fsroot="/home", uuid=UUID_ROOT)
 
-    def _sync_proc_mounts(self) -> None:
-        proc_dir = os.path.join(self.root, "proc")
-        os.makedirs(proc_dir, exist_ok=True)
-        with open(os.path.join(proc_dir, "mounts"), "w", encoding="utf-8") as fh:
-            fh.writelines(f"{src} {tgt} {fstype} {opts} 0 0\n" for src, tgt, fstype, opts in self.mounts)
+    def add_mount(
+        self,
+        dev: str,
+        tgt: str,
+        *,
+        fsroot: str,
+        uuid: str | None = UUID_CACHE_DRIVE,
+        bind: bool = False,
+    ) -> None:
+        """One mount: on btrfs with its UUID, or a tmpfs (no UUID); a bind shows its FSROOT in its source."""
+        self.mounts.append(
+            {
+                "source": f"{dev}[{fsroot}]" if bind else dev,
+                "target": tgt,
+                "fstype": "btrfs" if uuid is not None else "tmpfs",
+                "options": "rw,noatime,compress=zstd:1",
+                "uuid": uuid,
+                "fsroot": fsroot,
+            }
+        )
 
-    def add_mount(self, src: str, tgt: str, fstype: str = "btrfs", opts: str = "rw,noatime,compress=zstd:1") -> None:
-        self.mounts.append((src, tgt, fstype, opts))
-        self._sync_proc_mounts()
+    def _holding(self, path: str) -> dict[str, str | None]:
+        best = self.mounts[0]
+        for m in self.mounts:
+            tgt = str(m["target"]).rstrip("/") or "/"
+            if (tgt in (path, "/") or path.startswith(f"{tgt}/")) and len(tgt) >= len(str(best["target"]).rstrip("/")):
+                best = m
+        return best
 
-    def _handle_findmnt(self, tgt: str) -> CommandResult:
-        if f"{self.root}/var/mnt/" in tgt:
-            uuid = UUID_ROOT if self.same_uuid else UUID_CACHE_DRIVE
-            return CommandResult(0, f"btrfs {uuid} /dev/mapper/cache\n", "")
-        logical = tgt.removeprefix(self.root)
-        for src, m_tgt, fstype, _ in reversed(self.mounts):
-            if logical == m_tgt and m_tgt.endswith(("/.cache", "/Scratchpad")):
-                uuid = UUID_ROOT if self.same_uuid else UUID_CACHE_DRIVE
-                return CommandResult(0, f"{fstype} {uuid} {src}\n", "")
-        return CommandResult(0, f"btrfs {UUID_ROOT} /dev/dm-0\n", "")
+    def _findmnt_json(self) -> str:
+        fss = []
+        for m in self.mounts:
+            uuid = UUID_ROOT if self.same_uuid and m["uuid"] is not None else m["uuid"]
+            fss.append({**m, "uuid": uuid})
+        return json.dumps({"filesystems": fss}, indent=3)
 
     def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
         cmd = list(argv)
         self.calls.append(cmd)
-        if cmd[:4] == ["findmnt", "-rn", "-o", "FSTYPE,UUID,SOURCE"]:
-            return self._handle_findmnt(cmd[-1])
+        if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
+            if self.findmnt_fails:
+                return CommandResult(1, "", "findmnt: cannot read the mount table")
+            return CommandResult(0, self._findmnt_json(), "")
         if cmd[:2] == ["mount", "--bind"]:
-            self.add_mount(cmd[2].removeprefix(self.root), cmd[3].removeprefix(self.root))
+            src = cmd[2].removeprefix(self.root)
+            held = self._holding(src)
+            rel = src.removeprefix(str(held["target"]).rstrip("/"))
+            dev = str(held["source"]).split("[", 1)[0]
+            fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
+            self.add_mount(dev, cmd[3].removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
             return CommandResult(0, "", "")
         if cmd and cmd[0] == "umount":
             logical_tgt = cmd[1].removeprefix(self.root)
-            self.mounts = [m for m in self.mounts if m[1] != logical_tgt]
-            self._sync_proc_mounts()
+            for i in range(len(self.mounts) - 1, -1, -1):
+                if self.mounts[i]["target"] == logical_tgt:
+                    del self.mounts[i]
+                    break
             return CommandResult(0, "", "")
         return CommandResult(0, "", "")
 
@@ -126,6 +163,46 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertEqual(bare.error, parse_cache_mount_args(["status", "--no-cache"]).error)
         self.assertEqual(parse_cache_mount_args(["--help"]).action, CacheMountAction.HELP)
         self.assertEqual(parse_cache_mount_args(["-h"]).action, CacheMountAction.HELP)
+
+    def test_findmnt_json_keeps_source_when_uuid_is_null(self) -> None:
+        text = json.dumps(
+            {
+                "filesystems": [
+                    {
+                        "source": "/dev/x",
+                        "target": "/a b",
+                        "fstype": "btrfs",
+                        "options": "rw",
+                        "uuid": None,
+                        "fsroot": "/",
+                    },
+                    {
+                        "source": "/dev/x[/c]",
+                        "target": "/a b",
+                        "fstype": "btrfs",
+                        "options": "rw",
+                        "uuid": "U",
+                        "fsroot": "/c",
+                    },
+                ]
+            }
+        )
+        mounts = parse_findmnt_mounts(text)
+        assert mounts is not None
+        self.assertEqual((mounts[0].source, mounts[0].uuid, mounts[0].target), ("/dev/x", "", "/a b"))
+        self.assertEqual(mounts_by_target(mounts)["/a b"].fsroot, "/c")
+        for bad in ("", "[]", '{"filesystems": [{"source": "/dev/x"}]}', '{"filesystems": 3}', "not json"):
+            self.assertIsNone(parse_findmnt_mounts(bad), bad)
+
+    def test_mount_holding_is_the_longest_leading_folder(self) -> None:
+        def m(target: str, uuid: str) -> LiveMount:
+            return LiveMount("/dev/x", target, "btrfs", "rw", uuid, "/")
+
+        mounts = (m("/", "R"), m("/var/home", "H"), m("/var/homes", "X"), m("/var/home", "TOP"))
+        for path, uuid in (("/var/home/u", "TOP"), ("/var/home", "TOP"), ("/var/homeu", "R"), ("/var/homes/x", "X")):
+            held = mount_holding(mounts, path)
+            self.assertEqual(held.uuid if held else "", uuid, path)
+        self.assertIsNone(mount_holding((), "/x"))
 
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
@@ -245,9 +322,13 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
             fh.write("/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n")
         self.runner = _FakeMountRunner(self.tmp)
-        self.runner.add_mount("/dev/mapper/cache", CACHE_BASE)
-        self.runner.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE)
+        self.runner.add_mount("/dev/mapper/cache", CACHE_BASE, fsroot="/cache")
+        self.runner.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE, fsroot="/scratchpad")
         self.entry = os.path.join(REPO, "btrfs", "btrfs-cache")
+
+    def _fstab(self) -> str:
+        with open(os.path.join(self.tmp, "etc", "fstab"), encoding="utf-8") as fh:
+            return fh.read()
 
     def _run(
         self, argv: Sequence[str], *, user: str = "danilo", container: bool = False, root: bool = True
@@ -306,6 +387,61 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("target user        alice (uid=1001, home=/var/home/alice)", out)
         self.assertIn("/var/mnt/cache/alice -> /var/home/alice/.cache [not attached]", out)
+
+    def test_a_bind_of_another_folder_of_the_drive_is_not_attached(self) -> None:
+        tgt = "/var/home/danilo/.cache"
+        os.makedirs(os.path.join(self.tmp, tgt.lstrip("/")))
+        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/alice", bind=True)
+        _, out, _ = self._run(["status", "--user", "danilo"])
+        self.assertIn(f"/var/mnt/cache/danilo -> {tgt} [mounted (other source!)]", out)
+        rc_plan, out_plan, _ = self._run(["plan", "--no-scratchpad"])
+        self.assertEqual(rc_plan, 0)
+        self.assertIn(f"BLOCKED: {tgt} already has a mount CST did not make", out_plan)
+        before = self._fstab()
+        rc, _, err = self._run(["attach", "--no-scratchpad"])
+        self.assertEqual(rc, 1)
+        self.assertIn("a mount CST did not make", err)
+        self.assertEqual(self._fstab(), before)
+        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
+
+    def test_the_mount_on_top_decides(self) -> None:
+        tgt = "/var/home/danilo/.cache"
+        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/danilo", bind=True)
+        _, out, _ = self._run(["status"])
+        self.assertIn(f"-> {tgt} [mounted (not in fstab)]", out)
+        self.runner.add_mount("tmpfs", tgt, fsroot="/", uuid=None)
+        _, out, _ = self._run(["status"])
+        self.assertIn(f"-> {tgt} [mounted (other source!)]", out)
+
+    def test_a_home_with_a_space_matches_its_escaped_fstab_line(self) -> None:
+        with open(os.path.join(self.tmp, "etc", "passwd"), "a", encoding="utf-8") as fh:
+            fh.write("bob:x:1002:1002:Bob:/var/home/bob two:/bin/bash\n")
+        os.makedirs(os.path.join(self.tmp, "var", "home", "bob two", ".cache"))
+        tgt = "/var/home/bob two/.cache"
+        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/bob", bind=True)
+        with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
+            fh.write(
+                "/var/mnt/cache/bob /var/home/bob\\040two/.cache none bind,nofail 0 0 "
+                f"{CACHE_MOUNT_MARKER} user=bob kind=cache\n"
+            )
+        _, out, _ = self._run(["status", "--user", "bob"])
+        self.assertIn(f"/var/mnt/cache/bob -> {tgt} [active (fstab + mounted)]", out)
+
+    def test_findmnt_failing_blocks_every_write(self) -> None:
+        self.runner.findmnt_fails = True
+        before = self._fstab()
+        rc_s, out_s, _ = self._run(["status"])
+        self.assertEqual(rc_s, 0)
+        self.assertIn("cannot list mounts: findmnt failed: findmnt: cannot read the mount table", out_s)
+        _, out_p, _ = self._run(["plan"])
+        self.assertIn("BLOCKED: cannot list mounts", out_p)
+        for argv in (["attach"], ["detach"]):
+            rc, _, err = self._run(argv)
+            self.assertEqual(rc, 1, argv)
+            self.assertIn("ERROR: cannot list mounts", err)
+        self.assertEqual(self._fstab(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "mnt", "cache", "danilo")))
+        self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
 
     def test_safety_guards_nonempty_symlink_uuid_and_container(self) -> None:
         cache_d = os.path.join(self.tmp, "var", "home", "danilo", ".cache")
