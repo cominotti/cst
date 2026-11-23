@@ -4231,7 +4231,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             {installer} mark --component btrfs:core done
             [[ "$({core_state})" == *" done" ]]
             # Help after a write subcommand needs no sudo (tester has none here).
-            runuser -u tester -- /opt/cst-rw/cst btrfs scrub-limit set --help | grep -qF "Usage: cst btrfs scrub-limit"
+            runuser -u tester -- /opt/cst-rw/cst btrfs scrub-limit set --help | grep -qE '^Usage: (.*/)?cst btrfs scrub-limit '
             /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
             [[ ! -e {dropin} ]] || {{ echo "plan wrote {dropin}" >&2; exit 1; }}
             grep -qxF "HOME_SUBVOL='home'" {conf}
@@ -4401,7 +4401,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             udevadm verify --resolve-names=never --no-style /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "cgroup io:"
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "Dry run: nothing is changed."
-            runuser -u tester -- /opt/cst-rw/cst btrfs iocost apply --help | grep -qF "Usage: cst btrfs iocost"
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost apply --help | grep -qE '^Usage: (.*/)?cst btrfs iocost '
             # --device writes one disk now: only with --live-only (exit 2 without, nothing written).
             rc=0; runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --device sda >/dev/null 2>&1 || rc=$?
             [[ $rc == 2 ]]
