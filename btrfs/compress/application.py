@@ -10,8 +10,6 @@ from btrfs.compress.domain import (
     PROC_MOUNTS_PATH,
     TOP_MOUNT_UNIT_PATH,
     CoherenceReport,
-    CompressArgs,
-    CompressCommand,
     CompressMode,
     CompressPlan,
     CompressSnapshot,
@@ -25,6 +23,7 @@ from btrfs.compress.domain import (
     parse_proc_mounts,
     pick_root_mounts,
 )
+from btrfs.compress.domain.args import CompressArgs, CompressCommand
 from btrfs.compress.ports import CompressHostPort
 from cst_core.domain.errors import Refused
 from cst_core.ports import CommandFailed, WriteFailed

@@ -19,9 +19,6 @@ from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdap
 from btrfs.compress.application import CompressService
 from btrfs.compress.cli import CompressCliStreams, compress_cli
 from btrfs.compress.domain import (
-    ArgsError,
-    CompressArgs,
-    CompressCommand,
     CompressMode,
     CompressSnapshot,
     CompressSpec,
@@ -32,7 +29,6 @@ from btrfs.compress.domain import (
     build_plan,
     effective_compress_spec,
     matches_target_spec,
-    parse_compress_args,
     parse_compress_spec,
     parse_fstab_root_entries,
     parse_proc_mounts,
@@ -43,12 +39,13 @@ from btrfs.compress.domain import (
     rewrite_mount_options,
     top_mount_options_from_var,
 )
+from btrfs.compress.domain.args import ArgsError, CompressArgs, CompressCommand, parse_compress_args
 from btrfs.compress.presenter import render_compress_change, render_compress_plan, render_compress_status
 from btrfs.compress.wiring import CompressWiringOverrides
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService
-from cst_core.domain.install import InstallEntry
 from cst_core.domain.errors import Refused
+from cst_core.domain.install import InstallEntry
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.ports import CommandFailed, CommandResult, WriteFailed
 from tests.repo_files import REPO

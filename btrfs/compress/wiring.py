@@ -11,7 +11,7 @@ from typing import Final, NoReturn
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.application import CompressService
-from btrfs.compress.domain import CompressCommand
+from btrfs.compress.domain.args import CompressCommand
 from cst_core.adapters.files import LocalFileSystemAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import lc_ctype_handover, program_path, undo_python_start
