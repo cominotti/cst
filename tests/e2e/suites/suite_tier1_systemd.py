@@ -4446,8 +4446,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
             # An upgrade: the installed unit is an older one. plan says apply updates it and changes nothing;
             # apply rewrites it and marks btrfs:iocost done again; plan then finds it current.
-            printf '# an older CST
-' >>/etc/systemd/system/cst-btrfs-iocost.service
+            printf '# an older CST\n' >>/etc/systemd/system/cst-btrfs-iocost.service
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan >/tmp/e2e-128a-plan.out
             grep -qF "would update:  component btrfs:iocost (/etc/systemd/system/cst-btrfs-iocost.service)" /tmp/e2e-128a-plan.out
             grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
