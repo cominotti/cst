@@ -1630,7 +1630,12 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   mounts and removes only that user's managed lines from `/etc/fstab`, leaving
   the files under `/var/mnt/cache` and `/var/mnt/scratchpad` intact. `cst
   doctor` checks the base mounts, the absence of `flushoncommit`, `nofail`
-  in `/etc/crypttab`, and the live bind mounts.
+  in `/etc/crypttab` (for the mapping behind the bases, found through
+  `/dev/mapper/NAME` or the name of `/dev/dm-N`, and for the default names
+  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts.
+- **Homes through a link:** the targets use the home's real path (passwd's
+  `/home/u` is `/var/home/u` on Silverblue), the one the kernel and
+  findmnt show, so an attached bind is found and never mounted twice.
 
 ---
 

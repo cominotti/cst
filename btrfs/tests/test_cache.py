@@ -37,7 +37,12 @@ from btrfs.cache.domain import (
     plan_detach_fstab,
     unescape_mount_field,
 )
-from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health
+from btrfs.cache.domain.health import (
+    CacheMountFindingSeverity,
+    assess_cache_mount_health,
+    dm_device_names,
+    parse_crypttab_cache_issues,
+)
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.ports import CommandResult
@@ -246,6 +251,28 @@ class CacheMountDomainTests(unittest.TestCase):
             f"UUID=r / btrfs defaults 0 0\n{line}",
         )
         self.assertEqual(plan_detach_fstab(fstab, "u", {CacheMountKind.CACHE}), "UUID=r / btrfs defaults 0 0\n")
+
+    def test_the_cache_drives_crypttab_line_is_found_through_dm_and_luks_names(self) -> None:
+        crypt = "luks-1234 UUID=abc none discard\nluks-abcd UUID=def none discard\n"
+        warn = ["/etc/crypttab entry 'luks-1234' is missing 'nofail' (boot could stall if NVMe is absent)"]
+        self.assertEqual(parse_crypttab_cache_issues(crypt, ["/dev/dm-3"], {"dm-3": "luks-1234"}), warn)
+        self.assertEqual(parse_crypttab_cache_issues(crypt, ["/dev/mapper/luks-1234[/cache]"]), warn)
+        self.assertEqual(parse_crypttab_cache_issues(crypt, ["/dev/dm-3"], {"dm-4": "luks-1234"}), [])
+        self.assertEqual(parse_crypttab_cache_issues(crypt, ["/dev/mapper/other"]), [])
+        defaults = "cache-nvme UUID=a none discard\nluks-cache2 UUID=b none discard\ncache UUID=c none nofail\n"
+        self.assertEqual(
+            [i.split("'")[1] for i in parse_crypttab_cache_issues(defaults, [])], ["cache-nvme", "luks-cache2"]
+        )
+        self.assertEqual(
+            dm_device_names(["/dev/dm-3[/cache]", "/dev/dm-x", "/dev/mapper/a", "/dev/dm-12"]), {"dm-3", "dm-12"}
+        )
+        found = assess_cache_mount_health(
+            "UUID=feed /var/mnt/cache btrfs subvol=cache,nofail 0 0\n",
+            "/dev/dm-3 /var/mnt/cache btrfs rw,noatime 0 0\n",
+            crypt,
+            {"dm-3": "luks-1234"},
+        )
+        self.assertEqual([f.message for f in found if "crypttab" in f.message], warn)
 
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
@@ -636,6 +663,28 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
         _, out, _ = self._run(["status"])
         self.assertIn("-> /var/home/danilo/.cache [active (fstab + mounted)]", out)
+
+    def test_a_home_through_a_link_is_named_by_its_real_path(self) -> None:
+        os.symlink("var/home", os.path.join(self.tmp, "home"))
+        with open(os.path.join(self.tmp, "etc", "passwd"), "a", encoding="utf-8") as fh:
+            fh.write("dave:x:1004:1004:Dave:/home/dave:/bin/bash\n")
+        os.makedirs(os.path.join(self.tmp, "var", "home", "dave", ".cache"))
+        os.makedirs(os.path.join(self.tmp, "var", "mnt", "cache", "dave"))
+        tgt = "/var/home/dave/.cache"
+        self.runner.add_mount("/dev/mapper/cache", tgt, fsroot="/cache/dave", bind=True)
+        with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
+            fh.write(
+                f"/var/mnt/cache/dave {tgt} none bind,nofail,x-systemd.requires-mounts-for=/var/mnt/cache 0 0 "
+                f"{CACHE_MOUNT_MARKER} user=dave kind=cache\n"
+            )
+        _, out, _ = self._run(["status", "--user", "dave"])
+        self.assertIn("target user        dave (uid=1004, home=/var/home/dave)", out)
+        self.assertIn(f"/var/mnt/cache/dave -> {tgt} [active (fstab + mounted)]", out)
+        self.runner.calls.clear()
+        rc, out_a, err = self._run(["attach", "--user", "dave", "--no-scratchpad"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Already attached for dave; nothing to do.", out_a)
+        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
 
     def test_findmnt_failing_blocks_every_write(self) -> None:
         self.runner.findmnt_fails = True

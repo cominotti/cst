@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 from typing import Final
 
 from btrfs.cache.domain import (
@@ -17,6 +18,7 @@ from btrfs.cache.domain import (
     SCRATCHPAD_BASE,
     ManagedFstabEntry,
     has_mount_option,
+    mount_device,
     parse_all_mounts,
     parse_managed_fstab_entries,
 )
@@ -28,6 +30,8 @@ _DEFAULT_MAPPER: Final = "cache"
 _DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
 _CRYPTTAB_MIN_FIELDS: Final = 2
 _CRYPTTAB_OPT_IDX: Final = 3
+_DM_DEVICE_RE: Final = re.compile(r"/dev/dm-[0-9]+")
+_MAPPER_PREFIX: Final = "/dev/mapper/"
 
 
 class CacheMountFindingSeverity(StrEnum):
@@ -47,11 +51,37 @@ class CacheMountFinding:
     fix: str = ""
 
 
-def parse_crypttab_cache_issues(crypttab_text: str | None, backing_sources: Collection[str]) -> list[str]:
-    """Return missing-`nofail` warnings for any cache drive dm-crypt mapping in `/etc/crypttab`."""
+def dm_device_names(sources: Collection[str]) -> frozenset[str]:
+    """The kernel names (`dm-3`) of the `/dev/dm-N` devices among mount sources, whose mapping
+    names a caller reads from `/sys/class/block/dm-N/dm/name`."""
+    return frozenset(
+        dev.removeprefix("/dev/") for dev in (mount_device(s) for s in sources) if _DM_DEVICE_RE.fullmatch(dev)
+    )
+
+
+def mapper_names(sources: Collection[str], dm_names: Mapping[str, str]) -> frozenset[str]:
+    """The dm-crypt mapping names behind mount sources: `/dev/mapper/NAME` gives NAME, `/dev/dm-N`
+    the name dm_names has for `dm-N`; findmnt's `[FSROOT]` suffix is dropped first."""
+    names: set[str] = set()
+    for src in sources:
+        dev = mount_device(src)
+        if dev.startswith(_MAPPER_PREFIX):
+            names.add(dev.removeprefix(_MAPPER_PREFIX))
+        elif _DM_DEVICE_RE.fullmatch(dev) and dm_names.get(dev.removeprefix("/dev/"), ""):
+            names.add(dm_names[dev.removeprefix("/dev/")])
+    return frozenset(names)
+
+
+def parse_crypttab_cache_issues(
+    crypttab_text: str | None, backing_sources: Collection[str], dm_names: Mapping[str, str] | None = None
+) -> list[str]:
+    """Return missing-`nofail` warnings for any cache drive dm-crypt mapping in `/etc/crypttab`: one
+    with a default name (`cache`, `cache-*`, `luks-cache*`) or the mapping behind a base's source
+    (`/dev/mapper/NAME`, or `/dev/dm-N` through dm_names). Another `luks-*` line is not the cache
+    drive's: Fedora names the root disks so, and they have no `nofail` on purpose."""
     if crypttab_text is None or not crypttab_text:
         return []
-    mappers = {src.removeprefix("/dev/mapper/") for src in backing_sources if src.startswith("/dev/mapper/")}
+    mappers = mapper_names(backing_sources, dm_names or {})
     issues: list[str] = []
     for raw in crypttab_text.splitlines():
         stripped = raw.strip()
@@ -121,9 +151,12 @@ def assess_cache_mount_health(
     fstab_text: str | None,
     proc_mounts_text: str | None,
     crypttab_text: str | None,
+    dm_names: Mapping[str, str] | None = None,
 ) -> list[CacheMountFinding]:
-    """Evaluate the dedicated NVMe cache drive's mounts and crypttab for `cst doctor`."""
-    live_by_target = {m.target: m for m in parse_all_mounts(proc_mounts_text or "")}
+    """Evaluate the dedicated NVMe cache drive's mounts and crypttab for `cst doctor`. dm_names: the
+    mapping name of each `dm-N` among the mount sources (`/sys/class/block/dm-N/dm/name`)."""
+    live_all = parse_all_mounts(proc_mounts_text or "")
+    live_by_target = {m.target: m for m in live_all}
     fstab_by_target = {m.target: m for m in parse_all_mounts(fstab_text or "")}
     managed = parse_managed_fstab_entries(fstab_text or "")
     active_bases = _collect_active_bases(live_by_target, fstab_by_target, managed)
@@ -134,12 +167,14 @@ def assess_cache_mount_health(
     backing_sources: list[str] = []
     for base in active_bases:
         live, fst = live_by_target.get(base), fstab_by_target.get(base)
-        backing_sources.extend(entry.source for entry in (live, fst) if entry is not None)
+        backing_sources.extend(m.source for m in live_all if m.target == base)
+        if fst is not None:
+            backing_sources.append(fst.source)
         _check_base_mount(base, live, fst, findings)
 
     findings.extend(
         CacheMountFinding(CacheMountFindingSeverity.WARN, issue)
-        for issue in parse_crypttab_cache_issues(crypttab_text, backing_sources)
+        for issue in parse_crypttab_cache_issues(crypttab_text, backing_sources, dm_names)
     )
 
     findings.extend(

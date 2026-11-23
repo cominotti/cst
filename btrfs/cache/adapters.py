@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 import pwd
 import stat
@@ -120,7 +120,21 @@ def _resolve_target_user(requested: str | None, rt: _CacheMountRuntime) -> tuple
             return None, f"user {username!r} does not exist"
     if record.uid < MIN_HUMAN_UID:
         return None, f"refusing system user {record.name!r} (uid={record.uid} < {MIN_HUMAN_UID})"
-    return record, None
+    return replace(record, home=_real_home(record.home, rt)), None
+
+
+def _real_home(home: str, rt: _CacheMountRuntime) -> str:
+    """The home as the kernel and findmnt name it: passwd's /home/u is /var/home/u on Silverblue
+    (/home is a link). Resolved where the program sees the host (the test root, /run/host); a path
+    that leaves that view, or a home that cannot be resolved, stays as passwd has it."""
+    view = _map_path(home, rt, read_only=True)
+    if not view.endswith(home):
+        return home
+    prefix = view.removesuffix(home)
+    real = os.path.realpath(view)
+    if not prefix:
+        return real
+    return real.removeprefix(prefix) if real.startswith(f"{prefix}/") else home
 
 
 def _read_live_mounts(rt: _CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:

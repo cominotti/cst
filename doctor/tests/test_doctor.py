@@ -1534,6 +1534,21 @@ class BtrfsCacheDoctorTest(Scratch):
         self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
         self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
 
+    def test_the_cache_drives_crypttab_line_is_found_through_its_dm_device(self) -> None:
+        self._put("etc", "fstab", text="UUID=feed /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n")
+        self._put("etc", "crypttab", text="luks-1234 UUID=abc none discard\nluks-abcd UUID=def none discard\n")
+        self._put("sys", "class", "block", "dm-3", "dm", "name", text="luks-1234\n")
+        for proc, findmnt_all in (
+            ("/dev/dm-3 /var/mnt/cache btrfs rw,noatime 0 0\n", ""),
+            ("", "/dev/mapper/luks-1234[/cache] /var/mnt/cache btrfs rw,noatime\n"),
+        ):
+            with self.subTest(proc=proc, findmnt=findmnt_all):
+                self._put("proc", "mounts", text=proc)
+                self._set_findmnt_all(findmnt_all)
+                btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+                self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'luks-1234' is missing 'nofail'", btrfs_text)
+                self.assertNotIn("'luks-abcd'", btrfs_text)
+
     def test_cache_mount_non_btrfs_via_findmnt_and_unreadable_crypttab(self) -> None:
         self._put(
             "etc",

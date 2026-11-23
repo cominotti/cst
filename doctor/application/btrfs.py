@@ -32,7 +32,8 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
-from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health
+from btrfs.cache.domain import parse_all_mounts
+from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
@@ -772,7 +773,13 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
         CacheMountFindingSeverity.INFO: INFO,
         CacheMountFindingSeverity.WARN: WARN,
     }
-    for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None):
+    sources = [m.source for m in parse_all_mounts(f"{mounts_text}\n{fstab_raw}")]
+    dm_names = {
+        dm: name
+        for dm in sorted(dm_device_names(sources))
+        if (name := read_text(host, host.path(HostPath(f"/sys/class/block/{dm}/dm/name"))))
+    }
+    for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None, dm_names):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
     if crypttab_unreadable and has_hints:
