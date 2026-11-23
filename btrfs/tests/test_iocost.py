@@ -83,6 +83,8 @@ class _FakeRunner:
         self.on_call: Callable[[list[str]], None] | None = None
         # `udevadm info -q property -n /dev/NAME`: these properties, or by default a disk udev processed
         self.udev_props: dict[str, str] = {}
+        # every `udevadm info` call answers (exit status, stderr) instead
+        self.udev_failure: tuple[int, str] | None = None
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         cmd = list(argv)
@@ -92,6 +94,8 @@ class _FakeRunner:
         line = " ".join(cmd)
         if any(part in line for part in self.fail_on):
             return CommandResult(1, "", f"{line}: failed", argv=tuple(cmd))
+        if cmd[:2] == ["udevadm", "info"] and self.udev_failure is not None:
+            return CommandResult(self.udev_failure[0], "", self.udev_failure[1], argv=tuple(cmd))
         if cmd[:2] == ["udevadm", "info"]:
             name = cmd[-1].removeprefix("/dev/")
             return CommandResult(0, self.udev_props.get(name, "USEC_INITIALIZED=1234\n"), "", argv=tuple(cmd))
@@ -500,6 +504,17 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn(f"set:       {self.paths.qos_path} <- '259:1 enable=1 ctrl=auto' (nvme0n1)", out)
         self.assertTrue(any(line.startswith("note:      nvme0n1: udevadm info failed (") for line in out), out)
+
+    def test_the_udevadm_note_names_its_first_line_stripped(self) -> None:
+        self.runner.udev_failure = (4, "\n  Unknown device \t\nsecond line\n")
+        snap = collect_iocost_snapshot(self.paths, runner=self.runner)
+        self.assertEqual(
+            {d.name: d.udev_error for d in snap.disks if d.name.startswith("nvme")},
+            {"nvme0n1": "Unknown device", "nvme1n1": "Unknown device"},
+        )
+        self.runner.udev_failure = (4, " \n")
+        snap = collect_iocost_snapshot(self.paths, runner=self.runner)
+        self.assertEqual({d.udev_error for d in snap.disks if d.name.startswith("nvme")}, {"exit 4"})
 
     def test_a_disk_udev_configures_is_no_longer_cst_s(self) -> None:
         # An earlier run claimed it before 90-iocost.rules ran: revert must not reset the vendor's setting.

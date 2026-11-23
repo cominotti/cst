@@ -24,7 +24,7 @@ from cst_core.adapters.runtime import (
 from cst_core.application.install import InstallRefused, InstallService, Placement, staged
 from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.domain.text import group
+from cst_core.domain.text import first_line, group
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
@@ -161,8 +161,7 @@ def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDi
         output=OutputMode.CAPTURE,
     )
     if res.fault is not None or res.returncode != 0:
-        why = res.stderr.strip().splitlines()[0] if res.stderr.strip() else f"exit {res.returncode}"
-        return replace(disk, udev_error=why)
+        return replace(disk, udev_error=first_line(res.stderr) or f"exit {res.returncode}")
     props = dict(line.partition("=")[::2] for line in res.stdout.splitlines() if "=" in line)
     return replace(
         disk, hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(), udev_ready=USEC_INITIALIZED_PROP in props
