@@ -47,9 +47,10 @@ from btrfs.cache.domain import (
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import FileOwner, LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
+from cst_core.adapters.files import LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import ManagedCliEnv, host_view_path
+from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
 
 _CRYPTTAB_PATH: Final = "/etc/crypttab"
@@ -102,7 +103,7 @@ def _lookup_passwd_file(passwd_path: str, name: str) -> CacheMountUser | None:
 def _default_username(env_map: Mapping[str, str]) -> str:
     for key in ("SUDO_USER", "USER"):
         cand = (env_map.get(key) or "").strip()
-        if cand and cand != FileOwner.ROOT:
+        if cand and cand != ROOT_ACCOUNT:
             return cand
     return pwd.getpwuid(os.getuid()).pw_name
 
