@@ -272,7 +272,7 @@ def _enable_iocost_service(runner: CommandRunnerPort, paths: IocostPaths) -> tup
 
 
 def _install_and_write(
-    paths: IocostPaths, runner: CommandRunnerPort, live_only: bool, target_device: str | None
+    paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
 ) -> tuple[int, list[str]]:
     """Read, plan, install btrfs:iocost (not live-only) and write io.cost.qos: the part under the lock."""
     snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
@@ -309,7 +309,9 @@ def apply_iocost(
         # The installed zipapp has no installer.py, unit verifier or payload to install from.
         return 1, ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"]
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    rc_w, out = _locked(paths, lambda: _install_and_write(paths, cmd_runner, live_only, target_device))
+    rc_w, out = _locked(
+        paths, lambda: _install_and_write(paths, cmd_runner, live_only=live_only, target_device=target_device)
+    )
     if rc_w != 0 or live_only:
         return rc_w, out
     # The lock is free again: enable --now starts the service, which takes it.

@@ -61,35 +61,39 @@ class _FakeRunner:
         if any(part in " ".join(cmd) for part in self.fail_on):
             return CommandResult(1, "", "Access denied", argv=tuple(cmd))
         if "installer.py" in " ".join(cmd):
-            if self._installer_root:
-                real = subprocess.run(
-                    [sys.executable, "-I", "-B", cmd[3], cmd[4], "--root", self._installer_root, *cmd[5:]],
-                    input=input_text,
-                    capture_output=True,
-                    text=True,
-                    stdin=None if input_text is not None else subprocess.DEVNULL,
-                    check=False,
-                )
-                return CommandResult(real.returncode, real.stdout, real.stderr, argv=tuple(cmd))
-            if "text" in cmd:
-                dest = cmd[cmd.index("text") + 1]
-                existed = os.path.exists(dest)
-                old = None
-                if existed:
-                    with open(dest, encoding="utf-8") as fh:
-                        old = fh.read()
-                if old == input_text:
-                    return CommandResult(0, f"unchanged: {dest}\n", "", argv=tuple(cmd))
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as fh:
-                    fh.write(input_text or "")
-                return CommandResult(0, f"written:   {dest}\n", "", argv=tuple(cmd))
-            if "remove-text" in cmd:
-                dest = cmd[cmd.index("remove-text") + 1]
-                if os.path.exists(dest):
-                    os.remove(dest)
-                    return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
-                return CommandResult(0, "", "", argv=tuple(cmd))
+            return self._installer(cmd, input_text)
+        return CommandResult(0, "", "", argv=tuple(cmd))
+
+    def _installer(self, cmd: list[str], input_text: str | None) -> CommandResult:
+        if self._installer_root:
+            real = subprocess.run(
+                [sys.executable, "-I", "-B", cmd[3], cmd[4], "--root", self._installer_root, *cmd[5:]],
+                input=input_text,
+                capture_output=True,
+                text=True,
+                stdin=None if input_text is not None else subprocess.DEVNULL,
+                check=False,
+            )
+            return CommandResult(real.returncode, real.stdout, real.stderr, argv=tuple(cmd))
+        if "text" in cmd:
+            dest = cmd[cmd.index("text") + 1]
+            existed = os.path.exists(dest)
+            old = None
+            if existed:
+                with open(dest, encoding="utf-8") as fh:
+                    old = fh.read()
+            if old == input_text:
+                return CommandResult(0, f"unchanged: {dest}\n", "", argv=tuple(cmd))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(input_text or "")
+            return CommandResult(0, f"written:   {dest}\n", "", argv=tuple(cmd))
+        if "remove-text" in cmd:
+            dest = cmd[cmd.index("remove-text") + 1]
+            if os.path.exists(dest):
+                os.remove(dest)
+                return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
+            return CommandResult(0, "", "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
 
 

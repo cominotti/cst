@@ -921,7 +921,7 @@ class AdapterAndCliTests(unittest.TestCase):
         real_install = InstallService.install
 
         def refuse_first(svc: InstallService, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
-            calls.append(req.values.get("OPTIONS", "") if req.values else "")
+            calls.append(req.values.get("OPTIONS", "") if req.values is not None else "")
             if len(calls) == 1:
                 raise InstallRefused("var-mnt-btrfs\\x2dtop.mount: refused by the unit verifier")
             return real_install(svc, entries, req)
