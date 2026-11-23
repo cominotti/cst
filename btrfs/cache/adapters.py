@@ -43,6 +43,7 @@ from btrfs.cache.domain import (
     plan_attach_fstab,
     plan_detach_fstab,
     selected_kinds,
+    snapshot_error,
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
@@ -400,12 +401,9 @@ def _apply_detach(
     what this run unmounted. A mount CST did not make stays (its managed line still goes); a target
     whose mount cannot be told (base not mounted) or that hides CST's bind under another mount makes
     detach change nothing."""
-    if snap.user is None:
-        return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
-    if snap.mounts_error is not None:
-        return 1, [f"ERROR: cannot list mounts: {snap.mounts_error}"]
-    if snap.fstab_error is not None:
-        return 1, [f"ERROR: {snap.fstab_error}"]
+    err = snapshot_error(snap)
+    if err is not None or snap.user is None:
+        return 1, [f"ERROR: {err or 'cannot resolve target user'}"]
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     lines = cache_seam_lines(rt.seam_root)

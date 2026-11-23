@@ -532,6 +532,16 @@ def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKi
     return "\n".join(out_lines) + "\n" if out_lines else ""
 
 
+def snapshot_error(snap: CacheMountSnapshot) -> str | None:
+    """Why the snapshot cannot carry a write: no target user, no mount table, or an /etc/fstab that
+    is there but cannot be read; None when it can."""
+    if snap.user is None:
+        return snap.user_error or "cannot resolve target user"
+    if snap.mounts_error is not None:
+        return f"cannot list mounts: {snap.mounts_error}"
+    return snap.fstab_error
+
+
 def detach_blockers(snap: CacheMountSnapshot) -> list[str]:
     """Why detach must change nothing: a target whose mount it cannot tell (its base not mounted), or
     one where CST's bind is under a mount CST did not make (umount would take that one away)."""
@@ -581,12 +591,9 @@ def _target_blockers(probe: BindingProbe, *, allow_nonempty: bool) -> list[str]:
 
 def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool = False) -> list[str]:
     """Return blocking error reasons preventing safe `attach`, or empty list when safe."""
-    if snap.user is None:
-        return [snap.user_error or "cannot resolve target user"]
-    if snap.mounts_error is not None:
-        return [f"cannot list mounts: {snap.mounts_error}"]
-    if snap.fstab_error is not None:
-        return [snap.fstab_error]
+    err = snapshot_error(snap)
+    if err is not None or snap.user is None:
+        return [err or "cannot resolve target user"]
     if snap.home_missing:
         return [f"home folder {snap.user.home} does not exist"]
     errors: list[str] = []
