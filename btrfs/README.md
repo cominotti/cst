@@ -1577,7 +1577,10 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   the folder `<user>` of the subvolume (its FSROOT is `/cache/<user>`); any
   other mount there is "a mount CST did not make", and `attach` refuses.
   When findmnt fails, `status` says so and `plan`, `attach` and `detach`
-  refuse: nothing is guessed from another table.
+  refuse: nothing is guessed from another table. The same goes for an
+  `/etc/fstab` that is there but cannot be read (a permission or I/O
+  error): it is never taken for a missing file, which `attach` would
+  replace with one holding only CST's lines.
 - **What `attach` refuses** (`plan` shows each as `BLOCKED:`; nothing is
   changed): a base folder that is not mounted or not btrfs, a cache drive on
   the same filesystem as the home, a home folder that does not exist (CST

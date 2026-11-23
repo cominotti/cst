@@ -227,7 +227,14 @@ def _probe_binding(
 
 def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> CacheMountSnapshot:
     # Byte-transparent: the text is written back, and the bytes of the lines CST does not manage stay.
-    fstab_text = LocalFileSystemAdapter().read_text(_map_path(FSTAB_PATH, rt, read_only=True))
+    # A file there that cannot be read is no missing file: a fstab built from "" would drop every line.
+    fstab_error: str | None = None
+    try:
+        fstab_text = LocalFileSystemAdapter().read_text(
+            _map_path(FSTAB_PATH, rt, read_only=True), raise_unreadable=True
+        )
+    except OSError as exc:
+        fstab_text, fstab_error = None, f"cannot read {FSTAB_PATH}: {exc.strerror or exc}"
     crypttab_text = read_text(_map_path(_CRYPTTAB_PATH, rt, read_only=True))
     mounts, mounts_error = _read_live_mounts(rt)
 
@@ -254,6 +261,7 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> Cac
         fstab_text,
         mounts_error,
         home_missing=user is not None and not os.path.isdir(_map_path(user.home, rt, read_only=True)),
+        fstab_error=fstab_error,
     )
 
 
@@ -386,6 +394,8 @@ def _apply_detach(
         return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
     if snap.mounts_error is not None:
         return 1, [f"ERROR: cannot list mounts: {snap.mounts_error}"]
+    if snap.fstab_error is not None:
+        return 1, [f"ERROR: {snap.fstab_error}"]
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     lines = cache_seam_lines(rt.seam_root)

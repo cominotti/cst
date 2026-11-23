@@ -197,6 +197,8 @@ class CacheMountSnapshot:
     fstab_text: str | None
     mounts_error: str | None = None
     home_missing: bool = False
+    fstab_error: str | None = None
+    """Why /etc/fstab, which is there, could not be read (attach, detach and plan refuse)."""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -543,6 +545,8 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
         return [snap.user_error or "cannot resolve target user"]
     if snap.mounts_error is not None:
         return [f"cannot list mounts: {snap.mounts_error}"]
+    if snap.fstab_error is not None:
+        return [snap.fstab_error]
     if snap.home_missing:
         return [f"home folder {snap.user.home} does not exist"]
     errors: list[str] = []
@@ -608,6 +612,8 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     lines = [*cache_seam_lines(seam_root), "Dedicated cache drive mounts:"]
     if snap.mounts_error is not None:
         return [*lines, f"  cannot list mounts: {snap.mounts_error}"]
+    if snap.fstab_error is not None:
+        return [*lines, f"  {snap.fstab_error}"]
     for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
         base = snap.bases[kind]
         if base.mounted:

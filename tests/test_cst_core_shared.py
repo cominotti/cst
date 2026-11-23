@@ -331,6 +331,20 @@ class AdaptersTest(unittest.TestCase):
         with open(out, "rb") as fh:
             self.assertEqual(fh.read(), b"a\xffb\r\nc\n")
 
+    def test_the_byte_transparent_reader_can_raise_for_a_file_it_cannot_read(self) -> None:
+        # raise_unreadable: a file there that cannot be read (a folder here) raises; one that is not
+        # there (no such file, a path through a file) still gives the default. Without it, both do.
+        fs = core_files.LocalFileSystemAdapter()
+        p = self.path("f", b"text\n")
+        folder = self.path("folder")
+        os.mkdir(folder)
+        self.assertEqual(fs.read_text(p, raise_unreadable=True), "text\n")
+        self.assertIsNone(fs.read_text(self.path("missing"), raise_unreadable=True))
+        self.assertEqual(fs.read_text(os.path.join(p, "below"), "d", raise_unreadable=True), "d")
+        with self.assertRaises(IsADirectoryError):
+            fs.read_text(folder, raise_unreadable=True)
+        self.assertIsNone(fs.read_text(folder))
+
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")
         os.mkdir(existing, 0o700)

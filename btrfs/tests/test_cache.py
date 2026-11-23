@@ -725,6 +725,24 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("Already attached for dave; nothing to do.", out_a)
         self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
 
+    def test_an_fstab_that_cannot_be_read_blocks_every_write(self) -> None:
+        # A file there that cannot be read (a link loop: ELOOP) was taken for a missing one: attach
+        # wrote an /etc/fstab of CST's lines only, and a failed reload then deleted it.
+        fstab = os.path.join(self.tmp, "etc", "fstab")
+        os.unlink(fstab)
+        os.symlink("fstab", fstab)
+        self.runner.reload_fails = True
+        _, out_s, _ = self._run(["status"])
+        self.assertIn("  cannot read /etc/fstab: Too many levels of symbolic links", out_s)
+        _, out_p, _ = self._run(["plan"])
+        self.assertIn("BLOCKED: cannot read /etc/fstab: Too many levels of symbolic links", out_p)
+        for argv in (["attach"], ["detach"]):
+            rc, _, err = self._run(argv)
+            self.assertEqual(rc, 1, argv)
+            self.assertIn("ERROR: cannot read /etc/fstab: Too many levels of symbolic links", err)
+        self.assertEqual(os.readlink(fstab), "fstab")
+        self.assertFalse(any(c[:1] in (["mount"], ["umount"]) for c in self.runner.calls))
+
     def test_findmnt_failing_blocks_every_write(self) -> None:
         self.runner.findmnt_fails = True
         before = self._fstab()

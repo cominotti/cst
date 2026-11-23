@@ -230,17 +230,25 @@ class LocalFileSystemAdapter:
         can it tell a name in it that is not there (lexists False) from one it may not see."""
         return os.access(path, os.X_OK)
 
-    def read_text(self, path: str, default: str | None = None) -> str | None:
+    def read_text(self, path: str, default: str | None = None, *, raise_unreadable: bool = False) -> str | None:
         """Read the file as UTF-8 text, returning default on OSError.
 
         Byte-transparent, like bash's `read -r` on the shared files (fstab,
         crypttab): a byte that is not UTF-8 comes back as itself through
         write_atomic (surrogateescape), and line ends are kept as they are.
+        raise_unreadable: default only for a file that is not there (no such
+        file, or a path through a file); the OSError of one there that cannot
+        be read is raised, for a caller that must not take it for an empty or
+        missing file (one that writes the file back).
         """
         try:
             with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
                 return fh.read()
+        except FileNotFoundError, NotADirectoryError:
+            return default
         except OSError:
+            if raise_unreadable:
+                raise
             return default
 
     def read_first_line(self, path: str, default: str | None = None) -> str | None:
