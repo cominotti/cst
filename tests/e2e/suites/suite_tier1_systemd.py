@@ -7829,7 +7829,8 @@ EOF
         """`cst btrfs cache` per user, under a test root (CST_BTRFS_CACHE_ROOT), with real systemd and `cst doctor`.
 
         findmnt, mount and umount are stand-ins that keep one mount table: findmnt answers the program's
-        `-J -l` call as the real one does (a bind's source "DEVICE[FSROOT]") and doctor's `-rn` call.
+        `-J -l` call as the real one does (a bind's source "DEVICE[FSROOT]") and doctor's `-rn` call (any
+        mount whose FSROOT is not "/" shown as "DEVICE[FSROOT]", as findmnt prints SOURCE).
         plan writes nothing; attach (again: nothing to do), --no-cache, --no-scratchpad and a home with a
         space; the managed lines, copied to /etc/fstab, become mount units of systemd-fstab-generator at a
         real daemon-reload (What, Where, Options, RequiresMountsFor); a non-empty target, then
@@ -7862,9 +7863,11 @@ if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTION
     keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
     print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
 elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
+    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
     esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
     for r in rows:
-        print(esc(r[0]), esc(r[1]), r[2], r[3])
+        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
+        print(esc(src), esc(r[1]), r[2], r[3])
 elif prog == "findmnt":
     os.execv("/usr/bin/findmnt", ["findmnt", *args])
 elif prog == "mount" and args[:1] == ["--bind"]:
