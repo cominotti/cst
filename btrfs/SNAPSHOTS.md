@@ -283,7 +283,11 @@ There are two kinds:
 > `ok (external mount)`, `put_aside` leaves its child caches (such as
 > `~/.cache/uv`) untouched, `planned_left` does not block snapshots waiting for
 > conversion, and the runtime never tries to snapshot an externally mounted
-> `~/Workspace` as a local subvolume.
+> `~/Workspace` as a local subvolume. A planned folder that is a **symlink**
+> is no mount point here, even when it points to one (`mountpoint` follows the
+> link): `plan` shows it as to do, and the conversion skips it as "not a
+> directory (a symlink or file)". The child caches of a symlinked parent stay
+> where they are, as before.
 
 **What stays in /home snapshots** (examples): your documents, `Downloads`
 (except `Downloads/iso`, which is a link into `~/Bulk`), `Videos`,

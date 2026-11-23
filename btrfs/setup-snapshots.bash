@@ -287,7 +287,8 @@ snap_entry_state() {   # strategy path
         else
             echo -
         fi
-    elif mountpoint -q "${path}" 2>/dev/null; then echo "mounted"
+    # A symlink is never "mounted" (mountpoint follows it): the converter skips it as a symlink.
+    elif [[ ! -L "${path}" ]] && mountpoint -q "${path}" 2>/dev/null; then echo "mounted"
     elif is_subvol "${path}"; then echo "done"
     elif [[ -s "${SNAP_STATE}/skipped" ]] && cut -f1 "${SNAP_STATE}/skipped" | grep -qxF -- "${path}"; then
         printf 'skipped: %s\n' "$(P="${path}" awk -F '\t' '$1 == ENVIRON["P"] {print $2; exit}' "${SNAP_STATE}/skipped")"

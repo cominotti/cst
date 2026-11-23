@@ -1968,6 +1968,33 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.assertIn("Unknown command: scratch", r.stderr)
 
 
+class SnapEntryStateTest(unittest.TestCase):
+    """snap_entry_state (btrfs/setup-snapshots.bash): a symlink is never "mounted", though mountpoint
+    follows it to a mount point."""
+
+    def test_a_symlink_to_a_mountpoint_is_not_mounted(self) -> None:
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-entry-test-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        os.mkdir(os.path.join(tmp, "real"))
+        os.symlink(os.path.join(tmp, "real"), os.path.join(tmp, "link"))
+        script = (
+            f'SRC={BTRFS}; . "$SRC/setup-snapshots.bash"; SNAP_STATE="$T/state"\n'
+            # mountpoint -q PATH, as the real one answers through a link: true for both paths.
+            'mountpoint() { [[ "$2" == "$T/real" || "$2" == "$T/link" ]]; }\n'
+            'snap_entry_state copy "$T/real"; snap_entry_state copy "$T/link"\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": tmp, "HOME": tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["mounted", "todo"]), r.stderr)
+
+
 class WriteCommandHelpTest(unittest.TestCase):
     """`cst btrfs iocost apply --help` and `scrub-limit set --help` print help without sudo:
     btrfs-setup.sh hands every iocost and scrub-limit word to Python, which elevates only to write."""

@@ -667,7 +667,9 @@ planned_left() {
             [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
                 ! mountpoint -q "${path}" && ! mountpoint -q "$(dirname "${path}")" &&
                 printf '%s\n' "${path}"
-        elif [[ -e "${path}" || -d "$(dirname "${path}")" ]] && ! is_subvol "${path}" && ! mountpoint -q "${path}" && ! skipped "${path}"; then
+        # A symlink is no mount point here (mountpoint follows it): it stays until convert_one skips it.
+        elif [[ -e "${path}" || -d "$(dirname "${path}")" ]] && ! is_subvol "${path}" &&
+            { [[ -L "${path}" ]] || ! mountpoint -q "${path}"; } && ! skipped "${path}"; then
             printf '%s\n' "${path}"
         fi
     done <"${PLAN}"

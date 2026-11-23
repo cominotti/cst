@@ -216,6 +216,20 @@ class ConvertTest(Base):
         left = self.run_prog("planned-left")
         self.assertEqual((left.returncode, left.stdout), (0, ""))
 
+    def test_a_symlink_to_a_mountpoint_is_planned_until_it_is_skipped(self) -> None:
+        real = self.tree("real-cache")
+        link = os.path.join(self.home, ".cache")
+        os.symlink(real, link)
+        # The fake mountpoint answers for the path it is given, as the real one does through a link.
+        self.machine(mountpoints=[link])
+        self.plan(f"copy {link}")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, f"{link}\n"))
+        self.assertEqual(self.run_prog("convert").returncode, 0)
+        self.assertEqual(read(self.state_file("skipped")), f"{link}\tnot a directory (a symlink or file)\n")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+
     def test_a_busy_cache_stays_and_its_parent_is_still_cloned(self) -> None:
         cache = self.tree(".cache")
         uv = os.path.join(cache, "uv")
