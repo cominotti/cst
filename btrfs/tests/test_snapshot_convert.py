@@ -788,7 +788,7 @@ class BusyTest(Base):
 
     def test_an_escaped_backslash_before_040_is_a_backslash_not_a_blank(self) -> None:
         # One pass, left to right: \134040 is a backslash and the text 040 (the name a\040b), as
-        # bulk's unescape_mountinfo reads it; a sibling "a b" is not busy.
+        # cst_core's unescape_mount_field reads it; a sibling "a b" is not busy.
         self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
         self.mounted_elsewhere("/home/u/a\\134040b")
         literal, blank = os.path.join(self.home, "a\\040b"), os.path.join(self.home, "a b")
