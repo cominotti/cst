@@ -13,7 +13,7 @@ from typing import Final, TypedDict, TypeIs
 
 from btrfs.compress.domain import MountEntry
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
-from cst_core.domain.text import HELP_WORDS, enum_member, parse_subcommand_head
+from cst_core.domain.text import HELP_WORDS, enum_member, file_lines, parse_subcommand_head
 
 CACHE_BASE: Final = "/var/mnt/cache"
 SCRATCHPAD_BASE: Final = "/var/mnt/scratchpad"
@@ -238,9 +238,10 @@ def unescape_mount_field(field: str) -> str:
 
 
 def parse_all_mounts(text: str) -> tuple[MountEntry, ...]:
-    """Parse `/proc/mounts` or `/etc/fstab` lines across all filesystem types."""
+    """Parse `/proc/mounts` or `/etc/fstab` lines across all filesystem types (only a newline ends
+    a line, as the kernel and systemd-fstab-generator read them)."""
     entries: list[MountEntry] = []
-    for line in text.splitlines():
+    for line in file_lines(text):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -454,7 +455,7 @@ def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
 def unmanaged_fstab_targets(fstab_text: str) -> frozenset[str]:
     """The targets (unescaped) of the /etc/fstab lines CST does not manage."""
     targets: set[str] = set()
-    for raw in fstab_text.splitlines():
+    for raw in file_lines(fstab_text):
         stripped = raw.strip()
         if not stripped or stripped.startswith("#") or _parse_one_managed_line(raw) is not None:
             continue
@@ -475,7 +476,7 @@ def has_managed_line(managed: Sequence[ManagedFstabEntry], binding: CacheMountBi
 def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...]:
     """Return every `btrfs-cache`-managed entry in `fstab_text`."""
     out: list[ManagedFstabEntry] = []
-    for raw in fstab_text.splitlines():
+    for raw in file_lines(fstab_text):
         parsed = _parse_one_managed_line(raw)
         if parsed is not None:
             out.append(parsed)
@@ -484,11 +485,12 @@ def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...
 
 def plan_attach_fstab(fstab_text: str, bindings: Sequence[CacheMountBinding]) -> str:
     """Upsert managed bind lines for `bindings`, preserving all unrelated and other-user lines; a
-    repeated managed line of a wanted (user, kind) goes (one line, one mount unit per target)."""
+    repeated managed line of a wanted (user, kind) goes (one line, one mount unit per target). Only a
+    newline ends a line: every other line keeps its bytes, a carriage return or a form feed included."""
     wanted = {(b.user, b.kind): render_bind_fstab_line(b) for b in bindings}
     placed: set[tuple[str, CacheMountKind]] = set()
     out_lines: list[str] = []
-    for line in fstab_text.splitlines():
+    for line in file_lines(fstab_text):
         managed = _parse_one_managed_line(line)
         key = (managed.user, managed.kind) if managed is not None else None
         if key is None or key not in wanted:
@@ -501,9 +503,9 @@ def plan_attach_fstab(fstab_text: str, bindings: Sequence[CacheMountBinding]) ->
 
 
 def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKind]) -> str:
-    """Remove only `user`/`kinds` managed bind lines, keeping all other users' lines."""
+    """Remove only `user`/`kinds` managed bind lines, keeping all other users' lines (and their bytes)."""
     out_lines: list[str] = []
-    for line in fstab_text.splitlines():
+    for line in file_lines(fstab_text):
         managed = _parse_one_managed_line(line)
         if managed is not None and managed.user == user and managed.kind in kinds:
             continue

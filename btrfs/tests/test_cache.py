@@ -36,6 +36,7 @@ from btrfs.cache.domain import (
     plan_attach_fstab,
     plan_detach_fstab,
     unescape_mount_field,
+    unmanaged_fstab_targets,
 )
 from btrfs.cache.domain.health import (
     CacheMountFindingSeverity,
@@ -240,6 +241,25 @@ class CacheMountDomainTests(unittest.TestCase):
         entries = parse_managed_fstab_entries(text)
         self.assertEqual([(e.source, e.target) for e in entries], [("/var/mnt/cache/u", f"{home}/.cache")])
         self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
+
+    def test_only_a_newline_ends_an_fstab_line(self) -> None:
+        # str.splitlines() also split at a carriage return, a form feed and other separators: a CRLF
+        # line lost its CR, and the second half of a comment holding a form feed became a live entry.
+        u = CacheMountUser("u", 1000, 1000, "/var/home/u")
+        bindings = build_user_bindings(u, include_scratchpad=False)
+        line = plan_attach_fstab("", bindings)
+        other = (
+            "UUID=r / btrfs defaults 0 0\r\n"
+            "# old\x0c/dev/sdb1 /data ext4 defaults 0 0\n"
+            "# a\u2028/dev/sdc1 /more ext4 defaults 0 0\x1c\x85\n"
+        )
+        attached = plan_attach_fstab(other, bindings)
+        self.assertEqual(attached, other + line)
+        self.assertEqual(plan_detach_fstab(attached, "u", {CacheMountKind.CACHE}), other)
+        self.assertEqual(unmanaged_fstab_targets(attached), {"/"})
+        self.assertEqual(
+            [(e.user, e.target) for e in parse_managed_fstab_entries(attached)], [("u", "/var/home/u/.cache")]
+        )
 
     def test_a_repeated_managed_line_goes(self) -> None:
         u = CacheMountUser("u", 1000, 1000, "/var/home/u")
