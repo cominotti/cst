@@ -1450,6 +1450,10 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
   so no udev event enables a disk again after its reset. The tracking file is
   removed, also on a kernel without `io.cost.qos` (nothing to reset there).
+  `revert` removes the files and their record lines itself, so the installed
+  program (`/usr/local/sbin/btrfs-iocost revert`) works without a checkout;
+  `apply` (not `--live-only`) installs from a checkout and, run from the
+  installed program, refuses with "run it from one (cst btrfs iocost apply)".
 
 ### 9.3 `commit-interval`: coherent `commit=60` across root btrfs layers
 

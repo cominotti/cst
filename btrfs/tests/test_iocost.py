@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+import dataclasses
 import io
 import os
 import shutil
@@ -33,8 +34,12 @@ from btrfs.iocost.domain import (
     parse_iocost_qos,
     plan_iocost_apply,
 )
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
 from cst_core.adapters.runtime import RootElevation, enforce_host_root
-from cst_core.ports import CommandResult
+from cst_core.application.install import InstallService, Placement, staged
+from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
+from cst_core.domain.record import ROOT_RECORD, ComponentState
+from cst_core.ports import CommandResult, WriteFailed
 from tests.repo_files import REPO
 
 
@@ -95,6 +100,17 @@ class _FakeRunner:
         elif cmd[:3] == ["systemctl", "disable", "--now"]:
             self.active_state, self.enabled_state = "inactive", "disabled"
         return CommandResult(0, "", "", argv=tuple(cmd))
+
+
+class _RefusingRemove(InstallService):
+    """An installer whose remove fails before it removes anything."""
+
+    def __init__(self) -> None:
+        super().__init__(LocalInstallTarget(), lambda _e: b"")
+
+    @override
+    def remove(self, places: Sequence[Placement]) -> Iterator[str]:
+        raise WriteFailed(places[0].path, "Read-only file system")
 
 
 def _steps(calls: list[list[str]]) -> list[str]:
@@ -165,6 +181,8 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             rule_dest=os.path.join(self.tmp, "etc", "udev", "rules.d", "91-cst-iocost.rules"),
             installer_script="/opt/fake/cst_core/installer.py",
             udev_control=os.path.join(self.tmp, "run", "udev", "control"),
+            install_root=os.path.join(self.tmp, "root"),
+            record_path=staged(os.path.join(self.tmp, "root"), ROOT_RECORD),
         )
         self._write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
         self._write(self.paths.qos_path, "259:2 enable=1 ctrl=user rpct=95.00\n")
@@ -178,6 +196,28 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
+
+    def _component_files(self) -> list[str]:
+        return [
+            staged(self.paths.install_root, e.dest)
+            for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)
+        ]
+
+    def _seed_component(self) -> None:
+        """btrfs:iocost as an apply leaves it: its files in place, listed in the record, done."""
+        svc = program_installer(os.path.join(REPO, "btrfs", "btrfs-iocost"))
+        for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST):
+            place = Placement.of(
+                e, path=staged(self.paths.install_root, e.dest), dest=e.dest, record=self.paths.record_path
+            )
+            os.makedirs(os.path.dirname(place.path), exist_ok=True)
+            svc.put(place, b"installed\n", as_root=False)
+        svc.mark(self.paths.record_path, Component.BTRFS_IOCOST.value, ComponentState.DONE)
+
+    def _recorded_components(self) -> dict[str, str]:
+        rec = JsonInstallRecord().read(self.paths.record_path)
+        assert rec is not None
+        return {d: f.component for d, f in rec.files.items()}
 
     def _add_disk(self, name: str, devno: str, *, rot: str, sched: str, model: str = "") -> None:
         base = os.path.join(self.paths.sys_block, name)
@@ -241,13 +281,15 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         )
         self.assertTrue(any("unchanged: 259:1" in line for line in out_full))
 
+        self._seed_component()
         rc_rev, out_rev = revert_iocost(self.paths, live_only=False, runner=self.runner)
         self.assertEqual(rc_rev, 0)
         self.assertFalse(os.path.exists(self.paths.managed_file))
         with open(self.paths.qos_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read().strip(), "259:1 enable=0 ctrl=auto")
         self.assertTrue(any("non-CST enable=1 kept" in line for line in out_rev))
-        self.assertTrue(any("remove" in c and "btrfs:iocost" in c for c in self.runner.calls))
+        self.assertEqual([p for p in self._component_files() if os.path.lexists(p)], [])
+        self.assertEqual(self._recorded_components(), {})
 
     def test_unwritable_qos_fails_and_refusals(self) -> None:
         os.chmod(self.paths.qos_path, 0o444)
@@ -364,20 +406,54 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             self.assertEqual(fh.read(), "259:1 enable=0 ctrl=auto\n")
         self.assertEqual(
             _steps(self.runner.calls),
-            ["systemctl disable", "installer remove", "systemctl daemon-reload", "udevadm control"],
+            ["systemctl disable", "systemctl daemon-reload", "udevadm control"],
         )
         self.assertFalse(os.path.exists(self.paths.managed_file))
 
     def test_revert_failures_after_the_removal_are_errors(self) -> None:
-        for fail in ("systemctl daemon-reload", "udevadm control", "installer.py remove"):
+        for fail in ("systemctl daemon-reload", "udevadm control", "remove"):
             with self.subTest(fail=fail):
                 self.runner = _FakeRunner()
                 self.runner.fail_on = {fail}
                 self._write(self.paths.udev_control, "")
                 self._write(self.paths.managed_file, "259:1\n")
-                rc, _out = revert_iocost(self.paths, runner=self.runner)
+                refusing = _RefusingRemove() if fail == "remove" else None
+                rc, out = revert_iocost(self.paths, runner=self.runner, installer=refusing)
                 self.assertNotEqual(rc, 0)
                 self.assertTrue(os.path.exists(self.paths.managed_file))
+                if refusing is not None:
+                    self.assertIn("Read-only file system", "\n".join(out))
+                    self.assertFalse(self._ran("systemctl", "daemon-reload"))
+
+    def test_the_installed_zipapp_reverts_without_an_installer(self) -> None:
+        # /usr/local/sbin/btrfs-iocost is a zipapp: no checkout, so no cst_core/installer.py beside it.
+        # revert removes btrfs:iocost in this process; apply refuses at once (it installs from a checkout).
+        zipapp = os.path.join(self.tmp, "usr", "local", "sbin", "btrfs-iocost")
+        self._write(zipapp, "PK\x03\x04")
+        installed = iocost_paths_for(zipapp, ctx=_FakeCtx(container=False, root=True), read_only=False)
+        self.assertEqual(installed.installer_script, "")
+        paths = dataclasses.replace(self.paths, installer_script="", entry_file=zipapp)
+        self._seed_component()
+        self.runner.load_state = "loaded"
+        self._write(self.paths.managed_file, "259:1\n")
+        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=auto\n")
+
+        rc, out = revert_iocost(paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([p for p in self._component_files() if os.path.lexists(p)], [])
+        self.assertEqual(self._recorded_components(), {})
+        self.assertFalse(any(c[0].endswith("python3") for c in self.runner.calls), self.runner.calls)
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=0 ctrl=auto\n")
+
+        self.runner.calls.clear()
+        rc_a, out_a = apply_iocost(paths, runner=self.runner)
+        self.assertEqual(rc_a, 1)
+        self.assertEqual(
+            out_a,
+            ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"],
+        )
+        self.assertEqual(self.runner.calls, [])
 
     def test_revert_without_io_cost_qos_forgets_the_managed_disks(self) -> None:
         os.unlink(self.paths.qos_path)

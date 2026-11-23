@@ -10,6 +10,7 @@ from typing import Final
 
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
+from cst_core.adapters.install import program_installer
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
     ManagedCliEnv,
@@ -18,9 +19,11 @@ from cst_core.adapters.runtime import (
     probe_systemd_unit,
     run_installer,
 )
-from cst_core.domain.install import Component
+from cst_core.application.install import InstallRefused, InstallService, Placement, staged
+from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
+from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.text import group
-from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode
+from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
     IOCOST_MANAGED_FILE,
@@ -43,6 +46,7 @@ from btrfs.iocost.domain import (
 
 _DEVNO_RE: Final = re.compile(r"^[0-9]+:[0-9]+$")
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
+_UNINSTALL_ERRORS: Final = (InstallRefused, WriteFailed, OSError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +61,12 @@ class IocostPaths:
     rule_dest: str = IOCOST_RULE_DEST
     installer_script: str = ""
     udev_control: str = UDEV_CONTROL
+    # revert removes btrfs:iocost in this process (it works from the installed zipapp, which has no
+    # installer.py): the files under install_root ("" = the real root), their lines in record_path.
+    install_root: str = ""
+    record_path: str = ROOT_RECORD
+    entry_file: str = ""
+    fallback_root: str = ""
 
 
 def iocost_paths_for(
@@ -66,7 +76,7 @@ def iocost_paths_for(
     exec_ctx = ctx or HostExecutionContext()
     installer = installer_script_for(entry_file, fallback_root)
     if not read_only:
-        return IocostPaths(installer_script=installer)
+        return IocostPaths(installer_script=installer, entry_file=entry_file, fallback_root=fallback_root)
     raw = (
         IOCOST_QOS_PATH,
         IOCOST_MODEL_PATH,
@@ -219,6 +229,9 @@ def apply_iocost(
 
     Not live-only: install btrfs:iocost, write, daemon-reload, enable --now, reload the udev rules, and
     only then mark the component done; the first step that fails stops there (rc != 0, still pending)."""
+    if not live_only and not paths.installer_script:
+        # The installed zipapp has no installer.py, unit verifier or payload to install from.
+        return 1, ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"]
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     snap = collect_iocost_snapshot(paths, runner=cmd_runner)
     plan = plan_iocost_apply(snap, target_device=target_device)
@@ -252,7 +265,20 @@ def apply_iocost(
     return 0, out
 
 
-def _remove_iocost_component(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:
+def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, list[str]]:
+    places = [
+        Placement.of(e, path=staged(paths.install_root, e.dest), dest=e.dest, record=paths.record_path)
+        for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)
+    ]
+    try:
+        return 0, list(svc.remove(places))
+    except _UNINSTALL_ERRORS as exc:
+        return 1, [f"ERROR: {exc}"]
+
+
+def _remove_iocost_component(
+    runner: CommandRunnerPort, svc: InstallService, paths: IocostPaths
+) -> tuple[int, list[str]]:
     """Stop the service, remove btrfs:iocost and reload systemd and udev; the first failure stops there."""
     systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
     out: list[str] = []
@@ -263,9 +289,7 @@ def _remove_iocost_component(runner: CommandRunnerPort, paths: IocostPaths) -> t
             rc_d, lines_d = _failed(f"systemctl disable --now {IOCOST_SERVICE}", dis)
             return rc_d, [*lines_d, "nothing was removed"]
         out.append(f"disabled:  {IOCOST_SERVICE}")
-    rc_r, lines_r = _installer_step(
-        runner, paths.installer_script, ["remove", "--component", Component.BTRFS_IOCOST.value]
-    )
+    rc_r, lines_r = _remove_iocost_files(svc, paths)
     out.extend(lines_r)
     if rc_r != 0:
         return rc_r, out
@@ -278,7 +302,11 @@ def _remove_iocost_component(runner: CommandRunnerPort, paths: IocostPaths) -> t
 
 
 def revert_iocost(
-    paths: IocostPaths, *, live_only: bool = False, runner: CommandRunnerPort | None = None
+    paths: IocostPaths,
+    *,
+    live_only: bool = False,
+    runner: CommandRunnerPort | None = None,
+    installer: InstallService | None = None,
 ) -> tuple[int, list[str]]:
     """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule.
 
@@ -287,7 +315,8 @@ def revert_iocost(
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     out: list[str] = []
     if not live_only:
-        rc_c, out = _remove_iocost_component(cmd_runner, paths)
+        svc = program_installer(paths.entry_file, paths.fallback_root) if installer is None else installer
+        rc_c, out = _remove_iocost_component(cmd_runner, svc, paths)
         if rc_c != 0:
             return rc_c, out
     snap = collect_iocost_snapshot(paths, runner=cmd_runner)
