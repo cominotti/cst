@@ -26,6 +26,8 @@ MIN_HUMAN_UID: Final = 1000
 DIR_MODE_PRIVATE: Final = 0o700
 FILE_MODE_TAG: Final = 0o644
 EXIT_USAGE: Final = 2
+CACHE_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
+"""The test root: every host path below this folder (status, plan, attach and detach say so first)."""
 
 FSTYPE_BTRFS: Final = "btrfs"
 OPT_FLUSHONCOMMIT: Final = "flushoncommit"
@@ -596,12 +598,14 @@ def _binding_state_label(probe: BindingProbe) -> str:
     return next((label for on, label in states if on), "not attached")
 
 
+def cache_seam_lines(seam_root: str) -> list[str]:
+    """The line every command prints first under a test root (CACHE_SEAM_ROOT_ENV); none without one."""
+    return [f"test seam ({CACHE_SEAM_ROOT_ENV}): {seam_root}"] if seam_root else []
+
+
 def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:
     """Render lines for `cst btrfs cache status`."""
-    lines: list[str] = []
-    if seam_root:
-        lines.append(f"test seam (CST_BTRFS_CACHE_ROOT): {seam_root}")
-    lines.append("Dedicated cache drive mounts:")
+    lines = [*cache_seam_lines(seam_root), "Dedicated cache drive mounts:"]
     if snap.mounts_error is not None:
         return [*lines, f"  cannot list mounts: {snap.mounts_error}"]
     for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
@@ -645,9 +649,7 @@ def format_cache_mount_plan(
     snap: CacheMountSnapshot, prog: str, *, allow_nonempty: bool = False, seam_root: str = ""
 ) -> list[str]:
     """Render dry-run lines for `cst btrfs cache plan`."""
-    lines: list[str] = []
-    if seam_root:
-        lines.append(f"test seam (CST_BTRFS_CACHE_ROOT): {seam_root}")
+    lines = cache_seam_lines(seam_root)
     if snap.user is None:
         return [*lines, f"BLOCKED: {snap.user_error or 'cannot resolve target user'}"]
     lines.append(f"Target user: {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})")

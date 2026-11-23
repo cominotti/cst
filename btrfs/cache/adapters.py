@@ -12,6 +12,7 @@ from typing import Final
 
 from btrfs.cache.domain import (
     BASE_FOR_KIND,
+    CACHE_SEAM_ROOT_ENV,
     DIR_MODE_PRIVATE,
     FILE_MODE_TAG,
     FINDMNT_COLUMNS,
@@ -27,6 +28,7 @@ from btrfs.cache.domain import (
     LiveMount,
     ManagedFstabEntry,
     build_user_bindings,
+    cache_seam_lines,
     format_cache_mount_plan,
     format_cache_mount_status,
     has_managed_line,
@@ -50,7 +52,6 @@ from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunn
 from cst_core.adapters.runtime import ManagedCliEnv, host_view_path
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode
 
-_SEAM_ROOT_ENV: Final = "CST_BTRFS_CACHE_ROOT"
 _CRYPTTAB_PATH: Final = "/etc/crypttab"
 _ACCOUNT_DB_PATH: Final = "/etc/passwd"
 _FINDMNT_TIMEOUT_S: Final = 15
@@ -340,7 +341,7 @@ def _apply_attach(
         return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
 
     user = snap.user
-    lines: list[str] = [f"test seam (CST_BTRFS_CACHE_ROOT): {rt.seam_root}"] if rt.seam_root else []
+    lines = cache_seam_lines(rt.seam_root)
     for probe in snap.bindings:
         b = probe.binding
         h_src = _map_path(b.source, rt, read_only=False)
@@ -388,7 +389,7 @@ def _apply_detach(
         return 1, [f"ERROR: cannot list mounts: {snap.mounts_error}"]
     user = snap.user
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
-    lines: list[str] = [f"test seam (CST_BTRFS_CACHE_ROOT): {rt.seam_root}"] if rt.seam_root else []
+    lines = cache_seam_lines(rt.seam_root)
 
     unmounted: list[CacheMountBinding] = []
     for probe in snap.bindings:
@@ -424,7 +425,7 @@ def dispatch_cache_mount_cli_action(
     del read_only
     env_map = os.environ if env.env is None else env.env
     rt = _CacheMountRuntime(
-        seam_root=(env_map.get(_SEAM_ROOT_ENV) or "").strip(),
+        seam_root=(env_map.get(CACHE_SEAM_ROOT_ENV) or "").strip(),
         ctx=HostExecutionContext() if env.ctx is None else env.ctx,
         runner=SubprocessCommandRunner() if env.runner is None else env.runner,
         env_map=env_map,
