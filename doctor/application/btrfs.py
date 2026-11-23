@@ -616,13 +616,11 @@ def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
     uuids: list[tuple[str, str]] = []  # (target, UUID) of each line that has one
     for raw in out.splitlines():
         match raw.strip().split(None, 3):
-            case [src, tgt, opts, uuid]:
+            case [src, tgt, opts, *rest]:  # rest: the UUID, when the line has one
                 esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
                 lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
-                uuids.append((unescape_mount_field(esc_tgt), uuid))
-            case [src, tgt, opts]:
-                esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
-                lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
+                if rest:
+                    uuids.append((unescape_mount_field(esc_tgt), rest[0]))
     text = "".join(lines)
     root_targets = {m.target for m in pick_root_mounts(parse_proc_mounts(text))}
     root_uuid = next((uuid for tgt, uuid in uuids if tgt in root_targets), "")
