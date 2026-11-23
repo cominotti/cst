@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Unit tests for `cst perf` parsers, diagnosis thresholds, adapter, CLI, and presenter."""
 
+import contextlib
 import io
 import json
 import os
@@ -265,6 +266,35 @@ class PerfEvaluatorTest(unittest.TestCase):
                 ids = {f.finding_id for f in rep.findings}
                 self.assertEqual("cpu-deep-cstates" in ids, warned, ids)
                 self.assertIn(f"{driver or 'cpuidle'}: 350 µs", [m.value for m in rep.metrics])
+
+    def test_deep_cstates_follow_the_cap_cpu_power_applies(self) -> None:
+        # cpu-power's cap: CPU_CSTATE_MAX_LATENCY_US when cpu-setup.conf sets it (off or 0: none), else
+        # 200 us with intel_idle (or an unknown driver) and none with any other. A state at or above the
+        # cap that is still enabled is the finding; one cpu-power leaves on by design is not.
+        c3, c6 = CpuIdleStateSample("C3", 350, disabled=False), CpuIdleStateSample("C6", 1048, disabled=False)
+        c1 = CpuIdleStateSample("C1", 2, disabled=False)
+        cases = (
+            ("acpi_idle", "200", (c1, c3), "C3 enabled (350 µs >= 200 µs"),
+            ("intel_idle", "off", (c1, c3, c6), None),
+            ("intel_idle", "0", (c1, c3, c6), None),
+            ("intel_idle", "500", (c1, c3), None),
+            ("intel_idle", "500", (c1, c3, c6), "C6 enabled (1048 µs >= 500 µs"),
+            ("intel_idle", "", (c1, c3), "C3 enabled (350 µs >= 200 µs"),
+            ("acpi_idle", "", (c1, c3, c6), None),
+            ("intel_idle", "junk", (c1, c3), "C3 enabled (350 µs >= 200 µs"),
+            (None, " 300 ", (c1, c3), "C3 enabled (350 µs >= 300 µs"),
+        )
+        for driver, setting, states, summary in cases:
+            with self.subTest(driver=driver, setting=setting):
+                cpu = CpuProbeSnapshot(cpuidle_driver=driver, idle_states=states, cstate_setting=setting)
+                found = [f for f in evaluate_perf_cpu(cpu).findings if f.finding_id == "cpu-deep-cstates"]
+                if summary is None:
+                    self.assertEqual(found, [])
+                else:
+                    self.assertEqual(len(found), 1, found)
+                    self.assertIn(summary, found[0].summary)
+                    self.assertIn("the cap cpu-power applies)", found[0].summary)
+                    self.assertEqual(found[0].fix_command, "cst cpu install")
 
     def test_cpu_evaluation(self) -> None:
         ok_cpu = CpuProbeSnapshot(
@@ -623,6 +653,35 @@ class PerfScratchIntegrationTest(unittest.TestCase):
             rep = build_perf_report(LinuxPerfProbe(perf_paths_from_env()), (PerfAxis.MEMORY,))
         self.assertEqual(rep.verdict, PerfVerdict.ATTENTION)
         self.assertTrue(any(f.finding_id == "memory-session-floor" for f in rep.axes[0].findings))
+
+    def test_deep_cstates_read_the_cap_cpu_setup_conf_sets(self) -> None:
+        # The healthy tree has intel_idle; an enabled 350 us state is a finding under cpu-power's 200 us
+        # default and none when cpu-setup.conf turns the cap off, as cpu-power then leaves it on.
+        self._populate_healthy_tree()
+        state = "sys/devices/system/cpu/cpu0/cpuidle/state9"
+        self._write(f"{state}/name", "C3\n")
+        self._write(f"{state}/latency", "350\n")
+        self._write(f"{state}/disable", "0\n")
+        conf = "etc/cpu-setup/cpu-setup.conf"
+        for text, setting, warned in (
+            (None, "", True),
+            ("BUILD_CPUS='12-23'\n", "", True),
+            ("BUILD_CPUS='12-23'\nCPU_CSTATE_MAX_LATENCY_US='off'\n", "off", False),
+            ("CPU_CSTATE_MAX_LATENCY_US=400\n", "400", False),
+        ):
+            with self.subTest(conf=text):
+                path = os.path.join(self.tmp, conf)
+                if text is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                else:
+                    self._write(conf, text)
+                with mock.patch.dict(os.environ, {"CST_PERF_ROOT": self.tmp}, clear=True):
+                    probe = LinuxPerfProbe(perf_paths_from_env())
+                    self.assertEqual(probe.collect_snapshot().cpu.cstate_setting, setting)
+                    rep = build_perf_report(probe, (PerfAxis.CPU,))
+                ids = {f.finding_id for f in rep.axes[0].findings}
+                self.assertEqual("cpu-deep-cstates" in ids, warned, ids)
 
     def test_irqbalance_env_precedence_effective_affinity_and_iocost_enable_zero(self) -> None:
         self._populate_healthy_tree()

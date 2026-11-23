@@ -389,6 +389,7 @@ def assemble_cpu_probe(
     return CpuProbeSnapshot(
         cpuidle_driver=clean_opt_str(files.get(PerfPathKey.CPUIDLE_DRIVER)),
         idle_states=meta.idle_states,
+        cstate_setting=meta.cstate_setting,
         preempt_mode=parse_preempt_mode(files.get(PerfPathKey.SCHED_PREEMPT), files.get(PerfPathKey.CMDLINE)),
         preempt_unreadable=meta.preempt_unreadable,
         sched_ext_state=clean_opt_str(files.get(PerfPathKey.SCHED_EXT_STATE)),

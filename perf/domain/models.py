@@ -30,7 +30,6 @@ SESSION_FLOOR_HEADROOM_NUM: Final = 12
 SESSION_FLOOR_HEADROOM_DEN: Final = 10
 HUMAN_UID_MIN: Final = 1000
 
-CSTATE_DEEP_LATENCY_US: Final = 200
 IRQ_ACTIVE_MIN_COUNT: Final = 100_000
 IRQ_DOMINANT_SHARE: Final = 0.5
 IRQ_MIN_UNBANNED_CPUS: Final = 2
@@ -339,6 +338,7 @@ class CpuProbeExtra:
     """Topology, runtime service, idle, and device flags combined into `CpuProbeSnapshot`."""
 
     idle_states: tuple[CpuIdleStateSample, ...] = ()
+    cstate_setting: str = ""
     preempt_unreadable: bool = False
     ntsync_present: bool | None = None
     build_cpus: CpuSet | None = None
@@ -354,6 +354,8 @@ class CpuProbeSnapshot:
 
     cpuidle_driver: str | None = None
     idle_states: tuple[CpuIdleStateSample, ...] = ()
+    # CPU_CSTATE_MAX_LATENCY_US as /etc/cpu-setup/cpu-setup.conf sets it ("" without the file or the line).
+    cstate_setting: str = ""
     preempt_mode: str | None = None
     preempt_unreadable: bool = False
     sched_ext_state: str | None = None

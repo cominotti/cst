@@ -8,7 +8,7 @@ from typing import Final
 
 from cst_core.domain.text import group
 from cst_core.domain.values import CpuSet, HOUR, format_bytes_human
-from cpu.power.domain import default_cstate_cap_off
+from cpu.power.domain import boot_cstate_limit_us
 from perf.domain.models import (
     ALL_PERF_AXES,
     ALLOCSTALL_ATTENTION_PER_HOUR,
@@ -22,7 +22,6 @@ from perf.domain.models import (
     CgroupMemorySlice,
     COMPACT_ATTENTION_PER_HOUR,
     COMPACT_BOTTLENECK_PER_HOUR,
-    CSTATE_DEEP_LATENCY_US,
     CpuIdleStateSample,
     CpuProbeSnapshot,
     DEFAULT_CG_IO_WEIGHT,
@@ -400,8 +399,8 @@ def evaluate_perf_memory(mem: MemoryProbeSnapshot) -> PerfAxisReport:
     return col.report()
 
 
-def _worst_enabled_deep_cstate(states: Sequence[CpuIdleStateSample]) -> CpuIdleStateSample | None:
-    enabled_deep = [s for s in states if not s.disabled and s.latency_us >= CSTATE_DEEP_LATENCY_US]
+def _worst_enabled_deep_cstate(states: Sequence[CpuIdleStateSample], limit_us: int) -> CpuIdleStateSample | None:
+    enabled_deep = [s for s in states if not s.disabled and s.latency_us >= limit_us]
     return max(enabled_deep, key=lambda s: s.latency_us) if enabled_deep else None
 
 
@@ -494,11 +493,16 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate cpuidle wakeup latency, preemption mode, ntsync, and IRQ placement."""
     col = _AxisCollector(PerfAxis.CPU)
     if cpu.idle_states:
-        # Where cpu-power leaves the C-states on by default (any driver but intel_idle, such as AMD's
-        # acpi_idle), a deep state is what `cst cpu install` chose: no warning its fix cannot clear.
-        worst_deep = (
-            None if default_cstate_cap_off(cpu.cpuidle_driver or "") else _worst_enabled_deep_cstate(cpu.idle_states)
+        # The cap cpu-power applies: CPU_CSTATE_MAX_LATENCY_US when cpu-setup.conf sets it (off or 0: no
+        # cap), else 200 us with intel_idle (or an unknown driver) and none with any other (AMD's acpi_idle).
+        # A state cpu-power leaves on by design is no warning `cst cpu install` could clear. An invalid
+        # value is cpu-power's 200 us; its error is cpu-power's to report.
+        limit_us, _ = boot_cstate_limit_us(
+            cpu.cstate_setting,
+            explicit=bool(cpu.cstate_setting.strip()),
+            cpuidle_driver=cpu.cpuidle_driver or "",
         )
+        worst_deep = None if limit_us is None else _worst_enabled_deep_cstate(cpu.idle_states, limit_us)
         max_enabled = max((s.latency_us for s in cpu.idle_states if not s.disabled), default=0)
         col.metric("cpuidle max enabled", f"{cpu.cpuidle_driver or 'cpuidle'}: {max_enabled} µs")
         if worst_deep is not None:
@@ -506,7 +510,7 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
                 "cpu-deep-cstates",
                 (
                     f"Deep idle state {worst_deep.name} enabled "
-                    f"({worst_deep.latency_us} µs >= {CSTATE_DEEP_LATENCY_US} µs)"
+                    f"({worst_deep.latency_us} µs >= {limit_us} µs, the cap cpu-power applies)"
                 ),
                 "Deep package/core C-states add wakeup tail latency spikes during interactive/gaming loads.",
                 ("Cap C-state latency via CPU_CSTATE_MAX_LATENCY_US (`cst cpu power`).", "cst cpu install"),

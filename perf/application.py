@@ -158,10 +158,12 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
     conf_text = files.get(PerfPathKey.CPU_CONF)
     build_cpus = None
     p_cores = None
+    cstate_setting = ""
     if conf_text is not None:
         assigned = parse_shell_assignments(conf_text).values
         build_cpus = parse_optional_cpuset(assigned.get("BUILD_CPUS"))
         p_cores = parse_optional_cpuset(assigned.get("P_CORES"))
+        cstate_setting = assigned.get("CPU_CSTATE_MAX_LATENCY_US", "")
     banned_cpus = None
     cst_dropin_present = reader.exists_rel(PerfRootKind.ETC, _IRQBALANCE_CST_DROPIN)
     cst_irq_env = files.get(PerfPathKey.IRQBALANCE_CST_ENV) if cst_dropin_present else None
@@ -189,6 +191,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
         files,
         CpuProbeExtra(
             idle_states=_collect_idle_states(reader),
+            cstate_setting=cstate_setting,
             preempt_unreadable=preempt_unreadable,
             ntsync_present=ntsync_present,
             build_cpus=build_cpus,
