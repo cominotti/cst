@@ -252,10 +252,15 @@ def _step_cache_mount_flag(
 
 
 def parse_cache_mount_args(argv: Sequence[str]) -> CacheMountParsedArgs:
-    """Parse `cst btrfs cache` arguments cleanly without touching I/O."""
-    action, rest, head_err = parse_subcommand_head(
-        argv, CacheMountAction, default=CacheMountAction.STATUS, help_action=CacheMountAction.HELP
-    )
+    """Parse `cst btrfs cache` arguments cleanly without touching I/O.
+
+    A first word that is an option (`--user NAME`) means the default command, `status`, with it."""
+    if argv and argv[0].startswith("-") and argv[0] not in HELP_WORDS:
+        action, rest, head_err = CacheMountAction.STATUS, argv, None
+    else:
+        action, rest, head_err = parse_subcommand_head(
+            argv, CacheMountAction, default=CacheMountAction.STATUS, help_action=CacheMountAction.HELP
+        )
     if head_err is not None:
         return CacheMountParsedArgs(action=CacheMountAction.HELP, error=head_err, code=EXIT_USAGE)
     if any(tok in HELP_WORDS for tok in rest):

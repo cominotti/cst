@@ -116,6 +116,17 @@ class CacheMountDomainTests(unittest.TestCase):
         self.assertIsNotNone(parse_cache_mount_args(["status", "--allow-nonempty"]).error)
         self.assertIsNotNone(parse_cache_mount_args(["attach", "--user", "bad/user"]).error)
 
+    def test_options_first_mean_status(self) -> None:
+        p = parse_cache_mount_args(["--user", "alice"])
+        self.assertEqual((p.action, p.user, p.error), (CacheMountAction.STATUS, "alice", None))
+        p = parse_cache_mount_args(["--user=alice"])
+        self.assertEqual((p.action, p.user, p.error), (CacheMountAction.STATUS, "alice", None))
+        bare = parse_cache_mount_args(["--no-cache"])
+        self.assertEqual((bare.action, bare.code), (CacheMountAction.STATUS, 2))
+        self.assertEqual(bare.error, parse_cache_mount_args(["status", "--no-cache"]).error)
+        self.assertEqual(parse_cache_mount_args(["--help"]).action, CacheMountAction.HELP)
+        self.assertEqual(parse_cache_mount_args(["-h"]).action, CacheMountAction.HELP)
+
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
             p = parse_cache_mount_args(argv)
@@ -289,6 +300,12 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             fstab_after = fh.read()
         self.assertNotIn("user=alice", fstab_after)
         self.assertIn("user=danilo kind=cache", fstab_after)
+
+    def test_user_option_alone_shows_that_users_status(self) -> None:
+        rc, out, err = self._run(["--user", "alice"])
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("target user        alice (uid=1001, home=/var/home/alice)", out)
+        self.assertIn("/var/mnt/cache/alice -> /var/home/alice/.cache [not attached]", out)
 
     def test_safety_guards_nonempty_symlink_uuid_and_container(self) -> None:
         cache_d = os.path.join(self.tmp, "var", "home", "danilo", ".cache")
