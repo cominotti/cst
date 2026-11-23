@@ -44,7 +44,7 @@ from btrfs.cache.domain import (
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
-from cst_core.adapters.files import FileOwner, read_text, write_atomic
+from cst_core.adapters.files import FileOwner, LocalFileSystemAdapter, ensure_dir, read_text, write_atomic
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import ManagedCliEnv, host_view_path
 from cst_core.ports import CommandFailed, CommandRunnerPort, ExecutionContextPort, OutputMode
@@ -188,7 +188,7 @@ def _probe_binding(
     mapped_tgt = _map_path(binding.target, rt, read_only=True)
     live = tables.live.get(binding.target)
     is_link = os.path.islink(mapped_tgt)
-    exists = os.path.exists(mapped_tgt)
+    exists = os.path.lexists(mapped_tgt)
     nonempty = False if is_link else _dir_is_nonempty(mapped_tgt)
     from_source = live is not None and is_bind_from(live, base_info, user.name)
     return BindingProbe(
@@ -201,11 +201,14 @@ def _probe_binding(
         nonempty,
         os.path.isdir(mapped_src),
         fstab_unmanaged=binding.target in tables.unmanaged_targets,
+        source_is_symlink=os.path.islink(mapped_src),
+        target_not_dir=exists and not is_link and not os.path.isdir(mapped_tgt),
     )
 
 
 def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> CacheMountSnapshot:
-    fstab_text = read_text(_map_path(FSTAB_PATH, rt, read_only=True))
+    # Byte-transparent: the text is written back, and the bytes of the lines CST does not manage stay.
+    fstab_text = LocalFileSystemAdapter().read_text(_map_path(FSTAB_PATH, rt, read_only=True))
     crypttab_text = read_text(_map_path(_CRYPTTAB_PATH, rt, read_only=True))
     mounts, mounts_error = _read_live_mounts(rt)
 
@@ -231,14 +234,22 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> Cac
         crypttab_text,
         fstab_text,
         mounts_error,
+        home_missing=user is not None and not os.path.isdir(_map_path(user.home, rt, read_only=True)),
     )
 
 
 def _ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
-    os.makedirs(host_path, mode=DIR_MODE_PRIVATE, exist_ok=True)
-    os.chmod(host_path, DIR_MODE_PRIVATE)
-    if os.geteuid() == 0:
-        os.chown(host_path, user.uid, user.gid)
+    """The folder at host_path (created 0700, and labelled as root, when missing), then made 0700 and
+    the user's through a descriptor opened without following a link: a link put there after the
+    probe fails (ELOOP) instead of having its target changed."""
+    ensure_dir(host_path, DIR_MODE_PRIVATE, relabel=True)
+    fd = os.open(host_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(fd, DIR_MODE_PRIVATE)
+        if os.geteuid() == 0:
+            os.fchown(fd, user.uid, user.gid)
+    finally:
+        os.close(fd)
 
 
 def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
@@ -274,11 +285,14 @@ def _apply_attach(
         b = probe.binding
         h_src = _map_path(b.source, rt, read_only=False)
         h_tgt = _map_path(b.target, rt, read_only=False)
-        _ensure_private_dir(h_src, user)
-        if b.kind == CacheMountKind.SCRATCHPAD:
-            _ensure_scratchpad_tag(h_src, user)
-        if not probe.target_exists:
-            _ensure_private_dir(h_tgt, user)
+        try:
+            _ensure_private_dir(h_src, user)
+            if b.kind == CacheMountKind.SCRATCHPAD:
+                _ensure_scratchpad_tag(h_src, user)
+            if not probe.target_exists:
+                _ensure_private_dir(h_tgt, user)
+        except OSError as exc:
+            return 1, [*lines, f"ERROR: cannot prepare {b.source} and {b.target}: {exc.strerror or exc}"]
 
     fstab_path = _map_path(FSTAB_PATH, rt, read_only=False)
     cur_fstab = snap.fstab_text or ""

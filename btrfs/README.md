@@ -1580,10 +1580,16 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   refuse: nothing is guessed from another table.
 - **What `attach` refuses** (`plan` shows each as `BLOCKED:`; nothing is
   changed): a base folder that is not mounted or not btrfs, a cache drive on
-  the same filesystem as the home, a target that is a symlink, a non-empty
-  target without `--allow-nonempty`, a mount at a target that CST did not
-  make, and an `/etc/fstab` line CST does not manage for a target (remove it
-  first). CST writes paths into `/etc/fstab` escaped as fstab wants them (a
+  the same filesystem as the home, a home folder that does not exist (CST
+  never creates it), a target or a source folder that is a symlink, a target
+  that is not a folder (even with `--allow-nonempty`), a non-empty target
+  without `--allow-nonempty`, a mount at a target that CST did not make, and
+  an `/etc/fstab` line CST does not manage for a target (remove it first).
+  The folders it creates get `0700`, the user as owner and, as root, their
+  SELinux label; it changes them through a handle that does not follow a
+  link, so a link put there meanwhile makes `attach` stop with an error.
+  `/etc/fstab` is read and written back byte for byte: the lines CST does
+  not manage keep their bytes, even ones that are not UTF-8. CST writes paths into `/etc/fstab` escaped as fstab wants them (a
   space as `\040`, a tab `\011`, a newline `\012`, a backslash `\134`), and
   keeps one managed line per user and kind: a repeated one is removed.
 - **Provisioning, once, on the host** (CST does not do this part):

@@ -177,6 +177,8 @@ class BindingProbe:
     target_nonempty: bool
     source_exists: bool
     fstab_unmanaged: bool = False
+    source_is_symlink: bool = False
+    target_not_dir: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +194,7 @@ class CacheMountSnapshot:
     crypttab_text: str | None
     fstab_text: str | None
     mounts_error: str | None = None
+    home_missing: bool = False
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -518,17 +521,18 @@ def _base_blockers(base: BaseMountInfo | None, base_path: str, home_uuid: str) -
 
 def _target_blockers(probe: BindingProbe, *, allow_nonempty: bool) -> list[str]:
     b = probe.binding
-    if probe.target_is_symlink:
-        return [f"{b.target} is a symlink (refusing to follow or overwrite symlink)"]
-    if probe.fstab_unmanaged:
-        return [f"{b.target} has an /etc/fstab line CST does not manage; remove it first"]
-    if probe.mounted_from_source:
-        return []
-    if probe.mounted_other:
-        return [f"{b.target} already has a mount CST did not make (not {b.source}); unmount it first"]
-    if probe.target_nonempty and not allow_nonempty:
-        return [f"{b.target} is non-empty; move existing files to {b.source} first or pass --allow-nonempty"]
-    return []
+    blockers = (
+        (probe.target_is_symlink, f"{b.target} is a symlink (refusing to follow or overwrite symlink)"),
+        (probe.source_is_symlink, f"{b.source} is a symlink (refusing to follow it)"),
+        (probe.target_not_dir, f"{b.target} exists and is not a folder"),
+        (probe.fstab_unmanaged, f"{b.target} has an /etc/fstab line CST does not manage; remove it first"),
+        (probe.mounted_other, f"{b.target} already has a mount CST did not make (not {b.source}); unmount it first"),
+        (
+            probe.target_nonempty and not allow_nonempty and not probe.mounted_from_source,
+            f"{b.target} is non-empty; move existing files to {b.source} first or pass --allow-nonempty",
+        ),
+    )
+    return next(([msg] for on, msg in blockers if on), [])
 
 
 def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool = False) -> list[str]:
@@ -537,6 +541,8 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
         return [snap.user_error or "cannot resolve target user"]
     if snap.mounts_error is not None:
         return [f"cannot list mounts: {snap.mounts_error}"]
+    if snap.home_missing:
+        return [f"home folder {snap.user.home} does not exist"]
     errors: list[str] = []
     checked_bases: set[CacheMountKind] = set()
     for probe in snap.bindings:
@@ -583,6 +589,8 @@ def _binding_state_label(probe: BindingProbe) -> str:
         (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
         (probe.in_fstab, "in fstab (not mounted)"),
         (probe.target_is_symlink, "symlink (blocked)"),
+        (probe.source_is_symlink, "source is a symlink (blocked)"),
+        (probe.target_not_dir, "target is not a folder (blocked)"),
         (probe.target_nonempty, "unattached (target non-empty)"),
     )
     return next((label for on, label in states if on), "not attached")

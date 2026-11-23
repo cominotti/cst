@@ -15,6 +15,7 @@ from typing import override
 import unittest
 import unittest.mock
 
+from btrfs.cache import adapters as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
@@ -469,6 +470,78 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
         rc_s, _, err_s = self._run(["attach", "--no-cache"])
         self.assertEqual(rc_s, 0, err_s)
+
+    def test_a_symlinked_source_blocks_and_its_target_keeps_its_mode(self) -> None:
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(elsewhere, 0o755)
+        os.chmod(elsewhere, 0o755)
+        os.symlink(elsewhere, os.path.join(self.tmp, "var", "mnt", "cache", "danilo"))
+        before = self._fstab()
+        _, out_s, _ = self._run(["status"])
+        self.assertIn("-> /var/home/danilo/.cache [source is a symlink (blocked)]", out_s)
+        _, out_p, _ = self._run(["plan"])
+        self.assertIn("BLOCKED: /var/mnt/cache/danilo is a symlink (refusing to follow it)", out_p)
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("is a symlink", err)
+        self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
+        self.assertEqual(self._fstab(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "var", "home", "danilo", ".cache")))
+
+    def test_a_file_at_the_target_blocks_even_with_allow_nonempty(self) -> None:
+        with open(os.path.join(self.tmp, "var", "home", "danilo", ".cache"), "w", encoding="utf-8") as fh:
+            fh.write("not a folder")
+        before = self._fstab()
+        _, out_p, _ = self._run(["plan", "--allow-nonempty"])
+        self.assertIn("BLOCKED: /var/home/danilo/.cache exists and is not a folder", out_p)
+        rc, _, err = self._run(["attach", "--allow-nonempty"])
+        self.assertEqual(rc, 1)
+        self.assertIn("exists and is not a folder", err)
+        self.assertEqual(self._fstab(), before)
+        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
+
+    def test_a_missing_home_blocks_and_nothing_is_created(self) -> None:
+        with open(os.path.join(self.tmp, "etc", "passwd"), "a", encoding="utf-8") as fh:
+            fh.write("carol:x:1003:1003:Carol:/var/home/carol:/bin/bash\n")
+        _, out_p, _ = self._run(["plan", "--user", "carol"])
+        self.assertIn("BLOCKED: home folder /var/home/carol does not exist", out_p)
+        rc, _, err = self._run(["attach", "--user", "carol"])
+        self.assertEqual(rc, 1)
+        self.assertIn("home folder /var/home/carol does not exist", err)
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "var", "home", "carol")))
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "var", "mnt", "cache", "carol")))
+
+    def test_other_fstab_bytes_survive_attach(self) -> None:
+        path = os.path.join(self.tmp, "etc", "fstab")
+        with open(path, "ab") as fh:
+            fh.write(b"# caf\xe9 \xff written by an old tool\n")
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 0, err)
+        with open(path, "rb") as fh:
+            data = fh.read()
+        self.assertIn(b"# caf\xe9 \xff written by an old tool\n", data)
+        self.assertIn(b"user=danilo kind=cache", data)
+
+    def test_a_link_put_in_place_of_a_folder_after_the_probe_fails_cleanly(self) -> None:
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(elsewhere, 0o755)
+        os.chmod(elsewhere, 0o755)
+        real_ensure_dir = cache_adapters.ensure_dir
+
+        def swap(path: str, mode: int, *, relabel: bool) -> list[str]:
+            if path.endswith("/var/mnt/cache/danilo"):
+                os.symlink(elsewhere, path)
+                return []
+            return real_ensure_dir(path, mode, relabel=relabel)
+
+        before = self._fstab()
+        with unittest.mock.patch.object(cache_adapters, "ensure_dir", side_effect=swap):
+            rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ERROR: cannot prepare /var/mnt/cache/danilo and /var/home/danilo/.cache:", err)
+        self.assertNotIn("Traceback", out + err)
+        self.assertEqual(stat.S_IMODE(os.stat(elsewhere).st_mode), 0o755)
+        self.assertEqual(self._fstab(), before)
 
     def test_findmnt_failing_blocks_every_write(self) -> None:
         self.runner.findmnt_fails = True
