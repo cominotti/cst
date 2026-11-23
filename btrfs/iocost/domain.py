@@ -360,8 +360,17 @@ def format_iocost_status(snap: IocostSnapshot) -> list[str]:
     return lines
 
 
-def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan, *, live_only: bool = False) -> list[str]:
-    """Render dry-run output for `cst btrfs iocost plan` (live_only: only the io.cost.qos writes, no component)."""
+def format_iocost_plan(
+    snap: IocostSnapshot,
+    plan: IocostPlan,
+    *,
+    live_only: bool = False,
+    component_changes: Sequence[str] | None = None,
+) -> list[str]:
+    """Render dry-run output for `cst btrfs iocost plan` (live_only: only the io.cost.qos writes, no component).
+
+    component_changes: the component's files apply would write or record again (the installer's plan);
+    None when that could not be asked (no checkout, or the installer's plan failed)."""
     if plan.error is not None:
         return [f"ERROR: {plan.error}", "Dry run: nothing is changed."]
     lines: list[str] = []
@@ -373,6 +382,8 @@ def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan, *, live_only: boo
         lines.append("live only:     io.cost.qos writes; no unit, rule or record change")
     elif not snap.service_present or not snap.rule_installed:
         lines.append(f"would install: component btrfs:iocost ({IOCOST_SERVICE}, {IOCOST_RULE_DEST}) + enable service")
+    elif component_changes is not None and len(component_changes) > 0:
+        lines.append(f"would update:  component btrfs:iocost ({', '.join(component_changes)}) + enable service")
     else:
         lines.append(f"unchanged:     component btrfs:iocost ({snap.service_active}, {snap.service_enabled})")
     lines.extend(f"would write:   {IOCOST_QOS_PATH} <- '{w.line}' ({w.device_name}, {w.reason})" for w in plan.writes)

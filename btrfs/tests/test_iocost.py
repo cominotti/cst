@@ -20,6 +20,7 @@ from btrfs.iocost.adapters import (
     apply_iocost,
     collect_iocost_snapshot,
     iocost_paths_for,
+    plan_iocost,
     revert_iocost,
 )
 from btrfs.iocost.cli import IocostCliDeps, run_iocost_cli
@@ -85,6 +86,8 @@ class _FakeRunner:
         self.udev_props: dict[str, str] = {}
         # every `udevadm info` call answers (exit status, stderr) instead
         self.udev_failure: tuple[int, str] | None = None
+        # `installer.py plan`: (exit status, its lines)
+        self.installer_plan: tuple[int, str] = (0, "")
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         cmd = list(argv)
@@ -94,6 +97,8 @@ class _FakeRunner:
         line = " ".join(cmd)
         if any(part in line for part in self.fail_on):
             return CommandResult(1, "", f"{line}: failed", argv=tuple(cmd))
+        if len(cmd) > 4 and cmd[3].endswith("installer.py") and cmd[4] == "plan":
+            return CommandResult(self.installer_plan[0], self.installer_plan[1], "", argv=tuple(cmd))
         if cmd[:2] == ["udevadm", "info"] and self.udev_failure is not None:
             return CommandResult(self.udev_failure[0], "", self.udev_failure[1], argv=tuple(cmd))
         if cmd[:2] == ["udevadm", "info"]:
@@ -379,6 +384,11 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(mapped.qos_path, f"/run/host{IOCOST_QOS_PATH}")
         self.assertEqual(mapped.sys_block, "/run/host/sys/block")
+        self.assertEqual(mapped.install_root, "/run/host")  # the installer's plan reads the host's files
+        on_host = iocost_paths_for(
+            os.path.join(REPO, "btrfs", "btrfs-iocost"), ctx=_FakeCtx(container=False, root=False), read_only=True
+        )
+        self.assertEqual(on_host.install_root, "")
 
     def _installer_words(self) -> list[str]:
         """The installer commands run, in order (install, mark, remove)."""
@@ -546,6 +556,44 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         with open(self.paths.qos_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "259:1 enable=0 ctrl=auto\n")
         self.assertFalse(os.path.exists(self.paths.managed_file))
+
+    def test_plan_asks_the_installer_whether_the_component_is_current(self) -> None:
+        # An upgrade: the unit and the rule are there, but this checkout's unit differs from the installed one.
+        self._write(self.paths.rule_dest, "old rule\n")
+        self.runner.load_state, self.runner.active_state, self.runner.enabled_state = "loaded", "active", "enabled"
+        root = self.paths.install_root
+        said = (
+            f"unchanged: {root}/usr/local/sbin/btrfs-iocost\n"
+            f"would write: {root}/etc/systemd/system/cst-btrfs-iocost.service\n"
+            f"would record: {root}/etc/udev/rules.d/91-cst-iocost.rules\n"
+        )
+        self.runner.installer_plan = (0, said)
+        rc, out = plan_iocost(self.paths, self.runner, live_only=False, target_device=None)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(
+            "would update:  component btrfs:iocost (/etc/systemd/system/cst-btrfs-iocost.service,"
+            " /etc/udev/rules.d/91-cst-iocost.rules) + enable service",
+            out,
+        )
+        plans = [c for c in self.runner.calls if len(c) > 4 and c[4] == "plan"]
+        self.assertEqual([c[4:] for c in plans], [["plan", "--component", "btrfs:iocost", "--root", root]])
+        self.assertEqual(_steps(self.runner.calls), ["installer plan"])  # nothing else ran
+        self.assertFalse(os.path.exists(self.paths.managed_file))
+
+        for answer in ((0, f"unchanged: {root}/etc/systemd/system/cst-btrfs-iocost.service\n"), (1, "")):
+            with self.subTest(answer=answer):
+                self.runner.installer_plan = answer  # current, or a plan that failed: judged by the files
+                _, out_same = plan_iocost(self.paths, self.runner, live_only=False, target_device=None)
+                self.assertIn("unchanged:     component btrfs:iocost (active, enabled)", out_same)
+
+        self.runner.calls.clear()
+        _, out_live = plan_iocost(self.paths, self.runner, live_only=True, target_device=None)
+        self.assertIn("live only:     io.cost.qos writes; no unit, rule or record change", out_live)
+        self.assertEqual(_steps(self.runner.calls), [])
+        no_checkout = dataclasses.replace(self.paths, installer_script="")
+        _, out_zipapp = plan_iocost(no_checkout, self.runner, live_only=False, target_device=None)
+        self.assertIn("unchanged:     component btrfs:iocost (active, enabled)", out_zipapp)
+        self.assertEqual(_steps(self.runner.calls), [])
 
     def test_the_service_runs_after_udev_settle(self) -> None:
         with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:

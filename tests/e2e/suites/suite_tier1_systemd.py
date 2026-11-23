@@ -4337,7 +4337,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         """`cst cpu irq` and `cst btrfs iocost` real-systemd drop-in, unit, udev, and revert lifecycle.
 
         iocost: plan writes nothing; apply installs, enables and starts the service (ordered after udev
-        settle) and marks btrfs:iocost done last; a second apply rewrites nothing; the installed zipapp's
+        settle) and marks btrfs:iocost done last; a second apply rewrites nothing; with an older unit
+        installed, plan says apply updates the component (and changes nothing), apply rewrites it; the installed zipapp's
         revert (no checkout beside it) removes the unit, the rule, itself and the record lines; a second
         revert changes nothing. io.cost.qos is absent here (no blk-iocost in the container's cgroup), so
         the writes are "skipped:", and udevd does not run, so the rules' reload is a note."""
@@ -4354,7 +4355,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
             "/opt/cst-rw/cst cpu irq revert >/dev/null 2>&1 || true; "
-            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak /tmp/e2e-128a-bad.out; "
+            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak /tmp/e2e-128a-bad.out "
+            "/tmp/e2e-128a-plan.out /tmp/e2e-128a-apply.out; "
             "[[ ! -e /tmp/e2e-128a-cpu.orig ]] || mv /tmp/e2e-128a-cpu.orig /etc/cpu-setup/cpu-setup.conf; "
             "systemctl daemon-reload",
             check=False,
@@ -4417,6 +4419,19 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             /opt/cst-rw/cst btrfs iocost apply
             [[ "$(stat -c '%i %Y' /etc/systemd/system/cst-btrfs-iocost.service)" == "$unit_before" ]]
             [[ "$({record})" == *" done" ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
+            # An upgrade: the installed unit is an older one. plan says apply updates it and changes nothing;
+            # apply rewrites it and marks btrfs:iocost done again; plan then finds it current.
+            printf '# an older CST
+' >>/etc/systemd/system/cst-btrfs-iocost.service
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan >/tmp/e2e-128a-plan.out
+            grep -qF "would update:  component btrfs:iocost (/etc/systemd/system/cst-btrfs-iocost.service)" /tmp/e2e-128a-plan.out
+            grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
+            /opt/cst-rw/cst btrfs iocost apply >/tmp/e2e-128a-apply.out
+            grep -qF "written:   /etc/systemd/system/cst-btrfs-iocost.service" /tmp/e2e-128a-apply.out
+            ! grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
+            [[ "$({record})" == *" done" ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
             /usr/local/sbin/btrfs-iocost revert
             [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
             [[ ! -e /usr/local/sbin/btrfs-iocost && ! -e /run/btrfs-setup/iocost-managed ]]

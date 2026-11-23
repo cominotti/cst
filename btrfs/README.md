@@ -1486,6 +1486,13 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   limits the write to one whole disk and is accepted only together with
   `--live-only` (for `apply` and `plan`): a one-disk request never installs
   the service, whose next boot would write every disk;
+- `plan` asks the installer's plan (`installer.py plan --component
+  btrfs:iocost`, through `/run/host` from a toolbox) whether the program,
+  the unit and the rule are current: after an upgrade that changed one of
+  them it shows `would update:  component btrfs:iocost (FILES)`, which
+  `apply` then rewrites. From the installed program (no checkout) or when
+  the installer's plan fails, it only checks that the unit and the rule are
+  there;
 - one run at a time: the boot service, the udev rule's per-disk runs and the
   commands hold `/run/btrfs-setup/iocost-managed.lock` from their read of
   `io.cost.qos` to their save of `/run/btrfs-setup/iocost-managed`, so two

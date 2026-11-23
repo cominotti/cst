@@ -54,6 +54,7 @@ from btrfs.iocost.domain import (
 _DEVNO_RE: Final = re.compile(r"^[0-9]+:[0-9]+$")
 _ACTIVE_SCHED_RE: Final = re.compile(r"\[([^\]]+)\]")
 _UNINSTALL_ERRORS: Final = (InstallRefused, WriteFailed, OSError)
+_INSTALL_PLAN_CHANGES: Final = ("would write:", "would record:")  # the installer plan's lines for a change
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,11 @@ def iocost_paths_for(
         IOCOST_MANAGED_FILE,
         IOCOST_RULE_DEST,
     )
-    return IocostPaths(*[host_view_path(exec_ctx, item) for item in raw], installer_script=installer)
+    return IocostPaths(
+        *[host_view_path(exec_ctx, item) for item in raw],
+        installer_script=installer,
+        install_root=host_view_path(exec_ctx, "/").rstrip("/"),  # the host's files, for the installer's plan
+    )
 
 
 def _active_scheduler(raw: str | None) -> str:
@@ -388,6 +393,37 @@ def revert_iocost(
     return rc_w, [*out, *lines_w]
 
 
+def component_changes(paths: IocostPaths, runner: CommandRunnerPort) -> tuple[str, ...] | None:
+    """The btrfs:iocost files `apply` would write or record again, by the installer's plan (under
+    install_root: the host's files from a toolbox); None when it cannot tell (no checkout to install
+    from, or the plan failed)."""
+    if not paths.installer_script:
+        return None
+    root = ["--root", paths.install_root] if paths.install_root else []
+    rc, lines, _err = run_installer(
+        runner, paths.installer_script, ["plan", "--component", Component.BTRFS_IOCOST.value, *root]
+    )
+    if rc != 0:
+        return None
+    return tuple(
+        line.partition(": ")[2].strip().removeprefix(paths.install_root)
+        for line in lines
+        if line.startswith(_INSTALL_PLAN_CHANGES)
+    )
+
+
+def plan_iocost(
+    paths: IocostPaths, runner: CommandRunnerPort, *, live_only: bool, target_device: str | None
+) -> tuple[int, list[str]]:
+    """`cst btrfs iocost plan`: what apply would write, changing nothing."""
+    snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
+    pl = plan_iocost_apply(snap, target_device=target_device)
+    changes = None if live_only or pl.error is not None else component_changes(paths, runner)
+    return (1 if pl.error is not None else 0), format_iocost_plan(
+        snap, pl, live_only=live_only, component_changes=changes
+    )
+
+
 def dispatch_iocost_cli_action(
     parsed: IocostParsedArgs, env: ManagedCliEnv, *, read_only: bool
 ) -> tuple[int, list[str]]:
@@ -397,9 +433,8 @@ def dispatch_iocost_cli_action(
         case IocostAction.STATUS:
             return 0, format_iocost_status(collect_iocost_snapshot(paths, runner=env.runner))
         case IocostAction.PLAN:
-            snap = collect_iocost_snapshot(paths, runner=env.runner, udev=parsed.device is None)
-            pl = plan_iocost_apply(snap, target_device=parsed.device)
-            return (1 if pl.error is not None else 0), format_iocost_plan(snap, pl, live_only=parsed.live_only)
+            runner = SubprocessCommandRunner() if env.runner is None else env.runner
+            return plan_iocost(paths, runner, live_only=parsed.live_only, target_device=parsed.device)
         case IocostAction.APPLY:
             return apply_iocost(paths, live_only=parsed.live_only, target_device=parsed.device, runner=env.runner)
         case _:
