@@ -1431,6 +1431,15 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   into `/sys/fs/cgroup/io.cost.qos` for every non-rotational NVMe/SATA/VirtIO
   whole disk whose `enable` is not already `1` (vendor/pre-existing `enable=1`
   entries are preserved untouched and excluded from `/run/btrfs-setup/iocost-managed`);
+- the scan of every disk (`apply`, `plan`, `status` and the boot service)
+  asks udev about each one (`udevadm info`): a disk with an `IOCOST_SOLUTIONS`
+  hwdb solution is left to `90-iocost.rules` (`kept:`, and no longer listed as
+  CST's), and a disk udev has not processed yet (no `USEC_INITIALIZED`) is
+  skipped with a `note:` (the udev rule writes it once udev does). Without
+  `udevadm`, a disk is judged as before, with a `note:`. The service is ordered
+  after `systemd-udev-settle.service` (where something pulls it in) and
+  `systemd-udevd.service`. A `--device` run (the udev rule's) does not ask: the
+  rule itself matched an empty `IOCOST_SOLUTIONS`;
 - `--live-only` writes `io.cost.qos` only (no unit, rule or install record
   change); this is what the service and the udev rule run. `--device NAME`
   limits the write to one whole disk and is accepted only together with

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 import re
 from typing import Final
@@ -35,7 +35,10 @@ from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
     IOCOST_RULE_DEST,
     IOCOST_SERVICE,
+    IOCOST_SOLUTIONS_PROP,
     UDEV_CONTROL,
+    UDEVADM_TIMEOUT_S,
+    USEC_INITIALIZED_PROP,
     BlockDisk,
     IocostAction,
     IocostParsedArgs,
@@ -43,6 +46,7 @@ from btrfs.iocost.domain import (
     IocostSnapshot,
     format_iocost_plan,
     format_iocost_status,
+    is_auto_eligible_disk,
     parse_iocost_qos,
     plan_iocost_apply,
     plan_iocost_revert,
@@ -146,9 +150,36 @@ def _write_qos_line(qos_path: str, payload: str) -> OSError | None:
     return None
 
 
-def collect_iocost_snapshot(paths: IocostPaths, *, runner: CommandRunnerPort | None = None) -> IocostSnapshot:
-    """Collect kernel `io.cost.qos`, block devices, runtime state, and systemd unit state."""
+def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDisk:
+    """disk with what udev knows of it: its hwdb solution, whether udev has processed it, or why
+    `udevadm info` could not tell (missing, failed: the disk is judged as before)."""
+    res = runner.run(
+        ["udevadm", "info", "-q", "property", "-n", f"/dev/{disk.name}"],
+        on_host=True,
+        locale_c=True,
+        timeout=UDEVADM_TIMEOUT_S,
+        output=OutputMode.CAPTURE,
+    )
+    if res.fault is not None or res.returncode != 0:
+        why = res.stderr.strip().splitlines()[0] if res.stderr.strip() else f"exit {res.returncode}"
+        return replace(disk, udev_error=why)
+    props = dict(line.partition("=")[::2] for line in res.stdout.splitlines() if "=" in line)
+    return replace(
+        disk, hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(), udev_ready=USEC_INITIALIZED_PROP in props
+    )
+
+
+def collect_iocost_snapshot(
+    paths: IocostPaths, *, runner: CommandRunnerPort | None = None, udev: bool = True
+) -> IocostSnapshot:
+    """Collect kernel `io.cost.qos`, block devices, runtime state, and systemd unit state.
+
+    udev: ask udev about each disk the scan of every disk would write (its hwdb solution); a --device
+    run and revert do not need it."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
+    disks = _scan_sys_block(paths.sys_block)
+    if udev:
+        disks = tuple(_with_udev_properties(cmd_runner, d) if is_auto_eligible_disk(d) else d for d in disks)
     ctrl_raw = read_text(paths.controllers_path)
     io_present = ("io" in ctrl_raw.split()) if ctrl_raw is not None else None
     qos_raw = read_text(paths.qos_path)
@@ -158,7 +189,7 @@ def collect_iocost_snapshot(paths: IocostPaths, *, runner: CommandRunnerPort | N
         qos_exists=qos_raw is not None,
         qos_entries=parse_iocost_qos(qos_raw or ""),
         model_raw=(read_text(paths.model_path) or "").strip(),
-        disks=_scan_sys_block(paths.sys_block),
+        disks=disks,
         managed_devnos=_read_managed_devnos(paths.managed_file),
         service_present=svc_present,
         service_active=active,
@@ -191,6 +222,7 @@ def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan
             managed.discard(op.devno)
     out.extend(f"unchanged: {item}" for item in plan.unchanged)
     out.extend(f"kept:      {item}" for item in plan.preexisting)
+    out.extend(f"note:      {item}" for item in plan.notes)
     _save_managed_devnos(paths.managed_file, frozenset(managed))
     return rc, out
 
@@ -243,7 +275,7 @@ def _install_and_write(
     paths: IocostPaths, runner: CommandRunnerPort, live_only: bool, target_device: str | None
 ) -> tuple[int, list[str]]:
     """Read, plan, install btrfs:iocost (not live-only) and write io.cost.qos: the part under the lock."""
-    snap = collect_iocost_snapshot(paths, runner=runner)
+    snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
     plan = plan_iocost_apply(snap, target_device=target_device)
     if plan.error is not None:
         return (
@@ -349,7 +381,7 @@ def revert_iocost(
             return rc_c, out
 
     def reset() -> tuple[int, list[str]]:
-        snap = collect_iocost_snapshot(paths, runner=cmd_runner)
+        snap = collect_iocost_snapshot(paths, runner=cmd_runner, udev=False)
         return _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
 
     rc_w, lines_w = _locked(paths, reset)
@@ -365,7 +397,7 @@ def dispatch_iocost_cli_action(
         case IocostAction.STATUS:
             return 0, format_iocost_status(collect_iocost_snapshot(paths, runner=env.runner))
         case IocostAction.PLAN:
-            snap = collect_iocost_snapshot(paths, runner=env.runner)
+            snap = collect_iocost_snapshot(paths, runner=env.runner, udev=parsed.device is None)
             pl = plan_iocost_apply(snap, target_device=parsed.device)
             return (1 if pl.error is not None else 0), format_iocost_plan(snap, pl, live_only=parsed.live_only)
         case IocostAction.APPLY:

@@ -80,6 +80,8 @@ class _FakeRunner:
         self.enabled_state = "disabled"
         self.fail_on: set[str] = set()
         self.on_call: Callable[[list[str]], None] | None = None
+        # `udevadm info -q property -n /dev/NAME`: these properties, or by default a disk udev processed
+        self.udev_props: dict[str, str] = {}
 
     def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
         cmd = list(argv)
@@ -89,6 +91,9 @@ class _FakeRunner:
         line = " ".join(cmd)
         if any(part in line for part in self.fail_on):
             return CommandResult(1, "", f"{line}: failed", argv=tuple(cmd))
+        if cmd[:2] == ["udevadm", "info"]:
+            name = cmd[-1].removeprefix("/dev/")
+            return CommandResult(0, self.udev_props.get(name, "USEC_INITIALIZED=1234\n"), "", argv=tuple(cmd))
         if cmd[:2] == ["systemctl", "show"]:
             return CommandResult(
                 0,
@@ -119,7 +124,7 @@ def _steps(calls: list[list[str]]) -> list[str]:
     return [
         f"installer {c[4]}" if len(c) > 4 and c[3].endswith("installer.py") else " ".join(c[:2])
         for c in calls
-        if c[:2] != ["systemctl", "show"]
+        if c[:2] not in (["systemctl", "show"], ["udevadm", "info"])
     ]
 
 
@@ -255,6 +260,8 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertEqual(
             self.runner.calls,
             [
+                ["udevadm", "info", "-q", "property", "-n", "/dev/nvme0n1"],
+                ["udevadm", "info", "-q", "property", "-n", "/dev/nvme1n1"],
                 [
                     "systemctl",
                     "show",
@@ -426,6 +433,56 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                 if refusing is not None:
                     self.assertIn("Read-only file system", "\n".join(out))
                     self.assertFalse(self._ran("systemctl", "daemon-reload"))
+
+    def test_the_scan_leaves_disks_with_a_hwdb_solution_to_udev(self) -> None:
+        self._write(self.paths.qos_path, "")
+        self.runner.udev_props["nvme0n1"] = "IOCOST_SOLUTIONS=isolation\nUSEC_INITIALIZED=1234\n"
+        self.runner.udev_props["nvme1n1"] = "DEVTYPE=disk\n"  # udev has not processed it yet
+        status = "\n".join(format_iocost_status(collect_iocost_snapshot(self.paths, runner=self.runner)))
+        self.assertIn("(hwdb solution isolation)", status)
+        rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "")
+        self.assertIn("kept:      259:1 (nvme0n1: hwdb solution isolation; left to udev)", out)
+        self.assertIn(
+            "note:      nvme1n1: not processed by udev yet; the udev rule writes it when udev does", out
+        )
+        self.assertFalse(os.path.exists(self.paths.managed_file))
+
+    def test_a_device_run_writes_without_asking_udev(self) -> None:
+        # The udev rule's run: the rule matched IOCOST_SOLUTIONS=="" itself, and during a RUN the udev
+        # database still holds the previous event's properties.
+        self._write(self.paths.qos_path, "")
+        self.runner.udev_props["nvme0n1"] = "IOCOST_SOLUTIONS=isolation\n"
+        rc, out = apply_iocost(self.paths, live_only=True, target_device="nvme0n1", runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(self._ran("udevadm", "info"))
+        with open(self.paths.qos_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:1 enable=1 ctrl=auto\n")
+
+    def test_without_udevadm_the_scan_claims_the_disk_as_before(self) -> None:
+        self._write(self.paths.qos_path, "")
+        self.runner.fail_on = {"udevadm info -q property -n /dev/nvme0n1"}
+        rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"set:       {self.paths.qos_path} <- '259:1 enable=1 ctrl=auto' (nvme0n1)", out)
+        self.assertTrue(any(line.startswith("note:      nvme0n1: udevadm info failed (") for line in out), out)
+
+    def test_a_disk_udev_configures_is_no_longer_cst_s(self) -> None:
+        # An earlier run claimed it before 90-iocost.rules ran: revert must not reset the vendor's setting.
+        self._write(self.paths.qos_path, "259:1 enable=1 ctrl=user\n")
+        self._write(self.paths.managed_file, "259:1\n")
+        self.runner.udev_props["nvme0n1"] = "IOCOST_SOLUTIONS=isolation\nUSEC_INITIALIZED=1234\n"
+        rc, out = apply_iocost(self.paths, live_only=True, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        with open(self.paths.managed_file, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "259:2\n")  # nvme1n1 only: the scan claimed it, it has no solution
+
+    def test_the_service_runs_after_udev_settle(self) -> None:
+        with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:
+            after = [line.split("=", 1)[1].split() for line in fh if line.startswith("After=")]
+        self.assertEqual(after, [["systemd-udev-settle.service", "systemd-udevd.service", "local-fs.target"]])
 
     def _hold_lock(self) -> int:
         os.makedirs(os.path.dirname(self.paths.lock_path), exist_ok=True)

@@ -22,6 +22,11 @@ UDEV_CONTROL: Final = "/run/udev/control"  # udevd's control socket: there only 
 # from its read of io.cost.qos and the managed file to its save of the managed file.
 IOCOST_LOCK: Final = "/run/btrfs-setup/iocost-managed.lock"
 IOCOST_LOCK_TIMEOUT_S: Final = 30.0  # inside the 180 s udev gives a RUN program
+# udev properties of a disk (`udevadm info -q property`): 90-iocost.rules' hwdb solution, and the stamp
+# udev sets once it has processed the device (without it, the device's rules have not run yet).
+IOCOST_SOLUTIONS_PROP: Final = "IOCOST_SOLUTIONS"
+USEC_INITIALIZED_PROP: Final = "USEC_INITIALIZED"
+UDEVADM_TIMEOUT_S: Final = 10.0
 IOCOST_ENABLE_CTRL_AUTO: Final = "enable=1 ctrl=auto"
 IOCOST_DISABLE_CTRL_AUTO: Final = "enable=0 ctrl=auto"
 
@@ -75,6 +80,9 @@ class BlockDisk:
     rotational: bool
     scheduler: str
     model: str = ""
+    hwdb_solution: str = ""  # IOCOST_SOLUTIONS from udev: 90-iocost.rules configures this disk itself
+    udev_ready: bool = True  # False: udev has not processed it yet (no USEC_INITIALIZED)
+    udev_error: str = ""  # why udevadm info could not tell (the disk is then judged without it)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +121,7 @@ class IocostPlan:
     next_managed: frozenset[str]
     error: str | None = None
     revert_mode: bool = False
+    notes: tuple[str, ...] = ()
 
 
 def normalize_device_name(raw: str) -> str:
@@ -225,9 +234,21 @@ def plan_iocost_apply(snap: IocostSnapshot, *, target_device: str | None = None)
     writes: list[IocostWriteOp] = []
     unchanged: list[str] = []
     preexisting: list[str] = []
+    notes: list[str] = []
     next_managed = set(snap.managed_devnos)
 
     for disk in selected:
+        # The scan of every disk (the boot service) leaves udev's own disks alone; one --device run is
+        # the udev rule's, which only matches a disk without a hwdb solution.
+        if target_device is None and disk.hwdb_solution:
+            preexisting.append(f"{disk.devno} ({disk.name}: hwdb solution {disk.hwdb_solution}; left to udev)")
+            next_managed.discard(disk.devno)
+            continue
+        if target_device is None and not disk.udev_ready:
+            notes.append(f"{disk.name}: not processed by udev yet; the udev rule writes it when udev does")
+            continue
+        if target_device is None and disk.udev_error:
+            notes.append(f"{disk.name}: udevadm info failed ({disk.udev_error}); judged without its hwdb solution")
         entry = snap.qos_entries.get(disk.devno)
         if entry is not None and entry.enable == 1:
             if disk.devno in snap.managed_devnos:
@@ -249,6 +270,7 @@ def plan_iocost_apply(snap: IocostSnapshot, *, target_device: str | None = None)
         unchanged=tuple(unchanged),
         preexisting=tuple(preexisting),
         next_managed=frozenset(next_managed),
+        notes=tuple(notes),
     )
 
 
@@ -307,7 +329,12 @@ def format_iocost_status(snap: IocostSnapshot) -> list[str]:
         lines.append("disks:       no non-rotational nvme/sd/vd disks found under /sys/block")
     for d in eligible:
         entry = snap.qos_entries.get(d.devno)
-        tag = "CST" if d.devno in snap.managed_devnos else ("vendor/manual" if entry and entry.enable == 1 else "off")
+        if d.devno in snap.managed_devnos:
+            tag = "CST"
+        elif d.hwdb_solution:
+            tag = f"hwdb solution {d.hwdb_solution}"
+        else:
+            tag = "vendor/manual" if entry and entry.enable == 1 else "off"
         state = f"enable={entry.enable} ctrl={entry.ctrl}" if entry is not None else "unset"
         model = f" [{d.model}]" if d.model else ""
         lines.append(f"  {d.name:<10} ({d.devno}, sched={d.scheduler}){model}: {state} ({tag})")
@@ -337,5 +364,6 @@ def format_iocost_plan(snap: IocostSnapshot, plan: IocostPlan, *, live_only: boo
     lines.extend(f"would write:   {IOCOST_QOS_PATH} <- '{w.line}' ({w.device_name}, {w.reason})" for w in plan.writes)
     lines.extend(f"unchanged:     {u}" for u in plan.unchanged)
     lines.extend(f"pre-existing:  {p}" for p in plan.preexisting)
+    lines.extend(f"note:          {n}" for n in plan.notes)
     lines.append("Dry run: nothing is changed.")
     return lines

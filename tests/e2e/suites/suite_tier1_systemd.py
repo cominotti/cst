@@ -4306,9 +4306,15 @@ assert c["last_sample"] is None and d["samples"] == 0, c
 
     @e2e_tags(E2ETag.CPU, E2ETag.BTRFS, E2ETag.INSTALL)
     def test_128a_cpu_irq_and_btrfs_iocost_lifecycle(self) -> None:
-        """`cst cpu irq` and `cst btrfs iocost` real-systemd drop-in, unit, udev, and revert lifecycle."""
+        """`cst cpu irq` and `cst btrfs iocost` real-systemd drop-in, unit, udev, and revert lifecycle.
+
+        iocost: plan writes nothing; apply installs, enables and starts the service (ordered after udev
+        settle) and marks btrfs:iocost done last; a second apply rewrites nothing; the installed zipapp's
+        revert (no checkout beside it) removes the unit, the rule, itself and the record lines; a second
+        revert changes nothing. io.cost.qos is absent here (no blk-iocost in the container's cgroup), so
+        the writes are "skipped:", and udevd does not run, so the rules' reload is a note."""
         c = self.SYSTEMD_CONTAINER
-        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        record = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json btrfs:iocost"
         if exec_bash(
             c,
             "[[ ! -e /etc/cpu-setup/irqbalance.env ]] && [[ ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]] "
@@ -4370,13 +4376,25 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             rc=0; runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --device sda >/dev/null 2>&1 || rc=$?
             [[ $rc == 2 ]]
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --live-only | grep -qF "Dry run: nothing is changed."
-            {installer} install --component btrfs:iocost >/dev/null
-            {installer} mark --component btrfs:iocost done >/dev/null
-            systemctl daemon-reload
-            systemctl start cst-btrfs-iocost.service
+            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && "$({record})" == "- -" ]]
+            /opt/cst-rw/cst btrfs iocost apply
             [[ "$(systemctl show -P ActiveState cst-btrfs-iocost.service)" == active ]]
-            /opt/cst-rw/cst btrfs iocost revert
+            [[ "$(systemctl is-enabled cst-btrfs-iocost.service)" == enabled ]]
+            systemctl show -P After cst-btrfs-iocost.service | tr ' ' '\n' | grep -qxF systemd-udev-settle.service
+            [[ -e /etc/udev/rules.d/91-cst-iocost.rules && -e /usr/local/sbin/btrfs-iocost ]]
+            [[ "$({record})" == *" done" ]]
+            [[ -e /run/btrfs-setup/iocost-managed.lock ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "(active, enabled)"
+            unit_before="$(stat -c '%i %Y' /etc/systemd/system/cst-btrfs-iocost.service)"
+            /opt/cst-rw/cst btrfs iocost apply
+            [[ "$(stat -c '%i %Y' /etc/systemd/system/cst-btrfs-iocost.service)" == "$unit_before" ]]
+            [[ "$({record})" == *" done" ]]
+            /usr/local/sbin/btrfs-iocost revert
             [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
+            [[ ! -e /usr/local/sbin/btrfs-iocost && ! -e /run/btrfs-setup/iocost-managed ]]
+            [[ "$({record})" == "- -" ]]
+            /opt/cst-rw/cst btrfs iocost revert
+            [[ "$({record})" == "- -" ]]
             echo E2E-IRQ-IOCOST-OK
             """,
         ).stdout
