@@ -248,7 +248,7 @@ def _installer_step(runner: CommandRunnerPort, script: str, subargs: list[str]) 
 
 
 def _failed(what: str, result: CommandResult) -> tuple[int, list[str]]:
-    return (result.returncode or 1), [f"ERROR: {what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"]
+    return (result.returncode or 1), [f"ERROR: {result.failure(what)}"]
 
 
 def _reload_udev_rules(runner: CommandRunnerPort, paths: IocostPaths) -> tuple[int, list[str]]:

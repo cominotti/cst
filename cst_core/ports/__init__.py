@@ -68,6 +68,11 @@ class CommandResult:
             raise self.cause
         return self
 
+    def failure(self, what: str) -> str:
+        """`WHAT failed: REASON` for this failed command: its stderr (stripped), or `exit N` when it
+        wrote none."""
+        return f"{what} failed: {self.stderr.strip() or f'exit {self.returncode}'}"
+
 
 class CommandFailed(RuntimeError):
     """Raised when an external command fails and check=True."""

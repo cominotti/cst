@@ -1012,6 +1012,12 @@ class CommandRunnerTest(unittest.TestCase):
         plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
         self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
 
+    def test_failure_names_the_command_and_why(self) -> None:
+        said = core_ports.CommandResult(1, "out\n", "  Access denied\n")
+        self.assertEqual(said.failure("systemctl daemon-reload"), "systemctl daemon-reload failed: Access denied")
+        silent = core_ports.CommandResult(124, "out\n", " \n", fault=core_ports.CommandFault.TIMEOUT)
+        self.assertEqual(silent.failure("udevadm control"), "udevadm control failed: exit 124")
+
     def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
         # Only the arguments an option sets: a caller's test double that takes
         # a fixed set of arguments keeps working when the caller moves here.

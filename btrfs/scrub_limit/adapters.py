@@ -30,7 +30,7 @@ from cst_core.adapters.runtime import (
 )
 from cst_core.domain.install import Component
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
-from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort
+from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
@@ -205,10 +205,6 @@ def _mark_core_done(runner: CommandRunnerPort, paths: ScrubPaths) -> tuple[int, 
     return rc, (err or f"exit {rc}") if rc != 0 else ""
 
 
-def _failure(what: str, result: CommandResult) -> str:
-    return f"{what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"
-
-
 def scrub_limit_apply(
     paths: ScrubPaths,
     target_limit: str | None,
@@ -262,7 +258,7 @@ def scrub_limit_apply(
                 # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
                 rc_m, err_m = _mark_core_done(cmd_runner, paths)
                 failures.append(f"btrfs:core not marked done again: {err_m}" if rc_m != 0 else None)
-            return 1, [*out, _rolled_back(_failure("systemctl daemon-reload", dr), failures, reload_hint=True)]
+            return 1, [*out, _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)]
     if core_done and any(line.startswith("written:") for line in inst_lines):
         rc_m, err_m = _mark_core_done(cmd_runner, paths)
         if rc_m != 0:
