@@ -32,7 +32,7 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
-from btrfs.scratch.domain import ScratchFindingSeverity, assess_scratch_health
+from btrfs.cache.domain import CacheMountFindingSeverity, assess_cache_mount_health
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
@@ -748,7 +748,7 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 
 
 @check(CHECKS, "btrfs")
-def check_btrfs_scratch(host: DoctorHostPort) -> Iterator[Result]:
+def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     """Check dedicated NVMe cache/scratch mounts, crypttab `nofail`, and user bind mounts."""
     fstab_raw = read_text(host, host.path(FSTAB), 65536)
     proc_raw = read_text(host, host.path(HostPath("/proc/mounts")), 65536)
@@ -768,11 +768,11 @@ def check_btrfs_scratch(host: DoctorHostPort) -> Iterator[Result]:
     live_findmnt = _findmnt_all_mounts(host)
     mounts_text = f"{proc_raw}\n{live_findmnt}" if live_findmnt is not None else proc_raw
     sev_map = {
-        ScratchFindingSeverity.OK: OK,
-        ScratchFindingSeverity.INFO: INFO,
-        ScratchFindingSeverity.WARN: WARN,
+        CacheMountFindingSeverity.OK: OK,
+        CacheMountFindingSeverity.INFO: INFO,
+        CacheMountFindingSeverity.WARN: WARN,
     }
-    for finding in assess_scratch_health(fstab_raw or None, mounts_text or None, crypttab_raw or None):
+    for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs scratch: {finding.message}", fix_cmd)
     if crypttab_unreadable and has_hints:

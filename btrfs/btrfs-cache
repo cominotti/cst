@@ -1,6 +1,6 @@
 #!/usr/bin/python3 -I
 # SPDX-License-Identifier: MPL-2.0
-"""btrfs-scratch: manage multi-user NVMe cache/scratch bind mounts."""
+"""btrfs-cache: manage multi-user NVMe cache/scratch bind mounts."""
 
 import os.path as _cst_path
 import sys as _cst_sys
@@ -17,11 +17,11 @@ if not _cst_path.isfile(_cst_path.dirname(__file__)) and _cst_root not in _cst_s
 
 import sys
 
-from btrfs.scratch import cli
+from btrfs.cache import cli
 
 
 def main() -> int:
-    """Run btrfs-scratch with this program's arguments."""
+    """Run btrfs-cache with this program's arguments."""
     return cli.main(sys.argv[1:], entry_file=__file__)
 
 

@@ -157,7 +157,7 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "btrfs/health_check/cli.py": 32,
     "btrfs/iocost/cli.py": 18,
     "btrfs/pending_alerts/cli.py": 74,
-    "btrfs/scratch/cli.py": 20,
+    "btrfs/cache/cli.py": 20,
     "btrfs/scrub_limit/cli.py": 27,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/snapshot_runtime/cli.py": 13,

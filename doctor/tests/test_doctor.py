@@ -1462,8 +1462,8 @@ class BtrfsCompressionDoctorTest(Scratch):
         )
 
 
-class BtrfsScratchDoctorTest(Scratch):
-    """check_btrfs_scratch: silent when unconfigured; warns on flushoncommit, missing crypttab nofail, or unmounted bind."""
+class BtrfsCacheDoctorTest(Scratch):
+    """check_btrfs_cache: silent when unconfigured; warns on flushoncommit, missing crypttab nofail, or unmounted bind."""
 
     def _put(self, *parts: str, text: str) -> None:
         path = os.path.join(self.root, *parts)

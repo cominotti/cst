@@ -13,19 +13,19 @@ from typing import override
 import unittest
 import unittest.mock
 
-from btrfs.scratch.cli import main as scratch_main, run_scratch_cli
-from btrfs.scratch.domain import (
+from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
+from btrfs.cache.domain import (
     CACHE_BASE,
-    SCRATCH_BASE,
-    SCRATCH_MARKER,
-    ScratchAction,
-    ScratchFindingSeverity,
-    ScratchKind,
-    ScratchUser,
-    assess_scratch_health,
+    SCRATCHPAD_BASE,
+    CACHE_MOUNT_MARKER,
+    CacheMountAction,
+    CacheMountFindingSeverity,
+    CacheMountKind,
+    CacheMountUser,
+    assess_cache_mount_health,
     build_user_bindings,
     parse_managed_fstab_entries,
-    parse_scratch_args,
+    parse_cache_mount_args,
     plan_attach_fstab,
     plan_detach_fstab,
 )
@@ -35,7 +35,7 @@ from cst_core.ports import CommandResult
 from tests.repo_files import REPO
 
 UUID_ROOT = "11111111-1111-1111-1111-111111111111"
-UUID_SCRATCH = "22222222-2222-2222-2222-222222222222"
+UUID_CACHE_DRIVE = "22222222-2222-2222-2222-222222222222"
 
 
 class _TestCtx:
@@ -78,12 +78,12 @@ class _FakeMountRunner:
 
     def _handle_findmnt(self, tgt: str) -> CommandResult:
         if f"{self.root}/var/mnt/" in tgt:
-            uuid = UUID_ROOT if self.same_uuid else UUID_SCRATCH
+            uuid = UUID_ROOT if self.same_uuid else UUID_CACHE_DRIVE
             return CommandResult(0, f"btrfs {uuid} /dev/mapper/scratch\n", "")
         logical = tgt.removeprefix(self.root)
         for src, m_tgt, fstype, _ in reversed(self.mounts):
             if logical == m_tgt and m_tgt.endswith(("/.cache", "/Scratch")):
-                uuid = UUID_ROOT if self.same_uuid else UUID_SCRATCH
+                uuid = UUID_ROOT if self.same_uuid else UUID_CACHE_DRIVE
                 return CommandResult(0, f"{fstype} {uuid} {src}\n", "")
         return CommandResult(0, f"btrfs {UUID_ROOT} /dev/dm-0\n", "")
 
@@ -103,71 +103,71 @@ class _FakeMountRunner:
         return CommandResult(0, "", "")
 
 
-class ScratchDomainTests(unittest.TestCase):
-    def test_parse_scratch_args_flags_and_errors(self) -> None:
-        self.assertEqual(parse_scratch_args([]).action, ScratchAction.STATUS)
-        self.assertEqual(parse_scratch_args(["--help"]).action, ScratchAction.HELP)
-        p = parse_scratch_args(["attach", "--user", "alice", "--no-scratch", "--allow-nonempty"])
+class CacheMountDomainTests(unittest.TestCase):
+    def test_parse_cache_mount_args_flags_and_errors(self) -> None:
+        self.assertEqual(parse_cache_mount_args([]).action, CacheMountAction.STATUS)
+        self.assertEqual(parse_cache_mount_args(["--help"]).action, CacheMountAction.HELP)
+        p = parse_cache_mount_args(["attach", "--user", "alice", "--no-scratch", "--allow-nonempty"])
         self.assertEqual(
-            (p.action, p.user, p.include_cache, p.include_scratch, p.allow_nonempty),
-            (ScratchAction.ATTACH, "alice", True, False, True),
+            (p.action, p.user, p.include_cache, p.include_scratchpad, p.allow_nonempty),
+            (CacheMountAction.ATTACH, "alice", True, False, True),
         )
-        self.assertIsNotNone(parse_scratch_args(["attach", "--no-cache", "--no-scratch"]).error)
-        self.assertIsNotNone(parse_scratch_args(["status", "--allow-nonempty"]).error)
-        self.assertIsNotNone(parse_scratch_args(["attach", "--user", "bad/user"]).error)
+        self.assertIsNotNone(parse_cache_mount_args(["attach", "--no-cache", "--no-scratch"]).error)
+        self.assertIsNotNone(parse_cache_mount_args(["status", "--allow-nonempty"]).error)
+        self.assertIsNotNone(parse_cache_mount_args(["attach", "--user", "bad/user"]).error)
 
     def test_multi_user_fstab_plan_coexists_and_detaches_cleanly(self) -> None:
         base_fstab = (
             "UUID=root-id / btrfs subvol=root 0 0\n/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,nofail 0 0\n"
         )
-        u1 = ScratchUser("danilo", 1000, 1000, "/var/home/danilo")
-        u2 = ScratchUser("alice", 1001, 1001, "/var/home/alice")
+        u1 = CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")
+        u2 = CacheMountUser("alice", 1001, 1001, "/var/home/alice")
         f1 = plan_attach_fstab(base_fstab, build_user_bindings(u1))
         f2 = plan_attach_fstab(f1, build_user_bindings(u2))
         entries = parse_managed_fstab_entries(f2)
         self.assertEqual(
             [(e.user, e.kind, e.source, e.target) for e in entries],
             [
-                ("danilo", ScratchKind.CACHE, "/var/mnt/cache/danilo", "/var/home/danilo/.cache"),
-                ("danilo", ScratchKind.SCRATCH, "/var/mnt/scratch/danilo", "/var/home/danilo/Scratch"),
-                ("alice", ScratchKind.CACHE, "/var/mnt/cache/alice", "/var/home/alice/.cache"),
-                ("alice", ScratchKind.SCRATCH, "/var/mnt/scratch/alice", "/var/home/alice/Scratch"),
+                ("danilo", CacheMountKind.CACHE, "/var/mnt/cache/danilo", "/var/home/danilo/.cache"),
+                ("danilo", CacheMountKind.SCRATCHPAD, "/var/mnt/scratch/danilo", "/var/home/danilo/Scratch"),
+                ("alice", CacheMountKind.CACHE, "/var/mnt/cache/alice", "/var/home/alice/.cache"),
+                ("alice", CacheMountKind.SCRATCHPAD, "/var/mnt/scratch/alice", "/var/home/alice/Scratch"),
             ],
         )
         self.assertEqual(plan_attach_fstab(f2, build_user_bindings(u1)), f2)
 
-        f3 = plan_detach_fstab(f2, "alice", {ScratchKind.CACHE, ScratchKind.SCRATCH})
+        f3 = plan_detach_fstab(f2, "alice", {CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD})
         self.assertEqual(
             [(e.user, e.kind) for e in parse_managed_fstab_entries(f3)],
-            [("danilo", ScratchKind.CACHE), ("danilo", ScratchKind.SCRATCH)],
+            [("danilo", CacheMountKind.CACHE), ("danilo", CacheMountKind.SCRATCHPAD)],
         )
         self.assertIn("UUID=root-id / btrfs subvol=root 0 0", f3)
 
-    def test_assess_scratch_health_checks_flushoncommit_crypttab_and_mounts(self) -> None:
+    def test_assess_cache_mount_health_checks_flushoncommit_crypttab_and_mounts(self) -> None:
         self.assertEqual(
-            assess_scratch_health("UUID=root / btrfs defaults 0 0\n", "/dev/dm-0 / btrfs rw 0 0\n", ""), []
+            assess_cache_mount_health("UUID=root / btrfs defaults 0 0\n", "/dev/dm-0 / btrfs rw 0 0\n", ""), []
         )
 
         good_fstab = (
             "/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
             "/dev/mapper/scratch /var/mnt/scratch btrfs subvol=scratch,noatime,compress=zstd:1,nofail 0 0\n"
-            f"/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 {SCRATCH_MARKER} user=danilo kind=cache\n"
+            f"/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 {CACHE_MOUNT_MARKER} user=danilo kind=cache\n"
         )
         good_mounts = (
             f"/dev/mapper/scratch {CACHE_BASE} btrfs rw,noatime,compress=zstd:1 0 0\n"
-            f"/dev/mapper/scratch {SCRATCH_BASE} btrfs rw,noatime,compress=zstd:1 0 0\n"
+            f"/dev/mapper/scratch {SCRATCHPAD_BASE} btrfs rw,noatime,compress=zstd:1 0 0\n"
             "/dev/mapper/scratch /var/home/danilo/.cache btrfs rw,noatime,compress=zstd:1 0 0\n"
         )
         good_crypt = "scratch UUID=abcd /etc/cryptsetup-keys.d/scratch.key nofail,discard,no-read-workqueue\n"
-        ok_res = assess_scratch_health(good_fstab, good_mounts, good_crypt)
+        ok_res = assess_cache_mount_health(good_fstab, good_mounts, good_crypt)
         self.assertEqual(len(ok_res), 1)
-        self.assertEqual(ok_res[0].severity, ScratchFindingSeverity.OK)
+        self.assertEqual(ok_res[0].severity, CacheMountFindingSeverity.OK)
 
         bad_mounts = good_mounts.replace("compress=zstd:1", "compress=zstd:1,flushoncommit", 1).replace(
             "/dev/mapper/scratch /var/home/danilo/.cache btrfs rw,noatime,compress=zstd:1 0 0\n", ""
         )
         bad_crypt = "scratch UUID=abcd /etc/cryptsetup-keys.d/scratch.key discard\n"
-        warns = assess_scratch_health(good_fstab, bad_mounts, bad_crypt)
+        warns = assess_cache_mount_health(good_fstab, bad_mounts, bad_crypt)
         msgs = "\n".join(f.message for f in warns)
         self.assertIn("flushoncommit", msgs)
         self.assertIn("missing 'nofail'", msgs)
@@ -175,10 +175,10 @@ class ScratchDomainTests(unittest.TestCase):
         self.assertTrue(any(f.fix == "btrfs scratch attach --user danilo" for f in warns))
 
 
-class ScratchAdapterAndCliTests(unittest.TestCase):
+class CacheMountAdapterAndCliTests(unittest.TestCase):
     @override
     def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="cst-scratch-test-")
+        self.tmp = tempfile.mkdtemp(prefix="cst-cache-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
         os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
         os.makedirs(os.path.join(self.tmp, "var", "mnt", "cache"), exist_ok=True)
@@ -195,14 +195,14 @@ class ScratchAdapterAndCliTests(unittest.TestCase):
             fh.write("/dev/mapper/scratch /var/mnt/cache btrfs subvol=cache,nofail 0 0\n")
         self.runner = _FakeMountRunner(self.tmp)
         self.runner.add_mount("/dev/mapper/scratch", CACHE_BASE)
-        self.runner.add_mount("/dev/mapper/scratch", SCRATCH_BASE)
-        self.entry = os.path.join(REPO, "btrfs", "btrfs-scratch")
+        self.runner.add_mount("/dev/mapper/scratch", SCRATCHPAD_BASE)
+        self.entry = os.path.join(REPO, "btrfs", "btrfs-cache")
 
     def _run(
         self, argv: Sequence[str], *, user: str = "danilo", container: bool = False, root: bool = True
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        rc = run_scratch_cli(
+        rc = run_cache_mount_cli(
             argv,
             deps=ManagedCliEnv(
                 entry_file=self.entry,
@@ -284,4 +284,4 @@ class ScratchAdapterAndCliTests(unittest.TestCase):
             rc_box, _, err_box = self._run(["attach"], container=True, root=False)
         self.assertEqual(rc_box, 1)
         self.assertIn("toolbox/container", err_box)
-        self.assertEqual(scratch_main(["--help"]), 0)
+        self.assertEqual(cache_mount_main(["--help"]), 0)

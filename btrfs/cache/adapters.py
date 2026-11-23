@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Host and toolbox adapters for `cst btrfs scratch` (`btrfs/btrfs-scratch`)."""
+"""Host and toolbox adapters for `cst btrfs scratch` (`btrfs/btrfs-cache`)."""
 
 from __future__ import annotations
 
@@ -11,21 +11,21 @@ import stat
 from typing import Final
 
 from btrfs.compress.domain import FSTAB_PATH, MountEntry, PROC_MOUNTS_PATH
-from btrfs.scratch.domain import (
+from btrfs.cache.domain import (
     BASE_FOR_KIND,
     DIR_MODE_PRIVATE,
     FILE_MODE_TAG,
     MIN_HUMAN_UID,
     BindingProbe,
     BaseMountInfo,
-    ScratchAction,
-    ScratchKind,
-    ScratchParsedArgs,
-    ScratchSnapshot,
-    ScratchUser,
+    CacheMountAction,
+    CacheMountKind,
+    CacheMountParsedArgs,
+    CacheMountSnapshot,
+    CacheMountUser,
     build_user_bindings,
-    format_scratch_plan,
-    format_scratch_status,
+    format_cache_mount_plan,
+    format_cache_mount_status,
     parse_all_mounts,
     parse_managed_fstab_entries,
     plan_attach_fstab,
@@ -52,7 +52,7 @@ _MOUNT_ARGS_MIN: Final = 4
 
 
 @dataclass(frozen=True, slots=True)
-class _ScratchRuntime:
+class _CacheMountRuntime:
     seam_root: str
     ctx: ExecutionContextPort
     runner: CommandRunnerPort
@@ -66,13 +66,13 @@ class _MountTables:
     home_uuid: str
 
 
-def _map_path(host_path: str, rt: _ScratchRuntime, *, read_only: bool) -> str:
+def _map_path(host_path: str, rt: _CacheMountRuntime, *, read_only: bool) -> str:
     if rt.seam_root:
         return f"{rt.seam_root.rstrip('/')}{host_path}"
     return host_view_path(rt.ctx, host_path) if read_only else host_path
 
 
-def _lookup_passwd_file(passwd_path: str, name: str) -> ScratchUser | None:
+def _lookup_passwd_file(passwd_path: str, name: str) -> CacheMountUser | None:
     text = read_text(passwd_path)
     if text is None or not text:
         return None
@@ -82,7 +82,7 @@ def _lookup_passwd_file(passwd_path: str, name: str) -> ScratchUser | None:
         fields = line.split(":")
         if len(fields) >= _ACCOUNT_MIN_FIELDS and fields[0] == name:
             try:
-                return ScratchUser(name=fields[0], uid=int(fields[2]), gid=int(fields[3]), home=fields[5])
+                return CacheMountUser(name=fields[0], uid=int(fields[2]), gid=int(fields[3]), home=fields[5])
             except ValueError:
                 return None
     return None
@@ -96,9 +96,9 @@ def _default_username(env_map: Mapping[str, str]) -> str:
     return pwd.getpwuid(os.getuid()).pw_name
 
 
-def _resolve_target_user(requested: str | None, rt: _ScratchRuntime) -> tuple[ScratchUser | None, str | None]:
+def _resolve_target_user(requested: str | None, rt: _CacheMountRuntime) -> tuple[CacheMountUser | None, str | None]:
     username = requested or _default_username(rt.env_map)
-    record: ScratchUser | None = None
+    record: CacheMountUser | None = None
     if rt.seam_root:
         passwd_path = f"{rt.seam_root.rstrip('/')}{_ACCOUNT_DB_PATH}"
         if os.path.isfile(passwd_path):
@@ -106,7 +106,7 @@ def _resolve_target_user(requested: str | None, rt: _ScratchRuntime) -> tuple[Sc
     if record is None:
         try:
             pw = pwd.getpwnam(username)
-            record = ScratchUser(name=pw.pw_name, uid=pw.pw_uid, gid=pw.pw_gid, home=pw.pw_dir)
+            record = CacheMountUser(name=pw.pw_name, uid=pw.pw_uid, gid=pw.pw_gid, home=pw.pw_dir)
         except KeyError:
             return None, f"user {username!r} does not exist"
     if record.uid < MIN_HUMAN_UID:
@@ -114,7 +114,7 @@ def _resolve_target_user(requested: str | None, rt: _ScratchRuntime) -> tuple[Sc
     return record, None
 
 
-def _read_mounts_text(rt: _ScratchRuntime) -> str:
+def _read_mounts_text(rt: _CacheMountRuntime) -> str:
     if rt.seam_root:
         return read_text(f"{rt.seam_root.rstrip('/')}{PROC_MOUNTS_PATH}", "")
     res = rt.runner.run(
@@ -169,7 +169,7 @@ def _dir_is_nonempty(path: str) -> bool:
         return False
 
 
-def _probe_base(kind: ScratchKind, tables: _MountTables, rt: _ScratchRuntime) -> BaseMountInfo:
+def _probe_base(kind: CacheMountKind, tables: _MountTables, rt: _CacheMountRuntime) -> BaseMountInfo:
     path = BASE_FOR_KIND[kind]
     live = tables.live.get(path)
     fst = tables.fstab.get(path)
@@ -195,16 +195,16 @@ def _probe_base(kind: ScratchKind, tables: _MountTables, rt: _ScratchRuntime) ->
 
 
 def _probe_binding(
-    kind: ScratchKind,
-    user: ScratchUser,
+    kind: CacheMountKind,
+    user: CacheMountUser,
     base_info: BaseMountInfo,
     tables: _MountTables,
-    rt: _ScratchRuntime,
+    rt: _CacheMountRuntime,
 ) -> BindingProbe:
     binding = build_user_bindings(
         user,
-        include_cache=(kind == ScratchKind.CACHE),
-        include_scratch=(kind == ScratchKind.SCRATCH),
+        include_cache=(kind == CacheMountKind.CACHE),
+        include_scratchpad=(kind == CacheMountKind.SCRATCHPAD),
     )[0]
     mapped_src = _map_path(binding.source, rt, read_only=True)
     mapped_tgt = _map_path(binding.target, rt, read_only=True)
@@ -240,7 +240,7 @@ def _probe_binding(
     )
 
 
-def _probe_snapshot(parsed: ScratchParsedArgs, rt: _ScratchRuntime) -> ScratchSnapshot:
+def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> CacheMountSnapshot:
     fstab_text = read_text(_map_path(FSTAB_PATH, rt, read_only=True))
     crypttab_text = read_text(_map_path(_CRYPTTAB_PATH, rt, read_only=True))
     proc_mounts_text = _read_mounts_text(rt)
@@ -260,23 +260,23 @@ def _probe_snapshot(parsed: ScratchParsedArgs, rt: _ScratchRuntime) -> ScratchSn
         fstab={m.target: m for m in parse_all_mounts(fstab_text or "")},
         home_uuid=home_uuid,
     )
-    bases = {kind: _probe_base(kind, tables, rt) for kind in (ScratchKind.CACHE, ScratchKind.SCRATCH)}
-    kinds = selected_kinds(include_cache=parsed.include_cache, include_scratch=parsed.include_scratch)
+    bases = {kind: _probe_base(kind, tables, rt) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)}
+    kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     probes = tuple(_probe_binding(k, user, bases[k], tables, rt) for k in kinds) if user is not None else ()
     managed = parse_managed_fstab_entries(fstab_text or "")
-    return ScratchSnapshot(
+    return CacheMountSnapshot(
         user, user_err, home_uuid, bases, probes, managed, crypttab_text, fstab_text, proc_mounts_text
     )
 
 
-def _ensure_private_dir(host_path: str, user: ScratchUser) -> None:
+def _ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
     os.makedirs(host_path, mode=DIR_MODE_PRIVATE, exist_ok=True)
     os.chmod(host_path, DIR_MODE_PRIVATE)
     if os.geteuid() == 0:
         os.chown(host_path, user.uid, user.gid)
 
 
-def _ensure_scratch_tag(source_path: str, user: ScratchUser) -> None:
+def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
     tag_path = os.path.join(source_path, CACHE_TAG)
     if os.path.exists(tag_path) or os.path.islink(tag_path):
         return
@@ -296,7 +296,9 @@ def _write_fstab_and_reload(fstab_path: str, previous: str | None, new_text: str
         raise
 
 
-def _apply_attach(snap: ScratchSnapshot, parsed: ScratchParsedArgs, rt: _ScratchRuntime) -> tuple[int, list[str]]:
+def _apply_attach(
+    snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, rt: _CacheMountRuntime
+) -> tuple[int, list[str]]:
     blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
     if blockers or snap.user is None:
         return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
@@ -308,8 +310,8 @@ def _apply_attach(snap: ScratchSnapshot, parsed: ScratchParsedArgs, rt: _Scratch
         h_src = _map_path(b.source, rt, read_only=False)
         h_tgt = _map_path(b.target, rt, read_only=False)
         _ensure_private_dir(h_src, user)
-        if b.kind == ScratchKind.SCRATCH:
-            _ensure_scratch_tag(h_src, user)
+        if b.kind == CacheMountKind.SCRATCHPAD:
+            _ensure_scratchpad_tag(h_src, user)
         if not probe.target_exists:
             _ensure_private_dir(h_tgt, user)
 
@@ -341,11 +343,13 @@ def _apply_attach(snap: ScratchSnapshot, parsed: ScratchParsedArgs, rt: _Scratch
     return 0, lines
 
 
-def _apply_detach(snap: ScratchSnapshot, parsed: ScratchParsedArgs, rt: _ScratchRuntime) -> tuple[int, list[str]]:
+def _apply_detach(
+    snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, rt: _CacheMountRuntime
+) -> tuple[int, list[str]]:
     if snap.user is None:
         return 1, [f"ERROR: {snap.user_error or 'cannot resolve target user'}"]
     user = snap.user
-    kinds = selected_kinds(include_cache=parsed.include_cache, include_scratch=parsed.include_scratch)
+    kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     lines: list[str] = [f"test seam (CST_BTRFS_SCRATCH_ROOT): {rt.seam_root}"] if rt.seam_root else []
 
     unmounted_any = False
@@ -374,13 +378,13 @@ def _apply_detach(snap: ScratchSnapshot, parsed: ScratchParsedArgs, rt: _Scratch
     return 0, lines
 
 
-def dispatch_scratch_cli_action(
-    parsed: ScratchParsedArgs, env: ManagedCliEnv, *, read_only: bool
+def dispatch_cache_mount_cli_action(
+    parsed: CacheMountParsedArgs, env: ManagedCliEnv, *, read_only: bool
 ) -> tuple[int, list[str]]:
     """Resolve runtime dependencies and execute the requested `scratch` subcommand."""
     del read_only
     env_map = os.environ if env.env is None else env.env
-    rt = _ScratchRuntime(
+    rt = _CacheMountRuntime(
         seam_root=(env_map.get(_SEAM_ROOT_ENV) or "").strip(),
         ctx=HostExecutionContext() if env.ctx is None else env.ctx,
         runner=SubprocessCommandRunner() if env.runner is None else env.runner,
@@ -390,13 +394,13 @@ def dispatch_scratch_cli_action(
 
     snap = _probe_snapshot(parsed, rt)
     match parsed.action:
-        case ScratchAction.STATUS:
-            return 0, format_scratch_status(snap, seam_root=rt.seam_root)
-        case ScratchAction.PLAN:
-            return 0, format_scratch_plan(snap, prog, allow_nonempty=parsed.allow_nonempty, seam_root=rt.seam_root)
-        case ScratchAction.ATTACH:
+        case CacheMountAction.STATUS:
+            return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)
+        case CacheMountAction.PLAN:
+            return 0, format_cache_mount_plan(snap, prog, allow_nonempty=parsed.allow_nonempty, seam_root=rt.seam_root)
+        case CacheMountAction.ATTACH:
             return _apply_attach(snap, parsed, rt)
-        case ScratchAction.DETACH:
+        case CacheMountAction.DETACH:
             return _apply_detach(snap, parsed, rt)
         case _:
-            return 0, format_scratch_status(snap, seam_root=rt.seam_root)
+            return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)
