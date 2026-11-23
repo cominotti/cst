@@ -315,16 +315,13 @@ def apply_iocost(
     if rc_w != 0 or live_only:
         return rc_w, out
     # The lock is free again: enable --now starts the service, which takes it.
-    component = Component.BTRFS_IOCOST.value
-    for step in (
-        lambda: _enable_iocost_service(cmd_runner, paths),
-        lambda: _installer_step(cmd_runner, paths.installer_script, ["mark", "--component", component, "done"]),
-    ):
-        rc_s, lines_s = step()
-        out.extend(lines_s)
-        if rc_s != 0:
-            return rc_s, out
-    return 0, out
+    rc_s, lines_s = _enable_iocost_service(cmd_runner, paths)
+    out.extend(lines_s)
+    if rc_s != 0:
+        return rc_s, out
+    mark = ["mark", "--component", Component.BTRFS_IOCOST.value, "done"]
+    rc_m, lines_m = _installer_step(cmd_runner, paths.installer_script, mark)
+    return rc_m, [*out, *lines_m]
 
 
 def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, list[str]]:
