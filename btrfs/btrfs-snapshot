@@ -664,7 +664,8 @@ planned_left() {
     while read -r strategy path; do
         [[ -z "${path}" || "${strategy}" == \#* ]] && continue
         if [[ "${strategy}" == aside ]]; then
-            [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+            # A link is never put aside (put_aside skips it): it is not left either.
+            [[ -d "${path}" && ! -L "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
                 ! mountpoint -q "${path}" && ! mountpoint -q "$(dirname "${path}")" &&
                 printf '%s\n' "${path}"
         # A symlink is no mount point here (mountpoint follows it): it stays until convert_one skips it.

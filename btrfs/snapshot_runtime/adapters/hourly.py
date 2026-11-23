@@ -169,6 +169,7 @@ def planned_left(m: SnapshotRun) -> str:
         if strategy == "aside":
             if (
                 os.path.isdir(path)
+                and not os.path.islink(path)  # put_aside never moves a link: it is not left
                 and not m.is_subvol(path)
                 and not m.is_subvol(parent)
                 and not m.is_mountpoint(path)

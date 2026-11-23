@@ -979,6 +979,23 @@ class WaitingTest(Base):
         self.assertFalse(os.path.exists(self.path("etc/btrfs-setup/convert-at-boot")))
         self.assertEqual(sorted(os.listdir(self.state)), ["last-ok"])
 
+    def test_an_aside_link_does_not_block_hourly_snapshots(self) -> None:
+        # The Python planned_left listed a planned aside path that is a link (os.path.isdir follows
+        # it), which put_aside never moves: snapshots waited for a reboot at every run.
+        bulk_uv = os.path.join(self.home, "Bulk", "uv")
+        os.makedirs(bulk_uv)
+        cache = os.path.join(self.home, ".cache")
+        os.makedirs(cache)
+        link = os.path.join(cache, "uv")
+        os.symlink(bulk_uv, link)
+        self.write("etc/btrfs-setup/convert-plan", f"aside {link}\n")
+        self.write("etc/btrfs-setup/convert-at-boot", "")
+        r = self.run_prog("hourly")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(log(5, "all planned conversions done; snapshots start"), self.lines(r.stdout))
+        self.assertEqual(os.readlink(link), bulk_uv)
+        self.assertEqual([c[0] for c in self.core_calls()], ["snapshot"])
+
     def test_external_mountpoint_cache_does_not_block_hourly_snapshots(self) -> None:
         cache = os.path.join(self.home, ".cache")
         uv = os.path.join(cache, "uv")

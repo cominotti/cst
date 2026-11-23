@@ -287,7 +287,9 @@ There are two kinds:
 > is no mount point here, even when it points to one (`mountpoint` follows the
 > link): `plan` shows it as to do, and the conversion skips it as "not a
 > directory (a symlink or file)". The child caches of a symlinked parent stay
-> where they are, as before.
+> where they are, as before. A planned cache (`aside`, such as `~/.cache/uv`)
+> that is itself a symlink is left alone: it is never moved or deleted, `plan`
+> does not list it, and the conversion does not wait for it.
 
 **What stays in /home snapshots** (examples): your documents, `Downloads`
 (except `Downloads/iso`, which is a link into `~/Bulk`), `Videos`,

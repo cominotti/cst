@@ -1994,6 +1994,29 @@ class SnapEntryStateTest(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["mounted", "todo"]), r.stderr)
 
+    def test_an_aside_link_is_not_shown_as_to_delete(self) -> None:
+        # put_aside never moves a link, so plan must not list one as "cache: deleted before
+        # converting its parent" (test -d follows it).
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-entry-test-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        os.mkdir(os.path.join(tmp, "real"))
+        os.symlink(os.path.join(tmp, "real"), os.path.join(tmp, "link"))
+        script = (
+            f'SRC={BTRFS}; . "$SRC/setup-snapshots.bash"; SNAP_STATE="$T/state"\n'
+            "mountpoint() { return 1; }\n"
+            'snap_entry_state aside "$T/real"; snap_entry_state aside "$T/link"\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": tmp, "HOME": tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["aside", "-"]), r.stderr)
+
 
 class WriteCommandHelpTest(unittest.TestCase):
     """`cst btrfs iocost apply --help` and `scrub-limit set --help` print help without sudo:

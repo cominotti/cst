@@ -281,7 +281,8 @@ snap_install_runtime() {
 snap_entry_state() {   # strategy path
     local strategy="$1" path="$2"
     if [[ "${strategy}" == aside ]]; then
-        if [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+        # A link is never put aside (put_aside skips it): nothing to show.
+        if [[ -d "${path}" && ! -L "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
             ! mountpoint -q "${path}" 2>/dev/null && ! mountpoint -q "$(dirname "${path}")" 2>/dev/null; then
             echo aside
         else

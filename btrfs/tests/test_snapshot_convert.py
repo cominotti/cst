@@ -230,6 +230,24 @@ class ConvertTest(Base):
         left = self.run_prog("planned-left")
         self.assertEqual((left.returncode, left.stdout), (0, ""))
 
+    def test_an_aside_link_is_left_alone_and_never_left(self) -> None:
+        # put_aside skips a link, but planned_left listed it (test -d follows it): the boot flag stayed
+        # and convert-boot gave up after its retries, for a cache already somewhere else.
+        bulk_uv = self.tree("Bulk-uv")
+        cache = os.path.join(self.home, ".cache")
+        os.makedirs(cache)
+        link = os.path.join(cache, "uv")
+        os.symlink(bulk_uv, link)
+        self.plan(f"aside {link}")
+        self.write(BOOT_FLAG, "")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+        self.assertEqual(self.run_prog("convert").returncode, 0)
+        self.assertEqual(os.readlink(link), bulk_uv)
+        self.assertEqual(read(os.path.join(bulk_uv, "file")), "data\n")
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+
     def test_a_busy_cache_stays_and_its_parent_is_still_cloned(self) -> None:
         cache = self.tree(".cache")
         uv = os.path.join(cache, "uv")
