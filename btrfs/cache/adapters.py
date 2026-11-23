@@ -57,6 +57,7 @@ _FINDMNT_TIMEOUT_S: Final = 15
 _ACCOUNT_MIN_FIELDS: Final = 6
 _FSTAB_MODE: Final = 0o644
 _MOUNT_TIMEOUT_S: Final = 30
+_NOT_MOUNTED: Final = LiveMount(source="", target="", fstype="", options="", uuid="", fsroot="")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,16 +175,17 @@ def _probe_base(kind: CacheMountKind, tables: _MountTables) -> BaseMountInfo:
     path = BASE_FOR_KIND[kind]
     live = tables.live.get(path)
     fst = tables.fstab.get(path)
+    seen = live if live is not None else _NOT_MOUNTED
     return BaseMountInfo(
         path=path,
         mounted=live is not None,
-        fstype=live.fstype if live is not None else "",
-        uuid=live.uuid if live is not None else "",
-        options=live.options if live is not None else "",
+        fstype=seen.fstype,
+        uuid=seen.uuid,
+        options=seen.options,
         in_fstab=fst is not None,
         fstab_options=fst.options if fst is not None else "",
-        source=live.source if live is not None else "",
-        fsroot=live.fsroot if live is not None else "",
+        source=seen.source,
+        fsroot=seen.fsroot,
     )
 
 
@@ -269,42 +271,36 @@ def _ensure_private_dir(host_path: str, user: CacheMountUser) -> None:
 
 def _ensure_scratchpad_tag(source_path: str, user: CacheMountUser) -> None:
     tag_path = os.path.join(source_path, CACHE_TAG)
-    if os.path.exists(tag_path) or os.path.islink(tag_path):
+    if os.path.lexists(tag_path):
         return
     payload = CACHE_SIGNATURE + b"\n# Directory tag written by cst btrfs cache (excluded from backups).\n"
-    write_atomic(tag_path, payload, mode=FILE_MODE_TAG, relabel=(os.geteuid() == 0))
+    write_atomic(tag_path, payload, mode=FILE_MODE_TAG)
     if os.geteuid() == 0:
         os.chown(tag_path, user.uid, user.gid)
 
 
+def _run_mount(rt: _CacheMountRuntime, argv: list[str], what: str) -> str | None:
+    """Run mount or umount; None, or why it failed (what: the command as the message names it)."""
+    res = rt.runner.run(argv, timeout=_MOUNT_TIMEOUT_S, locale_c=True, output=OutputMode.CAPTURE)
+    return None if res.returncode == 0 else res.failure(what)
+
+
 def _bind(rt: _CacheMountRuntime, b: CacheMountBinding) -> str | None:
     """mount --bind of one binding; None, or why it failed."""
-    res = rt.runner.run(
-        ["mount", "--bind", _map_path(b.source, rt, read_only=False), _map_path(b.target, rt, read_only=False)],
-        timeout=_MOUNT_TIMEOUT_S,
-        locale_c=True,
-        output=OutputMode.CAPTURE,
-    )
-    return None if res.returncode == 0 else res.failure(f"mount --bind {b.source} {b.target}")
+    argv = ["mount", "--bind", _map_path(b.source, rt, read_only=False), _map_path(b.target, rt, read_only=False)]
+    return _run_mount(rt, argv, f"mount --bind {b.source} {b.target}")
 
 
 def _unbind(rt: _CacheMountRuntime, b: CacheMountBinding) -> str | None:
     """umount of one binding's target; None, or why it failed."""
-    res = rt.runner.run(
-        ["umount", _map_path(b.target, rt, read_only=False)],
-        timeout=_MOUNT_TIMEOUT_S,
-        locale_c=True,
-        output=OutputMode.CAPTURE,
-    )
-    return None if res.returncode == 0 else res.failure(f"umount {b.target}")
+    return _run_mount(rt, ["umount", _map_path(b.target, rt, read_only=False)], f"umount {b.target}")
 
 
 def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _CacheMountRuntime) -> str | None:
     """Write /etc/fstab and reload systemd; None, or why it failed after /etc/fstab was put back
     as it was (the previous text, or no file when there was none)."""
-    relabel = os.geteuid() == 0
     try:
-        write_atomic(fstab_path, new_text, mode=_FSTAB_MODE, relabel=relabel)
+        write_atomic(fstab_path, new_text, mode=_FSTAB_MODE)
     except OSError as exc:
         return f"cannot write {FSTAB_PATH}: {exc.strerror or exc}"
     res = SystemctlAdapter(rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
@@ -315,7 +311,7 @@ def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _Cac
         if previous is None:
             os.unlink(fstab_path)
         else:
-            write_atomic(fstab_path, previous, mode=_FSTAB_MODE, relabel=relabel)
+            write_atomic(fstab_path, previous, mode=_FSTAB_MODE)
     except OSError as exc:
         return f"{why}; cannot put {FSTAB_PATH} back: {exc.strerror or exc}"
     return why
