@@ -27,7 +27,9 @@ from btrfs.scrub_limit.domain import (
     ScrubParsedArgs,
     parse_scrub_dropin_limit,
     parse_scrub_limit_args,
+    ScrubStatusSnapshot,
     render_scrub_dropin,
+    scrub_limit_status_lines,
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
@@ -180,6 +182,25 @@ class ScrubLimitDomainTest(unittest.TestCase):
         for argv in (["set", "--help"], ["set", "500M", "-h"], ["off", "--help"], ["plan", "off", "help"]):
             with self.subTest(argv=argv):
                 self.assertEqual(parse_scrub_limit_args(argv), ScrubParsedArgs(ScrubLimitAction.HELP))
+
+    def test_status_names_the_one_command_that_fixes_a_drift(self) -> None:
+        for conf, want in (
+            ("NAS_ENABLED=1\n", "(run: cst btrfs scrub-limit off)"),
+            (None, "(run: cst btrfs scrub-limit off)"),
+            ("SCRUB_LIMIT='1G'\n", "(run: cst btrfs scrub-limit set 1G)"),
+        ):
+            with self.subTest(conf=conf):
+                lines = scrub_limit_status_lines(
+                    ScrubStatusSnapshot(
+                        conf_path="/etc/btrfs-setup/snapshots.conf",
+                        conf_text=conf,
+                        conf_unreadable=False,
+                        dropin_path="/etc/x/10-cst-limit.conf",
+                        dropin_text=render_scrub_dropin("500M"),
+                        live_sysfs=(),
+                    )
+                )
+                self.assertEqual(lines[1], f"  service: 500M, DIFFERS from setting {want}")
 
     def test_render_dropin_matches_btrfs_setup_script_byte_for_byte(self) -> None:
         setup = os.path.join(REPO, "btrfs-setup.sh")

@@ -213,9 +213,8 @@ def scrub_limit_status_lines(snapshot: ScrubStatusSnapshot) -> list[str]:
     elif want == have:
         svc_line = f"  service: {have or 'no limit'}, as set ({snapshot.dropin_path})"
     else:
-        svc_line = (
-            f"  service: {have or 'no limit'}, DIFFERS from setting (run: cst btrfs scrub-limit set {want or ''} / off)"
-        )
+        fix = f"set {want}" if want else "off"
+        svc_line = f"  service: {have or 'no limit'}, DIFFERS from setting (run: cst btrfs scrub-limit {fix})"
     lines = [want_line, svc_line]
     if snapshot.live_sysfs:
         lines.append(f"  now in sysfs (bytes/s, 0 = no limit): {', '.join(snapshot.live_sysfs)}")
