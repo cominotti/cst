@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import posixpath
 import re
 from typing import Final
 
@@ -21,6 +22,7 @@ from btrfs.cache.domain import (
     mount_device,
     parse_all_mounts,
     parse_managed_fstab_entries,
+    source_fsroot,
 )
 from btrfs.compress.domain import MountEntry
 
@@ -137,6 +139,18 @@ def _check_base_mount(
         )
 
 
+def _is_cst_bind(live: MountEntry, base_live: MountEntry | None, user: str) -> bool:
+    """live, the mount at a managed target, is CST's bind as far as the mount table tells: on the
+    base's device and, when findmnt names both roots (SOURCE[FSROOT]), at `<base root>/<user>`.
+    With the base not mounted there is nothing to compare with (it has a warning of its own)."""
+    if base_live is None:
+        return True
+    if mount_device(live.source) != mount_device(base_live.source):
+        return False
+    root, base_root = source_fsroot(live.source), source_fsroot(base_live.source)
+    return root is None or base_root is None or root == posixpath.join(base_root, user)
+
+
 def assess_cache_mount_health(
     fstab_text: str | None,
     proc_mounts_text: str | None,
@@ -175,6 +189,16 @@ def assess_cache_mount_health(
         )
         for entry in managed
         if entry.target not in live_by_target
+    )
+    findings.extend(
+        CacheMountFinding(
+            CacheMountFindingSeverity.WARN,
+            f"{entry.target} (user={entry.user}) has a mount that is not CST's bind of {entry.source}",
+            fix=f"btrfs cache status --user {entry.user}",
+        )
+        for entry in managed
+        if (live := live_by_target.get(entry.target)) is not None
+        and not _is_cst_bind(live, live_by_target.get(BASE_FOR_KIND[entry.kind]), entry.user)
     )
 
     if not findings:

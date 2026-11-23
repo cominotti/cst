@@ -294,6 +294,31 @@ class CacheMountDomainTests(unittest.TestCase):
         )
         self.assertEqual([f.message for f in found if "crypttab" in f.message], warn)
 
+    def test_doctor_warns_when_a_managed_target_has_another_mount(self) -> None:
+        # Any mount at the target counted as an active bind: a tmpfs, another drive or another user's
+        # folder there gave the ok line, while status says "mounted (other source!)".
+        fstab = (
+            "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n"
+            f"/var/mnt/cache/u /var/home/u/.cache none bind,nofail 0 0 {CACHE_MOUNT_MARKER} user=u kind=cache\n"
+        )
+        crypt = "cache UUID=abcd none nofail\n"
+        base = "/dev/mapper/cache[/cache] /var/mnt/cache btrfs rw 0 0\n"
+        warn = "/var/home/u/.cache (user=u) has a mount that is not CST's bind of /var/mnt/cache/u"
+        for at_target, warned in (
+            ("/dev/mapper/cache[/cache/u] /var/home/u/.cache btrfs rw 0 0\n", False),
+            ("/dev/mapper/cache /var/home/u/.cache btrfs rw 0 0\n", False),
+            ("tmpfs /var/home/u/.cache tmpfs rw 0 0\n", True),
+            ("/dev/sdb1 /var/home/u/.cache ext4 rw 0 0\n", True),
+            ("/dev/mapper/cache[/cache/alice] /var/home/u/.cache btrfs rw 0 0\n", True),
+        ):
+            with self.subTest(at_target=at_target):
+                found = assess_cache_mount_health(fstab, base + at_target, crypt)
+                self.assertEqual([f.message for f in found if f.message == warn], [warn] if warned else [])
+                if warned:
+                    self.assertIn("btrfs cache status --user u", [f.fix for f in found])
+                else:
+                    self.assertEqual([f.severity for f in found], [CacheMountFindingSeverity.OK])
+
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
             p = parse_cache_mount_args(argv)

@@ -13,7 +13,7 @@ from typing import Final, TypedDict, TypeIs
 
 from btrfs.compress.domain import MountEntry
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
-from cst_core.domain.text import HELP_WORDS, enum_member, file_lines, parse_subcommand_head
+from cst_core.domain.text import HELP_WORDS, enum_member, file_lines, group, parse_subcommand_head
 
 CACHE_BASE: Final = "/var/mnt/cache"
 SCRATCHPAD_BASE: Final = "/var/mnt/scratchpad"
@@ -315,6 +315,13 @@ def mount_holding(mounts: Sequence[LiveMount], path: str) -> LiveMount | None:
 def mount_device(source: str) -> str:
     """findmnt's SOURCE without the `[FSROOT]` it adds for a bind mount or a subvolume."""
     return _BRACKET_SUFFIX_RE.sub("", source)
+
+
+def source_fsroot(source: str) -> str | None:
+    """The FSROOT in the `[FSROOT]` findmnt adds to a bind's or a subvolume's SOURCE; None when the
+    source shows none (/proc/mounts never does; findmnt not for a filesystem's own root)."""
+    m = _BRACKET_SUFFIX_RE.search(source)
+    return group(m)[1:-1] if m is not None else None
 
 
 def is_bind_from(live: LiveMount, base: BaseMountInfo, user: str) -> bool:
