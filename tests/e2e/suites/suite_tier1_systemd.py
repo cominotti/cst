@@ -4216,7 +4216,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             exec_bash,
             c,
             f"rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
-            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
+            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
+            # /etc/btrfs-setup when the test made it; then systemd forgets the unit and its drop-in.
+            "if [[ -e /var/tmp/e2e-126-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-126-made-etc; fi; "
+            "systemctl daemon-reload",
             check=False,
         )
         out = exec_bash(
@@ -4224,6 +4227,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             f"""
             set -e
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-126-made-etc
             install -d -m 0755 /etc/btrfs-setup
             printf "HOME_SUBVOL='home'\\n" > {conf}
             # btrfs:core as an install leaves it: a file of it recorded, and done.
@@ -4249,6 +4253,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF "unchanged: {dropin}" <<<"$again"
             st="$(/opt/cst-rw/cst btrfs scrub-limit status)"
             grep -qF "service: 500M, as set" <<<"$st"
+            # cst doctor agrees: the limit in the service, no warning about it or SCRUB_LIMIT.
+            doc="$(/opt/cst-rw/cst doctor || true)"
+            grep -qF "info   weekly scrub: speed limit 500M per device" <<<"$doc"
+            ! grep -qE "WARN +.*(weekly scrub|SCRUB_LIMIT)" <<<"$doc"
             # A daemon-reload that fails puts snapshots.conf and the drop-in back as they were.
             b=/var/tmp/e2e-126-bin
             mkdir -p "$b"
@@ -4356,8 +4364,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
             "/opt/cst-rw/cst cpu irq revert >/dev/null 2>&1 || true; "
             "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak /tmp/e2e-128a-bad.out "
-            "/tmp/e2e-128a-plan.out /tmp/e2e-128a-apply.out; "
+            "/tmp/e2e-128a-plan.out /tmp/e2e-128a-apply.out /tmp/e2e-128a-apply2.out; "
             "[[ ! -e /tmp/e2e-128a-cpu.orig ]] || mv /tmp/e2e-128a-cpu.orig /etc/cpu-setup/cpu-setup.conf; "
+            # What the test created when it was not there: its cpu-setup.conf, then the folder (if empty).
+            "if [[ -e /tmp/e2e-128a-cpu.newconf ]]; then rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.newconf; fi; "
+            "if [[ -e /tmp/e2e-128a-cpu.newdir ]]; then rmdir /etc/cpu-setup 2>/dev/null; rm -f /tmp/e2e-128a-cpu.newdir; fi; "
             "systemctl daemon-reload",
             check=False,
         )
@@ -4365,14 +4376,16 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             rf"""
             set -e
-            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.orig
-            last_cpu="$(( $(nproc) - 1 ))"
-            mkdir -p /etc/cpu-setup
-            if (( last_cpu >= 2 )); then
-                printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+            [[ -d /etc/cpu-setup ]] || touch /tmp/e2e-128a-cpu.newdir
+            if [[ -e /etc/cpu-setup/cpu-setup.conf ]]; then
+                cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.orig
             else
-                printf "BUILD_CPUS=''\n" >/etc/cpu-setup/cpu-setup.conf
+                touch /tmp/e2e-128a-cpu.newconf
             fi
+            last_cpu="$(( $(nproc) - 1 ))"
+            online_n="$(getconf _NPROCESSORS_ONLN)"
+            mkdir -p /etc/cpu-setup
+            printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
             runuser -u tester -- /opt/cst-rw/cst cpu irq status | grep -qF "BUILD_CPUS="
             runuser -u tester -- /opt/cst-rw/cst cpu irq plan --no-pkg | grep -qF "Dry run: nothing is changed."
             if (( last_cpu >= 2 )); then
@@ -4396,6 +4409,13 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 /opt/cst-rw/cst cpu irq revert
                 [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
                 rm -f /run/systemd/system/irqbalance.service
+            elif (( online_n <= 2 )); then
+                # Two online CPUs (or one): none can be banned (MIN_UNBANNED_CPUS = 2). apply says so and
+                # writes neither file; revert has nothing to remove.
+                /opt/cst-rw/cst cpu irq apply --no-pkg >/tmp/e2e-128a-apply2.out
+                grep -qF "only $online_n online CPUs; leaving all unbanned" /tmp/e2e-128a-apply2.out
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                /opt/cst-rw/cst cpu irq revert | grep -qxF "unchanged: no CST irqbalance files present"
             fi
 
             udevadm verify --resolve-names=never --no-style /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
@@ -7655,6 +7675,10 @@ EOF
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"[[ ! -e {journald_dest} ]] || echo present").stdout.strip():
             self.skipTest(f"{journald_dest} already present (another test's)")
+        # The cleanup removes the top-mount units: never ones the test did not make.
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
         self.addCleanup(
             exec_bash,
             c,
@@ -7778,6 +7802,9 @@ EOF
             grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
+            # cst doctor after the revert: every layer back to the kernel's default, no warning.
+            doc_after="$(/opt/cst-rw/cst doctor || true)"
+            ! grep -qF "WARN   root btrfs commit interval" <<<"$doc_after"
             if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi
             # A commit= a mount refuses, only in the unit (fstab, kargs and the mounts are right already):
             # plan changes nothing, revert replaces it, a second revert has nothing to do.
