@@ -1600,8 +1600,10 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   daemon-reload`) last. When a mount, the write or the reload fails, it
   unmounts the binds this run mounted and puts `/etc/fstab` back as it was
   (no file when there was none), so no line is left that would mount at the
-  next boot; it says `previous state restored.`, or `ROLLBACK INCOMPLETE`
-  with what it could not undo. `detach` unmounts only the binds CST made
+  next boot; it says `mounts and /etc/fstab restored.`, or `ROLLBACK
+  INCOMPLETE` with what it could not undo. The folders, the `CACHEDIR.TAG`
+  and a new target folder it made stay (empty, the user's): a second
+  `attach` uses them. `detach` unmounts only the binds CST made
   (`kept: TARGET has a mount CST did not make` for any other) and removes
   the user's managed lines; when that fails, it mounts again what it
   unmounted. It changes nothing, and says why, when it cannot tell CST's

@@ -337,7 +337,7 @@ def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _Cac
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
     if undo_errors:
         return f"ERROR: {cause}; ROLLBACK INCOMPLETE ({'; '.join(undo_errors)})"
-    return f"ERROR: {cause}; previous state restored."
+    return f"ERROR: {cause}; mounts and {FSTAB_PATH} restored."
 
 
 def _undo(rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted: bool) -> list[str]:

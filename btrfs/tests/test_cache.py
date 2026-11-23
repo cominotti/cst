@@ -665,7 +665,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn(
             "ERROR: mount --bind /var/mnt/scratchpad/danilo /var/home/danilo/Scratchpad failed: "
-            "mount: permission denied; previous state restored.",
+            "mount: permission denied; mounts and /etc/fstab restored.",
             err,
         )
         self.assertEqual(self._mounted(), [])
@@ -677,16 +677,20 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.reload_fails = True
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
-        self.assertIn("ERROR: systemctl daemon-reload failed: Failed to reload daemon; previous state restored.", err)
+        self.assertIn(
+            "ERROR: systemctl daemon-reload failed: Failed to reload daemon; mounts and /etc/fstab restored.", err
+        )
         self.assertFalse(os.path.lexists(os.path.join(self.tmp, "etc", "fstab")))
         self.assertEqual(self._mounted(), [])
+        # Only the mounts and /etc/fstab are taken back: the folders and the tag it made stay.
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo", CACHE_TAG)))
 
     def test_a_failed_reload_puts_the_old_fstab_back(self) -> None:
         self.runner.reload_fails = True
         before = self._fstab()
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
-        self.assertIn("previous state restored.", err)
+        self.assertIn("mounts and /etc/fstab restored.", err)
         self.assertEqual(self._fstab(), before)
         self.assertEqual(self._mounted(), [])
 
@@ -759,7 +763,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.runner.reload_fails = True
         rc, _, err = self._run(["detach"])
         self.assertEqual(rc, 1)
-        self.assertIn("previous state restored.", err)
+        self.assertIn("mounts and /etc/fstab restored.", err)
         self.assertEqual(self._fstab(), attached)
         self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
         _, out, _ = self._run(["status"])

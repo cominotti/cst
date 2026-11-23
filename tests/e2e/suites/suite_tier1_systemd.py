@@ -8007,7 +8007,7 @@ STUB
             # A daemon-reload that fails: fstab and the mounts as they were, and it says so.
             keep
             rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
-            [[ $rc == 1 ]] && grep -qF "previous state restored." {w}/out
+            [[ $rc == 1 ]] && grep -qF "mounts and /etc/fstab restored." {w}/out
             unchanged
 
             # detach: the data and the other users' lines stay; a mount CST did not make stays.
