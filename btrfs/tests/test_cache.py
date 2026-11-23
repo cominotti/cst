@@ -35,6 +35,7 @@ from btrfs.cache.domain import (
     parse_cache_mount_args,
     plan_attach_fstab,
     plan_detach_fstab,
+    unescape_mount_field,
 )
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters.runtime import ManagedCliEnv
@@ -203,6 +204,31 @@ class CacheMountDomainTests(unittest.TestCase):
             held = mount_holding(mounts, path)
             self.assertEqual(held.uuid if held else "", uuid, path)
         self.assertIsNone(mount_holding((), "/x"))
+
+    def test_fstab_fields_are_escaped_and_read_back(self) -> None:
+        home = "/var/home/u\\x\ty\nz two"
+        u = CacheMountUser("u", 1000, 1000, home)
+        text = plan_attach_fstab("", build_user_bindings(u, include_scratchpad=False))
+        self.assertEqual(
+            text,
+            "/var/mnt/cache/u /var/home/u\\134x\\011y\\012z\\040two/.cache none "
+            "bind,nofail,x-systemd.requires-mounts-for=/var/mnt/cache 0 0 "
+            f"{CACHE_MOUNT_MARKER} user=u kind=cache\n",
+        )
+        entries = parse_managed_fstab_entries(text)
+        self.assertEqual([(e.source, e.target) for e in entries], [("/var/mnt/cache/u", f"{home}/.cache")])
+        self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
+
+    def test_a_repeated_managed_line_goes(self) -> None:
+        u = CacheMountUser("u", 1000, 1000, "/var/home/u")
+        line = plan_attach_fstab("", build_user_bindings(u, include_scratchpad=False))
+        stale = line.replace("/var/mnt/cache/u ", "/var/mnt/cache/old ", 1)
+        fstab = f"UUID=r / btrfs defaults 0 0\n{stale}{line}"
+        self.assertEqual(
+            plan_attach_fstab(fstab, build_user_bindings(u, include_scratchpad=False)),
+            f"UUID=r / btrfs defaults 0 0\n{line}",
+        )
+        self.assertEqual(plan_detach_fstab(fstab, "u", {CacheMountKind.CACHE}), "UUID=r / btrfs defaults 0 0\n")
 
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
@@ -426,6 +452,24 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             )
         _, out, _ = self._run(["status", "--user", "bob"])
         self.assertIn(f"/var/mnt/cache/bob -> {tgt} [active (fstab + mounted)]", out)
+
+    def test_an_unmanaged_fstab_line_on_a_target_blocks(self) -> None:
+        with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
+            fh.write("/x /var/home/danilo/.cache none bind 0 0\n")
+        before = self._fstab()
+        _, out_s, _ = self._run(["status"])
+        self.assertIn("-> /var/home/danilo/.cache [fstab line CST does not manage (blocked)]", out_s)
+        _, out_p, _ = self._run(["plan"])
+        self.assertIn(
+            "BLOCKED: /var/home/danilo/.cache has an /etc/fstab line CST does not manage; remove it first", out_p
+        )
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("an /etc/fstab line CST does not manage", err)
+        self.assertEqual(self._fstab(), before)
+        self.assertFalse(any(c[:1] == ["mount"] for c in self.runner.calls))
+        rc_s, _, err_s = self._run(["attach", "--no-cache"])
+        self.assertEqual(rc_s, 0, err_s)
 
     def test_findmnt_failing_blocks_every_write(self) -> None:
         self.runner.findmnt_fails = True

@@ -1578,6 +1578,14 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   other mount there is "a mount CST did not make", and `attach` refuses.
   When findmnt fails, `status` says so and `plan`, `attach` and `detach`
   refuse: nothing is guessed from another table.
+- **What `attach` refuses** (`plan` shows each as `BLOCKED:`; nothing is
+  changed): a base folder that is not mounted or not btrfs, a cache drive on
+  the same filesystem as the home, a target that is a symlink, a non-empty
+  target without `--allow-nonempty`, a mount at a target that CST did not
+  make, and an `/etc/fstab` line CST does not manage for a target (remove it
+  first). CST writes paths into `/etc/fstab` escaped as fstab wants them (a
+  space as `\040`, a tab `\011`, a newline `\012`, a backslash `\134`), and
+  keeps one managed line per user and kind: a repeated one is removed.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

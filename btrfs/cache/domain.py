@@ -34,6 +34,7 @@ _DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
 _CRYPTTAB_MIN_FIELDS: Final = 2
 _CRYPTTAB_OPT_IDX: Final = 3
 _FSTAB_MIN_FIELDS: Final = 4
+_FSTAB_TARGET_FIELDS: Final = 2
 _MOUNTS_MIN_FIELDS: Final = 4
 _OCTAL_ESCAPE_RE: Final = re.compile(r"\\([0-7]{3})")
 _USERNAME_RE: Final = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
@@ -187,6 +188,7 @@ class BindingProbe:
     target_exists: bool
     target_nonempty: bool
     source_exists: bool
+    fstab_unmanaged: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +238,12 @@ def is_cache_mount_err(code: int, line: str) -> bool:
 def is_valid_username(name: str) -> bool:
     """Validate POSIX account name before interpolating paths or fstab tags."""
     return bool(_USERNAME_RE.fullmatch(name))
+
+
+def escape_mount_field(field: str) -> str:
+    """Encode a path for one fstab field as the kernel and systemd-fstab-generator read it back:
+    backslash, space, tab and newline as `\\134`, `\\040`, `\\011`, `\\012`."""
+    return field.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
 
 
 def unescape_mount_field(field: str) -> str:
@@ -429,8 +437,8 @@ def build_user_bindings(
 def render_bind_fstab_line(binding: CacheMountBinding) -> str:
     """Format one managed `/etc/fstab` bind-mount entry."""
     return (
-        f"{binding.source} {binding.target} none "
-        f"{CACHE_MOUNT_BIND_OPTS},x-systemd.requires-mounts-for={binding.base} 0 0 "
+        f"{escape_mount_field(binding.source)} {escape_mount_field(binding.target)} none "
+        f"{CACHE_MOUNT_BIND_OPTS},x-systemd.requires-mounts-for={escape_mount_field(binding.base)} 0 0 "
         f"{CACHE_MOUNT_MARKER} user={binding.user} kind={binding.kind.value}"
     )
 
@@ -457,6 +465,27 @@ def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
     )
 
 
+def unmanaged_fstab_targets(fstab_text: str) -> frozenset[str]:
+    """The targets (unescaped) of the /etc/fstab lines CST does not manage."""
+    targets: set[str] = set()
+    for raw in fstab_text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or _parse_one_managed_line(raw) is not None:
+            continue
+        fields = stripped.split()
+        if len(fields) >= _FSTAB_TARGET_FIELDS:
+            targets.add(unescape_mount_field(fields[1]))
+    return frozenset(targets)
+
+
+def has_managed_line(managed: Sequence[ManagedFstabEntry], binding: CacheMountBinding) -> bool:
+    """/etc/fstab has CST's line for this binding: its user and kind, with its source and target."""
+    return any(
+        (e.user, e.kind, e.source, e.target) == (binding.user, binding.kind, binding.source, binding.target)
+        for e in managed
+    )
+
+
 def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...]:
     """Return every `btrfs-cache`-managed entry in `fstab_text`."""
     out: list[ManagedFstabEntry] = []
@@ -468,16 +497,20 @@ def parse_managed_fstab_entries(fstab_text: str) -> tuple[ManagedFstabEntry, ...
 
 
 def plan_attach_fstab(fstab_text: str, bindings: Sequence[CacheMountBinding]) -> str:
-    """Upsert managed bind lines for `bindings`, preserving all unrelated and other-user lines."""
+    """Upsert managed bind lines for `bindings`, preserving all unrelated and other-user lines; a
+    repeated managed line of a wanted (user, kind) goes (one line, one mount unit per target)."""
     wanted = {(b.user, b.kind): render_bind_fstab_line(b) for b in bindings}
+    placed: set[tuple[str, CacheMountKind]] = set()
     out_lines: list[str] = []
     for line in fstab_text.splitlines():
         managed = _parse_one_managed_line(line)
-        if managed is not None and (managed.user, managed.kind) in wanted:
-            out_lines.append(wanted.pop((managed.user, managed.kind)))
-        else:
+        key = (managed.user, managed.kind) if managed is not None else None
+        if key is None or key not in wanted:
             out_lines.append(line)
-    out_lines.extend(wanted.values())
+        elif key not in placed:
+            out_lines.append(wanted[key])
+            placed.add(key)
+    out_lines.extend(text for key, text in wanted.items() if key not in placed)
     return "\n".join(out_lines) + "\n" if out_lines else ""
 
 
@@ -508,6 +541,8 @@ def _target_blockers(probe: BindingProbe, *, allow_nonempty: bool) -> list[str]:
     b = probe.binding
     if probe.target_is_symlink:
         return [f"{b.target} is a symlink (refusing to follow or overwrite symlink)"]
+    if probe.fstab_unmanaged:
+        return [f"{b.target} has an /etc/fstab line CST does not manage; remove it first"]
     if probe.mounted_from_source:
         return []
     if probe.mounted_other:
@@ -678,17 +713,16 @@ def format_cache_mount_usage(prog: str) -> str:
 
 
 def _binding_state_label(probe: BindingProbe) -> str:
-    if probe.mounted_from_source and probe.in_fstab:
-        return "active (fstab + mounted)"
     if probe.mounted_from_source:
-        return "mounted (not in fstab)"
-    if probe.mounted_other:
-        return "mounted (other source!)"
-    if probe.in_fstab:
-        return "in fstab (not mounted)"
-    if probe.target_is_symlink:
-        return "symlink (blocked)"
-    return "unattached (target non-empty)" if probe.target_nonempty else "not attached"
+        return "active (fstab + mounted)" if probe.in_fstab else "mounted (not in fstab)"
+    states = (
+        (probe.mounted_other, "mounted (other source!)"),
+        (probe.fstab_unmanaged, "fstab line CST does not manage (blocked)"),
+        (probe.in_fstab, "in fstab (not mounted)"),
+        (probe.target_is_symlink, "symlink (blocked)"),
+        (probe.target_nonempty, "unattached (target non-empty)"),
+    )
+    return next((label for on, label in states if on), "not attached")
 
 
 def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:

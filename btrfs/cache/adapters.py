@@ -24,9 +24,11 @@ from btrfs.cache.domain import (
     CacheMountSnapshot,
     CacheMountUser,
     LiveMount,
+    ManagedFstabEntry,
     build_user_bindings,
     format_cache_mount_plan,
     format_cache_mount_status,
+    has_managed_line,
     is_bind_from,
     mount_holding,
     mounts_by_target,
@@ -36,6 +38,7 @@ from btrfs.cache.domain import (
     plan_attach_fstab,
     plan_detach_fstab,
     selected_kinds,
+    unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
@@ -67,6 +70,8 @@ class _CacheMountRuntime:
 class _MountTables:
     live: dict[str, LiveMount]
     fstab: dict[str, MountEntry]
+    managed: tuple[ManagedFstabEntry, ...]
+    unmanaged_targets: frozenset[str]
 
 
 def _map_path(host_path: str, rt: _CacheMountRuntime, *, read_only: bool) -> str:
@@ -182,20 +187,20 @@ def _probe_binding(
     mapped_src = _map_path(binding.source, rt, read_only=True)
     mapped_tgt = _map_path(binding.target, rt, read_only=True)
     live = tables.live.get(binding.target)
-    fst = tables.fstab.get(binding.target)
     is_link = os.path.islink(mapped_tgt)
     exists = os.path.exists(mapped_tgt)
     nonempty = False if is_link else _dir_is_nonempty(mapped_tgt)
     from_source = live is not None and is_bind_from(live, base_info, user.name)
     return BindingProbe(
         binding,
-        fst is not None,
+        has_managed_line(tables.managed, binding),
         from_source,
         live is not None and not from_source,
         is_link,
         exists,
         nonempty,
         os.path.isdir(mapped_src),
+        fstab_unmanaged=binding.target in tables.unmanaged_targets,
     )
 
 
@@ -206,14 +211,16 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> Cac
 
     user, user_err = _resolve_target_user(parsed.user, rt)
     home_mount = mount_holding(mounts, user.home) if user is not None else None
+    managed = parse_managed_fstab_entries(fstab_text or "")
     tables = _MountTables(
         live=mounts_by_target(mounts),
         fstab={m.target: m for m in parse_all_mounts(fstab_text or "")},
+        managed=managed,
+        unmanaged_targets=unmanaged_fstab_targets(fstab_text or ""),
     )
     bases = {kind: _probe_base(kind, tables) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD)}
     kinds = selected_kinds(include_cache=parsed.include_cache, include_scratchpad=parsed.include_scratchpad)
     probes = tuple(_probe_binding(k, user, bases[k], tables, rt) for k in kinds) if user is not None else ()
-    managed = parse_managed_fstab_entries(fstab_text or "")
     return CacheMountSnapshot(
         user,
         user_err,
