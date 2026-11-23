@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import dataclasses
 import io
 import os
 import shutil
@@ -30,6 +31,9 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.application.install import InstallService, Placement
+from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandResult
 from tests.repo_files import REPO
 
@@ -85,6 +89,49 @@ class _FakeRunner:
                     return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
                 return CommandResult(0, "", "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
+
+
+def _core_text(path: str, record: str) -> Placement:
+    """A generated text of btrfs:core at path, listed in record (as installer.py text --component writes it)."""
+    return Placement(
+        path=path,
+        dest=path,
+        record=record,
+        component="btrfs:core",
+        src=None,
+        kind=GeneratedKind.TEXT,
+        owner=Owner.ROOT,
+        mode=0o644,
+    )
+
+
+class _RecordingInstallerRunner(_FakeRunner):
+    """installer.py text, remove-text and mark as the installer runs them as root: the files written and
+    removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
+
+    def __init__(self, record: str) -> None:
+        super().__init__()
+        self.record = record
+        self.svc = InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
+        self.marks = 0
+
+    @override
+    def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+        cmd = list(argv)
+        if "installer.py" not in " ".join(cmd) or any(part in " ".join(cmd) for part in self.fail_on):
+            return super().run(argv, input_text=input_text, **kw)
+        self.calls.append(cmd)
+        word = cmd[4]
+        if word == "mark":
+            self.marks += 1
+            self.svc.mark(self.record, cmd[cmd.index("--component") + 1])
+            return CommandResult(0, "", "", argv=tuple(cmd))
+        place = _core_text(cmd[5], self.record)
+        if word == "text":
+            os.makedirs(os.path.dirname(place.path), exist_ok=True)
+            written = self.svc.put(place, (input_text or "").encode(), as_root=False)
+            return CommandResult(0, f"{'written:  ' if written else 'unchanged:'} {place.path}\n", "", argv=tuple(cmd))
+        return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
 
 
 class _FakeCtx:
@@ -300,6 +347,46 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             f" ({self.dropin}: Access denied)",
         )
         self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+
+    def _core_state(self, record: str) -> str:
+        rec = JsonInstallRecord().read(record)
+        assert rec is not None
+        return rec.components.get("btrfs:core", "-")
+
+    def test_set_keeps_btrfs_core_done_in_the_install_record(self) -> None:
+        for before in ("done", "pending"):
+            with self.subTest(before=before):
+                record = os.path.join(self.tmp, f"installed-{before}.json")
+                paths = dataclasses.replace(self.paths, record_path=record)
+                runner = _RecordingInstallerRunner(record)
+                # btrfs:core as an install leaves it: one of its files recorded, then done (or not yet).
+                runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+                if before == "done":
+                    runner.svc.mark(record, "btrfs:core")
+                rc, lines = scrub_limit_apply(paths, "500M", runner=runner)
+                self.assertEqual(rc, 0, lines)
+                self.assertIn(f"written:   {self.dropin}", lines)
+                self.assertEqual(self._core_state(record), before)
+                self.assertEqual(runner.marks, 1 if before == "done" else 0)
+
+                rc_again, _ = scrub_limit_apply(paths, "500M", runner=runner)
+                self.assertEqual(rc_again, 0)
+                self.assertEqual(runner.marks, 1 if before == "done" else 0)
+                rc_off, off_lines = scrub_limit_apply(paths, None, runner=runner)
+                self.assertEqual(rc_off, 0, off_lines)
+                self.assertIn(f"removed:   {self.dropin}", off_lines)
+                self.assertEqual(self._core_state(record), before)
+                shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
+
+    def test_a_failed_mark_is_an_error(self) -> None:
+        record = os.path.join(self.tmp, "installed.json")
+        runner = _RecordingInstallerRunner(record)
+        runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+        runner.svc.mark(record, "btrfs:core")
+        runner.fail_on = {"installer.py mark"}
+        rc, lines = scrub_limit_apply(dataclasses.replace(self.paths, record_path=record), "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(lines[-1], "ERROR: the installer could not mark btrfs:core done: Access denied")
 
     def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
         os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back

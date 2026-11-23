@@ -27,7 +27,9 @@ from cst_core.adapters.runtime import (
     run_installer,
     undo_python_start,
 )
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.install import Component
+from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
@@ -42,6 +44,7 @@ class ScrubPaths:
     dropin_path: str = SCRUB_DROPIN_PATH
     btrfs_sysfs: str = "/sys/fs/btrfs"
     installer_script: str = ""
+    record_path: str = ROOT_RECORD  # where the installer records btrfs:core (and the drop-in)
 
 
 def start_scrub_process() -> None:
@@ -185,6 +188,15 @@ def _rolled_back(cause: str, failures: list[str | None], *, reload_hint: bool) -
     return f"ERROR: {cause}; previous configuration restored.{hint}"
 
 
+def _core_done(record_path: str) -> bool:
+    """Whether the install record has btrfs:core done (no record, or one that cannot be read: no)."""
+    try:
+        rec = JsonInstallRecord().read(record_path)
+    except (RecordFormatError, OSError):
+        return False
+    return rec is not None and rec.components.get(Component.BTRFS_CORE.value) == ComponentState.DONE
+
+
 def _failure(what: str, result: CommandResult) -> str:
     return f"{what} failed: {result.stderr.strip() or f'exit {result.returncode}'}"
 
@@ -205,6 +217,8 @@ def scrub_limit_apply(
     dropin_before, dropin_unreadable = _read_optional_strict(paths.dropin_path)
     if dropin_unreadable:
         return 1, [f"ERROR: cannot read {paths.dropin_path}"]
+    # Writing the drop-in sets btrfs:core pending; a component install had finished stays done.
+    core_done = _core_done(paths.record_path)
     out: list[str] = []
     new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
     conf_changed = new_conf is not None and new_conf != conf_text
@@ -237,4 +251,10 @@ def scrub_limit_apply(
         if dr.returncode != 0:
             failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
             return 1, [*out, _rolled_back(_failure("systemctl daemon-reload", dr), failures, reload_hint=True)]
+    if core_done and any(line.startswith("written:") for line in inst_lines):
+        rc_m, _lines, err_m = run_installer(
+            cmd_runner, paths.installer_script, ["mark", "--component", Component.BTRFS_CORE.value, "done"]
+        )
+        if rc_m != 0:
+            return rc_m, [*out, f"ERROR: the installer could not mark btrfs:core done: {err_m or f'exit {rc_m}'}"]
     return 0, out

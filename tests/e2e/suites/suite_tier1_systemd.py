@@ -4199,8 +4199,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_126_btrfs_scrub_limit_and_nvme_apst_cycle(self) -> None:
         """`cst btrfs scrub-limit plan/set/status/off` against the real /etc and systemd on the container,
-        plus verification that `cst-nvme-apst.conf` and `65-cst-nvme-apst.rules` install under `btrfs:core`."""
+        plus verification that `cst-nvme-apst.conf` and `65-cst-nvme-apst.rules` install under `btrfs:core`.
+        A btrfs:core that an install marked done stays done after `set` writes its drop-in."""
         c = self.SYSTEMD_CONTAINER
+        seed = "/etc/btrfs-setup/e2e-126-core-seed"
+        core_state = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json btrfs:core"
         conf = "/etc/btrfs-setup/snapshots.conf"
         dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
         rec = "/var/lib/cst/installed.json"
@@ -4210,8 +4213,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         self.addCleanup(
             exec_bash,
             c,
-            f"rm -f {conf} {dropin}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
-            f"{installer} forget-text {dropin}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
+            f"rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service",
             check=False,
         )
         out = exec_bash(
@@ -4221,6 +4224,10 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
             install -d -m 0755 /etc/btrfs-setup
             printf "HOME_SUBVOL='home'\\n" > {conf}
+            # btrfs:core as an install leaves it: a file of it recorded, and done.
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            [[ "$({core_state})" == *" done" ]]
             # Help after a write subcommand needs no sudo (tester has none here).
             runuser -u tester -- /opt/cst-rw/cst btrfs scrub-limit set --help | grep -qF "Usage: cst btrfs scrub-limit"
             /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
@@ -4232,6 +4239,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF "HOME_SUBVOL='home'" {conf}
             [[ -f {dropin} ]]
             grep -qF '"{dropin}"' {rec}
+            [[ "$({core_state})" == *" done" ]]
             systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 500M /var"
             systemctl show -p ExecStopPost btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 0 /var"
             again="$(/opt/cst-rw/cst btrfs scrub-limit set 500M)"
@@ -4244,6 +4252,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             ! grep -qF "SCRUB_LIMIT" {conf}
             grep -qxF "HOME_SUBVOL='home'" {conf}
             ! grep -qF '"{dropin}"' {rec}
+            [[ "$({core_state})" == *" done" ]]
             [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"

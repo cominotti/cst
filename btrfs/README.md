@@ -369,6 +369,11 @@ cst btrfs scrub-limit off
   `ERROR: ...; previous configuration restored.`, or with
   `ROLLBACK INCOMPLETE (...)` naming what could not be put back. A drop-in
   that cannot be read stops the command before it writes anything.
+  Writing the drop-in sets `btrfs:core` pending in the install record; when
+  `btrfs:core` was done before, `set` marks it done again once the drop-in is
+  written and `daemon-reload` worked, so `cst doctor` does not ask for an
+  install that nothing needs. A `btrfs:core` that was never installed stays
+  pending.
 - `status` shows the setting, the limit the service sets and the value in
   sysfs now; `cst doctor` shows the same as `info` and warns when the
   setting and the service differ.
