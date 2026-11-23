@@ -7836,7 +7836,8 @@ EOF
         --allow-nonempty; refused with fstab and the mounts unchanged: a symlinked target or source, a file
         at the target (even with --allow-nonempty), the same UUID as the home, an fstab line CST does not
         manage, a bind of another folder of the drive; a failing daemon-reload leaves fstab and the mounts
-        as they were; doctor's ok line; detach keeps the data, the other users' lines and a mount CST did
+        as they were, and one after which /etc/fstab cannot be put back says ROLLBACK INCOMPLETE and names
+        it; doctor's ok line; detach keeps the data, the other users' lines and a mount CST did
         not make."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
@@ -7897,7 +7898,7 @@ else:
             c,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}/bin {w}/fail {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
+            rm -rf {w} && mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
             for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
             mkdir -p "{w}/var/home/u four"
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
@@ -7930,9 +7931,14 @@ STUB
             done
             printf '#!/bin/bash\\n[[ "$1" != daemon-reload ]] || exit 1\\nexec /usr/bin/systemctl "$@"\\n' >{w}/fail/systemctl
             chmod +x {w}/fail/systemctl
+            # A daemon-reload that fails and leaves a folder that is not empty where /etc/fstab was.
+            printf '#!/bin/bash\\nif [[ "$1" == daemon-reload ]]; then rm -f %s; mkdir -p %s/x; exit 1; fi\\nexec /usr/bin/systemctl "$@"\\n' \
+                {w}/etc/fstab {w}/etc/fstab >{w}/fail2/systemctl
+            chmod +x {w}/fail2/systemctl
             export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
             cst=/opt/cst-rw/cst
             keep() {{ cp {w}/etc/fstab {w}/fstab.before; cp {w}/mounts {w}/mounts.before; }}
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
             unchanged() {{ cmp -s {w}/etc/fstab {w}/fstab.before && cmp -s {w}/mounts {w}/mounts.before; }}
             refused() {{  # refused NEEDLE ATTACH-ARGS...: exit 1, NEEDLE in the output, fstab and mounts unchanged
                 local needle="$1" rc=0
@@ -8007,6 +8013,17 @@ STUB
             keep
             rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
             [[ $rc == 1 ]] && grep -qF "mounts and /etc/fstab restored." {w}/out
+            unchanged
+            # ...and one after which /etc/fstab cannot be put back: the binds are taken back, and the message
+            # says ROLLBACK INCOMPLETE and names /etc/fstab instead of "restored.".
+            keep
+            rc=0; PATH="{w}/fail2:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "attach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "ROLLBACK INCOMPLETE (cannot put /etc/fstab back:" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            absent "restored." {w}/out
+            [[ -d {w}/etc/fstab ]]
+            cmp -s {w}/mounts {w}/mounts.before
+            rm -rf {w}/etc/fstab && cp {w}/fstab.before {w}/etc/fstab
             unchanged
 
             # detach: the data and the other users' lines stay; a mount CST did not make stays.

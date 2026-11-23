@@ -311,13 +311,22 @@ def _unbind(rt: _CacheMountRuntime, b: CacheMountBinding) -> str | None:
     return _run_mount(rt, ["umount", _map_path(b.target, rt, read_only=False)], f"umount {b.target}")
 
 
-def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _CacheMountRuntime) -> str | None:
-    """Write /etc/fstab and reload systemd; None, or why it failed after /etc/fstab was put back
-    as it was (the previous text, or no file when there was none)."""
+@dataclass(frozen=True, slots=True)
+class _FstabFailure:
+    """Why writing /etc/fstab and reloading systemd failed, and what of /etc/fstab could not be undone."""
+
+    cause: str
+    undo_errors: tuple[str, ...] = ()  # /etc/fstab could not be put back: its new lines stay
+
+
+def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _CacheMountRuntime) -> _FstabFailure | None:
+    """Write /etc/fstab and reload systemd; None, or why it failed, after /etc/fstab was put back as
+    it was (the previous text, or no file when there was none) or, in undo_errors, why it could not be.
+    A failed first write leaves the file as it was (write_atomic)."""
     try:
         write_atomic(fstab_path, new_text, mode=_FSTAB_MODE)
     except OSError as exc:
-        return f"cannot write {FSTAB_PATH}: {exc.strerror or exc}"
+        return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}")
     res = SystemctlAdapter(rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
     if res.returncode == 0:
         return None
@@ -328,8 +337,8 @@ def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _Cac
         else:
             write_atomic(fstab_path, previous, mode=_FSTAB_MODE)
     except OSError as exc:
-        return f"{why}; cannot put {FSTAB_PATH} back: {exc.strerror or exc}"
-    return why
+        return _FstabFailure(why, (f"cannot put {FSTAB_PATH} back: {exc.strerror or exc}",))
+    return _FstabFailure(why)
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
@@ -381,9 +390,10 @@ def _apply_attach(
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_attach_fstab(cur_fstab, [p.binding for p in snap.bindings])
     if new_fstab != cur_fstab:
-        err = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
-        if err is not None:
-            return 1, [*lines, _error_after_undo(err, _undo(rt, mounted, mounted=True))]
+        failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
+        if failed is not None:
+            undo_errors = [*_undo(rt, mounted, mounted=True), *failed.undo_errors]
+            return 1, [*lines, _error_after_undo(failed.cause, undo_errors)]
     lines.extend(f"Mounted {b.source} -> {b.target}." for b in mounted)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
@@ -423,9 +433,10 @@ def _apply_detach(
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_detach_fstab(cur_fstab, user.name, set(kinds))
     if new_fstab != cur_fstab:
-        err = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
-        if err is not None:
-            return 1, [*lines, _error_after_undo(err, _undo(rt, unmounted, mounted=False))]
+        failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
+        if failed is not None:
+            undo_errors = [*_undo(rt, unmounted, mounted=False), *failed.undo_errors]
+            return 1, [*lines, _error_after_undo(failed.cause, undo_errors)]
     lines.extend(f"Unmounted {b.target}." for b in unmounted)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")

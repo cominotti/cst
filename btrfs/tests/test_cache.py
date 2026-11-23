@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import io
 import json
 import os
@@ -82,6 +82,7 @@ class _FakeMountRunner:
         self.same_uuid = same_uuid
         self.findmnt_fails = False
         self.reload_fails = False
+        self.on_failed_reload: Callable[[], None] | None = None  # runs when a reload fails, before the answer
         self.mount_fails: set[str] = set()
         self.fstab_at_mount: list[str | None] = []
         self.calls: list[list[str]] = []
@@ -128,7 +129,7 @@ class _FakeMountRunner:
     def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
         fstab = os.path.join(self.root, "etc", "fstab")
         self.fstab_at_mount.append(
-            Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.exists(fstab) else None
+            Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.isfile(fstab) else None
         )
         if tgt_path.removeprefix(self.root) in self.mount_fails:
             return CommandResult(32, "", "mount: permission denied")
@@ -155,6 +156,8 @@ class _FakeMountRunner:
                 return CommandResult(1, "", "findmnt: cannot read the mount table")
             return CommandResult(0, self._findmnt_json(), "")
         if cmd[-1:] == ["daemon-reload"] and self.reload_fails:
+            if self.on_failed_reload is not None:
+                self.on_failed_reload()
             return CommandResult(1, "", "Failed to reload daemon")
         if cmd[:2] == ["mount", "--bind"]:
             return self._bind(cmd[2], cmd[3])
@@ -716,6 +719,62 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("mounts and /etc/fstab restored.", err)
         self.assertEqual(self._fstab(), before)
         self.assertEqual(self._mounted(), [])
+
+    def _fstab_becomes_a_folder(self) -> None:
+        """At the failed reload, /etc/fstab becomes a folder that is not empty: putting it back fails."""
+        fstab = os.path.join(self.tmp, "etc", "fstab")
+
+        def hook() -> None:
+            if os.path.lexists(fstab):
+                os.unlink(fstab)
+            os.makedirs(os.path.join(fstab, "x"))
+
+        self.runner.reload_fails = True
+        self.runner.on_failed_reload = hook
+
+    def test_an_fstab_that_cannot_be_put_back_is_rollback_incomplete(self) -> None:
+        # The message said "mounts and /etc/fstab restored." while /etc/fstab still held CST's new
+        # lines, which mount at the next boot.
+        for had_fstab in (True, False):
+            with self.subTest(had_fstab=had_fstab):
+                self.setUp()
+                if not had_fstab:
+                    os.unlink(os.path.join(self.tmp, "etc", "fstab"))  # put back means unlink
+                self._fstab_becomes_a_folder()
+                rc, _, err = self._run(["attach"])
+                self.assertEqual(rc, 1)
+                self.assertIn(
+                    "ERROR: systemctl daemon-reload failed: Failed to reload daemon; "
+                    "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: Is a directory)",
+                    err,
+                )
+                self.assertNotIn("restored.", err)
+                self.assertEqual(self._mounted(), [])  # the binds were still taken back
+
+    def test_a_failed_detach_names_an_fstab_it_cannot_put_back(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self._fstab_becomes_a_folder()
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: systemctl daemon-reload failed: Failed to reload daemon; "
+            "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: Is a directory)",
+            err,
+        )
+        self.assertNotIn("restored.", err)
+        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+
+    def test_a_bind_and_an_fstab_not_undone_are_both_named(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self._fstab_becomes_a_folder()
+        self.runner.mount_fails.add("/var/home/danilo/Scratchpad")  # mounting it again fails
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "; ROLLBACK INCOMPLETE (mount --bind /var/mnt/scratchpad/danilo /var/home/danilo/Scratchpad failed: "
+            "mount: permission denied; cannot put /etc/fstab back: Is a directory)",
+            err,
+        )
 
     def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
         with unittest.mock.patch.object(
