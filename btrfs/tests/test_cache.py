@@ -22,11 +22,9 @@ from btrfs.cache.domain import (
     SCRATCHPAD_BASE,
     CACHE_MOUNT_MARKER,
     CacheMountAction,
-    CacheMountFindingSeverity,
     CacheMountKind,
     CacheMountUser,
     LiveMount,
-    assess_cache_mount_health,
     build_user_bindings,
     mount_holding,
     mounts_by_target,
@@ -37,6 +35,7 @@ from btrfs.cache.domain import (
     plan_detach_fstab,
     unescape_mount_field,
 )
+from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.ports import CommandResult

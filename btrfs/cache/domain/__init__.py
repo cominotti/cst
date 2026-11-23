@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Pure domain logic for `cst btrfs cache`: CLI parsing, fstab planning, safety checks, health."""
+"""Pure domain logic for `cst btrfs cache`: CLI parsing, fstab planning, safety checks (cst doctor's check:
+`health.py`)."""
 
 from __future__ import annotations
 
@@ -26,13 +27,8 @@ DIR_MODE_PRIVATE: Final = 0o700
 FILE_MODE_TAG: Final = 0o644
 EXIT_USAGE: Final = 2
 
-_BTRFS: Final = "btrfs"
-_FLUSHONCOMMIT: Final = "flushoncommit"
-_NOFAIL: Final = "nofail"
-_DEFAULT_MAPPER: Final = "cache"
-_DEFAULT_MAPPER_PREFIXES: Final = ("cache-", "luks-cache")
-_CRYPTTAB_MIN_FIELDS: Final = 2
-_CRYPTTAB_OPT_IDX: Final = 3
+FSTYPE_BTRFS: Final = "btrfs"
+OPT_FLUSHONCOMMIT: Final = "flushoncommit"
 _FSTAB_MIN_FIELDS: Final = 4
 _FSTAB_TARGET_FIELDS: Final = 2
 _MOUNTS_MIN_FIELDS: Final = 4
@@ -84,14 +80,6 @@ class CacheMountKind(StrEnum):
 
     CACHE = "cache"
     SCRATCHPAD = "scratchpad"
-
-
-class CacheMountFindingSeverity(StrEnum):
-    """Severity levels emitted by `assess_cache_mount_health` for `cst doctor`."""
-
-    OK = "ok"
-    INFO = "info"
-    WARN = "warn"
 
 
 BASE_FOR_KIND: Final[dict[CacheMountKind, str]] = {
@@ -204,15 +192,6 @@ class CacheMountSnapshot:
     crypttab_text: str | None
     fstab_text: str | None
     mounts_error: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CacheMountFinding:
-    """One diagnostic item produced by `assess_cache_mount_health`."""
-
-    severity: CacheMountFindingSeverity
-    message: str
-    fix: str = ""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -528,8 +507,8 @@ def plan_detach_fstab(fstab_text: str, user: str, kinds: Collection[CacheMountKi
 def _base_blockers(base: BaseMountInfo | None, base_path: str, home_uuid: str) -> list[str]:
     if base is None or not base.mounted:
         return [f"{base_path} is not mounted (provision & mount the cache drive's btrfs subvolumes first)"]
-    if base.fstype != _BTRFS:
-        return [f"{base_path} filesystem is {base.fstype or 'unknown'}, expected {_BTRFS}"]
+    if base.fstype != FSTYPE_BTRFS:
+        return [f"{base_path} filesystem is {base.fstype or 'unknown'}, expected {FSTYPE_BTRFS}"]
     if not base.uuid or not home_uuid:
         return [f"cannot verify filesystem UUID separation between {base_path} and target home directory"]
     if base.uuid == home_uuid:
@@ -569,124 +548,8 @@ def validate_attach_snapshot(snap: CacheMountSnapshot, *, allow_nonempty: bool =
     return errors
 
 
-def _has_opt(options: str, needle: str) -> bool:
+def has_mount_option(options: str, needle: str) -> bool:
     return needle in (tok.strip() for tok in options.split(",") if tok.strip())
-
-
-def parse_crypttab_cache_issues(crypttab_text: str | None, backing_sources: Collection[str]) -> list[str]:
-    """Return missing-`nofail` warnings for any cache drive dm-crypt mapping in `/etc/crypttab`."""
-    if crypttab_text is None or not crypttab_text:
-        return []
-    mappers = {src.removeprefix("/dev/mapper/") for src in backing_sources if src.startswith("/dev/mapper/")}
-    issues: list[str] = []
-    for raw in crypttab_text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        fields = stripped.split()
-        if len(fields) < _CRYPTTAB_MIN_FIELDS:
-            continue
-        name = fields[0]
-        is_cache_drive = name == _DEFAULT_MAPPER or name.startswith(_DEFAULT_MAPPER_PREFIXES) or name in mappers
-        if not is_cache_drive:
-            continue
-        opts = fields[_CRYPTTAB_OPT_IDX] if len(fields) > _CRYPTTAB_OPT_IDX else ""
-        if not _has_opt(opts, _NOFAIL):
-            issues.append(f"/etc/crypttab entry {name!r} is missing '{_NOFAIL}' (boot could stall if NVMe is absent)")
-    return issues
-
-
-def _collect_active_bases(
-    live_by_target: dict[str, MountEntry],
-    fstab_by_target: dict[str, MountEntry],
-    managed: Sequence[ManagedFstabEntry],
-) -> tuple[str, ...]:
-    active: list[str] = []
-    for base in (CACHE_BASE, SCRATCHPAD_BASE):
-        referenced = any(e.base_match for e in _managed_for_base(managed, base))
-        if base in live_by_target or base in fstab_by_target or referenced:
-            active.append(base)
-    return tuple(active)
-
-
-@dataclass(frozen=True, slots=True)
-class _ManagedRef:
-    entry: ManagedFstabEntry
-    base_match: bool
-
-
-def _managed_for_base(managed: Sequence[ManagedFstabEntry], base: str) -> list[_ManagedRef]:
-    return [_ManagedRef(entry=m, base_match=(BASE_FOR_KIND[m.kind] == base)) for m in managed]
-
-
-def _check_base_mount(
-    base: str,
-    live: MountEntry | None,
-    fst: MountEntry | None,
-    findings: list[CacheMountFinding],
-) -> None:
-    if live is None:
-        findings.append(CacheMountFinding(CacheMountFindingSeverity.WARN, f"{base} is configured but not mounted"))
-    elif live.fstype != _BTRFS:
-        findings.append(
-            CacheMountFinding(CacheMountFindingSeverity.WARN, f"{base} filesystem is {live.fstype}, expected btrfs")
-        )
-    has_flush = (live is not None and _has_opt(live.options, _FLUSHONCOMMIT)) or (
-        fst is not None and _has_opt(fst.options, _FLUSHONCOMMIT)
-    )
-    if has_flush:
-        findings.append(
-            CacheMountFinding(
-                CacheMountFindingSeverity.WARN,
-                f"{base} has 'flushoncommit' (disable it on the dedicated cache drive to reduce NVMe writes)",
-            )
-        )
-
-
-def assess_cache_mount_health(
-    fstab_text: str | None,
-    proc_mounts_text: str | None,
-    crypttab_text: str | None,
-) -> list[CacheMountFinding]:
-    """Evaluate the dedicated NVMe cache drive's mounts and crypttab for `cst doctor`."""
-    live_by_target = {m.target: m for m in parse_all_mounts(proc_mounts_text or "")}
-    fstab_by_target = {m.target: m for m in parse_all_mounts(fstab_text or "")}
-    managed = parse_managed_fstab_entries(fstab_text or "")
-    active_bases = _collect_active_bases(live_by_target, fstab_by_target, managed)
-    if not active_bases and not managed:
-        return []
-
-    findings: list[CacheMountFinding] = []
-    backing_sources: list[str] = []
-    for base in active_bases:
-        live, fst = live_by_target.get(base), fstab_by_target.get(base)
-        backing_sources.extend(entry.source for entry in (live, fst) if entry is not None)
-        _check_base_mount(base, live, fst, findings)
-
-    findings.extend(
-        CacheMountFinding(CacheMountFindingSeverity.WARN, issue)
-        for issue in parse_crypttab_cache_issues(crypttab_text, backing_sources)
-    )
-
-    findings.extend(
-        CacheMountFinding(
-            CacheMountFindingSeverity.WARN,
-            f"{entry.target} (user={entry.user}) is in /etc/fstab but not mounted",
-            fix=f"btrfs cache attach --user {entry.user}",
-        )
-        for entry in managed
-        if entry.target not in live_by_target
-    )
-
-    if not findings:
-        bases_str = ", ".join(active_bases)
-        findings.append(
-            CacheMountFinding(
-                CacheMountFindingSeverity.OK,
-                f"{bases_str} mounted (btrfs, no flushoncommit); {len(managed)} user bind mount(s) active",
-            )
-        )
-    return findings
 
 
 def format_cache_mount_usage(prog: str) -> str:
@@ -736,7 +599,7 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
         base = snap.bases[kind]
         if base.mounted:
-            flush_note = " [WARN: flushoncommit]" if _has_opt(base.options, _FLUSHONCOMMIT) else ""
+            flush_note = " [WARN: flushoncommit]" if has_mount_option(base.options, OPT_FLUSHONCOMMIT) else ""
             lines.append(f"  {base.path:<18} mounted ({base.fstype}, uuid={base.uuid or 'unknown'}){flush_note}")
         elif base.in_fstab:
             lines.append(f"  {base.path:<18} in fstab (not mounted)")

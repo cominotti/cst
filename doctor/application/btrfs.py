@@ -32,7 +32,7 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
-from btrfs.cache.domain import CacheMountFindingSeverity, assess_cache_mount_health
+from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib
