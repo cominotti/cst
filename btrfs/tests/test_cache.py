@@ -35,7 +35,6 @@ from btrfs.cache.domain import (
     parse_cache_mount_args,
     plan_attach_fstab,
     plan_detach_fstab,
-    unescape_mount_field,
     unmanaged_fstab_targets,
 )
 from btrfs.cache.domain.health import (
@@ -240,7 +239,6 @@ class CacheMountDomainTests(unittest.TestCase):
         )
         entries = parse_managed_fstab_entries(text)
         self.assertEqual([(e.source, e.target) for e in entries], [("/var/mnt/cache/u", f"{home}/.cache")])
-        self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
 
     def test_only_a_newline_ends_an_fstab_line(self) -> None:
         # str.splitlines() also split at a carriage return, a form feed and other separators: a CRLF

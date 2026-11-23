@@ -13,7 +13,14 @@ from typing import Final, TypedDict, TypeIs
 
 from btrfs.compress.domain import MountEntry
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
-from cst_core.domain.text import HELP_WORDS, enum_member, file_lines, group, parse_subcommand_head
+from cst_core.domain.text import (
+    HELP_WORDS,
+    enum_member,
+    file_lines,
+    group,
+    parse_subcommand_head,
+    unescape_mount_field,
+)
 
 CACHE_BASE: Final = "/var/mnt/cache"
 SCRATCHPAD_BASE: Final = "/var/mnt/scratchpad"
@@ -34,7 +41,6 @@ OPT_FLUSHONCOMMIT: Final = "flushoncommit"
 _FSTAB_MIN_FIELDS: Final = 4
 _FSTAB_TARGET_FIELDS: Final = 2
 _MOUNTS_MIN_FIELDS: Final = 4
-_OCTAL_ESCAPE_RE: Final = re.compile(r"\\([0-7]{3})")
 _USERNAME_RE: Final = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 _BRACKET_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 
@@ -234,11 +240,6 @@ def escape_mount_field(field: str) -> str:
     """Encode a path for one fstab field as the kernel and systemd-fstab-generator read it back:
     backslash, space, tab and newline as `\\134`, `\\040`, `\\011`, `\\012`."""
     return field.replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
-
-
-def unescape_mount_field(field: str) -> str:
-    """Decode octal escapes (`\\040`, `\\011`, ...) in fstab or `/proc/mounts` tokens."""
-    return _OCTAL_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 8)), field)
 
 
 def parse_all_mounts(text: str) -> tuple[MountEntry, ...]:

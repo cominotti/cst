@@ -97,6 +97,7 @@ from cst_core.domain.text import (
     printf_q_words,
     read_fields,
     split,
+    unescape_mount_field,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
@@ -1944,6 +1945,11 @@ class RegexTextTest(unittest.TestCase):
         self.assertEqual(split(r"(-)", "a-b"), ["a", "-", "b"])
         with self.assertRaisesRegex(ValueError, "did not take part"):
             split(r"(-)|(\+)", "a-b")
+
+    def test_unescape_mount_field(self) -> None:
+        self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
+        self.assertEqual(unescape_mount_field("/plain"), "/plain")
+        self.assertEqual(unescape_mount_field("\\0401\\9"), " 1\\9")
 
 
 class StdStreamsTest(unittest.TestCase):

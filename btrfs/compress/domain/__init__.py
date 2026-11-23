@@ -9,6 +9,8 @@ from enum import StrEnum
 import re
 from typing import Final
 
+from cst_core.domain.text import unescape_mount_field
+
 DEFAULT_LEVEL: Final[int] = 1
 BTRFS_ZSTD_DEFAULT_LEVEL: Final[int] = 3
 MIN_ZSTD_LEVEL: Final[int] = 1
@@ -234,10 +236,6 @@ def rewrite_mount_options(options_str: str, target_option: str) -> str:
     return ",".join(out)
 
 
-def _unescape_fstab(field: str) -> str:
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
-
-
 def _fstab_uuid(source: str) -> str | None:
     """The UUID of a `UUID=...` fstab source (lower case), or None for another kind of source."""
     return source[len(_UUID_PREFIX) :].lower() if source[: len(_UUID_PREFIX)].upper() == _UUID_PREFIX else None
@@ -274,8 +272,8 @@ def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
             case [raw_src, raw_tgt, fstype, opts, *_] if fstype == _BTRFS_FSTYPE:
                 entries.append(
                     MountEntry(
-                        source=_unescape_fstab(raw_src),
-                        target=_unescape_fstab(raw_tgt),
+                        source=unescape_mount_field(raw_src),
+                        target=unescape_mount_field(raw_tgt),
                         fstype=_BTRFS_FSTYPE,
                         options=opts,
                     )
@@ -301,7 +299,7 @@ def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str]
             continue
         match list(_NON_WS_RE.finditer(raw_line)):
             case [s_src, s_tgt, s_type, s_opt, *_] if s_type.group() == _BTRFS_FSTYPE and _is_root_btrfs_entry(
-                _unescape_fstab(s_src.group()), _unescape_fstab(s_tgt.group()), root_uuid, sources
+                unescape_mount_field(s_src.group()), unescape_mount_field(s_tgt.group()), root_uuid, sources
             ):
                 new_opts = option_rewriter(s_opt.group())
                 out_lines.append(raw_line[: s_opt.start()] + new_opts + raw_line[s_opt.end() :])

@@ -67,6 +67,14 @@ def split(pattern: re.Pattern[str] | str, text: str, maxsplit: int = 0) -> list[
     return out
 
 
+def unescape_mount_field(field: str) -> str:
+    """A path field of /proc/mounts, /proc/self/mountinfo or /etc/fstab as the path it is: the kernel
+    and fstab write a space, a tab, a line break and a backslash as \\ and three octal digits
+    (\\040 \\011 \\012 \\134). One pass, so an escaped backslash before "040" stays a backslash and
+    the text 040."""
+    return _OCTAL_ESCAPE.sub(lambda m: chr(int(group(m, 1), 8)), field)
+
+
 def cgroup_v2_path(text: str) -> str | None:
     """The cgroup v2 ("unified") path in the text of a /proc/PID/cgroup: the rest of the first line
     that starts with "0::/", from its "/" on (on a hybrid system the cgroup v1 lines,
@@ -120,6 +128,7 @@ def parse_subcommand_head[E: StrEnum](
 
 _KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _READ_BLANKS: Final = re.compile(r"[ \t\n]+")
+_OCTAL_ESCAPE: Final = re.compile(r"\\([0-7]{3})")
 _BLANKS: Final = " \t"  # what bash splits words at (not \f, \v or NBSP: bash keeps them in a value)
 # Characters bash treats as syntax in an unquoted word; any of them makes the line a problem.
 _SHELL_SYNTAX: Final = frozenset(";&|<>()")
