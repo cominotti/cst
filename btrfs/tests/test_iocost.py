@@ -40,7 +40,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, pro
 from cst_core.adapters.runtime import RootElevation, enforce_host_root, lc_ctype_handover
 from cst_core.application.install import InstallService, Placement, staged
 from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
-from cst_core.domain.record import ROOT_RECORD, ComponentState
+from cst_core.domain.record import ComponentState
 from cst_core.ports import CommandResult, WriteFailed
 from tests.repo_files import REPO
 
@@ -194,7 +194,6 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             udev_control=os.path.join(self.tmp, "run", "udev", "control"),
             lock_path=os.path.join(self.tmp, "run", "btrfs-setup", "iocost-managed.lock"),
             install_root=os.path.join(self.tmp, "root"),
-            record_path=staged(os.path.join(self.tmp, "root"), ROOT_RECORD),
         )
         self._write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
         self._write(self.paths.qos_path, "259:2 enable=1 ctrl=user rpct=95.00\n")

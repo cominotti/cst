@@ -21,9 +21,8 @@ from cst_core.adapters.runtime import (
     probe_systemd_unit,
     run_installer,
 )
-from cst_core.application.install import InstallRefused, InstallService, Placement, staged
-from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
-from cst_core.domain.record import ROOT_RECORD
+from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
+from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner, select_entries
 from cst_core.domain.text import first_line, group
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
@@ -72,11 +71,16 @@ class IocostPaths:
     lock_path: str = IOCOST_LOCK
     lock_timeout: float = IOCOST_LOCK_TIMEOUT_S
     # revert removes btrfs:iocost in this process (it works from the installed zipapp, which has no
-    # installer.py): the files under install_root ("" = the real root), their lines in record_path.
+    # installer.py): the files under install_root ("" = the real root), their lines in root's install
+    # record under the same root (record_path).
     install_root: str = ""
-    record_path: str = ROOT_RECORD
     entry_file: str = ""
     fallback_root: str = ""
+
+    @property
+    def record_path(self) -> str:
+        """The install record that lists btrfs:iocost's files: root's, under install_root."""
+        return record_file(Owner.ROOT, None, self.install_root)
 
 
 def iocost_paths_for(
@@ -324,10 +328,8 @@ def apply_iocost(
 
 
 def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, list[str]]:
-    places = [
-        Placement.of(e, path=staged(paths.install_root, e.dest), dest=e.dest, record=paths.record_path)
-        for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)
-    ]
+    req = InstallRequest(root=paths.install_root, as_root=True)
+    places = [svc.placement(e, req) for e in select_entries(INSTALL_MANIFEST, component=Component.BTRFS_IOCOST)]
     try:
         return 0, list(svc.remove(places))
     except _UNINSTALL_ERRORS as exc:
