@@ -418,7 +418,10 @@ def plan_iocost(
     """`cst btrfs iocost plan`: what apply would write, changing nothing."""
     snap = collect_iocost_snapshot(paths, runner=runner, udev=target_device is None)
     pl = plan_iocost_apply(snap, target_device=target_device)
-    changes = None if live_only or pl.error is not None else component_changes(paths, runner)
+    # The installer's plan builds the zipapp: ask it only when the unit and the rule are there, since
+    # otherwise the plan says "would install:" whatever it answers.
+    installed = snap.service_present and snap.rule_installed
+    changes = component_changes(paths, runner) if not live_only and pl.error is None and installed else None
     return (1 if pl.error is not None else 0), format_iocost_plan(
         snap, pl, live_only=live_only, component_changes=changes
     )

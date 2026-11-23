@@ -1488,7 +1488,8 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   the service, whose next boot would write every disk;
 - `plan` asks the installer's plan (`installer.py plan --component
   btrfs:iocost`, through `/run/host` from a toolbox) whether the program,
-  the unit and the rule are current: after an upgrade that changed one of
+  the unit and the rule are current, once both the unit and the rule are
+  there (before that it shows `would install:` without asking): after an upgrade that changed one of
   them it shows `would update:  component btrfs:iocost (FILES)`, which
   `apply` then rewrites. From the installed program (no checkout) or when
   the installer's plan fails, it only checks that the unit and the rule are

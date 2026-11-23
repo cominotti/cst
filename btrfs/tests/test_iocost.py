@@ -595,6 +595,29 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertIn("unchanged:     component btrfs:iocost (active, enabled)", out_zipapp)
         self.assertEqual(_steps(self.runner.calls), [])
 
+    def test_plan_asks_no_installer_while_the_unit_or_the_rule_is_missing(self) -> None:
+        # Without the unit or the rule plan says "would install:" whatever the installer's plan answers,
+        # and that plan builds the whole zipapp: it is not asked.
+        root = self.paths.install_root
+        self.runner.installer_plan = (0, f"would write: {root}/etc/systemd/system/cst-btrfs-iocost.service\n")
+        for unit, rule in ((False, False), (False, True), (True, False)):
+            with self.subTest(unit=unit, rule=rule):
+                self.runner.calls.clear()
+                self.runner.load_state = "loaded" if unit else "not-found"
+                if rule:
+                    self._write(self.paths.rule_dest, "old rule\n")
+                elif os.path.exists(self.paths.rule_dest):
+                    os.unlink(self.paths.rule_dest)
+                rc, out = plan_iocost(self.paths, self.runner, live_only=False, target_device=None)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(
+                    "would install: component btrfs:iocost (cst-btrfs-iocost.service,"
+                    " /etc/udev/rules.d/91-cst-iocost.rules) + enable service",
+                    out,
+                )
+                self.assertEqual(_steps(self.runner.calls), [])  # no installer plan, nothing else
+                self.assertFalse(os.path.exists(self.paths.managed_file))
+
     def test_the_service_runs_after_udev_settle(self) -> None:
         with open(os.path.join(REPO, "btrfs", "units", "cst-btrfs-iocost.service"), encoding="utf-8") as fh:
             after = [line.split("=", 1)[1].split() for line in fh if line.startswith("After=")]
