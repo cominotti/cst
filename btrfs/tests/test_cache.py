@@ -320,6 +320,28 @@ class CacheMountDomainTests(unittest.TestCase):
                 else:
                     self.assertEqual([f.severity for f in found], [CacheMountFindingSeverity.OK])
 
+    def test_doctor_reads_a_base_without_a_root_as_the_top_of_the_drive(self) -> None:
+        # findmnt shows "[FSROOT]" only for a root other than "/": a base mounted at the drive's top
+        # level has none. "root unknown" made a bind of another user's folder there CST's bind (ok),
+        # while status called it "mounted (other source!)".
+        fstab = (
+            "/dev/mapper/cache /var/mnt/cache btrfs nofail 0 0\n"
+            f"/var/mnt/cache/u /var/home/u/.cache none bind,nofail 0 0 {CACHE_MOUNT_MARKER} user=u kind=cache\n"
+        )
+        crypt = "cache UUID=abcd none nofail\n"
+        base = "/dev/mapper/cache /var/mnt/cache btrfs rw 0 0\n"
+        warn = "/var/home/u/.cache (user=u) has a mount that is not CST's bind of /var/mnt/cache/u"
+        for at_target, warned in (
+            ("/dev/mapper/cache[/bob] /var/home/u/.cache btrfs rw 0 0\n", True),
+            ("/dev/mapper/cache[/u] /var/home/u/.cache btrfs rw 0 0\n", False),
+            ("/dev/mapper/cache /var/home/u/.cache btrfs rw 0 0\n", False),  # neither root named: cannot tell
+        ):
+            with self.subTest(at_target=at_target):
+                found = assess_cache_mount_health(fstab, base + at_target, crypt)
+                self.assertEqual([f.message for f in found if f.message == warn], [warn] if warned else [])
+                if not warned:
+                    self.assertEqual([f.severity for f in found], [CacheMountFindingSeverity.OK])
+
     def test_the_old_scratch_flag_is_a_usage_error(self) -> None:
         for argv in (["plan", "--no-scratch"], ["attach", "--no-scratch"], ["detach", "--no-scratch"]):
             p = parse_cache_mount_args(argv)

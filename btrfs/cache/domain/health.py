@@ -141,13 +141,17 @@ def _check_base_mount(
 
 def _is_cst_bind(live: MountEntry, base_live: MountEntry | None, user: str) -> bool:
     """live, the mount at a managed target, is CST's bind as far as the mount table tells: on the
-    base's device and, when findmnt names both roots (SOURCE[FSROOT]), at `<base root>/<user>`.
+    base's device and, when findmnt names its root (SOURCE[FSROOT]), at `<base root>/<user>`.
+    findmnt adds "[FSROOT]" only when the root is not the filesystem's top, so a base without one
+    under a bind with one is at "/". With neither root named (/proc/mounts alone) it cannot tell.
     With the base not mounted there is nothing to compare with (it has a warning of its own)."""
     if base_live is None:
         return True
     if mount_device(live.source) != mount_device(base_live.source):
         return False
     root, base_root = source_fsroot(live.source), source_fsroot(base_live.source)
+    if root is not None and base_root is None:
+        base_root = "/"
     return root is None or base_root is None or root == posixpath.join(base_root, user)
 
 
