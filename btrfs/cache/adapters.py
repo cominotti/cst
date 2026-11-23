@@ -238,9 +238,7 @@ def _probe_snapshot(parsed: CacheMountParsedArgs, rt: _CacheMountRuntime) -> Cac
     # A file there that cannot be read is no missing file: a fstab built from "" would drop every line.
     fstab_error: str | None = None
     try:
-        fstab_text = LocalFileSystemAdapter().read_text(
-            _map_path(FSTAB_PATH, rt, read_only=True), raise_unreadable=True
-        )
+        fstab_text = LocalFileSystemAdapter().read_existing_text(_map_path(FSTAB_PATH, rt, read_only=True))
     except OSError as exc:
         fstab_text, fstab_error = None, f"cannot read {FSTAB_PATH}: {exc.strerror or exc}"
     crypttab_text = read_text(_map_path(_CRYPTTAB_PATH, rt, read_only=True))
