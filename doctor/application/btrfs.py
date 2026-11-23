@@ -18,7 +18,6 @@ from btrfs.commit.domain import (
 )
 from btrfs.compress.domain import (
     OSTREE_BOOTED_PATH,
-    ROOT_TARGETS,
     TOP_MOUNT_UNIT_PATH,
     CoherenceReport,
     CompressMode,
@@ -35,7 +34,7 @@ from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_
 from btrfs.cache.domain import parse_all_mounts
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments
+from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments, unescape_mount_field
 from cst_core.domain.values import GIB, format_bytes_gib_mib
 from doctor.application.shared import (
     check,
@@ -608,22 +607,26 @@ def _findmnt_to_octal_field(field: str) -> str:
 
 
 def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
+    """The live btrfs mounts as /proc/mounts lines, and the root filesystem's UUID: that of the mounts
+    pick_root_mounts takes (the device of /sysroot, else /, else /var), never a separate btrfs /home's."""
     rc, out, _ = host.run(["findmnt", "-rn", "-t", "btrfs", "-o", "SOURCE,TARGET,OPTIONS,UUID"], timeout=15)
     if rc != 0 or not out.strip():
         return None, ""
     lines: list[str] = []
-    root_uuid = ""
+    uuids: list[tuple[str, str]] = []  # (target, UUID) of each line that has one
     for raw in out.splitlines():
         match raw.strip().split(None, 3):
             case [src, tgt, opts, uuid]:
                 esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
                 lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
-                if not root_uuid and tgt in ROOT_TARGETS:
-                    root_uuid = uuid
+                uuids.append((unescape_mount_field(esc_tgt), uuid))
             case [src, tgt, opts]:
                 esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
                 lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
-    return ("".join(lines) or None), root_uuid
+    text = "".join(lines)
+    root_targets = {m.target for m in pick_root_mounts(parse_proc_mounts(text))}
+    root_uuid = next((uuid for tgt, uuid in uuids if tgt in root_targets), "")
+    return (text or None), root_uuid
 
 
 def _findmnt_all_mounts(host: DoctorHostPort) -> str | None:

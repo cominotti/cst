@@ -1422,6 +1422,35 @@ class BtrfsCompressionDoctorTest(Scratch):
         self.assertIn("flatpak-spawn --host findmnt -rn -t btrfs -o SOURCE,TARGET,OPTIONS,UUID", self.calls())
         self.assert_read_only()
 
+    def test_the_root_uuid_is_the_root_filesystems_not_a_separate_home(self) -> None:
+        # The UUID was that of the first root-like target findmnt listed: a separate btrfs /var/home
+        # listed first gave its UUID, and /var/home's fstab line (no compression) was read as the root's.
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        home_uuid = "0b7c3a52-9d1e-4f60-8a2b-5c4d3e2f1a09"
+        etc = os.path.join(self.root, "etc")
+        os.makedirs(etc, exist_ok=True)
+        with open(os.path.join(etc, "fstab"), "w") as f:
+            f.write(
+                f"UUID={home_uuid} /var/home btrfs subvol=home,noatime 0 0\n"
+                f"UUID={UUID} /var btrfs subvol=var,compress=zstd:1,noatime 0 0\n"
+            )
+        with open(self.env["FIX_KARGS"], "w") as f:
+            f.write(f"ostree=/abc root=UUID={UUID} rw rootflags=subvol=root,compress=zstd:1,noatime\n")
+        home = f"/dev/dm-1[/home] /var/home rw,seclabel,ssd,noatime {home_uuid}\n"
+        root = (
+            f"/dev/dm-0[/root] /sysroot rw,seclabel,compress=zstd:1,ssd,noatime {UUID}\n"
+            f"/dev/dm-0[/var] /var rw,seclabel,compress=zstd:1,ssd,noatime {UUID}\n"
+        )
+        for listed in (home + root, root + home):
+            with self.subTest(home_first=listed.startswith(home)):
+                with open(self.env["FIX_FINDMNT_OPTS"], "w") as f:
+                    f.write(listed)
+                r = self.run_tool()
+                self.assertIn(
+                    "  ok     root btrfs compression: coherent (compress=zstd:1)", area_lines(r.stdout, "btrfs")
+                )
+                self.assert_read_only()
+
     def test_no_compression_anywhere_is_info(self) -> None:
         self._setup_compression(fstab_opt=None, kargs_opt=None, live_opt=None, top_opt="")
         r = self.run_tool()
