@@ -1072,6 +1072,10 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             ([], "/opt/cst/cst btrfs install --no-below"),
             ([], "/opt/cst/cst btrfs compress-force apply --yes"),
             ([], "/opt/cst/cst btrfs compress-force revert --yes"),
+            ([], "/opt/cst/cst btrfs commit-interval apply --yes"),
+            ([], "/opt/cst/cst btrfs commit-interval revert --yes"),
+            ([], "/opt/cst/cst btrfs cache attach --user tester"),
+            ([], "/opt/cst/cst btrfs cache detach --user tester"),
             ([], "/opt/cst/cst btrfs iocost apply"),
             ([], "/opt/cst/cst btrfs iocost revert"),
             ([], "/opt/cst/cst btrfs scrub-limit set 500M"),
@@ -7823,15 +7827,69 @@ EOF
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
     def test_160_btrfs_cache_attach_detach_and_doctor(self) -> None:
-        """`cst btrfs cache` attaches/detaches per-user bind mounts cleanly alongside real systemd and `cst doctor`."""
+        """`cst btrfs cache` per user, under a test root (CST_BTRFS_CACHE_ROOT), with real systemd and `cst doctor`.
+
+        findmnt, mount and umount are stand-ins that keep one mount table: findmnt answers the program's
+        `-J -l` call as the real one does (a bind's source "DEVICE[FSROOT]") and doctor's `-rn` call.
+        plan writes nothing; attach (again: nothing to do), --no-cache, --no-scratchpad and a home with a
+        space; the managed lines, copied to /etc/fstab, become mount units of systemd-fstab-generator at a
+        real daemon-reload (What, Where, Options, RequiresMountsFor); a non-empty target, then
+        --allow-nonempty; refused with fstab and the mounts unchanged: a symlinked target or source, a file
+        at the target (even with --allow-nonempty), the same UUID as the home, an fstab line CST does not
+        manage, a bind of another folder of the drive; a failing daemon-reload leaves fstab and the mounts
+        as they were; doctor's ok line; detach keeps the data, the other users' lines and a mount CST did
+        not make."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
+        stub = r"""#!/usr/bin/python3 -I
+# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
+import json, os, sys
+w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+state = os.path.join(w, "mounts")
+prog, args = sys.argv[1], sys.argv[2:]
+rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
+def save():
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.writelines("\t".join(r) + "\n" for r in rows)
+def holding(path):
+    best = rows[0]
+    for r in rows:
+        t = r[1].rstrip("/") or "/"
+        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
+            best = r
+    return best
+if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
+    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
+    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
+elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
+    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
+    for r in rows:
+        print(esc(r[0]), esc(r[1]), r[2], r[3])
+elif prog == "findmnt":
+    os.execv("/usr/bin/findmnt", ["findmnt", *args])
+elif prog == "mount" and args[:1] == ["--bind"]:
+    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
+    held = holding(src)
+    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
+    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
+    save()
+elif prog == "umount":
+    tgt = args[0].removeprefix(w)
+    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
+    if not idx:
+        sys.exit(32)
+    del rows[idx[-1]]
+    save()
+else:
+    sys.exit(2)
+"""
         self.addCleanup(
             exec_bash,
             c,
             f"""
             if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
             if [[ -f {w}/crypttab.bak ]]; then cp -a {w}/crypttab.bak /etc/crypttab; else rm -f /etc/crypttab; fi
+            systemctl daemon-reload || true
             rm -rf {w}
             """,
             check=False,
@@ -7840,94 +7898,128 @@ EOF
             c,
             f"""
             set -euo pipefail
-            rm -rf {w} && mkdir -p {w}/bin {w}/etc {w}/proc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1 {w}/var/home/u2
+            rm -rf {w} && mkdir -p {w}/bin {w}/fail {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
+            for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
+            mkdir -p "{w}/var/home/u four"
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
-            cat >{w}/etc/passwd <<'EOF'
-root:x:0:0:root:/root:/bin/bash
-u1:x:1000:1000:U1:/var/home/u1:/bin/bash
-u2:x:1001:1001:U2:/var/home/u2:/bin/bash
-EOF
-            cat >{w}/etc/crypttab <<'EOF'
-cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard
-EOF
+            {{
+                echo "root:x:0:0:root:/root:/bin/bash"
+                n=1000
+                for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do echo "$u:x:$n:$n::/var/home/$u:/bin/bash"; n=$((n + 1)); done
+                echo "u4:x:1100:1100::/var/home/u four:/bin/bash"
+            }} >{w}/etc/passwd
+            echo "cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard" >{w}/etc/crypttab
             cat >{w}/etc/fstab <<'EOF'
 /dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0
 /dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0
 EOF
-            cat >{w}/proc/mounts <<'EOF'
-/dev/dm-0 /var btrfs rw,noatime,compress-force=zstd:1,flushoncommit 0 0
-/dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress=zstd:1 0 0
-/dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress=zstd:1 0 0
-EOF
-            cat >{w}/bin/findmnt <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ " $* " == *"SOURCE,TARGET,OPTIONS,UUID"* ]]; then
-    while read -r src tgt _ opts _; do
-        printf '%s %s %s uuid-cache-2222\\n' "$src" "$tgt" "$opts"
-    done <{w}/proc/mounts
-    exit 0
-fi
-tgt=""
-prev=""
-for a in "$@"; do
-    if [[ "$prev" == "--target" ]]; then tgt="$a"; fi
-    prev="$a"
-done
-if [[ -n "$tgt" ]]; then
-    if [[ "$tgt" == *"/var/mnt/"* ]] || grep -qF " ${{tgt#{w}}} " {w}/proc/mounts; then
-        echo "btrfs uuid-cache-2222 /dev/mapper/cache"
-    else
-        echo "btrfs uuid-root-1111 /dev/dm-0"
-    fi
-    exit 0
-fi
-exec /usr/bin/findmnt "$@"
-EOF
-            cat >{w}/bin/mount <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${{1:-}}" == "--bind" ]]; then
-    tgt="${{3#{w}}}"
-    echo "/dev/mapper/cache $tgt btrfs rw,noatime,compress=zstd:1 0 0" >>{w}/proc/mounts
-    exit 0
-fi
-exec /usr/bin/mount "$@"
-EOF
-            cat >{w}/bin/umount <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-tgt="${{1#{w}}}"
-grep -vF " $tgt " {w}/proc/mounts >{w}/proc/mounts.tmp && mv {w}/proc/mounts.tmp {w}/proc/mounts
-EOF
-            chmod +x {w}/bin/findmnt {w}/bin/mount {w}/bin/umount
-
+            row() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cp {w}/mounts {w}/mounts.drive
+            cat >{w}/bin/mnt-stub <<'STUB'
+{stub}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            printf '#!/bin/bash\\n[[ "$1" != daemon-reload ]] || exit 1\\nexec /usr/bin/systemctl "$@"\\n' >{w}/fail/systemctl
+            chmod +x {w}/fail/systemctl
             export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
-            /opt/cst-rw/cst btrfs cache plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
-            [[ ! -e {w}/var/mnt/cache/u1 ]]
+            cst=/opt/cst-rw/cst
+            keep() {{ cp {w}/etc/fstab {w}/fstab.before; cp {w}/mounts {w}/mounts.before; }}
+            unchanged() {{ cmp -s {w}/etc/fstab {w}/fstab.before && cmp -s {w}/mounts {w}/mounts.before; }}
+            refused() {{  # refused NEEDLE ATTACH-ARGS...: exit 1, NEEDLE in the output, fstab and mounts unchanged
+                local needle="$1" rc=0
+                shift
+                keep
+                $cst btrfs cache attach "$@" >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "attach $* exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF -- "$needle" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                unchanged
+            }}
 
-            /opt/cst-rw/cst btrfs cache attach --user u1
-            /opt/cst-rw/cst btrfs cache attach --user u1 | grep -qF "nothing to do"
-            /opt/cst-rw/cst btrfs cache attach --user u2
-            [[ -d {w}/var/mnt/cache/u1 ]]
-            [[ -f {w}/var/mnt/scratchpad/u1/CACHEDIR.TAG ]]
-            grep -qF "user=u1 kind=cache" {w}/etc/fstab
-            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            # plan writes nothing.
+            keep
+            $cst btrfs cache plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
+            [[ ! -e {w}/var/mnt/cache/u1 ]] && unchanged
 
+            # attach, then again; --no-cache, --no-scratchpad; a home with a space.
+            $cst btrfs cache attach --user u1
+            $cst btrfs cache attach --user u1 | grep -qF "nothing to do"
+            [[ -d {w}/var/mnt/cache/u1 && -f {w}/var/mnt/scratchpad/u1/CACHEDIR.TAG ]]
+            grep -qF "user=u1 kind=cache" {w}/etc/fstab && grep -qF "user=u1 kind=scratchpad" {w}/etc/fstab
+            grep -qF "$(printf '%s\\t%s\\t' '/dev/mapper/cache[/cache/u1]' /var/home/u1/.cache)" {w}/mounts
+            $cst btrfs cache attach --user u2 --no-cache
+            ! grep -qF "user=u2 kind=cache" {w}/etc/fstab && grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            $cst btrfs cache attach --user u3 --no-scratchpad
+            grep -qF "user=u3 kind=cache" {w}/etc/fstab && ! grep -qF "user=u3 kind=scratchpad" {w}/etc/fstab
+            $cst btrfs cache attach --user u4
+            grep -qF '/var/mnt/cache/u4 /var/home/u\\040four/.cache none bind,nofail' {w}/etc/fstab
+            $cst btrfs cache status --user u4 | grep -qF "/var/home/u four/.cache [active (fstab + mounted)]"
+
+            # A non-empty target is refused, then --allow-nonempty attaches it.
+            mkdir -p {w}/var/home/u5/.cache && echo keep >{w}/var/home/u5/.cache/f
+            refused "is non-empty" --user u5
+            $cst btrfs cache attach --user u5 --allow-nonempty
+
+            # The lines in /etc/fstab: systemd-fstab-generator makes their mount units at a real daemon-reload.
             cp -a {w}/etc/fstab /etc/fstab
             cp -a {w}/etc/crypttab /etc/crypttab
-            doc_out="$(/opt/cst-rw/cst doctor || true)"
+            systemctl daemon-reload
+            for pair in "/var/mnt/cache/u1|/var/home/u1/.cache|/var/mnt/cache" \
+                "/var/mnt/scratchpad/u2|/var/home/u2/Scratchpad|/var/mnt/scratchpad" \
+                "/var/mnt/cache/u4|/var/home/u four/.cache|/var/mnt/cache"; do
+                IFS='|' read -r src tgt base <<<"$pair"
+                unit="$(systemd-escape --path --suffix=mount "$tgt")"
+                [[ -f "/run/systemd/generator/$unit" ]]
+                [[ "$(systemctl show -P What "$unit")" == "$src" ]]
+                [[ "$(systemctl show -P Where "$unit")" == "$tgt" ]]
+                systemctl show -P Options "$unit" | grep -qE '^bind,nofail(,|$)'
+                systemctl show -P RequiresMountsFor "$unit" | tr ' ' '\\n' | grep -qxF "$base"
+            done
+            doc_out="$($cst doctor || true)"
             grep -qF "ok     btrfs cache: /var/mnt/cache, /var/mnt/scratchpad mounted" <<<"$doc_out"
 
+            # Refused, each with fstab and the mounts unchanged.
+            ln -s /tmp {w}/var/home/u6/.cache
+            refused "/var/home/u6/.cache is a symlink" --user u6 --no-scratchpad
+            ln -s /tmp {w}/var/mnt/cache/u7
+            refused "/var/mnt/cache/u7 is a symlink" --user u7 --no-scratchpad
+            echo file >{w}/var/home/u8/.cache
+            refused "exists and is not a folder" --user u8 --no-scratchpad --allow-nonempty
+            cp {w}/mounts {w}/mounts.real
+            sed -i 's/uuid-cache-2222/uuid-root-1111/' {w}/mounts
+            refused "same-filesystem" --user u11
+            cp {w}/mounts.real {w}/mounts
+            echo "/x /var/home/u9/.cache none bind 0 0" >>{w}/etc/fstab
+            refused "an /etc/fstab line CST does not manage" --user u9 --no-scratchpad
+            mkdir -p {w}/var/home/u10/.cache
+            row "/dev/mapper/cache[/cache/u1]" /var/home/u10/.cache btrfs rw uuid-cache-2222 /cache/u1 >>{w}/mounts
+            refused "a mount CST did not make" --user u10 --no-scratchpad
+
+            # A daemon-reload that fails: fstab and the mounts as they were, and it says so.
+            keep
+            rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]] && grep -qF "previous state restored." {w}/out
+            unchanged
+
+            # detach: the data and the other users' lines stay; a mount CST did not make stays.
             echo "keep-u1" >{w}/var/mnt/scratchpad/u1/data.txt
-            /opt/cst-rw/cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
-            /opt/cst-rw/cst btrfs cache detach --user u1
+            $cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
+            $cst btrfs cache detach --user u1
             [[ -f {w}/var/mnt/scratchpad/u1/data.txt ]]
             ! grep -qF "user=u1" {w}/etc/fstab
-            grep -qF "user=u2 kind=cache" {w}/etc/fstab
-            /opt/cst-rw/cst btrfs cache detach --user u2
-            ! grep -qF "btrfs-cache" {w}/etc/fstab
+            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            ! grep -qF "/var/home/u1/" {w}/mounts
+            $cst btrfs cache detach --user u10 | grep -qF "kept: /var/home/u10/.cache has a mount CST did not make"
+            grep -qF "/var/home/u10/.cache" {w}/mounts
             echo E2E-CACHE-OK
             """,
         ).stdout
