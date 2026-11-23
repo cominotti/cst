@@ -318,8 +318,10 @@ CPU_CSTATE_MAX_LATENCY_US='200'
 GAME_CSTATE_MAX_LATENCY_US='50'
 ```
 
-`install` writes the file only when it is missing, and reads four values
-from the machine's sysfs for it:
+`install` writes the file only when it is missing. It reads three values
+from the machine's sysfs (`BUILD_CPUS` and `P_CORES` from the CPU topology,
+`CPU_CSTATE_MAX_LATENCY_US` from the cpuidle driver) and derives `VM_VCPUS`
+from `BUILD_CPUS`:
 
 - `BUILD_CPUS` and `P_CORES`: on a hybrid Intel CPU (`/sys/devices/cpu_atom/cpus`),
   `P_CORES` is `/sys/devices/cpu_core/cpus` (or the online CPUs that are not
@@ -332,7 +334,9 @@ from the machine's sysfs for it:
   CPUs split the same way; with one CPU, both are that CPU. With no readable
   online list (`/sys/devices/system/cpu/online`), the values above.
 - `VM_VCPUS`: as many as `BUILD_CPUS` has CPUs, at most 12 (`vm-pin` pins
-  that many vCPUs onto `BUILD_CPUS`).
+  that many vCPUs onto `BUILD_CPUS`). It reads no sysfs file of its own and
+  is set once, when `install` writes the file: it does not follow a later
+  change of the host or of `BUILD_CPUS`.
 - `CPU_CSTATE_MAX_LATENCY_US`: `200` with the `intel_idle` cpuidle driver (or
   when it cannot be read), `off` with any other (AMD's `acpi_idle`, whose
   states the 200 µs was not chosen for). `cpu-power` applies the same rule
