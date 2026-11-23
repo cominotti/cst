@@ -7838,7 +7838,10 @@ EOF
         at the target (even with --allow-nonempty), the same UUID as the home, an fstab line CST does not
         manage, a bind of another folder of the drive; a failing daemon-reload leaves fstab and the mounts
         as they were, and one after which /etc/fstab cannot be put back says ROLLBACK INCOMPLETE and names
-        it; doctor's ok line; detach keeps the data, the other users' lines and a mount CST did
+        it; doctor's ok line; with a mount CST did not make on top of a bind, doctor's WARN and detach
+        refused; detach refused while /var/mnt/cache is not mounted; an /etc/fstab that cannot be read (a
+        link loop) refused by attach and detach and BLOCKED in plan, each with fstab and the mounts
+        unchanged; detach keeps the data, the other users' lines and a mount CST did
         not make."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
@@ -7952,6 +7955,15 @@ STUB
                 grep -qF -- "$needle" {w}/out || {{ cat {w}/out >&2; return 1; }}
                 unchanged
             }}
+            detach_refused() {{  # detach_refused NEEDLE DETACH-ARGS...: the same for detach
+                local needle="$1" rc=0
+                shift
+                keep
+                $cst btrfs cache detach "$@" >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "detach $* exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF -- "$needle" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                unchanged
+            }}
 
             # plan writes nothing.
             keep
@@ -8027,6 +8039,38 @@ STUB
             [[ -d {w}/etc/fstab ]]
             cmp -s {w}/mounts {w}/mounts.before
             rm -rf {w}/etc/fstab && cp {w}/fstab.before {w}/etc/fstab
+            unchanged
+
+            # A mount CST did not make on top of u1's bind: doctor warns, and detach changes nothing (umount
+            # would take that mount away and leave CST's bind under it).
+            cp {w}/mounts {w}/mounts.ok
+            row tmpfs /var/home/u1/.cache tmpfs rw "" / >>{w}/mounts
+            doc_out="$($cst doctor || true)"
+            grep -qF "WARN   btrfs cache: /var/home/u1/.cache (user=u1) has a mount that is not CST's bind of /var/mnt/cache/u1" \
+                <<<"$doc_out" || {{ echo "$doc_out" >&2; exit 1; }}
+            grep -qF "btrfs cache status --user u1" <<<"$doc_out"
+            detach_refused "ERROR: /var/home/u1/.cache has a mount CST did not make on top of CST's bind of /var/mnt/cache/u1; unmount that one first, then run detach again" --user u1
+            cp {w}/mounts.ok {w}/mounts
+            # /var/mnt/cache not mounted: CST cannot tell its bind from another mount, so detach changes nothing.
+            awk -F'\t' '$2 != "/var/mnt/cache"' {w}/mounts.ok >{w}/mounts
+            detach_refused "ERROR: /var/home/u1/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot tell whether it is its bind; mount /var/mnt/cache and run detach again" --user u1
+            cp {w}/mounts.ok {w}/mounts
+            # An /etc/fstab that cannot be read (a link loop) is not a missing one: attach and detach refuse,
+            # plan says BLOCKED, and nothing changes.
+            keep
+            mv {w}/etc/fstab {w}/fstab.real
+            ln -s fstab {w}/etc/fstab
+            for args in "attach --user u11" "detach --user u1"; do
+                rc=0; $cst btrfs cache $args >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "$args exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+                grep -qF "ERROR: cannot read /etc/fstab: Too many levels of symbolic links" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            done
+            plan_out="$($cst btrfs cache plan --user u11 2>&1 || true)"
+            grep -qF "BLOCKED: cannot read /etc/fstab" <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            [[ "$(readlink {w}/etc/fstab)" == fstab ]]
+            cmp -s {w}/mounts {w}/mounts.before
+            rm {w}/etc/fstab
+            mv {w}/fstab.real {w}/etc/fstab
             unchanged
 
             # detach: the data and the other users' lines stay; a mount CST did not make stays.
