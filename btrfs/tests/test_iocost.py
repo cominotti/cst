@@ -13,6 +13,7 @@ import sys
 import tempfile
 from typing import NoReturn, override
 import unittest
+from unittest import mock
 
 from btrfs.iocost.adapters import (
     IocostPaths,
@@ -36,7 +37,7 @@ from btrfs.iocost.domain import (
 )
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
-from cst_core.adapters.runtime import RootElevation, enforce_host_root
+from cst_core.adapters.runtime import RootElevation, enforce_host_root, lc_ctype_handover
 from cst_core.application.install import InstallService, Placement, staged
 from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
 from cst_core.domain.record import ROOT_RECORD, ComponentState
@@ -336,6 +337,39 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                 elevate=fake_elevate,
             )
         self.assertEqual(seen[0][0], "sudo")
+
+        # The command line root runs, as the bash front's "sudo -- env CST_PROG=... SELF ARGS" ran it: the
+        # system Python on this entry, every argument passed on.
+        with mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"), self.assertRaises(SystemExit):
+            run_iocost_cli(
+                ["apply", "--live-only", "--device", "nvme0n1"],
+                deps=IocostCliDeps(
+                    entry_file=os.path.join(REPO, "btrfs", "btrfs-iocost"),
+                    env={"CST_PROG": "cst btrfs iocost"},
+                    out=io.StringIO(),
+                    err=io.StringIO(),
+                    ctx=_FakeCtx(container=False, root=False),
+                    elevate=fake_elevate,
+                ),
+            )
+        self.assertEqual(
+            seen[-1],
+            [
+                "sudo",
+                "--",
+                "env",
+                "CST_PROG=cst btrfs iocost",
+                lc_ctype_handover(),
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                os.path.realpath(os.path.join(REPO, "btrfs", "btrfs-iocost")),
+                "apply",
+                "--live-only",
+                "--device",
+                "nvme0n1",
+            ],
+        )
 
         mapped = iocost_paths_for(
             os.path.join(REPO, "btrfs", "btrfs-iocost"), ctx=_FakeCtx(container=True, root=False), read_only=True

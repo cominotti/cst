@@ -13,6 +13,7 @@ import sys
 import tempfile
 from typing import NoReturn, override
 import unittest
+from unittest import mock
 
 from btrfs.scrub_limit.adapters import (
     ScrubPaths,
@@ -34,6 +35,7 @@ from btrfs.scrub_limit.domain import (
     validate_scrub_size,
 )
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandResult
@@ -498,6 +500,41 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             )
         self.assertEqual(len(elevated), 1)
         self.assertEqual(elevated[0][0], "sudo")
+
+        # The command line root runs, as the bash front's "sudo -- env CST_PROG=... SELF ARGS" ran it: the
+        # system Python on this entry, every argument passed on.
+        for args in (["set", "500M"], ["off"]):
+            with (
+                self.subTest(args=args),
+                mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"),
+                self.assertRaises(SystemExit),
+            ):
+                run_scrub_limit_cli(
+                    args,
+                    deps=ScrubCliDeps(
+                        entry_file=entry,
+                        env={"CST_PROG": "cst btrfs scrub-limit"},
+                        out=io.StringIO(),
+                        err=io.StringIO(),
+                        ctx=_FakeCtx(container=False, root=False),
+                        elevate=_elevate,
+                    ),
+                )
+            self.assertEqual(
+                elevated[-1],
+                [
+                    "sudo",
+                    "--",
+                    "env",
+                    "CST_PROG=cst btrfs scrub-limit",
+                    lc_ctype_handover(),
+                    "/usr/bin/python3",
+                    "-I",
+                    "-B",
+                    os.path.realpath(entry),
+                    *args,
+                ],
+            )
 
     def test_cli_help_and_btrfs_setup_dispatch(self) -> None:
         out, err = io.StringIO(), io.StringIO()

@@ -2488,6 +2488,7 @@ class ManagedRuntimeHelpersTest(unittest.TestCase):
             RootElevation,
             enforce_host_root,
             host_view_path,
+            lc_ctype_handover,
             run_managed_cli,
         )
         from cst_core.domain.text import parse_subcommand_head
@@ -2584,6 +2585,39 @@ class ManagedRuntimeHelpersTest(unittest.TestCase):
             )
         self.assertEqual(exc_info.exception.argv[0], "sudo")
         self.assertIn("/tmp/fake-entry", exc_info.exception.argv)
+        # Root runs the system Python, whatever interpreter (a venv's, first in PATH) started this one;
+        # the arguments go on as they came, an empty one too.
+        with (
+            mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"),
+            self.assertRaises(_ElevatedError) as venv_exc,
+        ):
+            run_managed_cli(
+                ["apply", "", "--x"],
+                _make_spec(0, ["ok"]),
+                ManagedCliEnv(
+                    entry_file="/tmp/fake-entry",
+                    env={"CST_PROG": "cst foo bar"},
+                    ctx=_Ctx(container=False, root=False),
+                    elevate=_fake_elevate,
+                ),
+            )
+        self.assertEqual(
+            venv_exc.exception.argv,
+            [
+                "sudo",
+                "--",
+                "env",
+                "CST_PROG=cst foo bar",
+                lc_ctype_handover(),
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                os.path.realpath("/tmp/fake-entry"),
+                "apply",
+                "",
+                "--x",
+            ],
+        )
 
         # Stderr routing: unprefixed failure -> stderr; explicit ERROR: -> ERROR to stderr, progress to stdout; Aborted -> stdout
         out_s, err_s = io.StringIO(), io.StringIO()

@@ -15,7 +15,6 @@ from pathlib import Path
 import pwd
 import signal
 import stat
-import sys
 from typing import NoReturn, Protocol, TextIO
 import zipfile
 
@@ -50,7 +49,7 @@ def enforce_host_root(
     ctx: ExecutionContextPort | None = None,
     elevate: Callable[[list[str]], NoReturn] | None = None,
 ) -> str | None:
-    """Refuse container writes and re-exec through `sudo` when not root."""
+    """Refuse container writes and re-exec through `sudo` when not root, on the system Python."""
     exec_ctx = HostExecutionContext() if ctx is None else ctx
     if exec_ctx.is_container():
         return f"'{req.prog} {req.action}' must run on the host, not inside a toolbox/container ({req.reason})."
@@ -63,7 +62,7 @@ def enforce_host_root(
             "env",
             f"CST_PROG={req.prog}",
             lc_ctype_handover(),
-            sys.executable,
+            SYSTEM_PYTHON,  # never the caller's interpreter (a venv's python3 first in PATH) as root
             "-I",
             "-B",
             program_path(req.entry_file),
