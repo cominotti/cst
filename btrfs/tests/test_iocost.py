@@ -272,7 +272,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
                     "-p",
                     "UnitFileState",
                     "cst-btrfs-iocost.service",
-                ]
+                ],
             ],
         )
         self.assertTrue(any("259:1 enable=1 ctrl=auto" in line for line in out))
@@ -445,9 +445,7 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         with open(self.paths.qos_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "")
         self.assertIn("kept:      259:1 (nvme0n1: hwdb solution isolation; left to udev)", out)
-        self.assertIn(
-            "note:      nvme1n1: not processed by udev yet; the udev rule writes it when udev does", out
-        )
+        self.assertIn("note:      nvme1n1: not processed by udev yet; the udev rule writes it when udev does", out)
         self.assertFalse(os.path.exists(self.paths.managed_file))
 
     def test_a_device_run_writes_without_asking_udev(self) -> None:

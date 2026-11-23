@@ -418,12 +418,12 @@ class SeparateHomeTests(unittest.TestCase):
                     out = rewrite_fstab(fstab, "compress-force=zstd:1", root_uuid)
                     self.assertIn(line, out)
                     self.assertEqual(out.count("compress-force=zstd:1"), 2)  # / and /var
-                    self.assertEqual(
-                        [e.target for e in parse_fstab_root_entries(fstab, root_uuid)], ["/", "/var"]
-                    )
+                    self.assertEqual([e.target for e in parse_fstab_root_entries(fstab, root_uuid)], ["/", "/var"])
 
     def test_live_mounts_are_the_root_filesystem_s(self) -> None:
-        self.assertEqual([m.target for m in pick_root_mounts(parse_proc_mounts(SEPARATE_HOME_MOUNTS))], ["/sysroot", "/var"])
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(SEPARATE_HOME_MOUNTS))], ["/sysroot", "/var"]
+        )
         findmnt = (
             "/dev/mapper/luks-a[/root] /sysroot btrfs ro,compress=zstd:1,subvol=/root 0 0\n"
             "/dev/mapper/luks-a[/var] /var btrfs rw,compress=zstd:1,subvol=/var 0 0\n"
@@ -436,7 +436,8 @@ class SeparateHomeTests(unittest.TestCase):
 
     def test_fedora_s_default_home_subvolume_is_still_the_root_s(self) -> None:
         self.assertEqual(
-            [m.target for m in pick_root_mounts(parse_proc_mounts(SAMPLE_PROC_MOUNTS))], ["/sysroot", "/var", "/var/home"]
+            [m.target for m in pick_root_mounts(parse_proc_mounts(SAMPLE_PROC_MOUNTS))],
+            ["/sysroot", "/var", "/var/home"],
         )
         self.assertEqual(
             [e.target for e in parse_fstab_root_entries(SAMPLE_FSTAB, SAMPLE_UUID)], ["/", "/var", "/var/home"]
@@ -475,7 +476,9 @@ class SeparateHomeTests(unittest.TestCase):
             err.getvalue(),
         )
         self.assertIn(SEPARATE_HOME_LINE, host.s.fstab or "")
-        self.assertIn("/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home", host.s.proc_mounts or "")
+        self.assertIn(
+            "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home", host.s.proc_mounts or ""
+        )
         self.assertFalse(any(c.startswith("remount:/var/home") for c in host.calls), host.calls)
         out, err = io.StringIO(), io.StringIO()
         self.assertEqual(
@@ -886,7 +889,10 @@ class AdapterAndCliTests(unittest.TestCase):
             host_root=self.tmp,
         )
         return LinuxCompressHostAdapter(
-            cfg, ctx=_FakeCtx(root=True, host_root=self.tmp), runner=_RecordingRunner(self.tmp), fs=LocalFileSystemAdapter()
+            cfg,
+            ctx=_FakeCtx(root=True, host_root=self.tmp),
+            runner=_RecordingRunner(self.tmp),
+            fs=LocalFileSystemAdapter(),
         )
 
     def _unit(self) -> str:

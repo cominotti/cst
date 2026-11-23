@@ -192,7 +192,7 @@ def _core_done(record_path: str) -> bool:
     """Whether the install record has btrfs:core done (no record, or one that cannot be read: no)."""
     try:
         rec = JsonInstallRecord().read(record_path)
-    except (RecordFormatError, OSError):
+    except RecordFormatError, OSError:
         return False
     return rec is not None and rec.components.get(Component.BTRFS_CORE.value) == ComponentState.DONE
 

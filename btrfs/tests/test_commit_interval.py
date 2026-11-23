@@ -318,7 +318,9 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertTrue((host.s.fstab or "").startswith(home_line), host.s.fstab)
         self.assertIn("commit=60", host.s.fstab or "")
-        self.assertIn("/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,subvol=/home 0 0", host.s.proc_mounts or "")
+        self.assertIn(
+            "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,subvol=/home 0 0", host.s.proc_mounts or ""
+        )
         self.assertFalse(any(c.startswith("remount:/var/home") for c in host.calls), host.calls)
         rc_r, out_r = execute_commit_change(
             host, CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)

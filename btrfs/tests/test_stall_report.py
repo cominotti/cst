@@ -2067,7 +2067,10 @@ class ReportCommandsTest(unittest.TestCase):
         # (a sample written late during a stall is where the IO was); longer gaps count the typical one.
         self.assertEqual(
             self._below_bytes(
-                *(f'{{"comm": "a", "timestamp": {ts}, "io.rbytes_per_sec": 1}}' for ts in (1000, 1015, 1030, 1150, 2000))
+                *(
+                    f'{{"comm": "a", "timestamp": {ts}, "io.rbytes_per_sec": 1}}'
+                    for ts in (1000, 1015, 1030, 1150, 2000)
+                )
             ),
             [{"comm": "a", "cgroup": "", "bytes": 15 + 15 + 15 + 120 + 15}],
         )

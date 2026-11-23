@@ -350,9 +350,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         runner.fail_on = {"installer.py"}
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 1)
-        self.assertEqual(
-            lines[-1], "ERROR: the installer failed: Access denied; previous configuration restored."
-        )
+        self.assertEqual(lines[-1], "ERROR: the installer failed: Access denied; previous configuration restored.")
         self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\nSCRUB_LIMIT='1G'\n")
         self.assertFalse(any(c[:2] == ["systemctl", "daemon-reload"] for c in runner.calls))
 
@@ -364,8 +362,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(
             lines[-1],
-            "ERROR: systemctl daemon-reload failed: Access denied; ROLLBACK INCOMPLETE"
-            f" ({self.dropin}: Access denied)",
+            f"ERROR: systemctl daemon-reload failed: Access denied; ROLLBACK INCOMPLETE ({self.dropin}: Access denied)",
         )
         self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
 

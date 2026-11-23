@@ -311,7 +311,7 @@ def _parse_below_timestamp(v: object) -> float | None:
         return num if math.isfinite(num) else None
     try:
         return datetime.fromisoformat(text).timestamp()
-    except (ValueError, OverflowError, OSError):
+    except ValueError, OverflowError, OSError:
         return None
 
 

@@ -641,9 +641,7 @@ def _plan_kargs(
     return _layer(LayerName.KARGS, status, current, ops.target_label, "rpm-ostree kargs rootflags="), edits
 
 
-def _plan_live(
-    live_roots: tuple[MountEntry, ...], ops: OptionLayerOps
-) -> tuple[LayerPlan, str | None]:
+def _plan_live(live_roots: tuple[MountEntry, ...], ops: OptionLayerOps) -> tuple[LayerPlan, str | None]:
     remount_entry = pick_remount_target(live_roots)
     if remount_entry is None:
         return (
