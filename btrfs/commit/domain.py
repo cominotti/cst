@@ -19,6 +19,7 @@ from btrfs.compress.domain import (
     plan_root_option_layers,
 )
 from cst_core.domain.text import HELP_WORDS, parse_subcommand_head
+from cst_core.domain.values import parse_whole_number
 
 KERNEL_DEFAULT_COMMIT_S: Final = 30
 DEFAULT_TARGET_COMMIT_S: Final = 60
@@ -186,9 +187,9 @@ def rewrite_commit_options(options_str: str, target_seconds: int | None) -> str:
 
 
 def _parse_seconds_value(raw: str) -> int | str:
-    if not raw.isdigit():
+    val = parse_whole_number(raw)
+    if val is None:
         return f"invalid commit interval {raw!r} (expected integer {MIN_COMMIT_S}..{MAX_COMMIT_S})"
-    val = int(raw)
     if val < MIN_COMMIT_S or val > MAX_COMMIT_S:
         return f"commit interval {val}s out of range ({MIN_COMMIT_S}..{MAX_COMMIT_S})"
     return val

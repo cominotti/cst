@@ -36,6 +36,10 @@ from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
 
+# Digits str.isdigit() takes but the kernel does not read: int() refuses the first and reads the second as 300.
+_SUPERSCRIPT_TWO = "\N{SUPERSCRIPT TWO}"
+_ARABIC_300 = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+
 SAMPLE_FSTAB = (
     f"UUID={SAMPLE_UUID} /home btrfs subvol=home,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\n"
     f"UUID={SAMPLE_UUID} /var  btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\n"
@@ -205,6 +209,16 @@ class CommitDomainTests(unittest.TestCase):
                     parsed = parse_commit_args([str(action), str(seconds)])
                     self.assertEqual(parsed.code, 2)
                     self.assertIn("out of range", parsed.error or "")
+
+    def test_seconds_in_other_digits_are_a_usage_error(self) -> None:
+        # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
+        # Arabic-Indic one as 300, a number the kernel's commit= parser does not read.
+        for action in (CommitAction.APPLY, CommitAction.PLAN):
+            for seconds in (_SUPERSCRIPT_TWO, _ARABIC_300, "1" * 5000):
+                with self.subTest(action=action, seconds=seconds[:12]):
+                    parsed = parse_commit_args([str(action), seconds])
+                    self.assertEqual(parsed.code, 2)
+                    self.assertTrue((parsed.error or "").startswith("invalid commit interval"), parsed.error)
 
     def test_option_parsing_and_rewriting_keeps_flushoncommit(self) -> None:
         base = "subvol=var,compress-force=zstd:1,noatime,flushoncommit"
@@ -469,3 +483,11 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             )
         self.assertEqual(rc_r, 1)
         self.assertIn("toolbox/container", err_r.getvalue())
+
+        out_u, err_u = io.StringIO(), io.StringIO()
+        rc_u = run_commit_cli(
+            ["plan", _SUPERSCRIPT_TWO],
+            deps=CommitCliDeps(entry_file=deps.entry_file, env=deps.env, out=out_u, err=err_u, ctx=deps.ctx),
+        )
+        self.assertEqual(rc_u, 2)
+        self.assertIn("invalid commit interval", err_u.getvalue())

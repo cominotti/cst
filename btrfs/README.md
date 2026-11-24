@@ -1560,6 +1560,8 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `commit=` is treated as `30 s` default everywhere (`revert` removes `commit=`
   from `fstab`/`kargs`/`top-mount` and remounts with `commit=30`). `cst doctor`
   flags any cross-layer drift.
+- SECONDS is written in ASCII digits (`plan 90`); anything else (`plan ²`,
+  digits of another script) is a usage error (exit 2).
 - A `commit=` that is not a positive number of seconds (`commit=abc`,
   `commit=0`, an empty `commit=`), which a mount refuses, is replaced in
   every layer, the top-mount unit included, by `apply` and `revert`, even
