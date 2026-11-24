@@ -1397,6 +1397,9 @@ cst btrfs compress-force apply         # root on host; asks confirmation unless 
 cst btrfs compress-force revert        # root on host; back to compress=zstd:N
 ```
 
+N is a zstd level 1..15 in ASCII digits; anything else is a usage error
+(exit 2).
+
 **Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
 before invoking zstd and skips compression altogether when the sample looks only
 borderline compressible. With `compress-force=zstd:1`, btrfs hands every extent
