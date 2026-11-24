@@ -2648,8 +2648,9 @@ How it works, as a sequence:
 1. Free space falls to **250 GiB or less**: snapshots **pause**. No new
    snapshots; old snapshots still expire normally. Alert
    `Snapshots paused: low space`.
-2. They stay paused until free space is **above 270 GiB**. The gap between
-   250 and 270 stops them from switching on and off every hour.
+2. They stay paused until free space is **above 270 GiB** (the larger of
+   `RESUME_ABOVE_GIB` and `SKIP_AT_OR_BELOW_GIB`; the alert names it). The gap
+   between 250 and 270 stops them from switching on and off every hour.
 3. Free space falls to **150 GiB or less**: **emergency purge**. The retention
    becomes `24h 3d` (`EMERGENCY_PRESERVE`) for both sources, the circuit
    breaker is off, and the extra snapshots are deleted. Alert

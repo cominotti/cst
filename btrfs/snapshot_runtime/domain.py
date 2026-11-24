@@ -187,10 +187,10 @@ def guard_limit(text: str) -> int:
 
 
 def snapshots_resume_above(guard: Mapping[str, int]) -> int:
-    """Where btrfs-snapshot's paused /home snapshots come back, in bytes, from snapshot_guard()'s
-    numbers: its hourly run stays paused while free <= SKIP_AT_OR_BELOW_GIB or (paused and free <=
-    RESUME_ABOVE_GIB), so they resume only above the larger of the two (a limit snapshot_guard read as
-    0 never holds them)."""
+    """Where btrfs-snapshot's paused /home snapshots come back, in the unit of GUARD's numbers
+    (snapshot_guard()'s bytes, guard_limit's GiB): its hourly run stays paused while free <=
+    SKIP_AT_OR_BELOW_GIB or (paused and free <= RESUME_ABOVE_GIB), so they resume only above the
+    larger of the two (a limit read as 0 never holds them)."""
     return max(guard["resume"], guard["pause"])
 
 

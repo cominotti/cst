@@ -7621,7 +7621,9 @@ echo test_109-ok
         the spool's format) and sets the day's stamp, so the next run keeps no second copy. Then
         convert-planned --lock-held against the real /run lock (/proc/self/fdinfo): an fd that holds
         the flock is taken; another open of the lock file while that one holds it, an fd of another
-        file and an fd whose lock was released are refused (exit 2, nothing converted)."""
+        file and an fd whose lock was released are refused (exit 2, nothing converted). Last, paused
+        with RESUME_ABOVE_GIB below SKIP_AT_OR_BELOW_GIB: the kept alert says the snapshots resume
+        above the larger of the two (the installed runtime's snapshots_resume_above)."""
         d = "/var/tmp/e2e-snapshot-unit"
         conf = "/etc/btrfs-setup/snapshots.conf"
         inst = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
@@ -7722,6 +7724,19 @@ rc=0; "$S" convert-planned --lock-held 9 >"$d/out" 2>&1 || rc=$?
 [ "$rc" = 2 ]
 refused 9
 exec 9>&- 8<&- 7<&-
+
+# 5. Paused (200 GiB free, SKIP 250, RESUME 100): the alert names the larger limit, where snapshots resume.
+printf '%s\n' '#!/bin/bash' 'if [ "$1 $2" = "filesystem usage" ]; then echo "    Free (estimated):     214748364800      (min: 214748364800)"; fi' 'exit 0' \
+    >"$d/bin/btrfs"
+printf '%s\n' "HOME_DIR=/home/tester" "HOME_MOUNT=/home" "TOP=$d/top" "NAS_RESTIC_HOST=e2e" "SKIP_AT_OR_BELOW_GIB=250" "RESUME_ABOVE_GIB=100" >"$conf"
+rm -f /var/lib/btrfs-snapshot/emergency
+rc=0; PATH="$P" "$S" hourly >"$d/out" 2>&1 || rc=$?
+cat "$d/out"
+[ "$rc" = 0 ]
+body="200 GiB free; hourly snapshots resume above 250 GiB. Older snapshots still expire normally."
+grep -qxF "<4>btrfs-snapshot: Snapshots paused: low space: $body" "$d/out"
+paused="$(grep -lxF "title=Snapshots paused: low space" "$pending"/*.alert)"
+grep -qxF "$body" "$paused"
 echo test_110-ok
 """,
         ).stdout

@@ -25,9 +25,11 @@ from btrfs.snapshot_runtime.domain import (
     core_reason,
     head_spaced,
     nonempty_count,
+    guard_limit,
     guard_number,
     plan_entries,
     read_lines,
+    snapshots_resume_above,
     source_args,
 )
 from cst_core.domain.contracts import Urgency
@@ -242,12 +244,15 @@ def after_conversions(m: SnapshotRun) -> int:
     m.rm_f(f"{m.state}/emergency")
     if at_or_below(m, free, "SKIP_AT_OR_BELOW_GIB") or (paused and at_or_below(m, free, "RESUME_ABOVE_GIB")):
         m.touch(f"{m.state}/paused")
+        # Paused while free <= SKIP or (paused and free <= RESUME): they resume above the larger. Read
+        # without at_or_below, which would stop the run on a RESUME the condition above never read.
+        limits = {"pause": guard_limit(s["SKIP_AT_OR_BELOW_GIB"]), "resume": guard_limit(s["RESUME_ABOVE_GIB"])}
         send_alert(
             m,
             AlertKind.PAUSED,
             Urgency.NORMAL,
             "Snapshots paused: low space",
-            f"{free // GIB} GiB free; hourly snapshots resume above {s['RESUME_ABOVE_GIB']} GiB. "
+            f"{free // GIB} GiB free; hourly snapshots resume above {snapshots_resume_above(limits)} GiB. "
             "Older snapshots still expire normally.",
         )
         prune_only(m)

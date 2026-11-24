@@ -11,6 +11,7 @@ the alerts btrfs-notify gets, and the state files.
 Run with: invowk cmd test module btrfs.tests.test_snapshot_hourly
 """
 
+import contextlib
 import json
 import os
 import shutil
@@ -773,6 +774,51 @@ class SpaceGuardTest(Base):
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                     self.assertEqual(os.path.exists(self.state_file("paused")), paused)
                     self.assertEqual("snapshot" in [c[0] for c in self.core_calls()], not paused)
+
+    def paused_body(self, free: int, resume: int) -> str:
+        return f"{free} GiB free; hourly snapshots resume above {resume} GiB. Older snapshots still expire normally."
+
+    def test_the_paused_alert_names_where_snapshots_resume(self) -> None:
+        # The larger of the two limits (snapshots_resume_above), not RESUME_ABOVE_GIB as written: the
+        # bash program printed that since it was written, and the port kept it.
+        for skip, resume in ((250, 100), (250, 270), (250, 0), (40, 45), (90, 45)):
+            above = max(skip, resume)
+            with self.subTest(skip=skip, resume=resume):
+                self.conf(SKIP_AT_OR_BELOW_GIB=str(skip), RESUME_ABOVE_GIB=str(resume), EMERGENCY_AT_OR_BELOW_GIB="10")
+                self.write(self.state_file("paused"), "")
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(self.state_file("alerted-paused"))
+                self.machine(free=above * GIB)
+                self.forget_calls()
+                r = self.run_prog("hourly")
+                self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+                body = self.paused_body(above, above)
+                self.assertEqual(self.notified(), [self.alert("normal", "Snapshots paused: low space", body)])
+                self.assertIn(log(4, f"Snapshots paused: low space: {body}"), self.lines(r.stdout))
+
+    def test_the_paused_alert_reads_the_resume_limit_as_the_guard_does(self) -> None:
+        # While SKIP holds, the guard never reads RESUME_ABOVE_GIB: one bash cannot compare is no
+        # error then (the run, its alert and its prune go on) and counts as no limit. An expression
+        # is its value.
+        for resume, free, paused, said in (
+            ("abc", 200, False, 250),
+            ("1.5", 200, False, 250),
+            ("2*150", 280, True, 300),
+        ):
+            with self.subTest(resume=resume):
+                shutil.rmtree(self.state, ignore_errors=True)
+                self.conf(SKIP_AT_OR_BELOW_GIB="250", RESUME_ABOVE_GIB=resume)
+                if paused:
+                    self.write(self.state_file("paused"), "")
+                self.machine(free=free * GIB)
+                self.forget_calls()
+                r = self.run_prog("hourly")
+                self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+                self.assertEqual(
+                    self.notified(),
+                    [self.alert("normal", "Snapshots paused: low space", self.paused_body(free, said))],
+                )
+                self.assertEqual(self.core_calls(), [self.prune_call()])
 
     def test_emergency_purge(self) -> None:
         self.machine(free=[150 * GIB, 160 * GIB])
