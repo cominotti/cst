@@ -119,7 +119,13 @@ time in the same measurements), to be measured again later.
 
 Some protocols must survive a process that dies or a disk that fills up
 halfway: docker-volumes-nocow's boot migration, `cst btrfs scrub-limit set`
-and `off` with their rollback, `cst btrfs iocost apply`'s "done last".
+and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
+`cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
+that is not mounted), `cst toolchains prune apply rust:build` (a folder
+renamed to the trash before it is deleted, the leftovers of a run that
+died), `cst bluetooth apply` and `revert` with their restarts and the
+record of the restarts still owed, and btrfs-bulk's moves of an item into
+`~/Bulk` with the journal that finishes or undoes an interrupted one.
 `tests/fault_injection.py` tests them at every step, with the standard
 library only.
 
@@ -134,8 +140,15 @@ armed there, in one of three modes:
 - `FAIL`: the call fails with ENOSPC and no effect; the run goes on;
 - `FAIL_FROM`: that call and every later one fail (a full disk stays full).
 
+`FaultPlan(dead_after_kill=True)` makes a `KILL` final: every later call
+raises `Killed` again, with no effect and no record, as a dead process runs
+no handler. Code that cleans up in an `except BaseException` handler
+(btrfs-bulk's copy) needs it: without it the cleanup runs after the kill,
+and the state a real kill leaves is never tried.
+
 A plan can hold several faults: a `FAIL` and then a `KILL` at each later
-call is a run that dies while it rolls back. A port that reports a failure
+call is a run that dies while it rolls back, and a `FAIL` then a second
+`FAIL` one that fails again there (`btrfs/tests/test_cache_faults.py`). A port that reports a failure
 without raising passes `failed` (a command answers exit 1; `ignore_error`
 for an `ignore_errors=True` removal); `FaultyRunner` does that for a command
 runner. The test then checks its invariants after the fault, after the next
@@ -145,13 +158,31 @@ run (recovery), and at the end (the same command again converges).
 
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
-  patch the names an adapter module calls (`ensure_dir`, `write_atomic`, a
-  proxy of `os`: `btrfs/tests/test_scrub_limit_faults.py`), or put
+  patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
+  `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
+  place of a module's `os` (the functions named are points, the rest of
+  `os` as it is: `btrfs/tests/test_scrub_limit_faults.py`,
+  `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
+  whose errors the code does not handle: a failure armed there does not
+  fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
   `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
   systemd has loaded and whether it needs a reload, the install record,
-  the service.
+  the service, what a daemon read at its last start. When the usual fake
+  is a shell script (bluetooth's FAKE), a run per command costs too much:
+  write a Python twin and a parity test that runs one scenario on both
+  and compares commands, exits, output and files (`SetupModel` and
+  `SetupModelParityTest` in `bluetooth/tests`).
+- Give each run its own clock time when the code names files by it (a
+  backup, a trash name): two runs in the same second would share a name a
+  real machine never shares.
+- Replace a sleep that waits out a clock tick by a wait for the next tick,
+  not by a shorter sleep: btrfs-bulk sleeps 0.05 s so that a ctime taken as
+  a stamp never shares its tick with an earlier change, and
+  `btrfs/tests/bulk_fakes.py` `tick_wait` creates files until one's ctime
+  moves on (exact on a coarse clock and on a fine one, with no constant to
+  measure).
 - Call `stub_fsync(self)` in `setUp`: these tests check what a kill leaves,
   not durability, and an fsync per write makes them many times slower on a
   btrfs home. The fsync probes of `tests/probes.py` stay for the tests that
@@ -165,15 +196,38 @@ run (recovery), and at the end (the same command again converges).
 **What it cannot model.** A power loss and writes not yet flushed (`KILL`
 keeps every call that finished; the fsync probes cover durability); a call
 torn half-way (each call is atomic here; the nocow fakes' `copy_into` has
-its own `stop_after`); threads and timing (a thread that outlives a
+its own `stop_after`, and btrfs-bulk's deletion of a tree is two points,
+its first file and the rest: `arm_points(..., torn_rmtree=True)`); threads and timing (a thread that outlives a
 cancel is no failure at a call); the real systemd, btrfs and udev (the E2E
 tests, such as tier 1's `test_161` for scrub-limit's reload).
 
-**Cost.** The four modules (`tests.test_fault_injection`,
+**btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
+program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
+`BulkHome`: the real moves, cp included, with fakes only for subvolumes,
++C, the busy check, flatpak and btrfs-snapshot's convert), from eight start
+states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
+old subvolume, a stale cache, an empty folder, a late write into the old
+tree, and writes on both sides). `arm_points` makes the user adapter's
+`os` calls (`FaultyOs`), the state files' writes and removals, cp
+(`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
+tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
+inside the repair; after a failure or a full disk, only a kill. One known
+gap is let through by name and counted per class: a fault that cuts the
+deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
+leaves a journal that every later repair keeps ("the copy ... was written
+to as well"), with the data back in /home.
+
+**Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
-`btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`)
-together: 0.63 to 0.65 s wall at `--jobs 4` (3 runs, `nice -n 10`), with
-fsync stubbed, so about the same on tmpfs and on a btrfs home.
+`btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
+`btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
+`bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`)
+together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+-I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
+whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
+there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
+in 24 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
+the times are about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
 
@@ -230,6 +284,14 @@ repository:
   group (`==0.17.5`): a different ruff that reads `pyproject.toml` (an
   editor's, one on `PATH`) refuses to run instead of linting or formatting
   by other rules. `tests/test_python_files.py` fails when the two differ.
+- **`[tool.ruff] per-file-target-version`**: the files CI runs on its
+  ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
+  and what they import) are formatted and linted as Python 3.12 (`py312`),
+  not as `requires-python`'s 3.15: `ruff format` would otherwise write
+  `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
+  error in them. `tests/test_e2e_host_python.py` finds that set from the
+  code and fails when a file of it has no `py312` entry
+  ([tests/e2e/README.md](../tests/e2e/README.md#the-python-that-runs-these-files)).
 - **`[tool.ruff.lint] typing-extensions = false`**: no ruff rule suggests,
   and no fix writes, an import from the third-party `typing_extensions`
   (by default ruff falls back to it for names newer than the target
@@ -640,12 +702,95 @@ not derive from it.
 - `mbt_snapshot_domain.py`: the snapshot retention plan, its safeguards and
   the circuit breaker, over generated policies, zones, timelines and clocks.
 - `mbt_profiles.py`: the profiles and the seeding themselves.
+- `mbt_cache_rollback.py`: `cst btrfs cache` attach and detach for two
+  users and the three kind selections, through the unit tests' fake
+  findmnt, mount and systemctl (`btrfs/tests/fakes.py`), with a bind mount
+  or the daemon-reload failing: `/etc/fstab` names exactly the mounted
+  binds, a failed command leaves `/etc/fstab` and the mounts as they were,
+  and the same command with no fault exits 0.
+- `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four
+  starting `snapshots.conf` files, through the unit tests' `SystemdModel`
+  (the installer through the real `InstallService`, and what systemd has
+  loaded), with the installer or the daemon-reload failing:
+  `snapshots.conf` and the drop-in agree, a failed step leaves both files
+  and their folders as they were, exit 0 means systemd loaded the limit,
+  and btrfs:core's state never changes.
+- `mbt_iocost_apply.py`: `cst btrfs iocost` apply (after an upgrade of
+  CST or not) and revert, live or not, with any one step failing (a file's write or removal, the
+  io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
+  the installer's mark), through a model of the installer (the real
+  `InstallService` in memory), systemd, udev and io.cost.qos: the component
+  is marked done only after every step it stands for (a7c5e92), exit 0
+  leaves the whole target, a vendor's io.cost.qos line stays, and apply or
+  revert again converges. One known gap is let through by name: a full
+  revert whose removal fails after its disable leaves btrfs:iocost done
+  with the service disabled, until the next full apply or revert.
+- `mbt_game_state.py`: the game profile's `game.state` and
+  `game.intended`, whose fields are written as bash's `printf %q` writes
+  them, over fields generated as bytes (any but NUL, as a bash variable
+  holds them): our reader reads what our writer wrote, an older bash copy's
+  `eval` reads back the exact bytes, `record_line` is bash's own
+  `printf %q` line, a line bash wrote reads back, a record cut short is
+  left out and removed before the next one, and `game.intended`'s drift
+  records keep their six fields. One known gap is let through by name: a
+  field that is not UTF-8 (a cgroup folder's name the user made) reads back
+  decoded with U+FFFD, so it never matches its record.
+- `mbt_game_profile.py`: a state machine over the game profile's `on`,
+  `tick` and `off` (through `locked`), with the unit tests' scratch and fake
+  systemctl, whose daemon-reload sets each value from the override files and
+  the drop-ins; between them the game starts and ends, Docker containers,
+  Steam scopes and boxes appear, settings drift and someone else reloads, and
+  each call may fail or die at any of its set-property calls and file writes:
+  every change has its record in `game.state`, an `off` with no fault
+  restores everything, `on` twice is `on` once, and a tick leaves no box
+  half handled. Three known gaps are let through by name: a set-property that
+  failed (or a process that died between the record and the set) is never
+  tried again while the profile is on; an `off` whose undo step fails
+  still removes `game.state`, so that setting keeps the profile's value;
+  and an `off` killed after it undid a setting of a scope (a Docker
+  container's, a Steam game's) keeps that scope's record in `game.state`,
+  so while the profile stays on no tick sets it again.
+- `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
+  unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
+  hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
+  twice, other options, written by hand, a folder), kernels, partitions,
+  zram and install records: each refusal leaves every file as it was and
+  runs no systemctl, sysctl or zram call, and an apply that exits 0 records
+  swap's files and changes nothing more when run again. Its first run, on
+  the code before, found that apply wrote crypttab before it refused an
+  fstab it could not read, and that with an install record of a newer CST
+  it wrote crypttab and fstab and started swap0 before the installer
+  refused; apply now refuses both before its first write. `mbt_game_state.py`,
+  `mbt_game_profile.py` and `mbt_swap_apply.py` took 6.2 s together at
+  `--jobs 1` and 2.8 s at `--jobs 4` (`--profile ci`, a shared workstation).
+- `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four
+  items (a plain move, one nested in it, a NOCOW item, an old subvolume),
+  through the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`: real
+  renames and `cp`, fakes only for subvolumes, +C, the busy check, flatpak
+  and the subvolume convert). The start puts each item absent, with data,
+  empty, in place, as a subvolume, with copy-on-write files or with data on
+  both sides; the rules are apply and recover with a kill, a failure or a
+  full disk at one of their first 20 points, an app's write into an item's
+  folder, busy, keep and settle. After every step no file the model holds
+  is lost (it is at the item's path, or at a path its journal names), no
+  `.bulk-old-` tree is without a journal, classify agrees with an oracle
+  over the disk, and a run leaves a kept item alone; settle converges, and
+  a further apply or recover changes nothing. It has no torn calls and no
+  writes during a call: the fault module above has those.
 
-These targets are in memory, so they do not depend on `TMPDIR`. A machine
-over adapters that write through `write_atomic` fsyncs every file, many
-times slower on the btrfs home than on tmpfs (the pilot measured about 20
-times; see [Test performance on a workstation](#test-performance-on-a-workstation)):
-stub the fsync in its fake, or run it with `TMPDIR` on tmpfs.
+The targets above the adapter machines are in memory, so they do not
+depend on `TMPDIR`. A machine over adapters that write through
+`write_atomic` fsyncs every file, many times slower on the btrfs home
+than on tmpfs (the pilot measured about 20 times; see
+[Test performance on a workstation](#test-performance-on-a-workstation)).
+The cache and scrub-limit machines write real files under a temporary
+folder; the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
+the managed-devices file there: btrfs:iocost's installed files and the
+install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
+does not cover how `LocalInstallTarget` writes them (modes, fsync,
+relabel). Each machine's TestCase stubs fsync
+(`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
+depend on `TMPDIR` either.
 
 ### Writing one: typing without ignore comments
 

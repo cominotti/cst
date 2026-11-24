@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeIs, cast, override
 from unittest import mock
 
@@ -39,12 +39,11 @@ from btrfs.bulk.adapters import child as bulk_child, machine as bulk_machine, us
 from btrfs.bulk.adapters.machine import HomeTree, Primitives
 from btrfs.bulk.adapters.user import UserFiles, as_user
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items
-from btrfs.bulk.application.context import Bulk
 from btrfs.bulk.domain import BadSettings, BulkPaths, ItemJournal, NoUser
 from btrfs.bulk.domain.steam import SteamJournal, SteamPart
 from btrfs.bulk.adapters.host import Host, snapshot_env
 from btrfs.bulk.wiring import Wiring
-from cst_core.adapters.files import CounterFile
+from btrfs.tests.bulk_fakes import TOOL, BulkHome
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import json_object
 from cst_core.domain.values import Json
@@ -62,7 +61,6 @@ def kind_of(path: str) -> str:
 
 # The exact bytes of state files the writers produce (tests/fixtures/state-formats).
 STATE_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), "tests", "fixtures", "state-formats")
-TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 
 
 def loose(value: object) -> dict[str, Any]:
@@ -78,10 +76,12 @@ class Crash(BaseException):
 
 class BulkBase(unittest.TestCase):
     """Scratch home and fakes (shared with test_btrfs_steam.py); no tests here.
-    The program is put together as main() does (Wiring), over a scratch
-    home and scratch paths; the fakes replace only the primitives that need
-    btrfs, root or the host (the methods of Primitives, the busy check and the
-    conversion of btrfs-snapshot): every step built on them is the real code."""
+    The scratch home is a BulkHome (btrfs/tests/bulk_fakes.py): the program put
+    together as main() does (Wiring), over a scratch home and scratch paths;
+    the fakes replace only the primitives that need btrfs, root or the host
+    (the methods of Primitives, the busy check and the conversion of
+    btrfs-snapshot): every step built on them is the real code. Its names are
+    the TestCase's too."""
 
     def fake(self, owner: object, name: str, value: object) -> None:
         """owner.name is value until the test ends."""
@@ -91,173 +91,70 @@ class BulkBase(unittest.TestCase):
 
     @override
     def setUp(self) -> None:
-        self.out: str = ""
-        self.tmp = tempfile.mkdtemp(prefix="bulk-test-")
-        self.home = os.path.join(self.tmp, "home")
-        os.mkdir(self.home)
-        etc = os.path.join(self.tmp, "etc")
-        os.mkdir(etc)
-        self.paths = BulkPaths.under(
-            etc=etc,
-            state=os.path.join(self.tmp, "state"),
-            lock=os.path.join(self.tmp, "lock"),
-            notify=os.path.join(self.tmp, "no-notify"),
+        self.fx = fx = BulkHome()
+        # The tests' own fakes (registered later) are undone first, then the home goes.
+        self.addCleanup(fx.close)
+        self.tmp, self.home, self.paths, self.alerts = fx.tmp, fx.home, fx.paths, fx.alerts
+        self.machine, self.wiring, self.host, self.state = fx.machine, fx.wiring, fx.host, fx.state
+        self.ctx, self.user, self.bulk = fx.ctx, fx.user, fx.bulk
+        self.subvols, self.nocow, self.flatpaks, self.convert_calls = (
+            fx.subvols,
+            fx.nocow,
+            fx.flatpaks,
+            fx.convert_calls,
         )
-        self.alerts = os.path.join(self.tmp, "alerts", "pending")
-        self.machine = Primitives()
-        self.wiring = Wiring(
-            TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine, alerts=self.alerts
-        )
-        self.host = self.wiring.host
-        self.state = self.wiring.state()
-        self.ctx = self.wiring.home_ctx(self.home)
-        self.user = UserFiles(self.wiring.tree, None, self.ctx.home)
-        self.bulk = Bulk(
-            ctx=self.ctx,
-            paths=self.paths,
-            user=self.user,
-            tree=self.wiring.tree,
-            state=self.state,
-            boots=CounterFile(self.paths.attempts),
-            host=self.host,
-            out=self.wiring.out,
-        )
-        # Fakes for what needs btrfs, root or the host.
-        self.subvols: set[tuple[int, int]] = set()  # (dev, ino) of fake subvolumes
-        self.nocow: set[tuple[int, int]] = set()  # (dev, ino) with +C
-        self.busy: set[str] = set()
-        self.flatpaks: dict[str, set[str]] = {}  # app -> set of filesystem overrides
-        self.convert_calls: list[str] = []
 
-        def key(p: str) -> tuple[int, int]:
-            st = os.lstat(p)
-            return st.st_dev, st.st_ino
+    @property
+    def out(self) -> str:
+        """What the last apply printed."""
+        return self.fx.out
 
-        def is_subvol(p: str) -> bool:
-            try:
-                return stat.S_ISDIR(os.lstat(p).st_mode) and key(p) in self.subvols
-            except OSError:
-                return False
+    @out.setter
+    def out(self, value: str) -> None:
+        self.fx.out = value
 
-        def subvol_create(p: str) -> None:
-            os.mkdir(p, 0o755)
-            self.subvols.add(key(p))
+    @property
+    def busy(self) -> set[str]:
+        """The paths the fake busy check reports in use."""
+        return self.fx.busy
 
-        def is_nocow(p: str) -> bool:
-            return key(p) in self.nocow
-
-        def set_nocow(p: str) -> None:
-            self.nocow.add(key(p))
-
-        real_copy = self.machine.copy_tree
-
-        def copy_tree(src: str, dst: str, nocow: bool) -> None:
-            real_copy(src, dst, nocow)
-            if nocow:  # btrfs: new files inherit +C from their folder
-                for root, dirs, files in os.walk(dst):
-                    for n in dirs + files:
-                        self.nocow.add(key(os.path.join(root, n)))
-
-        def busy_paths(paths: Iterable[str], home: str) -> set[str]:
-            return {
-                p for p in paths if any(p == b or p.startswith(b + "/") or b.startswith(p + "/") for b in self.busy)
-            }
-
-        self.fake(self.machine, "is_subvol", is_subvol)
-        self.fake(self.machine, "subvol_create", subvol_create)
-        self.fake(self.machine, "is_nocow", is_nocow)
-        self.fake(self.machine, "set_nocow", set_nocow)
-        self.fake(self.machine, "copy_tree", copy_tree)
-        self.fake(self.host, "busy_paths", busy_paths)
-        self.fake(self.machine, "mounts", list)
-        self.fake(self.machine, "free_bytes", lambda path: 10**15)
-        self.fake(self.machine, "flatpak_installed", lambda app: app in self.flatpaks)
-        self.fake(self.machine, "flatpak_has_fs", lambda app, path: path in self.flatpaks.get(app, set()))
-        self.fake(self.machine, "flatpak_add_fs", lambda app, path: self.flatpaks[app].add(path))
-        self.fake(self.host, "convert_bulk_dir", lambda bulk: self.convert_calls.append(bulk) or [])
+    @busy.setter
+    def busy(self, value: set[str]) -> None:
+        self.fx.busy = value
 
     def journal(self, ident: str) -> dict[str, Any]:
-        """The journal of ident, as JSON."""
-        with open(self.state.jpath(ident)) as f:
-            return loose(json.load(f))
+        return self.fx.journal(ident)
 
     def write_journal(self, ident: str, j: dict[str, Any]) -> None:
-        """Put back an edited journal (as an older version would have written it)."""
-        with open(self.state.jpath(ident), "w") as f:
-            json.dump(j, f)
+        self.fx.write_journal(ident, j)
 
     def root_wiring(self) -> Wiring:
-        """The program as root (the user from bulk.conf or --user), over the same scratch paths and fakes."""
-        return Wiring(TOOL, root=True, paths=self.paths, machine=self.machine, host=self.host)
-
-    @override
-    def tearDown(self) -> None:
-        for root, dirs, _ in os.walk(self.tmp):
-            for d in dirs:
-                os.chmod(os.path.join(root, d), 0o755)
-        shutil.rmtree(self.tmp)
+        return self.fx.root_wiring()
 
     # ---- helpers ----
     def H(self, rel: str) -> str:
-        return os.path.join(self.home, rel)
+        return self.fx.home_path(rel)
 
     def B(self, rel: str = "") -> str:
-        return os.path.join(self.home, "Bulk", rel) if rel else os.path.join(self.home, "Bulk")
+        return self.fx.bulk_path(rel)
 
     def write(self, rel: str, data: str = "x") -> str:
-        p = self.H(rel)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
-            f.write(data)
-        return p
+        return self.fx.write(rel, data)
 
     def read(self, rel: str) -> str:
-        with open(self.H(rel)) as f:
-            return f.read()
+        return self.fx.read(rel)
 
     def purge_tree(self, path: str) -> None:
-        # Clear fake inode sets before deleting so recycled inodes on ext4/tmpfs do not look +C.
-        if os.path.exists(path):
-            st = os.lstat(path)
-            self.nocow.discard((st.st_dev, st.st_ino))
-            self.subvols.discard((st.st_dev, st.st_ino))
-            for root, dirs, files in os.walk(path):
-                for n in dirs + files:
-                    st = os.lstat(os.path.join(root, n))
-                    self.nocow.discard((st.st_dev, st.st_ino))
-                    self.subvols.discard((st.st_dev, st.st_ino))
-            shutil.rmtree(path)
+        self.fx.purge_tree(path)
 
     def apply(self) -> tuple[list[str], list[str]]:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            res = bulk_items.apply(self.bulk)
-        self.out = out.getvalue()
-        return res
+        return self.fx.apply()
 
     def report(self, mode: str = "status") -> tuple[int, str]:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            left = bulk_items.report(self.bulk, mode)
-        return left, out.getvalue()
+        return self.fx.report(mode)
 
     def tree(self) -> list[tuple[str, str, str | bytes | int]]:
-        """Every path below the temp dir with its type, link target and content."""
-        out: list[tuple[str, str, str | bytes | int]] = []
-        for root, dirs, files in os.walk(self.tmp):
-            for n in sorted(dirs + files):
-                p = os.path.join(root, n)
-                if p == self.paths.lock:
-                    continue
-                st = os.lstat(p)
-                if stat.S_ISLNK(st.st_mode):
-                    out.append((p, "link", os.readlink(p)))
-                elif stat.S_ISREG(st.st_mode):
-                    with open(p, "rb") as f:
-                        out.append((p, "file", f.read()))
-                else:
-                    out.append((p, "dir", stat.S_IMODE(st.st_mode)))
-        return sorted(out)
+        return self.fx.tree()
 
     def assertLink(self, rel: str, target: str) -> None:
         p = self.H(rel)
@@ -265,11 +162,7 @@ class BulkBase(unittest.TestCase):
         self.assertEqual(os.readlink(p), self.B(target))
 
     def journals(self) -> list[str]:
-        return (
-            [f for f in os.listdir(self.paths.state) if f.startswith("journal-")]
-            if os.path.isdir(self.paths.state)
-            else []
-        )
+        return self.fx.journals()
 
 
 class BulkTest(BulkBase):

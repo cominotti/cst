@@ -20,7 +20,7 @@ import stat
 from typing import Final
 import unittest
 
-from bluetooth.setup.domain import watcher_prog_state
+from bluetooth.setup.domain import senders_of, watcher_prog_state
 from bluetooth.tests.setup_fakes import DEV, ISO, MAC, SETUP, Machine
 from cst_core.domain.files import OwnedState
 from bluetooth.tests.test_bluetooth import JOURNAL, OLD_WP, VENDOR
@@ -1387,6 +1387,23 @@ class MainConfTest(SetupCase):
         r = m.run("revert", "--check")
         self.assertEqual(r.returncode, 0, r.text)
         self.assertIn(f"WARNING: no backup {m.main_conf}.bak-* found; main.conf not changed\n", r.stderr)
+
+
+class SendersOfTest(unittest.TestCase):
+    BUS = "NAME PID PROCESS\n:1.5 2 wireplumber\n:1.6 002 wireplumber\n:1.7 \N{SUPERSCRIPT TWO} odd\n:1.8 30 other\n"
+
+    def test_the_pid_column_is_compared_as_awk_compares_it(self) -> None:
+        # Numbers when both are ASCII digits ("002" is pid 2), strings otherwise.
+        self.assertEqual(senders_of(self.BUS, "2"), [":1.5", ":1.6"])
+        self.assertEqual(senders_of(self.BUS, "30"), [":1.8"])
+        self.assertEqual(senders_of(self.BUS, "\N{SUPERSCRIPT TWO}"), [":1.7"])
+
+    def test_digits_of_other_than_ascii_are_no_number(self) -> None:
+        # isdigit() takes "²": int() refused it (a ValueError out of the survey), and "٢" was read as 2.
+        self.assertEqual(senders_of(self.BUS, "\N{SUPERSCRIPT THREE}"), [])
+        self.assertEqual(senders_of(self.BUS, "\N{ARABIC-INDIC DIGIT TWO}"), [])
+        self.assertEqual(senders_of(":1.9 \N{ARABIC-INDIC DIGIT TWO} x\n", "2"), [])
+        self.assertEqual(senders_of(f":1.9 {'2' * 5000} x\n", "2"), [])
 
 
 class WatcherProgStateTest(unittest.TestCase):

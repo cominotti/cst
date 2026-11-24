@@ -159,7 +159,9 @@ RUST_BUILD_MAX_TOTAL=200G
 | `RUST_SCCACHE_CACHE_SIZE` | `25G` | The size cap of `~/.cache/sccache`. sccache itself deletes the least recently used entries above it. A whole number with `K`, `M`, `G` or `T`; `0` is an error. |
 | `RUST_SCCACHE_WORKSPACE` | `yes` | `no`: your own crates (workspace members and path dependencies) skip sccache; only dependencies from a registry or git go through it. Matters only for builds without incremental compilation. `CST_SCCACHE_WORKSPACE=0` or `1` sets it for one build ([section 6](#local-crates-rust_sccache_workspace)). |
 
-Every key is `<LANG>_<CACHE>_<SETTING>`. Durations take `s`, `m`, `h`, `d` or
+Every key is `<LANG>_<CACHE>_<SETTING>`. Numbers are ASCII digits (`0`-`9`) and
+the unit letters and blanks ASCII ones, as bash and systemd read them: a digit
+of another script (an Arabic-Indic `40G`) is a wrong line. Durations take `s`, `m`, `h`, `d` or
 `w`. Sizes take `K`, `M`, `G` or `T` (`G`, `GB` and `GiB` all mean GiB), and
 the unit is required: `RUST_BUILD_MAX_TOTAL=150` is an error, not 150 bytes
 (a cap of 150 bytes would delete every folder not built in the last 2 hours).
@@ -812,9 +814,13 @@ after 30 (`TimeoutStartSec=30min`). On a busy disk, deleting tens of GiB
 can take long, so the run keeps to the budget
 itself: `python:uv` (at most 10 minutes) runs first, then `rust:build`;
 `rust:build` starts no new deletion with less than 2 minutes left (`stopped
-before ...: the run's time budget ...`) and stops an `rm` that is still
+before ...: the run's time budget ...`; for a leftover of an interrupted run,
+`leftover ... kept: the run's time budget ...`) and stops an `rm` that is still
 running when the budget ends (the folder was already renamed away: the next
-run deletes the rest as a leftover). Whatever is left is done by the next
+run deletes the rest as a leftover). A leftover that cannot be deleted gets
+an error line (`could not delete leftover ...`) and the run exits 1, as for
+a folder; the run's summary counts it as failed (`status`: `N failed` in
+`rust:build`'s last run). Whatever is left is done by the next
 runs. A manual `prune apply` has the same budget.
 `auto on` writes, as your user:
 

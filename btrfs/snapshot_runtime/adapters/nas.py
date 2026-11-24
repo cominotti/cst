@@ -23,7 +23,7 @@ from btrfs.snapshot_runtime.adapters.hourly import RunStopped, clear_alert, send
 from btrfs.snapshot_runtime.adapters.machine import SnapshotRun, Stopped
 from cst_core.adapters.files import write_atomic
 from cst_core.domain.contracts import NAS_SSH_ALIAS, Urgency
-from cst_core.domain.values import DAY
+from cst_core.domain.values import DAY, parse_whole_number
 from btrfs.snapshot_runtime.domain import (
     CHECK_FAILURES_ALERTED,
     EXIT_STOPPED,
@@ -135,8 +135,9 @@ class Nas:
         best = 0
         for name in ("nas-last-ok", "nas-enabled-at"):
             v = self.m.read(f"{self.m.state}/{name}")
-            if v is not None and v.isascii() and v.isdigit() and int(v) > best:
-                best = int(v)
+            n = None if v is None else parse_whole_number(v)  # ASCII digits within int()'s limit, else skipped
+            if n is not None and n > best:
+                best = n
         if best == 0:
             best = self.m.now()
             self.m.write(f"{self.m.state}/nas-enabled-at", f"{best}\n")
@@ -456,7 +457,8 @@ class Nas:
         if last_text is None:
             made = m.mtime(f"{m.state}/nas-repo-id")
             last_text = str(made) if made is not None else str(m.now())
-        last = int(last_text) if last_text.isascii() and last_text.isdigit() else m.now()
+        parsed = parse_whole_number(last_text)  # ASCII digits within int()'s limit, else now
+        last = m.now() if parsed is None else parsed
         age_d = self.days_since(last)
         every = self.number("NAS_CHECK_EVERY_DAYS")
         if every is not None and age_d >= 2 * every:

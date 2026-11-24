@@ -14,6 +14,11 @@ runs again with the plan armed at k:
 A plan can hold several faults: a FAIL at k and a KILL at a later j is a run that fails, then dies
 while it rolls back.
 
+FaultPlan(dead_after_kill=True): once a KILL has fired, every later call raises Killed again, with
+no effect and no record, as a dead process runs no handler. For code that catches BaseException to
+clean up (`except BaseException: remove(new); raise`): without it, that cleanup runs after the
+kill, which a real kill never does.
+
 A port whose contract reports a failure in another way (a command result with a non-zero exit, an
 `ignore_errors` removal) passes `failed`, which gives the port's answer for that failure.
 FaultyRunner does that for a command runner: the commands that only read go to the inner runner
@@ -30,10 +35,11 @@ target.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import errno
+import functools
 import os
 from typing import Protocol
 import unittest
@@ -71,10 +77,13 @@ class FaultPlan:
 
     faults: tuple[Fault, ...] = ()
     calls: list[str] = field(default_factory=list)
+    # True: after a KILL fired, the process is dead (see the module's docstring).
+    dead_after_kill: bool = field(default=False, kw_only=True)
+    dead: bool = field(default=False, init=False)
 
     def arm(self, *faults: Fault) -> FaultPlan:
-        """A new run: no call seen yet; these faults (none: a run that records only)."""
-        self.faults, self.calls = faults, []
+        """A new run: no call seen yet, alive again; these faults (none: a run that records only)."""
+        self.faults, self.calls, self.dead = faults, [], False
         return self
 
     def fault_at(self, n: int) -> FaultMode | None:
@@ -86,6 +95,8 @@ class FaultPlan:
 
     def step[T](self, name: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
         """Run one mutating call (effect) as the plan says; name is what the trace records."""
+        if self.dead:
+            raise Killed(f"dead: {name} never ran")
         self.calls.append(name)
         n = len(self.calls)
         mode = self.fault_at(n)
@@ -96,6 +107,7 @@ class FaultPlan:
             return failed(err)
         result = effect()
         if mode == FaultMode.KILL:
+            self.dead = self.dead_after_kill
             raise Killed(f"killed after call {n}: {name}")
         return result
 
@@ -124,6 +136,39 @@ def _no_fsync(fd: int) -> None:
 def stub_fsync(test: unittest.TestCase) -> None:
     """os.fsync flushes nothing until test's cleanups run (call it in setUp)."""
     test.enterContext(mock.patch.object(os, "fsync", _no_fsync))
+
+
+class FaultyOs:
+    """The os module as an adapter module sees it, with the functions named in names through plan
+    (the point is "os.NAME"); every other attribute is os's own.
+
+    Patch it over the module's name (`mock.patch.object(module, "os", FaultyOs(plan, ("rename",)))`):
+    only that module's calls become points, not the ones the standard library makes for it.
+
+    kill_only: the named calls are points of a kill only; a failure armed at one does not fire (the
+    call runs, and the run goes on), for calls whose errors the code under test does not handle."""
+
+    def __init__(self, plan: FaultPlan, names: Collection[str], *, kill_only: bool = False) -> None:
+        for name in names:
+            if not callable(getattr(os, name, None)):
+                raise AttributeError(f"os has no function {name!r}")
+        self.plan = plan
+        self.names = frozenset(names)
+        self.kill_only = kill_only
+        self.path = os.path
+
+    def __getattr__(self, name: str) -> object:
+        real = getattr(os, name)
+        if name not in self.names:
+            return real
+
+        def faulty(*args: object, **kw: object) -> object:
+            effect = functools.partial(real, *args, **kw)
+            if self.kill_only:
+                return self.plan.step(f"os.{name}", effect, lambda _err: effect())
+            return self.plan.step(f"os.{name}", effect)
+
+        return faulty
 
 
 def _joined(argv: Sequence[str]) -> str:

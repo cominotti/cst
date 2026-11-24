@@ -434,6 +434,12 @@ class ShowParseTests(unittest.TestCase):
             "duplicate": self.REAL.replace("\tName:", "\tUUID: \t\t\tf0402c44-a6dc-ad45-b805-24977d4eaee4\n\tName:"),
             "bad uuid": self.REAL.replace("f0402c44-a6dc", "zzzz2c44-a6dc"),
             "bad generation": self.REAL.replace("924444", "92x444"),
+            # isdigit() takes both, int() refuses the first and reads the second as 3.
+            "superscript generation": self.REAL.replace("924444", "92\N{SUPERSCRIPT TWO}444"),
+            "arabic-indic cgen": self.REAL.replace(
+                "Gen at creation: \t9", "Gen at creation: \t\N{ARABIC-INDIC DIGIT NINE}"
+            ),
+            "generation past int()'s digit limit": self.REAL.replace("924444", "1" * 5000),
             "bad parent": self.REAL.replace("Parent UUID: \t\t-", "Parent UUID: \t\tnope"),
             "empty": "",
             "unindented labels": self.REAL.replace("\t", ""),
@@ -441,6 +447,22 @@ class ShowParseTests(unittest.TestCase):
         for what, text in cases.items():
             with self.subTest(what=what), self.assertRaises(core.ParseError):
                 core.parse_subvolume_show(text)
+
+
+class ParseStateTest(unittest.TestCase):
+    def test_an_epoch_is_ascii_digits(self) -> None:
+        self.assertEqual(snap_domain.parse_state("1760000000"), snap_domain.LastRun(1760000000))
+        self.assertEqual(snap_domain.parse_state(f"0060 {uuid_n(1)} 1.5"), snap_domain.LastRun(60, uuid_n(1), 1.5))
+        for text in (
+            "\N{SUPERSCRIPT TWO}",
+            "\N{ARABIC-INDIC DIGIT THREE}",
+            f"\N{SUPERSCRIPT TWO} {uuid_n(1)} 1.0",
+            f"\N{ARABIC-INDIC DIGIT THREE} {uuid_n(1)} 1.0",
+            "1" * 5000,
+            "-5",
+        ):
+            with self.subTest(text=text[:20]):
+                self.assertIsNone(snap_domain.parse_state(text))
 
 
 # ---- retention boundaries -------------------------------------------------------------
@@ -1665,9 +1687,18 @@ class ClockGuardTests(CliTestCase):
     def test_corrupt_state_blocks(self) -> None:
         h, old = self.history("2026-10-13 14:07")
         os.makedirs(self.state)
-        for garbage in ("garbage", "123 not-a-uuid 5.0", f"123 {uuid_n(1)}"):
-            with self.subTest(garbage=garbage):
-                with open(os.path.join(self.state, core.STATE_FILE), "w") as f:
+        for garbage in (
+            "garbage",
+            "123 not-a-uuid 5.0",
+            f"123 {uuid_n(1)}",
+            # isdigit() takes these: int() refuses "²" and 5000 digits, and reads "٣" as epoch 3.
+            "\N{SUPERSCRIPT TWO}",
+            "\N{ARABIC-INDIC DIGIT THREE}",
+            f"\N{SUPERSCRIPT TWO} {uuid_n(1)} 1.0",
+            "1" * 5000,
+        ):
+            with self.subTest(garbage=garbage[:20]):
+                with open(os.path.join(self.state, core.STATE_FILE), "w", encoding="utf-8") as f:
                     f.write(garbage)
                 self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4)
                 self.assertLessEqual(set(old), set(h.snapshots()))

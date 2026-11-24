@@ -12,6 +12,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 from collections.abc import Callable, Sequence
 import contextlib
+import dataclasses
 import errno
 import fnmatch
 import io
@@ -151,6 +152,56 @@ class FakeSystemd:
             return "[not set]"
 
 
+@dataclasses.dataclass
+class GameScratch:
+    """The game profile's scratch machine (game_scratch): where things are, the fake systemd with its
+    baseline, the user manager's cgroup folder and the settings of the tests."""
+
+    paths: GamePaths
+    systemd: FakeSystemd
+    ucg: str
+    settings: GameSettings
+
+
+def add_gamemode_pid(proc: str, pid: str) -> None:
+    """A process pid under the /proc folder proc with GameMode's client library loaded (the game)."""
+    d = os.path.join(proc, pid)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "maps"), "w") as f:
+        f.write("7f00-7f01 r-xp 00000000 00:00 0 /usr/lib64/libgamemodeauto.so.0\n")
+
+
+def game_scratch(tmp: str) -> GameScratch:
+    """A fake cgroup tree, /proc and sysfs, and a fake systemd with its baseline, in the folder tmp
+    (which the caller removes); a GameMode client runs."""
+    t = tmp
+    paths = GamePaths(
+        conf=os.path.join(t, "conf"),
+        run=os.path.join(t, "run"),
+        cgroot=os.path.join(t, "cgroup"),
+        unit_runtime=os.path.join(t, "unit-runtime"),
+        run_systemd=os.path.join(t, "rs"),
+        run_user=os.path.join(t, "ru"),
+        sys_cpu=os.path.join(t, "sys-cpu"),
+        sys_drm=os.path.join(t, "sys-drm"),
+        proc=os.path.join(t, "proc"),
+    )
+    os.makedirs(paths.run)
+    settings = GameSettings(target_user=USER, game_zswap_writeback="yes")
+    # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
+    ucg = os.path.join(paths.cgroot, "user.slice", f"user-{UID}.slice", f"user@{UID}.service")
+    os.makedirs(ucg)
+    systemd = FakeSystemd(t)
+    # The baseline as systemd shows it before the profile.
+    systemd.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
+    for u in ("user.slice", f"user-{UID}.slice", f"user@{UID}.service"):
+        systemd.set_now("sys", u, MemoryLow="0")
+    systemd.set_now("usr", "user.slice", CPUWeight="30")
+    # A GameMode client runs (the game): pid 1 has its library loaded.
+    add_gamemode_pid(paths.proc, "1")
+    return GameScratch(paths, systemd, ucg, settings)
+
+
 class GameProfileCase(unittest.TestCase):
     """The game profile with a fake systemd, a fake cgroup tree, /proc and sysfs."""
 
@@ -158,39 +209,16 @@ class GameProfileCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="cst-game-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
-        t = self.tmp
-        self.paths = GamePaths(
-            conf=os.path.join(t, "conf"),
-            run=os.path.join(t, "run"),
-            cgroot=os.path.join(t, "cgroup"),
-            unit_runtime=os.path.join(t, "unit-runtime"),
-            run_systemd=os.path.join(t, "rs"),
-            run_user=os.path.join(t, "ru"),
-            sys_cpu=os.path.join(t, "sys-cpu"),
-            sys_drm=os.path.join(t, "sys-drm"),
-            proc=os.path.join(t, "proc"),
-        )
-        os.makedirs(self.paths.run)
+        scratch = game_scratch(self.tmp)
+        self.paths = scratch.paths
         self.state, self.intended, self.manual = self.paths.state, self.paths.intended, self.paths.manual
         self.unit_runtime = self.paths.unit_runtime
-        self.settings = GameSettings(target_user=USER, game_zswap_writeback="yes")
-        # The user manager's cgroup folder (uid 999999), as cgroupfs shows it.
-        self.ucg = os.path.join(self.paths.cgroot, "user.slice", f"user-{UID}.slice", f"user@{UID}.service")
-        os.makedirs(self.ucg)
-        self.systemd = FakeSystemd(t)
-        # The baseline as systemd shows it before the profile.
-        self.systemd.set_now("sys", "machine.slice", CPUWeight="50", IOWeight="50")
-        for u in ("user.slice", f"user-{UID}.slice", f"user@{UID}.service"):
-            self.systemd.set_now("sys", u, MemoryLow="0")
-        self.systemd.set_now("usr", "user.slice", CPUWeight="30")
-        # A GameMode client runs (the game): pid 1 has its library loaded.
-        self.gamemode_pid("1")
+        self.settings = scratch.settings
+        self.ucg = scratch.ucg
+        self.systemd = scratch.systemd
 
     def gamemode_pid(self, pid: str) -> None:
-        d = os.path.join(self.paths.proc, pid)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "maps"), "w") as f:
-            f.write("7f00-7f01 r-xp 00000000 00:00 0 /usr/lib64/libgamemodeauto.so.0\n")
+        add_gamemode_pid(self.paths.proc, pid)
 
     def no_game(self) -> None:
         shutil.rmtree(self.paths.proc)
@@ -2071,6 +2099,23 @@ class GameProfileCliTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout, r.stderr), (2, "", "usage: game-profile on|off|tick|state\n"))
 
 
+def full_after(target: str, records: int, *, mode: str = "a") -> contextlib.AbstractContextManager[object]:
+    """The game profile's own writes of target in mode fail with ENOSPC after records of them."""
+    real = open
+    written = {"n": 0}
+
+    def fake_open(
+        path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
+    ) -> IO[str]:
+        if path == target and flags == mode:
+            written["n"] += 1
+            if written["n"] > records:
+                raise OSError(errno.ENOSPC, "No space left on device", path)
+        return real(path, flags, encoding=encoding, errors=errors)
+
+    return unittest.mock.patch("cpu.game.adapters.profile.open", fake_open, create=True)
+
+
 class FullRunFolderTest(GameProfileCase):
     """/run full (ENOSPC) while 'on' writes game.state: a change whose record cannot be written is not
     made (off could not undo it), and 'on' still ends with exit 0, so cpu-game.service stays active and
@@ -2082,20 +2127,7 @@ class FullRunFolderTest(GameProfileCase):
     ) -> contextlib.AbstractContextManager[object]:
         """The game profile's own writes of target (game.state by default) in mode fail with ENOSPC after
         records of them."""
-        real = open
-        written = {"n": 0}
-        full = self.state if target is None else target
-
-        def fake_open(
-            path: str, flags: OpenTextMode = "r", *, encoding: str | None = None, errors: str | None = None
-        ) -> IO[str]:
-            if path == full and flags == mode:
-                written["n"] += 1
-                if written["n"] > records:
-                    raise OSError(errno.ENOSPC, "No space left on device", path)
-            return real(path, flags, encoding=encoding, errors=errors)
-
-        return unittest.mock.patch("cpu.game.adapters.profile.open", fake_open, create=True)
+        return full_after(self.state if target is None else target, records, mode=mode)
 
     def test_on_skips_what_it_cannot_record_and_still_succeeds_then_off_undoes_the_rest(self) -> None:
         self.systemd.actions = []

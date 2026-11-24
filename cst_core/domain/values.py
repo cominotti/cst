@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Pure domain value objects with invariant enforcement on construction."""
+"""Pure domain value objects with invariant enforcement on construction.
+
+CI runs this file on its E2E runner's python3, 3.12 (tests/e2e/selection.py
+imports parse_whole_number; tests/e2e/README.md, "The Python that runs these
+files"): it stays 3.12 code that imports the standard library only.
+tests/test_e2e_host_python.py checks it.
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -127,8 +133,9 @@ class ByteSize:
     @classmethod
     def parse(cls, spec: str | None) -> Self | None:
         """Parse a systemd-style binary size ('48G', '512M', '1024'), or None if invalid or above
-        _SIZE_MAX (2**64 - 1, the largest size systemd takes)."""
-        m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "")
+        _SIZE_MAX (2**64 - 1, the largest size systemd takes). ASCII digits and blanks only, as systemd reads
+        them (re.ASCII: the digit class is 0-9 only)."""
+        m = re.fullmatch(r"\s*(\d+)\s*([KMGT]?)\s*", spec or "", re.ASCII)
         number = _whole_number(m.group(1)) if m else None
         if m is None or number is None:
             return None
@@ -137,11 +144,16 @@ class ByteSize:
 
     @classmethod
     def parse_iec(cls, spec: str) -> Self:
-        """Parse '<float>[K|M|G|T][i][B]' or '0'/'off'/'no'/'none' into ByteSize."""
-        t = spec.strip().lower()
-        if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t):
-            return cls(0)
-        m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t)
+        """Parse '<float>[K|M|G|T][i][B]' or '0'/'off'/'no'/'none' into ByteSize.
+
+        ASCII only, as bash and systemd read a size: a digit of another script ("٣G"), a Unicode blank or a
+        letter lower() would fold to an ASCII one (the Kelvin sign K) is no size."""
+        m = None
+        if spec.isascii():
+            t = spec.strip().lower()
+            if re.fullmatch(r"0+(?:\.0*)?|off|none|no", t, re.ASCII):
+                return cls(0)
+            m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?", t, re.ASCII)
         if not m:
             raise DomainValidationError(
                 f"'{spec}' is not a size (a number with K, M, G or T, e.g. 150G; 0 or off for no cap)"
@@ -168,8 +180,9 @@ class Duration:
 
     @classmethod
     def parse(cls, spec: str) -> Self:
-        """Parse '<int>[s|m|h|d|w]' into a Duration, raising DomainValidationError if invalid."""
-        m = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", spec)
+        """Parse '<int>[s|m|h|d|w]' into a Duration, raising DomainValidationError if invalid (ASCII digits,
+        blanks and letters only: re.ASCII)."""
+        m = re.fullmatch(r"\s*(\d+)\s*([smhdw])\s*", spec, re.ASCII)
         number = _whole_number(m.group(1)) if m else None
         if m is None or number is None:
             raise DomainValidationError(f"invalid duration {spec!r} (expected integer with s, m, h, d or w)")
@@ -177,9 +190,12 @@ class Duration:
 
     @classmethod
     def parse_float(cls, spec: str, *, allow_unitless: bool = False, positive_only: bool = False) -> float:
-        """Parse a possibly fractional duration into seconds as float."""
+        """Parse a possibly fractional duration into seconds as float.
+
+        ASCII digits, blanks and unit letters only (re.ASCII: without it IGNORECASE also took the long s,
+        U+017F, for "s", a KeyError on _DURATION_UNITS)."""
         pattern = r"\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*" if allow_unitless else r"\s*(\d+(?:\.\d+)?)\s*([smhdw])\s*"
-        m = re.fullmatch(pattern, spec, re.IGNORECASE)
+        m = re.fullmatch(pattern, spec, re.IGNORECASE | re.ASCII)
         if not m:
             raise DomainValidationError(f"invalid duration {spec!r}")
         unit = m.group(2).lower() or "s"

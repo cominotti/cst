@@ -1521,6 +1521,74 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
             if line.startswith("METADATA"):
                 print(f"\ntest_03a: {line}")
 
+    def test_03b_snapshot_core_reads_its_state_file_as_ascii_digits(self) -> None:
+        """A state file whose epoch is a non-ASCII digit (ARABIC-INDIC THREE, SUPERSCRIPT TWO) blocks
+        deletions as an unreadable state (exit 4, the problem printed, no traceback); without the file
+        the same prune deletes."""
+        exec_bash(
+            self.PRIV_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "test_03b FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            TOP=/var/mnt/btrfs-top
+            CORE=/usr/local/sbin/btrfs-snapshot-core
+            """
+            + TOP_LEVEL_OPTS_FN
+            + r"""
+            opts="$(top_level_opts)"
+            mkdir -p "$TOP"
+            if ! mountpoint -q "$TOP"; then
+                mount -o "$opts" "$(head -n1 /run/e2e-loop-devs)" "$TOP"
+            fi
+            SRC=$TOP/e2e-digits-src
+            SNAPS=$TOP/e2e-digits-snaps
+            STATE="$(mktemp -d)"
+            cleanup() {
+                for s in "$SNAPS"/digits.*; do
+                    if [[ -e "$s" ]]; then btrfs subvolume delete "$s" >/dev/null 2>&1 || true; fi
+                done
+                rmdir "$SNAPS" 2>/dev/null || true
+                btrfs subvolume delete "$SRC" >/dev/null 2>&1 || true
+                rm -rf "$STATE"
+                umount "$TOP" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+            /usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py install btrfs/btrfs-snapshot-core
+            btrfs subvolume create "$SRC" >/dev/null
+            mkdir -p "$SNAPS"
+            # Five old read-only snapshots of the source: with the policy 1h, a prune keeps the three newest
+            # and deletes the two oldest (fewer than the circuit breaker's 5).
+            for day in 01 02 03 04 05; do
+                btrfs subvolume snapshot -r "$SRC" "$SNAPS/digits.202001${day}T0000" >/dev/null
+            done
+            count() { find "$SNAPS" -mindepth 1 -maxdepth 1 -name 'digits.*' | wc -l; }
+            prune() {
+                "$CORE" prune --snapdir "$SNAPS" --source "digits=$SRC:1h" --state-dir "$STATE" \
+                    --assume-clock-ok --no-lock --tz UTC
+            }
+            # The state file holds one digit that is not ASCII: ARABIC-INDIC DIGIT THREE (int() reads it as
+            # epoch 3), then SUPERSCRIPT TWO (int() refuses it).
+            for digit in '\u0663' '\u00b2'; do
+                python3 -I -c 'import sys; open(sys.argv[1], "w", encoding="utf-8").write(sys.argv[2].encode().decode("unicode_escape"))' \
+                    "$STATE/core-last-run" "$digit"
+                rc=0
+                out="$(prune 2>&1)" || rc=$?
+                printf '%s\n' "$out" >&2
+                test "$rc" -eq 4
+                grep -qF 'unreadable state' <<<"$out"
+                if grep -qF 'Traceback' <<<"$out"; then echo "a traceback for $digit" >&2; exit 1; fi
+                test "$(count)" -eq 5
+            done
+            # Without the state file the same prune deletes the two oldest.
+            rm -f "$STATE/core-last-run"
+            prune
+            test "$(count)" -eq 3
+            test ! -e "$SNAPS/digits.20200101T0000"
+            test ! -e "$SNAPS/digits.20200102T0000"
+            """,
+        )
+
     def test_04_btrfs_bulk_real_subvolume_and_nocow(self) -> None:
         """btrfs-bulk creates ~/Bulk subvolume, links items, sets +C NOCOW, and supports keep/unkeep."""
         as_tester_bash(

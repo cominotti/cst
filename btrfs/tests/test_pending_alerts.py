@@ -30,6 +30,8 @@ import time
 from typing import Final, override
 import unittest
 
+from btrfs.pending_alerts.domain import PendingPaths, alert_paths
+
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -652,6 +654,27 @@ class PendingAlertsTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(self.record))
         self.assertEqual(self.run_prog().returncode, 0)
         self.assertEqual(len(self.notifications()), 2)
+
+
+class AlertPathsWaitTest(unittest.TestCase):
+    def wait(self, value: str | None) -> int:
+        env = {"HOME": "/home/u"} if value is None else {"HOME": "/home/u", "CST_ALERTS_WAIT": value}
+        paths = alert_paths(env)
+        assert isinstance(paths, PendingPaths)
+        return paths.wait
+
+    def test_the_wait_is_ascii_digits_or_zero(self) -> None:
+        self.assertEqual(self.wait(None), 90)
+        self.assertEqual(self.wait(""), 90)
+        self.assertEqual(self.wait("0"), 0)
+        self.assertEqual(self.wait("060"), 60)
+        for bad in ("-1", "1.5", "x", "\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}"):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.wait(bad), 0)
+
+    def test_a_wait_past_int_s_digit_limit_is_zero(self) -> None:
+        # isascii() and isdigit() took 5000 digits, and int() raised ValueError: a traceback at login.
+        self.assertEqual(self.wait("1" * 5000), 0)
 
 
 if __name__ == "__main__":

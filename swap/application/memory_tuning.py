@@ -9,7 +9,7 @@ from typing import Final
 
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.text import group
-from cst_core.domain.values import format_bytes_human as human
+from cst_core.domain.values import format_bytes_human as human, parse_whole_number
 from cst_core.ports import CommandResult, FileSystemPort, SystemdPort, UnitName
 from perf.domain.models import HUMAN_UID_MIN, PerfPathKey, PerfRootKind, perf_path_spec
 from perf.domain.parsers import parse_bracket_choice, parse_sysfs_tmpfiles_writes
@@ -199,9 +199,9 @@ def _mem_total_bytes(fs: FileSystemPort, proc_dir: str) -> int | None:
 def _floor_matches(raw: str | None, want: int, *, capped: bool) -> bool:
     """Whether memory.min's text is the floor wanted (within a page when a share of MemTotal decided it: the
     kernel keeps memory.min in pages, so a value systemd writes reads back rounded down to one)."""
-    if raw is None or not raw.isdigit():
+    live = None if raw is None else parse_whole_number(raw)  # ASCII digits only
+    if live is None:
         return False
-    live = int(raw)
     return abs(live - want) <= PAGE if capped else live == want
 
 
@@ -225,7 +225,8 @@ def active_seat_users(fs: FileSystemPort, seats_dir: str) -> int:
         if not fields.get(_SEAT_ACTIVE_KEY, "").strip():
             continue
         uid = fields.get(_SEAT_ACTIVE_UID_KEY, "").strip()
-        if uid.isdigit() and int(uid) < HUMAN_UID_MIN:
+        number = parse_whole_number(uid)  # a uid of other than ASCII digits is no greeter's
+        if number is not None and number < HUMAN_UID_MIN:
             continue
         users.add(uid or f"seat {seat}")  # no uid given: that seat's user, whoever it is
     return len(users)
@@ -271,7 +272,8 @@ def uresourced_settings_row(
     if live_min == "0" and users == 0:
         return SettingCheckRow(SettingState.INACTIVE, _USER_SLICE_ROW, "no active seat session", want_txt)
     ok = _floor_matches(live_min, want, capped=capped)
-    live_txt = human(int(live_min)) if live_min.isdigit() else live_min
+    live_bytes = parse_whole_number(live_min)
+    live_txt = human(live_bytes) if live_bytes is not None else live_min
     return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _USER_SLICE_ROW, live_txt, want_txt)
 
 

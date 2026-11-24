@@ -1660,7 +1660,7 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 cst btrfs cache [--user NAME]             # status (default; user + toolbox)
 cst btrfs cache plan [--user NAME]        # dry run + safety checks (--no-cache / --no-scratchpad / --allow-nonempty)
 cst btrfs cache attach [--user NAME]      # root on host: 0700 folders, CACHEDIR.TAG, fstab bind lines, live mount
-cst btrfs cache detach [--user NAME]      # root on host: unmount + remove fstab lines; keeps the data on the drive
+cst btrfs cache detach [--user NAME]      # root on host: remove fstab lines + unmount; keeps the data on the drive
 ```
 
 Moves caches that are rewritten all the time, and build or temporary files,
@@ -1712,10 +1712,17 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   INCOMPLETE` with what it could not undo (an `/etc/fstab` it could not
   put back included: its new lines would mount at the next boot). The folders, the `CACHEDIR.TAG`
   and a new target folder it made stay (empty, the user's): a second
-  `attach` uses them. `detach` unmounts only the binds CST made
-  (`kept: TARGET has a mount CST did not make` for any other) and removes
-  the user's managed lines; when that fails, it mounts again what it
-  unmounted. It changes nothing, and says why, when it cannot tell CST's
+  `attach` uses them. `detach` is the mirror: it removes the user's
+  managed lines from `/etc/fstab` and runs `systemctl daemon-reload`
+  first, then unmounts only the binds CST made (`kept: TARGET has a mount
+  CST did not make` for any other). When the write or the reload fails, it
+  puts `/etc/fstab` back and unmounts nothing. When an unmount fails (a
+  busy target: a process with a file or its folder there), it mounts again
+  what it unmounted, then puts the lines back and reloads, and says
+  `mounts and /etc/fstab restored.` or `ROLLBACK INCOMPLETE`. A bind it
+  cannot mount again gets no line back (`ROLLBACK INCOMPLETE` names it). So a run
+  that dies at any point leaves no line for a bind that is not mounted; the
+  same `detach` again finishes the job. It changes nothing, and says why, when it cannot tell CST's
   bind from another mount (the base folder, `/var/mnt/cache` or
   `/var/mnt/scratchpad`, is not mounted) or when another mount sits on top
   of CST's bind (unmounting the target would take that one away instead):

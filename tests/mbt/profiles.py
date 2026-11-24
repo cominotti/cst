@@ -39,6 +39,7 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis.stateful import RuleBasedStateMachine, run_state_machine_as_test
 
 from cst_core.domain.text import enum_member
+from cst_core.domain.values import parse_whole_number
 from tests.repo_files import REPO
 
 PROFILE_VAR: Final = "CST_MBT_PROFILE"
@@ -90,10 +91,11 @@ def profile_from(environ: Mapping[str, str]) -> MbtProfile:
 
 
 def _count(name: str, text: str) -> int:
-    # isascii() too: isdigit() alone takes digits such as "²", which int() refuses.
-    if not (text.isascii() and text.isdigit()):
+    # ASCII digits within int()'s digit limit: isdigit() alone takes "²", which int() refuses.
+    number = parse_whole_number(text)
+    if number is None:
         raise SystemExit(f"{name}={text!r}: expected a whole number")
-    return int(text)
+    return number
 
 
 def examples_from(environ: Mapping[str, str], profile: MbtProfile) -> int:

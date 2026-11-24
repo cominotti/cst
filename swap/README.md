@@ -244,7 +244,11 @@ drop-in to a live `session.slice`. What the file asks is `[ActiveUser]
 MemoryMin` for each user with a session in a seat's foreground (logind's
 `/run/systemd/seats`, `ACTIVE_UID`; one user in front of two seats counts
 once), capped in total by `[Global] MaxMemoryMin`, as uresourced computes it.
-A greeter (the login screen, a uid below 1000) is no such user.
+A greeter (the login screen, a uid below 1000) is no such user; an
+`ACTIVE_UID` of other than ASCII digits (0-9) is no uid, so it counts as a user,
+as a seat without one does. A cgroup value (`memory.min`, `memory.low`,
+`memory.swap.current`) of other than ASCII digits is shown as it is and is no
+match.
 `user.slice memory.min` is inactive (`-`), not a difference, when uresourced
 is not active, and when it reads 0 while no such user is in front of a seat (a
 server, an ssh login, the login screen), since uresourced then protects nobody.
@@ -302,15 +306,19 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read without root. |
+| `?` | Could not be read without root (as root: `apply` stops before it writes anything). |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
 
 1. **Checks** that a partition is configured (`/etc/cst/swap.conf`,
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
-   partition (exists, exact size, no filesystem signature). On a machine an
-   older CST set up, it then writes `/etc/cst/swap.conf` (section 5).
+   partition (exists, exact size, no filesystem signature), that no `swap0`
+   line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
+   be read (a folder in place of one is refused), and that root's install
+   record (`/var/lib/cst/installed.json`) was not written by a newer CST (a
+   downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
+   `/etc/cst/swap.conf` (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
    is removed; with none, the line is appended. The file is replaced
@@ -388,7 +396,8 @@ marker is `# managed-by: swap-setup.sh (CST)`. Its own files started with
   will write: the name and PARTUUID from the marked crypttab line, the size
   that partition has now (trusted on this first use; from then on `apply`
   checks it every time). `apply` writes the file (`== settings`, after all its
-  checks, also those for a crypttab or fstab line written by hand, and before
+  checks, also those for a crypttab or fstab line written by hand or a crypttab
+  or fstab root cannot read, and before
   anything else), and the next `plan` shows `ok`. As your
   user (also in a toolbox) `/etc/crypttab` cannot be read: `plan` shows `?`
   and says so, from the marked `/etc/fstab` line. `apply` never writes over a

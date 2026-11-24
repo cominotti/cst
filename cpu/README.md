@@ -1321,6 +1321,11 @@ cst cpu quiet --wait 2h --for 120 && make bench
 ```
 
 It takes one reading per second for `SECONDS` seconds in a row (default 60).
+`SECONDS` is a whole number in ASCII digits (`0`-`9`), from 1 to the most a
+window can hold (2**63 - 2). `MAX` is a number of seconds in ASCII digits,
+a fraction allowed (`120`, `1.5`), or a number with the unit `s`, `m`, `h`,
+`d` or `w` (`90s`, `30m`, `2h`, `1.5h`; blanks and either case allowed:
+`2 H`), above 0 and not too large to hold. Anything else is a usage error.
 The window is quiet when **all** of these hold:
 
 | Test | Read from | Quiet when | Flag | Environment variable |
@@ -1350,6 +1355,10 @@ The window is quiet when **all** of these hold:
   partition and the disk).
 - **Pressure** (PSI, see section 11): the share of the last 10 seconds in
   which at least one task waited for a CPU, for the disks, or for memory.
+- A limit is a number above 0 in ASCII digits, a fraction and an exponent
+  allowed (`3`, `2.5`, `.5`, `1e1`), blanks or tabs around it; anything else
+  (another script's digits, `1_0`, `inf`) is a usage error, from a flag or a
+  variable.
 - A limit given as a flag wins over its environment variable, and the
   variable wins over the default. Inside a toolbox, `quiet` runs on the host
   (`flatpak-spawn --host`), so it reads the host's files and sees the game
@@ -1375,7 +1384,7 @@ When a test fails, its line ends in `FAIL`, and the last line names it:
 - **Exit code**: 0 quiet; 1 not quiet, or `--wait` ran out; 2 usage error (an
   unknown flag, a value that is not a number above 0, `--wait` shorter than
   `--for`); 130 after Ctrl-C.
-- `--wait MAX` (`120`, `90s`, `30m`, `2h`; the whole time, at least
+- `--wait MAX` (`120`, `90s`, `30m`, `2h`, `1d`; the whole time, at least
   `--for`): when a window is not quiet, the oldest second drops out and the
   next one is added, until the window is quiet or `MAX` has passed. Only the
   last window is printed (on standard output; a "waiting up to ..." line goes

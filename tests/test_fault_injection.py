@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import contextlib
 import errno
 import os
+import shutil
 import tempfile
 from typing import override
 import unittest
@@ -17,6 +18,7 @@ from tests.fault_injection import (
     ALL_MODES,
     FaultMode,
     FaultPlan,
+    FaultyOs,
     FaultyRunner,
     Killed,
     cut_points,
@@ -82,6 +84,47 @@ class FaultPlanTest(unittest.TestCase):
         with self.assertRaises(Killed), contextlib.suppress(Exception):
             fx.call(1)
         self.assertEqual(fx.done, [1])
+
+    def test_without_dead_after_kill_a_handler_still_runs_after_the_kill(self) -> None:
+        plan = FaultPlan().arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        # The code under test cleans up in an `except BaseException` handler: here it runs.
+        with self.assertRaises(Killed):
+            try:
+                fx.call(1)
+            except BaseException:
+                fx.call(2)
+                raise
+        self.assertEqual(fx.done, [1, 2])
+        self.assertEqual(plan.calls, ["call 1", "call 2"])
+
+    def test_dead_after_kill_runs_no_call_after_the_kill(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        with self.assertRaises(Killed):
+            try:
+                fx.call(1)
+            except BaseException:
+                fx.call(2)  # a dead process runs no handler: Killed again, no effect
+                raise
+        with self.assertRaises(Killed):
+            fx.call(3)
+        self.assertEqual(fx.done, [1])
+        self.assertEqual(plan.calls, ["call 1"])
+
+    def test_dead_after_kill_is_alive_again_after_arm(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        with self.assertRaises(Killed):
+            fx.run(2)
+        plan.arm()
+        self.assertEqual(fx.run(2), [1, 2])
+        self.assertEqual(fx.done, [1, 1, 2])
+
+    def test_dead_after_kill_changes_nothing_before_a_kill(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.FAIL, 2))
+        fx = Effects(plan)
+        self.assertEqual(fx.run(3), [1, "failed 2", 3])
 
     def test_fail_at_k_has_no_effect_and_the_next_call_runs(self) -> None:
         plan = FaultPlan().arm((FaultMode.FAIL, 2))
@@ -178,6 +221,88 @@ class StubFsyncTest(unittest.TestCase):
             recorder.assert_not_called()
             inner.doCleanups()
             self.assertIs(os.fsync, recorder)  # nothing left behind for the worker's later tests
+
+
+class FaultyOsTest(unittest.TestCase):
+    @override
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="cst-faulty-os-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.plan = FaultPlan()
+        self.fos = FaultyOs(self.plan, ("mkdir", "rmdir"))
+
+    def test_a_named_call_is_a_point_with_its_effect(self) -> None:
+        d = os.path.join(self.tmp, "d")
+        mkdir = self.fos.mkdir
+        assert callable(mkdir)
+        mkdir(d, 0o700)
+        self.assertTrue(os.path.isdir(d))
+        rmdir = self.fos.rmdir
+        assert callable(rmdir)
+        rmdir(d)
+        self.assertFalse(os.path.lexists(d))
+        self.assertEqual(self.plan.calls, ["os.mkdir", "os.rmdir"])
+
+    def test_every_other_name_is_os_own_and_no_point(self) -> None:
+        self.assertIs(self.fos.listdir, os.listdir)
+        self.assertIs(self.fos.path, os.path)
+        self.assertEqual(self.fos.sep, os.sep)
+        listdir = self.fos.listdir
+        assert callable(listdir)
+        self.assertEqual(listdir(self.tmp), [])
+        self.assertEqual(self.plan.calls, [])
+
+    def test_a_fault_on_a_named_call_fails_it_with_no_effect(self) -> None:
+        d = os.path.join(self.tmp, "d")
+        self.plan.arm((FaultMode.FAIL, 1))
+        mkdir = self.fos.mkdir
+        assert callable(mkdir)
+        with self.assertRaises(OSError) as raised:
+            mkdir(d)
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertFalse(os.path.lexists(d))
+
+    def test_a_kill_on_a_named_call_keeps_its_effect(self) -> None:
+        d = os.path.join(self.tmp, "d")
+        self.plan.arm((FaultMode.KILL, 1))
+        mkdir = self.fos.mkdir
+        assert callable(mkdir)
+        with self.assertRaises(Killed):
+            mkdir(d)
+        self.assertTrue(os.path.isdir(d))
+        os.rmdir(d)
+
+    def test_a_name_os_has_no_function_for_is_refused(self) -> None:
+        with self.assertRaises(AttributeError):
+            FaultyOs(self.plan, ("no_such_call",))
+        with self.assertRaises(AttributeError):
+            FaultyOs(self.plan, ("sep",))  # a value, not a function
+        with self.assertRaises(AttributeError):
+            FaultyOs(self.plan, ("no_such_call",), kill_only=True)
+
+    def test_kill_only_runs_a_call_a_failure_is_armed_at(self) -> None:
+        fos = FaultyOs(self.plan, ("mkdir",), kill_only=True)
+        d = os.path.join(self.tmp, "d")
+        for mode in (FaultMode.FAIL, FaultMode.FAIL_FROM):
+            with self.subTest(mode=mode):
+                self.plan.arm((mode, 1))
+                mkdir = fos.mkdir
+                assert callable(mkdir)
+                mkdir(d)  # no OSError: the call ran
+                self.assertTrue(os.path.isdir(d))
+                self.assertEqual(self.plan.calls, ["os.mkdir"])
+                os.rmdir(d)
+
+    def test_kill_only_still_kills_after_the_call(self) -> None:
+        fos = FaultyOs(self.plan, ("mkdir",), kill_only=True)
+        d = os.path.join(self.tmp, "d")
+        self.plan.arm((FaultMode.KILL, 1))
+        mkdir = fos.mkdir
+        assert callable(mkdir)
+        with self.assertRaises(Killed):
+            mkdir(d)
+        self.assertTrue(os.path.isdir(d))
+        os.rmdir(d)
 
 
 class _Inner:

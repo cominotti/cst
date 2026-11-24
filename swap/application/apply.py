@@ -3,10 +3,10 @@
 
 from collections.abc import Callable
 import posixpath
-from typing import override
+from typing import Final, override
 
-from cst_core.application.install import Placement
-from cst_core.domain.files import MarkedLineSpec, OwnedState
+from cst_core.application.install import InstallRefused, Placement
+from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
 from swap.application.memory_tuning import (
@@ -46,6 +46,11 @@ from swap.domain import (
 
 # swap0's marked lines, as apply checks and writes them: (file, line, the mode a new file gets).
 type _SwapLines = tuple[tuple[str, MarkedLineSpec, int], ...]
+
+# The states of a marked line apply writes (or leaves, OK); any other is refused before the first write.
+_WRITABLE_LINE_STATES: Final[frozenset[ManagedState]] = frozenset(
+    {OwnedState.OK, OwnedState.ADOPT, OwnedState.DUPLICATE, OwnedState.MISSING, OwnedState.CHANGE}
+)
 
 
 class _EventLog(list[ApplyEvent]):
@@ -123,23 +128,14 @@ class SwapApplicationService(SwapReports):
         name: str,
     ) -> tuple[bool, bool, bool]:
         """Apply one marked line (name: the swap device's). Returns (ok, line_changed, line_written)."""
-        prog = self._env.prog
         st = self._inspect_marked(path, line_spec)
         if st == OwnedState.OK:
             events.append(ApplyEvent("out", ApplyEventKind.LINE, f"unchanged: {path} ({name} entry)"))
             return True, False, False
-        if st == OwnedState.CONFLICT:
-            events.append(
-                ApplyEvent(
-                    "err",
-                    ApplyEventKind.ERROR,
-                    f"{prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
-                    "remove it by hand, then run apply again.",
-                )
-            )
-            return False, False, False
-        if st not in (OwnedState.ADOPT, OwnedState.DUPLICATE, OwnedState.MISSING, OwnedState.CHANGE):
-            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{prog}: ERROR: {path}: {st}"))
+        # _check_before_writing refused these already; the file may have changed since.
+        refusal = self._line_refusal(path, line_spec, st)
+        if refusal is not None:
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
             return False, False, False
 
         if not self._fs.exists(path):
@@ -279,24 +275,38 @@ class SwapApplicationService(SwapReports):
         return ((env.crypttab, spec.crypttab_spec(), 0o600), (env.fstab, spec.fstab_spec(), 0o644))
 
     def _check_before_writing(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> str | None:
-        """Every refusal, before the first write (the settings file too): the preconditions, and an
-        unmarked swap line among lines. The desired tmpfiles text, or None when apply stops."""
-        env = self._env
+        """Every refusal, before the first write (the settings file too): the preconditions, an
+        unmarked swap line among lines, a file of lines apply cannot read, and an install record of a
+        newer CST (the installer's puts would refuse it only after swap0's lines were written). The
+        desired tmpfiles text, or None when apply stops."""
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return None
-        for path, line_spec, _mode in lines:
-            if self._inspect_marked(path, line_spec) == OwnedState.CONFLICT:
-                events.append(
-                    ApplyEvent(
-                        "err",
-                        ApplyEventKind.ERROR,
-                        f"{env.prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
-                        "remove it by hand, then run apply again.",
-                    )
-                )
+        states = [(path, line_spec, self._inspect_marked(path, line_spec)) for path, line_spec, _mode in lines]
+        # An unmarked swap line is named first, whichever file has it; then a file apply cannot read.
+        for path, line_spec, st in sorted(states, key=lambda s: s[2] != OwnedState.CONFLICT):
+            refusal = self._line_refusal(path, line_spec, st)
+            if refusal is not None:
+                events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
                 return None
+        try:
+            self._installer.check_record(self._env.install_record)
+        except InstallRefused as e:
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{self._env.prog}: ERROR: {e}"))
+            return None
         return tmpfiles_text
+
+    def _line_refusal(self, path: str, line_spec: MarkedLineSpec, st: ManagedState) -> str | None:
+        """The error line apply stops with for a marked line in state st, None when apply may write it."""
+        prog = self._env.prog
+        if st == OwnedState.CONFLICT:
+            return (
+                f"{prog}: ERROR: {path} has an unmarked entry for {line_spec.key}: "
+                "remove it by hand, then run apply again."
+            )
+        if st not in _WRITABLE_LINE_STATES:
+            return f"{prog}: ERROR: {path}: {st}"
+        return None
 
     def _apply_swap0(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> int:
         """The "crypttab and fstab" section: each marked line of lines (a daemon-reload when one was

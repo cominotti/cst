@@ -614,8 +614,11 @@ others. With `cst btrfs bulk steam apply --copy`:
   [section 16](#16-the-space-guard)) plus 20 GiB. Without it, a large copy
   could push free space down to the emergency purge, which deletes most of
   the snapshot history. The script reads the limit the way `btrfs-snapshot`
-  does (its default, then `/etc/btrfs-setup/snapshots.conf`), so a changed
-  limit counts here too. If free space after all copies would be 250 GiB or less, `plan`
+  does (its default, then `/etc/btrfs-setup/snapshots.conf`, with
+  `btrfs-snapshot`'s own reader and its bash arithmetic: `010` is 8), so a
+  changed limit counts here too. A value `btrfs-snapshot` cannot compare
+  (`250GiB`, digits of another script) or one of 0 or less never starts its
+  purge or its pause, so it is no limit here either: only the 20 GiB stay. If free space after all copies would be 250 GiB or less, `plan`
   adds a `NOTE`: hourly `/home` snapshots then pause until free space is above
   270 GiB again (once old snapshots expire). Moving fewer games per run
   (`--app ID`) may avoid that.
@@ -2546,7 +2549,9 @@ minutes after boot, the clock is not more than 24 hours ahead of the newest
 snapshot and the last successful run.
 
 The last successful run is recorded in `/var/lib/btrfs-snapshot/core-last-run`,
-only when the clock is synchronized. It never moves backwards.
+only when the clock is synchronized. It never moves backwards. A file whose
+time is not ASCII digits (0-9) is an unreadable state: no deletions and no new
+snapshot until it is removed.
 
 ### Circuit breaker
 
