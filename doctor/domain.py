@@ -499,8 +499,7 @@ def parse_alert_text(data: str) -> tuple[str, str, int] | None:
         head[k] = v
     if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or head.get("title", "") == "":
         return None
-    last = parse_whole_number(head.get("last", ""))
-    return head["urgency"], head["title"][:200], 0 if last is None else last
+    return head["urgency"], head["title"][:200], parse_whole_number(head.get("last", "")) or 0
 
 
 def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
