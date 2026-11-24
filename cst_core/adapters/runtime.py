@@ -359,12 +359,47 @@ class ManagedCliSpec[P]:
     is_err_line: Callable[[int, str], bool] | None = None
 
 
+def _managed_prog[P](spec: ManagedCliSpec[P], env_map: Mapping[str, str]) -> str:
+    """The command's name in its messages: CST_PROG through spec.resolve_prog, else CST_PROG or the default."""
+    raw_prog = env_map.get("CST_PROG") or ""
+    if spec.resolve_prog is not None:
+        return spec.resolve_prog(raw_prog)
+    return raw_prog or spec.default_prog
+
+
+def _host_root_refusal[P](
+    spec: ManagedCliSpec[P], parsed: P, args: Sequence[str], cfg: ManagedCliEnv, prog: str
+) -> tuple[bool, str | None]:
+    """(whether the command writes, the refusal when a write cannot run here); a write run by a user
+    on the host is started again as root by enforce_host_root and does not come back."""
+    action = spec.write_action(parsed)
+    if action is None:
+        return False, None
+    req = RootElevation(prog, action, tuple(args), cfg.entry_file, spec.elevation_reason)
+    return True, enforce_host_root(req, ctx=cfg.ctx, elevate=cfg.elevate)
+
+
+def _explicit_error_line(code: int, line: str) -> bool:
+    return code != 0 and line.startswith("ERROR:")
+
+
+def _not_aborted_line(code: int, line: str) -> bool:
+    return code != 0 and not line.startswith("Aborted;")
+
+
+def _write_output_lines(
+    rc: int, lines: Sequence[str], is_err_line: Callable[[int, str], bool], out_fh: TextIO, err_fh: TextIO
+) -> None:
+    for line in lines:
+        target = err_fh if is_err_line(rc, line) else out_fh
+        target.write(f"{line}\n")
+
+
 def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: ManagedCliEnv | None = None) -> int:
     """Execute one standardized CLI invocation with help, usage error, and host-root checks."""
     cfg = ManagedCliEnv() if env is None else env
     env_map = os.environ if cfg.env is None else cfg.env
-    raw_prog = env_map.get("CST_PROG") or ""
-    prog = spec.resolve_prog(raw_prog) if spec.resolve_prog is not None else (raw_prog or spec.default_prog)
+    prog = _managed_prog(spec, env_map)
     out_fh = terminal.stdout() if cfg.out is None else cfg.out
     err_fh = terminal.stderr() if cfg.err is None else cfg.err
 
@@ -377,23 +412,14 @@ def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: Manage
         out_fh.write(spec.format_usage(prog))
         return 0
 
-    action = spec.write_action(parsed)
-    writes = action is not None
-    if action is not None:
-        req = RootElevation(prog, action, tuple(args), cfg.entry_file, spec.elevation_reason)
-        if (refusal := enforce_host_root(req, ctx=cfg.ctx, elevate=cfg.elevate)) is not None:
-            err_fh.write(f"{refusal}\n")
-            return 1
+    writes, refusal = _host_root_refusal(spec, parsed, args, cfg, prog)
+    if refusal is not None:
+        err_fh.write(f"{refusal}\n")
+        return 1
 
     rc, output_lines = spec.execute(parsed, cfg, read_only=not writes)
+    # Without an explicit ERROR: line, every line of a failure goes to stderr but an "Aborted;" one.
     has_explicit_err = rc != 0 and any(line.startswith("ERROR:") for line in output_lines)
-    default_err_pred: Callable[[int, str], bool] = (
-        (lambda code, line: code != 0 and line.startswith("ERROR:"))
-        if has_explicit_err
-        else (lambda code, line: code != 0 and not line.startswith("Aborted;"))
-    )
-    err_pred = spec.is_err_line or default_err_pred
-    for line in output_lines:
-        target = err_fh if err_pred(rc, line) else out_fh
-        target.write(f"{line}\n")
+    default_err_pred = _explicit_error_line if has_explicit_err else _not_aborted_line
+    _write_output_lines(rc, output_lines, spec.is_err_line or default_err_pred, out_fh, err_fh)
     return rc
