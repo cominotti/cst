@@ -574,6 +574,11 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.record.texts[self.ROOT] = render_record(InstallRecord(rec.files, {}))
         self.assertIsNone(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING))
         self.assertEqual(self.record.doc().components, {"m:t": "pending"})
+        # A state the record keeps for a component none of whose files it lists (an older CST's, a hand
+        # edit): None, not that state, which has nothing behind it.
+        self.record.texts[self.ROOT] = render_record(InstallRecord({}, {"m:t": ComponentState.DONE}))
+        self.assertEqual(parse_record(self.record.texts[self.ROOT]).components, {"m:t": "done"})
+        self.assertIsNone(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING))
         # No record named (""): None, nothing read or written.
         writes = self.record.writes
         self.assertIsNone(self.svc.mark("", "m:t"))

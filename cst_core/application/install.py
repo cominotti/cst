@@ -430,7 +430,9 @@ class InstallService:
         prior: list[ComponentState | None] = [None]
 
         def change(rec: InstallRecord) -> InstallRecord:
-            prior[0] = rec.components.get(component)
+            # A state no listed file names (one an older CST or a hand edit left) has nothing behind it.
+            if any(f.component == component for f in rec.files.values()):
+                prior[0] = rec.components.get(component)
             return with_state(rec, component, state)
 
         self._update(record, change)
