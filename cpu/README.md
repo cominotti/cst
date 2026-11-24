@@ -1321,6 +1321,9 @@ cst cpu quiet --wait 2h --for 120 && make bench
 ```
 
 It takes one reading per second for `SECONDS` seconds in a row (default 60).
+`SECONDS` is a whole number in ASCII digits (`0`-`9`); `MAX` is one too, or a
+number with `s`, `m` or `h` (`90s`, `30m`, `2h`). Anything else is a usage
+error.
 The window is quiet when **all** of these hold:
 
 | Test | Read from | Quiet when | Flag | Environment variable |

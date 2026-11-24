@@ -21,7 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import group
-from cst_core.domain.values import HOUR, MINUTE
+from cst_core.domain.values import HOUR, MINUTE, parse_whole_number
 
 URI = "qemu:///system"
 
@@ -485,7 +485,7 @@ def quiet_tests(window: Sequence[QuietSample], limits: Mapping[str, float]) -> l
 
 def duration(text: str) -> float:
     """Seconds from 120, 90s, 30m or 2h."""
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip())
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip(), re.ASCII)  # digits 0-9 only
     if not m or float(m.group(1)) <= 0:
         raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)")
     return float(m.group(1)) * {"": 1, "s": 1, "m": MINUTE, "h": HOUR}[m.group(2)]
@@ -528,9 +528,10 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
 
 def _window_seconds(val: str) -> int:
     """--for's value: a whole number of seconds, at least 1; ValueError for anything else."""
-    if not re.fullmatch(r"\d+", val) or int(val) < 1:
+    seconds = parse_whole_number(val)  # ASCII digits within int()'s digit limit
+    if seconds is None or seconds < 1:
         raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
-    return int(val)
+    return seconds
 
 
 def positive(text: str, what: str) -> float:

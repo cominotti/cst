@@ -1169,6 +1169,17 @@ class QuietNumbersTest(unittest.TestCase):
                 q(argv, {})
         with self.assertRaises(ValueError):
             q([], {"QUIET_CPU_PCT": "-1"})
+        # ASCII digits only: an Arabic-Indic "3" was 3 seconds (or minutes), and 5000 digits reached int()'s
+        # own "Exceeds the limit" error instead of --for's message.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        for argv, message in (
+            (["--for", three], "^--for: a whole number"),
+            (["--for", "1" * 5000], "^--for: a whole number"),
+            (["--for", "1", "--wait", f"{three}m"], "^not a duration"),
+            (["--for", "1", "--wait", f"1.{three}h"], "^not a duration"),
+        ):
+            with self.subTest(argv=[a[:10] for a in argv]), self.assertRaisesRegex(ValueError, message):
+                q(argv, {})
 
     def test_busy_pct(self) -> None:
         window: list[cpu_domain.Readings] = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
