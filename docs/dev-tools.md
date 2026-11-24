@@ -535,6 +535,10 @@ None has a deadline: on a shared machine one slow example is load, not a
 bug. `--examples N` (`CST_MBT_EXAMPLES`) changes the count of any profile;
 a pull request never runs fewer than 100: in the verification pilot, 5
 examples missed a known bug in one copy of the code.
+`tests/test_workflow_audit.py` keeps it so: it refuses a `CST_MBT_`
+variable anywhere in ci.yml or the nightly (an `env:` the task would
+pass on), and an `if:` or `continue-on-error:` on the mbt step or on the
+fast-gates job.
 
 The `dev` database keeps the examples that failed, so the next run tries
 them first. Hypothesis's own folder (its `constants/` and `unicode_data/`
