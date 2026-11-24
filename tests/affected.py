@@ -279,6 +279,16 @@ def _mbt_modules_by_file(inventory: Iterable[str]) -> dict[str, str]:
     return {rel: mod for rel in sorted(inventory) if is_mbt_test_file(rel) and (mod := module_of(rel)) is not None}
 
 
+def _affected_mbt(paths: Iterable[str], index: _RepoIndex) -> tuple[str, ...]:
+    """The tests/mbt modules a change of these paths affects: each changed one, and each whose imports reach one."""
+    mbt: set[str] = set()
+    for path in paths:
+        if path in index.mbt_mods_by_file:
+            mbt.add(index.mbt_mods_by_file[path])
+        mbt.update(index.mbt_rev.get(path, ()))
+    return tuple(sorted(mbt))
+
+
 def _apply_install_and_script_rules(path: str, index: _RepoIndex, selected: set[str]) -> None:
     top = path.split("/", 1)[0]
     is_extensionless_module_file = top in MODULE_ROOTS and "." not in os.path.basename(path)
@@ -340,12 +350,8 @@ def select_affected(
 
     index = _build_repo_index(inventory, repo)
     selected: set[str] = {m for m in GATE_MODULES if m in index.valid_mods}
-    mbt: set[str] = set()
     for path in uniq:
         _apply_path_rules(path, index, selected)
-        if path in index.mbt_mods_by_file:
-            mbt.add(index.mbt_mods_by_file[path])
-        mbt.update(index.mbt_rev.get(path, ()))
     final_mods = tuple(sorted(selected))
     return AffectedPlan(
         base=base,
@@ -353,7 +359,7 @@ def select_affected(
         full_suite=False,
         modules=final_mods,
         reason=f"{len(final_mods)} module(s) selected for {len(uniq)} changed file(s)",
-        mbt_modules=tuple(sorted(mbt)),
+        mbt_modules=_affected_mbt(uniq, index),
     )
 
 
