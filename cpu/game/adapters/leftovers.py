@@ -15,8 +15,15 @@ from typing import TYPE_CHECKING
 
 from cst_core.adapters.files import read_text, write_atomic
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, PropUndo, show_values, state_undo, transient_unit
-from cpu.game.domain.leftovers import Entry, leftover_entries, leftovers_text, newer_leftovers, undo_text
+from cpu.game.domain import Manager, show_values, transient_unit
+from cpu.game.domain.leftovers import (
+    Entry,
+    leftover_entries,
+    leftovers_text,
+    newer_leftovers,
+    of_user_manager,
+    undo_text,
+)
 
 if TYPE_CHECKING:
     from cpu.game.adapters.profile import GameProfile
@@ -47,8 +54,7 @@ def undo_entries(profile: GameProfile, entries: Sequence[Entry], reload: dict[st
             profile.act_for(uid, say=False)
         if profile.undo_record(rec, reload):
             continue
-        undo = state_undo(rec)
-        user = (profile.uid(say=say) or None) if isinstance(undo, PropUndo) and undo.mgr == "usr" else None
+        user = (profile.uid(say=say) or None) if of_user_manager(rec) else None
         failed.append((user, rec))
         if say:
             what = undo_text(rec, profile.paths.epp)

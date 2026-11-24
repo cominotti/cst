@@ -55,9 +55,14 @@ def leftover_entries(text: str) -> list[Entry]:
         if rec[0] == GameRecordKind.USER:
             user = rec[1] if len(rec) > 1 else None
             continue
-        undo = state_undo(rec)
-        out.append((user if isinstance(undo, PropUndo) and undo.mgr == "usr" else None, rec))
+        out.append((user if of_user_manager(rec) else None, rec))
     return out
+
+
+def of_user_manager(rec: Record) -> bool:
+    """Whether undoing the record sets a property in the user manager: its entry names the user it is for."""
+    undo = state_undo(rec)
+    return isinstance(undo, PropUndo) and undo.mgr == "usr"
 
 
 def newer_leftovers(path: str, text: str) -> str | None:
