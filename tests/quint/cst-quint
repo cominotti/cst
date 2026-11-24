@@ -53,6 +53,16 @@ import tempfile
 import time
 from typing import Final
 
+# The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path (and -B,
+# or the bytecode flag below, keeps the cst_core imported from there from writing __pycache__ into it).
+sys.dont_write_bytecode = True
+_CHECKOUT: Final = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
+from cst_core.domain.errors import ExitStatus
+from cst_core.domain.shapes import json_object, parse_json
+
 QUINT_VERSION: Final = "0.33.1"
 JVM_ARGS: Final = "-Xmx4g"
 TLC_CONFIG: Final = {"maxHeap": JVM_ARGS, "workers": 4}
@@ -65,7 +75,6 @@ FETCH_TIMEOUT: Final = 600
 REPLAY_TIMEOUT: Final = 300
 EX_FAILED: Final = 1
 EX_USAGE: Final = 2
-TIMED_OUT: Final = 124  # timeout(1)'s exit status when it stopped the command
 REQUIRED: Final = ("node", "npm", "java", "curl", "nice", "timeout")
 NICE: Final = ("nice", "-n", "10")
 
@@ -340,7 +349,7 @@ def verdict(ran: Ran) -> Verdict:
     # the last such line is the total.
     states = last_number(r"(\d+) distinct states found", ran.output)
     depth = last_number(r"depth of the complete state graph search is (\d+)", ran.output)
-    if ran.returncode == TIMED_OUT:
+    if ran.returncode == ExitStatus.TIMED_OUT:
         result = "timed out"
     elif ran.returncode == 0 and "[ok] No violation found" in ran.output:
         result = "ok"
@@ -367,17 +376,17 @@ def trace_problem(job: TraceJob, ran: Ran) -> str | None:
 def normalize(text: str, description: str) -> str:
     """An ITF trace as it is checked in: "#meta" without the spec's absolute path or a timestamp (the
     description in their place), one state per line, sorted keys: the same bytes for the same trace."""
-    doc = json.loads(text)
-    if not isinstance(doc, dict) or not isinstance(doc.get("states"), list):
+    doc = parse_json(text)
+    if not json_object(doc) or not isinstance(states_in := doc.get("states"), list):
         raise StepError("not an ITF trace")
     meta = doc.get("#meta")
-    kept = {k: meta[k] for k in ("format", "format-description") if isinstance(meta, dict) and k in meta}
+    kept = {k: meta[k] for k in ("format", "format-description") if json_object(meta) and k in meta}
     kept["description"] = description
     lines = ["{", f'"#meta": {json.dumps(kept, sort_keys=True)},']
     lines += [
         f"{json.dumps(k)}: {json.dumps(doc[k], sort_keys=True)}," for k in sorted(doc) if k not in {"#meta", "states"}
     ]
-    states = [json.dumps(state, sort_keys=True) for state in doc["states"]]
+    states = [json.dumps(state, sort_keys=True) for state in states_in]
     lines.append('"states": [')
     lines += [state + ("," if i < len(states) - 1 else "") for i, state in enumerate(states)]
     lines += ["]", "}"]
@@ -481,7 +490,7 @@ def cache_root(env: Mapping[str, str]) -> str:
 
 
 def checkout_root() -> str:
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return _CHECKOUT
 
 
 @dataclass(frozen=True, slots=True)
