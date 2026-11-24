@@ -56,6 +56,9 @@ LICENSE_EXEMPT: Final[dict[str, str]] = {
         "installs as the previous version (tests/e2e/README.md, Mixed-version tests), except that a personal or "
         "private value in one is replaced by an invented one"
     ),
+    "tests/quint/package.json": "JSON has no comments (npm's manifest of the quint pin, for npm ci)",
+    "tests/quint/package-lock.json": "JSON has no comments (npm's lock of the quint pin: every package and its hash)",
+    "btrfs/tests/quint/traces/*.itf.json": "JSON has no comments (ITF traces quint writes; the replay reads them)",
     "doctor/tests/fixtures/db-booted.txt": (
         "captured `rpm-ostree db list` output, copied whole into a fake package database"
     ),
@@ -79,6 +82,7 @@ _BY_SUFFIX: Final[dict[str, tuple[str, str]]] = {
     ".md": _MARKUP,
     ".mount": _HASH,
     ".py": _HASH,
+    ".qnt": _SLASHES,  # Quint specs
     ".rules": _SLASHES,  # polkit rules are JavaScript
     ".service": _HASH,
     ".sh": _HASH,

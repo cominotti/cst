@@ -109,6 +109,32 @@ jobs:
       - name: Run the property and state-machine tests (invowk cmd test mbt, nightly profile)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile nightly
 
+  # TLC on the Quint specs on main (invowk cmd test quint), as ci.yml's quint
+  # job runs it when a change touches what it checks: this run catches a drift
+  # of the runner (its JDK or node) or of a download between such changes. A job
+  # of its own, on the runner host as its own non-root user; no GitHub cache.
+  quint-nightly:
+    name: Quint Spec, TLC (docker-volumes-nocow)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      - name: Model-check the Quint specs (invowk cmd test quint)
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="${JAVA_HOME_21_X64}"
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          java -version
+          node --version
+          invowk cmd test quint
+
   # Known vulnerabilities in the locked dev tools (uv.lock, every group). It
   # needs the network, so it runs here and not in the fast gates. A job of
   # its own: a new advisory or a vulnerability database that does not answer

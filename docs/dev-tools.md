@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools: uv, ruff, ty, zizmor, coverage.py, Hypothesis, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, coverage.py, Hypothesis, cosmic-ray, Quint
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -15,6 +15,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [coverage.py](https://coverage.readthedocs.io/) 7.17.3 | statement and branch coverage of the unit suite, for `invowk cmd test coverage` (its own `coverage` group; the nightly runs it; see "Coverage") | `pyproject.toml`, `uv.lock` |
 | [Hypothesis](https://hypothesis.readthedocs.io/) 6.170.17 | property and state-machine tests of `tests/mbt`, for `invowk cmd test mbt` (its own `mbt` group; CI runs it on every pull request and in the nightly; see "Property and model-based tests") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
+| [Quint](https://quint-lang.org/) 0.33.1, [Apalache](https://apalache-mc.org/) 0.62.4 (its jar also runs TLC), Quint's evaluator 0.7.1 | model checking of the Quint specs with TLC, and the traces their replay tests read, for the optional `invowk cmd test quint` (not through uv: npm and two downloads checked by SHA-256, in `~/.cache/cst-quint`; see "Model checking with Quint") | `tests/quint/package.json` and `package-lock.json`; `tests/quint/cst-quint` (the two downloads) |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
 unchanged code. That is why it is pinned exactly and upgraded on purpose (see
@@ -99,6 +100,28 @@ other work at the same time (another test run, a build, an agent).
   competed (at 8 to 24 workers the times with and without it were within each
   other's spread). How much it helps the machine's other users was not
   measured.
+- **The longest work first.** A parallel run of the whole suite (no NAME,
+  no `--gates`) that passes writes how long each test took to
+  `${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json`, one file per
+  checkout or worktree (the key as `tests/uv-dev` makes it; a relative
+  `XDG_CACHE_HOME` is ignored, so the file never lands in the checkout). The
+  next parallel run, whole or named, queues its work units longest first by
+  those times, so a long unit (a class of real sleeps or timeouts) does not
+  start last and hold the run open; a test with no time yet counts as the
+  average one. With no file, or one it cannot read, the order is the old one:
+  most tests first. A run in one process (`--jobs 1`, `CST_TEST_JOBS=1`, a
+  load error, a single unit) neither reads nor writes the file, so it cannot
+  seed the times. A run that fails (a test, a gate, a lost worker) leaves
+  the file as it was: tests that error at once would otherwise record a
+  slow unit as a quick one. CI neither reads nor writes the file. Only the order
+  changes: the same tests and gates run, and a failure is the same failure.
+  Deleting the file costs one run in the old order. Measured on 2026-11-24 on
+  `main` (3,692 tests), under `nice -n 10` with TMPDIR on tmpfs, 5 runs each,
+  the old and the new order interleaved on a shared machine: at 16 workers
+  the median went from 56.1 s to 50.8 s (9.5% less; each order's runs spread
+  over 18%), at 8 workers it did not change (88.2 s and 89.1 s, within the
+  spread of 5% to 11%). With fewer workers the long units are a smaller part
+  of each worker's share, so their place in the queue matters less.
 
 Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
 a shared machine, with another project's load at times (the spread was 1% to
@@ -110,9 +133,6 @@ every fsync real. `main` has had those tests since, with fsync stubbed
 on where TMPDIR is. The "about 12 times" is those tests as they were then;
 the suite-level 8% to 13% was measured on that tree and may be smaller on
 `main`.
-
-Not adopted yet: queueing the longest work units first (6% to 12% less wall
-time in the same measurements), to be measured again later.
 
 ## Fault injection tests
 
@@ -966,6 +986,205 @@ cannot, so it is skipped there): the copy is writable; a write under
 outside stays empty; and, six folders deep under `/run`, `/tmp`, the home
 folders, `/var/mnt`, `/mnt` and `/media`, there is no Unix socket and no
 folder that is the real home.
+
+## Model checking with Quint (optional)
+
+A unit test checks the runs someone thought of. A model checker checks every
+run a model of the protocol can take. CST has one such model:
+`btrfs/tests/quint/docker_volumes_nocow.qnt`, a [Quint](https://quint-lang.org/)
+spec of docker-volumes-nocow's install and boot migration, with a crash or a
+fault after any step. TLC (the TLA+ model checker, run through quint)
+explores every state each instance of the spec can reach and checks that the
+spec's properties hold in all of them.
+
+```
+invowk cmd test quint                     # TLC on every instance, every property (a line per instance)
+invowk cmd test quint --instance nocow_ab # one instance
+invowk cmd test quint --spec FILE         # a planted copy of the spec instead of the checked-in one
+invowk cmd test quint --traces            # write the checked-in traces again, then run the replay
+invowk cmd test quint --keep              # keep the work folder (its path is printed)
+```
+
+`invowk cmd check` does not run it; CI runs it when a change touches what it
+checks, and the nightly runs it on main (see "In CI" below). It needs node and
+npm, java (17 or later) and curl.
+
+**The tools.** `tests/quint/cst-quint` puts every tool in place itself, under
+`${XDG_CACHE_HOME:-~/.cache}/cst-quint`, never in the checkout:
+
+- quint 0.33.1 with `npm ci --ignore-scripts` from `tests/quint/package.json`
+  and `package-lock.json` (the lock pins every package with its hash, which
+  `npm ci` checks), into a folder named after the lock's hash;
+- the two programs quint would otherwise download on first use without any
+  check: Apalache 0.62.4 (`apalache.tgz`, whose jar also runs TLC) and the
+  Rust evaluator 0.7.1. Each download is checked against the SHA-256 written
+  in `cst-quint`; a mismatch removes it and stops with both hashes. They are
+  unpacked into `QUINT_HOME` (`~/.cache/cst-quint/quint-home`), where quint
+  finds them and fetches nothing. A tool already there is used only when the
+  stamp beside it records the hash that was checked.
+
+About 240 MB in all, fetched once. quint, Apalache and TLC run from a new
+work folder under `~/.cache/cst-quint/work` (they write `_apalache-out/` in
+the folder they run in, and quint's TLC translation goes to `TMPDIR`, which
+is set to it), removed at the end. Every run is under `nice -n 10` and a time
+limit (TLC 5 minutes per instance, Apalache 10 minutes, the simulator 5). TLC
+gets an explicit config, `{"maxHeap": "-Xmx4g", "workers": 4}`, and
+`JVM_ARGS=-Xmx4g`: quint's defaults are an 8 GB heap and a worker per CPU.
+Each line gives the instance's verdict, its distinct states, the depth, the
+time and the largest resident memory of its process tree (the JVM included).
+
+The unit tests in `tests/quint/tests/` check the checksums (a match, a
+mismatch, a folder without the stamp), the `npm ci` call, the command
+lines, the verdicts, the trace normalizer and the refusal of a trace run that
+did not reach its witness, with a fake runner; no tool or
+network is used. `tests/test_quint_task.py` checks the task's flags.
+
+**What the spec models.** One action per call of
+`btrfs/docker_volumes_nocow/application.py` that changes the disk or the
+helper's files (the methods of `VolumeTreePort` and `NocowStatePort`), in
+the code's order: `install`'s `mark` (with copy-on-write data, the request
+first: an old count reset, then the flag, then +C on the volumes folder;
+without, the count forgotten, then +C), after which `btrfs-setup.sh` writes
+nothing whatever mark's exit status; each boot's
+`migrate` (the recovery of an interrupted migration, volume by volume; the
+folder's +C and its request; the give-up check; the counter; the rewrite of
+each volume: twin, label, copy, sync, the two renames, the old copy's
+removal; `give_up`); and Docker recreating a volume. A crash can come after
+any step: a kill, or a power loss that also loses a copy not yet synced. A
+step can fail where the code checks the outcome (a rename, the flag's
+removal, the counter, the copy). The label each action leaves in `step` is
+the call the replay records from the real code, so the spec's traces can be
+replayed against it. A start without the flag may hold a count of boots an
+older helper left (any count up to `GIVE_UP_AFTER`): with an install that
+touched the flag beside it after a failed reset, `attemptsMatch` fails. A
+volume's folders hold contents, not files ("cow",
+"copy", "partial", "empty", "absent"). The spec's header lists what it does
+not model: `scan(fix)`, the postponed record, journal lines and alerts,
+`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+a failing `remove_tree`, containers writing during an install, the
+durability of metadata, and the start an older install could leave (+C on
+the folder, copy-on-write data, no flag), which `requestKept` rules out:
+unit and tier 2 tests check that an install requests the migration again
+from there. A power loss loses only a copy's unsynced content:
+the flag (`/etc`), the counter (`/var`) and the data root may be on
+different file systems and roll back apart, and the code keeps the pairs
+that matter in order by fsync (the flag before +C, the counter's reset
+before the flag), which the unit tests check instead.
+
+Five instances bound the search: two volumes (`nocow_ab`), one
+(`nocow_a`), two with boots only (`nocow_ab_boots`: no install, Docker
+never recreates a volume), two with more crashes and installs
+(`nocow_ab_wide`), three volumes (`nocow_abc`). Each allows
+`GIVE_UP_AFTER = 2` boots, as the code does. All five together take a
+little over a minute and under 2 GB (about 6.5 million distinct states).
+
+**The properties**, checked in every state of every instance:
+
+- `noDataLoss`: each volume's `_data` holds the original or a complete
+  copy of it, or an old copy (the original, which the next boot's recovery
+  puts back) is there.
+- `requestKept`: +C on the volumes folder with copy-on-write data left
+  means the flag is there, unless the helper gave up. +C first and the flag
+  after would lose the request for good: no later boot looks again.
+- `attemptsMatch`: while the flag is there, the counter holds no boot its
+  round did not have (no early give-up).
+- `boundedTries`: at most `GIVE_UP_AFTER` rewrites in one round.
+- `cleanRunConverges`: a run with no fault and no crash that chose to
+  rewrite ends with every volume a NOCOW copy, no leftovers, no flag and no
+  counter.
+
+**Why two of them count per round, not per request.** The code removes the
+counter before the flag (at the give-up and when every volume is
+rewritten), so a later request never inherits a finished one's boots. A stop
+between the two removals leaves the flag with no counter, and the next boot
+starts that request's count over: up to `GIVE_UP_AFTER` more rewrites. The
+code also saves the counter before a rewrite starts, so a stop between the
+two counts a boot that rewrote nothing. "The counter equals the rewrites of
+this request" and "at most `GIVE_UP_AFTER` rewrites per request" therefore
+do not hold, on purpose. The spec states both per round instead, with ghost
+variables (not on disk) that change only on a decision or an outcome of the
+code, never on a write of the counter (a ghost that moved with the counter
+would make the properties hold by construction): a round starts at a new
+request (a flag created where there was none), at install's decision to
+request again, and at the decision to end the request (the give-up, or every
+volume rewritten); `boots` counts the round's boots that chose to rewrite,
+`rewrites` the rewrites started, and `carried` the count when the code
+decided to end the round (a failed removal of the flag puts it back). The
+witness `wNewRound` shows that a round started after a stop between the two
+removals is reachable. The properties still catch the orders that matter: a
+planted copy of the spec that removes the flag before the counter violates
+`attemptsMatch`, and one that saves the counter after the rewrite violates
+`boundedTries`.
+
+**Where `sync()` may go.** The copy is synced before `rename(_data,
+old)`. Moving the sync to just after that rename (still before
+`rename(new, _data)`) is safe, and the checker says so: a power loss before
+the second rename leaves the original as an old copy, which recovery puts
+back. Unsafe are the sync after the second rename, or no sync at all: a
+power loss then leaves a partial `_data` beside the old copy, the next
+boot's recovery sees a `_data` and removes the old copy, and
+`noDataLoss` fails.
+
+**The replay.** `btrfs/tests/test_docker_volumes_nocow_replay.py`, in the
+unit suite, replays the checked-in traces of the spec
+(`btrfs/tests/quint/traces/*.itf.json`) against the real code: the use
+case over its real adapters, with the fakes of the module's unit tests
+(NOCOW ioctls, the commands, `os.sync`). Each trace's start becomes the
+volumes on disk, the folder's +C, the flag and the counter; each run of the
+trace (a boot, an install, Docker recreating a volume) gets the faults the trace picked, each at its
+call's position in the run, and dies where the trace crashes (a power loss
+also spoils the copies the spec says it loses). Every call the code makes
+to the volume tree and to the flag and counter files is recorded with the
+spec's label; the calls of each run must be the spec's, in its order, and
+after each run each volume's `_data`, twin and old copies, the folder's +C,
+the flag and the counter must be the spec's state. A second test checks
+that the traces, together, replay every recorded call and outcome of the
+spec. `CST_NOCOW_TRACES` names a folder of more traces to replay.
+
+The traces are two random walks of the simulator, the shortest trace
+Apalache finds to two install witnesses (its bounded check answers in
+seconds for a few steps, but took more than 7 minutes for a 32-step one),
+and the first trace the simulator finds to each other witness a random walk
+rarely reaches (a restore, a failed
+recovery, a kept flag after a give-up, a power loss with a partial copy, a
+failed install request, a new round, ...). The new round's trace comes from
+the spec's `step_round_end`, the steps of `step_` with a crash only where a
+request ends: a walk of `step_` spends its crashes long before a rewrite
+ends and almost never stops there. `TRACE_JOBS` in
+`tests/quint/cst-quint` lists them with their seeds and bounds, and
+`invowk cmd test quint --traces` writes the same bytes again (one thread,
+the seed fixed, the absolute path and the time taken out). A witness's run
+must end with a violation of its negated invariant, and a walk's with exit 0:
+otherwise (the witness not reached within its bounds, a time limit, an
+error) the checked-in trace is left as it is and the run stops with exit 1. About 300 KB in
+all; the replay takes a fraction of a second.
+
+What the replay does not compare: `scan(fix)` setting +C in place on
+folders and empty files, the postponed record, journal lines and the alert,
+`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+a failing `remove_tree`, containers writing during an install, and the
+durability of metadata (the unit tests and the fault tests cover those).
+
+**A change of order in the module** changes the spec and its traces in the
+same commit (one action per call, in the code's order): the replay fails
+on a code change the spec does not follow, and the CI job on a spec change
+that breaks a property.
+
+**In CI.** The `quint` job of `.github/workflows/ci.yml` runs `invowk cmd
+test quint` when a pull request (or a push to main) changes a path under
+`btrfs/docker_volumes_nocow/`, `btrfs/tests/quint/` or `tests/quint/`, or
+`btrfs/tests/test_docker_volumes_nocow_replay.py`, or what runs the job
+(`.github/workflows/ci.yml`, `cst.invowkmod/invowkfile.cue`,
+`.github/actions/setup-invowk/`); `tests/test_quint_task.py` checks that
+list; `CI Status` accepts it
+skipped only when none changed. It runs on the runner host, as the runner's
+non-root user, with the runner's JDK 21 and node, and fetches its tools
+afresh (about 10 s; no GitHub cache, each download checked by its SHA-256).
+The nightly's `quint-nightly` job runs it on main too, which catches a
+drift of the runner or of a download between such changes. A pull request
+that changes the spec and its traces together passes the replay whatever
+the spec says; only TLC tells that the changed spec still holds its
+properties.
 
 ## Layout-only commits and `git blame`
 
