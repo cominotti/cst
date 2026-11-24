@@ -1061,7 +1061,9 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             self.runner.run(["umount", self.tmp + b.target])
         rc, _, err = self._run(["attach"])
         self.assertEqual(rc, 1)
-        self.assertIn("(run systemctl daemon-reload once it works); mounts and /etc/fstab restored.", err)
+        # Only the mounts are taken back: this run wrote no /etc/fstab (it says "/etc/fstab is as asked").
+        self.assertIn("(run systemctl daemon-reload once it works); the mounts this run made were taken back.", err)
+        self.assertNotIn("restored", err)
         self.assertEqual((self._fstab(), self._mounted()), (fstab, []))
 
     def test_detach_with_systemd_current_reloads_nothing(self) -> None:

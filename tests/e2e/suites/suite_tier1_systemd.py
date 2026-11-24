@@ -8664,7 +8664,9 @@ EOF
         the pid the test recorded), then run again, with the real systemd. The bases are tmpfs lines, which
         systemd-fstab-generator accepts, so var-mnt-cache.mount is loaded from /etc/fstab before the kill and
         the real `systemctl show` says NeedDaemonReload=yes after it (the test fails as "cannot bite"
-        otherwise). After the killed attach, plan says attach runs daemon-reload; the run again exits 0, says
+        otherwise). After the killed attach, plan says attach runs daemon-reload; with the binds unmounted by
+        hand, an attach whose catch-up reload fails mounts them, then takes back only the mounts (exit 1, "the
+        mounts this run made were taken back.": it wrote no /etc/fstab); the run again exits 0, says
         "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
         (NeedDaemonReload=no, the mount unit of ~/.cache made); a third run has nothing to do and reloads
         nothing. After the killed detach, the run again reloads once, unmounts the binds and leaves no mount
@@ -8737,7 +8739,10 @@ if [[ "$1" == daemon-reload ]]; then
 fi
 exec /usr/bin/systemctl "$@"
 EOF
-            chmod +x {w}/kill/systemctl {w}/sync/systemctl
+            # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
+            mkdir -p {w}/fail
+            printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl
             touch {w}/reloads
             export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
             cst=/opt/cst-rw/cst
@@ -8782,6 +8787,15 @@ EOF
             plan_out="$($cst btrfs cache plan --user u1)"
             grep -qF "Already attached for u1; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload." \
                 <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            # The binds unmounted by hand, then an attach whose catch-up reload fails: it mounts them, the
+            # reload fails, and it takes back only the mounts (it wrote no /etc/fstab).
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "attach with a failing reload: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "/etc/fstab is as asked, systemd has not loaded it (run systemctl daemon-reload once it works); the mounts this run made were taken back." {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the failed attach" >&2; exit 1; fi
+            [[ "$(behind)" == yes ]]
             again attach
             [[ -f "$cache_unit" ]] || {{ echo "no mount unit of ~/.cache after the reload" >&2; exit 1; }}
             [[ "$(systemctl show -P SourcePath var-home-u1-.cache.mount)" == /etc/fstab ]]

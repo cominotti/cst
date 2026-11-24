@@ -1751,7 +1751,8 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   before it unmounts; `attach` asks after the mounts it makes, and when
   that reload fails it unmounts them again and says `ERROR:` with
   `/etc/fstab is as asked` (its text is right; run `systemctl
-  daemon-reload` once it works). `plan` shows the same reload as
+  daemon-reload` once it works) and `the mounts this run made were taken
+  back.` (it wrote no `/etc/fstab`, so there is none to restore). `plan` shows the same reload as
   `Already attached for USER; systemd has not loaded /etc/fstab as it is
   on disk: attach runs systemctl daemon-reload.` Two limits, on purpose:
   systemd marks a reload as needed by the file's time, not its bytes, so

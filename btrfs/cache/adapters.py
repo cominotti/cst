@@ -406,6 +406,14 @@ def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
     return f"ERROR: {cause}; mounts and {FSTAB_PATH} restored."
 
 
+def _error_after_catch_up(cause: str, undo_errors: Sequence[str], mounted: Sequence[CacheMountBinding]) -> str:
+    """The ERROR line of attach's failed catch-up reload, a step that wrote no /etc/fstab: only the mounts
+    this run made are taken back."""
+    if undo_errors:
+        return _error_after_undo(cause, undo_errors)
+    return f"ERROR: {cause}; the mounts this run made were taken back." if mounted else f"ERROR: {cause}"
+
+
 def _undo_each(
     rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted: bool
 ) -> list[tuple[CacheMountBinding, str]]:
@@ -503,8 +511,7 @@ def _apply_attach(
         now = tuple(replace(p, mounted_from_source=True) if p.binding in mounted else p for p in snap.bindings)
         cause, reloaded = _catch_up_reload(replace(snap, bindings=now), rt)
         if cause is not None:
-            undo = _undo(rt, mounted, mounted=True)
-            return 1, [*lines, _error_after_undo(cause, undo) if mounted else f"ERROR: {cause}"]
+            return 1, [*lines, _error_after_catch_up(cause, _undo(rt, mounted, mounted=True), mounted)]
     else:
         error = _commit_fstab_or_undo(snap, new_fstab, rt, mounted)
         if error is not None:
