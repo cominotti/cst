@@ -45,6 +45,7 @@ from cst_core.adapters import nocow as core_nocow
 from cst_core.domain.shapes import json_object, parse_json
 from cst_core.ports import CommandResult, CommandRunnerPort
 from tests.fault_injection import stub_fsync
+from tests.quint.itf import Value, items, itf, number, record, text, truth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACES: Final = os.path.join(HERE, "quint", "traces")
@@ -88,61 +89,7 @@ SPEC_CALLS: Final = frozenset(
     }
 )
 
-type Value = bool | int | str | list[Value] | dict[str, Value]
 type VolumeState = tuple[str, str, int]  # _data's content, the twin's, the number of old copies
-
-
-def itf(value: object) -> Value:
-    """An ITF value as Python: {"#bigint": "N"} an int, {"#map": [[k, v], ...]} a dict, records and lists as they are."""
-    if isinstance(value, bool | str):
-        return value
-    if isinstance(value, list):
-        return [itf(v) for v in value]
-    if not json_object(value):
-        raise AssertionError(f"not an ITF value: {value!r}")
-    if "#bigint" in value:
-        return int(str(value["#bigint"]))
-    if "#map" in value:
-        pairs = value["#map"]
-        if not isinstance(pairs, list):
-            raise AssertionError(f"not an ITF map: {value!r}")
-        out: dict[str, Value] = {}
-        for pair in pairs:
-            if not (isinstance(pair, list) and len(pair) == 2):
-                raise AssertionError(f"not an ITF map entry: {pair!r}")
-            out[str(itf(pair[0]))] = itf(pair[1])
-        return out
-    return {k: itf(v) for k, v in value.items() if not k.startswith("#")}
-
-
-def record(value: Value) -> dict[str, Value]:
-    if not isinstance(value, dict):
-        raise AssertionError(f"not a record: {value!r}")
-    return value
-
-
-def text(value: Value) -> str:
-    if not isinstance(value, str):
-        raise AssertionError(f"not a string: {value!r}")
-    return value
-
-
-def number(value: Value) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise AssertionError(f"not an int: {value!r}")
-    return value
-
-
-def truth(value: Value) -> bool:
-    if not isinstance(value, bool):
-        raise AssertionError(f"not a bool: {value!r}")
-    return value
-
-
-def items(value: Value) -> list[Value]:
-    if not isinstance(value, list):
-        raise AssertionError(f"not a list: {value!r}")
-    return value
 
 
 @dataclass(frozen=True, slots=True)
