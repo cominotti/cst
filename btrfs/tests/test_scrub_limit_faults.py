@@ -109,9 +109,7 @@ class SystemdModel(ScrubFakeRunner):
     @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
         cmd = list(argv)
-        if cmd[:4] == ["systemctl", "show", "-p", "NeedDaemonReload"]:
-            self.calls.append(cmd)
-            return CommandResult(0, "yes\n" if self.dirty else "no\n", "", argv=tuple(cmd))
+        self.need_daemon_reload = "yes\n" if self.dirty else "no\n"
         r = super().run(argv, input_text=input_text, **kw)
         if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
             self.dirty = True
