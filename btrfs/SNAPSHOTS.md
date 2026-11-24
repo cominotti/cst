@@ -1677,6 +1677,13 @@ undone, that `.bulk-new` folder holds nothing you need: delete it and run
 holds anything you need: delete it if one is left (for example after going
 back to an older CST).
 
+This covers the moves of `cst btrfs bulk apply` only. The undo of a
+`cst btrfs bulk steam apply` move still deletes a game's copy under its own
+name, so a cut deletion there can still lead here (the message then ends with
+"run 'bulk steam apply' again"). If you did not play or install through the
+new library while the move was being undone, that copy holds nothing you
+need: delete it and run `cst btrfs bulk steam apply`.
+
 **`bulk status` says `NEEDS A LOOK: ... was created again after its data was moved to ...`.**
 An old subvolume was being moved into `~/Bulk` (the rename is instant) and the
 run was interrupted before the link was made; then a program created the usual
