@@ -80,18 +80,30 @@ class DockerVolumesNocow:
         ]
 
     def recover(self) -> None:
-        """Undo what an interrupted migration (kill, timeout, power loss) left, one volume at a time: in
-        one that died between the two renames the original goes back; then, when _data is a folder,
-        the other old copies and the twin go."""
-        for v in self.tree.leftovers():
-            todo = recovery(v)
-            data = os.path.join(v.folder, DATA_DIR)
-            if todo.restore is not None:
-                self.tree.rename(os.path.join(v.folder, todo.restore), data)
-                self.out.log(4, f"{v.name}: restored the original after an interrupted migration")
-            if self.tree.is_dir(data):
-                for x in todo.remove:
-                    self.tree.remove_tree(os.path.join(v.folder, x), ignore_errors=True)
+        """Undo what an interrupted migration (kill, timeout, power loss) left, one volume at a time.
+        A volume that cannot be recovered (an OSError) is a journal line and does not stop the others;
+        then recover raises, so this boot migrates nothing and the next one tries again."""
+        failed = 0
+        for name, folder in self.tree.volume_folders():
+            try:
+                self.recover_one(name, folder)
+            except OSError as e:  # one volume must not stop the others
+                self.out.log(3, f"{name}: {e}; recovery left for the next boot")
+                failed += 1
+        if failed:
+            raise OSError(f"{failed} volume(s) not recovered: migration left for the next boot")
+
+    def recover_one(self, name: str, folder: str) -> None:
+        """In a volume that died between the two renames the original goes back; then, when _data is
+        a folder, the other old copies and the twin go."""
+        todo = recovery(self.tree.leftovers(folder))
+        data = os.path.join(folder, DATA_DIR)
+        if todo.restore is not None:
+            self.tree.rename(os.path.join(folder, todo.restore), data)
+            self.out.log(4, f"{name}: restored the original after an interrupted migration")
+        if self.tree.is_dir(data):
+            for x in todo.remove:
+                self.tree.remove_tree(os.path.join(folder, x), ignore_errors=True)
 
     # ---- one volume ------------------------------------------------------
     def migrate_one(self, data: str) -> None:

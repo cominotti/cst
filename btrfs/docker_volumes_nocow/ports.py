@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from typing import Protocol
 
 from btrfs.docker_volumes_nocow.domain import PostponedRecord, StoredPostponed, TreeScan, VolumeLeftovers
@@ -33,10 +33,13 @@ class VolumeTreePort(Protocol):
 
     def set_nocow(self, path: str, *, on: bool) -> None: ...
 
-    def leftovers(self) -> Iterator[VolumeLeftovers]:
-        """What an interrupted migration (kill, timeout, power loss) may have left in each volume's
-        folder (a real folder, not a link), in the order the volumes folder lists them; each is read
-        just before it is yielded."""
+    def volume_folders(self) -> list[tuple[str, str]]:
+        """(name, path) of each volume's folder (a real folder, not a link), in the order the volumes
+        folder lists them; none when there is no volumes folder."""
+        ...
+
+    def leftovers(self, folder: str) -> VolumeLeftovers:
+        """What an interrupted migration (kill, timeout, power loss) may have left in this volume's folder."""
         ...
 
     def make_twin(self, data: str, new: str) -> None:

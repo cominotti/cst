@@ -189,21 +189,23 @@ class LocalVolumeTree:
     def set_nocow(self, path: str, *, on: bool) -> None:
         set_nocow(path, on)
 
-    def leftovers(self) -> Iterator[VolumeLeftovers]:
+    def volume_folders(self) -> list[tuple[str, str]]:
         if not os.path.isdir(self.paths.volumes):
-            return
+            return []
+        out = []
         for name in os.listdir(self.paths.volumes):
             d = os.path.join(self.paths.volumes, name)
-            if not os.path.isdir(d) or os.path.islink(d):
-                continue
-            names = os.listdir(d)
-            yield VolumeLeftovers(
-                name,
-                d,
-                has_data=os.path.lexists(os.path.join(d, DATA_DIR)),
-                olds=tuple(sorted(x for x in names if x.startswith(DATA_DIR + OLD_MARK))),
-                twin=DATA_DIR + NEW_SUFFIX in names,
-            )
+            if os.path.isdir(d) and not os.path.islink(d):
+                out.append((name, d))
+        return out
+
+    def leftovers(self, folder: str) -> VolumeLeftovers:
+        names = os.listdir(folder)
+        return VolumeLeftovers(
+            has_data=os.path.lexists(os.path.join(folder, DATA_DIR)),
+            olds=tuple(sorted(x for x in names if x.startswith(DATA_DIR + OLD_MARK))),
+            twin=DATA_DIR + NEW_SUFFIX in names,
+        )
 
     def make_twin(self, data: str, new: str) -> None:
         if os.path.lexists(new):

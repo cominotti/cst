@@ -1923,6 +1923,82 @@ class RecoverTest(Base):
         self.assert_no_leftovers("cow")  # the real volume is still cleaned
 
 
+class RecoverEachVolumeTest(Base):
+    """A volume that cannot be recovered (an OSError) does not stop the recovery of the others."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.fs.set(self.vols, nocow=True)
+        schedule(self)
+        self.before: dict[str, dict[str, tuple[object, ...]]] = {}
+        self.ino: dict[str, int] = {}
+        for name in ("a", "b"):
+            top = self.volume(name)
+            self.before[name], self.ino[name] = tree(top), ino(top)
+            # Died between the two renames: no _data, the original is its old copy.
+            os.rename(top, os.path.join(self.vols, name, "_data.cow-old-1700000000"))
+
+    def boot_with(self, patch: Callable[[str], contextlib.AbstractContextManager[object]]) -> None:
+        """For each volume as the one that fails (whichever the volumes folder lists first), the next boot."""
+        for bad, good in (("a", "b"), ("b", "a")):
+            with self.subTest(failing=bad):
+                fresh(self)
+                with patch(os.path.join(self.vols, bad)):
+                    rc, out, _err = self.main("migrate")
+                self.assertEqual(rc, 0)
+                data = os.path.join(self.vols, good, "_data")
+                self.assertEqual(ino(data), self.ino[good])
+                self.assertEqual(tree(data), self.before[good])
+                self.assert_no_leftovers(good)
+                self.assertIn(f"<4>{TAG}: {good}: restored the original after an interrupted migration\n", out)
+                self.assertIn(f"<3>{TAG}: {bad}: [Errno 5] Input/output error; recovery left for the next boot\n", out)
+                self.assertNotIn(f"{bad}: restored", out)
+                self.assertEqual(sorted(os.listdir(os.path.join(self.vols, bad))), ["_data.cow-old-1700000000"])
+                self.assertIn(
+                    f"<3>{TAG}: {self.vols}: 1 volume(s) not recovered: migration left for the next boot\n", out
+                )
+                # This boot migrates nothing: the request and the copy-on-write data wait for the next one.
+                self.assertTrue(os.path.exists(self.flag))
+                self.assertIsNone(read_attempts(self))
+                self.assertFalse(self.fs.nocow(os.path.join(data, "README")))
+                # The next boot, with no error, recovers the other one too and migrates both.
+                rc, out, _err = self.main("migrate")
+                self.assertEqual(rc, 0)
+                self.assertIn(f"<4>{TAG}: {bad}: restored the original after an interrupted migration\n", out)
+                for name in ("a", "b"):
+                    self.assertEqual(tree(os.path.join(self.vols, name, "_data")), self.before[name])
+                    self.assert_all_nocow(os.path.join(self.vols, name, "_data"))
+                    self.assert_no_leftovers(name)
+                self.assertFalse(os.path.exists(self.flag))
+
+    def test_a_rename_that_fails(self) -> None:
+        real_rename = os.rename
+
+        def failing(folder: str) -> contextlib.AbstractContextManager[object]:
+            def rename(src: str, dst: str) -> None:
+                if src.startswith(folder + os.sep):
+                    raise OSError(errno.EIO, "Input/output error")
+                real_rename(src, dst)
+
+            return mock.patch.object(os, "rename", rename)
+
+        self.boot_with(failing)
+
+    def test_a_volume_folder_that_cannot_be_listed(self) -> None:
+        real_listdir = os.listdir
+
+        def failing(folder: str) -> contextlib.AbstractContextManager[object]:
+            def listdir(path: str) -> list[str]:
+                if path == folder:
+                    raise OSError(errno.EIO, "Input/output error")
+                return real_listdir(path)
+
+            return mock.patch.object(os, "listdir", listdir)
+
+        self.boot_with(failing)
+
+
 class RecoveryTest(unittest.TestCase):
     """recovery(): what recover does in one volume, from what its folder holds (no I/O)."""
 
@@ -1942,7 +2018,7 @@ class RecoveryTest(unittest.TestCase):
         ]
         for (has_data, olds, twin), (restore, remove) in cases:
             with self.subTest(has_data=has_data, olds=olds, twin=twin):
-                todo = recovery(VolumeLeftovers("v", "/volumes/v", has_data=has_data, olds=olds, twin=twin))
+                todo = recovery(VolumeLeftovers(has_data=has_data, olds=olds, twin=twin))
                 self.assertEqual((todo.restore, todo.remove), (restore, remove))
 
 

@@ -46,8 +46,6 @@ class VolumeLeftovers:
     (a dangling link counts), its old copies (the _data.cow-old-* names, oldest first) and whether
     its twin (_data.nocow-new) is."""
 
-    name: str
-    folder: str
     has_data: bool
     olds: tuple[str, ...]
     twin: bool
