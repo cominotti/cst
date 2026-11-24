@@ -9016,6 +9016,108 @@ EOF
         ).stdout
         self.assertIn("E2E-CACHE-177-OK", out)
 
+    @e2e_tags(E2ETag.BLUETOOTH)
+    def test_180_bluetooth_main_conf_backups_never_replace_one_another(self) -> None:
+        """main.conf's backups with the real GNU cp: a backup is never replaced. A backup of each
+        second of the next two minutes is there already (each its own text, its mtime a day ahead, so
+        none is the oldest). `apply --yes --no-restart` (as tester) backs main.conf up as
+        `main.conf.bak-<its second>-1`, holding the vendor text, and leaves every planted file as it
+        was (content and mtime); the `revert --yes --no-restart` right after takes a name of its own
+        (another -1, or -2 in the same second), leaves the planted files and apply's backup, and puts
+        the vendor keys back; a second revert finds them as in the oldest backup and changes nothing.
+        The exact command apply runs, `sudo cp -p --preserve=context --update=none-fail`, onto a name
+        that is there exits 1 and leaves the file. Before, apply's `cp -p` replaced the planted file
+        of its second."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            exec_bash,
+            c,
+            """
+            set +e
+            runuser -u tester -- env HOME=/home/tester XDG_RUNTIME_DIR=/run/user/1000 \\
+                DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \\
+                /opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1
+            if [[ -f /tmp/bt180/before ]]; then
+                comm -13 /tmp/bt180/before <(ls -1 /etc/bluetooth/main.conf.bak-* 2>/dev/null | sort) | xargs -r -d '\\n' rm -f
+            fi
+            rm -rf /tmp/bt180 /home/tester/.config/cst/bluetooth.conf
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            r"""
+            set -E
+            trap 'echo "test_180 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            w=/tmp/bt180
+            mc=/etc/bluetooth/main.conf
+            vendor=$'[General]\n# Name = BlueZ'
+            rm -rf "$w"; mkdir -p "$w" /etc/bluetooth
+            printf '%s\n' "$vendor" >"$mc"
+            { ls -1 "$mc".bak-* 2>/dev/null || true; } | sort >"$w/before"
+            runuser -u tester -- bash -c 'mkdir -p ~/.config/cst && printf "DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n" >~/.config/cst/bluetooth.conf'
+            bt() {
+                runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester XDG_RUNTIME_DIR=/run/user/1000 \
+                    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus /opt/cst-rw/cst bluetooth "$@"
+            }
+            show() { sed "s/^/test_180 $1: /" <<<"$2" >&2; }   # the CI log
+            # A backup of each second from now + 2 to now + 122 s, each its own text, a day ahead in time
+            # (an earlier test's backups are of a second before now); then wait for the first of them.
+            now="$(date +%s)"
+            for t in $(seq $((now + 2)) $((now + 122))); do
+                f="$mc.bak-$(date -d "@$t" +%Y%m%d-%H%M%S)"
+                [[ ! -e "$f" ]]
+                echo "planted for $t" >"$f"
+                touch -d "@$((now + 86400))" "$f"
+                echo "$f" >>"$w/planted"
+            done
+            planted() { while read -r f; do echo "$(stat -c %Y "$f") $(sha256sum <"$f") $f"; done <"$w/planted"; }
+            p0="$(planted)"
+            while (( $(date +%s) < now + 2 )); do sleep 0.1; done
+            backup_of() { sed -n 's/^backup:    //p' <<<"$1"; }
+
+            # 1. apply: its second's name is taken, so its backup is that name with -1.
+            rc=0; out="$(bt apply --yes --no-restart 2>&1)" || rc=$?
+            show apply "$out"
+            [[ $rc == 1 ]]   # the live checks fail here (no adapter), and only they
+            grep -qF "ERROR: verification found problems (see above)." <<<"$out"
+            if grep -qF "stopped:" <<<"$out"; then exit 1; fi
+            a="$(backup_of "$out")"
+            [[ "$a" == "$mc".bak-[0-9]*-[0-9]*-1 ]] || { echo "apply's backup: $a" >&2; exit 1; }
+            grep -qxF "${a%-1}" "$w/planted"
+            [[ "$(cat "$a")" == "$vendor" ]]
+            [[ "$(planted)" == "$p0" ]] || { echo "apply changed a planted backup" >&2; exit 1; }
+            grep -qxF "Experimental = true" "$mc"
+
+            # 2. revert right after: a name of its own; the vendor keys back.
+            rc=0; out="$(bt revert --yes --no-restart 2>&1)" || rc=$?
+            show revert "$out"
+            [[ $rc == 0 ]]
+            r="$(backup_of "$out")"
+            [[ -n "$r" && "$r" != "$a" ]]
+            if grep -qxF "$r" "$w/planted"; then echo "revert's backup took a planted name: $r" >&2; exit 1; fi
+            [[ "$(planted)" == "$p0" ]] || { echo "revert changed a planted backup" >&2; exit 1; }
+            [[ "$(cat "$a")" == "$vendor" ]]
+            if grep -qxF "Experimental = true" "$mc"; then echo "revert left Experimental = true" >&2; exit 1; fi
+
+            # 3. a second revert: the keys are as in the oldest backup already; nothing written.
+            out="$(bt revert --yes --no-restart 2>&1)"
+            show "second revert" "$out"
+            grep -qF "unchanged: Experimental and KernelExperimental are already as in " <<<"$out"
+            if grep -q '^backup:' <<<"$out"; then echo "the second revert took a backup" >&2; exit 1; fi
+
+            # 4. apply's exact cp onto a name that is there: exit 1, the file left alone.
+            f="$(head -n 1 "$w/planted")"
+            s="$(stat -c %Y "$f") $(sha256sum <"$f")"
+            rc=0; runuser -u tester -- sudo cp -p --preserve=context --update=none-fail "$mc" "$f" 2>"$w/cp.err" || rc=$?
+            [[ $rc == 1 ]] || { echo "cp onto a backup that is there: exit $rc" >&2; cat "$w/cp.err" >&2; exit 1; }
+            [[ "$(stat -c %Y "$f") $(sha256sum <"$f")" == "$s" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
         """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before

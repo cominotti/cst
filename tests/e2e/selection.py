@@ -205,6 +205,7 @@ TIER1_WEIGHTS: Final[Mapping[str, int]] = {
     "test_90_swap_upgrade_from_an_install_with_the_partition_in_the_code": 9,
     "test_05_bluetooth_config_wp_roles_and_ldac_unit": 8,
     "test_102_docker_gc_enable_keeps_the_registry_of_mains_install": 7,
+    "test_180_bluetooth_main_conf_backups_never_replace_one_another": 7,
 }
 # Tests that load all host CPUs and must run solo when local containers run in parallel.
 HOST_EXCLUSIVE_TESTS: Final[frozenset[str]] = frozenset({"test_10_cpu_quiet_reads_the_real_proc_files"})

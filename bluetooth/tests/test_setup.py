@@ -1342,7 +1342,7 @@ class MainConfTest(SetupCase):
             ctx = " --preserve=context" if selinux else ""
             z = " -Z" if selinux else ""
             self.assertEqual(len(sudo), 3, sudo)
-            self.assertEqual(sudo[0], f"sudo cp -p{ctx} {m.main_conf} {backup.group(1)}")
+            self.assertEqual(sudo[0], f"sudo cp -p{ctx} --update=none-fail {m.main_conf} {backup.group(1)}")
             self.assertRegex(sudo[1], rf"^sudo install -m 0644 -o root -g root{z} \S+ {re.escape(m.main_conf)}\.new$")
             self.assertEqual(sudo[2], f"sudo mv -f {m.main_conf}.new {m.main_conf}")
             self.assertEqual(self.text(backup.group(1)), VENDOR)

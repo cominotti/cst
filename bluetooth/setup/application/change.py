@@ -28,11 +28,15 @@ from bluetooth.setup.application.checks import Checks
 from bluetooth.setup.application.survey import StepFailed, is_cst_rule
 from bluetooth.setup.domain import (
     A2DP_SINK_UUID,
+    BACKUP_NAME_TRIES,
     BapState,
     BearerState,
     BluetoothCommand,
     LeState,
     WpState,
+    backup_name,
+    backup_name_taken,
+    backup_order,
     bearer_matches,
     changes_machine,
     matches_a_line,
@@ -116,23 +120,47 @@ class Change(Checks):
 
     # ---- main.conf -------------------------------------------------------------------------
     def install_main_conf(self, src: str) -> None:
-        """A timestamped backup, then the new main.conf atomically (root, through sudo)."""
+        """A backup of a name of its own, then the new main.conf atomically (root, through sudo)."""
         mc = self.p.main_conf
-        bak = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
+        ctx: list[str] = []
         z: list[str] = []
         if (
             self.m.files.which("selinuxenabled")
             and self.run(["selinuxenabled"], output=OutputMode.INHERIT).returncode == 0
         ):
-            self.must(["sudo", "cp", "-p", "--preserve=context", mc, bak])
-            z = ["-Z"]
-        else:
-            self.must(["sudo", "cp", "-p", mc, bak])
+            ctx, z = ["--preserve=context"], ["-Z"]
+        bak = self.take_backup(ctx)
         self.backup = bak
         self.out(f"backup:    {bak}\n")
         self.must(["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", *z, src, f"{mc}.new"])
         self.must(["sudo", "mv", "-f", f"{mc}.new", mc])
         self.out(f"written:   {mc}\n")
+
+    def take_backup(self, ctx: list[str]) -> str:
+        """main.conf copied (cp -p) to main.conf.bak-YYYYmmdd-HHMMSS, or to the first of -1, -2, ...
+        after it that no backup has: a backup is never replaced. cp --update=none-fail creates the
+        name it is given only if it does not exist (O_CREAT|O_EXCL; GNU cp 9.5 or later), so a name
+        another run takes between the look and the copy is not replaced either: cp fails, the name is
+        there (cp says "File exists" or "not replacing"), and the next one is tried. Any other failure
+        stops the run, also one that left a part of the copy behind (a full disk)."""
+        mc = self.p.main_conf
+        base = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
+        taken = {name for _, name in self.m.files.backups(mc)}
+        for n in range(BACKUP_NAME_TRIES):
+            bak = backup_name(base, n)
+            if bak in taken:
+                continue
+            # cp's words are read: in the C locale (sudo keeps LC_ALL by default on Fedora; a cp that
+            # speaks another language fails the run, as any other failure does).
+            r = self.m.runner.run(["sudo", "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True)
+            if r.returncode == 0:
+                return bak
+            taken = {name for _, name in self.m.files.backups(mc)}
+            if bak not in taken or not backup_name_taken(r.stderr):
+                self.out(r.stdout)
+                self.err(r.stderr)
+                raise StepFailed(shell_exit_status(r.returncode))
+        raise self.die(f"no free name for a backup of {mc} ({base} and {BACKUP_NAME_TRIES - 1} more are taken)")
 
     def write_wp(self) -> None:
         """The rule, as the user, atomically; one with other settings is kept as .bak first."""
@@ -496,9 +524,10 @@ class Change(Checks):
 
     # ---- revert ----------------------------------------------------------------------------
     def oldest_backup(self) -> str | None:
-        """The oldest main.conf backup by time (ours or the old script's): the state before any of this."""
-        found = sorted((int(mtime), name) for mtime, name in self.m.files.backups(self.p.main_conf))
-        return found[0][1] if found else None
+        """The oldest main.conf backup by time, then name and -N number (ours or the old script's):
+        the state before any of this."""
+        found = sorted(backup_order(mtime, name) for mtime, name in self.m.files.backups(self.p.main_conf))
+        return found[0][3] if found else None
 
     def revert(self) -> int:
         p, f, check = self.p, self.m.files, self.o.check
