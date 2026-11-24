@@ -366,14 +366,15 @@ def core_text(path: str, record: str) -> Placement:
 
 
 class RecordingInstallerRunner(ScrubFakeRunner):
-    """installer.py text, remove-text and mark as the installer runs them as root: the files written and
-    removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
+    """installer.py text and remove-text as the installer runs them as root: the files written and
+    removed, and their lines and btrfs:core's state in one install record (a write sets it pending,
+    unless --keep-state keeps the state the record has). scrub-limit never marks btrfs:core: a mark call
+    fails the test."""
 
     def __init__(self, record: str) -> None:
         super().__init__()
         self.record = record
         self.svc = InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
-        self.marks = 0
 
     @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
@@ -383,13 +384,12 @@ class RecordingInstallerRunner(ScrubFakeRunner):
         self.calls.append(cmd)
         word = cmd[4]
         if word == "mark":
-            self.marks += 1
-            self.svc.mark(self.record, cmd[cmd.index("--component") + 1])
-            return CommandResult(0, "", "", argv=tuple(cmd))
+            raise AssertionError(f"scrub-limit ran the installer's mark: {cmd}")
         place = core_text(cmd[5], self.record)
         if word == "text":
             os.makedirs(os.path.dirname(place.path), exist_ok=True)
-            written = self.svc.put(place, (input_text or "").encode(), as_root=False)
+            data = (input_text or "").encode()
+            written = self.svc.put(place, data, as_root=False, keep_state="--keep-state" in cmd)
             return CommandResult(0, f"{'written:  ' if written else 'unchanged:'} {place.path}\n", "", argv=tuple(cmd))
         return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
 
