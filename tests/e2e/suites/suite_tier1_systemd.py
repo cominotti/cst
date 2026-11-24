@@ -4980,8 +4980,11 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         """docker-volumes-nocow (the checkout's program, as root in the container) with a migration
         requested and an /etc/docker/daemon.json that is not JSON: migrate changes nothing, records
         the boot as postponed with the file's reason, and status names the file; mark exits 2 and marks
-        nothing. With the file fixed, the reason is gone from the next run. The check comes before
-        any btrfs call, so the container's file system is enough."""
+        nothing, but writes the request itself: with no flag and a count an older helper left at 2, the
+        count is 0 and the flag is there after it (btrfs-setup.sh's touch used to create the flag beside
+        that count, and the first boot after the fix gave up at once). With the file fixed, the reason
+        is gone from the next run. The check comes before any btrfs call, so the container's file
+        system is enough."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             exec_bash,
@@ -5013,9 +5016,14 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ -e /etc/btrfs-setup/docker-nocow-pending ]]
             status="$($prog status 2>&1)" || true
             grep -qF "/etc/docker/daemon.json: not JSON: the boot's migration waits until it is fixed" <<<"$status"
+            rm -f /etc/btrfs-setup/docker-nocow-pending
+            printf '2\\n' >/var/lib/docker-volumes-nocow/attempts
             rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_114 mark: rc=$rc $out" >&2
             [[ "$rc" == 2 ]]
             grep -qF "nothing marked (fix the file, then run it again)" <<<"$out"
+            [[ -e /etc/btrfs-setup/docker-nocow-pending ]] || { echo "mark wrote no request" >&2; exit 1; }
+            [[ "$(cat /var/lib/docker-volumes-nocow/attempts)" == 0 ]] || { echo "the old count stayed" >&2; exit 1; }
             printf '{}' >/etc/docker/daemon.json
             out="$($prog migrate 2>&1)" || true
             echo "test_114 fixed: $out" >&2

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 // docker-volumes-nocow's install and boot migration (btrfs/docker_volumes_nocow/application.py) as a
-// state machine: DockerVolumesNocow.mark with btrfs-setup.sh's touch of the flag after it, and
+// state machine: DockerVolumesNocow.mark (btrfs-setup.sh writes nothing after it), and
 // migrate (recover, the folder's +C and its request, the give-up check, rewrite, give_up), with a
 // crash possible after any step: a kill, or a power loss that also loses a copy not yet synced.
 // What it checks and why: docs/dev-tools.md, "Model checking with Quint (optional)".
@@ -61,6 +61,7 @@ module nocow {
     rewrote: bool,     // this run chose to rewrite
     crashes: int,      // crashes so far (bounded by MAX_CRASHES)
     env: int,          // installs and Docker recreations so far (bounded by MAX_ENV)
+    installing: bool,  // the last run started is an install
   }
 
   var s: State
@@ -88,16 +89,21 @@ module nocow {
   def fault(st: State): State = { ...st, clean: false }
 
   // ---- the start: after an install (+C and the flag) or with Docker set up after it (no +C) -----------
+  // Without a flag, the counter may hold a count an older helper left (it removed the flag first, then
+  // the counter, and could stop between the two): any count up to GIVE_UP_AFTER.
   action init = {
     nondet start = VOLS.foldl(Set(Map()), (acc, v) =>
       acc.map(m => Set(m.put(v, { data: COW, twin: ABSENT, olds: 0, unsynced: false }),
                        m.put(v, { data: COPY, twin: ABSENT, olds: 0, unsynced: false }))).flatten())
       .oneOf()
     nondet nocow = Set(true, false).oneOf()
+    nondet stale = 0.to(GIVE_UP_AFTER).oneOf()
     val cow = VOLS.foldl(false, (acc, v) => acc or start.get(v).data == COW)
+    val flag = nocow and cow
     all {
-      s' = { vols: start, volsNocow: nocow, flag: nocow and cow, attempts: 0, pc: "idle", i: 0, todo: [],
-             failed: 0, recFailed: false, count: 0, gaveUp: false, boots: 0, rewrites: 0, carried: 0, started: false, clean: false, rewrote: false, crashes: 0, env: 0 },
+      s' = { vols: start, volsNocow: nocow, flag: flag, attempts: if (flag) 0 else stale, pc: "idle", i: 0,
+             todo: [], failed: 0, recFailed: false, count: 0, gaveUp: false, boots: 0, rewrites: 0, carried: 0,
+             started: false, clean: false, rewrote: false, crashes: 0, env: 0, installing: false },
       step' = lbl("~init", "", ""),
     }
   }
@@ -107,21 +113,23 @@ module nocow {
   action boot = all {
     s.pc == "idle",
     nondet roll = ROLLS.oneOf()
-    if (roll == 0) all { s' = { ...s, clean: false, rewrote: false, started: false }, step' = lbl("~postpone", "", "") }
-    else all {
-      s' = { ...s, pc: "recover", i: 0, recFailed: false, clean: true, rewrote: false, started: false },
+    if (roll == 0) all {
+      s' = { ...s, clean: false, rewrote: false, started: false, installing: false },
+      step' = lbl("~postpone", "", ""),
+    } else all {
+      s' = { ...s, pc: "recover", i: 0, recFailed: false, clean: true, rewrote: false, started: false, installing: false },
       step' = lbl("~boot", "", ""),
     },
   }
 
-  // cst btrfs install: mark, then btrfs-setup.sh touches the flag when mark exits non-zero (not after
-  // a kill). mark's request comes before +C: with copy-on-write data it resets an old count (renew:
-  // the request gets its GIVE_UP_AFTER boots again) and writes the flag, flushed; exit 2 when either
-  // fails (no +C then). Without copy-on-write data it forgets the count; +C; exit 0.
+  // cst btrfs install: mark (btrfs-setup.sh writes nothing after it, whatever its exit status). mark's
+  // request comes before +C: with copy-on-write data it resets an old count (renew: the request gets
+  // its GIVE_UP_AFTER boots again) and writes the flag, flushed; exit 2 when either fails (no +C then:
+  // the next boot asks again). Without copy-on-write data it forgets the count; +C; exit 0.
   action install = all {
     s.pc == "idle",
     s.env < MAX_ENV,
-    val st = { ...s, clean: false, rewrote: false, started: false, env: s.env + 1 }
+    val st = { ...s, clean: false, rewrote: false, started: false, env: s.env + 1, installing: true }
     if (not(anyCow)) all { s' = { ...st, pc: "install_forget" }, step' = lbl("~install", "", "") }
     else if (s.attempts > 0) all { s' = { ...st, pc: "install_reset" }, step' = lbl("~install", "", "") }
     else all { s' = { ...newRound(st), gaveUp: s.gaveUp, pc: "install_request" }, step' = lbl("~install", "", "") },
@@ -132,13 +140,13 @@ module nocow {
     if (roll != 0) all {
       s' = { ...newRound(s), gaveUp: s.gaveUp, attempts: 0, pc: "install_request" },
       step' = lbl("save_attempts", "", "ok"),
-    } else all { s' = { ...s, pc: "install_touch" }, step' = lbl("save_attempts", "", "fail") },
+    } else all { s' = { ...s, pc: "idle" }, step' = lbl("save_attempts", "", "fail") },
   }
   action installRequest = all {
     s.pc == "install_request",
     nondet roll = ROLLS.oneOf()
-    if (roll != 0) all { s' = { ...flagged(s), pc: "install_nocow_requested" }, step' = lbl("request_migration", "", "ok") }
-    else all { s' = { ...s, pc: "install_touch" }, step' = lbl("request_migration", "", "fail") },
+    if (roll != 0) all { s' = { ...flagged(s), pc: "install_nocow" }, step' = lbl("request_migration", "", "ok") }
+    else all { s' = { ...s, pc: "idle" }, step' = lbl("request_migration", "", "fail") },
   }
   // Install renews the count either way: forgotten here, reset above. Its round starts once that is done.
   action installForget = all {
@@ -147,14 +155,9 @@ module nocow {
     step' = lbl("forget_attempts", "", ""),
   }
   action installNocow = all {
-    s.pc == "install_nocow" or s.pc == "install_nocow_requested",
-    s' = { ...s, volsNocow: true, pc: if (s.pc == "install_nocow_requested") "install_touch" else "idle" },
+    s.pc == "install_nocow",
+    s' = { ...s, volsNocow: true, pc: "idle" },
     step' = lbl("set_nocow_vols", "", ""),
-  }
-  action installTouch = all {
-    s.pc == "install_touch",
-    s' = { ...flagged(s), pc: "idle" },
-    step' = lbl("touch_flag", "", ""),
   }
 
   // Docker made again (its data root recreated): the folder without +C, and a volume created
@@ -165,7 +168,7 @@ module nocow {
     all {
       s.pc == "idle",
       s.env < MAX_ENV,
-      s' = { ...s, volsNocow: false, clean: false, rewrote: false, started: false, env: s.env + 1,
+      s' = { ...s, volsNocow: false, clean: false, rewrote: false, started: false, env: s.env + 1, installing: false,
              vols: if (x.data == COPY and x.twin == ABSENT and x.olds == 0) setVol(v, { ...x, data: COW }) else s.vols },
       step' = lbl("~recreate", v, ""),
     }
@@ -178,10 +181,11 @@ module nocow {
     if (not(x.unsynced)) x
     else { data: if (x.data == COPY) PARTIAL else x.data, twin: if (x.twin == COPY) PARTIAL else x.twin,
            olds: x.olds, unsynced: false }
-  action crash = {
+  action crashIf(allowed: bool): bool = {
     nondet roll = CRASH_ROLLS.oneOf()
     nondet power = Set(false, true).oneOf()
     all {
+      allowed,
       s.pc != "idle",
       roll == 0,
       s.crashes < MAX_CRASHES,
@@ -190,6 +194,7 @@ module nocow {
       step' = if (power) lbl("~power_loss", "", "") else lbl("~crash", "", ""),
     }
   }
+  action crash = crashIf(true)
 
   // ---- recover(): recover_one for each volume; one that cannot be recovered does not stop the others,
   // and then this boot migrates nothing --------------------------------------------------------------
@@ -383,7 +388,18 @@ module nocow {
   }
 
   action step_ = any {
-    boot, install, installReset, installRequest, installForget, installNocow, installTouch, recreate, crash,
+    boot, install, installReset, installRequest, installForget, installNocow, recreate, crash,
+    recover, checkFolder, reset, request, setNocowVols1, checkFlag, giveUpAttempts, giveUpFlag, giveUpSave,
+    saveAttempts, setNocowVols2, volStart, makeTwin, referenceLabel, setNocowNew, copy, removeNew, sync,
+    renameDataOld, renameNewData, rollback, removeOld, finalAttempts, finalFlag,
+  }
+
+  // The steps of step_ with a crash only where the code ends a request (after its decision, before the
+  // flag is gone): for the new-round witness only. A random walk of step_ spends its crashes long
+  // before a rewrite ends, so it almost never reaches a stop there; each step of this one is one of step_'s.
+  pure val ROUND_END_PCS = Set("final_attempts", "final_flag", "give_up_attempts", "give_up_flag", "give_up_save")
+  action step_round_end = any {
+    boot, install, installReset, installRequest, installForget, installNocow, recreate, crashIf(ROUND_END_PCS.contains(s.pc)),
     recover, checkFolder, reset, request, setNocowVols1, checkFlag, giveUpAttempts, giveUpFlag, giveUpSave,
     saveAttempts, setNocowVols2, volStart, makeTwin, referenceLabel, setNocowNew, copy, removeNew, sync,
     renameDataOld, renameNewData, rollback, removeOld, finalAttempts, finalFlag,
@@ -420,8 +436,9 @@ module nocow {
   val wGaveUp = step.name == "remove_flag" and step.outcome == "ok" and s.gaveUp
   val wGaveUpFlagKept = step.name == "remove_flag" and step.outcome == "fail"
   val wConverged = step.name == "remove_flag" and step.outcome == "ok" and not(s.gaveUp)
-  val wInstallRequested = step.name == "touch_flag" and s.volsNocow
-  val wInstallRequestFailed = step.name == "request_migration" and step.outcome == "fail" and s.pc == "install_touch"
+  // install's +C (only install's leads back to "idle") after its request
+  val wInstallRequested = step.name == "set_nocow_vols" and s.pc == "idle" and s.flag and anyCow
+  val wInstallRequestFailed = step.name == "request_migration" and step.outcome == "fail" and s.installing
   val wPowerLossPartial = step.name == "~power_loss" and VOLS.foldl(false, (acc, v) => acc or vol(v).twin == PARTIAL)
   // A rewrite in a request the code had decided to end: after a stop between the counter's removal and
   // the flag's (the trade-off of the counter-first order).

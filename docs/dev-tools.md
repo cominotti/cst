@@ -878,9 +878,10 @@ network is used. `tests/test_quint_task.py` checks the task's flags.
 **What the spec models.** One action per call of
 `btrfs/docker_volumes_nocow/application.py` that changes the disk or the
 helper's files (the methods of `VolumeTreePort` and `NocowStatePort`), in
-the code's order: `install`'s `mark` (the flag written first, then +C on
-the volumes folder, then the count forgotten when nothing is left to copy)
-and `btrfs-setup.sh`'s touch of the flag after an exit 2; each boot's
+the code's order: `install`'s `mark` (with copy-on-write data, the request
+first: an old count reset, then the flag, then +C on the volumes folder;
+without, the count forgotten, then +C), after which `btrfs-setup.sh` writes
+nothing whatever mark's exit status; each boot's
 `migrate` (the recovery of an interrupted migration, volume by volume; the
 folder's +C and its request; the give-up check; the counter; the rewrite of
 each volume: twin, label, copy, sync, the two renames, the old copy's
@@ -889,7 +890,10 @@ any step: a kill, or a power loss that also loses a copy not yet synced. A
 step can fail where the code checks the outcome (a rename, the flag's
 removal, the counter, the copy). The label each action leaves in `step` is
 the call the replay records from the real code, so the spec's traces can be
-replayed against it. A volume's folders hold contents, not files ("cow",
+replayed against it. A start without the flag may hold a count of boots an
+older helper left (any count up to `GIVE_UP_AFTER`): with an install that
+touched the flag beside it after a failed reset, `attemptsMatch` fails. A
+volume's folders hold contents, not files ("cow",
 "copy", "partial", "empty", "absent"). The spec's header lists what it does
 not model: `scan(fix)`, the postponed record, journal lines and alerts,
 `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
@@ -905,7 +909,7 @@ Five instances bound the search: two volumes (`nocow_ab`), one
 never recreates a volume), two with more crashes and installs
 (`nocow_ab_wide`), three volumes (`nocow_abc`). Each allows
 `GIVE_UP_AFTER = 2` boots, as the code does. All five together take about
-a minute and a half and under 2 GB (about 6.4 million distinct states).
+a little over a minute and under 2 GB (about 6.5 million distinct states).
 
 **The properties**, checked in every state of every instance:
 
@@ -959,9 +963,8 @@ unit suite, replays the checked-in traces of the spec
 (`btrfs/tests/quint/traces/*.itf.json`) against the real code: the use
 case over its real adapters, with the fakes of the module's unit tests
 (NOCOW ioctls, the commands, `os.sync`). Each trace's start becomes the
-volumes on disk, the folder's +C and the flag; each run of the trace (a
-boot, an install with `btrfs-setup.sh`'s touch after a non-zero exit,
-Docker recreating a volume) gets the faults the trace picked, each at its
+volumes on disk, the folder's +C, the flag and the counter; each run of the
+trace (a boot, an install, Docker recreating a volume) gets the faults the trace picked, each at its
 call's position in the run, and dies where the trace crashes (a power loss
 also spoils the copies the spec says it loses). Every call the code makes
 to the volume tree and to the flag and counter files is recorded with the
@@ -974,7 +977,10 @@ spec. `CST_NOCOW_TRACES` names a folder of more traces to replay.
 The traces are two random walks of the simulator and the first trace it
 finds to each witness a random walk rarely reaches (a restore, a failed
 recovery, a kept flag after a give-up, a power loss with a partial copy, a
-failed install request, a new round, ...); `TRACE_JOBS` in
+failed install request, a new round, ...). The new round's trace comes from
+the spec's `step_round_end`, the steps of `step_` with a crash only where a
+request ends: a walk of `step_` spends its crashes long before a rewrite
+ends and almost never stops there. `TRACE_JOBS` in
 `tests/quint/cst-quint` lists them with their seeds and bounds, and
 `invowk cmd test quint --traces` writes the same bytes again (one thread,
 the seed fixed, the absolute path and the time taken out). A witness's run

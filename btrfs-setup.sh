@@ -1182,13 +1182,13 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
     # Docker volumes NOCOW: new ones at once; existing ones rewritten at the
     # next boot, before Docker starts (no container can be writing then).
     systemctl enable docker-volumes-nocow.service
-    # mark writes the flag itself, flushed, before it sets +C (exit 1), and resets the attempt
-    # counter. The touch is the fallback when mark could not (exit 2: daemon.json unreadable, or the
-    # request could not be written): the boot then waits for the fix, or asks again.
-    if ! /usr/local/sbin/docker-volumes-nocow mark; then
-        install -d -m 0755 /etc/btrfs-setup
-        touch /etc/btrfs-setup/docker-nocow-pending
-    fi
+    # mark writes the request itself before it sets +C: the attempt counter reset, then the flag,
+    # each flushed (exit 1: volumes left to copy). Also when daemon.json cannot be read (exit 2,
+    # nothing marked: the first boot after the fix migrates). Every exit 2 leaves a journal line;
+    # when the request could not be written, the folder keeps no +C and the next boot asks again.
+    # Nothing is written here: a flag touched beside an old count would make the next boot give up
+    # at once.
+    /usr/local/sbin/docker-volumes-nocow mark || true
     systemctl enable btrfs-stall-monitor.service
     systemctl restart btrfs-stall-monitor.service
     if (( with_below )) && rpm -q below >/dev/null 2>&1; then

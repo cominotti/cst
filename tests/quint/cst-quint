@@ -142,8 +142,8 @@ CHECKS: Final[tuple[Check, ...]] = tuple(Check(NOCOW_SPEC, main, NOCOW_PROPERTIE
 # value of the spec, or the negation of a step's label for a call with no witness of its own.
 NOCOW_WITNESSES: Final = (
     ("recovered", "nocow_a", "neverRecovered", 45),
-    ("recover_failed", "nocow_ab", "neverRecoverFailed", 40),
-    ("old_removed", "nocow_a", "neverOldRemoved", 45),
+    ("recover_failed", "nocow_a", "neverRecoverFailed", 40),
+    ("old_removed", "nocow_a", "neverOldRemoved", 40),
     ("twin_removed", "nocow_a", "neverTwinRemoved", 20),
     ("rolled_back", "nocow_a", "neverRolledBack", 30),
     ("gave_up", "nocow_a", "neverGaveUp", 30),
@@ -157,7 +157,6 @@ NOCOW_WITNESSES: Final = (
     ("copy_mismatch", "nocow_a", 'not(step.name == "copy" and step.outcome == "mismatch")', 20),
     ("copy_killed", "nocow_a", 'not(step.name == "copy" and step.outcome == "killed")', 25),
     ("power_loss_partial", "nocow_a", "neverPowerLossPartial", 20),
-    ("new_round", "nocow_a", "neverNewRound", 60),
 )
 TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     TraceJob("walk_ab", NOCOW_SPEC, "nocow_ab", "simulator", 40, seed=1),
@@ -165,6 +164,19 @@ TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     *(
         TraceJob(name, NOCOW_SPEC, main, "simulator", steps, seed=7, invariant=invariant, samples=100000)
         for name, main, invariant, steps in NOCOW_WITNESSES
+    ),
+    # A stop where a request ends, then a new round: the spec's step_round_end crashes only there (a walk
+    # of step_ spends its crashes long before), each of its steps one of step_'s.
+    TraceJob(
+        "new_round",
+        NOCOW_SPEC,
+        "nocow_a",
+        "simulator",
+        40,
+        seed=7,
+        invariant="neverNewRound",
+        samples=100000,
+        step="step_round_end",
     ),
 )
 TRACES_DIR: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs/tests/quint/traces"}

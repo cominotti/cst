@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: MPL-2.0
 """Replays the traces of the Quint spec of docker-volumes-nocow against the real code.
 
-btrfs/tests/quint/docker_volumes_nocow.qnt models install's mark (with btrfs-setup.sh's touch of
-the flag after it) and each boot's migrate, one action per call that changes the disk or the
+btrfs/tests/quint/docker_volumes_nocow.qnt models install's mark (btrfs-setup.sh writes nothing
+after it) and each boot's migrate, one action per call that changes the disk or the
 helper's files, with a crash after any step. `invowk cmd test quint --traces` writes runs of it as
 ITF traces (JSON) into btrfs/tests/quint/traces. This test replays each trace on the use case over
 its real adapters (the fakes of test_docker_volumes_nocow: NOCOW ioctls, commands, os.sync), run
 by run:
 
-- the trace's start becomes the volumes on disk, the folder's +C and the flag;
+- the trace's start becomes the volumes on disk, the folder's +C, the flag and the counter;
 - a run (a boot, an install, Docker recreating a volume) gets the faults the trace picked, each at
   the position of its call in the run (Docker running, no room, chcon, cp failing, killed or
   copying wrong; a rename, the flag, the counter or its reset failing) and dies where the trace
@@ -70,7 +70,6 @@ SPEC_CALLS: Final = frozenset(
         ("request_migration", FAIL),
         ("forget_attempts", ""),
         ("set_nocow_vols", ""),
-        ("touch_flag", ""),
         ("remove_attempts", ""),
         ("remove_flag", "ok"),
         ("remove_flag", FAIL),
@@ -487,6 +486,10 @@ class ReplayBase(Base):
         self.fs.set(self.vols, nocow=first.disk.vols_nocow)
         if first.disk.flag:
             open(self.flag, "a").close()
+        if first.disk.attempts:  # a count an older helper left without its flag
+            os.makedirs(os.path.dirname(self.attempts), exist_ok=True)
+            with open(self.attempts, "w", encoding="utf-8") as f:
+                f.write(f"{first.disk.attempts}\n")
         self.assertEqual(self.disk(), first.disk, "the start")
 
     def faults_of(self, run: list[Step]) -> Faults:
@@ -518,10 +521,9 @@ class ReplayBase(Base):
             self.fs.set(self.vols, nocow=False)
             if last.disk.vols[first.vol] != self.disk().vols[first.vol]:
                 self.make_volume(first.vol, nocow=False)
-        elif first.name == "~install":  # cst btrfs install: mark, then btrfs-setup.sh's touch on a non-zero exit
+        elif first.name == "~install":  # cst btrfs install: mark; btrfs-setup.sh writes nothing after it
             with contextlib.suppress(Crash):
-                if self.service.execute(NocowCommand.MARK) != 0:
-                    self.rec.step("touch_flag", "", lambda: open(self.flag, "a").close())
+                self.service.execute(NocowCommand.MARK)
         elif first.name in ("~boot", "~postpone"):
             with contextlib.suppress(Crash):
                 self.service.execute(NocowCommand.MIGRATE)

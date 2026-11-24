@@ -883,8 +883,9 @@ docker volume rm <name>         # or one volume by name
   it is recorded as postponed with that reason, even when nothing is scheduled
   and the default folder is absent or already `+C` (`status` shows it, `cst doctor`
   from two boots on), and the first boot after the file is fixed runs it. `mark`
-  (what `install` runs) changes nothing then and exits 2, so `install` leaves the
-  request to that boot. Another dockerd whose config file cannot be read that way
+  (what `install` runs) sets no `+C` then and exits 2, but writes the request
+  (an old count reset, then the flag, each flushed to disk), so that boot runs
+  the migration. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
@@ -928,12 +929,15 @@ docker volume rm <name>         # or one volume by name
   data; the snapshots setup creates it too), writing the flag then failed,
   and the request was lost. Such a machine shows `migration not scheduled`
   and stays that way. Run `cst btrfs install` once: its `mark` finds the
-  copy-on-write data, install creates the folder and the flag, and the next
+  copy-on-write data and writes the folder and the flag itself, and the next
   boot migrates the volumes (the same `install` also puts the fixed helper in
   place).
 - Older copies of `install` also set `+C` first: `mark` set it, and the
   flag was written after `mark` ended, without a flush. An install killed or
   powered off between the two left `+C`, copy-on-write volumes and no flag.
+  Their touch of the flag after any failing `mark` could also put it beside
+  an old count that `mark` had failed to reset, so the next boot gave up at
+  once; `install` now writes nothing after `mark`.
   `status` then shows `migration not scheduled`, `cst doctor` shows
   nothing, and no boot asks again. Run `cst btrfs install` once: it schedules
   the migration again.

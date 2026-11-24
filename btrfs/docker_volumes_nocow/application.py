@@ -47,8 +47,12 @@ class DockerVolumesNocow:
         try:
             match command:
                 case NocowCommand.MARK if self.paths.config_problem:
-                    # btrfs-setup then leaves the request to the boot, which waits until it is fixed.
+                    # Which folder Docker uses is unknown: no +C, but the request is written as mark's
+                    # own (the count reset, then the flag, each flushed), so the first boot after the
+                    # fix runs the migration. Nothing else writes it: a flag written by btrfs-setup
+                    # could sit beside an old count, which the next boot would take for this request's.
                     self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
+                    self.request_migration(renew=True)
                     return 2
                 case NocowCommand.MARK:
                     return self.mark()
@@ -263,7 +267,8 @@ class DockerVolumesNocow:
     def mark(self) -> int:
         """+C on the volumes folder (new volumes inherit it). Its exit status: 0 nothing left to
         migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
-        written; 2 the request could not be written (a journal line says why)."""
+        written; 2 the request could not be written (a journal line says why; no +C then, so the
+        next boot asks again)."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")

@@ -543,8 +543,8 @@ class MarkUnmarkTest(Base):
         self.assertTrue(self.fs.nocow(self.vols))
 
     def test_mark_that_cannot_write_the_flag_leaves_the_folder_copy_on_write(self) -> None:
-        # The flag's folder is a file: no request, so no +C either; install's exit 2 makes
-        # btrfs-setup try the flag once more, and the next boot sees the folder without +C.
+        # The flag's folder is a file: no request, so no +C either; the next boot sees the
+        # folder without +C and asks again.
         shutil.rmtree(os.path.dirname(self.flag))
         with open(os.path.dirname(self.flag), "w") as f:
             f.write("in the way\n")
@@ -1371,7 +1371,7 @@ class PostponeBase(Base):
 
 class DaemonJsonProblemTest(PostponeBase):
     """/etc/docker/daemon.json that dockerd cannot read (NocowPaths.config_problem): which volumes
-    folder Docker uses is unknown, so nothing is migrated, and mark changes nothing."""
+    folder Docker uses is unknown, so nothing is migrated, and mark writes only the request."""
 
     PROBLEM = "/etc/docker/daemon.json: not JSON"
 
@@ -1408,13 +1408,34 @@ class DaemonJsonProblemTest(PostponeBase):
                     f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1]
                 )
 
-    def test_mark_changes_nothing(self) -> None:
+    def test_mark_writes_only_the_request(self) -> None:
+        # No +C (the folder Docker uses is unknown), but the request, as mark's own: an old count
+        # without its flag is reset first, so the first boot after the fix gets its two boots. A flag
+        # written beside that count (btrfs-setup's touch, before) made that boot give up at once.
+        os.remove(self.flag)
+        self.set_attempts("2")
         self.fs.sets.clear()
         before = tree(self.vols)
         rc, out, err = self.main("mark")
         self.assertEqual(rc, 2)
         self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "0")
+
+    def test_mark_that_cannot_write_the_request_says_so(self) -> None:
+        os.remove(self.flag)
+        os.rmdir(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.sets.clear()
+        before = tree(self.vols)
+        rc, out, err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
+        self.assertIn(f"<3>{TAG}: cannot schedule the migration ([Errno 17] File exists", out + err)
+        self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertFalse(os.path.exists(self.flag))
 
 
 class DockerRunningTest(PostponeBase):
