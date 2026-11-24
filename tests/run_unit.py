@@ -747,6 +747,18 @@ def _coverage_active() -> bool:
     return sys.monitoring.get_tool(sys.monitoring.COVERAGE_ID) is not None
 
 
+def _ascii_whole_number(raw: str, invalid: str) -> int:
+    """RAW as a whole number when it is ASCII digits only; SystemExit(INVALID) for anything else.
+
+    str.isdigit also takes "²", which int() refuses, and a digit of another script, which
+    int() reads; int() also refuses more digits than Python's limit (sys.get_int_max_str_digits).
+    """
+    if raw.isascii() and raw.isdigit():
+        with contextlib.suppress(ValueError):
+            return int(raw)
+    raise SystemExit(invalid)
+
+
 def jobs_from_env(environ: Mapping[str, str]) -> int | None:
     """The worker count CST_TEST_JOBS asks for: None when it is unset, empty or 0 (the default applies).
 
@@ -755,13 +767,8 @@ def jobs_from_env(environ: Mapping[str, str]) -> int | None:
     raw = environ.get(TEST_JOBS_ENV, "")
     if not raw:
         return None
-    invalid = SystemExit(f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)")
-    if not (raw.isascii() and raw.isdigit()):
-        raise invalid
-    try:
-        return int(raw) or None
-    except ValueError:  # past Python's limit on the digits int() converts
-        raise invalid from None
+    invalid = f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)"
+    return _ascii_whole_number(raw, invalid) or None
 
 
 def default_jobs(env_jobs: int | None = None) -> int:
@@ -816,14 +823,8 @@ class _ParseAcc:
 
 
 def _parse_jobs_value(raw: str) -> int:
-    """N of -j N/--jobs N: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
-    invalid = SystemExit(f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
-    if not (raw.isascii() and raw.isdigit()):
-        raise invalid
-    try:
-        return int(raw)
-    except ValueError:  # past Python's limit on the digits int() converts
-        raise invalid from None
+    """N of -j N/--jobs N: ASCII digits only."""
+    return _ascii_whole_number(raw, f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
 
 
 def _parse_worker_fds(raw: str) -> tuple[int, int]:
