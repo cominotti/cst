@@ -7,9 +7,9 @@ test_docker_volumes_nocow (Base: the NOCOW ioctls, the commands, os.sync) and os
 the volume tree and of the state files goes through a FaultPlan. One migration of two volumes
 from a volumes folder without +C (Docker installed after btrfs-setup, no flag yet) has N such
 calls; for every mode and every k in 1..N the migration fails at the k-th call. Then the next
-boot's recover() runs, also with a second fault at each of its own steps (os.rename and
-shutil.rmtree inside the adapter's restore_interrupted: recover's logic is there, below the
-port), and then a whole migrate, with no fault.
+boot's recover() runs, also with a second fault at each of its own steps (tree.rename and
+tree.remove_tree, the steps recover decides in the application), and then a whole migrate,
+with no fault.
 
 Checked after each fault, after the recovery and at the end:
 - no data is lost: each volume's _data, if it is there, holds the original content; if it is
@@ -32,15 +32,13 @@ pinning its number of cases.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 import contextlib
 import functools
 import io
 import os
-import shutil
 import stat
 from typing import override
-from unittest import mock
 
 from btrfs.docker_volumes_nocow.adapters import DockerDaemons, LocalVolumeTree, NocowOutput, NocowStateFiles
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
@@ -81,9 +79,6 @@ class FaultyTree(LocalVolumeTree):
     def __init__(self, paths: NocowPaths, runner: CommandRunnerPort, plan: FaultPlan) -> None:
         super().__init__(paths, runner)
         self.plan = plan
-        # True while recover()'s faulty_os block runs: its steps are os.rename and shutil.rmtree there,
-        # so rename and remove_tree go straight to the adapter (each step is counted once, at one level).
-        self.os_level = False
 
     def rel(self, path: str) -> str:
         return os.path.relpath(path, self.paths.volumes)
@@ -116,16 +111,10 @@ class FaultyTree(LocalVolumeTree):
     @override
     def remove_tree(self, path: str, *, ignore_errors: bool = False) -> None:
         effect = functools.partial(super().remove_tree, path, ignore_errors=ignore_errors)
-        if self.os_level:
-            effect()
-            return
         self.plan.step(f"remove_tree {self.rel(path)}", effect, ignore_error if ignore_errors else None)
 
     @override
     def rename(self, src: str, dst: str) -> None:
-        if self.os_level:
-            super().rename(src, dst)
-            return
         self.plan.step(f"rename {self.rel(src)} {self.rel(dst)}", functools.partial(super().rename, src, dst))
 
 
@@ -165,22 +154,6 @@ class FaultyState(NocowStateFiles):
         self.plan.step("clear_postponed", super().clear_postponed)
 
 
-@contextlib.contextmanager
-def faulty_os(plan: FaultPlan, top: str) -> Generator[None]:
-    """os.rename and shutil.rmtree through plan while the block runs (the steps inside an adapter)."""
-    real_rename, real_rmtree = os.rename, shutil.rmtree
-
-    def rename(src: str, dst: str) -> None:
-        plan.step(f"os.rename {os.path.relpath(src, top)}", functools.partial(real_rename, src, dst))
-
-    def rmtree(path: str, *, ignore_errors: bool = False) -> None:
-        effect = functools.partial(real_rmtree, path, ignore_errors=ignore_errors)
-        plan.step(f"rmtree {os.path.relpath(path, top)}", effect, ignore_error if ignore_errors else None)
-
-    with mock.patch.object(os, "rename", rename), mock.patch.object(shutil, "rmtree", rmtree):
-        yield
-
-
 class NocowFaultBase(Base):
     """The fixture: a volumes folder without +C holding two copy-on-write volumes, no flag."""
 
@@ -189,10 +162,9 @@ class NocowFaultBase(Base):
         super().setUp()
         stub_fsync(self)
         self.plan = FaultPlan()
-        self.faulty_tree = FaultyTree(self.paths, self.fs, self.plan)
         self.service = DockerVolumesNocow(
             paths=self.paths,
-            tree=self.faulty_tree,
+            tree=FaultyTree(self.paths, self.fs, self.plan),
             state=FaultyState(self.paths, self.plan),
             daemon=DockerDaemons(self.paths, self.fs),
             out=NocowOutput(self.paths, self.fs),
@@ -216,15 +188,11 @@ class NocowFaultBase(Base):
         return self.quiet(functools.partial(self.service.execute, NocowCommand.MIGRATE))
 
     def recover(self, *faults: Fault) -> list[str]:
-        """The next boot's recover(), the steps inside the adapter through the plan: those steps.
+        """The next boot's recover(), its tree.rename and tree.remove_tree through the plan: those steps.
         An OSError there ends the boot, as the program logs it; Killed goes through."""
         self.plan.arm(*faults)
-        self.faulty_tree.os_level = True
-        try:
-            with faulty_os(self.plan, self.vols), contextlib.suppress(OSError):
-                self.quiet(self.service.recover)
-        finally:
-            self.faulty_tree.os_level = False
+        with contextlib.suppress(OSError):
+            self.quiet(self.service.recover)
         return list(self.plan.calls)
 
     # ---- the invariants -------------------------------------------------
