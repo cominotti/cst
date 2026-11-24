@@ -1,0 +1,224 @@
+# SPDX-License-Identifier: MPL-2.0
+"""Static gate: the Python CI runs on its runner's python3 is code that Python can run.
+
+The rules live in tests/e2e_host_python.py: which files CI runs on the
+ubuntu-24.04 runner's python3 (3.12) and not in a container (the E2E driver,
+what it imports and loads, image_digest.py), how the gate finds them from the
+code and CI's files, and what it checks in each (the grammar of that Python,
+a table of newer standard-library names). This module runs those checks on
+the checkout and on temporary copies with a planted problem.
+
+Standard library only: the unit tests run on /usr/bin/python3 without uv.
+"""
+
+import ast
+import importlib
+import os
+import shutil
+import tempfile
+from typing import override
+import unittest
+
+from tests import e2e_host_python as gate
+from tests.repo_files import REPO
+
+# The files of the checkout the gate reads: CI's workflows and actions, the invowkfile, the closure.
+_READ_TREES = (".github",)
+_READ_FILES = (
+    "cst.invowkmod/invowkfile.cue",
+    "tests/__init__.py",
+    "tests/e2e/__init__.py",
+    "tests/e2e/image_digest.py",
+    "tests/e2e/run.py",
+    "tests/e2e/selection.py",
+    "tests/e2e/suites/suite_tier1_systemd.py",
+    "tests/e2e/suites/suite_tier2_storage_cpu.py",
+)
+
+
+class CheckoutTest(unittest.TestCase):
+    def test_the_checkout_has_no_problem(self) -> None:
+        self.assertEqual(gate.problems(REPO), [])
+
+    def test_the_closure_is_found_from_the_code(self) -> None:
+        closure, problems = gate.host_closure(REPO)
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            closure,
+            [
+                "tests/__init__.py",
+                "tests/e2e/__init__.py",
+                "tests/e2e/image_digest.py",
+                "tests/e2e/run.py",
+                "tests/e2e/selection.py",
+                "tests/e2e/suites/suite_tier1_systemd.py",
+                "tests/e2e/suites/suite_tier2_storage_cpu.py",
+            ],
+        )
+
+    def test_ci_runs_the_entries_on_the_known_runner(self) -> None:
+        by_runner, problems = gate.host_runs(REPO)
+        self.assertEqual(problems, [])
+        self.assertEqual(set(by_runner), {"ubuntu-24.04"})
+        self.assertEqual(set(by_runner["ubuntu-24.04"]), set(gate.HOST_ENTRIES))
+        self.assertEqual(gate.target_version(by_runner), (3, 12))
+
+    def test_every_table_name_exists_on_this_python(self) -> None:
+        # A typo in NEWER_STDLIB would name nothing and catch nothing: each name is a module, or an
+        # attribute of one, on the interpreter the unit tests run on (newer than every entry).
+        for name in gate.NEWER_STDLIB:
+            with self.subTest(name=name):
+                try:
+                    importlib.import_module(name)
+                except ImportError:
+                    module, _, attr = name.rpartition(".")
+                    self.assertTrue(hasattr(importlib.import_module(module), attr), name)
+
+
+class PlantedTest(unittest.TestCase):
+    """A temporary copy of the files the gate reads, with one problem planted."""
+
+    @override
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        for tree in _READ_TREES:
+            shutil.copytree(os.path.join(REPO, tree), os.path.join(self.repo, tree))
+        for rel in _READ_FILES:
+            os.makedirs(os.path.dirname(os.path.join(self.repo, rel)), exist_ok=True)
+            shutil.copyfile(os.path.join(REPO, rel), os.path.join(self.repo, rel))
+        self.assertEqual(gate.problems(self.repo), [])
+
+    def append(self, rel: str, text: str) -> None:
+        """Append text to the copy's file rel (created when it is not there)."""
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def line_of(self, rel: str, text: str) -> int:
+        """The number of the last line of the copy's file rel that holds text."""
+        with open(os.path.join(self.repo, rel), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return max(n for n, line in enumerate(lines, 1) if text in line)
+
+    def replace(self, rel: str, old: str, new: str) -> None:
+        path = os.path.join(self.repo, rel)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count(old), 1, old)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(old, new))
+
+    def assert_one_problem(self, *words: str) -> None:
+        problems = gate.problems(self.repo)
+        self.assertEqual(len(problems), 1, problems)
+        for word in words:
+            self.assertIn(word, problems[0])
+
+    def test_an_unparenthesized_except_is_reported_with_its_file_and_line(self) -> None:
+        # Body on the handler's line: Python names the line where the handler ends.
+        self.append("tests/e2e/selection.py", "\ntry:\n    pass\nexcept OSError, ValueError: pass\n")
+        line = self.line_of("tests/e2e/selection.py", "except OSError, ValueError:")
+        self.assert_one_problem(f"tests/e2e/selection.py:{line}:", "ubuntu-24.04, 3.12")
+
+    def test_a_newer_os_function_is_reported(self) -> None:
+        self.append("tests/e2e/run.py", "\nCPUS = os.process_cpu_count()\n")
+        line = self.line_of("tests/e2e/run.py", "CPUS = os.process_cpu_count()")
+        self.assert_one_problem(f"tests/e2e/run.py:{line}:", "os.process_cpu_count is new in Python 3.13")
+
+    def test_a_newer_typing_name_in_a_suite_is_reported(self) -> None:
+        self.append("tests/e2e/suites/suite_tier2_storage_cpu.py", "\nfrom typing import TypeIs\n")
+        self.assert_one_problem("suite_tier2_storage_cpu.py", "typing.TypeIs is new in Python 3.13")
+
+    def test_a_newer_module_is_reported(self) -> None:
+        self.append("tests/e2e/image_digest.py", "\nimport annotationlib\n")
+        self.assert_one_problem("tests/e2e/image_digest.py", "annotationlib is new in Python 3.14")
+
+    def test_a_newer_name_through_an_alias_is_reported(self) -> None:
+        self.append("tests/e2e/run.py", "\nimport os as o\n\nCPUS = o.process_cpu_count()\n")
+        self.assert_one_problem("tests/e2e/run.py", "os.process_cpu_count")
+
+    def test_a_newer_name_in_a_docstring_or_comment_is_not_reported(self) -> None:
+        self.append(
+            "tests/e2e/run.py",
+            '\n\ndef cpus() -> int:\n    """Like os.process_cpu_count()."""\n    return 1  # not os.process_cpu_count\n',
+        )
+        self.assertEqual(gate.problems(self.repo), [])
+
+    def test_a_module_the_closure_imports_is_checked_too(self) -> None:
+        self.append("tests/e2e/helper.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append("tests/e2e/selection.py", "\nimport tests.e2e.helper\n")
+        self.assert_one_problem("tests/e2e/helper.py:3:")
+
+    def test_a_load_by_path_the_gate_cannot_follow_is_reported(self) -> None:
+        self.append(
+            "tests/e2e/run.py",
+            "\n\ndef other(path: str) -> None:\n"
+            "    import importlib.util\n\n"
+            '    importlib.util.spec_from_file_location("x", path + ".py")\n',
+        )
+        line = self.line_of("tests/e2e/run.py", 'spec_from_file_location("x", path')
+        self.assert_one_problem(f"tests/e2e/run.py:{line}:", "teach the gate this load")
+
+    def test_a_new_suite_file_is_checked_too(self) -> None:
+        self.replace(
+            "tests/e2e/run.py",
+            '    2: "suite_tier2_storage_cpu.py",\n',
+            '    2: "suite_tier2_storage_cpu.py",\n    3: "suite_new.py",\n',
+        )
+        self.append("tests/e2e/suites/suite_new.py", "import annotationlib\n")
+        self.assert_one_problem("tests/e2e/suites/suite_new.py:1:", "annotationlib")
+
+    def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B tests/e2e/new.py "${name}")"',
+        )
+        self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_a_host_job_that_runs_another_invowk_task_with_python_is_reported(self) -> None:
+        self.replace(
+            ".github/workflows/ci.yml",
+            '          invowk cmd test e2e tier1 "${flags[@]}"\n',
+            '          invowk cmd test e2e tier1 "${flags[@]}"\n          invowk cmd test unit\n',
+        )
+        problems = gate.problems(self.repo)
+        self.assertTrue(problems)
+        self.assertTrue(all("(job e2e-tier1)" in p and "tests/run_unit.py" in p for p in problems), problems)
+
+    def test_a_runner_with_no_recorded_python_is_reported(self) -> None:
+        path = os.path.join(self.repo, ".github/workflows/ci.yml")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        head, job, tail = text.partition("  e2e-tier1:\n")
+        tail = tail.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-26.04\n", 1)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(head + job + tail)
+        self.assert_one_problem("(job e2e-tier1)", "ubuntu-26.04", "HOST_PYTHON_BY_RUNNER")
+
+
+class NamesTest(unittest.TestCase):
+    def names(self, source: str, target: tuple[int, int] = (3, 12)) -> list[str]:
+        return [name for _, name, _ in gate.newer_names(ast.parse(source), target)]
+
+    def test_imports_and_attributes(self) -> None:
+        self.assertEqual(self.names("from os import process_cpu_count\n"), ["os.process_cpu_count"])
+        self.assertEqual(self.names("import string.templatelib\n"), ["string.templatelib"])
+        self.assertEqual(self.names("import os\nos.process_cpu_count()\n"), ["os.process_cpu_count"])
+        self.assertEqual(self.names("raise PythonFinalizationError\n"), ["builtins.PythonFinalizationError"])
+        self.assertEqual(self.names("import os\nos.cpu_count()\nos.path.join('a')\n"), [])
+
+    def test_a_name_the_target_has_is_not_reported(self) -> None:
+        self.assertEqual(self.names("import os\nos.process_cpu_count()\n", (3, 13)), [])
+        self.assertEqual(self.names("import annotationlib\n", (3, 13)), ["annotationlib"])
+
+    def test_the_oldest_runner_python_is_the_target(self) -> None:
+        self.assertEqual(gate.target_version({"ubuntu-24.04": ["tests/e2e/run.py"]}), (3, 12))
+        self.assertEqual(gate.target_version({}), (3, 12))
+
+
+if __name__ == "__main__":
+    unittest.main()
