@@ -714,6 +714,20 @@ not derive from it.
   revert again converges. One known gap is let through by name: a full
   revert whose removal fails after its disable leaves btrfs:iocost done
   with the service disabled, until the next full apply or revert.
+- `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four
+  items (a plain move, one nested in it, a NOCOW item, an old subvolume),
+  through the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`: real
+  renames and `cp`, fakes only for subvolumes, +C, the busy check, flatpak
+  and the subvolume convert). The start puts each item absent, with data,
+  empty, in place, as a subvolume, with copy-on-write files or with data on
+  both sides; the rules are apply and recover with a kill, a failure or a
+  full disk at one of their first 20 points, an app's write into an item's
+  folder, busy, keep and settle. After every step no file the model holds
+  is lost (it is at the item's path, or at a path its journal names), no
+  `.bulk-old-` tree is without a journal, classify agrees with an oracle
+  over the disk, and a run leaves a kept item alone; settle converges, and
+  a further apply or recover changes nothing. It has no torn calls and no
+  writes during a call: the fault module above has those.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
@@ -721,7 +735,7 @@ depend on `TMPDIR`. A machine over adapters that write through
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
 The cache and scrub-limit machines write real files under a temporary
-folder. The iocost machine writes only io.cost.qos, its sysfs tree and
+folder; the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
 the managed-devices file there: btrfs:iocost's installed files and the
 install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
 does not cover how `LocalInstallTarget` writes them (modes, fsync,
