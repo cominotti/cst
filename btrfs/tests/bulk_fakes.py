@@ -74,42 +74,42 @@ class BulkHome:
         self.stack = contextlib.ExitStack()
         self.out: str = ""
         self.tmp = tempfile.mkdtemp(prefix="bulk-test-")
-        self.home = os.path.join(self.tmp, "home")
-        os.mkdir(self.home)
-        etc = os.path.join(self.tmp, "etc")
-        os.mkdir(etc)
-        self.paths = BulkPaths.under(
-            etc=etc,
-            state=os.path.join(self.tmp, "state"),
-            lock=os.path.join(self.tmp, "lock"),
-            notify=os.path.join(self.tmp, "no-notify"),
-        )
-        self.alerts = os.path.join(self.tmp, "alerts", "pending")
-        self.machine = Primitives()
-        self.wiring = Wiring(
-            TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine, alerts=self.alerts
-        )
-        self.host = self.wiring.host
-        self.state = self.wiring.state()
-        self.ctx = self.wiring.home_ctx(self.home)
-        self.user = UserFiles(self.wiring.tree, None, self.ctx.home)
-        self.bulk = Bulk(
-            ctx=self.ctx,
-            paths=self.paths,
-            user=self.user,
-            tree=self.wiring.tree,
-            state=self.state,
-            boots=CounterFile(self.paths.attempts),
-            host=self.host,
-            out=self.wiring.out,
-        )
-        # Fakes for what needs btrfs, root or the host.
-        self.subvols: set[tuple[int, int]] = set()  # (dev, ino) of fake subvolumes
-        self.nocow: set[tuple[int, int]] = set()  # (dev, ino) with +C
-        self.busy: set[str] = set()
-        self.flatpaks: dict[str, set[str]] = {}  # app -> set of filesystem overrides
-        self.convert_calls: list[str] = []
-        try:
+        try:  # from here on, a failure removes the folder again
+            self.home = os.path.join(self.tmp, "home")
+            os.mkdir(self.home)
+            etc = os.path.join(self.tmp, "etc")
+            os.mkdir(etc)
+            self.paths = BulkPaths.under(
+                etc=etc,
+                state=os.path.join(self.tmp, "state"),
+                lock=os.path.join(self.tmp, "lock"),
+                notify=os.path.join(self.tmp, "no-notify"),
+            )
+            self.alerts = os.path.join(self.tmp, "alerts", "pending")
+            self.machine = Primitives()
+            self.wiring = Wiring(
+                TOOL, root=False, paths=self.paths, home=self.home, machine=self.machine, alerts=self.alerts
+            )
+            self.host = self.wiring.host
+            self.state = self.wiring.state()
+            self.ctx = self.wiring.home_ctx(self.home)
+            self.user = UserFiles(self.wiring.tree, None, self.ctx.home)
+            self.bulk = Bulk(
+                ctx=self.ctx,
+                paths=self.paths,
+                user=self.user,
+                tree=self.wiring.tree,
+                state=self.state,
+                boots=CounterFile(self.paths.attempts),
+                host=self.host,
+                out=self.wiring.out,
+            )
+            # Fakes for what needs btrfs, root or the host.
+            self.subvols: set[tuple[int, int]] = set()  # (dev, ino) of fake subvolumes
+            self.nocow: set[tuple[int, int]] = set()  # (dev, ino) with +C
+            self.busy: set[str] = set()
+            self.flatpaks: dict[str, set[str]] = {}  # app -> set of filesystem overrides
+            self.convert_calls: list[str] = []
             self.fake_primitives()
         except BaseException:
             self.close()
@@ -174,12 +174,15 @@ class BulkHome:
         self.fake(self.host, "convert_bulk_dir", lambda bulk: self.convert_calls.append(bulk) or [])
 
     def close(self) -> None:
-        """Undo the patches, then remove the folder (read-only folders made writable first)."""
-        self.stack.close()
-        for root, dirs, _ in os.walk(self.tmp):
-            for d in dirs:
-                os.chmod(os.path.join(root, d), 0o755)
-        shutil.rmtree(self.tmp)
+        """Undo the patches, then remove the folder (read-only folders made writable first), also
+        when undoing a patch fails."""
+        try:
+            self.stack.close()
+        finally:
+            for root, dirs, _ in os.walk(self.tmp):
+                for d in dirs:
+                    os.chmod(os.path.join(root, d), 0o755)
+            shutil.rmtree(self.tmp)
 
     def rel(self, path: str) -> str:
         """path as a point names it: relative to the home (the state files by their names)."""
