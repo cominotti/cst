@@ -7964,7 +7964,9 @@ EOF
         it; doctor's ok line; with a mount CST did not make on top of a bind, doctor's WARN and detach
         refused; detach refused while /var/mnt/cache is not mounted; an /etc/fstab that cannot be read (a
         link loop) refused by attach and detach and BLOCKED in plan, each with fstab and the mounts
-        unchanged; detach keeps the data, the other users' lines and a mount CST did
+        unchanged; a detach whose second umount finds the target busy (umount's stand-in answers exit 32
+        while a process has its folder there) exits 1 with fstab and the mounts as they were, after
+        a real daemon-reload each way; detach keeps the data, the other users' lines and a mount CST did
         not make."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
@@ -8003,6 +8005,15 @@ elif prog == "mount" and args[:1] == ["--bind"]:
     rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
     save()
 elif prog == "umount":
+    # Busy, as the real umount says, while a process has its folder at or below the target.
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if cwd == args[0] or cwd.startswith(args[0] + "/"):
+            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
+            sys.exit(32)
     tgt = args[0].removeprefix(w)
     idx = [i for i, r in enumerate(rows) if r[1] == tgt]
     if not idx:
@@ -8207,6 +8218,21 @@ STUB
             rm {w}/etc/fstab
             mv {w}/fstab.real {w}/etc/fstab
             unchanged
+
+            # A busy target (a process whose folder is in it): detach removes the lines and reloads, unmounts
+            # ~/.cache, fails on ~/Scratchpad, then mounts ~/.cache again and puts the lines back; fstab and
+            # the mounts are as they were (the remount comes last in the table). Once the process ends,
+            # the same detach below works.
+            keep
+            (cd {w}/var/home/u1/Scratchpad && exec sleep 300) >/dev/null 2>&1 &
+            busy=$!
+            rc=0; $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            kill "$busy"; wait "$busy" || true
+            [[ $rc == 1 ]] || {{ echo "busy detach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "ERROR: umount /var/home/u1/Scratchpad failed: umount: {w}/var/home/u1/Scratchpad: target is busy.; mounts and /etc/fstab restored." {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            cmp -s {w}/etc/fstab {w}/fstab.before
+            cmp -s <(sort {w}/mounts) <(sort {w}/mounts.before)
 
             # detach: the data and the other users' lines stay; a mount CST did not make stays.
             echo "keep-u1" >{w}/var/mnt/scratchpad/u1/data.txt

@@ -622,7 +622,7 @@ def format_cache_mount_usage(prog: str) -> str:
         "                                       (works as your user and inside a toolbox; default command)\n"
         "  plan [OPTIONS]                       dry run showing directories, fstab edits, and blockers\n"
         "  attach [OPTIONS]                     (root, host only) create 0700 dirs, CACHEDIR.TAG, mount, then update fstab\n"
-        "  detach [OPTIONS]                     (root, host only) unmount CST's binds, remove its fstab lines; keeps data\n"
+        "  detach [OPTIONS]                     (root, host only) remove its fstab lines, then unmount its binds; keeps data\n"
         "  help                                 show this help\n"
         "\n"
         "Options:\n"
