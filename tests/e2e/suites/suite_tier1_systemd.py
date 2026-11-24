@@ -1286,7 +1286,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             test -L "$link"
             # The removal of the unchecked auto off: no disable, no daemon-reload that worked.
             rm {self.TOOLCHAINS_INSTALLED}
-            test -L "$link" && test ! -e "$link"
+            test -L "$link"
+            test ! -e "$link"
             en_rc=0
             en="$(systemctl --user is-enabled cst-toolchains-prune.timer 2>&1)" || en_rc=$?
             ac_rc=0
@@ -2078,7 +2079,8 @@ echo E2E-OK
                 ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
                     XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
                 doc() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}   # exits non-zero on a WARN
-                test -d "$ucg/e2eprobe.slice" && test -d "$ucg/app.slice/run-e2eprobe.service"
+                test -d "$ucg/e2eprobe.slice"
+                test -d "$ucg/app.slice/run-e2eprobe.service"
                 test -d "$ucg/user.slice/user-e2eok.slice"
                 # The doctor names the escaped boxes the real systemd made, and not user-<x>.slice.
                 d="$(doc)"
@@ -2818,7 +2820,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             /usr/bin/python3 -I "$tool" backup-timer off e2evm
             if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
             if [ -e "$stamp" ]; then echo "off left $stamp" >&2; exit 1; fi
-            [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
+            [ ! -e "$w/sbin/cst-vm" ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
             [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
             echo E2E-OK
             """,
@@ -3735,7 +3738,8 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             /usr/bin/python3 -I "$tool" backup-timer on e2emask >/dev/null
             systemctl is-enabled "$unit"
             /usr/bin/python3 -I "$tool" backup-timer off e2emask >/dev/null
-            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ] && [ ! -e "$w/sbin/cst-vm" ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
+            [ ! -e "$w/sbin/cst-vm" ]
             echo E2E-OK-VM
             """,
         ).stdout
@@ -4230,6 +4234,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             f"""
             set -e
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
             [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-126-made-etc
             install -d -m 0755 /etc/btrfs-setup
@@ -4243,7 +4248,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
             [[ ! -e {dropin} ]] || {{ echo "plan wrote {dropin}" >&2; exit 1; }}
             grep -qxF "HOME_SUBVOL='home'" {conf}
-            ! grep -qF "SCRUB_LIMIT" {conf}
+            absent SCRUB_LIMIT {conf}
             /opt/cst-rw/cst btrfs scrub-limit set 500M
             grep -qxF "SCRUB_LIMIT='500M'" {conf}
             grep -qxF "HOME_SUBVOL='home'" {conf}
@@ -4260,7 +4265,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             # cst doctor agrees: the limit in the service, no warning about it or SCRUB_LIMIT.
             doc="$(/opt/cst-rw/cst doctor || true)"
             grep -qF "info   weekly scrub: speed limit 500M per device" <<<"$doc"
-            ! grep -qE "WARN +.*(weekly scrub|SCRUB_LIMIT)" <<<"$doc"
+            if grep -qE "WARN +.*(weekly scrub|SCRUB_LIMIT)" <<<"$doc"; then echo "$doc" >&2; exit 1; fi
             # A daemon-reload that fails puts snapshots.conf and the drop-in back as they were.
             b=/var/tmp/e2e-126-bin
             mkdir -p "$b"
@@ -4274,9 +4279,9 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             [[ "$({core_state})" == *" done" ]]
             /opt/cst-rw/cst btrfs scrub-limit off
             [[ ! -e {dropin} ]]
-            ! grep -qF "SCRUB_LIMIT" {conf}
+            absent SCRUB_LIMIT {conf}
             grep -qxF "HOME_SUBVOL='home'" {conf}
-            ! grep -qF '"{dropin}"' {rec}
+            absent '"{dropin}"' {rec}
             [[ "$({core_state})" == *" done" ]]
             [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
             {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
@@ -4452,7 +4457,7 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
             /opt/cst-rw/cst btrfs iocost apply >/tmp/e2e-128a-apply.out
             grep -qF "written:   /etc/systemd/system/cst-btrfs-iocost.service" /tmp/e2e-128a-apply.out
-            ! grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
+            if grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service; then echo "apply left the older unit" >&2; exit 1; fi
             [[ "$({record})" == *" done" ]]
             runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
             /usr/local/sbin/btrfs-iocost revert
@@ -7712,6 +7717,7 @@ EOF
             c,
             f"""
             set -euo pipefail
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
             rm -rf {w} && mkdir -p {w}/bin {w}/proc
             [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
             touch /run/ostree-booted
@@ -7802,7 +7808,7 @@ EOF
 
             export PATH="{w}/bin:$PATH" CST_BTRFS_COMMIT_PROC="{w}/proc"
             /opt/cst-rw/cst btrfs commit-interval plan | grep -qF "commit=60"
-            ! grep -qF "commit=60" /etc/fstab
+            absent "commit=60" /etc/fstab
             /opt/cst-rw/cst btrfs commit-interval apply --yes
             grep -qF "commit=60" /etc/fstab
             grep -qF "flushoncommit" /etc/fstab
@@ -7817,16 +7823,16 @@ EOF
             doc_out="$(/opt/cst-rw/cst doctor || true)"
             grep -qF "ok     root btrfs commit interval: coherent (commit=60)" <<<"$doc_out"
             /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
-            ! grep -qF "commit=" /etc/fstab
-            ! grep -qF "commit=" {w}/kargs
-            ! grep -qF "commit=" {w}/proc/mounts
-            ! grep -qF "commit=" "/etc/systemd/system/{top_unit}"
+            absent "commit=" /etc/fstab
+            absent "commit=" {w}/kargs
+            absent "commit=" {w}/proc/mounts
+            absent "commit=" "/etc/systemd/system/{top_unit}"
             grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             grep -qxF '{home_line}' /etc/fstab
             grep -qxF '{home_mount}' {w}/proc/mounts
             # cst doctor after the revert: every layer back to the kernel's default, no warning.
             doc_after="$(/opt/cst-rw/cst doctor || true)"
-            ! grep -qF "WARN   root btrfs commit interval" <<<"$doc_after"
+            if grep -qF "WARN   root btrfs commit interval" <<<"$doc_after"; then echo "$doc_after" >&2; exit 1; fi
             if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi
             # A commit= a mount refuses, only in the unit (fstab, kargs and the mounts are right already):
             # plan changes nothing, revert replaces it, a second revert has nothing to do.
@@ -7998,18 +8004,22 @@ STUB
             # plan writes nothing.
             keep
             $cst btrfs cache plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
-            [[ ! -e {w}/var/mnt/cache/u1 ]] && unchanged
+            [[ ! -e {w}/var/mnt/cache/u1 ]]
+            unchanged
 
             # attach, then again; --no-cache, --no-scratchpad; a home with a space.
             $cst btrfs cache attach --user u1
             $cst btrfs cache attach --user u1 | grep -qF "nothing to do"
             [[ -d {w}/var/mnt/cache/u1 && -f {w}/var/mnt/scratchpad/u1/CACHEDIR.TAG ]]
-            grep -qF "user=u1 kind=cache" {w}/etc/fstab && grep -qF "user=u1 kind=scratchpad" {w}/etc/fstab
+            grep -qF "user=u1 kind=cache" {w}/etc/fstab
+            grep -qF "user=u1 kind=scratchpad" {w}/etc/fstab
             grep -qF "$(printf '%s\\t%s\\t' '/dev/mapper/cache[/cache/u1]' /var/home/u1/.cache)" {w}/mounts
             $cst btrfs cache attach --user u2 --no-cache
-            ! grep -qF "user=u2 kind=cache" {w}/etc/fstab && grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            absent "user=u2 kind=cache" {w}/etc/fstab
+            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
             $cst btrfs cache attach --user u3 --no-scratchpad
-            grep -qF "user=u3 kind=cache" {w}/etc/fstab && ! grep -qF "user=u3 kind=scratchpad" {w}/etc/fstab
+            grep -qF "user=u3 kind=cache" {w}/etc/fstab
+            absent "user=u3 kind=scratchpad" {w}/etc/fstab
             $cst btrfs cache attach --user u4
             grep -qF '/var/mnt/cache/u4 /var/home/u\\040four/.cache none bind,nofail' {w}/etc/fstab
             $cst btrfs cache status --user u4 | grep -qF "/var/home/u four/.cache [active (fstab + mounted)]"
@@ -8057,7 +8067,8 @@ STUB
             # A daemon-reload that fails: fstab and the mounts as they were, and it says so.
             keep
             rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
-            [[ $rc == 1 ]] && grep -qF "mounts and /etc/fstab restored." {w}/out
+            [[ $rc == 1 ]]
+            grep -qF "mounts and /etc/fstab restored." {w}/out
             unchanged
             # ...and one after which /etc/fstab cannot be put back: the binds are taken back, and the message
             # says ROLLBACK INCOMPLETE and names /etc/fstab instead of "restored.".
@@ -8115,9 +8126,9 @@ STUB
             $cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
             $cst btrfs cache detach --user u1
             [[ -f {w}/var/mnt/scratchpad/u1/data.txt ]]
-            ! grep -qF "user=u1" {w}/etc/fstab
+            absent "user=u1" {w}/etc/fstab
             grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
-            ! grep -qF "/var/home/u1/" {w}/mounts
+            absent "/var/home/u1/" {w}/mounts
             $cst btrfs cache detach --user u10 | grep -qF "kept: /var/home/u10/.cache has a mount CST did not make"
             grep -qF "/var/home/u10/.cache" {w}/mounts
             echo E2E-CACHE-OK

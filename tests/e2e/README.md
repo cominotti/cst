@@ -158,6 +158,24 @@ prints the fix, `chcon -R -t container_file_t <checkout>`.
 `test lint`, `test pylint`, `test types`, `test workflows`, `test unit`), then
 both tiers.
 
+## Checks that stop the script
+
+The suites run their scripts under `bash -euo pipefail`. set -e never stops a
+script on a negation (`! grep -qF x file`) or on the first command of an
+`A && B` list: such a line checks nothing when it fails, and the script goes
+on (only the script's last command sets its exit status). So:
+
+- a negative check is `absent NEEDLE FILE`, with
+  `absent() { ! grep -qF -- "$1" "$2"; }` defined in the script (a function's
+  status is its last command's, and a failing call stops the script), or
+  `if grep ...; then echo "..." >&2; exit 1; fi` (a regex, a here-string);
+- one check per line: `A` and `B` on two lines, or one `[[ ... && ... ]]`.
+
+`A && B` stays right where it is not a check: a loop's `&& break`, a
+condition that sets a variable (`[[ -e f ]] && was_off=1`), the body of a
+one-line function (`unchanged() { cmp ... && cmp ...; }`: the caller's line
+checks its status), or a line ending in `|| { ...; exit 1; }`.
+
 ## Mixed-version tests
 
 The history of this repository was rewritten on 2026-11-18. The commit SHAs in fixture names (`tests/fixtures/legacy/<file>@<sha>`) and the `(#NN)` pull request numbers in older commit subjects refer to the history before that date; the fixtures' contents are what the names describe.

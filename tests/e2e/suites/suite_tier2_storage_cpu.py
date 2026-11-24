@@ -1409,7 +1409,7 @@ EOF
             test ! -e /etc/systemd/system/machine.slice.d/10-cpu-setup.conf
             test ! -e /etc/polkit-1/rules.d/50-cpu-setup-game.rules
             test ! -e /etc/tmpfiles.d/btrfs-automatic-reclaim.conf
-            ! systemctl is-active -q cpu-game-watchdog.timer
+            if systemctl is-active -q cpu-game-watchdog.timer; then echo "the watchdog timer still runs" >&2; exit 1; fi
             """,
         )
 
