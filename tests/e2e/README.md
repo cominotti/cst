@@ -133,7 +133,8 @@ container pairs:
 - `--jobs N` (`run.py --jobs N` / `-j N`; `invowk cmd test e2e tier1` defaults
   to `0` = auto up to 4 parallel containers when more than 4 tests are
   selected, half the CPUs this process may run on (its CPU affinity, as in a
-  pinned toolbox), `1` for smaller selections): images are built or checked once,
+  pinned toolbox; every CPU of the machine where Python cannot read the
+  affinity, as on macOS), `1` for smaller selections): images are built or checked once,
   parallel shards run concurrently, and `test_10_cpu_quiet_reads_the_real_proc_files`
   (which loads every host CPU) runs alone after the parallel shards finish.
 Without `--rebuild`, `run.py` uses a local image only when its label

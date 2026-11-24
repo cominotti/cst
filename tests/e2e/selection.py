@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import contextlib
 import fnmatch
 import os
 from typing import Final
@@ -271,14 +272,14 @@ def filter_host_scope(cases: Sequence[unittest.TestCase], scope: HostScope) -> l
 
 def _usable_cpus() -> int:
     """The CPUs this process may run on: its CPU affinity (a pinned toolbox, a cgroup's cpuset), or every
-    CPU of the machine when the affinity cannot be read.
+    CPU of the machine when the affinity cannot be read or Python has no os.sched_getaffinity (macOS).
 
     os.sched_getaffinity (Linux, where the E2E tests run), not os.process_cpu_count (Python 3.13 and
     later): CI's tier 1 job runs this file on the python3 of its Ubuntu 24.04 host, 3.12."""
-    try:
-        return len(os.sched_getaffinity(0))
-    except OSError:
-        return os.cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):
+        with contextlib.suppress(OSError):
+            return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
 
 
 def default_tier1_jobs(selected_count: int, cpu_count: int | None = None) -> int:
