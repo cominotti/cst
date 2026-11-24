@@ -207,8 +207,7 @@ def active_game_gpu_cards(profile: GameProfile) -> list[str]:
     client: set[str] = set()
     for pid in _game_pids(profile):
         comm = read_stripped(os.path.join(profile.paths.proc, pid, "comm")) or ""
-        found = client if comm in _STEAM_CLIENT_COMMS else matched
-        found |= _pid_cards(profile, pid, dev_to_card)
+        (client if comm in _STEAM_CLIENT_COMMS else matched).update(_pid_cards(profile, pid, dev_to_card))
     if matched:
         return sorted(matched, key=_card_number)
     return _connected_cards(sys_drm, cards) or sorted(client, key=_card_number)
