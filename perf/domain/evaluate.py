@@ -7,12 +7,11 @@ import re
 from typing import Final
 
 from cst_core.domain.text import group
-from cst_core.domain.values import CpuSet, format_bytes_human
+from cst_core.domain.values import CpuSet, format_bytes_human, format_cpulist
 from cpu.power.domain import boot_cstate_limit_us
 from perf.domain.axis import (
     AxisCollector,
     VERDICT_RANK,
-    format_perf_cpuset,
     hourly_rate,
     rate_str,
     worst_perf_verdict,
@@ -344,7 +343,7 @@ def _irq_overlap_detail(line: IrqLineSample, build_set: frozenset[int]) -> str |
         overlap = line.effective_cpus.cpus & build_set
         if not overlap:
             return None
-        return f"IRQ {line.irq_id} ({dev_name} on CPU {format_perf_cpuset(CpuSet(frozenset(overlap)))})"
+        return f"IRQ {line.irq_id} ({dev_name} on CPU {format_cpulist(overlap)})"
     total = line.total_count
     build_hits = sum(cnt for c, cnt in line.counts_by_cpu.items() if c in build_set)
     if total <= 0 or build_hits / total < IRQ_DOMINANT_SHARE:
@@ -356,7 +355,7 @@ def _irq_overlap_detail(line: IrqLineSample, build_set: frozenset[int]) -> str |
 def _eval_irq_build_overlap(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
     if cpu.build_cpus is None or not cpu.irq_lines:
         return
-    build_spec = format_perf_cpuset(cpu.build_cpus)
+    build_spec = format_cpulist(cpu.build_cpus.cpus)
     build_set = cpu.build_cpus.cpus
     hot_on_build: list[str] = []
     for line in cpu.irq_lines:
@@ -450,7 +449,7 @@ def _eval_cpu_cstates(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
 def _irqbalance_ban_text(cpu: CpuProbeSnapshot) -> str:
     if cpu.irqbalance_banned_cpus is None:
         return "no ban-list"
-    return f"ban={format_perf_cpuset(cpu.irqbalance_banned_cpus)}"
+    return f"ban={format_cpulist(cpu.irqbalance_banned_cpus.cpus)}"
 
 
 def _irqbalance_ban_missing(cpu: CpuProbeSnapshot) -> bool:

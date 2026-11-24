@@ -17,9 +17,9 @@ from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component
 from cst_core.domain.text import HELP_WORDS
 from cst_core.domain.text import file_lines
-from cst_core.domain.values import CpuSet, DomainValidationError, Json
+from cst_core.domain.values import CpuSet, DomainValidationError, Json, format_cpulist
 from cpu.game.domain import BUILDS_SLICE
-from cpu.irq.domain import IrqAction, format_cpulist
+from cpu.irq.domain import IrqAction
 from cpu.power.domain import CpuTopology, PowerAction, default_cstate_cap_off
 
 

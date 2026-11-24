@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
 from cst_core.domain.text import DRY_RUN_LINE, parse_subcommand_head
 from cst_core.domain.units import ActiveState
-from cst_core.domain.values import CpuSet
+from cst_core.domain.values import CpuSet, format_cpulist
 
 IRQ_ENV_PATH: Final = "/etc/cpu-setup/irqbalance.env"
 IRQ_SYSCONFIG_PATH: Final = "/etc/sysconfig/irqbalance"
@@ -66,23 +66,6 @@ class IrqSnapshot:
     warnings: tuple[str, ...] = ()
     # Why apply must refuse: BUILD_CPUS empty or not a CPU list, or a syntax error in the settings file.
     build_cpus_error: str | None = None
-
-
-def format_cpulist(cpus: Iterable[int]) -> str:
-    """Format CPU indices as a compact Linux cpulist range string (e.g. `0-3,8-11`)."""
-    ordered = sorted(set(cpus))
-    if not ordered:
-        return ""
-    ranges: list[str] = []
-    start = prev = ordered[0]
-    for cpu in ordered[1:]:
-        if cpu == prev + 1:
-            prev = cpu
-            continue
-        ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
-        start = prev = cpu
-    ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
-    return ",".join(ranges)
 
 
 def compute_banned_cpulist(

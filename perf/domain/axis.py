@@ -4,7 +4,7 @@
 from collections.abc import Iterable
 from typing import Final
 
-from cst_core.domain.values import CpuSet, HOUR
+from cst_core.domain.values import HOUR
 from perf.domain.models import (
     MIN_UPTIME_FOR_RATE_SECONDS,
     PerfAxis,
@@ -62,23 +62,6 @@ class AxisCollector:
             metrics=tuple(self.metrics),
             findings=tuple(self.findings),
         )
-
-
-def format_perf_cpuset(cpuset: CpuSet) -> str:
-    """Format a `CpuSet` compactly using Linux range syntax (`0-7,12-23`)."""
-    nums = cpuset.sorted_cpus()
-    if not nums:
-        return ""
-    ranges: list[str] = []
-    start = end = nums[0]
-    for cpu in nums[1:]:
-        if cpu == end + 1:
-            end = cpu
-        else:
-            ranges.append(f"{start}-{end}" if start != end else str(start))
-            start = end = cpu
-    ranges.append(f"{start}-{end}" if start != end else str(start))
-    return ",".join(ranges)
 
 
 def worst_perf_verdict(verdicts: Iterable[PerfVerdict]) -> PerfVerdict:

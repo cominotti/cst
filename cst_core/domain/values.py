@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Pure domain value objects with invariant enforcement on construction."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import math
 import re
@@ -228,6 +229,24 @@ def _parse_range(token: str, spec: str) -> range:
     if start > end:
         raise DomainValidationError(f"descending CPU range {token!r} in {spec!r}")
     return range(start, end + 1)
+
+
+def format_cpulist(cpus: Iterable[int]) -> str:
+    """Format CPU indices as a compact Linux cpulist range string (e.g. `0-3,8-11`; "" for none): the
+    syntax CpuSet.parse reads, as cpu irq writes IRQBALANCE_BANNED_CPULIST and cst perf shows CPU lists."""
+    ordered = sorted(set(cpus))
+    if not ordered:
+        return ""
+    ranges: list[str] = []
+    start = prev = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
+        start = prev = cpu
+    ranges.append(f"{start}" if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
 
 
 @dataclass(frozen=True, slots=True)
