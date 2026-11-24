@@ -18,6 +18,7 @@ import subprocess
 import time
 import unittest
 
+from btrfs.bulk.domain.steam import snapshots_resume_above
 from btrfs.tests.snapshot_fakes import GIB, SCRIPT, UMASK, USAGE, RuntimeTest, log, read
 from tests.test_module_routing import userns_root
 
@@ -757,6 +758,22 @@ class AlertStampTest(Base):
 
 
 class SpaceGuardTest(Base):
+    def test_paused_snapshots_resume_just_above_what_btrfs_bulk_says(self) -> None:
+        # btrfs-bulk's steam plan tells when paused snapshots come back (snapshots_resume_above): at that
+        # free space the paused hourly run stays paused, one byte above it the snapshot is made.
+        for skip, resume in ((250, 100), (250, 270), (250, 0), (40, 45), (90, 45)):
+            above = snapshots_resume_above({"pause": skip * GIB, "resume": resume * GIB})
+            self.conf(SKIP_AT_OR_BELOW_GIB=str(skip), RESUME_ABOVE_GIB=str(resume), EMERGENCY_AT_OR_BELOW_GIB="10")
+            for free, paused in ((above, True), (above + 1, False)):
+                with self.subTest(skip=skip, resume=resume, free=free):
+                    self.write(self.state_file("paused"), "")
+                    self.machine(free=free)
+                    self.forget_calls()
+                    r = self.run_prog("hourly")
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertEqual(os.path.exists(self.state_file("paused")), paused)
+                    self.assertEqual("snapshot" in [c[0] for c in self.core_calls()], not paused)
+
     def test_emergency_purge(self) -> None:
         self.machine(free=[150 * GIB, 160 * GIB])
         self.core(prune={"out": log(5, "home: deleted 3") + "\n"})
