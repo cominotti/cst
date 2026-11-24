@@ -9,7 +9,7 @@ processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `c
 The worker count, first rule that applies (`requested_jobs()`): `-j N`/`--jobs N`
 with N >= 1; 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
 (unset, empty or 0: the next rule; any other value that is not a whole number
-is a usage error); one per CPU of the affinity. `invowk cmd check` passes no
+is a usage error, when this rule is reached); one per CPU of the affinity. `invowk cmd check` passes no
 --jobs, so CST_TEST_JOBS is how a run on a shared machine caps the suite.
 A NAME is a test module, class or method as unittest names it (vm.tests.test_vm,
 vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
@@ -774,9 +774,14 @@ def default_jobs(env_jobs: int | None = None) -> int:
 
 
 def requested_jobs(cli_jobs: int | None, environ: Mapping[str, str]) -> int:
-    """The worker count of a run: `-j N` with N >= 1 wins (the environment is not read), else the default."""
+    """The worker count of a run: `-j N` with N >= 1 wins, then 1 under coverage.py, else the default.
+
+    The environment is read only when neither applies, so a bad CST_TEST_JOBS is no error then.
+    """
     if cli_jobs is not None and cli_jobs >= 1:
         return cli_jobs
+    if _coverage_active():
+        return 1
     return default_jobs(jobs_from_env(environ))
 
 

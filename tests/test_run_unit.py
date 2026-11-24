@@ -921,6 +921,13 @@ class TestJobsEnvTest(unittest.TestCase):
             self.assertEqual(run_unit_module.requested_jobs(None, {"CST_TEST_JOBS": "6"}), 1)
             self.assertEqual(run_unit_module.requested_jobs(3, {"CST_TEST_JOBS": "6"}), 3)
 
+    def test_under_coverage_the_variable_is_not_read(self) -> None:
+        # The documented order puts coverage.py before CST_TEST_JOBS: a bad value there is no error.
+        with mock.patch("sys.gettrace", return_value=lambda *_a: None):
+            for cli in (None, 0):
+                with self.subTest(cli=cli):
+                    self.assertEqual(run_unit_module.requested_jobs(cli, {"CST_TEST_JOBS": "abc"}), 1)
+
     def test_a_run_with_no_jobs_flag_uses_the_variable(self) -> None:
         units = [(f"dummy.mod{i}",) for i in range(5)]
         with (
