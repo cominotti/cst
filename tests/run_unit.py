@@ -1316,7 +1316,8 @@ def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]],
     return 0 if not has_test_fail and not errors else 1
 
 
-def _print_affected_plan(repo: str, base: str | None) -> int:
+def _print_affected_plan(repo: str, base: str | None, *, mbt_only: bool = False) -> int:
+    """Print the plan of the change since base (`--list-affected`); mbt_only: only its tests/mbt modules."""
     from tests.affected import format_plan, git_changed_files, select_affected
 
     try:
@@ -1325,7 +1326,11 @@ def _print_affected_plan(repo: str, base: str | None) -> int:
         print(f"run_unit: {exc}", file=sys.stderr)
         return 2
     plan = select_affected(changed, repo=repo, base=resolved_base)
-    print(format_plan(plan))
+    if mbt_only:
+        for mod in plan.mbt_modules:
+            print(mod)
+    else:
+        print(format_plan(plan))
     return 0
 
 
@@ -1334,17 +1339,7 @@ def print_affected_mbt(repo: str, base: str | None) -> int:
 
     `invowk cmd test affected` and `invowk cmd test mbt --affected` read it; it never imports Hypothesis.
     """
-    from tests.affected import git_changed_files, select_affected
-
-    try:
-        resolved_base, changed = git_changed_files(repo, base)
-    except ValueError as exc:
-        print(f"run_unit: {exc}", file=sys.stderr)
-        return 2
-    plan = select_affected(changed, repo=repo, base=resolved_base)
-    for mod in plan.mbt_modules:
-        print(mod)
-    return 0
+    return _print_affected_plan(repo, base, mbt_only=True)
 
 
 def _resolve_affected_opts(repo: str, opts: RunOptions) -> RunOptions:
