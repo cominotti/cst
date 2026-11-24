@@ -1867,6 +1867,55 @@ class SwapSettingsTest(_SwapScratch):
         os.remove(self.env.fstab)
         self.assertIn("REFUSE    cst/swap.conf", self._plan_text(self.env, unreadable={self.env.crypttab}))
 
+    def test_as_root_a_crypttab_or_fstab_it_cannot_read_says_apply_refuses_not_root(self) -> None:
+        # Root, and access refuses (a security policy, a root-squashed mount): --root cannot help, and
+        # apply refuses that file before it writes anything.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        rows = {self.env.crypttab: "crypttab: swap0 line", self.env.fstab: "fstab: /dev/mapper/swap0 line"}
+        for as_root in (True, False):
+            env = dataclasses.replace(self.env, as_root=as_root)
+            for path, row in rows.items():
+                for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                    with self.subTest(as_root=as_root, path=path, cmd=cmd):
+                        self.env = env
+                        rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={path}))
+                        self.assertEqual(rc, 0, err)
+                        line = next(x for x in out.splitlines() if row in x)
+                        if as_root:
+                            self.assertEqual(
+                                line.split(row, 1)[1].strip(),
+                                "cannot be read, even as root: apply refuses before it writes anything",
+                            )
+                            self.assertNotIn("--root", out)
+                        else:
+                            self.assertEqual(
+                                line.split(row, 1)[1].strip(), f"needs root to read: on the host, cst swap {cmd} --root"
+                            )
+                        self.assertTrue(line.startswith("  ?  "), line)
+
+    def test_as_root_an_older_install_whose_crypttab_it_cannot_read_says_apply_refuses(self) -> None:
+        # No /etc/cst/swap.conf, the fstab line an older CST wrote, and a crypttab root may not read:
+        # the swap.conf row does not ask for --root, and apply stops with it before any write.
+        self._older_install()
+        self.env = dataclasses.replace(self.env, as_root=True)
+        note = (
+            "not written yet; an older CST set up swap0 (fstab), and crypttab cannot be read, even as root:"
+            " apply refuses before it writes anything"
+        )
+        before = file_tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={self.env.crypttab}))
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"  ?         cst/swap.conf                          {note}\n", out)
+                self.assertNotIn("--root", out)
+        rc, out, err, systemd = self._run_on(D.SwapCommand.APPLY, self._fs(unreadable={self.env.crypttab}))
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.settings_path}: {note}.\n")
+        self.assertEqual((systemd.daemon_reloads, systemd.calls), (0, []))
+        self.assertEqual(file_tree(self.tmp), before)
+
 
 class MemoryLowOverrideTest(_SwapScratch):
     """machine.slice's MemoryLow from a drop-in systemd applies after CST's: an "over" row naming it, no

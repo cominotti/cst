@@ -187,6 +187,19 @@ class SwapEnvironment:
         return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
 
 
+# A crypttab or fstab that root cannot read (a security policy, a root-squashed mount): --root cannot help, and
+# apply refuses it before the first write.
+_ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
+
+
+def _marked_line_note(state: ManagedState, swap_name: str, prog: str, verb: str, *, as_root: bool) -> str:
+    """The note of the crypttab or fstab row: state_note's, except a file that cannot be read when the
+    reader already runs as root (as_root), which apply refuses before it writes anything."""
+    if as_root and state == OwnedState.UNREADABLE:
+        return _ROOT_CANNOT_READ
+    return state_note(state, swap_name, prog, verb)
+
+
 def _short_etc_path(etc_dir: str, path: str) -> str:
     prefix = etc_dir.rstrip("/") + "/"
     return path.removeprefix(prefix).removeprefix("systemd/system/")
@@ -360,12 +373,13 @@ class SwapReports:
                 f" {spec.expected_size_bytes} bytes (its size now)",
             )
         if res.state == SwapSpecState.UNKNOWN:
-            return PlanItem(
-                "?",
-                target,
-                f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
-                f" which needs root to read: on the host, {env.prog} {verb} --root",
+            older = f"not written yet; an older CST set up {res.note} (fstab)"
+            note = (
+                f"{older}, and crypttab {_ROOT_CANNOT_READ}"
+                if env.as_root
+                else f"{older}: apply writes it from crypttab, which needs root to read: on the host, {env.prog} {verb} --root"
             )
+            return PlanItem("?", target, note)
         if res.state == SwapSpecState.UNREADABLE:
             return PlanItem("?", target, f"cannot be read as this user: on the host, {env.prog} {verb} --root")
         if res.state == SwapSpecState.BAD:
@@ -395,18 +409,9 @@ class SwapReports:
         file_items: list[PlanItem] = []
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
-        file_items.append(
-            PlanItem(
-                describe_state(c_state), f"crypttab: {spec.name} line", state_note(c_state, spec.name, env.prog, verb)
-            )
-        )
-        file_items.append(
-            PlanItem(
-                describe_state(f_state),
-                f"fstab: {spec.mapper_path} line",
-                state_note(f_state, spec.name, env.prog, verb),
-            )
-        )
+        for state, row in ((c_state, f"crypttab: {spec.name} line"), (f_state, f"fstab: {spec.mapper_path} line")):
+            note = _marked_line_note(state, spec.name, env.prog, verb, as_root=env.as_root)
+            file_items.append(PlanItem(describe_state(state), row, note))
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
 
