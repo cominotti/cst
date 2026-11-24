@@ -21,7 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import group
-from cst_core.domain.values import HOUR, MINUTE, parse_whole_number
+from cst_core.domain.values import DomainValidationError, Duration, parse_whole_number
 
 URI = "qemu:///system"
 
@@ -484,11 +484,12 @@ def quiet_tests(window: Sequence[QuietSample], limits: Mapping[str, float]) -> l
 
 
 def duration(text: str) -> float:
-    """Seconds from 120, 90s, 30m or 2h."""
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip(), re.ASCII)  # digits 0-9 only
-    if not m or float(m.group(1)) <= 0:
-        raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)")
-    return float(m.group(1)) * {"": 1, "s": 1, "m": MINUTE, "h": HOUR}[m.group(2)]
+    """Seconds from 120, 1.5, 90s, 30m, 2h, 1d or 1w (Duration.parse_float: ASCII digits, above 0 and
+    finite); ValueError with --wait's message for anything else."""
+    try:
+        return Duration.parse_float(text, allow_unitless=True, positive_only=True)
+    except DomainValidationError:
+        raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)") from None
 
 
 def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, float | None, bool, dict[str, float]]:

@@ -1322,9 +1322,10 @@ cst cpu quiet --wait 2h --for 120 && make bench
 
 It takes one reading per second for `SECONDS` seconds in a row (default 60).
 `SECONDS` is a whole number in ASCII digits (`0`-`9`), from 1 to the most a
-window can hold (2**63 - 2); `MAX` is
-one too, or a number with `s`, `m` or `h` (`90s`, `30m`, `2h`). Anything else
-is a usage error.
+window can hold (2**63 - 2). `MAX` is a number of seconds in ASCII digits,
+a fraction allowed (`120`, `1.5`), or a number with the unit `s`, `m`, `h`,
+`d` or `w` (`90s`, `30m`, `2h`, `1.5h`; blanks and either case allowed:
+`2 H`), above 0 and not too large to hold. Anything else is a usage error.
 The window is quiet when **all** of these hold:
 
 | Test | Read from | Quiet when | Flag | Environment variable |
@@ -1379,7 +1380,7 @@ When a test fails, its line ends in `FAIL`, and the last line names it:
 - **Exit code**: 0 quiet; 1 not quiet, or `--wait` ran out; 2 usage error (an
   unknown flag, a value that is not a number above 0, `--wait` shorter than
   `--for`); 130 after Ctrl-C.
-- `--wait MAX` (`120`, `90s`, `30m`, `2h`; the whole time, at least
+- `--wait MAX` (`120`, `90s`, `30m`, `2h`, `1d`; the whole time, at least
   `--for`): when a window is not quiet, the oldest second drops out and the
   next one is added, until the window is quiet or `MAX` has passed. Only the
   last window is printed (on standard output; a "waiting up to ..." line goes
