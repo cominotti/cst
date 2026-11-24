@@ -24,7 +24,7 @@ from cst_core.domain.contracts import NAS_SSH_ALIAS, StateFormatKey, state_forma
 from cst_core.domain.errors import ExitStatus, Refused
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.ostree import query_status
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, parse_whole_number
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode, VirshPort
 from cst_core.domain.text import (
     NO_WORDS,
@@ -241,9 +241,9 @@ def prepare_command(paths: VmPaths, cmd: VmCommand, sub: VmSub | None, nas: bool
 
 
 def conf_number(paths: VmPaths, key: str) -> int:
-    """A whole number of /etc/cst/vm.conf (NAS_DEFAULTS when missing or not a number >= 0)."""
-    v = read_conf(paths.vm_conf, nas_conf=paths.nas_conf).get(key, "")
-    return int(v) if v.isdigit() else NAS_DEFAULTS[key]
+    """A whole number of /etc/cst/vm.conf in ASCII digits (NAS_DEFAULTS when missing or anything else)."""
+    v = parse_whole_number(read_conf(paths.vm_conf, nas_conf=paths.nas_conf).get(key, ""))
+    return NAS_DEFAULTS[key] if v is None else v
 
 
 def default_vm(paths: VmPaths) -> str:
