@@ -56,7 +56,7 @@ import re
 import tempfile
 import unittest
 
-from cst_core.domain.text import group_or_none
+from cst_core.domain.text import group, group_or_none
 from tests.repo_files import REPO, repo_files
 
 CONFIG = ".github/zizmor.yml"
@@ -338,6 +338,18 @@ def _jobs(lines: Iterable[tuple[int, str]]) -> dict[str, list[tuple[int, str]]]:
     return jobs
 
 
+def _step_starts(body: Iterable[tuple[int, str]]) -> list[int]:
+    """The first line of each step of a job's body (the `- ` items at the shallowest depth)."""
+    steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
+    depth = min((d for _, d in steps), default=0)
+    return [n for n, d in steps if d == depth]
+
+
+def _lenient_keys(lines: Iterable[tuple[int, str]], pattern: re.Pattern[str] = _LENIENT) -> list[tuple[int, str]]:
+    """The number and key of each line pattern matches (by default `if:`, `continue-on-error:` or `needs:`)."""
+    return [(n, group(m, 1)) for n, line in lines if (m := pattern.match(line)) is not None]
+
+
 def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes).
 
@@ -362,16 +374,12 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
         out.append(f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)")
     for name, at in runs:
         body = jobs[name]
-        for n, line in body:
-            lenient = _LENIENT.match(line)
-            if lenient is not None:
-                out.append(
-                    f"{NIGHTLY}:{n}: the job {name} has `{lenient.group(1)}:`; the job that runs uv audit may "
-                    "not, since it lets the nightly pass without the audit"
-                )
-        steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
-        depth = min((d for _, d in steps), default=0)
-        if any(n > at and d == depth for n, d in steps):
+        out += [
+            f"{NIGHTLY}:{n}: the job {name} has `{key}:`; the job that runs uv audit may "
+            "not, since it lets the nightly pass without the audit"
+            for n, key in _lenient_keys(body)
+        ]
+        if any(n > at for n in _step_starts(body)):
             out.append(
                 f"{NIGHTLY}:{at}: the uv audit step must be the last step of the job {name}: when it fails, "
                 "the steps after it do not run (give the audit a job of its own)"
@@ -390,9 +398,7 @@ _STEP_LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error)\s*:")
 
 def _step_lines(body: Sequence[tuple[int, str]], at: int) -> list[tuple[int, str]]:
     """The lines of the step of a job's body that holds line `at`."""
-    steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
-    depth = min((d for _, d in steps), default=0)
-    starts = [n for n, d in steps if d == depth]
+    starts = _step_starts(body)
     start = max((n for n in starts if n <= at), default=at)
     end = min((n for n in starts if n > at), default=None)
     return [(n, line) for n, line in body if n >= start and (end is None or n < end)]
@@ -409,31 +415,35 @@ def mbt_step_problems(ci: str, nightly: str) -> list[str]:
     in a job with no `if:`, `continue-on-error:` or `needs:`. Comment
     lines are left out.
     """
+    return _mbt_ci_problems(ci) + _mbt_nightly_problems(nightly)
+
+
+def _mbt_ci_problems(ci: str) -> list[str]:
     out: list[str] = []
     body = _jobs(_uncommented(ci)).get(MBT_CI_JOB, [])
     runs = [n for n, line in body if MBT_CI_STEP.match(line)]
     if not runs:
         out.append(f"{CI}: the job {MBT_CI_JOB} has no step `{_MBT_SHOWN.format('ci')}` (on one line, nothing added)")
     for at in runs:
-        for n, line in _step_lines(body, at):
-            lenient = _STEP_LENIENT.match(line)
-            if lenient is not None:
-                out.append(
-                    f"{CI}:{n}: the mbt step has `{lenient.group(1)}:`; it may not, since it lets CI pass "
-                    "without the property tests"
-                )
+        out += [
+            f"{CI}:{n}: the mbt step has `{key}:`; it may not, since it lets CI pass without the property tests"
+            for n, key in _lenient_keys(_step_lines(body, at), _STEP_LENIENT)
+        ]
+    return out
+
+
+def _mbt_nightly_problems(nightly: str) -> list[str]:
+    out: list[str] = []
     jobs = _jobs(_uncommented(nightly))
     named = [name for name, lines in jobs.items() if any(MBT_NIGHTLY_STEP.match(line) for _, line in lines)]
     if not named:
         out.append(f"{NIGHTLY}: no step runs `{_MBT_SHOWN.format('nightly')}` (on one line, nothing added)")
     for name in named:
-        for n, line in jobs[name]:
-            lenient = _LENIENT.match(line)
-            if lenient is not None:
-                out.append(
-                    f"{NIGHTLY}:{n}: the job {name} has `{lenient.group(1)}:`; the job that runs the nightly "
-                    "mbt profile may not, since it lets the nightly pass without it"
-                )
+        out += [
+            f"{NIGHTLY}:{n}: the job {name} has `{key}:`; the job that runs the nightly "
+            "mbt profile may not, since it lets the nightly pass without it"
+            for n, key in _lenient_keys(jobs[name])
+        ]
     return out
 
 
