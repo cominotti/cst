@@ -711,6 +711,19 @@ not derive from it.
   failed (or a process that died between the record and the set) is never
   tried again while the profile is on, and an `off` whose undo step fails
   still removes `game.state`, so that setting keeps the profile's value.
+- `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
+  unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
+  hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
+  twice, other options, written by hand, a folder), kernels, partitions,
+  zram and install records: each refusal leaves every file as it was and
+  runs no systemctl, sysctl or zram call, and an apply that exits 0 records
+  swap's files and changes nothing more when run again. Its first run, on
+  the code before, found that apply wrote crypttab before it refused an
+  fstab it could not read. One known gap is let through by name: with an
+  install record of a newer CST, apply writes crypttab and fstab and starts
+  swap0 before the installer refuses. `mbt_game_state.py`,
+  `mbt_game_profile.py` and `mbt_swap_apply.py` took 6.2 s together at
+  `--jobs 1` and 2.8 s at `--jobs 4` (`--profile ci`, a shared workstation).
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
