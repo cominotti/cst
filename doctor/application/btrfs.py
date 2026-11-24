@@ -179,13 +179,12 @@ def btrfs_device_bytes(host: DoctorHostPort, mnt: str, profiles: Mapping[str, Ma
     if not mnt or factor is None:
         return None
     rc, out, _ = host.run(["stat", "-f", "-c", "%S %b", mnt], timeout=15)
-    f = out.split() if rc == 0 else []
-    if len(f) != 2:
-        return None
-    block, blocks = parse_whole_number(f[0]), parse_whole_number(f[1])  # ASCII digits only
-    if block is None or blocks is None:
-        return None
-    return block * blocks * factor
+    fields = out.split() if rc == 0 else []
+    match [parse_whole_number(x) for x in fields]:  # ASCII digits only
+        case [int() as block, int() as blocks]:
+            return block * blocks * factor
+        case _:
+            return None
 
 
 def btrfs_devices(host: DoctorHostPort, base: ViewPath) -> tuple[list[tuple[str, str, int]], str]:
