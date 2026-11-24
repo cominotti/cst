@@ -5,7 +5,7 @@ vm/tests/quint/nas.qnt models backup_nas and nas_run (vm/application/nas.py), on
 call that changes the machine, the repository or the records, or whose answer the code branches on,
 with a stop, a kill, the guest and libvirt acting between any two steps. `invowk cmd test quint --traces`
 writes runs of it as ITF traces (JSON) into vm/tests/quint/traces. This test replays each trace on
-backup_nas over in-process fakes of its ports (built on test_vm_nas.py's _Nas* fakes), run by run,
+backup_nas over in-process fakes of its ports (built on test_vm_nas.py's FakeNas* fakes), run by run,
 driven by a World: the VM's state, each disk's source in the live and the persistent definition, the
 overlay files, the repository's snapshots, the torn record and the index.
 
@@ -47,15 +47,15 @@ from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
 from vm.tests.test_vm_nas import (
     NOW,
-    _blklist,
-    _nas_xml,
-    _NasClock,
-    _NasCommands,
-    _NasOut,
-    _NasRestic,
-    _NasSettings,
-    _NasSignals,
-    _NasStore,
+    fake_blklist,
+    fake_nas_xml,
+    FakeNasClock,
+    FakeNasCommands,
+    FakeNasOut,
+    FakeNasRestic,
+    FakeNasSettings,
+    FakeNasSignals,
+    FakeNasStore,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -359,7 +359,7 @@ class Recorder:
             self.calls.append(("preflight", "", 0, outcome))
 
 
-class Signals(_NasSignals):
+class Signals(FakeNasSignals):
     """The stop signals: a stop that came in a held block is raised at its end (signals_held)."""
 
     def __init__(self, rec: Recorder) -> None:
@@ -405,7 +405,7 @@ class _Held(contextlib.AbstractContextManager[object]):
             raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
 
-class Store(_NasStore):
+class Store(FakeNasStore):
     """The files: the images, the overlays of the World, the torn record and the index."""
 
     def __init__(self, rec: Recorder) -> None:
@@ -490,7 +490,7 @@ class Store(_NasStore):
         self.world.record = [e for e in self.world.record if e["snapshot"] not in gone]
 
 
-class Restic(_NasRestic):
+class Restic(FakeNasRestic):
     """The repository: its snapshots in the World."""
 
     def __init__(self, rec: Recorder, run: int) -> None:
@@ -551,13 +551,13 @@ class Restic(_NasRestic):
         return (3 if outcome == "incomplete" else 0), summary
 
 
-class Settings(_NasSettings):
+class Settings(FakeNasSettings):
     @override
     def number(self, key: str) -> int:
         return {"VM_NAS_KEEP_WEEKLY": 2}.get(key, 0)
 
 
-class Clock(_NasClock):
+class Clock(FakeNasClock):
     """now: the run's week; monotonic moves on with sleep (a poll until a deadline ends)."""
 
     def __init__(self, r: int) -> None:
@@ -586,12 +586,12 @@ class Virsh:
         self.quiesce = quiesce
 
     def xml(self, definition: Mapping[str, int], *, agent: bool) -> str:
-        text_ = _nas_xml(self.world.sources(definition))
+        text_ = fake_nas_xml(self.world.sources(definition))
         return text_.replace("</devices>", AGENT + "</devices>") if agent else text_
 
     def listing(self, *, inactive: bool) -> str:
         w = self.world
-        return _blklist(w.sources(w.pers if inactive or w.vm == "shutoff" else w.live))
+        return fake_blklist(w.sources(w.pers if inactive or w.vm == "shutoff" else w.live))
 
     def __call__(self, args: Sequence[str]) -> tuple[int, str, str]:
         handlers: Mapping[str, Callable[[Sequence[str]], tuple[int, str, str]]] = {
@@ -690,7 +690,7 @@ def replay_run(world: World, run: Sequence[Step]) -> Ran:
         alerts.append((title, body))
 
     port = vm_app_nas.NasBackup(
-        commands=_NasCommands(virsh, signals),
+        commands=FakeNasCommands(virsh, signals),
         store=Store(rec),
         settings=Settings(),
         restic=Restic(rec, start.r),
@@ -698,7 +698,7 @@ def replay_run(world: World, run: Sequence[Step]) -> Ran:
         lock=lambda _vm: contextlib.nullcontext(),
         alert=alert,
         clock=Clock(start.r),
-        out=_NasOut(),
+        out=FakeNasOut(),
         root=True,
     )
     end, message = "ok", ""

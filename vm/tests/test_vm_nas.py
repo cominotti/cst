@@ -2261,8 +2261,8 @@ class SetupRoutingTest(unittest.TestCase):
         self.assertIn("backup [VM] --nas [--keep-tag NAME] [--no-quiesce]", r.stdout)
 
 
-class _NasCommands:
-    def __init__(self, handler: Callable[[Sequence[str]], tuple[int, str, str]], signals: _NasSignals) -> None:
+class FakeNasCommands:
+    def __init__(self, handler: Callable[[Sequence[str]], tuple[int, str, str]], signals: FakeNasSignals) -> None:
         self.handler = handler
         self.signals = signals
         self.in_detached = False
@@ -2293,7 +2293,7 @@ class _NasCommands:
         return None
 
 
-class _NasStore:
+class FakeNasStore:
     def __init__(self, disks: Sequence[str]) -> None:
         self.disk_paths = set(disks)
         self.overlays: set[str] = set()
@@ -2378,7 +2378,7 @@ class _NasStore:
         del entries
 
 
-class _NasSettings:
+class FakeNasSettings:
     def number(self, key: str) -> int:
         del key
         return 0
@@ -2399,7 +2399,7 @@ class _NasSettings:
         return "win"
 
 
-class _NasRestic:
+class FakeNasRestic:
     def __init__(self, backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None) -> None:
         self.backup_fn = backup_fn
 
@@ -2418,7 +2418,7 @@ class _NasRestic:
         return 0, {"snapshot_id": SNAP_ID, "total_bytes_processed": 1024, "data_added": 512}
 
 
-class _NasSignals:
+class FakeNasSignals:
     def __init__(self) -> None:
         self.ignored_active = False
 
@@ -2438,7 +2438,7 @@ class _NasSignals:
             self.ignored_active = was
 
 
-class _NasOut:
+class FakeNasOut:
     def __init__(self) -> None:
         self.lines: list[str] = []
 
@@ -2450,7 +2450,7 @@ class _NasOut:
         self.lines.append(text)
 
 
-class _NasClock:
+class FakeNasClock:
     def now(self) -> float:
         return float(NOW)
 
@@ -2461,26 +2461,26 @@ class _NasClock:
         del seconds
 
 
-def _nas_xml(disks: Sequence[tuple[str, str]]) -> str:
+def fake_nas_xml(disks: Sequence[tuple[str, str]]) -> str:
     nodes = "".join(f"<disk type='file' device='disk'><source file='{p}'/><target dev='{t}'/></disk>" for t, p in disks)
     return f"<domain type='kvm'><name>win</name><uuid>{UUID}</uuid><os/><devices>{nodes}</devices></domain>"
 
 
-def _blklist(disks: Sequence[tuple[str, str]]) -> str:
+def fake_blklist(disks: Sequence[tuple[str, str]]) -> str:
     rows = "\n".join(f" file   disk   {t}   {p}" for t, p in disks)
     return f" Type   Device   Target   Source\n{'-' * 40}\n{rows}\n"
 
 
 def _default_virsh(
-    args: Sequence[str], disks: Sequence[tuple[str, str]], live: dict[str, str], store: _NasStore
+    args: Sequence[str], disks: Sequence[tuple[str, str]], live: dict[str, str], store: FakeNasStore
 ) -> tuple[int, str, str]:
     cmd = args[0]
     if cmd == "dumpxml":
-        return 0, _nas_xml([(t, live[t]) for t, _ in disks]), ""
+        return 0, fake_nas_xml([(t, live[t]) for t, _ in disks]), ""
     if cmd == "domstate":
         return 0, "running", ""
     if cmd == "domblklist":
-        return 0, _blklist([(t, live[t]) for t, _ in disks]), ""
+        return 0, fake_blklist([(t, live[t]) for t, _ in disks]), ""
     if cmd == "snapshot-create-as":
         for i, a in enumerate(args):
             if a == "--diskspec" and "snapshot=external" in args[i + 1]:
@@ -2504,33 +2504,33 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         disks: Sequence[tuple[str, str]],
         *,
         on_virsh: Callable[
-            [Sequence[str], _NasCommands, _NasSignals, dict[str, str], _NasStore], tuple[int, str, str] | None
+            [Sequence[str], FakeNasCommands, FakeNasSignals, dict[str, str], FakeNasStore], tuple[int, str, str] | None
         ],
         backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None,
-        signals: _NasSignals | None = None,
+        signals: FakeNasSignals | None = None,
         clock: ClockPort | None = None,
-    ) -> tuple[vm_app_nas.NasBackup, _NasCommands, _NasStore, _NasSignals, list[tuple[str, str]]]:
+    ) -> tuple[vm_app_nas.NasBackup, FakeNasCommands, FakeNasStore, FakeNasSignals, list[tuple[str, str]]]:
         live: dict[str, str] = dict(disks)
-        store = _NasStore([p for _, p in disks])
-        signals = _NasSignals() if signals is None else signals
+        store = FakeNasStore([p for _, p in disks])
+        signals = FakeNasSignals() if signals is None else signals
         alerts: list[tuple[str, str]] = []
 
         def handle(args: Sequence[str]) -> tuple[int, str, str]:
             custom = on_virsh(args, commands, signals, live, store)
             return _default_virsh(args, disks, live, store) if custom is None else custom
 
-        commands = _NasCommands(handle, signals)
-        clock = _NasClock() if clock is None else clock
+        commands = FakeNasCommands(handle, signals)
+        clock = FakeNasClock() if clock is None else clock
         port = vm_app_nas.NasBackup(
             commands=commands,
             store=store,
-            settings=_NasSettings(),
-            restic=_NasRestic(backup_fn),
+            settings=FakeNasSettings(),
+            restic=FakeNasRestic(backup_fn),
             signals=signals,
             lock=lambda _vm: contextlib.nullcontext(),
             alert=lambda title, body: alerts.append((title, body)),
             clock=clock,
-            out=_NasOut(),
+            out=FakeNasOut(),
             root=True,
         )
         return port, commands, store, signals, alerts
@@ -2541,10 +2541,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             # Only fail the initial find_overlays lookup (the commit_back verification after blockcommit runs normally).
             if (
@@ -2582,10 +2582,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             live: dict[str, str],
-            store: _NasStore,
+            store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "snapshot-create-as":
                 store.overlays.add(overlay_a)
@@ -2614,10 +2614,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if cmds.in_detached and sigs.ignored_active and args[0] == "domstate":
                 raise OSError("libvirt vanished")
@@ -2646,10 +2646,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
 
         def hook(
             args: Sequence[str],
-            cmds: _NasCommands,
-            sigs: _NasSignals,
+            cmds: FakeNasCommands,
+            sigs: FakeNasSignals,
             _live: dict[str, str],
-            _store: _NasStore,
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if cmds.in_detached and sigs.ignored_active and args[0] == "domblklist":
                 raise RuntimeError("list failed")
@@ -2709,10 +2709,10 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         # End-to-end 2-disk partial switch: snapshot-create-as fails after switching vda only; vda merges cleanly.
         def partial_hook(
             args: Sequence[str],
-            _cmds: _NasCommands,
-            _sigs: _NasSignals,
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
             live: dict[str, str],
-            st: _NasStore,
+            st: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "snapshot-create-as":
                 st.overlays.update((overlay_a, overlay_b))
@@ -2740,7 +2740,7 @@ class _HeldStop(contextlib.AbstractContextManager[object]):
         raise vm_domain_backup.Stop("stopped by signal SIGTERM")
 
 
-class _StopAtHeldEnd(_NasSignals):
+class _StopAtHeldEnd(FakeNasSignals):
     """SignalsPort whose first held block ends with a stop that came during it."""
 
     def __init__(self) -> None:
@@ -2753,7 +2753,7 @@ class _StopAtHeldEnd(_NasSignals):
         return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
 
 
-class _MovingClock(_NasClock):
+class _MovingClock(FakeNasClock):
     """A clock whose sleep moves monotonic on, so a poll until a deadline ends."""
 
     def __init__(self) -> None:
@@ -2777,9 +2777,15 @@ class NasUnclearSnapshotTest(unittest.TestCase):
 
     def _timeout_hook(
         self, switched: Mapping[str, str], made: Sequence[str]
-    ) -> Callable[[Sequence[str], _NasCommands, _NasSignals, dict[str, str], _NasStore], tuple[int, str, str] | None]:
+    ) -> Callable[
+        [Sequence[str], FakeNasCommands, FakeNasSignals, dict[str, str], FakeNasStore], tuple[int, str, str] | None
+    ]:
         def hook(
-            args: Sequence[str], _cmds: _NasCommands, _sigs: _NasSignals, live: dict[str, str], store: _NasStore
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "snapshot-create-as":
                 store.overlays.update(made)
@@ -2819,7 +2825,7 @@ class NasUnclearSnapshotTest(unittest.TestCase):
         timeout = self._timeout_hook({"vda": overlay_a}, [overlay_a, overlay_b])
 
         def hook(
-            args: Sequence[str], cmds: _NasCommands, sigs: _NasSignals, live: dict[str, str], store: _NasStore
+            args: Sequence[str], cmds: FakeNasCommands, sigs: FakeNasSignals, live: dict[str, str], store: FakeNasStore
         ) -> tuple[int, str, str] | None:
             if args[0] == "blockcommit":
                 return 1, "", "error: block commit timed out"
