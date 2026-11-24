@@ -417,6 +417,14 @@ class InstallService:
         if record and dests:
             self._update(record, lambda rec: without_files(rec, list(dests)))
 
+    def forget_places(self, places: Sequence[Placement]) -> None:
+        """forget, in each record the places name, their destinations; the files stay. A record of a newer CST
+        stops the call before any record is rewritten (_read_records), as remove does."""
+        records = sorted({p.record for p in places if p.record})
+        self._read_records(set(records))
+        for record in records:
+            self.forget(record, [p.dest for p in places if p.record == record])
+
     def remove(self, places: Sequence[Placement]) -> Iterator[str]:
         """Remove each file (a link itself) and its line in the record, in the reverse of the order given
         (install writes in that order: what uses an earlier file goes before it); `removed:   PATH` for

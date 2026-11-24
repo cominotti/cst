@@ -29,7 +29,9 @@ Usage:
                                           the record in that home; as root, refused for a home
                                           not root's own, as for text, text-plan, forget-text)
   installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
-                                          are (a file a setup script keeps); prints nothing
+                                          are (a file a setup script keeps); prints nothing; a
+                                          record of a newer CST refuses before any record is
+                                          changed (exit 1)
   installer.py forget-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
@@ -297,8 +299,7 @@ def _remove_or_forget(service: InstallService, command: str, places: Sequence[Pl
     forget or forget-text: only the record lines dropped, the files left alone."""
     if command not in (InstallerCommand.FORGET, InstallerCommand.FORGET_TEXT):
         return _stream(service.remove(places))
-    for record in sorted({p.record for p in places if p.record}):
-        service.forget(record, [p.dest for p in places if p.record == record])
+    service.forget_places(places)
     return 0
 
 

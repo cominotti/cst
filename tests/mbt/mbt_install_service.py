@@ -170,12 +170,15 @@ class InstallMachine(RuleBasedStateMachine):
 
     @rule(entries=subsets)
     def forget(self, entries: list[InstallEntry]) -> None:
+        places: list[Placement] = [self.svc.placement(e, InstallRequest(home=HOME)) for e in entries]
+        before = self._state()
         try:
-            for record in sorted(self._records_of(entries)):
-                dests = [self._dest(e) for e in entries if record in self._records_of([e])]
-                self.svc.forget(record, dests)
+            self.svc.forget_places(places)
         except InstallRefused:
             assert self._refused(entries), "forget refused without a newer record"
+            assert self._state() == before, "a refused forget changed something"
+            return
+        assert self.target.files == before[0], "forget changed a file"
 
     @rule(e=st.sampled_from(ENTRIES), delete=st.booleans())
     def change_behind_csts_back(self, *, e: InstallEntry, delete: bool) -> None:
