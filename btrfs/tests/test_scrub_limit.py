@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Generator, Sequence
 import contextlib
-import dataclasses
 import errno
+import hashlib
 import io
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -38,13 +39,20 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
-from btrfs.tests.fakes import ScrubFakeRunner
-from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from btrfs.tests.fakes import RecordingInstallerRunner, ScrubFakeRunner, core_text
+from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runtime import lc_ctype_handover
-from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
+from cst_core.domain.record import (
+    ROOT_RECORD,
+    USER_RECORD_REL,
+    ComponentState,
+    InstallRecord,
+    RecordedFile,
+    render_record,
+)
 from cst_core.ports import CommandFault, CommandResult
-from tests.fault_injection import no_space
+from tests.fault_injection import Killed, no_space
 from tests.repo_files import REPO
 
 
@@ -64,47 +72,17 @@ def _folder_fsync_fails(*, times: int) -> Generator[None]:
         yield
 
 
-def _core_text(path: str, record: str) -> Placement:
-    """A generated text of btrfs:core at path, listed in record (as installer.py text --component writes it)."""
-    return Placement(
-        path=path,
-        dest=path,
-        record=record,
-        component="btrfs:core",
-        src=None,
-        kind=GeneratedKind.TEXT,
-        owner=Owner.ROOT,
-        mode=0o644,
-    )
+class _KilledAfterInstaller:
+    """A runner over inner that dies (Killed) right after the installer's text or remove-text call."""
 
+    def __init__(self, inner: ScrubFakeRunner) -> None:
+        self.inner = inner
 
-class _RecordingInstallerRunner(ScrubFakeRunner):
-    """installer.py text, remove-text and mark as the installer runs them as root: the files written and
-    removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
-
-    def __init__(self, record: str) -> None:
-        super().__init__()
-        self.record = record
-        self.svc = InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
-        self.marks = 0
-
-    @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
-        cmd = list(argv)
-        if "installer.py" not in " ".join(cmd) or any(part in " ".join(cmd) for part in self.fail_on):
-            return super().run(argv, input_text=input_text, **kw)
-        self.calls.append(cmd)
-        word = cmd[4]
-        if word == "mark":
-            self.marks += 1
-            self.svc.mark(self.record, cmd[cmd.index("--component") + 1])
-            return CommandResult(0, "", "", argv=tuple(cmd))
-        place = _core_text(cmd[5], self.record)
-        if word == "text":
-            os.makedirs(os.path.dirname(place.path), exist_ok=True)
-            written = self.svc.put(place, (input_text or "").encode(), as_root=False)
-            return CommandResult(0, f"{'written:  ' if written else 'unchanged:'} {place.path}\n", "", argv=tuple(cmd))
-        return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
+        r = self.inner.run(argv, input_text=input_text, **kw)
+        if "installer.py" in " ".join(argv):
+            raise Killed(f"killed after {list(argv)}")
+        return r
 
 
 class _FakeCtx:
@@ -222,8 +200,6 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             dropin_path=self.dropin,
             btrfs_sysfs=self.sysfs,
             installer_script=os.path.join(REPO, "cst_core", "installer.py"),
-            # never the real /var/lib/cst/installed.json: apply reads btrfs:core's state there
-            record_path=os.path.join(self.tmp, "installed.json"),
         )
 
     def test_plan_set_idempotent_status_and_off_cycle(self) -> None:
@@ -344,50 +320,57 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         assert rec is not None
         return rec.components.get("btrfs:core", "-")
 
-    def test_set_keeps_btrfs_core_done_in_the_install_record(self) -> None:
+    def _seeded(self, record: str, state: str) -> RecordingInstallerRunner:
+        """A recording runner whose record has btrfs:core as an install leaves it: one of its files recorded,
+        then done (or not yet)."""
+        runner = RecordingInstallerRunner(record)
+        runner.svc.put(core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+        if state == "done":
+            runner.svc.mark(record, "btrfs:core")
+        return runner
+
+    def _assert_keep_state_writes(self, runner: ScrubFakeRunner) -> None:
+        """Every installer text call of scrub-limit passes --keep-state (the recording runner fails on a mark)."""
+        texts = [c for c in runner.calls if "installer.py" in " ".join(c) and c[4] == "text"]
+        self.assertTrue(texts)
+        for c in texts:
+            self.assertIn("--keep-state", c)
+
+    def test_set_keeps_btrfs_core_s_state_in_the_install_record(self) -> None:
         for before in ("done", "pending"):
             with self.subTest(before=before):
                 record = os.path.join(self.tmp, f"installed-{before}.json")
-                paths = dataclasses.replace(self.paths, record_path=record)
-                runner = _RecordingInstallerRunner(record)
-                # btrfs:core as an install leaves it: one of its files recorded, then done (or not yet).
-                runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
-                if before == "done":
-                    runner.svc.mark(record, "btrfs:core")
-                rc, lines = scrub_limit_apply(paths, "500M", runner=runner)
+                runner = self._seeded(record, before)
+                rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
                 self.assertEqual(rc, 0, lines)
                 self.assertIn(f"written:   {self.dropin}", lines)
                 self.assertEqual(self._core_state(record), before)
-                self.assertEqual(runner.marks, 1 if before == "done" else 0)
 
-                rc_again, _ = scrub_limit_apply(paths, "500M", runner=runner)
+                rc_again, _ = scrub_limit_apply(self.paths, "500M", runner=runner)
                 self.assertEqual(rc_again, 0)
-                self.assertEqual(runner.marks, 1 if before == "done" else 0)
-                rc_off, off_lines = scrub_limit_apply(paths, None, runner=runner)
+                self.assertEqual(self._core_state(record), before)
+                rc_off, off_lines = scrub_limit_apply(self.paths, None, runner=runner)
                 self.assertEqual(rc_off, 0, off_lines)
                 self.assertIn(f"removed:   {self.dropin}", off_lines)
                 self.assertEqual(self._core_state(record), before)
+                self._assert_keep_state_writes(runner)
                 shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
 
     def test_a_rolled_back_change_keeps_btrfs_core_s_state(self) -> None:
-        # A failed daemon-reload puts the 500M drop-in back through the installer, a second write: a
-        # btrfs:core that was done before is marked done again; one that was pending stays pending.
+        # A failed daemon-reload puts the 500M drop-in back through the installer, a second write: both
+        # writes keep btrfs:core's state, done or pending.
         for before in ("done", "pending"):
             for target in ("1G", None):
                 with self.subTest(before=before, target=target):
                     shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
                     record = os.path.join(self.tmp, f"installed-{before}-{target}.json")
-                    paths = dataclasses.replace(self.paths, record_path=record)
-                    runner = _RecordingInstallerRunner(record)
-                    runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
-                    if before == "done":
-                        runner.svc.mark(record, "btrfs:core")
-                    rc_set, set_lines = scrub_limit_apply(paths, "500M", runner=runner)
+                    runner = self._seeded(record, before)
+                    rc_set, set_lines = scrub_limit_apply(self.paths, "500M", runner=runner)
                     self.assertEqual(rc_set, 0, set_lines)
                     self.assertEqual(self._core_state(record), before)
 
                     runner.fail_on = {"systemctl daemon-reload"}
-                    rc, lines = scrub_limit_apply(paths, target, runner=runner)
+                    rc, lines = scrub_limit_apply(self.paths, target, runner=runner)
                     self.assertEqual(rc, 1)
                     self.assertEqual(
                         lines[-1],
@@ -396,32 +379,76 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     )
                     self.assertEqual(self._read(self.dropin), render_scrub_dropin("500M"))
                     self.assertEqual(self._core_state(record), before)
+                    self._assert_keep_state_writes(runner)
 
-    def test_a_rollback_that_cannot_mark_btrfs_core_done_says_so(self) -> None:
+    def test_a_run_killed_after_its_installer_then_run_again_keeps_btrfs_core_s_state(self) -> None:
+        # Run 1 dies right after the installer wrote the drop-in (before its daemon-reload); the command
+        # again finds both files as asked, reloads systemd and exits 0. Before, btrfs:core stayed pending.
+        for before in ("done", "pending"):
+            for target in ("500M", None):
+                with self.subTest(before=before, target=target):
+                    shutil.rmtree(os.path.join(self.tmp, "etc"), ignore_errors=True)
+                    record = os.path.join(self.tmp, f"installed-killed-{before}-{target}.json")
+                    runner = self._seeded(record, before)
+                    if target is None:  # off: from a 500M set that finished
+                        self.assertEqual(scrub_limit_apply(self.paths, "500M", runner=runner)[0], 0)
+                    killing = _KilledAfterInstaller(runner)
+                    with self.assertRaises(Killed):
+                        scrub_limit_apply(self.paths, target, runner=killing)
+                    runner.need_daemon_reload = "yes"
+                    rc, lines = scrub_limit_apply(self.paths, target, runner=runner)
+                    self.assertEqual(rc, 0, lines)
+                    self.assertIn(["systemctl", "daemon-reload"], runner.calls)
+                    self.assertEqual(self._core_state(record), before)
+
+    def test_a_drop_in_whose_record_line_was_lost_keeps_btrfs_core_done(self) -> None:
+        # An earlier installer call wrote the drop-in and died before its record update: the line has the
+        # old sha256, btrfs:core is done, both files are as asked. Before, the run left btrfs:core pending.
         record = os.path.join(self.tmp, "installed.json")
-        paths = dataclasses.replace(self.paths, record_path=record)
-        runner = _RecordingInstallerRunner(record)
-        runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
+        runner = self._seeded(record, "done")
+        runner.svc.put(core_text(self.dropin, record), render_scrub_dropin("1G").encode(), as_root=False)
         runner.svc.mark(record, "btrfs:core")
-        runner.fail_on = {"systemctl daemon-reload", "installer.py mark"}
-        rc, lines = scrub_limit_apply(paths, "500M", runner=runner)
-        self.assertEqual(rc, 1)
+        with open(self.dropin, "w", encoding="utf-8") as fh:
+            fh.write(render_scrub_dropin("500M"))
+        os.makedirs(os.path.dirname(self.conf), exist_ok=True)
+        with open(self.conf, "w", encoding="utf-8") as fh:
+            fh.write("SCRUB_LIMIT='500M'\n")
+        runner.need_daemon_reload = "no"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual((rc, lines), (0, [f"unchanged: {self.conf}", f"unchanged: {self.dropin}"]))
+        rec = JsonInstallRecord().read(record)
+        assert rec is not None
         self.assertEqual(
-            lines[-1],
-            "ERROR: systemctl daemon-reload failed: Access denied;"
-            " ROLLBACK INCOMPLETE (btrfs:core not marked done again: Access denied)",
+            rec.files[self.dropin].sha256, hashlib.sha256(render_scrub_dropin("500M").encode()).hexdigest()
         )
-        self.assertIsNone(self._read(self.dropin))
+        self.assertEqual(self._core_state(record), "done")
 
-    def test_a_failed_mark_is_an_error(self) -> None:
-        record = os.path.join(self.tmp, "installed.json")
-        runner = _RecordingInstallerRunner(record)
-        runner.svc.put(_core_text(os.path.join(self.tmp, "core.conf"), record), b"x\n", as_root=False)
-        runner.svc.mark(record, "btrfs:core")
-        runner.fail_on = {"installer.py mark"}
-        rc, lines = scrub_limit_apply(dataclasses.replace(self.paths, record_path=record), "500M", runner=runner)
-        self.assertEqual(rc, 1)
-        self.assertEqual(lines[-1], "ERROR: the installer could not mark btrfs:core done: Access denied")
+    def test_the_real_installer_takes_the_drop_in_write_and_keeps_btrfs_core_done(self) -> None:
+        # The argv scrub-limit builds, through cst_core/installer.py's own parser (--root STAGE). The
+        # installer writes under its stage, so scrub-limit's own reads of the drop-in find none: what is
+        # checked is the installer's answer and its record (the user's under the stage, run as a user;
+        # root's when the tests run as root).
+        stage = os.path.join(self.tmp, "stage")
+        if os.geteuid() == 0:
+            record = stage + ROOT_RECORD
+        else:
+            record = stage + pwd.getpwuid(os.getuid()).pw_dir.rstrip("/") + "/" + USER_RECORD_REL
+        os.makedirs(os.path.dirname(record))
+        seed = RecordedFile(None, "btrfs:core", GeneratedKind.TEXT, "0" * 64, 0o644, Owner.USER)
+        with open(record, "w", encoding="utf-8") as fh:
+            fh.write(render_record(InstallRecord({"/etc/e2e-core-seed": seed}, {"btrfs:core": ComponentState.DONE})))
+        runner = ScrubFakeRunner(installer_root=stage)
+        with self.assertRaises(Killed):
+            scrub_limit_apply(self.paths, "500M", runner=_KilledAfterInstaller(runner))
+        self.assertEqual(self._core_state(record), "done")
+        runner.need_daemon_reload = "yes"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 0, lines)
+        self.assertIn(f"unchanged: {stage}{self.dropin}", lines)
+        rec = JsonInstallRecord().read(record)
+        assert rec is not None
+        self.assertEqual(rec.files[self.dropin].component, "btrfs:core")
+        self.assertEqual(self._core_state(record), "done")
 
     def test_a_full_disk_at_a_new_snapshots_conf_is_an_error_line_with_nothing_written(self) -> None:
         for broken in ("write_atomic", "ensure_dir"):

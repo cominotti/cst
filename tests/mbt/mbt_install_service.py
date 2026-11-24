@@ -3,8 +3,8 @@
 
 It drives the real service over the unit tests' in-memory target and
 record (tests/test_install.py MemoryTarget, tests/test_install_record.py
-MemoryRecord) through any sequence of plan, install, put, mark, remove and
-forget, with failed writes, files edited or deleted behind CST's back, a
+MemoryRecord) through any sequence of plan, install, put (with or without
+keep_state), mark, remove and forget, with failed writes, files edited or deleted behind CST's back, a
 checkout whose payloads change, and a record written by a newer CST. After
 every step it checks the record against the disk; each step checks what
 the call itself promises (plan changes nothing and predicts install; a
@@ -81,6 +81,11 @@ class InstallMachine(RuleBasedStateMachine):
     def _records_of(self, entries: Sequence[InstallEntry]) -> set[str]:
         return {USER_RECORD if e.owner == Owner.USER else ROOT_RECORD for e in entries}
 
+    def _component_state(self, record: str, component: str) -> ComponentState | None:
+        """The component's state in record (None: no record, or no state for it)."""
+        text = self.record.texts.get(record)
+        return None if text is None else parse_record(text).components.get(component)
+
     def _refused(self, entries: Sequence[InstallEntry]) -> bool:
         """A call that reads the root record refuses while a newer CST wrote it."""
         return self.newer and ROOT_RECORD in self._records_of(entries)
@@ -120,18 +125,24 @@ class InstallMachine(RuleBasedStateMachine):
         again, n = self.svc.plan(entries, req)
         assert n == 0 and all(line.startswith("unchanged:") for line in again), f"not converged: {again}"
 
-    @rule(e=st.sampled_from(ENTRIES))
-    def put(self, e: InstallEntry) -> None:
+    @rule(e=st.sampled_from(ENTRIES), keep_state=st.booleans())
+    def put(self, *, e: InstallEntry, keep_state: bool) -> None:
         req = self._req([e])
         place = self.svc.placement(e, req, req.values)
         before = self._state()
+        old = None if self._refused([e]) else self._component_state(place.record, e.component)
         try:
-            self.svc.put(place, self.svc.desired(e, req.values), as_root=False)
+            written = self.svc.put(place, self.svc.desired(e, req.values), as_root=False, keep_state=keep_state)
         except InstallRefused:
             assert self._refused([e]), "put refused without a newer record"
             assert self._state() == before, "a refused put changed something"
             return
         self.tainted.discard(place.dest)
+        new = self._component_state(place.record, e.component)
+        if keep_state and old is not None:
+            assert new == old, f"put with keep_state changed {e.component}: {old} -> {new}"
+        elif written or old is None:
+            assert new == ComponentState.PENDING, f"put wrote {place.dest} and left {e.component} {new}"
 
     @rule(component=st.sampled_from(COMPONENTS), user=st.booleans())
     def mark(self, *, component: str, user: bool) -> None:

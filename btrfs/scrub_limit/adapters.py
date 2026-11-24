@@ -23,7 +23,6 @@ from btrfs.scrub_limit.domain import (
 )
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
 from cst_core.adapters.files import ensure_dir, read_text, write_atomic
-from cst_core.adapters.install import JsonInstallRecord
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
 from cst_core.adapters.runtime import (
     host_view_path,
@@ -32,7 +31,6 @@ from cst_core.adapters.runtime import (
     undo_python_start,
 )
 from cst_core.domain.install import Component, InstallReportWord
-from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.domain.text import YES_WORDS
 from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, UnitName
@@ -53,7 +51,6 @@ class ScrubPaths:
     dropin_path: str = SCRUB_DROPIN_PATH
     btrfs_sysfs: str = _BTRFS_SYSFS
     installer_script: str = ""
-    record_path: str = ROOT_RECORD  # where the installer records btrfs:core (and the drop-in)
 
 
 def start_scrub_process() -> None:
@@ -196,13 +193,15 @@ def _restore_conf(paths: ScrubPaths, old_text: str | None, *, made_dir: bool) ->
 
 
 def _write_dropin(runner: CommandRunnerPort, paths: ScrubPaths, text: str | None) -> tuple[int, list[str], str]:
-    """The drop-in through the installer: written with text, or removed (None)."""
+    """The drop-in through the installer: written with text, or removed (None). Its record line is written
+    or dropped and btrfs:core keeps the state it has in the install record (text --keep-state): this command
+    is not btrfs:core's setup command, so no end of its run (killed, failed, rolled back) changes that state."""
     if text is None:
         return run_installer(runner, paths.installer_script, ["remove-text", paths.dropin_path])
     return run_installer(
         runner,
         paths.installer_script,
-        ["text", paths.dropin_path, "0644", "--component", Component.BTRFS_CORE.value],
+        ["text", paths.dropin_path, "0644", "--component", Component.BTRFS_CORE.value, "--keep-state"],
         input_text=text,
     )
 
@@ -222,23 +221,6 @@ def _rolled_back(cause: str, failures: list[str | None], *, reload_hint: bool) -
         return f"ERROR: {cause}; ROLLBACK INCOMPLETE ({'; '.join(left)})"
     hint = " (run systemctl daemon-reload once it works)" if reload_hint else ""
     return f"ERROR: {cause}; previous configuration restored.{hint}"
-
-
-def _core_done(record_path: str) -> bool:
-    """Whether the install record has btrfs:core done (no record, or one that cannot be read: no)."""
-    try:
-        rec = JsonInstallRecord().read(record_path)
-    except RecordFormatError, OSError:
-        return False
-    return rec is not None and rec.components.get(Component.BTRFS_CORE.value) == ComponentState.DONE
-
-
-def _mark_core_done(runner: CommandRunnerPort, paths: ScrubPaths) -> tuple[int, str]:
-    """btrfs:core done again in the install record: (the installer's exit status, what failed or "")."""
-    rc, _lines, err = run_installer(
-        runner, paths.installer_script, ["mark", "--component", Component.BTRFS_CORE.value, "done"]
-    )
-    return rc, (err or f"exit {rc}") if rc != 0 else ""
 
 
 def _read_conf_and_dropin(paths: ScrubPaths) -> tuple[str | None, str | None, str | None]:
@@ -288,24 +270,17 @@ def _apply_conf(
 
 def _reload_or_roll_back(
     cmd_runner: CommandRunnerPort,
-    paths: ScrubPaths,
     restore_files: Callable[[], list[str | None]],
     *,
-    core_done: bool,
     timeout: float | None,
 ) -> str | None:
     """systemctl daemon-reload (at most timeout seconds; None: no limit); when it fails, snapshots.conf and
-    the drop-in go back (restore_files: what failed of each, the drop-in last; and btrfs:core is marked
-    done again) and the ERROR line comes back."""
+    the drop-in go back (restore_files: what failed of each, the drop-in last) and the ERROR line comes
+    back."""
     dr = SystemctlAdapter(cmd_runner, timeout=timeout, on_host=SystemctlHost.LOCAL).daemon_reload_result()
     if dr.returncode == 0:
         return None
-    failures = restore_files()
-    if core_done and failures[-1] is None:
-        # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
-        rc_m, err_m = _mark_core_done(cmd_runner, paths)
-        failures.append(f"btrfs:core not marked done again: {err_m}" if rc_m != 0 else None)
-    return _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)
+    return _rolled_back(dr.failure("systemctl daemon-reload"), restore_files(), reload_hint=True)
 
 
 def _reload_what_is_on_disk(cmd_runner: CommandRunnerPort, *, behind: bool | None) -> str | None:
@@ -352,18 +327,6 @@ def _load_in_systemd(
     return error, [f"reloaded:  {why}"]
 
 
-def _mark_core_after_write(
-    cmd_runner: CommandRunnerPort, paths: ScrubPaths, inst_lines: Sequence[str], *, core_done: bool
-) -> tuple[int, str | None]:
-    """btrfs:core done again after the installer wrote the drop-in: (exit status, the ERROR line or None)."""
-    if not (core_done and any(line.startswith(InstallReportWord.WRITTEN) for line in inst_lines)):
-        return 0, None
-    rc_m, err_m = _mark_core_done(cmd_runner, paths)
-    if rc_m != 0:
-        return rc_m, f"ERROR: the installer could not mark btrfs:core done: {err_m}"
-    return 0, None
-
-
 def scrub_limit_apply(
     paths: ScrubPaths,
     target_limit: str | None,
@@ -377,8 +340,6 @@ def scrub_limit_apply(
     conf_text, dropin_before, read_error = _read_conf_and_dropin(paths)
     if read_error is not None:
         return 1, [read_error]
-    # Writing the drop-in sets btrfs:core pending; a component install had finished stays done.
-    core_done = _core_done(paths.record_path)
     conf_changed, made_dir, conf_line, write_error = _apply_conf(paths, conf_text, target_limit)
     if write_error is not None:  # snapshots.conf as it was (or ROLLBACK INCOMPLETE), the drop-in not touched
         return 1, [write_error]
@@ -402,13 +363,10 @@ def scrub_limit_apply(
         return [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
 
     def reload_or_roll_back(timeout: float | None) -> str | None:
-        return _reload_or_roll_back(cmd_runner, paths, restore_files, core_done=core_done, timeout=timeout)
+        return _reload_or_roll_back(cmd_runner, restore_files, timeout=timeout)
 
     error, note = _load_in_systemd(cmd_runner, inst_lines, reload_or_roll_back, conf_changed=conf_changed)
     if error is not None:
         return 1, [*out, error]
     out.extend(note)
-    rc_m, mark_error = _mark_core_after_write(cmd_runner, paths, inst_lines, core_done=core_done)
-    if mark_error is not None:
-        return rc_m, [*out, mark_error]
     return 0, out
