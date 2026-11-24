@@ -5,7 +5,7 @@ scrub_limit_apply writes snapshots.conf itself (cst_core's ensure_dir and write_
 and os.rmdir in its rollback) and the drop-in through the installer, then reloads systemd; both of
 those are commands. Each of these mutating calls goes through a FaultPlan: the module's own file
 calls by patching its names, the commands through FaultyRunner (systemctl show only reads).
-SystemdModel, the runner under it, keeps what systemd has loaded: the drop-in's text at the last
+SystemdModel (btrfs/tests/fakes.py), the runner under it, keeps what systemd has loaded: the drop-in's text at the last
 daemon-reload that worked, and whether a write or a removal of the drop-in came since (systemd's
 NeedDaemonReload, which follows the files' times and the list of drop-ins, not their text).
 os.fsync is stubbed.
@@ -52,10 +52,9 @@ from unittest import mock
 from btrfs.scrub_limit import adapters as scrub_adapters
 from btrfs.scrub_limit.adapters import ScrubPaths, scrub_limit_apply
 from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_scrub_limit
-from btrfs.tests.fakes import RecordingInstallerRunner, core_text
+from btrfs.tests.fakes import SystemdModel, core_text
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.record import ComponentState
-from cst_core.ports import CommandResult
 from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyRunner, Killed, cut_points, every_fault, stub_fsync
 from tests.repo_files import REPO
 
@@ -109,28 +108,6 @@ def write(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
-
-
-class SystemdModel(RecordingInstallerRunner):
-    """The installer (its writes and their record through the real InstallService) and systemctl, and
-    what systemd has loaded of the drop-in."""
-
-    def __init__(self, dropin: str, start: Start, record: str) -> None:
-        super().__init__(record)
-        self.dropin = dropin
-        self.loaded = start.loaded
-        self.dirty = start.behind  # a write or a removal of the drop-in since the last reload that worked
-
-    @override
-    def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
-        cmd = list(argv)
-        self.need_daemon_reload = "yes\n" if self.dirty else "no\n"
-        r = super().run(argv, input_text=input_text, **kw)
-        if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
-            self.dirty = True
-        if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
-            self.loaded, self.dirty = read(self.dropin), False
-        return r
 
 
 def reads(argv: Sequence[str]) -> bool:
@@ -212,7 +189,7 @@ class ScrubFaultBase(unittest.TestCase):
             write(self.dropin, s.dropin)
         with contextlib.suppress(FileNotFoundError):
             os.remove(self.record)
-        model = SystemdModel(self.dropin, s, self.record)
+        model = SystemdModel(self.dropin, self.record, loaded=s.loaded, behind=s.behind)
         if s.core is not None:
             # btrfs:core as an install leaves it: a seed text and the drop-in recorded, then done (or not).
             model.svc.put(core_text(os.path.join(self.tmp, "core-seed"), self.record), b"seed\n", as_root=False)
