@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: MPL-2.0
 """tests/run_unit.py: what it loads (all, --gates, names), and its run-time gates."""
 
+from collections.abc import Mapping
 import contextlib
+import hashlib
 import io
+import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
 import tempfile
 import types
-from typing import override
+from typing import Final, override
 import unittest
 from unittest import mock
 
@@ -35,6 +39,11 @@ from tests.run_unit import (
     plan_work_units,
     skip_problems,
 )
+
+
+def _child_env(tmp: str, **more: str) -> dict[str, str]:
+    """The environment of a runner a test starts: its durations file in tmp, never the user's own."""
+    return {**os.environ, "XDG_CACHE_HOME": os.path.join(tmp, "cache"), **more}
 
 
 def ids(suite: unittest.TestSuite) -> set[str]:
@@ -126,7 +135,7 @@ class HostCommandGuardTest(unittest.TestCase):
                 "        subprocess.run(['systemctl', 'start', 'x.service'], capture_output=True,"
                 " stdin=subprocess.DEVNULL, check=False)\n"
             )
-        env = {**os.environ, "PYTHONPATH": tmp}
+        env = _child_env(tmp, PYTHONPATH=tmp)
         done = subprocess.run(
             [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_guard"],
             capture_output=True,
@@ -354,7 +363,7 @@ class SignalGateTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
-            env={**os.environ, "PYTHONPATH": tmp},
+            env=_child_env(tmp, PYTHONPATH=tmp),
         )
 
     def errors(self, done: subprocess.CompletedProcess[str]) -> list[str]:
@@ -451,7 +460,7 @@ class ResourceWarningGateTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
-            env={**os.environ, "PYTHONPATH": tmp},
+            env=_child_env(tmp, PYTHONPATH=tmp),
         )
 
     def test_a_leaked_file_fails_the_run_and_names_the_test(self) -> None:
@@ -580,7 +589,7 @@ class ResourceWarningGateTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
-            env={**os.environ, "PYTHONPATH": tmp},
+            env=_child_env(tmp, PYTHONPATH=tmp),
         )
         self.assertEqual(done.returncode, 1, done.stderr)
         error = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
@@ -692,6 +701,7 @@ class BytecodeGateTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
+            env=_child_env(tmp),
         )
         return done, tmp
 
@@ -1035,8 +1045,9 @@ class TestJobsEnvTest(unittest.TestCase):
 
     def test_a_run_with_no_jobs_flag_uses_the_variable(self) -> None:
         units = [(f"dummy.mod{i}",) for i in range(5)]
+        cache = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-durations-"))
         with (
-            mock.patch.dict(os.environ, {"CST_TEST_JOBS": "3"}),
+            mock.patch.dict(os.environ, {"CST_TEST_JOBS": "3", "XDG_CACHE_HOME": cache}),
             mock.patch.object(run_unit_module, "_load_options", return_value=unittest.TestSuite()),
             mock.patch.object(run_unit_module, "plan_work_units", return_value=(units, False)),
             mock.patch.object(run_unit_module, "_run_parallel", return_value=0) as parallel,
@@ -1136,7 +1147,7 @@ class ParallelRunnerTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
-            env={**os.environ, "PYTHONPATH": tmp},
+            env=_child_env(tmp, PYTHONPATH=tmp),
         )
 
     def test_parallel_enforces_runtime_gates_and_aggregates_passes(self) -> None:
@@ -1265,12 +1276,313 @@ class ParallelRunnerTest(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             check=False,
             timeout=120,
+            env=_child_env(tmp),
         )
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertRegex(
             done.stderr, r"error: a test wrote bytecode into the checkout: __pycache__/sibling\.cpython-\d+\.pyc"
         )
         self.assertIn(BYTECODE_HINT, done.stderr)
+
+
+def _checkout_key(path: str) -> str:
+    """The key tests/uv-dev gives a checkout: the first 12 hex digits of the sha1 of its physical path."""
+    return hashlib.sha1(os.fsencode(os.path.realpath(path)), usedforsecurity=False).hexdigest()[:12]
+
+
+def _durations_file(cache: str, repo: str) -> str:
+    return os.path.join(cache, "cst-unit-durations", f"{_checkout_key(repo)}.json")
+
+
+def _write_durations(path: str, seconds: Mapping[str, object], version: object = 1) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"version": version, "seconds": seconds}, f)
+
+
+# Today's order (plan_work_units: most tests first, then the first name).
+_TODAYS: list[tuple[str, ...]] = [
+    ("m.A.a", "m.A.b", "m.A.c"),
+    ("m.B.a", "m.B.b"),
+    ("m.C.a",),
+]
+
+_PROBE_A = """
+import unittest
+class A(unittest.TestCase):
+    def test_one(self):
+        pass
+    def test_two(self):
+        pass
+"""
+_PROBE_B = """
+import unittest
+class B(unittest.TestCase):
+    def test_three(self):
+        pass
+"""
+_PROBE_IDS: Final = {"test_probe_a.A.test_one", "test_probe_a.A.test_two", "test_probe_b.B.test_three"}
+
+
+class LongestFirstTest(unittest.TestCase):
+    """A parallel run queues its work units longest first by the last whole-suite run's times.
+
+    The runner's new names are reached through the module object, not imported at the top: on a
+    runner without them only these tests fail, and the wiring and end-to-end tests fail by assertion.
+    """
+
+    def tmp(self) -> str:
+        return self.enterContext(tempfile.TemporaryDirectory(prefix="cst-durations-"))
+
+    def test_units_run_longest_first_by_their_recorded_times(self) -> None:
+        durations = {"m.A.a": 0.1, "m.A.b": 0.1, "m.A.c": 0.1, "m.B.a": 1.0, "m.B.b": 1.0, "m.C.a": 5.0}
+        self.assertEqual(
+            run_unit_module.order_units(_TODAYS, durations),
+            [("m.C.a",), ("m.B.a", "m.B.b"), ("m.A.a", "m.A.b", "m.A.c")],
+        )
+
+    def test_without_a_file_the_order_is_todays(self) -> None:
+        missing = os.path.join(self.tmp(), "none.json")
+        self.assertEqual(run_unit_module.read_durations(missing), {})
+        self.assertEqual(run_unit_module.read_durations(None), {})
+        self.assertEqual(run_unit_module.order_units(_TODAYS, {}), _TODAYS)
+
+    def test_a_damaged_file_keeps_todays_order(self) -> None:
+        tmp = self.tmp()
+        cases: dict[str, bytes] = {
+            "not UTF-8": b'{"version": 1, "seconds": {"m.C.a": 1}}\xff',
+            "not JSON": b"{not json",
+            "a list": b"[]",
+            "no seconds": b'{"version": 1}',
+            "seconds a list": b'{"version": 1, "seconds": []}',
+            "no version": b'{"seconds": {"m.C.a": 1}}',
+            "version 0": b'{"version": 0, "seconds": {"m.C.a": 1}}',
+            "version 2": b'{"version": 2, "seconds": {"m.C.a": 1}}',
+            "version true": b'{"version": true, "seconds": {"m.C.a": 1}}',
+            "version a string": b'{"version": "1", "seconds": {"m.C.a": 1}}',
+            "a bool": b'{"version": 1, "seconds": {"m.C.a": true}}',
+            "a string": b'{"version": 1, "seconds": {"m.C.a": "9"}}',
+            "negative": b'{"version": 1, "seconds": {"m.C.a": 9, "m.A.a": -1}}',
+            "NaN": b'{"version": 1, "seconds": {"m.C.a": NaN}}',
+            "Infinity": b'{"version": 1, "seconds": {"m.C.a": Infinity}}',
+            "too large": b'{"version": 1, "seconds": {"m.C.a": 1e999}}',
+            "too deep": b"[" * 100_000 + b"]" * 100_000,
+        }
+        for label, body in cases.items():
+            with self.subTest(label=label):
+                path = os.path.join(tmp, f"{len(label)}-{label.replace(' ', '-')}.json")
+                with open(path, "wb") as f:
+                    f.write(body)
+                durations = run_unit_module.read_durations(path)
+                self.assertEqual(durations, {})
+                self.assertEqual(run_unit_module.order_units(_TODAYS, durations), _TODAYS)
+        with self.subTest(label="a folder at the path"):
+            folder = os.path.join(tmp, "a-folder.json")
+            os.mkdir(folder)
+            self.assertEqual(run_unit_module.read_durations(folder), {})
+
+    def test_a_good_file_reads_back(self) -> None:
+        path = os.path.join(self.tmp(), "good.json")
+        _write_durations(path, {"m.C.a": 2, "m.A.a": 0.25, "m.B.a": 0})
+        self.assertEqual(run_unit_module.read_durations(path), {"m.C.a": 2.0, "m.A.a": 0.25, "m.B.a": 0.0})
+
+    def test_a_test_with_no_record_counts_as_the_mean_of_the_recorded_ones(self) -> None:
+        units = [("a.T.one", "a.T.two"), ("b.T.one",), ("c.T.new",)]
+        # Mean 2.0: the new test goes between b (5.0) and a (1.0); as 0 it would be last, as a
+        # count of tests (today) it would be after a.
+        durations = {"a.T.one": 0.5, "a.T.two": 0.5, "b.T.one": 5.0}
+        self.assertEqual(
+            run_unit_module.order_units(units, durations),
+            [("b.T.one",), ("c.T.new",), ("a.T.one", "a.T.two")],
+        )
+
+    def test_when_no_test_of_the_run_has_a_record_the_order_is_todays(self) -> None:
+        # The mbt modules are never part of a whole-suite run: their ids are never recorded.
+        for durations in ({"x.T.other": 9.0}, {"x.T.other": 0.0}, {"x.T.a": 0.3, "x.T.b": 7.1}):
+            with self.subTest(durations=durations):
+                self.assertEqual(run_unit_module.order_units(_TODAYS, durations), _TODAYS)
+
+    def test_ties_keep_todays_order(self) -> None:
+        units = [("c.T.one",), ("b.T.one", "b.T.two"), ("a.T.one", "a.T.two")]
+        durations = {"a.T.one": 1.0, "a.T.two": 1.0, "b.T.one": 1.0, "b.T.two": 1.0, "c.T.one": 2.0}
+        self.assertEqual(
+            run_unit_module.order_units(units, durations),
+            [("a.T.one", "a.T.two"), ("b.T.one", "b.T.two"), ("c.T.one",)],
+        )
+
+    def test_the_file_is_outside_the_checkout_one_per_checkout(self) -> None:
+        tmp = self.tmp()
+        repo = os.path.join(tmp, "repo")
+        other = os.path.join(tmp, "other")
+        os.mkdir(repo)
+        os.mkdir(other)
+        link = os.path.join(tmp, "link")
+        os.symlink(repo, link)
+        name = f"{_checkout_key(repo)}.json"
+        user_home = pwd.getpwuid(os.getuid()).pw_dir
+        cases: list[tuple[dict[str, str], str]] = [
+            ({"XDG_CACHE_HOME": "/x/cache", "HOME": "/home/u"}, "/x/cache"),
+            ({"XDG_CACHE_HOME": "x/cache", "HOME": "/home/u"}, "/home/u/.cache"),
+            ({"XDG_CACHE_HOME": "", "HOME": "/home/u"}, "/home/u/.cache"),
+            ({"HOME": "/home/u"}, "/home/u/.cache"),
+            ({"HOME": ""}, os.path.join(user_home, ".cache")),
+            ({"HOME": "u"}, os.path.join(user_home, ".cache")),
+            ({}, os.path.join(user_home, ".cache")),
+        ]
+        for environ, base in cases:
+            with self.subTest(environ=environ):
+                self.assertEqual(
+                    run_unit_module.durations_path(repo, environ), os.path.join(base, "cst-unit-durations", name)
+                )
+        environ = {"HOME": "/home/u"}
+        self.assertRegex(name, r"^[0-9a-f]{12}\.json$")
+        self.assertEqual(run_unit_module.durations_path(link, environ), run_unit_module.durations_path(repo, environ))
+        self.assertNotEqual(
+            run_unit_module.durations_path(other, environ), run_unit_module.durations_path(repo, environ)
+        )
+
+    def test_ci_neither_reads_nor_writes(self) -> None:
+        for environ in ({"CI": "true"}, {"GITHUB_ACTIONS": "true"}, {"CI": "1", "XDG_CACHE_HOME": "/x"}):
+            with self.subTest(environ=environ):
+                self.assertIsNone(run_unit_module.durations_path(REPO, {"HOME": "/home/u", **environ}))
+        self.assertIsNotNone(run_unit_module.durations_path(REPO, {"HOME": "/home/u", "CI": ""}))
+
+    def test_saving_keeps_unmeasured_tests_and_drops_removed_ones(self) -> None:
+        folder = os.path.join(self.tmp(), "cst-unit-durations")
+        path = os.path.join(folder, "key.json")
+        _write_durations(path, {"m.B.a": 3.0, "gone.T.test": 1.0, "m.A.a": 9.0})
+        units = [("m.A.a", "m.A.b", "m.A.c", "m.A.d"), ("m.B.a",), ("m.N.a",)]
+        old = run_unit_module.read_durations(path)
+        run_unit_module.save_durations(path, units, {units[0]: 2.0}, old)
+        self.assertEqual(
+            run_unit_module.read_durations(path),
+            {"m.A.a": 0.5, "m.A.b": 0.5, "m.A.c": 0.5, "m.A.d": 0.5, "m.B.a": 3.0},
+        )
+        self.assertEqual(os.listdir(folder), ["key.json"])
+
+    def test_saving_makes_a_private_folder(self) -> None:
+        folder = os.path.join(self.tmp(), "cache", "cst-unit-durations")
+        path = os.path.join(folder, "key.json")
+        run_unit_module.save_durations(path, [("m.A.a",)], {("m.A.a",): 1.5}, {})
+        self.assertEqual(run_unit_module.read_durations(path), {"m.A.a": 1.5})
+        self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+
+    def test_a_write_that_fails_is_silent(self) -> None:
+        tmp = self.tmp()
+        not_a_folder = os.path.join(tmp, "file")
+        with open(not_a_folder, "w", encoding="utf-8") as f:
+            f.write("x")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            run_unit_module.save_durations(
+                os.path.join(not_a_folder, "cst-unit-durations", "key.json"), [("m.A.a",)], {("m.A.a",): 1.0}, {}
+            )
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+        self.assertEqual(os.listdir(tmp), ["file"])
+
+    def _run_with_durations(self, opts: RunOptions) -> tuple[mock.MagicMock | mock.AsyncMock, str]:
+        """_run on today's units with a durations file that puts the 1-test unit first; _run_parallel mocked."""
+        cache = self.tmp()
+        _write_durations(
+            _durations_file(cache, REPO),
+            {"m.A.a": 0.1, "m.A.b": 0.1, "m.A.c": 0.1, "m.B.a": 1.0, "m.B.b": 1.0, "m.C.a": 5.0},
+        )
+        with (
+            mock.patch.dict(os.environ, {"CST_TEST_JOBS": "3", "XDG_CACHE_HOME": cache}),
+            mock.patch.object(run_unit_module, "_load_options", return_value=unittest.TestSuite()),
+            mock.patch.object(run_unit_module, "plan_work_units", return_value=(list(_TODAYS), False)),
+            mock.patch.object(run_unit_module, "_run_parallel", return_value=0) as parallel,
+            mock.patch("sys.gettrace", return_value=None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
+            mock.patch.dict(sys.modules, {"coverage": None}),
+        ):
+            for name in ("CI", "GITHUB_ACTIONS"):
+                os.environ.pop(name, None)
+            self.assertEqual(run_unit_module._run(REPO, opts), 0)
+        parallel.assert_called_once()
+        return parallel, cache
+
+    def test_run_hands_the_workers_the_units_longest_first(self) -> None:
+        parallel, cache = self._run_with_durations(RunOptions())
+        self.assertEqual(parallel.call_args.args[2], [("m.C.a",), ("m.B.a", "m.B.b"), ("m.A.a", "m.A.b", "m.A.c")])
+        self.assertEqual(parallel.call_args.args[3], 3)
+        self.assertEqual(parallel.call_args.kwargs.get("record"), _durations_file(cache, REPO))
+
+    def test_a_named_run_is_ordered_but_records_nothing(self) -> None:
+        for opts in (RunOptions(names=("m",)), RunOptions(gates=True)):
+            with self.subTest(opts=opts):
+                parallel, _ = self._run_with_durations(opts)
+                self.assertEqual(parallel.call_args.args[2][0], ("m.C.a",))
+                self.assertIsNone(parallel.call_args.kwargs.get("record"))
+
+    def _probe_tree(self) -> str:
+        """A checkout of its own: a copy of the runner and two probe modules, discovered as the whole suite."""
+        tmp = self.tmp()
+        os.makedirs(os.path.join(tmp, "tests"))
+        shutil.copy2(os.path.join(REPO, "tests", "run_unit.py"), os.path.join(tmp, "tests", "run_unit.py"))
+        for name, text in (("test_probe_a.py", _PROBE_A), ("test_probe_b.py", _PROBE_B)):
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        return tmp
+
+    def _run_tree(self, tmp: str, *names: str, ci: bool = False) -> subprocess.CompletedProcess[str]:
+        env = _child_env(tmp)
+        for name in ("CI", "GITHUB_ACTIONS", "CST_TEST_JOBS"):
+            env.pop(name, None)
+        if ci:
+            env["CI"] = "true"
+        done = subprocess.run(
+            [sys.executable, "-I", "-B", os.path.join(tmp, "tests", "run_unit.py"), "--jobs", "2", *names],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env=env,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Ran 3 tests in ", done.stderr)
+        self.assertIn("(2 workers)", done.stderr)
+        self.assertEqual(done.stderr.splitlines()[-1], "OK", done.stderr)
+        self.assertNotIn("error:", done.stderr)
+        return done
+
+    def _recorded(self, path: str) -> dict[str, object]:
+        with open(path, encoding="utf-8") as f:
+            data: object = json.load(f)
+        if not isinstance(data, dict) or not isinstance(seconds := data.get("seconds"), dict):
+            self.fail(f"not a durations file: {data!r}")
+        self.assertEqual(sorted(data), ["seconds", "version"])
+        self.assertEqual(data.get("version"), 1)
+        self.assertTrue(all(isinstance(v, float) and v >= 0 for v in seconds.values()), seconds)
+        return {str(k): v for k, v in seconds.items()}
+
+    def test_a_whole_suite_run_records_every_test_and_a_named_run_does_not(self) -> None:
+        tmp = self._probe_tree()
+        path = _durations_file(os.path.join(tmp, "cache"), tmp)
+        self._run_tree(tmp)
+        self.assertEqual(set(self._recorded(path)), _PROBE_IDS)
+        with self.subTest("a removed test is dropped"):
+            _write_durations(path, {**self._recorded(path), "gone.T.test_x": 1.0})
+            self._run_tree(tmp)
+            self.assertEqual(set(self._recorded(path)), _PROBE_IDS)
+        with self.subTest("a damaged file is replaced"):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            self._run_tree(tmp)
+            self.assertEqual(set(self._recorded(path)), _PROBE_IDS)
+        with self.subTest("a named run reads it and writes nothing"):
+            with open(path, "rb") as f:
+                before = f.read()
+            self._run_tree(tmp, "test_probe_a", "test_probe_b")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), before)
+            self.assertEqual(os.listdir(os.path.dirname(path)), [os.path.basename(path)])
+
+    def test_under_ci_a_whole_run_writes_nothing(self) -> None:
+        tmp = self._probe_tree()
+        self._run_tree(tmp, ci=True)
+        self.assertFalse(os.path.exists(os.path.join(tmp, "cache")))
 
 
 if __name__ == "__main__":

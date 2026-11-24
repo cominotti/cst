@@ -108,6 +108,16 @@ shebang it has no -B), notes every .pyc of the checkout before the tests
 (.git, virtual environments and other checkouts nested in it, such as an
 agent's worktree under .claude/worktrees, left out), and fails the run on
 each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
+
+A parallel run queues its work units longest first. A run of the whole
+suite (no NAME, no --gates) writes how long each test took to
+${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json, one file per
+checkout (`durations_path`), and the next parallel run, whole or named, puts
+the units with the most recorded seconds first (`order_units`: a test with
+no time yet counts as the average one), so a long unit does not start last.
+With no file, or one it cannot read, the order is the old one: most tests
+first. CI neither reads nor writes the file. Only the order changes: the
+same tests and gates run, with the same results.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -116,9 +126,12 @@ import contextlib
 import ctypes
 from dataclasses import dataclass, field
 import gc
+import hashlib
 import io
 import json
+import math
 import os
+import pwd
 import queue
 import shlex
 import shutil
@@ -130,7 +143,7 @@ import tempfile
 import threading
 import time
 from types import FrameType
-from typing import Final, override
+from typing import Final, TypedDict, TypeIs, override
 import unittest
 from unittest import mock
 import warnings
@@ -670,6 +683,7 @@ class _ParallelTotals:
     hook_problems: list[str] = field(default_factory=list)
     signal_problems: list[str] = field(default_factory=list)
     worker_errors: list[str] = field(default_factory=list)
+    unit_seconds: dict[tuple[str, ...], float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1007,6 +1021,124 @@ def plan_work_units(
     return units, False
 
 
+DURATIONS_VERSION: Final = 1
+"""The version of the durations file's format (`UnitDurations`); a file of any other version is not read."""
+DURATIONS_FOLDER: Final = "cst-unit-durations"
+"""The folder of the durations files, in the user's cache folder (`durations_path`)."""
+_CI_VARIABLES: Final = ("CI", "GITHUB_ACTIONS")
+_CHECKOUT_KEY_DIGITS: Final = 12
+
+
+class UnitDurations(TypedDict):
+    """The durations file: the seconds each test of the last whole-suite run took."""
+
+    version: int
+    seconds: dict[str, float]
+
+
+def _seconds_value(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+def _is_unit_durations(value: object) -> TypeIs[UnitDurations]:
+    if not isinstance(value, dict):
+        return False
+    version = value.get("version")
+    seconds = value.get("seconds")
+    if isinstance(version, bool) or version != DURATIONS_VERSION or not isinstance(seconds, dict):
+        return False
+    return all(isinstance(key, str) and _seconds_value(val) for key, val in seconds.items())
+
+
+def durations_path(repo: str, environ: Mapping[str, str]) -> str | None:
+    """The durations file of this checkout, outside it; None under CI, which neither reads nor writes one.
+
+    The key is the one tests/uv-dev and tests/mbt/profiles.py give a checkout (the first 12 hex digits of
+    the sha1 of its physical path). A relative XDG_CACHE_HOME is ignored, as the XDG spec says: the runner
+    works in the checkout, so a relative folder would be inside it.
+    """
+    if any(environ.get(name, "") != "" for name in _CI_VARIABLES):
+        return None
+    base = environ.get("XDG_CACHE_HOME", "")
+    if not os.path.isabs(base):
+        home = environ.get("HOME", "")
+        if not os.path.isabs(home):
+            try:
+                home = pwd.getpwuid(os.getuid()).pw_dir
+            except KeyError:
+                return None
+        base = os.path.join(home, ".cache")
+    key = hashlib.sha1(os.fsencode(os.path.realpath(repo)), usedforsecurity=False).hexdigest()
+    return os.path.join(base, DURATIONS_FOLDER, f"{key[:_CHECKOUT_KEY_DIGITS]}.json")
+
+
+def read_durations(path: str | None) -> dict[str, float]:
+    """The seconds of each test in the durations file at path; {} for no path or a file it cannot use."""
+    if path is None:
+        return {}
+    try:
+        with open(path, "rb") as f:
+            data = _decode_json(f.read().decode("utf-8"))
+    except OSError, ValueError, RecursionError:  # ValueError: not UTF-8, not JSON
+        return {}
+    if not _is_unit_durations(data):
+        return {}
+    return {test_id: float(took) for test_id, took in data["seconds"].items()}
+
+
+def order_units(units: Sequence[tuple[str, ...]], durations: Mapping[str, float]) -> list[tuple[str, ...]]:
+    """The units, the most recorded seconds first; with no durations, as they came (most tests first).
+
+    A test with no record counts as the average recorded test. When no test of the run has a record,
+    every estimate grows with the unit's size alone, so the order is the one the units came in.
+    """
+    if not durations:
+        return list(units)
+    fill = sum(durations.values()) / len(durations)
+
+    def estimate(unit: tuple[str, ...]) -> float:
+        return sum(durations.get(test_id, fill) for test_id in unit)
+
+    return sorted(units, key=lambda unit: (-estimate(unit), -len(unit), unit[0]))
+
+
+def save_durations(
+    path: str,
+    units: Sequence[tuple[str, ...]],
+    measured: Mapping[tuple[str, ...], float],
+    old: Mapping[str, float],
+) -> None:
+    """Write each test's seconds (its unit's time over its tests) to path; quietly nothing when it cannot.
+
+    A test of this run whose unit got no reply keeps its old time; a test not in this run is dropped.
+    The file is replaced whole (a temporary file renamed over it), never fsynced: it is a cache.
+    """
+    seconds: dict[str, float] = {}
+    for unit in units:
+        took = measured.get(unit)
+        for test_id in unit:
+            if took is not None:
+                seconds[test_id] = took / len(unit)
+            elif test_id in old:
+                seconds[test_id] = old[test_id]
+    data: UnitDurations = {"version": DURATIONS_VERSION, "seconds": seconds}
+    folder = os.path.dirname(path)
+    try:
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".durations-", suffix=".tmp", dir=folder)
+    except OSError:
+        return
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def _open_socket_stdin() -> socket.socket:
     ours, theirs = socket.socketpair()
     os.dup2(theirs.fileno(), 0)  # fd 0 is now a socket, inherited by every child
@@ -1185,6 +1317,7 @@ def _drain_worker(
             unit = work_q.get_nowait()
         except queue.Empty:
             break
+        started = time.monotonic()
         try:
             worker.cmd_fh.write(json.dumps({"names": list(unit)}) + "\n")
             worker.cmd_fh.flush()
@@ -1193,6 +1326,7 @@ def _drain_worker(
             with totals.lock:
                 totals.worker_errors.append(f"worker I/O failed running {unit[0]}: {exc}")
             return
+        took = time.monotonic() - started
         if not reply:
             with totals.lock:
                 totals.worker_errors.append(f"worker exited unexpectedly running {unit[0]}")
@@ -1203,6 +1337,8 @@ def _drain_worker(
             with totals.lock:
                 totals.worker_errors.append(f"malformed worker reply running {unit[0]}: {exc}")
             return
+        with totals.lock:
+            totals.unit_seconds[unit] = took
         _record_report(report, totals)
     worker.cmd_fh.close()
     worker.res_fh.close()
@@ -1309,7 +1445,10 @@ def _run_in_process(repo: str, opts: RunOptions) -> int:
     return 0 if result.wasSuccessful() and not errors else 1
 
 
-def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]], jobs: int) -> int:
+def _run_parallel(
+    repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]], jobs: int, *, record: str | None = None
+) -> int:
+    """Run units across jobs workers; with record, save each test's seconds there (`save_durations`)."""
     effective_jobs = min(jobs, len(units))
     bytecode_before = bytecode_files(repo)
     started = time.monotonic()
@@ -1324,6 +1463,8 @@ def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]],
         extra_errors=[*totals.hook_problems, *totals.signal_problems, *totals.worker_errors],
     )
     errors = _emit_gate_checks(repo, bytecode_before, findings)
+    if record is not None:
+        save_durations(record, units, totals.unit_seconds, read_durations(record))
     has_test_fail = bool(totals.failures or totals.errors or totals.unexpected_successes)
     return 0 if not has_test_fail and not errors else 1
 
@@ -1388,7 +1529,10 @@ def _run(repo: str, opts: RunOptions) -> int:
     units, has_load_error = plan_work_units(suite)
     if has_load_error or min(requested, len(units)) <= 1:
         return _run_in_process(repo, active_opts)
-    return _run_parallel(repo, active_opts, units, requested)
+    path = durations_path(repo, os.environ)
+    units = order_units(units, read_durations(path))
+    whole = not active_opts.names and not active_opts.gates
+    return _run_parallel(repo, active_opts, units, requested, record=path if whole else None)
 
 
 def guard_hits(folder: str) -> list[str]:
