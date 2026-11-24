@@ -364,11 +364,18 @@ def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
     return f"ERROR: {cause}; mounts and {FSTAB_PATH} restored."
 
 
-def _undo(rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted: bool) -> list[str]:
+def _undo_each(
+    rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted: bool
+) -> list[tuple[CacheMountBinding, str]]:
     """Take back what this run did, last first: unmount the binds it mounted (mounted=True) or
-    mount again the ones it unmounted; the failures."""
+    mount again the ones it unmounted; each binding that could not be taken back, with why."""
     step = _unbind if mounted else _bind
-    return [err for b in reversed(done) if (err := step(rt, b)) is not None]
+    return [(b, err) for b in reversed(done) if (err := step(rt, b)) is not None]
+
+
+def _undo(rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted: bool) -> list[str]:
+    """_undo_each's failures, the reasons only."""
+    return [err for _, err in _undo_each(rt, done, mounted=mounted)]
 
 
 def _prepare_attach_dirs(snap: CacheMountSnapshot, user: CacheMountUser, rt: _CacheMountRuntime) -> str | None:
@@ -466,7 +473,8 @@ def _apply_detach(
     """Drop the user's managed lines from /etc/fstab and reload systemd first, then unmount only the
     binds CST made (the mirror of attach), so no line is left for a bind that is not mounted, even
     when the run dies halfway. A failed write or reload puts /etc/fstab back; a failed umount mounts
-    again what this run unmounted, then puts the lines back and reloads. A mount CST did not make
+    again what this run unmounted, then puts the lines back and reloads (only those of the binds
+    that are mounted again: a bind that cannot be mounted again keeps no line). A mount CST did not make
     stays (its managed line still goes); a target whose mount cannot be told (base not mounted) or
     that hides CST's bind under another mount makes detach change nothing."""
     err = snapshot_error(snap)
@@ -491,9 +499,14 @@ def _apply_detach(
 
     unmounted, cause = _unbind_cst_mounts(snap, rt)
     if cause is not None:
-        undo_errors = _undo(rt, unmounted, mounted=False)
-        if new_fstab != cur_fstab:
-            undo_errors += _restore_fstab(fstab_path, snap.fstab_text, rt)
+        not_back = _undo_each(rt, unmounted, mounted=False)
+        undo_errors = [err for _, err in not_back]
+        # The lines of the binds that are not mounted again stay out of /etc/fstab.
+        put_back = (
+            snap.fstab_text if not not_back else plan_detach_fstab(cur_fstab, user.name, {b.kind for b, _ in not_back})
+        )
+        if new_fstab not in (cur_fstab, put_back):
+            undo_errors += _restore_fstab(fstab_path, put_back, rt)
         return 1, [*lines, _error_after_undo(cause, undo_errors)]
     lines.extend(f"Unmounted {b.target}." for b in unmounted)
     if new_fstab != cur_fstab:

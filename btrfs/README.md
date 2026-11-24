@@ -1689,7 +1689,8 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   puts `/etc/fstab` back and unmounts nothing. When an unmount fails (a
   busy target: a process with a file or its folder there), it mounts again
   what it unmounted, then puts the lines back and reloads, and says
-  `mounts and /etc/fstab restored.` or `ROLLBACK INCOMPLETE`. So a run
+  `mounts and /etc/fstab restored.` or `ROLLBACK INCOMPLETE`. A bind it
+  cannot mount again gets no line back (`ROLLBACK INCOMPLETE` names it). So a run
   that dies at any point leaves no line for a bind that is not mounted; the
   same `detach` again finishes the job. It changes nothing, and says why, when it cannot tell CST's
   bind from another mount (the base folder, `/var/mnt/cache` or

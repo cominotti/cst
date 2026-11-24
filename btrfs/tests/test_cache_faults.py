@@ -11,11 +11,13 @@ stubbed.
 
 Start states: an attach from nothing, from no /etc/fstab at all, and after an attach killed after
 its first mount; a detach of both binds, and after a detach killed after its first umount (the
-lines already gone). For each, every mode at every point, and every FAIL followed by a KILL at each
-later point of that run (a run that dies while it rolls back), checked:
-- I1: every managed line of the user names a bind that is mounted from its source, unless the run
-  returned non-zero and its last line says ROLLBACK INCOMPLETE (a line that would mount at the next
-  boot for a bind that is not mounted is what PR 14 and the detach fix ruled out);
+lines already gone). For each, every mode at every point, and every FAIL followed by a KILL or a second FAIL at
+each later point of that run (a run that dies, or fails again, while it rolls back), checked:
+- I1: every managed line of the user names a bind that is mounted from its source, unless an
+  attach returned non-zero and its last line says ROLLBACK INCOMPLETE (a line that would mount at
+  the next boot for a bind that is not mounted is what PR 14 and the detach fix ruled out). A
+  detach keeps I1 even when its rollback is incomplete: a bind it cannot mount again gets no line
+  back, and an /etc/fstab it cannot put back keeps fewer lines;
 - I2: exit 0 means the target: attach, both binds mounted from source and /etc/fstab as
   plan_attach_fstab gives it (the other lines kept); detach, no bind of CST and no line of the user;
 - I3: a non-zero exit leaves the mounts and /etc/fstab as at the start, or its last line says
@@ -73,24 +75,25 @@ ATTACH, DETACH = "attach", "detach"
 @dataclass(frozen=True)
 class Start:
     """A state before the run: the command, /etc/fstab (None: no file), the binds mounted from their
-    source (targets), and the pinned numbers of points and of FAIL then KILL cases."""
+    source (targets), and the pinned numbers of points and of FAIL then a later fault cases (the same
+    count for a KILL and for a FAIL as the second fault)."""
 
     action: str
     fstab: str | None
     mounted: tuple[str, ...]
     points: int
-    fail_then_kill: int
+    fail_then_later: int
 
 
 ATTACHED_FSTAB = plan_attach_fstab(BASE_FSTAB, BINDINGS)
 BOTH = tuple(b.target for b in BINDINGS)
-ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=9, fail_then_kill=6)
-ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=9, fail_then_kill=6)
+ATTACH_FRESH = Start(ATTACH, BASE_FSTAB, (), points=9, fail_then_later=6)
+ATTACH_NO_FSTAB = Start(ATTACH, None, (), points=9, fail_then_later=6)
 # An attach killed after its first mount: the cache bind mounted, no line yet.
-ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=7, fail_then_kill=3)
-DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=4, fail_then_kill=6)
+ATTACH_HALF_DONE = Start(ATTACH, BASE_FSTAB, (BOTH[0],), points=7, fail_then_later=3)
+DETACH_FULL = Start(DETACH, ATTACHED_FSTAB, BOTH, points=4, fail_then_later=6)
 # A detach killed after its first umount: the lines gone and the reload done, the scratchpad still mounted.
-DETACH_HALF_DONE = Start(DETACH, BASE_FSTAB, (BOTH[1],), points=1, fail_then_kill=0)
+DETACH_HALF_DONE = Start(DETACH, BASE_FSTAB, (BOTH[1],), points=1, fail_then_later=0)
 
 
 def read(path: str) -> str | None:
@@ -225,7 +228,7 @@ class CacheFaultBase(unittest.TestCase):
         start_mounts, start_fstab = self.mounts(model), read(self.fstab)
         result = self.run_once(model, *faults)
         incomplete = result is not None and result[0] != 0 and bool(result[1]) and INCOMPLETE in result[1][-1]
-        if not incomplete:
+        if not incomplete or self.start.action == DETACH:
             self.assert_no_line_without_its_bind(model, when)
         if result is not None:
             rc, lines = result
@@ -261,14 +264,16 @@ class CacheFaultBase(unittest.TestCase):
             with self.subTest(fault=fault, call=calls[fault[1] - 1]):
                 self.check(fault)
 
-    def every_failure_then_a_kill(self) -> None:
+    def every_failure_then(self, mode: FaultMode) -> None:
+        """Every FAIL, then a second fault of MODE at each later point of that run (a kill or a
+        failure while it rolls back)."""
         cases = 0
         for fail in every_fault(self.start.points, (FaultMode.FAIL,)):
-            for kill in every_fault(len(self.points(fail)), (FaultMode.KILL,), after=fail[1]):
-                with self.subTest(fault=fail, then=kill):
+            for then in every_fault(len(self.points(fail)), (mode,), after=fail[1]):
+                with self.subTest(fault=fail, then=then):
                     cases += 1
-                    self.check(fail, kill)
-        self.assertEqual(cases, self.start.fail_then_kill)
+                    self.check(fail, then)
+        self.assertEqual(cases, self.start.fail_then_later)
 
 
 class AttachFreshFaultTest(CacheFaultBase):
@@ -286,7 +291,10 @@ class AttachFreshFaultTest(CacheFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
 
 
 class AttachNoFstabFaultTest(CacheFaultBase):
@@ -304,7 +312,10 @@ class AttachNoFstabFaultTest(CacheFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
 
 
 class AttachHalfDoneFaultTest(CacheFaultBase):
@@ -322,7 +333,10 @@ class AttachHalfDoneFaultTest(CacheFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
 
 
 class DetachFullFaultTest(CacheFaultBase):
@@ -340,7 +354,10 @@ class DetachFullFaultTest(CacheFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)
 
 
 class DetachHalfDoneFaultTest(CacheFaultBase):
@@ -358,4 +375,7 @@ class DetachHalfDoneFaultTest(CacheFaultBase):
         self.every(FaultMode.FAIL_FROM)
 
     def test_every_failure_then_a_kill_at_each_later_point(self) -> None:
-        self.every_failure_then_a_kill()
+        self.every_failure_then(FaultMode.KILL)
+
+    def test_every_failure_then_a_failure_at_each_later_point(self) -> None:
+        self.every_failure_then(FaultMode.FAIL)

@@ -139,7 +139,8 @@ armed there, in one of three modes:
 - `FAIL_FROM`: that call and every later one fail (a full disk stays full).
 
 A plan can hold several faults: a `FAIL` and then a `KILL` at each later
-call is a run that dies while it rolls back. A port that reports a failure
+call is a run that dies while it rolls back, and a `FAIL` then a second
+`FAIL` one that fails again there (`btrfs/tests/test_cache_faults.py`). A port that reports a failure
 without raising passes `failed` (a command answers exit 1; `ignore_error`
 for an `ignore_errors=True` removal); `FaultyRunner` does that for a command
 runner. The test then checks its invariants after the fault, after the next
@@ -187,7 +188,7 @@ tests, such as tier 1's `test_161` for scrub-limit's reload).
 `btrfs.tests.test_docker_volumes_nocow_faults`,
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
-`bluetooth.tests.test_setup_faults`) together: 2.0 to 2.1 s wall at
+`bluetooth.tests.test_setup_faults`) together: 2.3 to 2.4 s wall at
 `--jobs 4` (`nice -n 10 /usr/bin/python3 -I -B tests/run_unit.py --jobs 4`
 on the seven, 3 runs), with fsync stubbed, so about the same on tmpfs and
 on a btrfs home.

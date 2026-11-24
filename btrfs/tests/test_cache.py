@@ -770,6 +770,30 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             err,
         )
 
+    def test_a_bind_not_mounted_again_gets_no_line_back(self) -> None:
+        # The put-back after a busy umount wrote every line back, also .cache's, whose bind could not
+        # be mounted again: the next boot mounted a bind detach had dropped.
+        self.assertEqual(self._run(["attach"])[0], 0)
+        attached = self._fstab()
+        self.runner.umount_fails.add("/var/home/danilo/Scratchpad")  # after .cache's umount
+        self.runner.mount_fails.add("/var/home/danilo/.cache")  # mounting it again fails
+        rc, _, err = self._run(["detach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: umount /var/home/danilo/Scratchpad failed: umount: target is busy; ROLLBACK INCOMPLETE "
+            "(mount --bind /var/mnt/cache/danilo /var/home/danilo/.cache failed: mount: permission denied)",
+            err,
+        )
+        self.assertEqual(self._mounted(), ["/var/home/danilo/Scratchpad"])
+        self.assertEqual(self._fstab(), plan_detach_fstab(attached, "danilo", {CacheMountKind.CACHE}))
+        self.assertIn("user=danilo kind=scratchpad", self._fstab())
+        self.runner.umount_fails.clear()
+        self.runner.mount_fails.clear()
+        rc_again, _, err_again = self._run(["detach"])
+        self.assertEqual(rc_again, 0, err_again)
+        self.assertEqual(self._mounted(), [])
+        self.assertNotIn("user=danilo", self._fstab())
+
     def test_a_folder_that_cannot_be_made_is_an_error_not_a_traceback(self) -> None:
         with unittest.mock.patch.object(
             cache_adapters, "ensure_dir", side_effect=PermissionError(13, "Permission denied")
