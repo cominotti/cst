@@ -56,7 +56,8 @@ from typing import Final
 # The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path (and -B,
 # or the bytecode flag below, keeps the cst_core imported from there from writing __pycache__ into it).
 sys.dont_write_bytecode = True
-_CHECKOUT: Final = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Through the script's real path: run by a link (from ~/bin, say), the folders above the link are not the checkout.
+_CHECKOUT: Final = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 

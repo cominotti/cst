@@ -300,6 +300,18 @@ class ArgvTest(unittest.TestCase):
         self.assertNotIn("--seed", argv)
 
 
+class CheckoutTest(unittest.TestCase):
+    def test_run_by_a_link_it_finds_the_checkout_of_its_real_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="cst-quint-test-") as tmp:
+            link = os.path.join(tmp, "bin", "cst-quint")
+            os.makedirs(os.path.dirname(link))
+            os.symlink(TOOL, link)
+            self.addCleanup(sys.modules.pop, "cst_quint_by_link", None)
+            linked = load_script(link, "cst_quint_by_link")
+            self.assertEqual(linked.checkout_root(), os.path.realpath(_CHECKOUT))
+            self.assertEqual(M.checkout_root(), os.path.realpath(_CHECKOUT))
+
+
 class ExecuteTest(unittest.TestCase):
     def test_output_that_is_not_utf8_is_read_with_replacement_characters(self) -> None:
         # A child (curl, npm, the JVM, the replay) may print bytes that are not UTF-8: a path or a
