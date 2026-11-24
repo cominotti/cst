@@ -384,6 +384,226 @@ echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after inst
 """
 
 
+# test_05b, test_05c: docker-volumes-nocow's boot run (its unit, from test_02's
+# install) when a state file cannot be changed, on the loop btrfs with Docker
+# stopped. The volumes folder and the state are as test_05a left them: the
+# folder with +C, no flag, no count. Each script names the journal lines of its
+# own runs by time: mark gives a second after every line sent so far.
+NOCOW_FAULT_FNS = r"""
+helper=/usr/local/sbin/docker-volumes-nocow
+unit=docker-volumes-nocow.service
+vols=/var/lib/docker/volumes
+flag=/etc/btrfs-setup/docker-nocow-pending
+state=/var/lib/docker-volumes-nocow
+attempts=$state/attempts
+rewriting='without copy-on-write before Docker starts'
+gave_up='docker-volumes-nocow: Gave up after two boots'
+fail() { echo "$*" >&2; exit 1; }
+idle_docker() {   # no Docker that could use the volumes: the boot's run goes on
+    systemctl stop docker.service e2e-dind.service 2>/dev/null || true
+    case "$(systemctl show -P ActiveState docker.service)" in
+        inactive | failed) ;;
+        *) fail "docker.service is not stopped" ;;
+    esac
+}
+cow_volume() {   # cow_volume NAME: a volume whose data is copy-on-write
+    mkdir "$vols/$1"
+    chattr -C "$vols/$1"
+    mkdir "$vols/$1/_data"
+    head -c 1M /dev/urandom >"$vols/$1/_data/db"
+    [[ "$(lsattr "$vols/$1/_data/db" | awk '{print $1}')" != *C* ]]
+}
+run_unit() {   # one boot's run, as systemd starts it
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    systemctl start "$unit"
+    [[ "$(systemctl show -P Result "$unit")" == success ]]
+}
+mark() { journalctl --sync; sleep 1.1; date +%s; }
+since() { journalctl --sync; journalctl -q --no-pager -o cat -u "$unit" --since "@$1"; }
+lines() { since "$1" | grep -cF -- "$2" || true; }   # lines T TEXT: the unit's lines since T with TEXT
+wait_lines() {   # wait_lines T TEXT N: up to 10 s for N such lines; the journal on failure
+    local _
+    for _ in $(seq 1 20); do
+        (( $(lines "$1" "$2") >= $3 )) && return 0
+        sleep 0.5
+    done
+    since "$1" >&2
+    return 1
+}
+"""
+
+# test_05b: the third boot of a scheduled migration gives up, but the flag's
+# folder is read-only (a read-only bind mount over /etc/btrfs-setup) while the
+# count's is not. The count of 2 must stay with the flag: three boots each give
+# up again at once (no copy, no alert); once the mount is gone, the next boot
+# gives up for good, removes both and keeps one alert for the next login.
+NOCOW_GIVE_UP_SCRIPT = (
+    r"""
+set -E
+trap 'echo "test_05b FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+"""
+    + NOCOW_FAULT_FNS
+    + r"""
+vol=e2e-give-up
+title='Docker volumes: NOCOW migration gave up'
+erofs="$vols: [Errno 30] Read-only file system: '$flag'"
+pending=/var/lib/cst-alerts/pending
+aside=/var/tmp/e2e-05b-alerts
+made_etc=0
+ours() { grep -lxF "title=$title" "$pending"/*.alert 2>/dev/null || true; }   # kept alerts of this title
+cleanup() {
+    local f
+    while mountpoint -q /etc/btrfs-setup; do umount /etc/btrfs-setup || break; done
+    rm -rf "${vols:?}/$vol"
+    rm -f "$flag" "$attempts" "$state/postponed"
+    for f in $(ours); do rm -f "$f"; done
+    if [[ -d "$aside" ]]; then
+        for f in "$aside"/*.alert; do
+            if [[ -e "$f" ]]; then mv "$f" "$pending/"; fi
+        done
+        rm -rf "$aside"
+    fi
+    (( made_etc == 0 )) || rmdir /etc/btrfs-setup 2>/dev/null || true
+    systemctl reset-failed "$unit" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+test -x "$helper"
+idle_docker
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]   # as install (and test_05a) left it
+test ! -e "$flag"
+if [[ ! -d /etc/btrfs-setup ]]; then
+    made_etc=1
+    install -d -m 0755 /etc/btrfs-setup
+fi
+# An alert of this title kept before (another test's) waits aside: this test counts its own.
+mkdir -p "$aside"
+for f in $(ours); do mv "$f" "$aside/"; done
+cow_volume "$vol"
+d="$vols/$vol/_data"
+ino="$(stat -c %i "$d")"
+sum="$(sha256sum <"$d/db")"
+install -d -m 0755 "$state"
+rm -f "$state/postponed"
+touch "$flag"
+printf 2 >"$attempts"   # two boots have tried: the next one gives up
+mount --bind /etc/btrfs-setup /etc/btrfs-setup
+mount -o remount,bind,ro /etc/btrfs-setup
+if touch /etc/btrfs-setup/e2e-probe 2>/dev/null; then fail "/etc/btrfs-setup is still writable"; fi
+t0="$(mark)"
+
+# 1. Three boots with the flag stuck: each gives up at once and puts the count back.
+for boot in 1 2 3; do
+    run_unit
+    [[ "$(cat "$attempts" 2>&1)" == 2 ]] || fail "boot $boot: the count is $(cat "$attempts" 2>&1)"
+    test -e "$flag"
+    wait_lines "$t0" "$erofs" "$boot"
+done
+[[ "$(lines "$t0" "$erofs")" == 3 ]]
+[[ "$(lines "$t0" "$gave_up")" == 0 ]]
+[[ "$(lines "$t0" "$rewriting")" == 0 ]]   # no try started over
+[[ "$(stat -c %i "$d")" == "$ino" ]]
+[[ "$(sha256sum <"$d/db")" == "$sum" ]]
+[[ "$(ls -A "$vols/$vol")" == _data ]]   # no copy beside it
+[[ "$(lsattr "$d/db" | awk '{print $1}')" != *C* ]]
+[[ -z "$(ours)" ]] || fail "an alert was kept before the give-up: $(ours)"
+echo "E2E-NOCOW give-up with /etc/btrfs-setup read-only: 3 boots, count $(cat "$attempts"), flag kept"
+
+# 2. The flag's folder writable again: the next boot gives up for good and keeps one alert.
+umount /etc/btrfs-setup
+run_unit
+wait_lines "$t0" "$gave_up" 1
+test ! -e "$flag"
+test ! -e "$attempts"
+kept="$(ours)"
+[[ -n "$kept" && "$(wc -l <<<"$kept")" == 1 ]] || fail "kept alerts of the give-up: ${kept:-none}"
+grep -qx 'count=1' "$kept"
+[[ "$(stat -c %i "$d")" == "$ino" ]]
+[[ "$(lines "$t0" "$rewriting")" == 0 ]]
+grep -q 'migration not scheduled' <<<"$("$helper" status)"
+
+# 3. A later boot has nothing left to give up: no second alert.
+run_unit
+[[ "$(lines "$t0" "$gave_up")" == 1 ]]
+[[ "$(lines "$t0" "$erofs")" == 3 ]]
+grep -qx 'count=1' "$kept"
+echo E2E-OK
+"""
+)
+
+# test_05c: a count of boots an older helper left without its flag (2), the
+# volumes folder without +C and a copy-on-write volume (a new request), and
+# the count cannot be reset: a read-only bind mount of the count's file (a
+# rename over a mount point fails; the folder stays writable for the postponed
+# record). A read-only mount of the whole folder would fail the run earlier,
+# at the postponed record's removal (unlink there is EROFS even for a missing
+# file), and never reach the reset. The run makes no request (no flag, no +C)
+# and logs it; once the mount is gone, the next boot makes the request and
+# migrates.
+NOCOW_RESET_SCRIPT = (
+    r"""
+set -E
+trap 'echo "test_05c FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+"""
+    + NOCOW_FAULT_FNS
+    + r"""
+vol=e2e-reset
+refused='cannot schedule the migration ('
+cleanup() {
+    while mountpoint -q "$attempts"; do umount "$attempts" || break; done
+    rm -rf "${vols:?}/$vol"
+    rm -f "$flag" "$attempts" "$state/postponed"
+    chattr +C "$vols" 2>/dev/null || true   # as install left it
+    systemctl reset-failed "$unit" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+test -x "$helper"
+idle_docker
+test ! -e "$flag"
+cow_volume "$vol"
+chattr -C "$vols"   # Docker set up after install, say: the sign of a new request
+d="$vols/$vol/_data"
+ino="$(stat -c %i "$d")"
+sum="$(sha256sum <"$d/db")"
+install -d -m 0755 "$state"
+rm -f "$state/postponed"
+printf 2 >"$attempts"   # left by an older helper, without its flag
+mount --bind "$attempts" "$attempts"
+mount -o remount,bind,ro "$attempts"
+t0="$(mark)"
+
+# 1. The reset fails: no request, and the journal says so.
+run_unit
+wait_lines "$t0" "$refused" 1
+grep -qF "$vols keeps copy-on-write, the next boot tries again" <<<"$(since "$t0" | grep -F "$refused")"
+test ! -e "$flag"
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" != *C* ]]
+[[ "$(cat "$attempts")" == 2 ]]
+[[ "$(ls -A "$state")" == attempts ]]   # the reset's temporary file is gone
+[[ "$(stat -c %i "$d")" == "$ino" ]]
+[[ "$(lines "$t0" "$rewriting")" == 0 ]]
+[[ "$(lines "$t0" "$gave_up")" == 0 ]]
+echo "E2E-NOCOW reset refused: $(since "$t0" | grep -F "$refused")"
+
+# 2. The count writable again: the next boot resets it, makes the request and migrates.
+umount "$attempts"
+run_unit
+wait_lines "$t0" 'all Docker volumes are NOCOW now' 1
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]
+[[ "$(stat -c %i "$d")" != "$ino" ]]
+[[ "$(sha256sum <"$d/db")" == "$sum" ]]
+[[ "$(lsattr "$d/db" | awk '{print $1}')" == *C* ]]
+[[ "$(ls -A "$vols/$vol")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+[[ "$(lines "$t0" "$refused")" == 1 ]]
+[[ "$(lines "$t0" "$gave_up")" == 0 ]]
+echo E2E-OK
+"""
+)
+
+
 # test_10a: runs a command on a new pseudo-terminal (crypt-perf needs a
 # terminal: it checks [[ -t 0 ]] and cryptsetup reads /dev/tty) and answers
 # each "Enter passphrase" prompt with argv[1]. cryptsetup prints the prompt,
@@ -1330,6 +1550,29 @@ sys.exit(0 if sys.argv[2] in [x["path"] for x in src["snapshots"]] else 1)' "$1"
         for line in out.splitlines():
             if line.startswith("E2E-NOCOW"):
                 print(f"\ntest_05a: {line}")
+
+    def test_05b_docker_volumes_nocow_gives_up_at_once_while_its_flag_cannot_be_removed(self) -> None:
+        """docker-volumes-nocow's unit at the third boot of a scheduled migration, with /etc/btrfs-setup
+        read-only (a bind mount) and /var/lib/docker-volumes-nocow writable: three boots end in success,
+        the count stays 2 and the flag stays, no copy starts and no alert is kept; with the mount gone the
+        next boot gives up for good (flag and count removed, one alert kept for the next login, still no
+        copy), and a boot after it alerts no more."""
+        out = exec_bash(self.PRIV_CONTAINER, NOCOW_GIVE_UP_SCRIPT).stdout
+        for line in out.splitlines():
+            if line.startswith("E2E-NOCOW"):
+                print(f"\ntest_05b: {line}")
+        self.assertIn("E2E-OK", out)
+
+    def test_05c_docker_volumes_nocow_a_count_that_cannot_be_reset_makes_no_request(self) -> None:
+        """docker-volumes-nocow's unit with a count of 2 left without its flag, the volumes folder without +C
+        and a copy-on-write volume, the count's file a read-only bind mount: the run ends in success, makes
+        no request (no flag, no +C, the count still 2, no copy) and logs "cannot schedule the migration";
+        with the mount gone the next boot makes the request and migrates the volume (flag and count gone)."""
+        out = exec_bash(self.PRIV_CONTAINER, NOCOW_RESET_SCRIPT).stdout
+        for line in out.splitlines():
+            if line.startswith("E2E-NOCOW"):
+                print(f"\ntest_05c: {line}")
+        self.assertIn("E2E-OK", out)
 
     def test_06_cpu_cgroups_game_profile_watchdog_polkit_and_vm_pin(self) -> None:
         """cpu install, cgroup v2 weights/IOWeight, game-profile on/off, Polkit check, vm-pin XML plan, and uninstall."""
