@@ -8183,14 +8183,22 @@ STUB
         holder = "/etc/systemd/system/cst-e2e-161-holder.service"
         render = "/var/tmp/e2e-161-render.py"
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
-        if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
-            self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        unit_file = "/etc/systemd/system/btrfs-scrub-weekly.service"
+        rec = "/var/lib/cst/installed.json"
+        if exec_bash(c, f"for f in {conf} {dropin} {unit_file}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf, 10-cst-limit.conf or the scrub unit already exists (another test's)")
+        # The installer writes the drop-in with --component btrfs:core (pending in root's record): the
+        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        exec_bash(c, f"rm -f /var/tmp/e2e-161-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-161-rec; fi")
         self.addCleanup(
             exec_bash,
             c,
-            "systemctl stop cst-e2e-161-holder.service 2>/dev/null; "
+            # exec_bash runs bash -e: every step must run, also after one that fails (an rmdir of a
+            # folder off already removed), or the rest of the machine stays changed.
+            "set +e; systemctl stop cst-e2e-161-holder.service 2>/dev/null; "
             f"rm -f {holder} {conf} {dropin} {render} /var/tmp/e2e-161-out; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
-            f"{installer} forget-text {dropin}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
+            f"{installer} forget-text {dropin}; rm -f {unit_file}; "
+            f"if [[ -e /var/tmp/e2e-161-rec ]]; then mv /var/tmp/e2e-161-rec {rec}; else rm -f {rec}; fi; "
             "if [[ -e /var/tmp/e2e-161-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-161-made-etc; fi; "
             "systemctl daemon-reload",
             check=False,
@@ -8318,12 +8326,18 @@ EOF
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        # The second set writes the drop-in with --component btrfs:core (pending in root's record): the
+        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        exec_bash(c, f"rm -f /var/tmp/e2e-162-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-162-rec; fi")
         self.addCleanup(
             exec_bash,
             c,
-            "umount /etc/btrfs-setup 2>/dev/null; "
+            # exec_bash runs bash -e: every step must run, also after one that fails (the umount of a
+            # tmpfs the test already took away), or the rest of the machine stays changed.
+            "set +e; umount /etc/btrfs-setup 2>/dev/null; "
             f"rm -f {conf} {dropin} /var/tmp/e2e-162-out; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
             f"{installer} forget-text {dropin}; "
+            f"if [[ -e /var/tmp/e2e-162-rec ]]; then mv /var/tmp/e2e-162-rec {rec}; else rm -f {rec}; fi; "
             "if [[ -e /var/tmp/e2e-162-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-162-made-etc; fi; "
             "systemctl daemon-reload",
             check=False,
