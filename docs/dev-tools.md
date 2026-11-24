@@ -122,8 +122,9 @@ and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
 `cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
 that is not mounted), `cst toolchains prune apply rust:build` (a folder
 renamed to the trash before it is deleted, the leftovers of a run that
-died), and `cst bluetooth apply` and `revert` with their restarts and the
-record of the restarts still owed.
+died), `cst bluetooth apply` and `revert` with their restarts and the
+record of the restarts still owed, and btrfs-bulk's moves of an item into
+`~/Bulk` with the journal that finishes or undoes an interrupted one.
 `tests/fault_injection.py` tests them at every step, with the standard
 library only.
 
@@ -173,6 +174,12 @@ run (recovery), and at the end (the same command again converges).
 - Give each run its own clock time when the code names files by it (a
   backup, a trash name): two runs in the same second would share a name a
   real machine never shares.
+- Replace a sleep that waits out a clock tick by a wait for the next tick,
+  not by a shorter sleep: btrfs-bulk sleeps 0.05 s so that a ctime taken as
+  a stamp never shares its tick with an earlier change, and
+  `btrfs/tests/bulk_fakes.py` `tick_wait` creates files until one's ctime
+  moves on (exact on a coarse clock and on a fine one, with no constant to
+  measure).
 - Call `stub_fsync(self)` in `setUp`: these tests check what a kill leaves,
   not durability, and an fsync per write makes them many times slower on a
   btrfs home. The fsync probes of `tests/probes.py` stay for the tests that
@@ -186,18 +193,38 @@ run (recovery), and at the end (the same command again converges).
 **What it cannot model.** A power loss and writes not yet flushed (`KILL`
 keeps every call that finished; the fsync probes cover durability); a call
 torn half-way (each call is atomic here; the nocow fakes' `copy_into` has
-its own `stop_after`); threads and timing (a thread that outlives a
+its own `stop_after`, and btrfs-bulk's deletion of a tree is two points,
+its first file and the rest: `arm_points(..., torn_rmtree=True)`); threads and timing (a thread that outlives a
 cancel is no failure at a call); the real systemd, btrfs and udev (the E2E
 tests, such as tier 1's `test_161` for scrub-limit's reload).
 
-**Cost.** The seven modules (`tests.test_fault_injection`,
+**btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
+program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
+`BulkHome`: the real moves, cp included, with fakes only for subvolumes,
++C, the busy check, flatpak and btrfs-snapshot's convert), from eight start
+states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
+old subvolume, a stale cache, an empty folder, a late write into the old
+tree, and writes on both sides). `arm_points` makes the user adapter's
+`os` calls (`FaultyOs`), the state files' writes and removals, cp
+(`FaultyRunner`) and each tree's deletion (torn in two) points of the
+plan, which is dead after a kill. After a kill every mode is tried again
+inside the repair; after a failure or a full disk, only a kill. One known
+gap is let through by name and counted per class: a fault that cuts the
+deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
+leaves a journal that every later repair keeps ("the copy ... was written
+to as well"), with the data back in /home.
+
+**Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
-`bluetooth.tests.test_setup_faults`) together: 2.3 to 2.4 s wall at
-`--jobs 4` (`nice -n 10 /usr/bin/python3 -I -B tests/run_unit.py --jobs 4`
-on the seven, 3 runs), with fsync stubbed, so about the same on tmpfs and
-on a btrfs home.
+`bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`)
+together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+-I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
+whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
+there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
+in 24 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
+the times are about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
 

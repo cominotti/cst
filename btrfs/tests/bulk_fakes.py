@@ -9,6 +9,11 @@ the real code (classification, the copy with cp, the switch, the journal and
 the recovery of interrupted runs). Its patches live in an ExitStack; close()
 undoes them, then removes the folder.
 
+For the fault injection tests (tests/fault_injection.py) and the state
+machine of tests/mbt: arm_points makes the calls that change the home or the
+state files points of a FaultPlan, and use_tick_clock replaces the user
+adapter's two 0.05 s sleeps by a wait for the filesystem's next ctime tick.
+
 A module of its own, not part of fakes.py: the importers of fakes.py do not
 depend on btrfs.bulk. Not collected as a test module (unittest finds test*.py).
 """
@@ -16,15 +21,19 @@ depend on btrfs.bulk. Not collected as a test module (unittest finds test*.py).
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import json
 import os
 import shutil
 import stat
 import tempfile
+import time
 from collections.abc import Iterable, Mapping
+from typing import Final
 from unittest import mock
 
+from btrfs.bulk.adapters import state as bulk_state, user as bulk_user
 from btrfs.bulk.adapters.machine import Primitives
 from btrfs.bulk.adapters.user import UserFiles
 from btrfs.bulk.application import items as bulk_items
@@ -33,11 +42,18 @@ from btrfs.bulk.domain import BulkPaths
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.shapes import json_object
+from tests.fault_injection import FaultPlan, FaultyOs, FaultyRunner
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
 
 type TreeEntry = tuple[str, str, str | bytes | int]
+
+# The os functions through which btrfs.bulk.adapters.user changes the home (os.open: in the moves
+# of an item, every call creates a file: the clock's stamp probe and CACHEDIR.TAG).
+USER_OS_POINTS: Final = ("rename", "symlink", "mkdir", "rmdir", "unlink", "open")
+# The ones of btrfs.bulk.adapters.state (its writes go through write_atomic, patched apart).
+STATE_OS_POINTS: Final = ("remove",)
 
 
 def inode(path: str) -> tuple[int, int]:
@@ -154,6 +170,10 @@ class BulkHome:
                 os.chmod(os.path.join(root, d), 0o755)
         shutil.rmtree(self.tmp)
 
+    def rel(self, path: str) -> str:
+        """path as a point names it: relative to the home (the state files by their names)."""
+        return os.path.relpath(path, self.home) if path.startswith(self.home + "/") else os.path.basename(path)
+
     def root_wiring(self) -> Wiring:
         """The program as root (the user from bulk.conf or --user), over the same scratch paths and fakes."""
         return Wiring(TOOL, root=True, paths=self.paths, machine=self.machine, host=self.host)
@@ -241,3 +261,87 @@ class BulkHome:
             if os.path.isdir(self.paths.state)
             else []
         )
+
+
+def fresh_ctime(probe: str) -> int:
+    """The ctime of a file created at probe now (the file is removed again)."""
+    fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        return os.fstat(fd).st_ctime_ns
+    finally:
+        os.close(fd)
+        os.unlink(probe)
+
+
+def tick_wait(folder: str) -> None:
+    """Return once the filesystem's ctime clock has moved on: a fresh file in folder has a ctime
+    other than one made at the start. Nothing done before then shares a ctime with what comes
+    after, which is what the user adapter's 0.05 s sleeps are for; exact on a coarse clock (a
+    kernel tick) and on a fine one, with no measured constant."""
+    probe = os.path.join(folder, ".tick-probe")
+    first = fresh_ctime(probe)
+    while fresh_ctime(probe) == first:
+        pass
+
+
+class TickTime:
+    """The time module as btrfs.bulk.adapters.user sees it: sleep() waits for the next ctime tick of
+    folder (tick_wait) instead of its 0.05 s; every other name is time's own."""
+
+    def __init__(self, folder: str) -> None:
+        self.folder = folder
+
+    def sleep(self, _seconds: float) -> None:
+        tick_wait(self.folder)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
+def use_tick_clock(home: BulkHome) -> None:
+    """The user adapter's sleeps wait for one ctime tick of the home's scratch folder (outside the home)."""
+    home.fake(bulk_user, "time", TickTime(home.tmp))
+
+
+def arm_points(home: BulkHome, plan: FaultPlan, *, torn_rmtree: bool) -> None:
+    """Every call by which btrfs-bulk changes the home or its state files goes through plan:
+
+    - os.NAME of the user adapter (USER_OS_POINTS) and the state adapter (STATE_OS_POINTS);
+    - "write NAME": a state file's write_atomic (a journal, the boot flag, the keep file, the
+      convert plan), by its file name;
+    - "cp DEST": the copy (a fault answers exit 1: copy_tree's "copy failed");
+    - "rmtree PATH": the user adapter's u_rmtree, one call; with torn_rmtree, a folder holding two
+      or more files is two points, "rmtree-part PATH" (its first file in sorted walk order) and
+      "rmtree PATH" (the rest): a deletion cut half-way (FaultPlan keeps every other call atomic).
+
+    The commands that only read (stat, du, flatpak) are no points. restorecon is not run (u_relabel
+    answers True): it is best effort, its errors suppressed, and changes no data."""
+    home.fake(bulk_user, "os", FaultyOs(plan, USER_OS_POINTS))
+    home.fake(bulk_state, "os", FaultyOs(plan, STATE_OS_POINTS))
+    real_write = bulk_state.write_atomic
+    home.fake(
+        bulk_state,
+        "write_atomic",
+        lambda path, data, **kw: plan.step(
+            f"write {os.path.basename(path)}", functools.partial(real_write, path, data, **kw)
+        ),
+    )
+    home.fake(
+        home.machine,
+        "runner",
+        FaultyRunner(
+            plan, home.machine.runner, reads=lambda argv: argv[0] != "cp", name=lambda argv: f"cp {home.rel(argv[-1])}"
+        ),
+    )
+    home.fake(home.user, "u_relabel", lambda path: True)
+    real_rmtree = home.user.u_rmtree
+
+    def rmtree(path: str) -> None:
+        name = home.rel(path)
+        if torn_rmtree and os.path.isdir(path) and not os.path.islink(path):
+            files = sorted(os.path.join(root, n) for root, _dirs, names in os.walk(path) for n in names)
+            if len(files) > 1:
+                plan.step(f"rmtree-part {name}", functools.partial(os.unlink, files[0]))
+        plan.step(f"rmtree {name}", functools.partial(real_rmtree, path))
+
+    home.fake(home.user, "u_rmtree", rmtree)
