@@ -14,6 +14,7 @@ import stat
 
 from btrfs.docker_volumes_nocow.domain import (
     DAEMON_JSON,
+    DATA_DIR,
     NEW_SUFFIX,
     OLD_MARK,
     NocowPaths,
@@ -150,7 +151,7 @@ class LocalVolumeTree:
             return []
         out = []
         for name in sorted(os.listdir(self.paths.volumes)):
-            data = os.path.join(self.paths.volumes, name, "_data")
+            data = os.path.join(self.paths.volumes, name, DATA_DIR)
             if os.path.isdir(data) and not os.path.islink(data):
                 out.append((name, data))
         return out
@@ -199,9 +200,9 @@ class LocalVolumeTree:
             yield VolumeLeftovers(
                 name,
                 d,
-                has_data=os.path.lexists(os.path.join(d, "_data")),
-                olds=tuple(sorted(x for x in names if x.startswith("_data" + OLD_MARK))),
-                twin="_data" + NEW_SUFFIX in names,
+                has_data=os.path.lexists(os.path.join(d, DATA_DIR)),
+                olds=tuple(sorted(x for x in names if x.startswith(DATA_DIR + OLD_MARK))),
+                twin=DATA_DIR + NEW_SUFFIX in names,
             )
 
     def make_twin(self, data: str, new: str) -> None:

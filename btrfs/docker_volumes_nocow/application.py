@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 
 from btrfs.docker_volumes_nocow.domain import (
+    DATA_DIR,
     GAVE_UP,
     GIVE_UP_AFTER,
     MARGIN,
@@ -84,7 +85,7 @@ class DockerVolumesNocow:
         the other old copies and the twin go."""
         for v in self.tree.leftovers():
             todo = recovery(v)
-            data = os.path.join(v.folder, "_data")
+            data = os.path.join(v.folder, DATA_DIR)
             if todo.restore is not None:
                 self.tree.rename(os.path.join(v.folder, todo.restore), data)
                 self.out.log(4, f"{v.name}: restored the original after an interrupted migration")

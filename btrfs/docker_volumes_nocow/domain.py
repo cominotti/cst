@@ -32,6 +32,8 @@ def is_config_reason(reason: object) -> bool:
     return isinstance(reason, str) and reason.endswith(CONFIG_UNKNOWN)
 
 
+# A volume's data folder, in the volume's folder (Docker's name for it).
+DATA_DIR: Final = "_data"
 # Beside a volume's _data during its migration: the NOCOW copy being made, and the
 # original between the two renames (followed by the time it was moved aside).
 NEW_SUFFIX = ".nocow-new"
@@ -64,7 +66,7 @@ def recovery(v: VolumeLeftovers) -> Recovery:
     """A volume that died between the two renames (no _data, an old copy) gets its newest old copy
     back. The other old copies and the twin go only once _data is a folder: the caller checks it
     after the restore (the copy put back may be a file or a link)."""
-    twin = ("_data" + NEW_SUFFIX,) if v.twin else ()
+    twin = (DATA_DIR + NEW_SUFFIX,) if v.twin else ()
     if not v.has_data and v.olds:
         return Recovery(v.olds[-1], v.olds[:-1] + twin)
     return Recovery(None, v.olds + twin)
