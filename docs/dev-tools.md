@@ -138,6 +138,12 @@ armed there, in one of three modes:
 - `FAIL`: the call fails with ENOSPC and no effect; the run goes on;
 - `FAIL_FROM`: that call and every later one fail (a full disk stays full).
 
+`FaultPlan(dead_after_kill=True)` makes a `KILL` final: every later call
+raises `Killed` again, with no effect and no record, as a dead process runs
+no handler. Code that cleans up in an `except BaseException` handler
+(btrfs-bulk's copy) needs it: without it the cleanup runs after the kill,
+and the state a real kill leaves is never tried.
+
 A plan can hold several faults: a `FAIL` and then a `KILL` at each later
 call is a run that dies while it rolls back, and a `FAIL` then a second
 `FAIL` one that fails again there (`btrfs/tests/test_cache_faults.py`). A port that reports a failure
