@@ -537,6 +537,49 @@ class AdaptersTest(unittest.TestCase):
         )
         self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
 
+    def test_systemctl_show_units_lists_the_loaded_units_a_glob_names(self) -> None:
+        seen: list[tuple[list[str], dict[str, object]]] = []
+
+        class Recording:
+            def __init__(self, result: CommandResult) -> None:
+                self.result = result
+
+            def run(self, argv: Sequence[str], *, check: bool = False, **options: object) -> CommandResult:
+                seen.append((list(argv), {"check": check, **options}))
+                return self.result
+
+        out = (
+            "Id=var-mnt-cache.mount\nSourcePath=/etc/fstab\nNeedDaemonReload=yes\n\n"
+            "Id=home-u-.cache.mount\nSourcePath=/proc/self/mountinfo\nNeedDaemonReload=no\n"
+        )
+        sysd = SystemctlAdapter(Recording(CommandResult(0, out, "")))
+        props = ("Id", "SourcePath", "NeedDaemonReload")
+        self.assertEqual(
+            sysd.show_units("*.mount", props),
+            [
+                {"Id": "var-mnt-cache.mount", "SourcePath": "/etc/fstab", "NeedDaemonReload": "yes"},
+                {"Id": "home-u-.cache.mount", "SourcePath": "/proc/self/mountinfo", "NeedDaemonReload": "no"},
+            ],
+        )
+        argv, options = seen[0]
+        self.assertEqual(
+            argv, ["systemctl", "show", "-p", "Id", "-p", "SourcePath", "-p", "NeedDaemonReload", "*.mount"]
+        )
+        # As show: on the host from a toolbox (SHOW_ONLY, the default), the C locale, 20 s.
+        self.assertEqual(options, {"check": False, "timeout": 20, "locale_c": True, "on_host": True})
+        # An answer that lists no unit is [] (blank lines too); a systemctl that fails is no answer: None.
+        self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "", ""))).show_units("*.mount", props), [])
+        self.assertEqual(SystemctlAdapter(Recording(CommandResult(0, "\n\n", ""))).show_units("*.mount", props), [])
+        failing = SystemctlAdapter(Recording(CommandResult(1, "", "Failed to connect to bus")))
+        self.assertIsNone(failing.show_units("*.mount", props))
+        # LOCAL and a timeout of the adapter's own.
+        seen.clear()
+        local = SystemctlAdapter(
+            Recording(CommandResult(0, "Id=a.mount\n", "")), timeout=5, on_host=SystemctlHost.LOCAL
+        )
+        self.assertEqual(local.show_units("*.mount", ("Id",)), [{"Id": "a.mount"}])
+        self.assertEqual(seen[0][1], {"check": False, "timeout": 5, "locale_c": True, "on_host": False})
+
     def test_systemctl_adapter_user_scope(self) -> None:
         unit = UnitName("cst-toolchains-prune.timer")
 

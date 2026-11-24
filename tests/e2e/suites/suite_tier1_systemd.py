@@ -74,6 +74,14 @@ p, comp = sys.argv[1:3]
 d = json.load(open(p)) if os.path.exists(p) else {"files": {}, "components": {}}
 files = sorted(k for k, v in d["files"].items() if v["component"] == comp)
 print(" ".join(files) or "-", d["components"].get(comp, "-"))"""
+# HOLD_FLOCK LOCK READY: hold an exclusive flock on LOCK (as cst_core's take_lock takes it), touch READY,
+# and keep it until killed.
+HOLD_FLOCK = r"""import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)"""
+IOCOST_LOCK_WAIT_S = 30  # btrfs/iocost/domain.py IOCOST_LOCK_TIMEOUT_S: how long a run waits for a lock
 RECORD_STRIP = r"""import json, sys
 p, comp = sys.argv[1:3]
 d = json.load(open(p))
@@ -1033,6 +1041,63 @@ stop_server() {
     for _ in $(seq 50); do [ -d "$2" ] || break; sleep 0.1; done
     test ! -d "$2"
 }
+"""
+
+
+# findmnt, mount and umount stand-ins over one mount table, for `cst btrfs cache` under a test root
+# (CST_BTRFS_CACHE_ROOT=W): the script goes to W/bin/mnt-stub, and W/bin/findmnt, mount and umount run it.
+CACHE_MOUNT_STUB = r"""#!/usr/bin/python3 -I
+# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
+import json, os, sys
+w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+state = os.path.join(w, "mounts")
+prog, args = sys.argv[1], sys.argv[2:]
+rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
+def save():
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.writelines("\t".join(r) + "\n" for r in rows)
+def holding(path):
+    best = rows[0]
+    for r in rows:
+        t = r[1].rstrip("/") or "/"
+        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
+            best = r
+    return best
+if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
+    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
+    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
+elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
+    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
+    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
+    for r in rows:
+        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
+        print(esc(src), esc(r[1]), r[2], r[3])
+elif prog == "findmnt":
+    os.execv("/usr/bin/findmnt", ["findmnt", *args])
+elif prog == "mount" and args[:1] == ["--bind"]:
+    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
+    held = holding(src)
+    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
+    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
+    save()
+elif prog == "umount":
+    # Busy, as the real umount says, while a process has its folder at or below the target.
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if cwd == args[0] or cwd.startswith(args[0] + "/"):
+            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
+            sys.exit(32)
+    tgt = args[0].removeprefix(w)
+    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
+    if not idx:
+        sys.exit(32)
+    del rows[idx[-1]]
+    save()
+else:
+    sys.exit(2)
 """
 
 
@@ -4547,6 +4612,153 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             """,
         ).stdout
         self.assertIn("E2E-IRQ-IOCOST-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_175_btrfs_iocost_revert_that_fails_after_its_disable_leaves_the_component_pending(self) -> None:
+        """A full `cst btrfs iocost revert` whose disable --now works and whose first removal then fails
+        (/etc/udev/rules.d bound read-only over itself: unlink fails with EROFS): exit 1 with the ERROR line,
+        the service disabled, btrfs:iocost pending in root's real install record, and `cst doctor` warns
+        that it is installed only in part. With the folder writable again, the next revert converges (no
+        file, no state, no warning), and so does the next apply (enabled, done). An older CST's revert left
+        such a record done: apply and revert from that state converge too. Before, the failed revert left
+        btrfs:iocost done with the service disabled. While another process holds the component lock, a full
+        revert waits, gives up (exit 1, "another btrfs-iocost run holds ...") and changes nothing: a full
+        apply and a full revert cannot interleave (before, an apply could mark done between a revert's
+        disable and its failed removal). The record is copied aside first and put back after."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        rules = "/etc/udev/rules.d"
+        unit = "cst-btrfs-iocost.service"
+        component_lock = "/run/btrfs-setup/iocost-component.lock"
+        record = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:iocost"
+        if exec_bash(c, f"[[ ! -e /etc/systemd/system/{unit} ]] || echo busy").stdout.strip():
+            self.skipTest("btrfs:iocost files already present on container")
+        exec_bash(c, f"rm -f /var/tmp/e2e-175-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-175-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; if [[ -e /var/tmp/e2e-175-bound ]]; then umount {rules}; rm -f /var/tmp/e2e-175-bound; fi; "
+            "if [[ -s /var/tmp/e2e-175-holder ]]; then kill $(cat /var/tmp/e2e-175-holder); fi; "
+            "rm -f /var/tmp/e2e-175-holder /var/tmp/e2e-175-held; "
+            "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1; "
+            "rm -f /var/tmp/e2e-175-out /var/tmp/e2e-175-doc; "
+            f"if [[ -e /var/tmp/e2e-175-rec ]]; then mv /var/tmp/e2e-175-rec {rec}; else rm -f {rec}; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-175-doc 2>&1 || true; grep -qE "WARN +btrfs:iocost: installed only in part" /var/tmp/e2e-175-doc; }}
+            ro() {{ mount --bind {rules} {rules} && touch /var/tmp/e2e-175-bound && mount -o remount,bind,ro {rules}; }}
+            rw() {{ umount {rules} && rm -f /var/tmp/e2e-175-bound; }}
+            applied() {{
+                [[ "$(systemctl is-enabled {unit})" == enabled ]] || {{ echo "not enabled" >&2; return 1; }}
+                [[ "$({record})" == *" done" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+            }}
+            reverted() {{
+                [[ "$({record})" == "- -" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+                [[ ! -e /etc/systemd/system/{unit} && ! -e {rules}/91-cst-iocost.rules && ! -e /usr/local/sbin/btrfs-iocost ]]
+                if warned; then echo "doctor still warns about btrfs:iocost" >&2; cat /var/tmp/e2e-175-doc >&2; return 1; fi
+            }}
+            failed_revert() {{
+                ro
+                rc=0; /usr/local/sbin/btrfs-iocost revert >/var/tmp/e2e-175-out 2>&1 || rc=$?
+                # The test cannot bite unless the revert got past its disable.
+                [[ "$(systemctl is-enabled {unit} 2>/dev/null)" == disabled ]] \
+                    || {{ echo "the test cannot bite: the revert did not disable the service" >&2; cat /var/tmp/e2e-175-out >&2; return 1; }}
+                [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-175-out >&2; return 1; }}
+                grep -qxF "ERROR: cannot write {rules}/91-cst-iocost.rules: Read-only file system" /var/tmp/e2e-175-out \
+                    || {{ cat /var/tmp/e2e-175-out >&2; return 1; }}
+                if grep -q Traceback /var/tmp/e2e-175-out; then cat /var/tmp/e2e-175-out >&2; return 1; fi
+                [[ "$({record})" == *" pending" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+                warned || {{ echo "doctor does not warn about btrfs:iocost" >&2; cat /var/tmp/e2e-175-doc >&2; return 1; }}
+                grep -qF 'btrfs iocost revert` began removing it and has not finished since: run ' /var/tmp/e2e-175-doc \
+                    && grep -qF 'btrfs iocost revert` again to finish the removal)' \
+                    /var/tmp/e2e-175-doc || {{ cat /var/tmp/e2e-175-doc >&2; return 1; }}
+                rw
+            }}
+            # A failed revert, then revert again.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            failed_revert
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
+            # A failed revert, then apply again.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            failed_revert
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            [[ "$(systemctl show -P ActiveState {unit})" == active ]]
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
+            # What an older CST's failed revert left: done, the service disabled, the rule gone.
+            for next in apply revert; do
+                /opt/cst-rw/cst btrfs iocost apply >/dev/null
+                systemctl disable --now {unit} 2>/dev/null
+                rm -f {rules}/91-cst-iocost.rules
+                [[ "$({record})" == *" done" ]]
+                /opt/cst-rw/cst btrfs iocost "$next" >/dev/null
+                if [[ $next == apply ]]; then applied; [[ -e {rules}/91-cst-iocost.rules ]]; else reverted; fi
+            done
+            # A full apply and a full revert hold the component lock from their first step to their last:
+            # while another process holds it, revert waits ({IOCOST_LOCK_WAIT_S} s), gives up and changes nothing.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            /usr/bin/python3 -I -c {shlex.quote(HOLD_FLOCK)} {component_lock} /var/tmp/e2e-175-held &
+            echo $! >/var/tmp/e2e-175-holder
+            for _ in $(seq 100); do [[ -e /var/tmp/e2e-175-held ]] && break; sleep 0.1; done
+            [[ -e /var/tmp/e2e-175-held ]] || {{ echo "the lock holder did not start" >&2; exit 1; }}
+            rc=0; /opt/cst-rw/cst btrfs iocost revert >/var/tmp/e2e-175-out 2>&1 || rc=$?
+            kill "$(cat /var/tmp/e2e-175-holder)"; rm -f /var/tmp/e2e-175-holder
+            [[ $rc == 1 ]] || {{ echo "revert while the lock is held: exit $rc" >&2; cat /var/tmp/e2e-175-out >&2; exit 1; }}
+            grep -qxF "ERROR: another btrfs-iocost run holds {component_lock}" /var/tmp/e2e-175-out \
+                || {{ cat /var/tmp/e2e-175-out >&2; exit 1; }}
+            applied
+            [[ -e {rules}/91-cst-iocost.rules ]]
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_176_btrfs_iocost_revert_whose_managed_file_cannot_be_removed_is_an_error_line(self) -> None:
+        """`cst btrfs iocost revert --live-only` as root with a folder where /run/btrfs-setup/iocost-managed
+        belongs (its unlink fails with EISDIR; the container has no io.cost.qos, so revert only removes
+        the file): exit 1, `ERROR: cannot write /run/btrfs-setup/iocost-managed: Is a directory` and no
+        traceback. With the folder gone, the same command exits 0. Before, the failed removal ended the
+        command in a Python traceback. A full tmpfs (test_162's trick) cannot make an unlink fail, and apply
+        never writes the file here (no io.cost.qos), so revert's removal is the save this tier can stage."""
+        c = self.SYSTEMD_CONTAINER
+        managed = "/run/btrfs-setup/iocost-managed"
+        if exec_bash(c, f"[[ ! -e {managed} ]] || echo busy").stdout.strip():
+            self.skipTest(f"{managed} already exists (another test's)")
+        self.addCleanup(exec_bash, c, f"set +e; rm -rf {managed} /var/tmp/e2e-176-out", check=False)
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /sys/fs/cgroup/io.cost.qos ]] || {{ echo "the test cannot bite: io.cost.qos is here" >&2; exit 1; }}
+            mkdir -p {managed}/x
+            rc=0; /opt/cst-rw/cst btrfs iocost revert --live-only >/var/tmp/e2e-176-out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-176-out >&2; exit 1; }}
+            grep -qxF "ERROR: cannot write {managed}: Is a directory" /var/tmp/e2e-176-out \
+                || {{ cat /var/tmp/e2e-176-out >&2; exit 1; }}
+            if grep -q Traceback /var/tmp/e2e-176-out; then cat /var/tmp/e2e-176-out >&2; exit 1; fi
+            [[ -d {managed}/x ]]
+            rm -rf {managed}
+            /opt/cst-rw/cst btrfs iocost revert --live-only >/dev/null
+            [[ ! -e {managed} ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
@@ -8318,59 +8530,6 @@ EOF
         has nothing to do."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
-        stub = r"""#!/usr/bin/python3 -I
-# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
-import json, os, sys
-w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-state = os.path.join(w, "mounts")
-prog, args = sys.argv[1], sys.argv[2:]
-rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
-def save():
-    with open(state, "w", encoding="utf-8") as fh:
-        fh.writelines("\t".join(r) + "\n" for r in rows)
-def holding(path):
-    best = rows[0]
-    for r in rows:
-        t = r[1].rstrip("/") or "/"
-        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
-            best = r
-    return best
-if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
-    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
-    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
-elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
-    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
-    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
-    for r in rows:
-        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
-        print(esc(src), esc(r[1]), r[2], r[3])
-elif prog == "findmnt":
-    os.execv("/usr/bin/findmnt", ["findmnt", *args])
-elif prog == "mount" and args[:1] == ["--bind"]:
-    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
-    held = holding(src)
-    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
-    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
-    save()
-elif prog == "umount":
-    # Busy, as the real umount says, while a process has its folder at or below the target.
-    for pid in filter(str.isdigit, os.listdir("/proc")):
-        try:
-            cwd = os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
-            continue
-        if cwd == args[0] or cwd.startswith(args[0] + "/"):
-            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
-            sys.exit(32)
-    tgt = args[0].removeprefix(w)
-    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
-    if not idx:
-        sys.exit(32)
-    del rows[idx[-1]]
-    save()
-else:
-    sys.exit(2)
-"""
         self.addCleanup(
             exec_bash,
             c,
@@ -8411,7 +8570,7 @@ EOF
             }} >{w}/mounts
             cp {w}/mounts {w}/mounts.drive
             cat >{w}/bin/mnt-stub <<'STUB'
-{stub}
+{CACHE_MOUNT_STUB}
 STUB
             for p in findmnt mount umount; do
                 printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
@@ -8645,6 +8804,217 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-CACHE-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_177_btrfs_cache_run_again_after_one_killed_at_its_daemon_reload_reloads(self) -> None:
+        """`cst btrfs cache attach` and `detach` under a test root (CST_BTRFS_CACHE_ROOT, test_160's
+        findmnt, mount and umount stand-ins), each killed by SIGKILL at its daemon-reload, after it wrote
+        /etc/fstab (a systemctl shim on PATH copies the test root's fstab to the real /etc/fstab, then kills
+        the pid the test recorded), then run again, with the real systemd. The bases are tmpfs lines, which
+        systemd-fstab-generator accepts, so var-mnt-cache.mount is loaded from /etc/fstab before the kill and
+        the real `systemctl show` says NeedDaemonReload=yes after it (the test fails as "cannot bite"
+        otherwise). After the killed attach, `status` and `cst doctor` say systemd has not loaded /etc/fstab
+        (none does once the run again reloaded), plan says attach runs daemon-reload; with the binds unmounted by
+        hand, an attach whose catch-up reload fails mounts them, then takes back only the mounts (exit 1, "the
+        mounts this run made were taken back.": it wrote no /etc/fstab); the run again exits 0, says
+        "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
+        (NeedDaemonReload=no, the mount unit of ~/.cache made); a third run has nothing to do and reloads
+        nothing. A second user's lines that systemd never read, with no unit of /etc/fstab behind and no unit
+        of the binds at all: plan shows the reload attach runs after its mounts, and attach runs it (the
+        units of the binds then come from /etc/fstab). After the killed detach, the run again reloads once,
+        unmounts the binds and leaves no mount
+        unit of them; a third has nothing to do. With no systemd that answers (systemctl show and
+        daemon-reload both fail), a detach after a killed one warns, exits 0 and still unmounts; the next one
+        reloads. Before, the run again said "nothing to do" (attach) or
+        only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-177"
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"""
+            set +e
+            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            systemctl daemon-reload
+            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
+            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
+            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
+            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\nu2:x:1001:1001::/var/home/u2:/bin/bash\n' >{w}/etc/passwd
+            mkdir -p {w}/var/home/u2
+            cat >{w}/etc/fstab <<'EOF'
+tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
+tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
+EOF
+            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            # Both shims hand systemd the test root's fstab at each daemon-reload; kill/ then kills the
+            # command (the pid this script recorded) before the reload runs, sync/ logs it and runs it.
+            cat >{w}/kill/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
+    touch {w}/killed
+    kill -KILL "$(cat {w}/pid)"
+    sleep 5
+    exit 1
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    echo reload >>{w}/reloads
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
+            mkdir -p {w}/fail
+            printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
+            # nobus/: no systemd that answers (a rescue shell): every systemctl call fails.
+            mkdir -p {w}/nobus
+            printf '#!/bin/bash\necho "Failed to connect to bus: No such file or directory" >&2\nexit 1\n' >{w}/nobus/systemctl
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl {w}/nobus/systemctl
+            touch {w}/reloads
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            behind() {{ systemctl show -P NeedDaemonReload var-mnt-cache.mount; }}
+            reloads() {{ wc -l <{w}/reloads; }}
+            # The bases in the real /etc/fstab, loaded and started: their units come from /etc/fstab.
+            cp {w}/etc/fstab /etc/fstab
+            systemctl daemon-reload
+            systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
+            [[ "$(systemctl show -P SourcePath var-mnt-cache.mount)" == /etc/fstab ]]
+            [[ "$(behind)" == no ]]
+            # killed ACTION: the command, killed by SIGKILL at its daemon-reload, after its /etc/fstab write.
+            killed() {{
+                rm -f {w}/pid {w}/killed
+                PATH="{w}/kill:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1 &
+                echo $! >{w}/pid
+                rc=0; wait $! || rc=$?
+                [[ $rc == 137 ]] || {{ echo "$1: the killed run exited $rc" >&2; cat {w}/out >&2; return 1; }}
+                [[ -e {w}/killed ]] || {{ echo "the test cannot bite: $1 was not killed at its daemon-reload" >&2; return 1; }}
+                [[ "$(behind)" == yes ]] || {{ echo "the test cannot bite: systemd says it has /etc/fstab loaded after the killed $1" >&2; return 1; }}
+            }}
+            # again ACTION: the run again reloads once and leaves systemd with /etc/fstab loaded; a third run
+            # has nothing to do and reloads nothing.
+            again() {{
+                local n rc=0
+                n=$(reloads)
+                PATH="{w}/sync:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1 || rc=$?
+                [[ $rc == 0 ]] || {{ echo "$1 again: exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                    || {{ echo "$1 again did not reload:" >&2; cat {w}/out >&2; return 1; }}
+                [[ $(reloads) == $((n + 1)) ]] || {{ echo "$1 again: $(($(reloads) - n)) reloads" >&2; return 1; }}
+                [[ "$(behind)" == no ]]
+                PATH="{w}/sync:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1
+                grep -qF "nothing to do" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                [[ $(reloads) == $((n + 1)) ]] || {{ echo "a third $1 reloaded" >&2; return 1; }}
+            }}
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+
+            killed attach
+            grep -qF "user=u1 kind=cache" {w}/etc/fstab
+            [[ ! -e "$cache_unit" ]]
+            # status and cst doctor say systemd has not loaded /etc/fstab (the real one, which the shim wrote).
+            doc() {{ $cst doctor >{w}/doc 2>&1 || true; grep -qF "btrfs cache: systemd has not loaded /etc/fstab as it is on disk" {w}/doc; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            grep -qF "  systemd            has not loaded /etc/fstab as it is on disk" <<<"$st_out" || {{ echo "$st_out" >&2; exit 1; }}
+            doc || {{ echo "cst doctor does not warn that systemd has not loaded /etc/fstab" >&2; cat {w}/doc >&2; exit 1; }}
+            plan_out="$($cst btrfs cache plan --user u1)"
+            grep -qF "Already attached for u1; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload." \
+                <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            # The binds unmounted by hand, then an attach whose catch-up reload fails: it mounts them, the
+            # reload fails, and it takes back only the mounts (it wrote no /etc/fstab).
+            grep -vF /var/home/u1/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "attach with a failing reload: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "/etc/fstab is as asked, systemd has not loaded it (run systemctl daemon-reload once it works); the mounts this run made were taken back." {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the failed attach" >&2; exit 1; fi
+            [[ "$(behind)" == yes ]]
+            again attach
+            [[ -f "$cache_unit" ]] || {{ echo "no mount unit of ~/.cache after the reload" >&2; exit 1; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            if grep -qF "  systemd   " <<<"$st_out"; then echo "$st_out" >&2; exit 1; fi
+            if doc; then echo "cst doctor still warns after the reload" >&2; cat {w}/doc >&2; exit 1; fi
+            [[ "$(systemctl show -P SourcePath var-home-u1-.cache.mount)" == /etc/fstab ]]
+
+            # u2's lines in the test root's /etc/fstab that systemd never read (an attach killed at its
+            # reload before its shim copied them), its binds unmounted since: no unit of /etc/fstab says
+            # NeedDaemonReload=yes, and systemd has no unit of u2's binds at all. Had it read the lines it
+            # would have their units, so plan shows the reload and attach runs it after its mounts.
+            mkdir -p {w}/killnc
+            printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then kill -KILL "$(cat {w}/pid)"; sleep 5; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/killnc/systemctl
+            chmod +x {w}/killnc/systemctl
+            rm -f {w}/pid
+            PATH="{w}/killnc:$PATH" $cst btrfs cache attach --user u2 >{w}/out 2>&1 &
+            echo $! >{w}/pid
+            rc=0; wait $! || rc=$?
+            [[ $rc == 137 ]] || {{ echo "the u2 attach killed at its reload exited $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "user=u2 kind=cache" {w}/etc/fstab
+            grep -vF /var/home/u2/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            [[ "$(behind)" == no ]] || {{ echo "the test cannot bite: a unit of /etc/fstab says NeedDaemonReload=yes" >&2; exit 1; }}
+            [[ "$(systemctl show -P LoadState var-home-u2-.cache.mount)" != loaded ]]
+            plan_out="$($cst btrfs cache plan --user u2)"
+            grep -qF "u2's lines are in /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload after the mounts." \
+                <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            n=$(reloads)
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u2 >{w}/out 2>&1
+            grep -qF "Mounted /var/mnt/cache/u2 -> /var/home/u2/.cache." {w}/out && grep -qF "reloaded: " {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]]
+            [[ "$(systemctl show -P SourcePath var-home-u2-.cache.mount)" == /etc/fstab ]]
+
+            killed detach
+            if grep -qF "user=u1" {w}/etc/fstab; then echo "a u1 line after the killed detach" >&2; exit 1; fi
+            grep -qF "/var/home/u1/.cache" {w}/mounts
+            again detach
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the detach" >&2; exit 1; fi
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit of ~/.cache after the detach's reload" >&2; exit 1; }}
+
+            # No systemd that answers (systemctl show and daemon-reload both fail): a detach after a killed
+            # one warns, exits 0 and still unmounts; the next detach, with systemd back, reloads.
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >/dev/null
+            killed detach
+            rc=0; PATH="{w}/nobus:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "detach with no systemd that answers: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "systemctl could not say whether systemd had loaded /etc/fstab as it is on disk either" {w}/out \
+                && grep -qF "warning: systemctl daemon-reload failed: " {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the detach" >&2; exit 1; fi
+            [[ "$(behind)" == yes ]]
+            again detach
+            echo E2E-CACHE-177-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CACHE-177-OK", out)
 
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:

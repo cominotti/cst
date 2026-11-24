@@ -10,9 +10,15 @@ is stubbed (the TestCase's setUp), so the machine does not depend on TMPDIR.
 
 After every step: /etc/fstab's managed lines name exactly the binds mounted
 under /var/home (no line waits for the next boot without its mount, and no
-bind of CST lives without its line).
+bind of CST lives without its line), except the binds a detach killed at its
+daemon-reload left mounted after it took their lines out (until a later step
+unmounts them or writes their lines back). A step that exits 0 leaves systemd
+with /etc/fstab loaded as it is on disk (FakeMountRunner's view of it): a run
+after one killed between its /etc/fstab write and its daemon-reload reloads.
 
-Each step: a step whose fault fired (the command ran the mount or the reload
+Each step: a step killed at its daemon-reload (the fault KILLED_AT_RELOAD:
+FakeMountRunner's before_reload raises Killed, after the /etc/fstab write)
+has no exit to check. A step whose fault fired (the command ran the mount or the reload
 that was made to fail) exits non-zero with an ERROR line, never ROLLBACK
 INCOMPLETE (nothing here can make the undo fail), and left /etc/fstab's text
 and the mounts as they were (the folders and the CACHEDIR.TAG it made may
@@ -21,7 +27,8 @@ fire (the bind was already mounted, /etc/fstab did not change so no reload
 ran), exits 0: the same command converges from every state.
 
 Not modelled: a failed umount, a failed write of /etc/fstab, a findmnt that
-fails, a mount CST did not make, kills, and a fault that fails only some of
+fails, a mount CST did not make, kills elsewhere than at the daemon-reload
+(btrfs/tests/test_cache_faults.py kills at every point of one run), and a fault that fails only some of
 the calls it matches: a reload fault fails the step's one daemon-reload
 (its undo runs none), and a mount fault fails an attach's bind, never the
 undo's mount again of a detach. So the undo never fails here; the
@@ -51,7 +58,7 @@ from btrfs.cache.domain import (
 )
 from btrfs.tests.fakes import CacheTestCtx, FakeMountRunner, write
 from cst_core.adapters.runtime import ManagedCliEnv
-from tests.fault_injection import stub_fsync
+from tests.fault_injection import Killed, stub_fsync
 from tests.mbt import profiles
 from tests.repo_files import REPO
 
@@ -78,12 +85,14 @@ SELECTION_FLAGS: Final = {
 
 
 class CacheStepFault(StrEnum):
-    """What fails in one step: nothing, the cache's or the scratchpad's mount --bind, or daemon-reload."""
+    """What fails in one step: nothing, the cache's or the scratchpad's mount --bind, or daemon-reload; or the
+    run is killed at its daemon-reload."""
 
     NONE = "none"
     CACHE_MOUNT = "cache-mount"
     SCRATCHPAD_MOUNT = "scratchpad-mount"
     RELOAD = "daemon-reload"
+    KILLED_AT_RELOAD = "killed-at-daemon-reload"
 
 
 # The bind whose mount --bind each mount fault fails.
@@ -93,6 +102,10 @@ MOUNT_FAULT: Final = {
 }
 
 type Mounts = list[tuple[str, str, str]]
+
+
+def _kill() -> None:
+    raise Killed
 
 
 class CacheMachine(RuleBasedStateMachine):
@@ -111,6 +124,8 @@ class CacheMachine(RuleBasedStateMachine):
         self.runner.add_mount("/dev/mapper/cache", CACHE_BASE, fsroot="/cache")
         self.runner.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE, fsroot="/scratchpad")
         self.entry = os.path.join(REPO, "btrfs", "btrfs-cache")
+        # The binds a detach killed at its reload left mounted without their lines.
+        self.left_by_kill: set[str] = set()
 
     @override
     def teardown(self) -> None:
@@ -129,6 +144,9 @@ class CacheMachine(RuleBasedStateMachine):
 
     def _mounts(self) -> Mounts:
         return sorted((str(m["target"]), str(m["source"]), str(m["fsroot"])) for m in self.runner.mounts)
+
+    def _lines(self) -> list[str]:
+        return sorted(e.target for e in parse_managed_fstab_entries(self._fstab() or ""))
 
     def _binds(self) -> list[str]:
         return sorted(t for t, _source, _fsroot in self._mounts() if t.startswith("/var/home/"))
@@ -153,6 +171,9 @@ class CacheMachine(RuleBasedStateMachine):
         if fault == CacheStepFault.RELOAD:
             self.runner.reload_fails = True
             return ["systemctl", "daemon-reload"]
+        if fault == CacheStepFault.KILLED_AT_RELOAD:
+            self.runner.before_reload = _kill
+            return ["systemctl", "daemon-reload"]
         kind = MOUNT_FAULT.get(fault)
         if kind is None:
             return []
@@ -169,11 +190,18 @@ class CacheMachine(RuleBasedStateMachine):
         failing = self._arm(user, fault)
         try:
             rc, lines = self._run(argv)
+        except Killed:
+            if action == "detach":
+                self.left_by_kill |= set(self._binds()) - set(self._lines())
+            return
         finally:
             self.runner.mount_fails.clear()
             self.runner.reload_fails = False
+            self.runner.before_reload = None
         made = self.runner.calls[calls_before:]
         fired = bool(failing) and failing in made
+        if rc == 0:
+            assert self.runner.view_current(), f"{argv} exited 0 and systemd has not loaded /etc/fstab: {lines}"
         if not fired:
             assert rc == 0, f"{argv} ({fault} did not fire) exited {rc}: {lines}"
             return
@@ -195,7 +223,7 @@ class CacheMachine(RuleBasedStateMachine):
     @rule(
         user=st.sampled_from(sorted(USERS)),
         selection=st.sampled_from(CacheSelection),
-        fault=st.sampled_from([CacheStepFault.NONE, CacheStepFault.RELOAD]),
+        fault=st.sampled_from([CacheStepFault.NONE, CacheStepFault.RELOAD, CacheStepFault.KILLED_AT_RELOAD]),
     )
     def detach(self, user: str, selection: CacheSelection, fault: CacheStepFault) -> None:
         self._step("detach", user, selection, fault)
@@ -203,8 +231,11 @@ class CacheMachine(RuleBasedStateMachine):
     # ---- invariants --------------------------------------------------------------------------
     @invariant()
     def fstab_names_exactly_the_mounted_binds(self) -> None:
-        lines = sorted(e.target for e in parse_managed_fstab_entries(self._fstab() or ""))
-        assert lines == self._binds(), f"/etc/fstab names {lines}, mounted are {self._binds()}"
+        lines, binds = self._lines(), self._binds()
+        self.left_by_kill &= set(binds) - set(lines)  # a later step unmounted them or wrote their lines
+        assert set(lines) <= set(binds), f"/etc/fstab names {lines}, mounted are {binds}"
+        extra = set(binds) - set(lines)
+        assert extra <= self.left_by_kill, f"/etc/fstab names {lines}, mounted are {binds}"
 
 
 class CacheMachineTest(profiles.MbtTestCase):
