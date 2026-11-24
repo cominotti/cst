@@ -14,7 +14,7 @@ from enum import StrEnum
 from itertools import islice
 import posixpath
 import re
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from typing import Final, Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
@@ -526,11 +526,16 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
     return seconds, wait, as_json, limits
 
 
+# The longest --for window: quiet keeps SECONDS + 1 readings in a deque, whose maxlen is at most
+# sys.maxsize (2**63 - 1 on the 64-bit machines CST runs on; domain code does not read sys).
+MAX_WINDOW_SECONDS: Final = (1 << 63) - 2
+
+
 def _window_seconds(val: str) -> int:
-    """--for's value: a whole number of seconds, at least 1; ValueError for anything else."""
+    """--for's value: a whole number of seconds, from 1 to MAX_WINDOW_SECONDS; ValueError for anything else."""
     seconds = parse_whole_number(val)  # ASCII digits within int()'s digit limit
-    if seconds is None or seconds < 1:
-        raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
+    if seconds is None or not 1 <= seconds <= MAX_WINDOW_SECONDS:
+        raise ValueError(f"--for: a whole number of seconds, from 1 to {MAX_WINDOW_SECONDS} (got {val!r})")
     return seconds
 
 

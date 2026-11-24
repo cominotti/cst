@@ -719,6 +719,7 @@ class QuietTest(unittest.TestCase):
             (["--for", "0"], {}),
             (["--for", "1.5"], {}),
             (["--for"], {}),
+            (["--for", "9" * 20], {}),
             (["--for", "5", "--wait", "3"], {}),
             (["--wait", "2x"], {}),
             (["--wait", "0"], {}),
@@ -1156,6 +1157,7 @@ class QuietNumbersTest(unittest.TestCase):
         )
         self.assertEqual((seconds, wait, as_json, limits["io-pressure"], limits["writes"]), (1, 120.0, True, 2.5, 40.0))
         self.assertEqual(q(["--for", "12", "--cpu", "3"], {})[0], 12)
+        self.assertEqual(q(["--for", str(sys.maxsize - 1)], {})[0], cpu_domain.MAX_WINDOW_SECONDS)
         for argv in (
             ["--for"],
             ["--for", "0"],
@@ -1175,6 +1177,9 @@ class QuietNumbersTest(unittest.TestCase):
         for argv, message in (
             (["--for", three], "^--for: a whole number"),
             (["--for", "1" * 5000], "^--for: a whole number"),
+            # Above sys.maxsize, deque(maxlen=SECONDS + 1) raised OverflowError: a traceback, not exit 2.
+            (["--for", "9" * 20], "^--for: a whole number"),
+            (["--for", str(sys.maxsize)], "^--for: a whole number"),
             (["--for", "1", "--wait", f"{three}m"], "^not a duration"),
             (["--for", "1", "--wait", f"1.{three}h"], "^not a duration"),
         ):
