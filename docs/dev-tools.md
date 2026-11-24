@@ -154,7 +154,9 @@ run (recovery), and at the end (the same command again converges).
   `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
   `os` as it is: `btrfs/tests/test_scrub_limit_faults.py`,
-  `toolchains/tests/test_prune_faults.py`), or put
+  `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
+  whose errors the code does not handle: a failure armed there does not
+  fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
   `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
