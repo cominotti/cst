@@ -25,7 +25,6 @@ from btrfs.cache.domain import (
     CacheMountParsedArgs,
     CacheMountSnapshot,
     CacheMountUser,
-    MOUNT_UNIT_PROPS,
     LiveMount,
     ManagedFstabEntry,
     build_user_bindings,
@@ -45,10 +44,10 @@ from btrfs.cache.domain import (
     plan_detach_fstab,
     selected_kinds,
     snapshot_error,
-    systemd_behind_fstab,
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, systemd_behind_fstab
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost

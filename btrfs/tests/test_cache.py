@@ -21,7 +21,6 @@ from btrfs.cache import adapters as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
-    MOUNT_UNIT_PROPS,
     SCRATCHPAD_BASE,
     CACHE_MOUNT_MARKER,
     CacheMountAction,
@@ -44,6 +43,7 @@ from btrfs.cache.domain.health import (
     dm_device_names,
     parse_crypttab_cache_issues,
 )
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from btrfs.tests.fakes import UUID_CACHE_DRIVE, CacheTestCtx, FakeMountRunner
 from cst_core.adapters.runtime import ManagedCliEnv
