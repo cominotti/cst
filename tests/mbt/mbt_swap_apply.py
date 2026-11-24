@@ -27,8 +27,9 @@ The expected outcome of an apply comes from those parts (an oracle over the file
    scratch tree byte for byte, no systemctl call, no daemon-reload, no sysctl or zram call.
    modprobe is left out on purpose: the checks load the compressor module before they can tell
    whether zstd exists (bash parity).
-2. Otherwise exit 0 with no ERROR line, and an apply right after changes no file, starts, stops or
-   restarts no unit, reloads nothing and exits 0.
+2. Otherwise exit 0 with no ERROR line and no zswap parameter skipped (a kernel with zswap has all
+   four the scratch has; the kernel rule puts them back when zswap comes back), and an apply right
+   after changes no file, starts, stops or restarts no unit, reloads nothing and exits 0.
 3. After an apply that exits 0, the install record lists swap's five files with the sha256 of what is
    in place, and swap:core is done.
 Named gap (O1): with an install record of a newer CST, apply writes crypttab and fstab (and their
@@ -72,6 +73,7 @@ from swap.tests.test_swap import (
     file_tree,
     swap_installer,
     swap_scratch,
+    write_zswap_params,
 )
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
@@ -374,7 +376,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
         """Another kernel, another disk: zswap, zstd, the partition's size and signature."""
         params = self.env.zswap_params_dir
         if zswap and not os.path.isdir(params):
-            os.makedirs(params)
+            write_zswap_params(params)  # its four parameters, as at a boot
         elif not zswap and os.path.isdir(params):
             shutil.rmtree(params)
         self._put(
@@ -410,6 +412,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
             self._assert_newer_record_gap(before, rc, err)
             return
         assert (rc, "ERROR:" in err) == (0, False), f"apply exited {rc}: {out}{err}"
+        assert "skipped:   zswap" not in out, f"a kernel with zswap lacks a parameter: {out}"
         self.assert_record()
         after = file_tree(self.tmp)
         rc, out, err, system = self.apply()
