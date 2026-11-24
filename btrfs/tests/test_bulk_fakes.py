@@ -11,12 +11,13 @@ import contextlib
 import os
 import shutil
 import tempfile
+from typing import override
 import unittest
 from unittest import mock
 
 from btrfs.tests import bulk_fakes
-from btrfs.tests.bulk_fakes import BulkHome, run_armed
-from tests.fault_injection import FaultMode, FaultPlan
+from btrfs.tests.bulk_fakes import BulkHome, arm_points, run_armed
+from tests.fault_injection import FaultMode, FaultPlan, Killed, stub_fsync
 
 
 def fail() -> None:
@@ -98,6 +99,49 @@ class RunArmedTest(unittest.TestCase):
         plan = FaultPlan()
         calls = run_armed(plan, lambda: self.crash_after(plan, 3), (FaultMode.KILL, 2))
         self.assertEqual(calls, ["call 1", "call 2"])
+
+
+class CopyTreeNocowTest(unittest.TestCase):
+    """The fake copy gives a NOCOW copy's files +C (as btrfs does: inherited from their folder)."""
+
+    @override
+    def setUp(self) -> None:
+        stub_fsync(self)
+        self.fx = BulkHome()
+        self.addCleanup(self.fx.close)
+        self.src = os.path.join(self.fx.tmp, "src")
+        os.makedirs(os.path.join(self.src, "sub"))
+        for rel in ("disk.img", "sub/d2"):
+            with open(os.path.join(self.src, rel), "w") as f:
+                f.write(rel)
+        self.dst = self.fx.bulk_path("emulators/android/avd.bulk-new")
+        os.makedirs(self.dst)
+
+    def copied(self) -> list[str]:
+        return sorted(
+            os.path.relpath(os.path.join(root, n), self.dst)
+            for root, dirs, files in os.walk(self.dst)
+            for n in dirs + files
+        )
+
+    def test_a_copy_has_c(self) -> None:
+        self.fx.machine.copy_tree(self.src, self.dst, True)
+        self.assertEqual(self.copied(), ["disk.img", "sub", "sub/d2"])
+        self.assertEqual([p for p in self.copied() if not self.fx.is_nocow(os.path.join(self.dst, p))], [])
+
+    def test_a_copy_killed_after_cp_has_c(self) -> None:
+        plan = FaultPlan(dead_after_kill=True)
+        arm_points(self.fx, plan, torn_rmtree=False)
+        plan.arm((FaultMode.KILL, 1))
+        with self.assertRaises(Killed):
+            self.fx.machine.copy_tree(self.src, self.dst, True)
+        self.assertEqual(plan.calls, ["cp Bulk/emulators/android/avd.bulk-new"])
+        self.assertEqual(self.copied(), ["disk.img", "sub", "sub/d2"])
+        self.assertEqual([p for p in self.copied() if not self.fx.is_nocow(os.path.join(self.dst, p))], [])
+
+    def test_a_copy_on_write_copy_has_no_c(self) -> None:
+        self.fx.machine.copy_tree(self.src, self.dst, False)
+        self.assertEqual([p for p in self.copied() if self.fx.is_nocow(os.path.join(self.dst, p))], [])
 
 
 if __name__ == "__main__":

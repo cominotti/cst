@@ -149,11 +149,15 @@ class BulkHome:
         real_copy = self.machine.copy_tree
 
         def copy_tree(src: str, dst: str, nocow: bool) -> None:
-            real_copy(src, dst, nocow)
-            if nocow:  # btrfs: new files inherit +C from their folder
-                for root, dirs, files in os.walk(dst):
-                    for n in dirs + files:
-                        self.nocow.add(inode(os.path.join(root, n)))
+            try:
+                real_copy(src, dst, nocow)
+            finally:
+                # btrfs: new files inherit +C from their folder, also those of a cp killed after it
+                # copied (a fault plan's KILL) or cut short (what it copied before it failed).
+                if nocow:
+                    for root, dirs, files in os.walk(dst):
+                        for n in dirs + files:
+                            self.nocow.add(inode(os.path.join(root, n)))
 
         def busy_paths(paths: Iterable[str], home: str) -> set[str]:
             return {
