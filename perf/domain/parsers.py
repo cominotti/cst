@@ -384,7 +384,11 @@ def assemble_cpu_probe(
     files: Mapping[PerfPathKey, str | None],
     extra: CpuProbeExtra | None = None,
 ) -> CpuProbeSnapshot:
-    """Build `CpuProbeSnapshot` cleanly from raw text keyed by `PerfPathKey`."""
+    """Build `CpuProbeSnapshot` from raw text keyed by `PerfPathKey` and from `extra`.
+
+    The IRQ lines come only from `extra.irq_lines` (the probe reads them with each IRQ's effective
+    affinity): `files[PerfPathKey.INTERRUPTS]` is not read here, and without `extra` the snapshot has none.
+    """
     meta = CpuProbeExtra() if extra is None else extra
     return CpuProbeSnapshot(
         cpuidle_driver=clean_opt_str(files.get(PerfPathKey.CPUIDLE_DRIVER)),
