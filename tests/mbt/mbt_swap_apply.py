@@ -145,6 +145,11 @@ def line_text(path_key: str, kind: LineKind) -> str | None:
     return "".join(f"{x}\n" for x in lines)
 
 
+def is_key_line(line: str, key: str) -> bool:
+    """The line of crypttab or fstab is one for key (its first field)."""
+    return line.split()[:1] == [key]
+
+
 def sha256_of(path: str) -> str:
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
@@ -206,6 +211,17 @@ class SwapApplyMachine(RuleBasedStateMachine):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
 
+    def _boot(self, *, mapper: bool, zram: bool) -> None:
+        """A boot: swap0's mapper there or not (and open in /proc/swaps), zram0 in use or not."""
+        self.fs = self._new_fs(mapper=mapper)
+        self.systemd = SwapFakeSystemd(self.swaps, "/dev/dm-0", fs=self.fs)
+        rows = [SWAPS_HEADER]
+        if mapper:
+            rows.append("/dev/dm-0 partition 134217724 0 -2")
+        if zram:
+            rows.append("/dev/zram0 partition 8388604 102400 100")
+        self._put(self.swaps, "".join(f"{r}\n" for r in rows))
+
     def _put_line(self, path: str, key: str, kind: LineKind) -> None:
         self._put(path, line_text(key, kind), folder=kind == LineKind.FOLDER)
 
@@ -239,7 +255,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
 
     def _has_swap0_line(self, path: str, key: str) -> bool:
         lines = self._lines(path)
-        return lines is not None and any(line.split()[:1] == [key] for line in lines)
+        return lines is not None and any(is_key_line(line, key) for line in lines)
 
     def refusal(self) -> str | None:
         """Why apply must refuse this machine (the oracle), None when it must not."""
@@ -251,7 +267,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
             return "settings folder"
         if not os.path.exists(env.settings_path):
             crypt = self._lines(env.crypttab) or []
-            if not any(line.split()[:1] == [CRYPT_KEY] and (OLD in line or NEW in line) for line in crypt):
+            if not any(is_key_line(line, CRYPT_KEY) and (OLD in line or NEW in line) for line in crypt):
                 return "no partition configured"
             return None
         with open(env.settings_path, encoding="utf-8") as fh:
@@ -273,7 +289,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
             lines = self._lines(path)
             if lines is None:
                 return f"{path} unreadable"
-            if any(line.split()[:1] == [key] and "managed-by:" not in line for line in lines):
+            if any(is_key_line(line, key) and "managed-by:" not in line for line in lines):
                 return f"{path}: an unmarked swap0 line"
         return None
 
@@ -321,14 +337,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
         self._put_line(env.crypttab, CRYPT_KEY, start.crypttab)
         self._put_line(env.fstab, FSTAB_KEY, start.fstab)
         self._set_settings(start.settings)
-        self.fs = self._new_fs(mapper=start.mapper)
-        self.systemd = SwapFakeSystemd(self.swaps, "/dev/dm-0", fs=self.fs)
-        rows = [SWAPS_HEADER]
-        if start.mapper:
-            rows.append("/dev/dm-0 partition 134217724 0 -2")
-        if start.zram_in_use:
-            rows.append("/dev/zram0 partition 8388604 102400 100")
-        self._put(self.swaps, "".join(f"{r}\n" for r in rows))
+        self._boot(mapper=start.mapper, zram=start.zram_in_use)
         match start.zram_conf:
             case "masked":
                 os.makedirs(os.path.dirname(env.zram_conf), exist_ok=True)
@@ -377,11 +386,7 @@ class SwapApplyMachine(RuleBasedStateMachine):
     @rule(zram=st.booleans())
     def reboot(self, *, zram: bool) -> None:
         """swap0 closed, the mapper gone, zram0 back when zram-generator.conf is not masked."""
-        self.fs = self._new_fs(mapper=False)
-        self.systemd = SwapFakeSystemd(self.swaps, "/dev/dm-0", fs=self.fs)
-        masked = os.path.islink(self.env.zram_conf)
-        rows = [SWAPS_HEADER, *(["/dev/zram0 partition 8388604 102400 100"] if zram and not masked else [])]
-        self._put(self.swaps, "".join(f"{r}\n" for r in rows))
+        self._boot(mapper=False, zram=zram and not os.path.islink(self.env.zram_conf))
 
     @rule(newer=st.booleans())
     def record(self, *, newer: bool) -> None:
