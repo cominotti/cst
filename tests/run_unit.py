@@ -764,7 +764,8 @@ def default_jobs(env_jobs: int | None = None) -> int:
     `env_jobs` (CST_TEST_JOBS, from `jobs_from_env`) when given; else one per CPU this
     process may run on (`os.process_cpu_count()`: the CPU affinity, as a toolbox or a
     cgroup's cpuset narrows it), not per CPU of the machine (`os.cpu_count()`). It reads no
-    environment itself, so its callers' tests do not depend on the caller's CST_TEST_JOBS.
+    environment itself, so its own tests do not depend on the caller's CST_TEST_JOBS. A test that
+    starts a child runner on several work units passes `--jobs` to pick its path.
     """
     if _coverage_active():
         return 1

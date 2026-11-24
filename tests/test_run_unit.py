@@ -562,7 +562,17 @@ class ResourceWarningGateTest(unittest.TestCase):
             with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
                 f.write(text)
         done = subprocess.run(
-            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_first", "probe_second"],
+            # --jobs 1: both modules in one process, so the runner itself must put its hook back between them
+            # (the parallel runner's version of this check is in ParallelRunnerTest).
+            [
+                sys.executable,
+                "-B",
+                os.path.join(REPO, "tests", "run_unit.py"),
+                "--jobs",
+                "1",
+                "probe_first",
+                "probe_second",
+            ],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
