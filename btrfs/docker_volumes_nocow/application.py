@@ -272,11 +272,10 @@ class DockerVolumesNocow:
         # leave +C with copy-on-write data and no flag (no boot would ever ask again). When it
         # cannot be written, the folder keeps no +C and the next boot sees the request again.
         requested = bool(self.pending())
-        if requested:
-            if not self.request_migration(renew=True):  # a new request gets its two boots again
-                return 2
-        else:
+        if not requested:
             self.state.forget_attempts()
+        elif not self.request_migration(renew=True):  # a new request gets its two boots again
+            return 2
         self.tree.set_nocow(vols, on=True)
         todo = self.pending(fix=True)  # folders and empty files: in place, now
         if not todo:
