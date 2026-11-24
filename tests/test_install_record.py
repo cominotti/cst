@@ -522,6 +522,29 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.assertEqual(self.target.writes, [])
         self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
 
+    def test_check_record_refuses_a_record_of_a_newer_cst_and_changes_nothing(self) -> None:
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaises(InstallRefused) as cm:
+            self.svc.check_record(self.ROOT)
+        self.assertEqual(
+            str(cm.exception),
+            f"{self.ROOT}: format 9, written by a newer CST (this one reads format 1): nothing was changed",
+        )
+        self.assertEqual(self.record.texts, {self.ROOT: '{"format": 9, "files": {}}'})
+        self.assertEqual((self.record.writes, self.target.writes), (0, []))
+
+    def test_check_record_passes_no_record_a_current_one_a_broken_one_and_none(self) -> None:
+        self.svc.check_record(self.ROOT)  # no record yet
+        self.svc.check_record("")  # no record named
+        self.assertEqual(self.record.texts, {})
+        list(self.svc.install([self.a], InstallRequest()))
+        writes = self.record.writes
+        self.svc.check_record(self.ROOT)  # this CST's record
+        self.record.texts[self.ROOT] = "not a record"
+        self.svc.check_record(self.ROOT)  # install starts it again; check_record leaves it
+        self.assertEqual(self.record.texts[self.ROOT], "not a record")
+        self.assertEqual(self.record.writes, writes)
+
     def test_no_record_port_records_nothing(self) -> None:
         svc = InstallService(self.target, lambda e: self.payloads[e.src])
         self.assertEqual(list(svc.install([self.a], InstallRequest())), ["written:   /usr/local/sbin/a"])

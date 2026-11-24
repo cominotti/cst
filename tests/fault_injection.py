@@ -143,14 +143,18 @@ class FaultyOs:
     (the point is "os.NAME"); every other attribute is os's own.
 
     Patch it over the module's name (`mock.patch.object(module, "os", FaultyOs(plan, ("rename",)))`):
-    only that module's calls become points, not the ones the standard library makes for it."""
+    only that module's calls become points, not the ones the standard library makes for it.
 
-    def __init__(self, plan: FaultPlan, names: Collection[str]) -> None:
+    kill_only: the named calls are points of a kill only; a failure armed at one does not fire (the
+    call runs, and the run goes on), for calls whose errors the code under test does not handle."""
+
+    def __init__(self, plan: FaultPlan, names: Collection[str], *, kill_only: bool = False) -> None:
         for name in names:
             if not callable(getattr(os, name, None)):
                 raise AttributeError(f"os has no function {name!r}")
         self.plan = plan
         self.names = frozenset(names)
+        self.kill_only = kill_only
         self.path = os.path
 
     def __getattr__(self, name: str) -> object:
@@ -159,7 +163,10 @@ class FaultyOs:
             return real
 
         def faulty(*args: object, **kw: object) -> object:
-            return self.plan.step(f"os.{name}", functools.partial(real, *args, **kw))
+            effect = functools.partial(real, *args, **kw)
+            if self.kill_only:
+                return self.plan.step(f"os.{name}", effect, lambda _err: effect())
+            return self.plan.step(f"os.{name}", effect)
 
         return faulty
 

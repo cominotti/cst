@@ -161,7 +161,9 @@ run (recovery), and at the end (the same command again converges).
   `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
   place of a module's `os` (the functions named are points, the rest of
   `os` as it is: `btrfs/tests/test_scrub_limit_faults.py`,
-  `toolchains/tests/test_prune_faults.py`), or put
+  `toolchains/tests/test_prune_faults.py`; `kill_only=True` for calls
+  whose errors the code does not handle: a failure armed there does not
+  fire, a kill does), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
   `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
@@ -722,6 +724,44 @@ not derive from it.
   revert again converges. One known gap is let through by name: a full
   revert whose removal fails after its disable leaves btrfs:iocost done
   with the service disabled, until the next full apply or revert.
+- `mbt_game_state.py`: the game profile's `game.state` and
+  `game.intended`, whose fields are written as bash's `printf %q` writes
+  them, over fields generated as bytes (any but NUL, as a bash variable
+  holds them): our reader reads what our writer wrote, an older bash copy's
+  `eval` reads back the exact bytes, `record_line` is bash's own
+  `printf %q` line, a line bash wrote reads back, a record cut short is
+  left out and removed before the next one, and `game.intended`'s drift
+  records keep their six fields. One known gap is let through by name: a
+  field that is not UTF-8 (a cgroup folder's name the user made) reads back
+  decoded with U+FFFD, so it never matches its record.
+- `mbt_game_profile.py`: a state machine over the game profile's `on`,
+  `tick` and `off` (through `locked`), with the unit tests' scratch and fake
+  systemctl, whose daemon-reload sets each value from the override files and
+  the drop-ins; between them the game starts and ends, Docker containers,
+  Steam scopes and boxes appear, settings drift and someone else reloads, and
+  each call may fail or die at any of its set-property calls and file writes:
+  every change has its record in `game.state`, an `off` with no fault
+  restores everything, `on` twice is `on` once, and a tick leaves no box
+  half handled. Three known gaps are let through by name: a set-property that
+  failed (or a process that died between the record and the set) is never
+  tried again while the profile is on; an `off` whose undo step fails
+  still removes `game.state`, so that setting keeps the profile's value;
+  and an `off` killed after it undid a setting of a scope (a Docker
+  container's, a Steam game's) keeps that scope's record in `game.state`,
+  so while the profile stays on no tick sets it again.
+- `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
+  unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
+  hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
+  twice, other options, written by hand, a folder), kernels, partitions,
+  zram and install records: each refusal leaves every file as it was and
+  runs no systemctl, sysctl or zram call, and an apply that exits 0 records
+  swap's files and changes nothing more when run again. Its first run, on
+  the code before, found that apply wrote crypttab before it refused an
+  fstab it could not read, and that with an install record of a newer CST
+  it wrote crypttab and fstab and started swap0 before the installer
+  refused; apply now refuses both before its first write. `mbt_game_state.py`,
+  `mbt_game_profile.py` and `mbt_swap_apply.py` took 6.2 s together at
+  `--jobs 1` and 2.8 s at `--jobs 4` (`--profile ci`, a shared workstation).
 - `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four
   items (a plain move, one nested in it, a NOCOW item, an old subvolume),
   through the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`: real

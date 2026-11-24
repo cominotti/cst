@@ -277,6 +277,32 @@ class FaultyOsTest(unittest.TestCase):
             FaultyOs(self.plan, ("no_such_call",))
         with self.assertRaises(AttributeError):
             FaultyOs(self.plan, ("sep",))  # a value, not a function
+        with self.assertRaises(AttributeError):
+            FaultyOs(self.plan, ("no_such_call",), kill_only=True)
+
+    def test_kill_only_runs_a_call_a_failure_is_armed_at(self) -> None:
+        fos = FaultyOs(self.plan, ("mkdir",), kill_only=True)
+        d = os.path.join(self.tmp, "d")
+        for mode in (FaultMode.FAIL, FaultMode.FAIL_FROM):
+            with self.subTest(mode=mode):
+                self.plan.arm((mode, 1))
+                mkdir = fos.mkdir
+                assert callable(mkdir)
+                mkdir(d)  # no OSError: the call ran
+                self.assertTrue(os.path.isdir(d))
+                self.assertEqual(self.plan.calls, ["os.mkdir"])
+                os.rmdir(d)
+
+    def test_kill_only_still_kills_after_the_call(self) -> None:
+        fos = FaultyOs(self.plan, ("mkdir",), kill_only=True)
+        d = os.path.join(self.tmp, "d")
+        self.plan.arm((FaultMode.KILL, 1))
+        mkdir = fos.mkdir
+        assert callable(mkdir)
+        with self.assertRaises(Killed):
+            mkdir(d)
+        self.assertTrue(os.path.isdir(d))
+        os.rmdir(d)
 
 
 class _Inner:
