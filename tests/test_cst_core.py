@@ -52,6 +52,7 @@ from cst_core.domain.values import (
     format_bytes_decimal,
     format_bytes_gib_mib,
     format_bytes_human,
+    format_cpulist,
 )
 from cst_core.domain.units import ActiveState
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
@@ -174,6 +175,15 @@ class ValueObjectsTest(unittest.TestCase):
             CpuSet(frozenset())
         with self.assertRaises(DomainValidationError):
             CpuSet(frozenset({-1}))
+
+    def test_format_cpulist(self) -> None:
+        self.assertEqual(format_cpulist([0, 1, 2, 5, 8, 9, 10]), "0-2,5,8-10")
+        # Any order, a CPU named twice, none at all (cpu setup's split can be empty).
+        self.assertEqual(format_cpulist([13, 12, 6, 6, 0]), "0,6,12-13")
+        self.assertEqual(format_cpulist([]), "")
+        # What CpuSet.parse reads back as the same set.
+        cs = CpuSet.parse("0-3,6,12-13")
+        self.assertEqual(CpuSet.parse(format_cpulist(cs.cpus)), cs)
 
     def test_octal_mode_parse(self) -> None:
         self.assertEqual(OctalMode.parse("0600"), OctalMode(0o600))

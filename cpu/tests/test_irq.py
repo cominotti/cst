@@ -25,7 +25,6 @@ from cpu.irq.cli import IrqCliDeps, run_irq_cli
 from cpu.irq.domain import (
     IrqAction,
     compute_banned_cpulist,
-    format_cpulist,
     format_irq_plan,
     format_irq_status,
     parse_irq_args,
@@ -115,7 +114,6 @@ class CpuIrqDomainTest(unittest.TestCase):
         self.assertIsNotNone(parse_irq_args(["bogus"]).error)
 
     def test_compute_banned_cpulist_topology_cases(self) -> None:
-        self.assertEqual(format_cpulist([0, 1, 2, 5, 8, 9, 10]), "0-2,5,8-10")
         banned, notes = compute_banned_cpulist(CpuSet.parse("12-23"), CpuSet.parse("0-23"))
         self.assertEqual((banned, notes), ("12-23", ()))
         am5_ban, _ = compute_banned_cpulist(CpuSet.parse("12-23"), CpuSet.parse("0-15"))
