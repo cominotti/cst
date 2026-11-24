@@ -62,7 +62,7 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, postponed_line
+from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, VolumeLeftovers, postponed_line, recovery
 from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, entries, tree
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -1921,6 +1921,29 @@ class RecoverTest(Base):
         self.assertTrue(os.path.islink(os.path.join(self.vols, "link")))
         self.assertEqual(sorted(os.listdir(elsewhere)), names)
         self.assert_no_leftovers("cow")  # the real volume is still cleaned
+
+
+class RecoveryTest(unittest.TestCase):
+    """recovery(): what recover does in one volume, from what its folder holds (no I/O)."""
+
+    def test_the_choice_for_each_volume_folder(self) -> None:
+        o1, o2, o3 = "_data.cow-old-1700000001", "_data.cow-old-1700000002", "_data.cow-old-1700000003"
+        cases = [
+            # (_data there, old copies oldest first, twin there) -> (put back, then removed)
+            ((False, (), False), (None, ())),
+            ((False, (), True), (None, ("_data.nocow-new",))),
+            ((False, (o1,), False), (o1, ())),
+            ((False, (o1, o2), True), (o2, (o1, "_data.nocow-new"))),
+            ((False, (o1, o2, o3), False), (o3, (o1, o2))),
+            ((True, (), False), (None, ())),
+            ((True, (), True), (None, ("_data.nocow-new",))),
+            ((True, (o1, o2), False), (None, (o1, o2))),
+            ((True, (o1, o2, o3), True), (None, (o1, o2, o3, "_data.nocow-new"))),
+        ]
+        for (has_data, olds, twin), (restore, remove) in cases:
+            with self.subTest(has_data=has_data, olds=olds, twin=twin):
+                todo = recovery(VolumeLeftovers("v", "/volumes/v", has_data=has_data, olds=olds, twin=twin))
+                self.assertEqual((todo.restore, todo.remove), (restore, remove))
 
 
 class PostponedDurableTest(PostponeBase):
