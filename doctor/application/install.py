@@ -3,8 +3,9 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Final
 
-from cst_core.domain.install import INSTALL_MANIFEST, InstallEntry, Owner, expand_dest, manifest_by_src
+from cst_core.domain.install import INSTALL_MANIFEST, Component, InstallEntry, Owner, expand_dest, manifest_by_src
 from cst_core.domain.record import (
     ROOT_RECORD,
     USER_RECORD_REL,
@@ -13,12 +14,17 @@ from cst_core.domain.record import (
     RecordedFile,
     RecordFormatError,
 )
+from cst_core.domain.text import enum_member
 from doctor.application.shared import check, refresh, runs
 from doctor.domain import INFO, OK, WARN, HostPath, Result, ViewPath, host_join, is_unit_file, unit_exec_paths
 from doctor.ports import CheckFn, DoctorHostPort, InstalledFilesPort
 
 # This area's checks, in the order the report prints them (doctor/application/registry.py puts the areas in order).
 CHECKS: list[tuple[str, CheckFn]] = []
+
+# The components whose removal command marks them pending before it changes anything (as cst names it): a
+# pending state of one of them is an install or a removal that did not finish.
+PENDING_REMOVALS: Final = {Component.BTRFS_IOCOST: "cst btrfs iocost revert"}
 
 
 @dataclass(slots=True)
@@ -104,6 +110,29 @@ def _unit_findings(
     return bad
 
 
+def _pending_result(host: DoctorHostPort, component: str) -> Result:
+    """The WARN of a component the record says is pending; for one whose removal marks it pending first
+    (PENDING_REMOVALS), it names that removal too, which finishes the other way (the fix stays the install
+    command: a fix line is one command)."""
+    fix = refresh(host, component)
+    known = enum_member(Component, component)
+    removal = PENDING_REMOVALS.get(known) if known is not None else None
+    if removal is None:
+        return Result(
+            WARN,
+            f"{component}: installed only in part (a file of it was recorded and `{fix or component}` "
+            "has not finished since)",
+            fix,
+        )
+    undo = f"{host.cst} {removal.removeprefix('cst ')}"
+    return Result(
+        WARN,
+        f"{component}: installed only in part (a file of it was recorded and `{fix}` has not finished since, "
+        f"or `{undo}` began removing it and has not finished since: run `{undo}` again to finish the removal)",
+        fix,
+    )
+
+
 def _record_results(
     host: DoctorHostPort, files: InstalledFilesPort, rec: InstallRecord, where: str, home: str
 ) -> Iterator[Result]:
@@ -112,15 +141,7 @@ def _record_results(
     out = _InstallFindings()
     for component, state in sorted(rec.components.items()):
         if state == ComponentState.PENDING:
-            fix = refresh(host, component)
-            out.results.append(
-                Result(
-                    WARN,
-                    f"{component}: installed only in part (a file of it was recorded, or a removal of it began, "
-                    f"and `{fix or component}` has not finished since)",
-                    fix,
-                )
-            )
+            out.results.append(_pending_result(host, component))
     for dest, f in sorted(rec.files.items()):
         _file_findings(host, files, dest, f, home, out)
     yield from out.results

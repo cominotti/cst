@@ -4676,7 +4676,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 if grep -q Traceback /var/tmp/e2e-175-out; then cat /var/tmp/e2e-175-out >&2; return 1; fi
                 [[ "$({record})" == *" pending" ]] || {{ echo "record: $({record})" >&2; return 1; }}
                 warned || {{ echo "doctor does not warn about btrfs:iocost" >&2; cat /var/tmp/e2e-175-doc >&2; return 1; }}
-                grep -qF "btrfs:iocost: installed only in part (a file of it was recorded, or a removal of it began" \
+                grep -qF 'btrfs iocost revert` began removing it and has not finished since: run ' /var/tmp/e2e-175-doc \
+                    && grep -qF 'btrfs iocost revert` again to finish the removal)' \
                     /var/tmp/e2e-175-doc || {{ cat /var/tmp/e2e-175-doc >&2; return 1; }}
                 rw
             }}
