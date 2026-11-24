@@ -177,6 +177,15 @@ class ShardingTest(unittest.TestCase):
         self.assertEqual(default_tier1_jobs(75, cpu_count=24), 4)
         self.assertEqual(default_tier1_jobs(75, cpu_count=4), 2)
 
+        for argv in (
+            ("--tier", "1", "--shard", "1/3", "--jobs", "2"),
+            ("--tier", "1", "--jobs", "-1"),
+            ("--tier", "2", "--allow-privileged", "--shard", "1/2"),
+            ("--tier", "2", "--allow-privileged", "--jobs", "2"),
+        ):
+            rc, _, _ = self._run_cli(*argv)
+            self.assertEqual(rc, 2, argv)
+
     def test_default_jobs_count_the_cpu_affinity(self) -> None:
         # A process pinned to 4 of 24 CPUs (a toolbox's cpuset) gets 2 containers, not 4.
         with (
@@ -192,15 +201,6 @@ class ShardingTest(unittest.TestCase):
             mock.patch.object(e2e_selection.os, "sched_getaffinity", side_effect=OSError("no affinity")),
         ):
             self.assertEqual(default_tier1_jobs(75), 4)
-
-        for argv in (
-            ("--tier", "1", "--shard", "1/3", "--jobs", "2"),
-            ("--tier", "1", "--jobs", "-1"),
-            ("--tier", "2", "--allow-privileged", "--shard", "1/2"),
-            ("--tier", "2", "--allow-privileged", "--jobs", "2"),
-        ):
-            rc, _, _ = self._run_cli(*argv)
-            self.assertEqual(rc, 2, argv)
 
     def test_assign_shards_partitions_all_tier1_tests(self) -> None:
         cases = iter_cases(self.mod.load_suite("suite_tier1_systemd.py"))
