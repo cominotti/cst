@@ -1195,8 +1195,9 @@ The Python code inside `vm/` (standard library only at run time):
   from the cli, over the same ports plus `SettingsPort` (vm.conf and
   the NAS settings), `ResticPort` (`vm/adapters/restic.py`'s `Restic`, generic:
   the /home NAS backup can use it), `SignalsPort` (the stop signals: caught,
-  held during the snapshot call, ignored during the merge back), the per-VM
-  lock and the critical alert. `__init__.py`: `backup-timer on` and
+  held during the snapshot call, ignored during the merge back and what
+  follows it: the unclear snapshot's problems, the alert and the building
+  of the refusal), the per-VM lock and the critical alert. `__init__.py`: `backup-timer on` and
   `off` (`TimerFilesPort`: the timer's files through the installer and the
   links that say which timer is on, its adapter `vm/adapters/timer.py`'s
   `TimerFiles`; systemd through cst_core's `SystemdPort`), and `tune` (plan,
