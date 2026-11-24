@@ -42,7 +42,11 @@ The unit tests do not need any of this: `python3 -I -B tests/run_unit.py`
 still runs on the system Python with the standard library (in parallel by
 default, one worker per CPU the run may use: its CPU affinity, so a toolbox or
 cgroup pinned to 16 of 24 CPUs gets 16; pass `--jobs 1` to force a single
-process, or let it fall back to 1 automatically when run under `coverage.py`). For faster local iterations,
+process, or let it fall back to 1 automatically when run under `coverage.py`).
+`CST_TEST_JOBS=N` in the environment sets that default worker count for a
+run that passes no `--jobs` (`invowk cmd check` passes none): an explicit
+`--jobs N` wins over it, coverage's 1 too, and an empty value or 0 keeps the
+default; any value that is not a whole number stops the run with a usage error. For faster local iterations,
 `invowk cmd test affected [--list] [--base REF]` (`tests/run_unit.py --affected`)
 selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
