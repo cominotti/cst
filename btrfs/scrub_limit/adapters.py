@@ -141,6 +141,12 @@ def scrub_limit_plan(paths: ScrubPaths, target_limit: str | None) -> tuple[int, 
     )
 
 
+def _remove_if_empty(folder: str) -> None:
+    """Remove folder when it is empty; one that is not, or is not there, stays as it is."""
+    with contextlib.suppress(OSError):
+        os.rmdir(folder)
+
+
 def _write_conf(path: str, text: str) -> None:
     ensure_dir(os.path.dirname(path), 0o755)
     write_atomic(path, text, mode=0o644, durable=True, relabel=True)
@@ -155,8 +161,7 @@ def _restore_conf(paths: ScrubPaths, old_text: str | None, *, made_dir: bool) ->
         with contextlib.suppress(FileNotFoundError):
             os.remove(paths.conf_path)
         if made_dir:
-            with contextlib.suppress(OSError):
-                os.rmdir(os.path.dirname(paths.conf_path))
+            _remove_if_empty(os.path.dirname(paths.conf_path))
     except OSError as exc:
         return f"{paths.conf_path}: {exc.strerror or exc}"
     return None
@@ -179,8 +184,7 @@ def _restore_dropin(runner: CommandRunnerPort, paths: ScrubPaths, old_text: str 
     if rc != 0:
         return f"{paths.dropin_path}: {err or f'installer exit {rc}'}"
     if old_text is None:
-        with contextlib.suppress(OSError):
-            os.rmdir(os.path.dirname(paths.dropin_path))
+        _remove_if_empty(os.path.dirname(paths.dropin_path))
     return None
 
 
@@ -234,8 +238,7 @@ def _apply_conf(paths: ScrubPaths, conf_text: str | None, target_limit: str | No
             _write_conf(paths.conf_path, new_conf)
         except OSError:
             if made_dir:  # write_atomic removed its temporary file: the folder is empty again
-                with contextlib.suppress(OSError):
-                    os.rmdir(os.path.dirname(paths.conf_path))
+                _remove_if_empty(os.path.dirname(paths.conf_path))
             raise
         verb = "written:" if conf_text is None else "updated:"
         note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
@@ -347,8 +350,7 @@ def scrub_limit_apply(
         return rc_i, [*out, _rolled_back(cause, [restore_conf()], reload_hint=False)]
 
     if target_limit is None:
-        with contextlib.suppress(OSError):
-            os.rmdir(os.path.dirname(paths.dropin_path))
+        _remove_if_empty(os.path.dirname(paths.dropin_path))
 
     def reload_or_roll_back() -> str | None:
         return _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
