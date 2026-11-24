@@ -2944,6 +2944,28 @@ class NasRecoveryLinesTest(unittest.TestCase):
         self.assertTrue(store.exists(self.overlay_b))
         self.assertEqual(len(alerts), 1)
 
+    def test_the_look_first_commands_stay_when_no_disk_is_left_to_name(self) -> None:
+        # vda shows its overlay and is merged back; vdb never shows its overlay, and its file is not there.
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)],
+            on_virsh=self._timeout_hook({"vda": self.overlay_a}, [self.overlay_a]),
+            clock=FakeNasMovingClock(),
+        )
+        msg = self._refusal(port)
+        self.assertIn("may still switch to it", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        v = f"sudo virsh -c {vm_domain.URI}"
+        self.assertIn("# vda: the VM's state or the files could not be read: look first", recovery)
+        for line in (
+            f"{v} domstate win",
+            f"{v} domblklist win --details",
+            f"{v} domblklist win --details --inactive",
+            f"sudo ls -l --time-style=full-iso {self.disk_a} {self.overlay_a}",
+        ):
+            self.assertIn(line, recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertEqual(len(alerts), 1)
+
 
 class NasHeldStopThawTest(unittest.TestCase):
     """A stop held through a quiesced snapshot call is raised when the held block ends: the best-effort

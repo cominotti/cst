@@ -477,8 +477,10 @@ def _nas_not_merged_back(
     p.alert("VM backup: disk left on a snapshot overlay", body)
     if not run.overlaid:  # nothing known: the files this run could have made
         _add_overlay_files(p, run)
-    # A disk the merge back put back (both listings show its image) needs no command.
-    left = [(t, spec) for t, spec in run.overlaid.items() if t not in merge.back]
+    # A disk the merge back put back (both listings show its image) needs no command. When none is left
+    # to name (a disk that never showed its overlay, a listing that could not be read), the look-first
+    # commands of the disks the run knows (no recovery kind) still show where the VM stands.
+    left = [(t, spec) for t, spec in run.overlaid.items() if t not in merge.back] or list(run.overlaid.items())
     lines = overlay_recovery(run.vm, left, merge.how)
     msg = (
         "DISK NOT MERGED BACK:\n  "

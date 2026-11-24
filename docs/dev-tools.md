@@ -1210,8 +1210,8 @@ Four instances are checked: a running VM with one disk and three runs, the
 quiesced attempt first (`nas_live1`), two disks and two runs
 (`nas_live2`), a shut-off VM with three runs and `--keep-tag` or not
 (`nas_shutoff`), and the VM's state changed by the user between two runs
-(`nas_mixed`); `KEEP = 2`. Together about 7.2 million distinct states in
-about 1.5 minutes and under 2 GB (`nas_live1`: 5.5 million, 41 s).
+(`nas_mixed`); `KEEP = 2`. Together about 8 million distinct states in
+about 1.5 minutes and under 2 GB (`nas_live1`: 6.2 million, 44 s).
 
 **The properties:**
 
