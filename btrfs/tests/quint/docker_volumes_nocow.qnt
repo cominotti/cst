@@ -17,10 +17,12 @@
 // "absent". Not modelled: scan(fix) setting +C in place on folders and empty files, the postponed
 // record, journal lines and the alert, daemon.json problems, a dockerd outside docker.service, status
 // and unmark, a failing remove_tree, containers writing during an install (mark's second scan finds
-// what the first did), and durability of metadata. A power loss is modelled only as the loss of a
-// copy's unsynced content: the flag (/etc), the counter (/var) and the data root may be on different
-// filesystems and roll back apart; the code keeps the pairs that matter in order by fsync (the flag
-// before +C, the counter's reset before the flag), which unit tests check.
+// what the first did), durability of metadata, and the start an older install could leave (+C on
+// the folder, copy-on-write data, no flag: requestKept rules it out; MarkUnmarkTest and tier 2
+// test_05a check that an install requests the migration again from there). A power loss is modelled
+// only as the loss of a copy's unsynced content: the flag (/etc), the counter (/var) and the data root
+// may be on different filesystems and roll back apart; the code keeps the pairs that matter in order by
+// fsync (the flag before +C, the counter's reset before the flag), which unit tests check.
 module nocow {
   // The volumes, in the order the code walks them (LocalVolumeTree.volumes: sorted names).
   const VOLS: List[str]

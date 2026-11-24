@@ -5168,8 +5168,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
 
     @e2e_tags(E2ETag.BTRFS)
     def test_170_docker_volumes_nocow_mark_writes_the_flag_before_it_tries_nocow(self) -> None:
-        """docker-volumes-nocow mark (the checkout's program, as root in the container: `cst btrfs
-        install` killed right after mark, so btrfs-setup.sh's own touch of the flag never runs) on a
+        """docker-volumes-nocow mark (the checkout's program, as root in the container, as install's
+        step runs it: btrfs-setup.sh writes nothing after it) on a
         data root of the test's own on a tmpfs, holding one volume with data and a count of boots an
         older helper left. The container has no btrfs, so +C cannot be set: tmpfs answers the flags
         ioctl and refuses NOCOW (EOPNOTSUPP), which the test checks first. That refusal is the witness

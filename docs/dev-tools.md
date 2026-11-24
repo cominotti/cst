@@ -897,8 +897,11 @@ volume's folders hold contents, not files ("cow",
 "copy", "partial", "empty", "absent"). The spec's header lists what it does
 not model: `scan(fix)`, the postponed record, journal lines and alerts,
 `daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
-a failing `remove_tree`, containers writing during an install, and the
-durability of metadata. A power loss loses only a copy's unsynced content:
+a failing `remove_tree`, containers writing during an install, the
+durability of metadata, and the start an older install could leave (+C on
+the folder, copy-on-write data, no flag), which `requestKept` rules out:
+unit and tier 2 tests check that an install requests the migration again
+from there. A power loss loses only a copy's unsynced content:
 the flag (`/etc`), the counter (`/var`) and the data root may be on
 different file systems and roll back apart, and the code keeps the pairs
 that matter in order by fsync (the flag before +C, the counter's reset
@@ -908,8 +911,8 @@ Five instances bound the search: two volumes (`nocow_ab`), one
 (`nocow_a`), two with boots only (`nocow_ab_boots`: no install, Docker
 never recreates a volume), two with more crashes and installs
 (`nocow_ab_wide`), three volumes (`nocow_abc`). Each allows
-`GIVE_UP_AFTER = 2` boots, as the code does. All five together take about
-a little over a minute and under 2 GB (about 6.5 million distinct states).
+`GIVE_UP_AFTER = 2` boots, as the code does. All five together take a
+little over a minute and under 2 GB (about 6.5 million distinct states).
 
 **The properties**, checked in every state of every instance:
 

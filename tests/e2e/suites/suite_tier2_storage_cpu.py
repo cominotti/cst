@@ -360,7 +360,7 @@ test ! -e "$attempts"
 
 # 5. A machine an older helper left behind in that case: the volumes folder
 # has +C, a volume still holds CoW data, and nothing is scheduled. Running
-# `cst btrfs install` again schedules it (mark finds the CoW data; install
+# `cst btrfs install` again schedules it (its mark finds the CoW data and
 # creates /etc/btrfs-setup and the flag), and the next boot migrates it.
 rm -rf /etc/btrfs-setup
 make_volume e2e-cow4
@@ -383,9 +383,9 @@ test ! -e "$flag"
 test ! -e "$attempts"
 echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after install on an affected machine"
 
-# 6. The install's mark alone, as when `cst btrfs install` is killed right after it (btrfs-setup.sh's
-# own touch of the flag never runs): mark writes the flag before it sets +C, so the two come
-# together, and the next boot migrates. An older mark set +C and left the flag to install.
+# 6. The install's mark alone (btrfs-setup.sh writes nothing after it): mark writes the flag
+# before it sets +C, so the two come together, and the next boot migrates. An older mark set +C
+# and left the flag to install.
 rm -f "$flag" "$attempts"
 chattr -C "$vols"
 make_volume e2e-cow5
