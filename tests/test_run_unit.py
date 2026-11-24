@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pwd
+import queue
 import shutil
 import subprocess
 import sys
@@ -1495,6 +1496,30 @@ class LongestFirstTest(unittest.TestCase):
             )
         self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
         self.assertEqual(os.listdir(tmp), ["file"])
+
+    def test_the_worker_times_a_unit_from_loading_its_tests_to_the_end_of_their_run(self) -> None:
+        clock = mock.Mock(side_effect=[100.0, 102.5])
+        with mock.patch.object(run_unit_module, "time", types.SimpleNamespace(monotonic=clock)):
+            payload = run_unit_module._run_unit_payload([], 1)
+        self.assertEqual(payload.get("seconds"), 2.5)
+        self.assertEqual(clock.call_count, 2)
+
+    def test_a_unit_s_time_is_the_one_its_worker_measured_not_the_wait_for_its_reply(self) -> None:
+        # The wait for a reply also holds the worker's start-up (its first unit) and the pipes: a
+        # reply that says 2.5 s is recorded as 2.5 s, however long the reply took to come.
+        reply = json.dumps({**run_unit_module._run_unit_payload([], 1), "seconds": 2.5}) + "\n"
+        proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", "pass"], stdin=subprocess.DEVNULL)
+        worker = run_unit_module._WorkerHandle(
+            proc=proc,
+            cmd_fh=io.TextIOWrapper(io.BytesIO(), encoding="utf-8"),
+            res_fh=io.TextIOWrapper(io.BytesIO(reply.encode()), encoding="utf-8"),
+        )
+        work_q: queue.SimpleQueue[tuple[str, ...]] = queue.SimpleQueue()
+        work_q.put(("m.A.a", "m.A.b"))
+        totals = run_unit_module._ParallelTotals(lock=threading.Lock())
+        run_unit_module._drain_worker(worker, work_q, totals)
+        self.assertEqual(totals.worker_errors, [])
+        self.assertEqual(totals.unit_seconds, {("m.A.a", "m.A.b"): 2.5})
 
     def _run_with_durations(self, opts: RunOptions) -> tuple[mock.MagicMock | mock.AsyncMock, str]:
         """_run on today's units with a durations file that puts the 1-test unit first; _run_parallel mocked."""

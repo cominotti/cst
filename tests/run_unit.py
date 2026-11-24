@@ -661,6 +661,8 @@ class _WorkerReport:
     lost_exceptions: tuple[str, ...]
     hook_problems: tuple[str, ...]
     signal_problems: tuple[str, ...]
+    seconds: float
+    """How long the unit took in the worker, from loading its tests to the end of their run."""
 
 
 @dataclass(slots=True)
@@ -713,6 +715,13 @@ def _int_field(obj: dict[object, object], key: str) -> int:
     return val
 
 
+def _float_field(obj: dict[object, object], key: str) -> float:
+    val = obj.get(key)
+    if not isinstance(val, float):
+        raise ValueError(f"expected float for {key!r}")
+    return val
+
+
 def _str_list_field(obj: dict[object, object], key: str) -> tuple[str, ...]:
     raw = obj.get(key)
     if not isinstance(raw, list):
@@ -754,6 +763,7 @@ def _decode_worker_report(line: str) -> _WorkerReport:
         lost_exceptions=_str_list_field(raw, "lost_exceptions"),
         hook_problems=_str_list_field(raw, "hook_problems"),
         signal_problems=_str_list_field(raw, "signal_problems"),
+        seconds=_float_field(raw, "seconds"),
     )
 
 
@@ -1176,6 +1186,8 @@ def _open_socket_stdin() -> socket.socket:
 
 
 def _run_unit_payload(names: Sequence[str], verbosity: int) -> dict[str, object]:
+    """The report of one unit, with the seconds it took here: the worker's start-up is not part of them."""
+    started = time.monotonic()
     suite = unittest.defaultTestLoader.loadTestsFromNames(names)
     stream_buf = io.StringIO()
     err_buf = io.StringIO()
@@ -1189,6 +1201,7 @@ def _run_unit_payload(names: Sequence[str], verbosity: int) -> dict[str, object]
             result.stopTestRun()
             if gc_was_enabled and not gc.isenabled():
                 gc.enable()
+    seconds = time.monotonic() - started
     return {
         "ran": result.testsRun,
         "stream": stream_buf.getvalue(),
@@ -1202,6 +1215,7 @@ def _run_unit_payload(names: Sequence[str], verbosity: int) -> dict[str, object]
         "lost_exceptions": list(result.lost_exceptions),
         "hook_problems": list(result.hook_problems),
         "signal_problems": list(result.signal_problems),
+        "seconds": seconds,
     }
 
 
@@ -1345,7 +1359,6 @@ def _drain_worker(
             unit = work_q.get_nowait()
         except queue.Empty:
             break
-        started = time.monotonic()
         try:
             worker.cmd_fh.write(json.dumps({"names": list(unit)}) + "\n")
             worker.cmd_fh.flush()
@@ -1354,7 +1367,6 @@ def _drain_worker(
             with totals.lock:
                 totals.worker_errors.append(f"worker I/O failed running {unit[0]}: {exc}")
             return
-        took = time.monotonic() - started
         if not reply:
             with totals.lock:
                 totals.worker_errors.append(f"worker exited unexpectedly running {unit[0]}")
@@ -1366,7 +1378,7 @@ def _drain_worker(
                 totals.worker_errors.append(f"malformed worker reply running {unit[0]}: {exc}")
             return
         with totals.lock:
-            totals.unit_seconds[unit] = took
+            totals.unit_seconds[unit] = report.seconds
         _record_report(report, totals)
     worker.cmd_fh.close()
     worker.res_fh.close()
