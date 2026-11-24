@@ -63,19 +63,21 @@ def records(draw: st.DrawFn) -> InstallRecord:
     return InstallRecord(files, states)
 
 
-# A small pool of destinations, each with its component, as the manifest gives them: a destination
-# keeps its component from one step to the next. Out of scope here (written down for a fix of its
-# own): with_files() keeps the state of a component whose last file moved to another component.
-POOL: Final = (("/etc/a", "m:a"), ("/etc/b", "m:a"), ("/etc/c", "m:b"), ("/usr/local/sbin/d", "n:c"))
-COMPONENTS: Final = sorted({c for _, c in POOL})
-dests = st.sampled_from([d for d, _ in POOL])
+# A small pool of destinations and components. Each step draws a destination's component, so a
+# destination can move to another component from one step to the next (a manifest move between
+# versions, or the same generated text recorded under another --component).
+DESTS: Final = ("/etc/a", "/etc/b", "/etc/c", "/usr/local/sbin/d")
+COMPONENTS: Final = ("m:a", "m:b", "n:c")
+dests = st.sampled_from(DESTS)
 
 
 @st.composite
 def recordings(draw: st.DrawFn) -> dict[str, tuple[RecordedFile, bool]]:
-    """What one install records: {dest: (file, written)} for some destinations of POOL."""
-    chosen = draw(st.lists(st.sampled_from(POOL), unique=True, max_size=len(POOL)))
-    return {dest: (draw(recorded_files(st.just(component))), draw(st.booleans())) for dest, component in chosen}
+    """What one install records: {dest: (file, written)} for some destinations of DESTS, each under a
+    component of COMPONENTS."""
+    chosen = draw(st.lists(dests, unique=True, max_size=len(DESTS)))
+    component = st.sampled_from(COMPONENTS)
+    return {dest: (draw(recorded_files(component)), draw(st.booleans())) for dest in chosen}
 
 
 @dataclass(frozen=True, slots=True)

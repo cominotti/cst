@@ -8387,3 +8387,56 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_163_installer_drops_a_component_state_no_recorded_file_names(self) -> None:
+        """Root's real install record as an older CST could leave it: a state for btrfs:degraded-boot, with no
+        file of it recorded (its last file had been recorded again under another component, and
+        with_files() kept the state). `cst doctor` warns that btrfs:degraded-boot is installed only in part;
+        one `installer.py text --component btrfs:core` writes the record without that state, after which
+        doctor no longer warns about it, and the same call again changes no byte of the record. Before,
+        the state stayed, and so did doctor's warning."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-163-core-seed"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        state = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:degraded-boot"
+        if exec_bash(c, f"[[ ! -e {seed} ]] || echo {seed}; {state}").stdout.split() != ["-", "-"]:
+            self.skipTest("the seed exists, or root's record already lists btrfs:degraded-boot (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-163-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-163-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} /var/tmp/e2e-163-doc; "
+            f"if [[ -e /var/tmp/e2e-163-rec ]]; then mv /var/tmp/e2e-163-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        orphan = (
+            "import json, os, sys\n"
+            "p = sys.argv[1]\n"
+            'd = json.load(open(p)) if os.path.exists(p) else {"format": 1, "files": {}, "components": {}}\n'
+            'd.setdefault("components", {})["btrfs:degraded-boot"] = "pending"\n'
+            "os.makedirs(os.path.dirname(p), exist_ok=True)\n"
+            'open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\\n")\n'
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-163-doc 2>&1 || true; grep -qE "WARN +btrfs:degraded-boot: installed only in part" /var/tmp/e2e-163-doc; }}
+            /usr/bin/python3 -I -c {shlex.quote(orphan)} {rec}
+            [[ "$({state})" == "- pending" ]]
+            warned || {{ echo "the test cannot bite: doctor does not warn about the orphan state" >&2; cat /var/tmp/e2e-163-doc >&2; exit 1; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            [[ "$({state})" == "- -" ]] || {{ echo "the orphan state stayed: $({state})" >&2; exit 1; }}
+            if warned; then echo "doctor still warns about btrfs:degraded-boot" >&2; cat /var/tmp/e2e-163-doc >&2; exit 1; fi
+            before="$(sha256sum <{rec})"
+            again="$(printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core)"
+            [[ "$again" == "unchanged: {seed}" ]]
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

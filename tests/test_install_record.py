@@ -184,6 +184,21 @@ class RecordDomainTest(unittest.TestCase):
         self.assertEqual(with_files(rec, {"/etc/a": (_f("bb"), False)}).components, {"m:t": "pending"})
         self.assertEqual(with_files(EMPTY_RECORD, {"/etc/a": (_f(), False)}).components, {"m:t": "pending"})
 
+    def test_a_component_whose_last_file_is_recorded_under_another_loses_its_state(self) -> None:
+        # A destination recorded under m:t, done, recorded again under m:u (a manifest move, or the same
+        # generated text written with another --component): m:t has no file left, so no state either.
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.DONE})
+        moved = with_files(rec, {"/etc/a": (_f(component="m:u"), False)})
+        self.assertEqual(moved.components, {"m:u": "pending"})
+        # With another file of m:t still recorded, m:t keeps its state.
+        rec = InstallRecord({"/etc/a": _f(), "/etc/b": _f("bb")}, {"m:t": ComponentState.DONE})
+        moved = with_files(rec, {"/etc/a": (_f(component="m:u"), False)})
+        self.assertEqual(moved.components, {"m:t": "done", "m:u": "pending"})
+
+    def test_a_state_an_older_cst_left_without_a_file_goes_at_the_next_write(self) -> None:
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.DONE, "m:gone": ComponentState.PENDING})
+        self.assertEqual(with_files(rec, {"/etc/a": (_f(), False)}).components, {"m:t": "done"})
+
     def test_marked_and_without_files(self) -> None:
         rec = with_files(EMPTY_RECORD, {"/etc/a": (_f(), True), "/etc/b": (_f(component="m:u"), True)})
         self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done", "m:u": "pending"})
@@ -925,6 +940,29 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(sorted(doc.files), sorted([*main_lines, dest]))
         self.assertEqual({d: doc.files[d].sha256 for d in main_lines}, {d: f["sha256"] for d, f in main_lines.items()})
         self.assertEqual(self.cli("check", timer).returncode, 0)
+
+    def test_upgrade_a_record_an_older_cst_left_with_a_state_no_file_names(self) -> None:
+        # An older CST's with_files() kept the state of a component whose last file moved to another
+        # component. Such a record still reads as it is; the next text --component writes it without the
+        # orphan state, and a second identical call changes no byte of it.
+        dest, data = "/etc/x.conf", b"x\n"
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        f = RecordedFile(None, "btrfs:core", GeneratedKind.TEXT, hashlib.sha256(data).hexdigest(), 0o644, Owner.USER)
+        old = InstallRecord({dest: f}, {"btrfs:core": ComponentState.DONE, "m:gone": ComponentState.PENDING})
+        user_record.parent.mkdir(parents=True)
+        user_record.write_text(render_record(old))
+        Path(self.stage + "/etc").mkdir()
+        Path(self.stage + dest).write_bytes(data)
+        os.chmod(self.stage + dest, 0o644)
+        self.assertEqual(parse_record(user_record.read_text()), old)
+        # The file is current and recorded so: btrfs:core keeps done, and only the orphan goes.
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        self.assertEqual(parse_record(user_record.read_text()).components, {"btrfs:core": "done"})
+        before = user_record.read_bytes()
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        self.assertEqual(user_record.read_bytes(), before)
 
     def test_text_plan_with_a_component_names_a_current_file_its_record_does_not_list_so(self) -> None:
         # text-plan --component says what text --component would do to the record too: "would record:" for
