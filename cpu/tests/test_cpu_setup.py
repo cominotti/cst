@@ -21,12 +21,15 @@ import unittest.mock
 from cpu import domain as cpu_domain
 from cpu.setup import cli as setup_cli, wiring as setup_wiring
 from cpu.setup.adapters import CpuSetup, target_user
+from cpu.power.domain import CpuTopology
 from cpu.setup.domain import (
+    default_settings,
     DROPIN_NAME,
     OLD_DROPIN_NAME,
     QUIET_ENV,
     SetupPaths,
     conf_lines,
+    first_conf_lines,
     gamemode_ini,
     helper_dropin,
     toolbox_dropin,
@@ -38,7 +41,7 @@ from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from tests.repo_files import REPO
 
 # What cpu-setup.sh reads or runs for these commands (a module that is not there fails the copy).
-NEEDED = ("cpu-setup.sh", "cst-install.bash", "cst-link.bash", "cst", "cpu", "cst_core")
+NEEDED = ("cpu-setup.sh", "cst-install.bash", "cst-link.bash", "cst", "cpu", "cst_core", "perf")
 
 
 def help_text(script: str, prog: str) -> str:
@@ -259,6 +262,20 @@ class RouteTest(unittest.TestCase):
                     host.said, [("err", f"'{cmd}' must run on the host, not inside a toolbox/container.\n")]
                 )
                 self.assertEqual((host.execs, self.ran), ([], []))
+        for act in ("apply", "revert"):
+            host = FakeHost(container=True, euid=0)
+            self.assertEqual(self.main("power", act, host=host), 1)
+            self.assertEqual(host.said, [("err", "'power' must run on the host, not inside a toolbox/container.\n")])
+
+    def test_power_readonly_routes_without_flatpak_spawn(self) -> None:
+        power_bin = os.path.join(REPO, "cpu", "cpu-power")
+        for sub in ((), ("status",), ("plan", "--gpu-only"), ("help",)):
+            host = FakeHost(container=True)
+            self.assertEqual(self.main("power", *sub, host=host), 0)
+            self.assertEqual(host.execs, [["python3", "-I", "-B", power_bin, *sub]])
+        host_apply = FakeHost(euid=0)
+        self.assertEqual(self.main("power", "apply", host=host_apply), 7)
+        self.assertEqual(self.ran, [("power", ["apply"])])
 
     def test_as_a_user_root_commands_run_the_script_again_through_sudo(self) -> None:
         host = FakeHost()
@@ -396,12 +413,17 @@ class CpuSetupCase(unittest.TestCase):
             daemon_json=f"{t}/etc/docker/daemon.json",
             hwp_boost=f"{t}/sys/hwp_dynamic_boost",
             hwp_tmpfiles=f"{t}/etc/tmpfiles.d/cpu-setup-hwp-boost.conf",
+            ntsync_modules_load=f"{t}/etc/modules-load.d/cst-ntsync.conf",
+            ntsync_dev=f"{t}/dev/ntsync",
             e_cores=f"{t}/sys/cpu_atom/cpus",
+            p_cores=f"{t}/sys/cpu_core/cpus",
             unit_runtime=f"{t}/run/systemd/system",
             run=f"{t}/run/cpu-setup",
             cgroot=f"{t}/sys/fs/cgroup",
             sched_ext=f"{t}/sys/sched_ext",
             preempt=f"{t}/sys/preempt",
+            proc_dir=f"{t}/proc",
+            sys_dir=f"{t}/sys",
             etc_group=f"{t}/etc/group",
             lib_group=f"{t}/usr/lib/group",
             etc_gshadow=f"{t}/etc/gshadow",
@@ -497,6 +519,9 @@ class InstallTest(CpuSetupCase):
             f"{inst} text {self.paths.conf} 0644",
             f"{inst} install --set USER=tester --component cpu:core",
             f"{inst} text {self.paths.hwp_tmpfiles} 0644 --component cpu:core",
+            "modinfo ntsync",
+            f"{inst} text {self.paths.ntsync_modules_load} 0644 --component cpu:core",
+            "modprobe ntsync",
             f"{runuser} text {toolbox_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} text {helper_dropin(self.home)} 0644 --component cpu:toolbox",
             f"{runuser} install --home {self.home} --component cpu:gamemode",
@@ -504,7 +529,10 @@ class InstallTest(CpuSetupCase):
             "usermod -aG gamemode tester",
             "systemctl daemon-reload",
             "systemctl --user -M tester@ daemon-reload",
+            "udevadm control --reload-rules",
             "systemctl enable --now cpu-game-watchdog.timer",
+            "systemctl enable cst-cpu-power.service",
+            "systemctl restart cst-cpu-power.service",
             f"{inst} mark --component cpu:core done",
             f"{runuser} mark --home {self.home} --component cpu:toolbox done",
             f"{runuser} mark --home {self.home} --component cpu:gamemode done",
@@ -528,13 +556,109 @@ class InstallTest(CpuSetupCase):
         self.assertTrue(
             out.endswith("  - measure: cst cpu watch -l baseline --game dota2 --seconds 300   (while a build runs)\n")
         )
+        self.assertIn("loaded:    ntsync kernel module\n", out)
         self.assertEqual(os.stat(os.path.dirname(self.paths.conf)).st_mode & 0o777, 0o755)
+
+    def _write_topology(
+        self, *, p_cores: str, e_cores: str, online: str, siblings: Mapping[int, str], driver: str
+    ) -> None:
+        cpu_dir = f"{self.paths.sys_dir}/devices/system/cpu"
+        for path, text in ((self.paths.p_cores, p_cores), (self.paths.e_cores, e_cores)):
+            if text:
+                self.write(path, text + "\n")
+            elif os.path.exists(path):
+                os.remove(path)
+        self.write(f"{cpu_dir}/online", online + "\n")
+        for cpu, sib in siblings.items():
+            self.write(f"{cpu_dir}/cpu{cpu}/topology/thread_siblings_list", sib + "\n")
+        self.write(f"{cpu_dir}/cpuidle/current_driver", driver + "\n")
+
+    def test_first_settings_on_this_hybrid_host_are_the_fixed_ones(self) -> None:
+        # The Core Ultra 9 285K these defaults were chosen on (P-cores 0-7, E-cores 8-23, no SMT, intel_idle)
+        # gets cpu-setup.conf exactly as before the topology was read.
+        self._write_topology(
+            p_cores="0-7", e_cores="8-23", online="0-23", siblings={c: str(c) for c in range(24)}, driver="intel_idle"
+        )
+        self.command("install")
+        self.assertEqual(
+            self.runner.inputs[self.paths.conf],
+            "# Managed by cpu-setup.sh (CST); values may be edited.\n"
+            "TARGET_USER='tester'\n"
+            "BUILD_CPUS='12-23'\n"
+            "P_CORES='0-7'\n"
+            "VM_WEIGHT=10\n"
+            "GAME_MEMORY_LOW='16G'\n"
+            "GAME_ZSWAP_WRITEBACK='no'\n"
+            "VM_NAME='win11-devbox'\n"
+            "VM_VCPUS=12\n"
+            "VM_CPU_DISABLE='cet-ss cet-ibt vmx-mbec vmx-exit-save-cet vmx-entry-load-cet'\n"
+            "GPU_PM_MODE='always'\n"
+            "CPU_CSTATE_MAX_LATENCY_US='200'\n"
+            "GAME_CSTATE_MAX_LATENCY_US='50'\n",
+        )
+
+    def test_first_settings_on_an_amd_host_follow_its_topology(self) -> None:
+        # A 16-core Ryzen with SMT (CPU c and c+16 share a core) and acpi_idle: the first 8 cores (one CCD)
+        # with their siblings for the game, the other 8 for builds, and no C-state cap.
+        self._write_topology(
+            p_cores="",
+            e_cores="",
+            online="0-31",
+            siblings={c: f"{c % 16},{c % 16 + 16}" for c in range(32)},
+            driver="acpi_idle",
+        )
+        self.command("install")
+        conf = str(self.runner.inputs[self.paths.conf])
+        self.assertIn("BUILD_CPUS='8-15,24-31'\n", conf)
+        self.assertIn("P_CORES='0-7,16-23'\n", conf)
+        self.assertIn("CPU_CSTATE_MAX_LATENCY_US='off'\n", conf)
+
+    def test_default_settings_for_other_topologies(self) -> None:
+        cases = (
+            # i9-13900K: 8 P-cores with SMT (0-15), 16 E-cores: the first 4 E-cores stay out of BUILD_CPUS.
+            (CpuTopology("0-15", "16-31", "0-31", (), "intel_idle"), ("20-31", "0-15", "200")),
+            # i5 with 4 E-cores: BUILD_CPUS is all of them; P_CORES from online when cpu_core is missing.
+            (CpuTopology("", "12-15", "0-15", (), "intel_idle"), ("12-15", "0-11", "200")),
+            # 8 cores, no SMT, siblings unreadable: the online CPUs split in half.
+            (CpuTopology("", "", "0-7", (), "acpi_idle"), ("4-7", "0-3", "off")),
+            # One core with SMT: its two logical CPUs split; an unknown driver keeps the 200 us cap.
+            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), ("1", "0", "200")),
+            # One CPU: the game and builds share it.
+            (CpuTopology("", "", "0", ("0",), "acpi_idle"), ("0", "0", "off")),
+            # A CPU whose siblings could not be read is a core of its own, not dropped.
+            (CpuTopology("", "", "0-3", ("0,2", "", "0,2", ""), "acpi_idle"), ("1,3", "0,2", "off")),
+            # No online list: the fixed defaults.
+            (CpuTopology(), ("12-23", "0-7", "200")),
+            (CpuTopology("", "", "0-x", (), "intel_idle"), ("12-23", "0-7", "200")),
+        )
+        for topo, want in cases:
+            with self.subTest(topo=topo):
+                self.assertEqual(default_settings(topo), want)
+
+    def test_first_vm_vcpus_fit_build_cpus(self) -> None:
+        # vm-pin pins VM_VCPUS vCPUs onto BUILD_CPUS: as many as BUILD_CPUS has CPUs, at most 12.
+        for topo, want in (
+            (CpuTopology("0-7", "8-23", "0-23", (), "intel_idle"), "VM_VCPUS=12\n"),  # the 285K: 12-23
+            (CpuTopology("", "12-15", "0-15", (), "intel_idle"), "VM_VCPUS=4\n"),  # i5, 4 E-cores
+            (
+                CpuTopology("", "", "0-31", tuple(f"{c % 16},{c % 16 + 16}" for c in range(32)), "acpi_idle"),
+                "VM_VCPUS=12\n",
+            ),
+            (CpuTopology("", "", "0-1", ("0-1", "0-1"), ""), "VM_VCPUS=1\n"),
+            (CpuTopology(), "VM_VCPUS=12\n"),  # the fixed 12-23
+        ):
+            with self.subTest(topo=topo):
+                self.assertIn(want, first_conf_lines("tester", topo))
 
     def test_what_install_hands_the_installer(self) -> None:
         self.command("install")
         texts = self.runner.inputs
         self.assertEqual(texts[self.paths.conf], conf_lines("tester"))
         self.assertIn("TARGET_USER='tester'\n", conf_lines("tester"))
+        self.assertIn("GPU_PM_MODE='always'\n", conf_lines("tester"))
+        self.assertIn("CPU_CSTATE_MAX_LATENCY_US='200'\n", conf_lines("tester"))
+        self.assertIn("GAME_CSTATE_MAX_LATENCY_US='50'\n", conf_lines("tester"))
+        self.assertTrue(str(texts[self.paths.ntsync_modules_load]).endswith("\nntsync\n"))
         self.assertTrue(str(texts[toolbox_dropin(self.home)]).endswith("[Slice]\nCPUWeight=30\nAllowedCPUs=8-23\n"))
         self.assertTrue(str(texts[helper_dropin(self.home)]).endswith("[Service]\nAllowedCPUs=8-23\n"))
         # Every installer call hands over the caller's LC_CTYPE, as cst-install.bash did.
@@ -548,13 +672,17 @@ class InstallTest(CpuSetupCase):
         self.write(gamemode_ini(self.home), "[general]\n")
         self.write(helper_dropin(self.home), "x")
         self.write(self.paths.conf, "TARGET_USER='tester'\n")
-        self.runner.answers = [("id -nG tester", CommandResult(0, "tester gamemode\n", ""))]
+        self.runner.answers = [
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+            ("modinfo ntsync", CommandResult(1, "", "ERROR: Module ntsync not found.")),
+        ]
         rc, out, err = self.command("install")
         self.assertEqual(rc, 0, err)
         self.assertIn("NOTE: no E-cores found (/sys/devices/cpu_atom/cpus): toolbox CPU restriction skipped", err)
         self.assertIn(
             f"NOTE: {self.paths.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped", err
         )
+        self.assertIn("NOTE: ntsync kernel module not available on this kernel: autoload skipped", err)
         self.assertIn(
             f"NOTE: {gamemode_ini(self.home)} is your own: add [custom] start/end from {REPO}/cpu/gamemode.ini by hand",
             err,
@@ -580,15 +708,39 @@ class InstallTest(CpuSetupCase):
                 )
                 self.assertEqual(self.runner.calls, [])
 
+    def test_a_second_install_applies_cpu_power_again(self) -> None:
+        # The unit already ran (a oneshot that stays active): `enable --now` would not run cpu-power apply again,
+        # so a C-state cap or GPU policy set but not in effect (states turned back on, a new
+        # CPU_CSTATE_MAX_LATENCY_US) would stay so. Each install restarts it.
+        for run in (1, 2):
+            self.runner.calls.clear()
+            self.assertEqual(self.command("install")[0], 0, run)
+            calls = self.runner.joined()
+            self.assertIn("systemctl restart cst-cpu-power.service", calls, run)
+            self.assertLess(
+                calls.index("systemctl enable cst-cpu-power.service"),
+                calls.index("systemctl restart cst-cpu-power.service"),
+            )
+
     def test_a_failing_step_ends_install_with_its_exit_status(self) -> None:
-        self.runner.answers = [
-            ("systemctl enable --now", CommandResult(4, "", "")),
-            ("id -nG", CommandResult(0, "gamemode", "")),
-        ]
-        rc, out, _ = self.command("install")
-        self.assertEqual(rc, 4)
-        self.assertFalse([c for c in self.runner.joined() if " mark " in c])
-        self.assertNotIn("Done.", out)
+        # Each of the three systemctl calls at the end stops install: nothing after it runs, nothing is marked done.
+        steps = (
+            "systemctl enable --now cpu-game-watchdog.timer",
+            "systemctl enable cst-cpu-power.service",
+            "systemctl restart cst-cpu-power.service",
+        )
+        for i, step in enumerate(steps):
+            with self.subTest(step=step):
+                self.runner.calls.clear()
+                self.runner.answers = [(step, CommandResult(4, "", "")), ("id -nG", CommandResult(0, "gamemode", ""))]
+                rc, out, _ = self.command("install")
+                self.assertEqual(rc, 4)
+                calls = self.runner.joined()
+                self.assertIn(step, calls)
+                for later in steps[i + 1 :]:
+                    self.assertNotIn(later, calls)
+                self.assertFalse([c for c in calls if " mark " in c])
+                self.assertNotIn("Done.", out)
         self.runner.answers = [("usermod", CommandResult(-15, "", ""))]
         self.assertEqual(self.command("install")[0], 143)  # killed by SIGTERM: 128+15, as bash
         self.runner.answers = [("text " + self.paths.hwp_tmpfiles, CommandResult(1, "", ""))]
@@ -644,7 +796,15 @@ class UninstallTest(CpuSetupCase):
             os.path.join(self.paths.unit_dir, "machine.slice.d", OLD_DROPIN_NAME),
             toolbox_dropin(self.home, OLD_DROPIN_NAME),
         ]
-        for f in [*left, *old, keep, self.paths.hwp_tmpfiles, toolbox_dropin(self.home), helper_dropin(self.home)]:
+        for f in [
+            *left,
+            *old,
+            keep,
+            self.paths.hwp_tmpfiles,
+            self.paths.ntsync_modules_load,
+            toolbox_dropin(self.home),
+            helper_dropin(self.home),
+        ]:
             self.write(f, "")
         self.write(gamemode_ini(self.home), "; Managed by cpu-setup.sh (CST).\n")
         self.runner.on_call = remove_text_files
@@ -669,9 +829,15 @@ class UninstallTest(CpuSetupCase):
                 # before its unit and its off program are deleted.
                 "systemctl disable --now cpu-game-watchdog.timer",
                 "systemctl stop cpu-game.service",
+                "systemctl disable --now cst-cpu-power.service",
+                f"python3 -I -B {REPO}/cpu/cpu-power revert",
+                f"python3 -I -B {REPO}/cpu/cpu-irq revert",
                 f"{inst} remove --component cpu:core",
+                "udevadm control --reload-rules",
                 # Through the installer, with their install record lines (the hwp file also when gone).
                 f"{inst} remove-text {self.paths.hwp_tmpfiles}",
+                f"{inst} remove-text {self.paths.ntsync_modules_load}",
+                "modprobe -r ntsync",
                 f"runuser -u tester -- {inst} remove-text --home {self.home} {dropins}",
                 f"runuser -u tester -- {inst} remove --home {self.home} --component cpu:gamemode",
                 "systemctl --user -M tester@ daemon-reload",
@@ -935,6 +1101,11 @@ class GameAndVmPinTest(CpuSetupCase):
         self.assertEqual(self.command("game", "on")[0], 1)
         self.assertEqual(self.runner.joined(), ["systemctl start cpu-game.service"])
 
+    def test_power_command_forwards_to_cpu_power(self) -> None:
+        self.runner.calls.clear()
+        self.assertEqual(self.command("power", "plan")[0], 0)
+        self.assertEqual(self.runner.joined(), [f"python3 -I -B {REPO}/cpu/cpu-power plan"])
+
     def test_vm_pin_runs_in_the_foreground(self) -> None:
         self.assertEqual(self.command("vm-pin", "apply", "vm1")[0], 3)
         self.assertEqual(self.passed, [["python3", "-I", "-B", f"{REPO}/cpu/vm-pin", "apply", "vm1"]])
@@ -961,6 +1132,8 @@ class StatusTest(CpuSetupCase):
             ("show -P AllowedCPUs user.slice", CommandResult(0, "8-23\n", "")),
             ("vm-pin status", CommandResult(0, vm, "")),
             ("is-active builds.slice", CommandResult(3, "inactive\n", "")),
+            ("cpu-power status", CommandResult(0, "settings: GPU_PM_MODE=always\n", "")),
+            ("cpu-irq status", CommandResult(0, "service:   irqbalance.service (active, enabled)\n", "")),
             ("cpu-watch report", CommandResult(0, "".join(f"r{i}\n" for i in range(7)), "")),
         ]
         rc, out, err = self.command("status")
@@ -974,6 +1147,7 @@ class StatusTest(CpuSetupCase):
             "\n== game profile\n  game profile: off\n    x\n  watchdog timer: active\n"
             "\n== GameMode\n  group: member; ini: managed; gamemoded: active\n"
             f"  HWP dynamic boost: 0 (kept at boot by {self.paths.hwp_tmpfiles})\n"
+            "  ntsync: inactive (not managed)\n"
             "\n== baseline weights\n  machine.slice 50, toolboxes 30, app.slice , background.slice \n"
             "\n== E-cores for toolboxes and host commands\n"
             "  cpuset delegated: yes; toolboxes AllowedCPUs=8-23; flatpak-spawn --host AllowedCPUs=\n"
@@ -983,6 +1157,10 @@ class StatusTest(CpuSetupCase):
             "\n== memory experiments\n"
             f"  minfree-256m   {self.tmp}/proc/min_free_kbytes -> 262144   now: 67584\n"
             f"  thp-defer      {self.tmp}/sys/defrag -> defer    now: always defer [madvise] never\n"
+            "\n== GPU runtime PM and CPU C-states\n"
+            "  settings: GPU_PM_MODE=always\n"
+            "\n== irqbalance\n"
+            "  service:   irqbalance.service (active, enabled)\n"
             "\n== last measurements\n  r2\n  r3\n  r4\n  r5\n  r6\n",
         )
         self.assertIn(
@@ -992,9 +1170,9 @@ class StatusTest(CpuSetupCase):
     def test_without_a_target_user_the_user_parts_are_left_out_and_it_exits_1(self) -> None:
         rc, out, _ = self.command("status", user="")
         self.assertEqual(rc, 1)
-        self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n", out)
+        self.assertIn("\n== GameMode\n  HWP dynamic boost: 0 (not managed)\n  ntsync: inactive (not managed)\n", out)
         self.assertIn("\n== E-cores for toolboxes and host commands\n\n== VM\n", out)
-        self.assertTrue(out.endswith("\n== last measurements\n"))
+        self.assertTrue(out.endswith("\n== GPU runtime PM and CPU C-states\n\n== irqbalance\n\n== last measurements\n"))
         self.assertFalse([c for c in self.runner.joined() if c.startswith("runuser")])
 
     def test_target_user(self) -> None:
@@ -1046,6 +1224,38 @@ class BaselineDropinTest(unittest.TestCase):
         self.assertEqual(
             helper_dropin("/home/u"), "/home/u/.config/systemd/user/flatpak-session-helper.service.d/10-cpu-setup.conf"
         )
+
+
+class NtsyncInstallTest(CpuSetupCase):
+    def test_builtin_ntsync_skips_modules_load_and_cleans_old_conf(self) -> None:
+        self.write(self.paths.ntsync_dev, "")
+        self.runner.answers = [
+            ("id -nG tester", CommandResult(0, "tester gamemode\n", "")),
+            ("modinfo ntsync", CommandResult(0, "name:           ntsync\nfilename:       (builtin)\n", "")),
+        ]
+        rc, _, err = self.command("install")
+        self.assertEqual((rc, err), (0, ""))
+        calls = self.runner.joined()
+        inst = " ".join(INSTALLER)
+        self.assertIn(f"{inst} remove-text {self.paths.ntsync_modules_load}", calls)
+        self.assertNotIn("modprobe ntsync", calls)
+
+
+class StatusDiagnosisTest(CpuSetupCase):
+    """`cst cpu status` renders a `== diagnosis` block when sys/proc CPU or GPU nodes exist."""
+
+    def test_status_emits_diagnosis_when_telemetry_present(self) -> None:
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/name", "C3_ACPI\n")
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/latency", "1048\n")
+        self.write(f"{self.paths.sys_dir}/devices/system/cpu/cpu0/cpuidle/state0/disable", "0\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/card0-DP-1/status", "connected\n")
+        self.write(f"{self.paths.sys_dir}/class/drm/card0/device/power/control", "auto\n")
+        self.runner.answers = [("game-profile state", CommandResult(0, "off\n", ""))]
+        _, out, _ = self.command("status", user="")
+        self.assertIn("== diagnosis", out)
+        self.assertIn("Deep idle state C3_ACPI enabled", out)
+        self.assertIn("Connected display GPU card0 (amdgpu, DP-1) has power/control=auto", out)
 
 
 if __name__ == "__main__":

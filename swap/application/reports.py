@@ -13,6 +13,18 @@ from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
+from perf.application import collect_memory_from_reader
+from perf.domain.evaluate import evaluate_perf_memory
+from perf.domain.models import PerfRootKind, PerfVerdict
+from swap.application.memory_tuning import (
+    MM_TMPFILES_ENTRY,
+    THP_EXPERIMENT,
+    URESOURCED_ENTRY,
+    SwapPerfReader,
+    UresourcedView,
+    mm_settings_rows,
+    uresourced_settings_row,
+)
 from swap.domain import (
     MACHINE_SLICE,
     WSF_EXPERIMENT,
@@ -97,6 +109,8 @@ class SwapEnvironment:
     zswap_params_dir: str = "/sys/module/zswap/parameters"
     zswap_debug_dir: str = "/sys/kernel/debug/zswap"
     cpu_run_dir: str = "/run/cpu-setup"
+    # logind's seat files: whether a session is in the foreground (uresourced's floor).
+    seats_dir: str = "/run/systemd/seats"
     prog: str = "cst swap"
     # The install record that lists swap's three files ("": not recorded) and whether apply runs as
     # root (a root file owned by another account is then rewritten, as by the installer).
@@ -105,10 +119,23 @@ class SwapEnvironment:
     # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
     test_seam: tuple[tuple[str, str, str], ...] = ()
 
+    @property
+    def uresourced_view(self) -> UresourcedView:
+        """Where uresourced's floor is read (the cgroup tree, /proc, the seat files)."""
+        return UresourcedView(self.cgroup_dir, self.proc_dir, self.seats_dir)
+
     def host_view(self, host_path: str) -> str:
         """Where a host path (one systemd names) is seen from here: under the folder etc_dir is in."""
         root = self.etc_dir.rstrip("/").removesuffix("/etc")
         return root + host_path
+
+    def etc_path(self, entry: InstallEntry) -> str:
+        """Where `entry` is installed under this environment's `etc_dir`."""
+        return _under(self.etc_dir, entry.dest, _ETC_PREFIX)
+
+    def src_path(self, entry: InstallEntry) -> str:
+        """Where `entry`'s source template lives under `src_dir`."""
+        return _under(self.src_dir, entry.src, _SWAP_SRC_PREFIX)
 
     @property
     def settings_path(self) -> str:
@@ -448,7 +475,9 @@ class SwapReports:
 
         for src, dest in (
             (env.src_tmpfiles, env.tmpfiles_conf),
+            (env.src_path(MM_TMPFILES_ENTRY), env.etc_path(MM_TMPFILES_ENTRY)),
             (env.src_sysctl, env.sysctl_conf),
+            (env.src_path(URESOURCED_ENTRY), env.etc_path(URESOURCED_ENTRY)),
             (env.src_dropin, env.slice_dropin),
         ):
             st = self._inspect_file(src, dest)
@@ -521,16 +550,38 @@ class SwapReports:
                 )
         exp_name, exp_key = WSF_EXPERIMENT
         exp_on = self._fs.exists(posixpath.join(self._env.cpu_run_dir, "exp-" + exp_name))
+        wsf_overridden = False
         for key, want in parse_sysctl(self._desired_text(self._env.src_sysctl)):
             live = self._read_first(posixpath.join(self._env.proc_dir, "sys", key.replace(".", "/")), "?")
             state = SettingState.OK if live == want else SettingState.DIFF
             if state == SettingState.DIFF and key == exp_key and exp_on:
                 state = SettingState.EXP
+                wsf_overridden = True
             rows.append(SettingCheckRow(state, key, live, want))
+        mm_rows, thp_overridden = mm_settings_rows(
+            self._fs,
+            sys_dir=self._env.sys_dir,
+            cpu_run_dir=self._env.cpu_run_dir,
+            mm_text=self._desired_text(self._env.src_path(MM_TMPFILES_ENTRY)),
+        )
+        rows.extend(mm_rows)
+        ures_row = uresourced_settings_row(
+            self._fs,
+            self._systemd,
+            where=self._env.uresourced_view,
+            uresourced_text=self._desired_text(self._env.src_path(URESOURCED_ENTRY)),
+        )
+        if ures_row is not None:
+            rows.append(ures_row)
         row, source = self._memory_low_row(parse_memory_low(self._desired_text(self._env.src_dropin)))
         rows.append(row)
         return SettingsReport(
-            rows=tuple(rows), exp_name=exp_name, exp_key=exp_key, override_source=source, cst_dropin=DROPIN_ENTRY.dest
+            rows=tuple(rows),
+            experiments=tuple(
+                exp for exp, on in ((WSF_EXPERIMENT, wsf_overridden), (THP_EXPERIMENT, thp_overridden)) if on
+            ),
+            override_source=source,
+            cst_dropin=DROPIN_ENTRY.dest,
         )
 
     def _memory_low_row(self, want_low: int | None) -> tuple[SettingCheckRow, str]:
@@ -666,6 +717,15 @@ class SwapReports:
         devices = self._build_devices()
         cgroups = self._build_cgroup_rows()
         psi_text = self._fs.read_text(posixpath.join(self._env.proc_dir, "pressure", "memory")) or "  not available\n"
+        perf_roots = {
+            PerfRootKind.PROC: self._env.proc_dir,
+            PerfRootKind.SYS: self._env.sys_dir,
+            PerfRootKind.CGROUP: self._env.cgroup_dir,
+            PerfRootKind.ETC: self._env.etc_dir,
+            PerfRootKind.ZSWAP_PARAMS: self._env.zswap_params_dir,
+        }
+        mem_diag = evaluate_perf_memory(collect_memory_from_reader(SwapPerfReader(self._fs, perf_roots)))
+        diagnosis = mem_diag.findings if mem_diag.verdict is not PerfVerdict.SKIP else None
         return SwapStatusReport(
             config=config,
             settings=settings,
@@ -676,4 +736,5 @@ class SwapReports:
             devices=devices,
             cgroups=cgroups,
             psi_lines=tuple(psi_text.splitlines()),
+            diagnosis=diagnosis,
         )

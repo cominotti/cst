@@ -120,6 +120,7 @@ esac
 FINDMNT = """#!/bin/sh
 echo "findmnt $*" >>"$STUB_LOG"
 case " $* " in
+  *"FSTYPE,OPTIONS"*) [ -n "$FIX_FINDMNT_ALL" ] && [ -f "$FIX_FINDMNT_ALL" ] && exec cat "$FIX_FINDMNT_ALL" ;;
   *"OPTIONS"*) [ -n "$FIX_FINDMNT_OPTS" ] && [ -f "$FIX_FINDMNT_OPTS" ] && exec cat "$FIX_FINDMNT_OPTS" ;;
 esac
 [ -f "$FIX_FINDMNT" ] && exec cat "$FIX_FINDMNT"
@@ -212,6 +213,7 @@ class Scratch(unittest.TestCase):
             "FIX_USER_FAILED": self.user_failed,
             "FIX_FINDMNT": os.path.join(self.tmp, "findmnt.out"),
             "FIX_FINDMNT_OPTS": os.path.join(self.tmp, "findmnt-opts.out"),
+            "FIX_FINDMNT_ALL": os.path.join(self.tmp, "findmnt-all.out"),
             "FIX_KARGS": os.path.join(self.tmp, "kargs.out"),
             "FIX_STATFS": os.path.join(self.tmp, "statfs.out"),
             "FIX_VIRSH": "",
@@ -249,6 +251,7 @@ class Scratch(unittest.TestCase):
             "systemctl --user list-units --state=failed",
             "flatpak-spawn --host ",
             "findmnt -rn -t btrfs -o SOURCE,TARGET",
+            "findmnt -rn -o SOURCE,TARGET,FSTYPE,OPTIONS",
             "stat -f -c %S %b ",
             "virsh -r -c qemu:///system list --all --name",
             "virsh -r -c qemu:///system dumpxml --inactive ",
@@ -1419,6 +1422,35 @@ class BtrfsCompressionDoctorTest(Scratch):
         self.assertIn("flatpak-spawn --host findmnt -rn -t btrfs -o SOURCE,TARGET,OPTIONS,UUID", self.calls())
         self.assert_read_only()
 
+    def test_the_root_uuid_is_the_root_filesystems_not_a_separate_home(self) -> None:
+        # The UUID was that of the first root-like target findmnt listed: a separate btrfs /var/home
+        # listed first gave its UUID, and /var/home's fstab line (no compression) was read as the root's.
+        self.env["CST_DOCTOR_CONTAINER"] = "1"
+        home_uuid = "0b7c3a52-9d1e-4f60-8a2b-5c4d3e2f1a09"
+        etc = os.path.join(self.root, "etc")
+        os.makedirs(etc, exist_ok=True)
+        with open(os.path.join(etc, "fstab"), "w") as f:
+            f.write(
+                f"UUID={home_uuid} /var/home btrfs subvol=home,noatime 0 0\n"
+                f"UUID={UUID} /var btrfs subvol=var,compress=zstd:1,noatime 0 0\n"
+            )
+        with open(self.env["FIX_KARGS"], "w") as f:
+            f.write(f"ostree=/abc root=UUID={UUID} rw rootflags=subvol=root,compress=zstd:1,noatime\n")
+        home = f"/dev/dm-1[/home] /var/home rw,seclabel,ssd,noatime {home_uuid}\n"
+        root = (
+            f"/dev/dm-0[/root] /sysroot rw,seclabel,compress=zstd:1,ssd,noatime {UUID}\n"
+            f"/dev/dm-0[/var] /var rw,seclabel,compress=zstd:1,ssd,noatime {UUID}\n"
+        )
+        for listed in (home + root, root + home):
+            with self.subTest(home_first=listed.startswith(home)):
+                with open(self.env["FIX_FINDMNT_OPTS"], "w") as f:
+                    f.write(listed)
+                r = self.run_tool()
+                self.assertIn(
+                    "  ok     root btrfs compression: coherent (compress=zstd:1)", area_lines(r.stdout, "btrfs")
+                )
+                self.assert_read_only()
+
     def test_no_compression_anywhere_is_info(self) -> None:
         self._setup_compression(fstab_opt=None, kargs_opt=None, live_opt=None, top_opt="")
         r = self.run_tool()
@@ -1428,6 +1460,28 @@ class BtrfsCompressionDoctorTest(Scratch):
             area_lines(r.stdout, "btrfs"),
         )
 
+    def test_commit_interval_coherence_and_drift(self) -> None:
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        ok_r = self.run_tool()
+        self.assertIn("  ok     root btrfs commit interval: coherent (commit=60)", area_lines(ok_r.stdout, "btrfs"))
+
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1",
+            live_opt="compress-force=zstd:1",
+            top_opt="compress-force=zstd:1",
+        )
+        drift_r = self.run_tool()
+        self.assertEqual(drift_r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(drift_r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs commit interval: drift across layers:", btrfs_text)
+        self.assertIn("fix: cst btrfs commit-interval apply", btrfs_text)
+
         self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
         r2 = self.run_tool()
         self.assertEqual(r2.returncode, 0, r2.stdout)
@@ -1435,6 +1489,113 @@ class BtrfsCompressionDoctorTest(Scratch):
             "  info   root btrfs compression: no compression option set across active layers",
             area_lines(r2.stdout, "btrfs"),
         )
+
+
+class BtrfsCacheDoctorTest(Scratch):
+    """check_btrfs_cache: silent when unconfigured; warns on flushoncommit, missing crypttab nofail, or unmounted bind."""
+
+    def _put(self, *parts: str, text: str) -> None:
+        path = os.path.join(self.root, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _set_findmnt(self, text: str) -> None:
+        with open(self.env["FIX_FINDMNT_OPTS"], "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _set_findmnt_all(self, text: str) -> None:
+        with open(self.env["FIX_FINDMNT_ALL"], "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_cache_mount_health_states(self) -> None:
+        self._put("etc", "fstab", text=f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n")
+        self._put("proc", "mounts", text="/dev/dm-0 /var btrfs rw,compress-force=zstd:1,flushoncommit 0 0\n")
+        self._set_findmnt(f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n")
+        silent = self.run_tool()
+        self.assertNotIn("btrfs cache:", "\n".join(area_lines(silent.stdout, "btrfs")))
+
+        self._put(
+            "etc",
+            "fstab",
+            text=(
+                f"UUID={UUID} / btrfs subvol=root,compress-force=zstd:1,flushoncommit 0 0\n"
+                "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0\n"
+                "/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0\n"
+                "/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 "
+                "# managed-by: btrfs-cache (CST) user=danilo kind=cache\n"
+            ),
+        )
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,compress=zstd:1,subvol=/cache cache-u\n"
+            "/dev/mapper/cache /var/mnt/scratchpad noatime,compress=zstd:1,subvol=/scratchpad cache-u\n"
+            "/dev/mapper/cache /var/home/danilo/.cache noatime,compress=zstd:1,subvol=/cache/danilo cache-u\n"
+        )
+        self._set_findmnt_all(
+            "/dev/dm-0 /var btrfs compress-force=zstd:1,flushoncommit\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,compress=zstd:1,subvol=/cache\n"
+            "/dev/mapper/cache /var/mnt/scratchpad btrfs noatime,compress=zstd:1,subvol=/scratchpad\n"
+            "/dev/mapper/cache /var/home/danilo/.cache btrfs noatime,compress=zstd:1,subvol=/cache/danilo\n"
+        )
+        ok_r = self.run_tool()
+        self.assertIn(
+            "  ok     btrfs cache: /var/mnt/cache, /var/mnt/scratchpad mounted",
+            "\n".join(area_lines(ok_r.stdout, "btrfs")),
+        )
+
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key discard\n")
+        self._set_findmnt(
+            f"/dev/dm-0 /var compress-force=zstd:1,flushoncommit {UUID}\n"
+            "/dev/mapper/cache /var/mnt/cache noatime,flushoncommit cache-u\n"
+            "/dev/mapper/cache /var/mnt/scratchpad noatime cache-u\n"
+        )
+        self._set_findmnt_all(
+            "/dev/dm-0 /var btrfs compress-force=zstd:1,flushoncommit\n"
+            "/dev/mapper/cache /var/mnt/cache btrfs noatime,flushoncommit\n"
+            "/dev/mapper/cache /var/mnt/scratchpad btrfs noatime\n"
+        )
+        warn_r = self.run_tool()
+        self.assertEqual(warn_r.returncode, 1)
+        btrfs_text = "\n".join(area_lines(warn_r.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /var/mnt/cache has 'flushoncommit'", btrfs_text)
+        self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
+        self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
+
+    def test_the_cache_drives_crypttab_line_is_found_through_its_dm_device(self) -> None:
+        self._put("etc", "fstab", text="UUID=feed /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n")
+        self._put("etc", "crypttab", text="luks-1234 UUID=abc none discard\nluks-abcd UUID=def none discard\n")
+        self._put("sys", "class", "block", "dm-3", "dm", "name", text="luks-1234\n")
+        for proc, findmnt_all in (
+            ("/dev/dm-3 /var/mnt/cache btrfs rw,noatime 0 0\n", ""),
+            ("", "/dev/mapper/luks-1234[/cache] /var/mnt/cache btrfs rw,noatime\n"),
+        ):
+            with self.subTest(proc=proc, findmnt=findmnt_all):
+                self._put("proc", "mounts", text=proc)
+                self._set_findmnt_all(findmnt_all)
+                btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+                self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'luks-1234' is missing 'nofail'", btrfs_text)
+                self.assertNotIn("'luks-abcd'", btrfs_text)
+
+    def test_cache_mount_non_btrfs_via_findmnt_and_unreadable_crypttab(self) -> None:
+        self._put(
+            "etc",
+            "fstab",
+            text="/dev/nvme2n1p1 /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n",
+        )
+        self._set_findmnt_all("/dev/nvme2n1p1 /var/mnt/cache ext4 rw,noatime\n")
+        crypttab = os.path.join(self.root, "etc", "crypttab")
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key discard\n")
+        if os.geteuid() != 0:
+            os.chmod(crypttab, 0o000)
+            self.addCleanup(os.chmod, crypttab, 0o600)
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 1)
+        btrfs_text = "\n".join(area_lines(res.stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: /var/mnt/cache filesystem is ext4, expected btrfs", btrfs_text)
+        if os.geteuid() != 0:
+            self.assertIn("info   btrfs cache: /etc/crypttab is not readable as this user", btrfs_text)
 
 
 class SnapshotsWritableTest(Scratch):
@@ -1562,6 +1723,52 @@ class ZswapParamsTest(Scratch):
                     "  WARN   zswap: not in this kernel (no /sys/module/zswap/parameters): "
                     "/etc/tmpfiles.d/zswap.conf sets nothing"
                 )
+            ],
+        )
+
+
+class MmResponsivenessDoctorTest(Scratch):
+    """check_mm_responsiveness_params: sysfs knobs cst-mm-responsiveness.conf sets."""
+
+    def install_conf(self) -> None:
+        d = os.path.join(self.root, "etc", "tmpfiles.d")
+        os.makedirs(d, exist_ok=True)
+        shutil.copy(
+            os.path.join(REPO, "swap", "tmpfiles", "cst-mm-responsiveness.conf"),
+            os.path.join(d, "cst-mm-responsiveness.conf"),
+        )
+
+    def lines(self, out: str) -> list[str]:
+        return [ln for ln in out.splitlines() if "mm responsiveness" in ln]
+
+    def test_nothing_without_file_ok_when_present_warn_when_missing(self) -> None:
+        self.assertEqual(self.lines(self.run_tool().stdout), [])
+        self.install_conf()
+        defrag = os.path.join(self.root, "sys", "kernel", "mm", "transparent_hugepage", "defrag")
+        os.makedirs(os.path.dirname(defrag), exist_ok=True)
+        with open(defrag, "w", encoding="utf-8") as f:
+            f.write("defer+madvise\n")
+        r_missing = self.run_tool()
+        self.assertEqual(r_missing.returncode, 1, r_missing.stdout)
+        self.assertEqual(
+            self.lines(r_missing.stdout),
+            [
+                (
+                    "  WARN   mm responsiveness /sys/kernel/mm/lru_gen/min_ttl_ms: this kernel lacks this knob; "
+                    "/etc/tmpfiles.d/cst-mm-responsiveness.conf skips it at boot without a word"
+                )
+            ],
+        )
+        min_ttl = os.path.join(self.root, "sys", "kernel", "mm", "lru_gen", "min_ttl_ms")
+        os.makedirs(os.path.dirname(min_ttl), exist_ok=True)
+        with open(min_ttl, "w", encoding="utf-8") as f:
+            f.write("1000\n")
+        r_ok = self.run_tool()
+        self.assertEqual(r_ok.returncode, 0, r_ok.stdout)
+        self.assertEqual(
+            self.lines(r_ok.stdout),
+            [
+                "  ok     mm responsiveness: every sysfs knob /etc/tmpfiles.d/cst-mm-responsiveness.conf sets is in this kernel"
             ],
         )
 
@@ -3471,7 +3678,9 @@ class CommandLineTest(Scratch):
         for a, _ in doc_registry.CHECKS:
             if a not in areas:
                 areas.append(a)
-        self.assertEqual(areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "install"])
+        self.assertEqual(
+            areas, ["rpm-ostree", "services", "alerts", "btrfs", "cpu", "swap", "vm", "responsiveness", "install"]
+        )
 
     def test_every_module_that_registers_checks_is_an_area(self) -> None:
         # registry.CHECKS holds only the checks of the modules in AREAS: a module of doctor/application/
@@ -3981,7 +4190,7 @@ class CstIntegrationTest(Scratch):
         super().setUp()
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "doctor"))
-        for pkg in ("btrfs", "cst_core", "cpu", "swap", "vm"):  # doctor imports these packages
+        for pkg in ("btrfs", "cst_core", "cpu", "perf", "swap", "vm"):  # doctor imports these packages
             shutil.copytree(
                 os.path.join(REPO, pkg), os.path.join(self.repo, pkg), ignore=shutil.ignore_patterns("tests")
             )
@@ -4289,6 +4498,123 @@ class DoctorWiringTest(unittest.TestCase):
                 ["help"], doc="usage: doctor [--brief]", entry_file=os.path.join(DOCTOR_DIR, "cst-doctor"), out=out
             )
         self.assertEqual((rc, out.getvalue()), (0, "usage: my doctor [--brief]\n"))
+
+
+class ResponsivenessAreaTest(Scratch):
+    """Doctor's `responsiveness` area delegates cleanly to `perf` diagnosis rules."""
+
+    def _write_host(self, rel: str, content: str) -> None:
+        full = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def test_empty_root_emits_no_responsiveness_findings(self) -> None:
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("responsiveness:", res.stdout)
+
+    def test_unconfigured_host_skips_responsiveness_even_with_kernel_telemetry(self) -> None:
+        self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
+        self._write_host("proc/sys/vm/min_free_kbytes", "65536\n")
+        self._write_host("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        self._write_host("sys/module/zswap/parameters/enabled", "N\n")
+        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
+        self._write_host("sys/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self._write_host("sys/class/drm/card0/card0-DP-1/status", "connected\n")
+        self._write_host("sys/class/drm/card0/device/power/control", "auto\n")
+        self._write_host("etc/uresourced.conf", "[Global]\nMaxMemoryMin=10%\n")
+        res = self.run_tool()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("0 ERROR, 0 WARN", res.stdout)
+        self.assertNotIn("responsiveness", res.stdout)
+
+        # CST-managed /etc/uresourced.conf activates the memory responsiveness axis.
+        self._write_host(
+            "etc/uresourced.conf", "# Managed by swap-setup.sh (CST): uresourced\n[ActiveUser]\nMemoryMin=1G\n"
+        )
+        cst_res = self.run_tool()
+        self.assertEqual(cst_res.returncode, 1, cst_res.stdout + cst_res.stderr)
+        self.assertIn("WARN   memory: zswap is disabled", cst_res.stdout)
+        self.assertIn("fix: cst swap apply", cst_res.stdout)
+
+    def test_healthy_and_flagged_host_states(self) -> None:
+        self._write_host("etc/sysctl.d/99-swap-tuning.conf", "vm.swappiness = 60\n")
+        self._write_host("proc/meminfo", "MemTotal: 67108864 kB\nMemAvailable: 50000000 kB\n")
+        self._write_host("proc/sys/vm/min_free_kbytes", "262144\n")
+        self._write_host("sys/kernel/mm/transparent_hugepage/defrag", "always defer [defer+madvise] madvise never\n")
+        self._write_host("sys/kernel/mm/lru_gen/enabled", "0x0007\n")
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "1000\n")
+        self._write_host("sys/module/zswap/parameters/enabled", "Y\n")
+
+        ok_res = self.run_tool()
+        self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+        self.assertIn("responsiveness: 1 axes checked, no bottlenecks", ok_res.stdout)
+
+        # Advisory cpu item -> info (no fix command); dangling invocation symlink counts as active!
+        self._write_host(
+            "etc/tmpfiles.d/cpu-setup-hwp-boost.conf",
+            "w /sys/devices/system/cpu/cpufreq/boost - - - - 1\n",
+        )
+        self._write_host("dev/ntsync", "")
+        os.makedirs(os.path.join(self.root, "run/systemd/units"), exist_ok=True)
+        os.symlink(
+            "deadbeef00112233445566778899aabb",
+            os.path.join(self.root, "run/systemd/units/invocation:irqbalance.service"),
+        )
+        self._write_host("proc/cmdline", "quiet preempt=voluntary\n")
+        info_res = self.run_tool()
+        self.assertEqual(info_res.returncode, 0, info_res.stdout + info_res.stderr)
+        self.assertIn("info   cpu: Kernel preemption is 'voluntary'", info_res.stdout)
+        self.assertNotIn("irqbalance service is inactive", info_res.stdout)
+
+        self._write_host("etc/sysctl.d/90-btrfs-writeback.conf", "vm.dirty_bytes = 268435456\n")
+        self._write_host("sys/module/nvme_core/parameters/default_ps_max_latency_us", "100000\n")
+        nvme_res = self.run_tool()
+        self.assertEqual(nvme_res.returncode, 1, nvme_res.stdout + nvme_res.stderr)
+        self.assertIn("WARN   io: nvme_core default_ps_max_latency_us=100000", nvme_res.stdout)
+        self.assertIn("fix: cst btrfs install", nvme_res.stdout)
+
+        self._write_host("sys/class/drm/card0/device/uevent", "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self._write_host("sys/class/drm/card0/card0-DP-1/status", "connected\n")
+        self._write_host("sys/class/drm/card0/device/power/control", "auto\n")
+        gpu_res = self.run_tool()
+        self.assertEqual(gpu_res.returncode, 1, gpu_res.stdout + gpu_res.stderr)
+        self.assertIn("WARN   gpu: Connected display GPU card0 (amdgpu, DP-1) has power/control=auto", gpu_res.stdout)
+        self.assertIn("fix: cst cpu install", gpu_res.stdout)
+
+        self._write_host("sys/kernel/mm/lru_gen/min_ttl_ms", "0\n")
+        mglru_res = self.run_tool()
+        self.assertEqual(mglru_res.returncode, 1, mglru_res.stdout + mglru_res.stderr)
+        self.assertIn("WARN   memory: MGLRU min_ttl_ms is 0", mglru_res.stdout)
+        self.assertIn("fix: cst swap apply", mglru_res.stdout)
+
+        self._write_host("sys/module/zswap/parameters/enabled", "N\n")
+        warn_res = self.run_tool()
+        self.assertEqual(warn_res.returncode, 1, warn_res.stdout + warn_res.stderr)
+        self.assertIn("WARN   memory: zswap is disabled", warn_res.stdout)
+        self.assertIn("fix: cst swap apply", warn_res.stdout)
+
+    def test_phase4_and_cst_prog_fix_rewrite(self) -> None:
+        self._write_host("etc/cpu-setup/cpu-setup.conf", "BUILD_CPUS='12-23'\n")
+        self._write_host("etc/sysctl.d/90-btrfs-writeback.conf", "vm.dirty_bytes = 268435456\n")
+        os.makedirs(os.path.join(self.root, "run/systemd/units"), exist_ok=True)
+        os.symlink(
+            "deadbeef00112233445566778899aabb",
+            os.path.join(self.root, "run/systemd/units/invocation:irqbalance.service"),
+        )
+        self._write_host("sys/block/nvme0n1/queue/scheduler", "[none]\n")
+        self._write_host("sys/block/nvme0n1/queue/rotational", "0\n")
+        self._write_host("sys/fs/cgroup/io.cost.qos", "")
+        self._write_host("sys/fs/cgroup/builds.slice/io.weight", "default 20\n")
+        self.env["CST_PROG"] = "./cst doctor"
+        p4_res = self.run_tool()
+        self.assertEqual(p4_res.returncode, 1, p4_res.stdout + p4_res.stderr)
+        self.assertNotIn("irqbalance service is inactive", p4_res.stdout)
+        self.assertIn("fix: ./cst cpu irq apply", p4_res.stdout)
+        self.assertIn("fix: ./cst btrfs iocost apply", p4_res.stdout)
+        self.assertNotIn("fix: sudo cst ", p4_res.stdout)
 
 
 if __name__ == "__main__":

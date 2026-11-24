@@ -65,13 +65,16 @@ SYSTEM_PYTHON: Final = "/usr/bin/python3"
 # An entry without one is checked statically only.
 HELP_MODES: Final[dict[str, tuple[tuple[str, ...], int]]] = {
     "btrfs/btrfs-bulk": (("--help",), 2),
+    "btrfs/btrfs-iocost": (("--help",), 0),
     "btrfs/btrfs-snapshot-core": (("--help",), 0),
     "btrfs/btrfs-snapshot-runtime": (("--help",), 2),
     "btrfs/btrfs-stall-monitord": (("--help",), 0),
+    "cpu/cpu-irq": (("--help",), 0),
     "btrfs/btrfs-stall-report": (("--help",), 0),
     "btrfs/cst-pending-alerts": (("--help",), 2),
     "btrfs/docker-gc": (("--help",), 2),
     "btrfs/docker-volumes-nocow": (("--help",), 2),
+    "cpu/cpu-power": (("--help",), 0),
     "cpu/cpu-watch": (("--help",), 2),
     "cpu/game-profile": (("--help",), 2),
     "cpu/vm-pin": (("--help",), 2),

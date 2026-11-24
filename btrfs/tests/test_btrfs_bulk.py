@@ -1157,8 +1157,6 @@ class BulkTest(BulkBase):
         with mock.patch("builtins.open", mock.mock_open(read_data=line)):
             got = bulk_machine.Primitives.mounts(self.machine)
         self.assertEqual(got, ["/mnt/a b\tc\nd\\e\\040f"])
-        self.assertEqual(bulk_machine.unescape_mountinfo("/plain"), "/plain")
-        self.assertEqual(bulk_machine.unescape_mountinfo("\\0401\\9"), " 1\\9")
 
     def test_failed_recovery_is_a_problem(self) -> None:
         self.setup_programs()

@@ -14,6 +14,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
     python3 -B -m unittest btrfs.tests.test_btrfs_setup -v
 """
 
+from collections.abc import Sequence
 import json
 import os
 from pathlib import Path
@@ -1816,16 +1817,20 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-status-mounts-test-"))
         self.addCleanup(shutil.rmtree, self.tmp)
 
-    def _run_status_mounts(self, opts_by_mount: str) -> str:
+    def _run_status_mounts(self, opts_by_mount: str, *extra: str) -> str:
         script = "\n".join(
             [
                 "set -Eeuo pipefail",
                 assignment("EXPECTED_OPTS"),
+                shell_function(SETUP, "root_fs_uuid"),
                 shell_function(SETUP, "status_mounts"),
                 f'SYSCTL_FILE="{self.tmp}/sysctl.conf"',
+                f'JOURNALD_DROPIN="{self.tmp}/10-cst-write-budget.conf"',
                 f'echo "2147483648" > "{self.tmp}/dirty_bytes"',
                 f'echo "536870912" > "{self.tmp}/dirty_background_bytes"',
-                'printf "vm.dirty_bytes = 2147483648\\nvm.dirty_background_bytes = 536870912\\n" > "${SYSCTL_FILE}"',
+                f'echo "1500" > "{self.tmp}/dirty_writeback_centisecs"',
+                f'echo "6000" > "{self.tmp}/dirty_expire_centisecs"',
+                'printf "vm.dirty_bytes = 2147483648\\nvm.dirty_background_bytes = 536870912\\nvm.dirty_writeback_centisecs = 1500\\nvm.dirty_expire_centisecs = 6000\\n" > "${SYSCTL_FILE}"',
                 "findmnt() {",
                 '  local mnt="$5"',
                 '  case "${mnt}" in',
@@ -1836,9 +1841,12 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
                 '  case "$1" in',
                 f'    /proc/sys/vm/dirty_bytes) command cat "{self.tmp}/dirty_bytes" ;;',
                 f'    /proc/sys/vm/dirty_background_bytes) command cat "{self.tmp}/dirty_background_bytes" ;;',
+                f'    /proc/sys/vm/dirty_writeback_centisecs) command cat "{self.tmp}/dirty_writeback_centisecs" ;;',
+                f'    /proc/sys/vm/dirty_expire_centisecs) command cat "{self.tmp}/dirty_expire_centisecs" ;;',
                 '    *) command cat "$@" ;;',
                 "  esac",
                 "}",
+                *extra,
                 "status_mounts",
             ]
         )
@@ -1857,23 +1865,298 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
         base = "flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
         out_comp = self._run_status_mounts(f'    /var) echo "compress=zstd:1,{base}" ;;')
         self.assertIn("/var       ok (compress=zstd:1 ", out_comp)
+        self.assertIn("vm.dirty_writeback_centisecs", out_comp)
+        self.assertIn("1500 ok", out_comp)
+        self.assertIn("journald write budget", out_comp)
         out_force = self._run_status_mounts(f'    /var) echo "compress-force=zstd:1,{base}" ;;')
         self.assertIn("/var       ok (compress-force=zstd:1 ", out_force)
         out_missing = self._run_status_mounts(f'    /var) echo "{base}" ;;')
         self.assertIn("/var       MISSING: compress=zstd/compress-force=zstd", out_missing)
 
-    def test_btrfs_setup_dispatches_compress_force_help(self) -> None:
+    def test_a_separate_home_filesystem_is_named_not_judged(self) -> None:
+        # A btrfs /var/home of its own (another UUID than the root's) was judged by the root's options:
+        # "MISSING: compress=zstd/compress-force=zstd ...", though CST never sets them there.
+        full = "compress=zstd:1,flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+
+        def stub(root_uuid: str, var_uuid: str, home_uuid: str, home_opts: str = "noatime,ssd") -> str:
+            # findmnt -rn -o UUID --target /sysroot, and findmnt -rn -o OPTIONS,UUID -M MNT (or the
+            # -o OPTIONS of an older status_mounts).
+            return "\n".join(
+                [
+                    "findmnt() {",
+                    '  case "$3:$5" in',
+                    f'    UUID:/sysroot) echo "{root_uuid}" ;;',
+                    f'    OPTIONS,UUID:/var) echo "{full} {var_uuid}" ;;',
+                    f'    OPTIONS,UUID:/var/home) echo "{home_opts} {home_uuid}" ;;',
+                    f'    OPTIONS:/var) echo "{full}" ;;',
+                    f'    OPTIONS:/var/home) echo "{home_opts}" ;;',
+                    "  esac",
+                    "}",
+                ]
+            )
+
+        separate = "  /var/home  separate filesystem (not the root's): CST does not set its options"
+        out = self._run_status_mounts("", stub("uuid-a", "uuid-a", "uuid-b"))
+        self.assertIn("  /var       ok (compress=zstd:1 ", out)
+        self.assertIn(separate, out)
+        self.assertNotIn("/var/home  MISSING", out)
+        for root_uuid, home_uuid in (("uuid-a", "uuid-a"), ("", "uuid-b"), ("uuid-a", "")):
+            with self.subTest(root_uuid=root_uuid, home_uuid=home_uuid):  # the root's, or cannot tell
+                out = self._run_status_mounts("", stub(root_uuid, "uuid-a", home_uuid))
+                self.assertIn("  /var/home  MISSING: compress=zstd/compress-force=zstd", out)
+                self.assertNotIn("separate filesystem", out)
+                self.assertIn("  /var       ok (compress=zstd:1 ", out)
+
+    # A findmnt stand-in over a mount table (TABLE: "TARGET FSTYPE UUID OPTIONS" lines) that reads its
+    # arguments as findmnt does: -o UUID or -o OPTIONS,UUID, --target or -M, and -t, which prints nothing
+    # and fails when the mount is of another type. A target not in the table fails, as findmnt
+    # --target does for a path that does not exist.
+    MOUNT_TABLE_FINDMNT = r"""
+findmnt() {
+    local cols="" target="" fstype="" m t u o
+    while (( $# )); do
+        case "$1" in
+            -o) cols="$2"; shift ;;
+            --target|-M) target="$2"; shift ;;
+            -t) fstype="$2"; shift ;;
+        esac
+        shift
+    done
+    while read -r m t u o; do
+        [[ "$m" == "$target" ]] || continue
+        [[ -z "$fstype" || "$fstype" == "$t" ]] || return 1
+        case "$cols" in
+            UUID) echo "$u" ;;
+            OPTIONS,UUID) echo "$o $u" ;;
+        esac
+        return 0
+    done <<<"$TABLE"
+    return 1
+}
+"""
+
+    def test_the_root_uuid_falls_back_to_root_then_var(self) -> None:
+        # root_fs_uuid asked only /sysroot: a host without it (Fedora Workstation) had no root UUID.
+        cases = {
+            "silverblue": ("/sysroot btrfs uuid-a o\n/ overlay - o\n/var btrfs uuid-a o", "uuid-a"),
+            "no /sysroot": ("/ btrfs uuid-w o\n/var/home btrfs uuid-h o", "uuid-w"),
+            "a root that is not btrfs": ("/ ext4 uuid-e o\n/var btrfs uuid-v o", "uuid-v"),
+            "no btrfs": ("/ ext4 uuid-e o", ""),
+        }
+        for name, (table, want) in cases.items():
+            with self.subTest(name):
+                script = "\n".join(
+                    [
+                        "set -Eeuo pipefail",
+                        shell_function(SETUP, "root_fs_uuid"),
+                        self.MOUNT_TABLE_FINDMNT,
+                        f"TABLE=$'{table}'",
+                        'uuid="$(root_fs_uuid)"',
+                        'echo "[$uuid]"',
+                    ]
+                )
+                r = subprocess.run(
+                    ["bash", "-c", script],
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                )
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"[{want}]\n", ""))
+
+    def test_a_separate_home_is_named_on_a_host_without_sysroot(self) -> None:
+        # Without /sysroot the root UUID was empty, so a separate btrfs /var/home was judged by the
+        # root's options ("MISSING: compress=zstd ...") while cst doctor took it for a separate filesystem.
+        full = "compress=zstd:1,flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+        table = f"/ btrfs uuid-a {full}\n/var btrfs uuid-a {full}\n/var/home btrfs uuid-b noatime,ssd"
+        # status runs status_mounts with set +e +o pipefail: findmnt -M /sysroot fails here.
+        out = self._run_status_mounts("", self.MOUNT_TABLE_FINDMNT, f"TABLE=$'{table}'", "set +e +o pipefail")
+        self.assertIn("  /var       ok (compress=zstd:1 ", out)
+        self.assertIn("  /var/home  separate filesystem (not the root's): CST does not set its options", out)
+        self.assertNotIn("MISSING", out)
+
+    def _nvme_lines(self, param: str | None, *, managed: bool, tolerances: Sequence[str] = ()) -> list[str]:
+        """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file) and
+        controllers nvme0, nvme1, ... whose latency tolerance holds each of TOLERANCES."""
+        for i, value in enumerate(tolerances):
+            qos = Path(self.tmp, "class", f"nvme{i}", "power", "pm_qos_latency_tolerance_us")
+            qos.parent.mkdir(parents=True, exist_ok=True)
+            qos.write_text(f"{value}\n", encoding="utf-8")
+        param_path = os.path.join(self.tmp, "default_ps_max_latency_us")
+        managed_path = os.path.join(self.tmp, "cst-nvme-apst.conf")
+        if param is not None:
+            Path(param_path).write_text(f"{param}\n", encoding="utf-8")
+        if managed:
+            Path(managed_path).write_text(
+                "w /sys/module/nvme_core/parameters/default_ps_max_latency_us\n", encoding="utf-8"
+            )
+        out = self._run_status_mounts(
+            "    *) ;;",
+            f'NVME_APST_PARAM="{param_path}"',
+            f'NVME_APST_FILE="{managed_path}"',
+            f'NVME_QOS_GLOB="{self.tmp}/class/nvme*/power/pm_qos_latency_tolerance_us"',
+        )
+        return [line for line in out.splitlines() if "nvme" in line]
+
+    def test_nvme_default_latency_ok_drift_and_not_managed(self) -> None:
+        self.assertEqual(self._nvme_lines("0", managed=True), ["  nvme default_ps_latency   0 us ok"])
+        self.assertEqual(
+            self._nvme_lines("100000", managed=True),
+            ["  nvme default_ps_latency   100000 us DRIFT (expected 0; run install)"],
+        )
+        os.unlink(os.path.join(self.tmp, "cst-nvme-apst.conf"))
+        self.assertEqual(
+            self._nvme_lines("100000", managed=False),
+            ["  nvme default_ps_latency   100000 us (not managed: run install)"],
+        )
+
+    def test_nvme_latency_tolerance_per_controller(self) -> None:
+        self.assertEqual(
+            self._nvme_lines("0", managed=True, tolerances=("0", "100000")),
+            [
+                "  nvme default_ps_latency   0 us ok",
+                "  nvme0 latency tolerance   0 us ok",
+                "  nvme1 latency tolerance   100000 us DRIFT (expected 0; run install)",
+            ],
+        )
+        os.unlink(os.path.join(self.tmp, "cst-nvme-apst.conf"))
+        self.assertEqual(
+            self._nvme_lines("0", managed=False)[1:],
+            [
+                "  nvme0 latency tolerance   0 us (not managed: run install)",
+                "  nvme1 latency tolerance   100000 us (not managed: run install)",
+            ],
+        )
+
+    def test_nvme_without_the_kernel_parameter_prints_no_line(self) -> None:
+        self.assertEqual(self._nvme_lines(None, managed=True), [])
+
+    def test_journald_write_budget_ok_and_not_managed(self) -> None:
+        dropin = os.path.join(self.tmp, "10-cst-write-budget.conf")
+        out = self._run_status_mounts("    *) ;;")
+        self.assertIn("  journald write budget         not managed (run install)\n", out)
+        Path(dropin).write_text("[Journal]\n", encoding="utf-8")
+        out = self._run_status_mounts("    *) ;;")
+        self.assertIn(f"  journald write budget         ok ({dropin})\n", out)
+
+    def test_btrfs_setup_dispatches_compress_and_commit_help(self) -> None:
+        for cmd, needle in (
+            ("compress-force", "revert"),
+            ("commit-interval", "commit=SECONDS"),
+            ("cache", "--allow-nonempty"),
+        ):
+            r = subprocess.run(
+                ["bash", SETUP, cmd, "--help"],
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(cmd, r.stdout)
+            self.assertIn(needle, r.stdout)
+
+    def test_btrfs_setup_refuses_the_old_scratch_command(self) -> None:
+        """The cache helper's command is `cache`: the word it had before the rename is unknown."""
         r = subprocess.run(
-            ["bash", SETUP, "compress-force", "--help"],
+            ["bash", SETUP, "scratch", "--help"],
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
             check=False,
         )
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("compress-force", r.stdout)
-        self.assertIn("revert", r.stdout)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("Unknown command: scratch", r.stderr)
+
+
+class SnapEntryStateTest(unittest.TestCase):
+    """snap_entry_state (btrfs/setup-snapshots.bash): a symlink is never "mounted", though mountpoint
+    follows it to a mount point."""
+
+    def test_a_symlink_to_a_mountpoint_is_not_mounted(self) -> None:
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-entry-test-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        os.mkdir(os.path.join(tmp, "real"))
+        os.symlink(os.path.join(tmp, "real"), os.path.join(tmp, "link"))
+        script = (
+            f'SRC={BTRFS}; . "$SRC/setup-snapshots.bash"; SNAP_STATE="$T/state"\n'
+            # mountpoint -q PATH, as the real one answers through a link: true for both paths.
+            'mountpoint() { [[ "$2" == "$T/real" || "$2" == "$T/link" ]]; }\n'
+            'snap_entry_state copy "$T/real"; snap_entry_state copy "$T/link"\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": tmp, "HOME": tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["mounted", "todo"]), r.stderr)
+
+    def test_an_aside_link_is_not_shown_as_to_delete(self) -> None:
+        # put_aside never moves a link, so plan must not list one as "cache: deleted before
+        # converting its parent" (test -d follows it).
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-snap-entry-test-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        os.mkdir(os.path.join(tmp, "real"))
+        os.symlink(os.path.join(tmp, "real"), os.path.join(tmp, "link"))
+        script = (
+            f'SRC={BTRFS}; . "$SRC/setup-snapshots.bash"; SNAP_STATE="$T/state"\n'
+            "mountpoint() { return 1; }\n"
+            'snap_entry_state aside "$T/real"; snap_entry_state aside "$T/link"\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "T": tmp, "HOME": tmp},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["aside", "-"]), r.stderr)
+
+
+class WriteCommandHelpTest(unittest.TestCase):
+    """`cst btrfs iocost apply --help` and `scrub-limit set --help` print help without sudo:
+    btrfs-setup.sh hands every iocost and scrub-limit word to Python, which elevates only to write."""
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cst-write-help-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.mkdir(self.bin)
+        self.marker = os.path.join(self.tmp, "sudo-ran")
+        sudo = os.path.join(self.bin, "sudo")
+        Path(sudo).write_text(f'#!/bin/sh\necho "$@" >"{self.marker}"\nexit 97\n', encoding="utf-8")
+        os.chmod(sudo, 0o755)
+
+    def test_help_after_a_write_subcommand_needs_no_sudo(self) -> None:
+        for argv, usage in (
+            (["iocost", "apply", "--help"], "Usage: cst btrfs iocost"),
+            (["iocost", "revert", "-h"], "Usage: cst btrfs iocost"),
+            (["scrub-limit", "set", "--help"], "Usage: cst btrfs scrub-limit"),
+            (["scrub-limit", "off", "--help"], "Usage: cst btrfs scrub-limit"),
+        ):
+            with self.subTest(argv=argv):
+                r = subprocess.run(
+                    ["bash", SETUP, *argv],
+                    env={"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": self.tmp, "CST_PROG": "cst btrfs"},
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                    timeout=60,
+                )
+                self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+                self.assertIn(usage, r.stdout)
+                self.assertFalse(os.path.exists(self.marker), "sudo was run")
 
 
 if __name__ == "__main__":

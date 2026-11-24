@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst cpu`'s root commands on the machine: install, status, uninstall, game, vm-pin, docker-slice, experiment.
 
-CpuSetup carries what every step needs (the paths, the command runner, the
-checkout, the name to show, the target user) across the steps of a command.
-Each step runs what cpu-setup.sh ran, the way it ran it: the installer
-(cst_core/installer.py, through runuser for the user's files), systemctl,
-the checkout's programs. A command that cpu-setup.sh ran under set -e ends
-the command when it fails, with its exit status (Halt).
+CpuSetup carries what every step needs (the paths, the command runner, the checkout, the name to show, the
+target user) across the steps of a command. Each step runs what cpu-setup.sh ran, the way it ran it: the
+installer (cst_core/installer.py, through runuser for the user's files), systemctl, the checkout's programs.
+A command that cpu-setup.sh ran under set -e ends the command when it fails, with its exit status (Halt).
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -14,6 +12,7 @@ import contextlib
 import fnmatch
 import glob
 import grp
+import io
 import locale
 import os
 import pwd
@@ -28,10 +27,16 @@ from cst_core.domain.record import ComponentState
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.values import ROOT_ACCOUNT
 from cst_core.ports import CommandFault, CommandResult, CommandRunnerPort, OutputMode
+from perf.adapters import LinuxPerfProbe, PerfPaths
+from perf.domain.evaluate import evaluate_perf_snapshot
+from perf.domain.models import PerfAxis
+from perf.presenter import render_perf_findings_block
 from cpu.game.adapters.host import holds, read_stripped
 from cpu.game.domain import APP_SLICE, BUILDS_SLICE, GAME_DROPIN, USER_SLICE, cpuset_in
+from cpu.power.adapters import read_cpu_topology
 from cpu.setup.domain import (
     CORE_COMPONENT,
+    CPU_POWER_SERVICE,
     DOCKER_SLICE_COMPONENT,
     GAMEMODE_COMPONENT,
     GAMEMODE_GROUP,
@@ -44,13 +49,14 @@ from cpu.setup.domain import (
     DaemonJson,
     DockerSliceAction,
     Halt,
+    SchedExtState,
     SetupPaths,
-    conf_lines,
     cgroup_parent_shown,
     current_choice,
     docker_slice_status,
     experiment_line,
     first_arg,
+    first_conf_lines,
     first_four_and_last,
     gamemode_ini,
     helper_dropin,
@@ -61,6 +67,7 @@ from cpu.setup.domain import (
     is_daemon_json,
     json_text,
     last_lines,
+    ntsync_modules_load_text,
     preempt_modes,
     target_user_in,
     toolbox_dropin,
@@ -321,7 +328,7 @@ class CpuSetup:
                 raise Halt(1, f"{self.root}/{f}: syntax error")
         _make_run_dir(os.path.dirname(p.conf))
         if not os.path.exists(p.conf):
-            self.install_text(p.conf, conf_lines(user))
+            self.install_text(p.conf, first_conf_lines(user, read_cpu_topology(p.sys_dir, p.p_cores, p.e_cores)))
         self.installer("install", "--set", f"USER={user}", "--component", CORE_COMPONENT)
         if os.access(p.hwp_boost, os.W_OK):
             self.install_text(p.hwp_tmpfiles, hwp_tmpfiles_text(p.hwp_boost), component=CORE_COMPONENT)
@@ -329,6 +336,7 @@ class CpuSetup:
                 self.say(f"set:       {p.hwp_boost} = 1")
         else:
             self.warn(f"NOTE: {p.hwp_boost} not found (no intel_pstate in HWP mode): HWP dynamic boost skipped")
+        self._install_ntsync()
         ecores = self.e_cores()
         if ecores:
             self.install_text(self.toolbox_dropin(), toolbox_dropin_text(ecores), user, TOOLBOX_COMPONENT)
@@ -344,7 +352,10 @@ class CpuSetup:
         self._gamemode_group()
         self.run(["systemctl", "daemon-reload"])
         self.usys("daemon-reload")
+        self.run(["udevadm", "control", "--reload-rules"], check=False, quiet=True)
         self.run(["systemctl", "enable", "--now", WATCHDOG_TIMER])
+        self.run(["systemctl", "enable", CPU_POWER_SERVICE])
+        self.run(["systemctl", "restart", CPU_POWER_SERVICE])
         self.installer("mark", "--component", CORE_COMPONENT, ComponentState.DONE)
         home = self.required_home(user, "cst-install.bash")
         self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, ComponentState.DONE, as_user=user)
@@ -353,6 +364,30 @@ class CpuSetup:
         for line in install_done_lines(self.prog):
             self.say(line)
         return 0
+
+    def _ntsync_active(self) -> bool:
+        p = self.paths
+        ntsync_nodes = (
+            p.ntsync_dev,
+            os.path.join(p.sys_dir, "class", "misc", "ntsync"),
+            os.path.join(p.sys_dir, "module", "ntsync"),
+        )
+        return any(os.path.exists(node) for node in ntsync_nodes)
+
+    def _install_ntsync(self) -> None:
+        p = self.paths
+        info = self.run(["modinfo", "ntsync"], check=False, quiet=True, capture=True)
+        if info.returncode == 0 and "(builtin)" not in info.stdout:
+            self.install_text(p.ntsync_modules_load, ntsync_modules_load_text(), component=CORE_COMPONENT)
+            if not self._ntsync_active():
+                if self.run(["modprobe", "ntsync"], check=False, quiet=True).returncode == 0:
+                    self.say("loaded:    ntsync kernel module")
+                else:
+                    self.warn("NOTE: modprobe ntsync failed: autoload file written for next boot")
+        elif self._ntsync_active():
+            self.installer("remove-text", p.ntsync_modules_load)
+        else:
+            self.warn("NOTE: ntsync kernel module not available on this kernel: autoload skipped")
 
     def _echo_to(self, path: str, value: str) -> bool:
         """echo VALUE >PATH; bash's message on stderr when it fails."""
@@ -405,15 +440,23 @@ class CpuSetup:
         # unit and its off program are deleted.
         self.run(["systemctl", "disable", "--now", WATCHDOG_TIMER], check=False, quiet=True)
         self.run(["systemctl", "stop", "cpu-game.service"], check=False, quiet=True)
+        self.run(["systemctl", "disable", "--now", CPU_POWER_SERVICE], check=False, quiet=True)
+        self.run(self._checkout_program("cpu-power", "revert"), check=False, quiet=True)
+        self.run(self._checkout_program("cpu-irq", "revert"), check=False, quiet=True)  # cpu:irq, before cpu:core
         # Without the watchdog nothing would remove one left behind (the reload below then drops its MemoryLow).
         self.remove_game_dropins()
         self.installer("remove", "--component", CORE_COMPONENT)
+        self.run(["udevadm", "control", "--reload-rules"], check=False, quiet=True)
         self.remove_old_dropins()
         had_hwp = os.path.isfile(p.hwp_tmpfiles)
         # Also when it is gone already: its install record line goes too.
         self.installer("remove-text", p.hwp_tmpfiles)
         if had_hwp and os.access(p.hwp_boost, os.W_OK) and self._echo_to(p.hwp_boost, "0"):
             self.say(f"set:       {p.hwp_boost} = 0")
+        had_ntsync = os.path.isfile(p.ntsync_modules_load)
+        self.installer("remove-text", p.ntsync_modules_load)
+        if had_ntsync:
+            self.run(["modprobe", "-r", "ntsync"], check=False, quiet=True)
         self.rmdir(os.path.dirname(p.machine_dropin), os.path.dirname(p.delegate_dropin))
         if self.user:
             dropins = (self.toolbox_dropin(), self.helper_dropin())
@@ -614,10 +657,39 @@ class CpuSetup:
         self.say()
         self.say(f"== {title}")
 
+    def _render_perf_diagnosis(self) -> None:
+        p = self.paths
+        probes = (
+            os.path.join(p.proc_dir, "interrupts"),
+            os.path.join(p.sys_dir, "devices", "system", "cpu", "cpu0"),
+            os.path.join(p.sys_dir, "class", "drm"),
+        )
+        if not any(os.path.exists(node) for node in probes):
+            return
+        hr = "/" if p.sys_dir == "/sys" else os.path.dirname(p.sys_dir)
+        paths = PerfPaths(
+            p.proc_dir,
+            p.sys_dir,
+            p.cgroot,
+            os.path.join(hr, "etc"),
+            os.path.join(hr, "run"),
+            os.path.join(hr, "dev"),
+            os.path.join(p.sys_dir, "module", "zswap", "parameters"),
+            p.conf,
+            p.preempt,
+            p.sched_ext,
+        )
+        axes = (PerfAxis.CPU, PerfAxis.GPU)
+        rep = evaluate_perf_snapshot(LinuxPerfProbe(paths).collect_snapshot(axes), axes)
+        buf = io.StringIO()
+        render_perf_findings_block([f for ax in rep.axes for f in ax.findings], buf)
+        self.section("diagnosis")
+        self.write(buf.getvalue())
+
     def status(self) -> int:
         """The whole picture; nothing in it stops the rest."""
         p, user = self.paths, self.user
-        ext = " + sched_ext!" if read_stripped(p.sched_ext) == "enabled" else ""
+        ext = " + sched_ext!" if read_stripped(p.sched_ext) == SchedExtState.ENABLED else ""
         self.say(
             f"kernel {os.uname().release}, scheduler EEVDF{ext}, preempt {preempt_modes(read_text(p.preempt) or '')}"
         )
@@ -636,6 +708,9 @@ class CpuSetup:
         boost = read_stripped(p.hwp_boost)
         kept = f"kept at boot by {p.hwp_tmpfiles}" if os.path.isfile(p.hwp_tmpfiles) else "not managed"
         self.say(f"  HWP dynamic boost: {'n/a' if boost is None else boost} ({kept})")
+        nt_state = "active" if self._ntsync_active() else "inactive"
+        nt_kept = f"autoloaded by {p.ntsync_modules_load}" if os.path.isfile(p.ntsync_modules_load) else "not managed"
+        self.say(f"  ntsync: {nt_state} ({nt_kept})")
         self.section("baseline weights")
         machine = self.run(["systemctl", "show", "-P", "CPUWeight", "machine.slice"], check=False, capture=True)
         weights = [
@@ -655,6 +730,11 @@ class CpuSetup:
         self.write(indented(self.docker_slice_status() + "\n"))
         self.section("memory experiments")
         self.experiment(["list"])
+        self.section("GPU runtime PM and CPU C-states")
+        self.write(indented(self.run(self._checkout_program("cpu-power", "status"), check=False, capture=True).stdout))
+        self.section("irqbalance")
+        self.write(indented(self.run(self._checkout_program("cpu-irq", "status"), check=False, capture=True).stdout))
+        self._render_perf_diagnosis()
         self.section("last measurements")
         if not user:
             return 1
@@ -699,6 +779,9 @@ class CpuSetup:
                     return self.vm_pin(args)
                 case CpuRootCommand.DOCKER_SLICE:
                     return self.docker_slice(args)
+                case CpuRootCommand.POWER | CpuRootCommand.IRQ:
+                    prog = "cpu-power" if cmd == CpuRootCommand.POWER else "cpu-irq"
+                    return self.run(self._checkout_program(prog, *args), check=False).returncode
                 case _:
                     return self.experiment(args)
         except Halt as stop:

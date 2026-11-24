@@ -31,6 +31,9 @@ the CPU side (`cst cpu`), is [../README.md](../README.md).
 8. [`degraded-boot`: start the PC with one disk dead](#8-degraded-boot-start-the-pc-with-one-disk-dead)
 9. [`crypt-perf`: faster encryption path](#9-crypt-perf-faster-encryption-path)
     - [9.1 `compress-force`: skip the cheap btrfs compressibility estimator](#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator)
+    - [9.2 `iocost`: enable kernel blk-iocost QoS for slice `IOWeight`](#92-iocost-enable-kernel-blk-iocost-qos-for-slice-ioweight)
+    - [9.3 `commit-interval`: coherent `commit=60` across root btrfs layers](#93-commit-interval-coherent-commit60-across-root-btrfs-layers)
+    - [9.4 Dedicated NVMe cache drive (`cache`)](#94-dedicated-nvme-cache-drive-cache)
 10. [`snapshots` (summary)](#10-snapshots-summary)
     - [10.1 `bulk`: one folder for everything you can download again](#101-bulk-one-folder-for-everything-you-can-download-again)
     - [10.2 Toolchain caches: in `cst toolchains` now](#102-toolchain-caches-in-cst-toolchains-now)
@@ -132,6 +135,10 @@ cst btrfs help
 | `degraded-boot [install\|plan\|status\|files-only\|uninstall]` | root | Boot without a dead disk, unattended (section 8). |
 | `crypt-perf [status\|enable\|disable]` | root | Faster dm-crypt mode (section 9). |
 | `compress-force [status\|plan\|apply\|revert]` | user / root | Force zstd compression across mount layers (section 9.1): `status` and `plan` work as your user and in a toolbox; `apply` and `revert` need root on the host. |
+| `commit-interval [status\|plan\|apply\|revert]` | user / root | Keep the root Btrfs `commit=` interval aligned across the live mount, `/etc/fstab`, BLS kernel args, and top-mount drop-ins (section 9.3; default target `60`s): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
+| `cache [status\|plan\|attach\|detach]` | user / root | Multi-user bind mounts from a dedicated NVMe cache drive (`/var/mnt/cache/<user>` -> `~/.cache`, `/var/mnt/scratchpad/<user>` -> `~/Scratchpad`; section 9.4): `status` and `plan` run in a toolbox; `attach` and `detach` need root on the host. |
+| `iocost [status\|plan [--live-only [--device N]]\|apply [--live-only [--device N]]\|revert [--live-only]]` | user / root | Enable kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without an upstream hwdb entry so cgroup `IOWeight=` is arbitrated across slices (section 9.2): `status` and `plan` run in a toolbox; `apply` and `revert` need root on the host. |
+| `scrub-limit [status\|plan [SIZE\|off]\|set [SIZE]\|off]` | user / root | Inspect or configure `SCRUB_LIMIT` (default `500M`) and `10-cst-limit.conf` (section 4.3): `status` and `plan` work as your user and in a toolbox; `set` and `off` need root on the host. |
 | `snapshots ...` | root | Hourly snapshots and NAS backup (section 10, details in [SNAPSHOTS.md](SNAPSHOTS.md)). |
 | `bulk plan\|apply\|status\|keep ID\|unkeep ID` | root | `~/Bulk`: one folder for everything that can be downloaded again, with no snapshots and no NAS backup (section 10.1). Also the first step of `snapshots setup`. `keep ID` leaves one item in /home on purpose. |
 | `bulk steam plan\|apply [--app ID] [--copy]` | root | Moves your installed Steam games into the `~/Bulk/steam` library, with Steam closed (section 10.1). `plan` is a dry run. `apply` also installs the boot step that repairs an interrupted move. `--copy` allows a real copy of NOCOW game data (it cannot be reflinked). |
@@ -186,7 +193,8 @@ Unit files go to `/etc/systemd/system/`.
 | Weekly scrub (4.3) | `btrfs-scrub-weekly.service` + `.timer` | Sunday 02:00, up to 15 min later (or after the next boot if the PC was off); speed limit: `SCRUB_LIMIT` |
 | fstrim (4.4) | Fedora's own `fstrim.timer` (only enabled, not changed) | weekly |
 | Block-group reclaim (4.5) | `/etc/tmpfiles.d/btrfs-automatic-reclaim.conf` | at every boot, and once now |
-| Writeback limits (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf` | at every boot, and at every `install` |
+| Writeback limits & journald budget (4.6) | `/etc/sysctl.d/90-btrfs-writeback.conf`, `/etc/systemd/journald.conf.d/10-cst-write-budget.conf` | at every boot, and at every `install` |
+| NVMe APST latency cap | `/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules` | at every boot, NVMe udev events, and at `install`; the boot-time lines are `w-`, so a write the kernel refuses (a read-only sysfs in a container, a value a controller rejects) does not fail `systemd-tmpfiles-setup.service` (the udev rule and `install` still set the values) |
 | Stall monitor (4.7) | `/usr/local/sbin/btrfs-stall-monitord`, `btrfs-stall-monitor.service` | always |
 | Stall report (section 7) | `/usr/local/bin/btrfs-stall-report`, and a small launcher `~/.local/bin/btrfs-stall-report` | when you run it |
 | The `cst` command | the link `~/.local/bin/cst` -> the `cst` of the CST folder, only if nothing else is there, so the hints of alerts and logs (`cst btrfs ...`) work as typed ([README.md, The `cst` command](../README.md#the-cst-command)) | when you run it |
@@ -325,7 +333,16 @@ any IO scheduler. Set it in `/etc/btrfs-setup/snapshots.conf` (create the
 file if it is not there; other keys can stay out) and run `cst btrfs install`:
 
 ```
-SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limit
+SCRUB_LIMIT=500M    # per second, per device; e.g. 500M, 1G, 2G; empty or 0 = no limit
+```
+
+Or manage both `/etc/btrfs-setup/snapshots.conf` and the drop-in directly with `cst btrfs scrub-limit` (default `500M`, dry-run with `plan`, undo with `off`):
+
+```
+cst btrfs scrub-limit plan 500M
+cst btrfs scrub-limit set 500M
+cst btrfs scrub-limit status
+cst btrfs scrub-limit off
 ```
 
 - The default is **no limit**: choose the number after measuring (for
@@ -347,6 +364,20 @@ SCRUB_LIMIT=1G      # per second, per device; 500M, 2G ...; empty or 0 = no limi
 - If setting the limit fails (a btrfs-progs without `scrub limit`), that
   scrub does not run and the unit fails: it never runs at full speed by
   mistake. The health check alerts when the last scrub gets too old.
+- `scrub-limit set` and `off` write `snapshots.conf` first, then the drop-in
+  (through the installer), then run `daemon-reload`. When the installer or
+  `daemon-reload` fails, both files go back to what they were before (a file
+  that was not there is removed) and the command ends with
+  `ERROR: ...; previous configuration restored.`, or with
+  `ROLLBACK INCOMPLETE (...)` naming what could not be put back. A drop-in
+  that cannot be read stops the command before it writes anything.
+  Writing the drop-in sets `btrfs:core` pending in the install record; when
+  `btrfs:core` was done before, `set` marks it done again once the drop-in is
+  written and `daemon-reload` worked, so `cst doctor` does not ask for an
+  install that nothing needs. A rollback after a failed `daemon-reload`
+  writes the old drop-in back, which sets `btrfs:core` pending again; it
+  marks it done again too (a mark that fails is a `ROLLBACK INCOMPLETE`).
+  A `btrfs:core` that was never installed stays pending.
 - `status` shows the setting, the limit the service sets and the value in
   sysfs now; `cst doctor` shows the same as `info` and warns when the
   setting and the service differ.
@@ -417,23 +448,34 @@ wait, and the desktop can freeze.
 **How:** `/etc/sysctl.d/90-btrfs-writeback.conf` sets fixed limits. These are
 **global** kernel settings: they apply to all filesystems and disks, not only to
 btrfs. The real file is a comment block (the same reasons as above) and these
-two lines:
+four lines:
 
 ```
 vm.dirty_background_bytes = 536870912
 vm.dirty_bytes = 2147483648
+vm.dirty_writeback_centisecs = 1500
+vm.dirty_expire_centisecs = 6000
 ```
 
 - `vm.dirty_background_bytes` = 512 MiB: above this, Linux starts writing in
   the background.
 - `vm.dirty_bytes` = 2 GiB: above this, programs that write must wait.
+- `vm.dirty_writeback_centisecs` = 1500 (15 s): wakes the background flusher 3x
+  less often than the 5 s default.
+- `vm.dirty_expire_centisecs` = 6000 (60 s): aligns page expiry with
+  `commit=60` (section 9.3) so short-lived build files expire in RAM before
+  hitting NAND.
 
-This does not change how much is written in total. It only limits the size of
-each burst (2 GiB is about 0.5 s of NVMe writes). Setting these values turns
-off tuned's `vm.dirty_ratio`. tuned is configured with `reapply_sysctl=1`, so
-the file in `/etc/sysctl.d` wins over the tuned profile. `install` applies the
-values again every time it runs. `status` shows `DRIFT` if the live values
-differ.
+Setting byte limits turns off tuned's `vm.dirty_ratio`. tuned is configured with
+`reapply_sysctl=1`, so `/etc/sysctl.d` wins over the tuned profile. `install`
+applies the values again every time it runs. `status` shows `DRIFT` if any live
+value differs.
+
+`btrfs:core` also installs
+`/etc/systemd/journald.conf.d/10-cst-write-budget.conf` (`SyncIntervalSec=15m`,
+`SystemMaxUse=1G`, `MaxRetentionSec=1month`) and tries restarting
+`systemd-journald` so periodic non-critical journal fsyncs drop without losing
+crash logs or reboot persistence.
 
 ### 4.7 Stall monitor (`btrfs-stall-monitord`, always on)
 
@@ -546,9 +588,18 @@ every 15 minutes.
 
 ### 4.8 below
 
-**below** is a separate tool (a Fedora package) that records, every 5 s, how much
-each process and cgroup read and wrote. The stall monitor knows *that* the disk
+**below** is a separate tool (a Fedora package) that records, every **15 s** (`--interval 15`), how much
+each process and cgroup read and wrote (reduced from 5 s to cut continuous metadata write amplification by 3x while `btrfs-stall-monitord` keeps sampling every 5 s / 1 s in RAM, and `btrfs-stall-report` integrates `below` samples using actual timestamp deltas). The stall monitor knows *that* the disk
 was busy; below knows *who* did it.
+
+How `btrfs-stall-report` counts below's bytes: each sample's rate times the
+time since the sample before it, counted in full up to 300 s (a sample written
+late, during the stall the report is about, covers that whole time). A row
+without a usable time (none, a time that is not a number or a date, NaN or an
+infinity), the first sample, and gaps outside 1..300 s count the typical gap
+of the window, or 15 s (the recording interval) when there is none. A time
+without a zone is local time, as below prints it. A rate that is not a finite
+number counts 0.
 
 `install` adds it with `rpm-ostree install --apply-live below`. **rpm-ostree** is
 the tool that manages the Silverblue system image. Extra packages are
@@ -845,13 +896,14 @@ Read-only. Sections:
 | `docker volumes (NOCOW)` | how many volumes are fully NOCOW, and if a migration is pending (`at the next boot`) or `not scheduled`; `migration postponed at N boot(s) in a row` with the reason when boots had to wait (section 4.10) |
 | `docker-gc` | last cleanup, or `off` |
 | `space and automatic reclaim` | unallocated space per disk, data/metadata use, reclaim switches and counters |
-| `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry either `compress=zstd[:N]` or `compress-force=zstd[:N]` plus `flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file |
+| `mount options and writeback limits` | each of `/sysroot`, `/var`, `/var/home` must carry either `compress=zstd[:N]` or `compress-force=zstd[:N]` plus `flushoncommit noatime discard=async degraded space_cache=v2 ssd`; `vm.dirty_*` must match the file; the journald write budget; the NVMe APST settings of `cst-nvme-apst.conf`: `nvme default_ps_latency` and one `nvmeN latency tolerance` line per controller (`ok` at 0, `DRIFT (expected 0; run install)`, or `(not managed: run install)` without the file) |
 | `compression (compress-force)` | summary of root btrfs compression across live mount, `/etc/fstab`, `rpm-ostree kargs`, and `btrfs:top-mount` |
 | `degraded boot` | the summary of the degraded-boot part |
 | `alerts raised while nobody was logged in` | alerts of the last 7 days that no desktop could show when they happened (section 4.9), with time, program and title. Each line says whether **you** (the user who ran the script) have seen it: `[shown to you]`, `[NOT shown to you yet: next login]`, or `[only counted in the summary at login; text not shown]` (when many alerts waited). Lines marked `[shown to you]` need nothing from you; they stay listed until they expire. `none` if there were none. `shown at login: NOT installed` means the login part is missing: run `install` |
 | `snapshots` | the snapshot summary |
 | `Bulk (re-downloadable data: ...)` | the output of `bulk status` (section 10.1): `~/Bulk` is a subvolume, `CACHEDIR.TAG`, each link, the `+C` state of the emulator folders (`~/Bulk/emulators`), items waiting for the next boot, game data still in the old Steam library (with the command that moves it: `bulk steam plan`), an interrupted Steam game move |
 | `stalls, last hour` | the verdict lines of `report --since '1 hour ago' --no-below` |
+| `responsiveness diagnosis` | compact `io` axis diagnosis from `cst perf --axis io --compact` (block schedulers vs `blk-iocost`, NVMe APST latency, dirty writeback limits, `SCRUB_LIMIT`, and btrfs `commit_stats`; see [../perf/README.md](../perf/README.md)) |
 
 At the end: the size of the recorded data and the btrfs features.
 
@@ -883,7 +935,11 @@ How to read it:
   there is enough unallocated space for btrfs to reserve more.
 - `dynamic=1 periodic=1`: automatic reclaim is on. `errors` should be 0.
 - `ok` after each mount: all expected mount options are there. Otherwise you see
-  `MISSING:` and the names.
+  `MISSING:` and the names. A separate filesystem at `/var/home` (another UUID
+  than the root's) is named as such and not checked: CST sets only the root's
+  options. The root is the btrfs of `/sysroot`, else of `/` (a host without
+  `/sysroot`, such as Fedora Workstation), else of `/var`, as `cst doctor`
+  finds it; `install`, `status` and `crypt-perf` take its UUID the same way.
 - `ok` after `vm.dirty_*`: the live values match the file. Otherwise `DRIFT`.
 
 ---
@@ -913,7 +969,7 @@ It does not ask for confirmation; it starts at once. It stops and removes:
   record, CST's launcher still goes, with a warning, and uninstall goes on);
 - the below drop-in (also `10-f44-tools.conf`, its name in versions called
   f44-tools), and it disables `below.service`;
-- the writeback file. Then it restarts `tuned` so its own values come back. If
+- the writeback file and the NVMe APST latency cap (`/etc/tmpfiles.d/cst-nvme-apst.conf`, `/etc/udev/rules.d/65-cst-nvme-apst.rules`). Then it restarts `tuned` so its own values come back, reloads udev rules, and restores NVMe APST latency tolerance to `100000` us (default power-saving returns at the next boot if not writable). If
   tuned is not running, the old values come back at the next boot;
 - the reclaim file, **only if this script created it**. The switches stay on in
   the running kernel until the next reboot;
@@ -1360,9 +1416,37 @@ remount inconsistent (`cst doctor` flags any cross-layer drift):
    subvolumes),
 4. `btrfs:top-mount` (`/etc/systemd/system/var-mnt-btrfs\x2dtop.mount`, when
    `snapshots setup` installed it), rendered through CST's installer so
-   `installed.json` stays current.
+   `installed.json` stays current. Only the compress option of the unit's own
+   `Options=` changes; its other options stay as they are (the live `/var`'s
+   options are not copied in).
 
 On failure at any step, prior changes are rolled back so the layers never drift.
+
+**Only the root filesystem:** `apply` and `revert` (here and in
+`commit-interval`, section 9.3) change only the root btrfs filesystem's
+`/etc/fstab` lines and mounts. The root filesystem's UUID is that of the btrfs
+mounted at `/sysroot`, else at `/`, else at `/var`, as `cst doctor` and
+`btrfs-setup` find it, so a separate btrfs `/var` is not taken for the root.
+An fstab line is the root's when its source is
+`UUID=` of the root filesystem; a line with another `UUID=` is another
+filesystem, whatever its mount point. Without a UUID to compare (`LABEL=`,
+`/dev/...`), `/`, `/sysroot` and `/var` are the root's, and `/home` or
+`/var/home` only when its source is the same as theirs. A live mount is the
+root's when it is on the device of `/sysroot` (else `/`, else `/var`). So
+Fedora's default `/home` (a subvolume of the root filesystem) follows the
+setting, and a separate btrfs `/home` or `/var/home` is never changed or
+remounted.
+
+**After an upgrade, on a host with a separate btrfs `/var`:** an older CST
+asked for `/var` first and took that filesystem for the root, so its
+`compress-force apply` and `commit-interval apply` wrote their option
+(`compress-force=zstd:N`, `commit=N`) on the fstab lines of the separate `/var`
+filesystem, not on the root's `/` line. Those lines are not the root's, so
+nothing changes them back (`revert` included). `status`, `plan`, `apply` and
+`revert` of each command print a `note` naming each line of that filesystem
+(the lines with the `UUID=` of the `/var` line) that has its option. If you did
+not set it yourself, put that line's options back by hand (`sudoedit
+/etc/fstab`); `cst doctor` does not check a separate filesystem.
 
 **What it does not touch:** the live remount takes effect immediately for new
 writes without rebooting. Existing files keep their current extents until rewritten
@@ -1377,6 +1461,212 @@ deployments.
 patches Anaconda's Web UI manual partitioning backend to apply
 `compress-force=...` (Fedora's default zstd level, usually `zstd:1`) from
 installation time.
+
+### 9.2 `iocost`: enable kernel blk-iocost QoS for slice `IOWeight`
+
+Cgroup v2 `IOWeight=` settings on `machine.slice`, `builds.slice`, and user
+slices only arbitrate I/O when either BFQ or kernel **`blk-iocost`** is active
+on the block device. Because NVMe drives run with `none` scheduler and many
+modern consumer SSDs (such as Samsung 990 PRO and Kingston KC3000) have no
+upstream solution in `90-iocost.rules` hwdb (`IOCOST_SOLUTIONS` stays empty),
+`/sys/fs/cgroup/io.cost.qos` remains blank by default.
+
+```
+cst btrfs iocost status
+cst btrfs iocost plan
+cst btrfs iocost apply
+cst btrfs iocost revert
+```
+
+What `cst btrfs iocost apply` does (component `btrfs:iocost`):
+
+- installs `/usr/local/sbin/btrfs-iocost`,
+  `/etc/systemd/system/cst-btrfs-iocost.service`, and
+  `/etc/udev/rules.d/91-cst-iocost.rules` (which runs after upstream
+  `90-iocost.rules` on non-rotational disks with empty `IOCOST_SOLUTIONS`);
+- enables `cst-btrfs-iocost.service` and writes `<MAJ>:<MIN> enable=1 ctrl=auto`
+  into `/sys/fs/cgroup/io.cost.qos` for every non-rotational NVMe/SATA/VirtIO
+  whole disk whose `enable` is not already `1` (vendor/pre-existing `enable=1`
+  entries are preserved untouched and excluded from `/run/btrfs-setup/iocost-managed`);
+- the scan of every disk (`apply`, `plan`, `status` and the boot service)
+  asks udev about each one (`udevadm info`): a disk with an `IOCOST_SOLUTIONS`
+  hwdb solution is left to `90-iocost.rules` (`kept:`, and no longer listed as
+  CST's), unless CST's own `enable=1 ctrl=auto` of earlier this boot is still
+  on it (udev's solutions write `ctrl=user`): that disk stays CST's
+  (`unchanged:`), so `revert` resets it, and the next boot leaves it to udev; a disk udev has not processed yet (no `USEC_INITIALIZED`) is
+  skipped with a `note:` (the udev rule writes it once udev does). Without
+  `udevadm`, a disk is judged as before, with a `note:`. The service is ordered
+  after `systemd-udev-settle.service` (where something pulls it in) and
+  `systemd-udevd.service`. A `--device` run (the udev rule's) does not ask: the
+  rule itself matched an empty `IOCOST_SOLUTIONS`;
+- `--live-only` writes `io.cost.qos` only (no unit, rule or install record
+  change); this is what the service and the udev rule run. `--device NAME`
+  limits the write to one whole disk and is accepted only together with
+  `--live-only` (for `apply` and `plan`): a one-disk request never installs
+  the service, whose next boot would write every disk;
+- `plan` asks the installer's plan (`installer.py plan --component
+  btrfs:iocost`, through `/run/host` from a toolbox) whether the program,
+  the unit and the rule are current, once both the unit and the rule are
+  there (before that it shows `would install:` without asking): after an upgrade that changed one of
+  them it shows `would update:  component btrfs:iocost (FILES)`, which
+  `apply` then rewrites. From the installed program (no checkout) or when
+  the installer's plan fails, it only checks that the unit and the rule are
+  there;
+- one run at a time: the boot service, the udev rule's per-disk runs and the
+  commands hold `/run/btrfs-setup/iocost-managed.lock` from their read of
+  `io.cost.qos` to their save of `/run/btrfs-setup/iocost-managed`, so two
+  runs never lose each other's devices. A run that cannot take it within 30 s
+  stops with `ERROR: another btrfs-iocost run holds ...` and writes nothing;
+  `apply` releases it before `enable --now` starts the service;
+- marks `btrfs:iocost` done in the install record only after the writes,
+  `daemon-reload`, `enable --now` and the udev rules' reload worked. The first
+  step that fails stops `apply` with an `ERROR:` line and a non-zero exit, and
+  the component stays pending (`cst doctor` shows it). A write that
+  `io.cost.qos` refuses is such an error, also for `--live-only` (the boot
+  service then fails visibly in `systemctl --failed`); a kernel without
+  `io.cost.qos` is only `skipped:` (exit 0). Without a running udevd (a
+  container) the rules' reload is skipped with a `note:`;
+- **`revert`** first stops and disables `cst-btrfs-iocost.service` (when that
+  fails, nothing is removed), removes `btrfs:iocost`, reloads systemd and the
+  udev rules (a failure is an error), and only then resets the `MAJ:MIN`
+  devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
+  so no udev event enables a disk again after its reset. The tracking file is
+  removed, also on a kernel without `io.cost.qos` (nothing to reset there).
+  `revert` removes the files and their record lines itself, so the installed
+  program (`/usr/local/sbin/btrfs-iocost revert`) works without a checkout;
+  `apply` (not `--live-only`) installs from a checkout and, run from the
+  installed program, refuses with "run it from one (cst btrfs iocost apply)".
+
+### 9.3 `commit-interval`: coherent `commit=60` across root btrfs layers
+
+```
+cst btrfs commit-interval               # status (default; user + toolbox)
+cst btrfs commit-interval plan          # dry run (also: SECONDS, --revert)
+cst btrfs commit-interval apply         # root on host; sets commit=60 (--yes skips prompt)
+cst btrfs commit-interval revert        # root on host; back to kernel default (30 s)
+```
+
+- Spaces periodic btrfs transaction commits from the 30 s default to **60 s**
+  (allowed range `15..300` s) across all four layers (`/etc/fstab`, next-boot
+  `rpm-ostree kargs`, live remount, and `btrfs:top-mount`), rolling back on any
+  partial error. Like `compress-force`, it changes only the root filesystem's
+  fstab lines and mounts: a separate btrfs `/home` or `/var/home` is never
+  touched (section 9.1, "Only the root filesystem"). In `btrfs:top-mount` only
+  the `commit=` of the unit's own `Options=` changes.
+- Keeps **`flushoncommit`** untouched on the root RAID1 filesystem so crash
+  consistency is preserved while Halving periodic `flushoncommit` barriers
+  (aligned with `vm.dirty_expire_centisecs = 6000` in section 4.6).
+- Because the Linux kernel omits `commit=30` from `/proc/mounts`, missing
+  `commit=` is treated as `30 s` default everywhere (`revert` removes `commit=`
+  from `fstab`/`kargs`/`top-mount` and remounts with `commit=30`). `cst doctor`
+  flags any cross-layer drift.
+- A `commit=` that is not a positive number of seconds (`commit=abc`,
+  `commit=0`, an empty `commit=`), which a mount refuses, is replaced in
+  every layer, the top-mount unit included, by `apply` and `revert`, even
+  when the valid `commit=` next to it already has the target.
+
+### 9.4 Dedicated NVMe cache drive (`cache`)
+
+```
+cst btrfs cache [--user NAME]             # status (default; user + toolbox)
+cst btrfs cache plan [--user NAME]        # dry run + safety checks (--no-cache / --no-scratchpad / --allow-nonempty)
+cst btrfs cache attach [--user NAME]      # root on host: 0700 folders, CACHEDIR.TAG, fstab bind lines, live mount
+cst btrfs cache detach [--user NAME]      # root on host: unmount + remove fstab lines; keeps the data on the drive
+```
+
+Moves caches that are rewritten all the time, and build or temporary files,
+off the root RAID1 onto a dedicated single-disk Btrfs filesystem (without
+`flushoncommit`). That saves the root disks' write endurance (TBW).
+`~/Workspace` stays on the mirrored root, with hourly snapshots and the NAS
+backup: nothing on the cache drive is in a snapshot or a backup.
+
+- **Layout:** two top-level subvolumes on the cache drive:
+  - `subvol=cache` mounted at `/var/mnt/cache`, with per-user `0700`
+    folders `/var/mnt/cache/<user>` bind-mounted to `~/.cache`.
+  - `subvol=scratchpad` mounted at `/var/mnt/scratchpad`, with per-user
+    `0700` folders `/var/mnt/scratchpad/<user>` (carrying `CACHEDIR.TAG`)
+    bind-mounted to `~/Scratchpad`.
+- **Multi-user safe:** every user runs `attach` / `detach` on their own,
+  with `--user NAME` (or `$SUDO_USER`); each bind line in `/etc/fstab`
+  carries `bind,nofail,x-systemd.requires-mounts-for=...` and the marker
+  `# managed-by: btrfs-cache (CST) user=<name> kind=<cache|scratchpad>`.
+- **How it reads the mounts:** one `findmnt -J -l -o SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT`
+  call (on the host from a toolbox). A mount at `~/.cache` counts as attached
+  only when it is on the cache drive's filesystem (the same UUID) and shows
+  the folder `<user>` of the subvolume (its FSROOT is `/cache/<user>`); any
+  other mount there is "a mount CST did not make", and `attach` refuses.
+  When findmnt fails, `status` says so and `plan`, `attach` and `detach`
+  refuse: nothing is guessed from another table. The same goes for an
+  `/etc/fstab` that is there but cannot be read (a permission or I/O
+  error): it is never taken for a missing file, which `attach` would
+  replace with one holding only CST's lines.
+- **What `attach` refuses** (`plan` shows each as `BLOCKED:`; nothing is
+  changed): a base folder that is not mounted or not btrfs, a cache drive on
+  the same filesystem as the home, a home folder that does not exist (CST
+  never creates it), a target or a source folder that is a symlink, a target
+  that is not a folder (even with `--allow-nonempty`), a non-empty target
+  without `--allow-nonempty`, a mount at a target that CST did not make, and
+  an `/etc/fstab` line CST does not manage for a target (remove it first).
+  The folders it creates get `0700`, the user as owner and, as root, their
+  SELinux label; it changes them through a handle that does not follow a
+  link, so a link put there meanwhile makes `attach` stop with an error.
+  `/etc/fstab` is read and written back byte for byte: the lines CST does
+  not manage keep their bytes, even ones that are not UTF-8. CST writes paths into `/etc/fstab` escaped as fstab wants them (a
+  space as `\040`, a tab `\011`, a newline `\012`, a backslash `\134`), and
+  keeps one managed line per user and kind: a repeated one is removed.
+- **Order, and what a failure leaves:** `attach` makes the folders, then
+  mounts each bind, and writes `/etc/fstab` (and runs `systemctl
+  daemon-reload`) last. When a mount, the write or the reload fails, it
+  unmounts the binds this run mounted and puts `/etc/fstab` back as it was
+  (no file when there was none), so no line is left that would mount at the
+  next boot; it says `mounts and /etc/fstab restored.`, or `ROLLBACK
+  INCOMPLETE` with what it could not undo (an `/etc/fstab` it could not
+  put back included: its new lines would mount at the next boot). The folders, the `CACHEDIR.TAG`
+  and a new target folder it made stay (empty, the user's): a second
+  `attach` uses them. `detach` unmounts only the binds CST made
+  (`kept: TARGET has a mount CST did not make` for any other) and removes
+  the user's managed lines; when that fails, it mounts again what it
+  unmounted. It changes nothing, and says why, when it cannot tell CST's
+  bind from another mount (the base folder, `/var/mnt/cache` or
+  `/var/mnt/scratchpad`, is not mounted) or when another mount sits on top
+  of CST's bind (unmounting the target would take that one away instead):
+  mount the base, or unmount the other mount, and run `detach` again.
+  `status` shows these two as `mounted (source not checked: base not
+  mounted)` and `mounted (other source on top of CST's bind!)`.
+- **Provisioning, once, on the host** (CST does not do this part):
+  - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
+    `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in
+    `/etc/crypttab`:
+    `cache UUID=<luks uuid> /etc/cryptsetup-keys.d/cache.key nofail,discard,no-read-workqueue,no-write-workqueue`.
+    `nofail` lets the PC still boot when the drive is missing.
+  - Format it: `mkfs.btrfs -f -L cache -m dup -d single /dev/mapper/cache`.
+    In plain words: `-m dup` keeps two copies of the metadata (the
+    filesystem's index of files and folders) on the one disk, so one bad
+    metadata block is repaired from its twin instead of losing the whole
+    filesystem; `-d single` keeps one copy of the data, which is cache and
+    scratch work that can be made again.
+  - Mount the drive's top level (`subvolid=5`) at
+    `/var/mnt/btrfs-cache-top`, create the subvolumes `cache` and
+    `scratchpad` there, and unmount it. Use `/var/mnt`, not `/mnt`: on
+    Silverblue `/mnt` is a link to `var/mnt`, and a systemd `.mount` unit's
+    name follows the real path (the root filesystem's own top level is
+    `/var/mnt/btrfs-top`).
+  - Mount the two subvolumes from `/etc/fstab`, for example
+    `/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,discard=async,compress=zstd:1,commit=60,nofail 0 0`
+    (and the same for `scratchpad`), without `flushoncommit`.
+  - Move the existing `~/.cache` files when the desktop and builds are idle
+    (`rsync -aHAX`), clear the old `~/.cache`, then run
+    `cst btrfs cache attach`.
+- **Undo:** `cst btrfs cache detach [--user NAME]` unmounts the user's bind
+  mounts and removes only that user's managed lines from `/etc/fstab`, leaving
+  the files under `/var/mnt/cache` and `/var/mnt/scratchpad` intact. `cst
+  doctor` checks the base mounts, the absence of `flushoncommit`, `nofail`
+  in `/etc/crypttab` (for the mapping behind the bases, found through
+  `/dev/mapper/NAME` or the name of `/dev/dm-N`, and for the default names
+  `cache`, `cache-*`, `luks-cache*`), and the live bind mounts.
+- **Homes through a link:** the targets use the home's real path (passwd's
+  `/home/u` is `/var/home/u` on Silverblue), the one the kernel and
+  findmnt show, so an attached bind is found and never mounted twice.
 
 ---
 
@@ -2356,7 +2646,11 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-snapshot-core` | `snapshot/` | `domain.py`: retention (btrbk's schedule()), the safeguards, snapshot names and wall-clock time, the circuit breaker's limits, parsing of `--source`, `--caches-skip`, the state file and `btrfs subvolume show`, and the values the ports and the presenter pass (`Scan`, `CacheWalk`, `RunOptions`, `Listing`); no I/O. `ports.py`: the host, btrfs, state directory, pin file, run lock and log boundaries. `application.py`: one `Run` per invocation (clock guards, state lists, creation, sealing, deletions under the circuit breaker and their re-checks), the scan of the snapshot folder and the bodies of the six commands. `adapters.py`: the `Host` (commands, clock, directory entries, the cache-folder walk; tests replace it), the btrfs commands, the state directory, the pin file (it resolves pinned paths on the filesystem), the run lock, the journal lines and the local time zone. `wiring.py`: `$TZ`, the time zone and the adapters. `presenter.py`: what `list`, `caches` and `latest` print. `cli.py`: the argument parser and `main()`. |
 | `btrfs-snapshot-runtime` | `snapshot_runtime/` | The Python side of `btrfs-snapshot` (`hourly`, `nas`, `list`, `caches`, `prune`, `purge`, `configure`), which the bash front `btrfs/btrfs-snapshot` execs for them; the front's conversion engine (`convert`, `convert-boot`, `convert-one`, `convert-planned`, `planned-left`) and `busy` stay bash for good. `domain.py`: the settings and their defaults (`DEFAULTS`; the space-guard numbers also stay as three lines in the front, for btrfs-bulk), bash arithmetic as the guard reads it (`guard_number`), the core's sources and cache options, `CORE_REASON` and the blocked alert, the NAS texts, durations and summary, the vocabularies (`AlertKind`, `CoreExit`, `ResticExit`, ...); no I/O. `adapters/`: `machine.py` (`SnapshotRun`: the paths below `CST_SNAPSHOT_ROOT` for a run that is not root, `snapshots.conf` read as data with cst_core's `parse_snapshots_conf`, the commands with the run's lock fds handed on, the files as the bash's commands treated them, the trapped signals), `hourly.py` (`hourly`, `prune`, `purge`: the lock, the space guard, the waits, the core's runs and alerts), `nas.py` (`Nas`: the NAS backup), `commands.py` (`list`, `caches`, `configure`, the table of commands). `cli.py`: `main()`. |
 | `btrfs-bulk` | `bulk/` | `domain/`, no I/O: `__init__.py` (the items, `Item`, `ITEMS`, whose home, `Ctx`, and the program's paths, `BulkPaths`, the CACHEDIR.TAG text, sizes and texts, the record of an item's journal, `ItemJournal`) and `steam.py` (Steam's file formats: VDF as the recursive type `Vdf`, the `libraryfolders.vdf` checks and edits, app manifests; the steam command's arguments and the record of a game's journal, `SteamJournal`; `ItemJournal` and `SteamJournal` keep the same JSON keys as before). `ports.py`: the changes made as the user (`UserFilesPort`), the looks at the home that never follow a link (`HomeTreePort`), the program's own files (`BulkStatePort`), the boot counter, the rest of the machine (`HostPort`) and the output. `application/`: `items.py` (each item's state, its move and link with its journal, recovery, `apply`, the plan/status report), `steam.py` (reading Steam's files as the user, one game's plan, its move with its journal and recovery), `commands.py` (`steam plan/apply`, the boot step, `keep/unkeep`), all over one `Bulk` (`context.py`). `adapters/`: `machine.py` (the btrfs and filesystem primitives, `Primitives`, and the lstat-only looks built on them, `HomeTree`), `child.py` (the child process that runs as the user, `as_user`, and the check of the result each step sends back), `user.py` (the steps it runs, `UserFiles`), `state.py` (bulk.conf, the journals, the boot flag, the keep list, convert-plan, the run lock), `host.py` (btrfs-snapshot's busy check, conversion and space limits, Steam's processes, the alert, the output). `wiring.py`: root or not, the `BTRFS_BULK_*` overrides (never as root), whose home (`--user`, `BULK_USER`), where `btrfs-snapshot` is (the checkout's copy from a checkout, the installed one from the zipapp) and the ports over the real adapters. `cli.py`: the arguments and `main()`. |
-| `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain.py` (pure CLI arg parser, `CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
+| `btrfs-compress` | `compress/` | Checkout-only entry behind `cst btrfs compress-force`: `domain/args.py` (the command line: `CompressCommand`, `CompressArgs`, `parse_compress_args`); `domain/__init__.py` (`CompressSpec`/`MountEntry`/`CompressPlan`/`CoherenceReport`, which fstab lines and mounts are the root filesystem's, option/fstab/kargs/top-mount rewriters, cross-layer coherence check); `ports.py` (`CompressHostPort`); `application.py` (`CompressService`: `gather_status`, `build_change_plan`, `execute_change` with rollback and post-remount verification); `presenter.py` (plain status/plan/change formatting); `adapters.py` (`LinuxCompressHostAdapter` over `cst_core`); `wiring.py` (`CST_BTRFS_COMPRESS_PROC` test seam, sudo re-exec); `cli.py` (container refusal, sudo escalation, dispatch). |
+| `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
+| `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). |
+| `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
+| `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the rollback of both files on a failure, and `btrfs:core` kept done in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |

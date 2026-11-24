@@ -130,7 +130,7 @@ PURE_NAMES: Final[dict[str, frozenset[str]]] = {
 # Builtins that reach the terminal, files or run code.
 IO_BUILTINS: Final[frozenset[str]] = frozenset({"open", "print", "input", "exec", "eval", "compile", "__import__"})
 REPO_PACKAGES: Final[frozenset[str]] = frozenset(
-    {"bluetooth", "btrfs", "cpu", "cst_core", "doctor", "swap", "toolchains", "vm"}
+    {"bluetooth", "btrfs", "cpu", "cst_core", "doctor", "perf", "swap", "toolchains", "vm"}
 )
 IO_LAYERS: Final[frozenset[str]] = frozenset({"domain", "application"})
 
@@ -150,21 +150,28 @@ CLI_CEILINGS: Final[dict[str, int]] = {
     "bluetooth/setup/cli.py": 32,
     "btrfs/bulk/cli.py": 88,
     "btrfs/chrome_cache/cli.py": 84,
-    "btrfs/compress/cli.py": 75,
+    "btrfs/commit/cli.py": 25,
+    "btrfs/compress/cli.py": 72,
     "btrfs/docker_gc/cli.py": 23,
     "btrfs/docker_volumes_nocow/cli.py": 13,
     "btrfs/health_check/cli.py": 32,
+    "btrfs/iocost/cli.py": 18,
     "btrfs/pending_alerts/cli.py": 74,
+    "btrfs/cache/cli.py": 20,
+    "btrfs/scrub_limit/cli.py": 27,
     "btrfs/snapshot/cli.py": 147,
     "btrfs/snapshot_runtime/cli.py": 13,
     "btrfs/stall_monitord/cli.py": 11,
     "btrfs/stall_report/cli.py": 34,
     "cpu/cli.py": 146,
     "cpu/game/cli.py": 13,
+    "cpu/irq/cli.py": 21,
+    "cpu/power/cli.py": 47,
     "cpu/setup/cli.py": 32,
     "cst_core/cli.py": 7,
     "doctor/cli.py": 24,
-    "swap/cli.py": 87,
+    "perf/cli.py": 23,
+    "swap/cli.py": 86,
     "toolchains/cli/": 79,
     "vm/cli/": 267,
 }
@@ -223,6 +230,7 @@ HEXAGONAL_PACKAGES: Final[dict[str, str]] = {
     "cpu/setup": "cpu/setup/wiring.py",
     "cst_core": "cst_core/wiring.py",
     "doctor": "doctor/wiring.py",
+    "perf": "perf/wiring.py",
     "swap": "swap/wiring.py",
     "toolchains": "toolchains/wiring.py",
     "vm": "vm/wiring.py",

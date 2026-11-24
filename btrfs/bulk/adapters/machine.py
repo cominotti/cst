@@ -40,18 +40,12 @@ from btrfs.bulk.domain import (
 )
 from cst_core.adapters.nocow import FS_NOCOW_FL, inode_flags, set_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
+from cst_core.domain.text import unescape_mount_field
 from cst_core.ports import CommandResult, CommandRunnerPort
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
-
-
-def unescape_mountinfo(field: str) -> str:
-    """A path field of /proc/self/mountinfo as the path it is: the kernel writes a space, a tab,
-    a line break and a backslash as \\ and three octal digits (\\040 \\011 \\012 \\134). One
-    pass, so an escaped backslash before "040" stays a backslash and the text 040."""
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
 
 
 class Progress:
@@ -171,7 +165,7 @@ class Primitives:
             with open("/proc/self/mountinfo") as f:
                 for line in f:
                     p = line.split()[4]
-                    out.append(unescape_mountinfo(p))
+                    out.append(unescape_mount_field(p))
         except OSError:
             pass
         return out

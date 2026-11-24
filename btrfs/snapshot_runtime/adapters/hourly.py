@@ -167,9 +167,21 @@ def planned_left(m: SnapshotRun) -> str:
     for strategy, path in plan_entries(m.read_raw(m.plan)):
         parent = os.path.dirname(path)
         if strategy == "aside":
-            if os.path.isdir(path) and not m.is_subvol(path) and not m.is_subvol(parent):
+            if (
+                os.path.isdir(path)
+                and not os.path.islink(path)  # put_aside never moves a link: it is not left
+                and not m.is_subvol(path)
+                and not m.is_subvol(parent)
+                and not m.is_mountpoint(path)
+                and not m.is_mountpoint(parent)
+            ):
                 out.append(path)
-        elif (os.path.exists(path) or os.path.isdir(parent)) and not m.is_subvol(path) and not skipped(m, path):
+        elif (
+            (os.path.exists(path) or os.path.isdir(parent))
+            and not m.is_subvol(path)
+            and not m.is_mountpoint(path)
+            and not skipped(m, path)
+        ):
             out.append(path)
     return "".join(f"{p}\n" for p in out)
 

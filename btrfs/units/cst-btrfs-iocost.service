@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MPL-2.0
+# Managed by btrfs-setup.sh (CST). Enables kernel blk-iocost (enable=1 ctrl=auto)
+# on non-rotational SSDs that do not have an upstream hwdb iocost solution.
+[Unit]
+Description=CST blk-iocost block I/O QoS baseline
+# After udev settle where something pulls it in (no Wants=: it is deprecated and slows the boot); the
+# scan skips a disk udev has not processed yet, which its udev rule writes when udev does.
+After=systemd-udev-settle.service systemd-udevd.service local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/btrfs-iocost apply --live-only
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

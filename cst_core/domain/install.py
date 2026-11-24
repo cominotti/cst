@@ -17,6 +17,27 @@ class Owner(StrEnum):
     USER = "user"
 
 
+# The width the installer pads its report word to: that of `unchanged:`, so the paths line up.
+_REPORT_WORD_WIDTH: Final = 10
+
+
+class InstallReportWord(StrEnum):
+    """The first word of the line the installer prints for each file: an install's `written:` or
+    `unchanged:`, a removal's `removed:`, a plan's `would write:`, `would record:` or `unchanged:`.
+    The programs that read the installer's output (bluetooth, cpu irq, scrub-limit, the settings steps)
+    match these words."""
+
+    UNCHANGED = "unchanged:"
+    WRITTEN = "written:"
+    REMOVED = "removed:"
+    WOULD_WRITE = "would write:"
+    WOULD_RECORD = "would record:"
+
+    def line(self, path: str) -> str:
+        """The installer's line for path: this word padded to the width of `unchanged:`, a space, path."""
+        return f"{self.value:<{_REPORT_WORD_WIDTH}} {path}"
+
+
 class ArtifactKind(StrEnum):
     """What an installed file is (the manifest's kind column)."""
 
@@ -44,10 +65,12 @@ class Component(StrEnum):
     BTRFS_TOP_MOUNT = "btrfs:top-mount"
     BTRFS_DOCKER_GC = "btrfs:docker-gc"
     BTRFS_DEGRADED_BOOT = "btrfs:degraded-boot"
+    BTRFS_IOCOST = "btrfs:iocost"
     BTRFS_REPORT_LAUNCHER = "btrfs:report-launcher"
     CPU_CORE = "cpu:core"
     CPU_GAMEMODE = "cpu:gamemode"
     CPU_DOCKER_SLICE = "cpu:docker-slice"
+    CPU_IRQ = "cpu:irq"
     CPU_TOOLBOX = "cpu:toolbox"
     BLUETOOTH_LDAC = "bluetooth:ldac"
     SWAP_CORE = "swap:core"
@@ -130,6 +153,7 @@ btrfs/btrfs-notify                                  /usr/local/sbin/btrfs-notify
 btrfs/btrfs-snapshot                                /usr/local/sbin/btrfs-snapshot                                755  root  shell         root   btrfs:snapshots
 # btrfs: systemd units and data
 btrfs/units/below.service.d/10-cst.conf             /etc/systemd/system/below.service.d/10-cst.conf               644  root  unit          root   btrfs:below
+btrfs/units/journald.conf.d/10-cst-write-budget.conf /etc/systemd/journald.conf.d/10-cst-write-budget.conf        644  root  data          root   btrfs:core
 btrfs/units/btrfs-bulk-boot.service                 /etc/systemd/system/btrfs-bulk-boot.service                   644  root  unit          root   btrfs:snapshots
 btrfs/units/btrfs-health-check.service              /etc/systemd/system/btrfs-health-check.service                644  root  unit          root   btrfs:core
 btrfs/units/btrfs-health-check.timer                /etc/systemd/system/btrfs-health-check.timer                  644  root  unit          root   btrfs:core
@@ -151,24 +175,35 @@ btrfs/snapshots/top.mount.in                        /etc/systemd/system/var-mnt-
 btrfs/snapshots/top.automount.in                    /etc/systemd/system/var-mnt-btrfs\x2dtop.automount            644  root  unit          root   btrfs:top-mount
 btrfs/sysctl/90-btrfs-writeback.conf                /etc/sysctl.d/90-btrfs-writeback.conf                         644  root  data          root   btrfs:core
 btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in      /etc/tmpfiles.d/btrfs-automatic-reclaim.conf                  644  root  data          root   btrfs:core
+btrfs/tmpfiles/cst-nvme-apst.conf                   /etc/tmpfiles.d/cst-nvme-apst.conf                            644  root  data          root   btrfs:core
+btrfs/udev/65-cst-nvme-apst.rules                   /etc/udev/rules.d/65-cst-nvme-apst.rules                      644  root  data          root   btrfs:core
+btrfs/btrfs-iocost                                  /usr/local/sbin/btrfs-iocost                                  755  root  python-entry  root   btrfs:iocost
+btrfs/units/cst-btrfs-iocost.service                /etc/systemd/system/cst-btrfs-iocost.service                  644  root  unit          root   btrfs:iocost
+btrfs/udev/91-cst-iocost.rules                      /etc/udev/rules.d/91-cst-iocost.rules                         644  root  data          root   btrfs:iocost
 # cpu
 cpu/vm-pin                                          /usr/local/sbin/cpu-vm-pin                                    755  root  python-entry  root   cpu:core
+cpu/cpu-irq                                         /usr/local/sbin/cpu-irq                                       755  root  python-entry  root   cpu:core
+cpu/cpu-power                                       /usr/local/sbin/cpu-power                                     755  root  python-entry  root   cpu:core
 cpu/cpu-watch                                       /usr/local/bin/cpu-watch                                      755  root  python-entry  user   cpu:core
 cpu/game-profile                                    /usr/local/sbin/cpu-game-profile                              755  root  python-entry  root   cpu:core
 cpu/units/builds.slice.in                           /etc/systemd/system/builds.slice                              644  root  unit          root   cpu:docker-slice
 cpu/units/cpu-game.service                          /etc/systemd/system/cpu-game.service                          644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.service                 /etc/systemd/system/cpu-game-watchdog.service                 644  root  unit          root   cpu:core
 cpu/units/cpu-game-watchdog.timer                   /etc/systemd/system/cpu-game-watchdog.timer                   644  root  unit          root   cpu:core
+cpu/units/cst-cpu-power.service                     /etc/systemd/system/cst-cpu-power.service                     644  root  unit          root   cpu:core
 cpu/units/machine.slice.d-10-cpu-setup.conf         /etc/systemd/system/machine.slice.d/10-cpu-setup.conf         644  root  unit          root   cpu:core
 cpu/units/user@.service.d-50-cpu-setup-cpuset.conf  /etc/systemd/system/user@.service.d/50-cpu-setup-cpuset.conf  644  root  unit          root   cpu:core
 cpu/gamemode.ini                                    ~/.config/gamemode.ini                                        644  user  data          user   cpu:gamemode
 cpu/cpu-game.rules.in                               /etc/polkit-1/rules.d/50-cpu-setup-game.rules                 644  root  data          root   cpu:core
+cpu/udev/65-cst-gpu-pm.rules                        /etc/udev/rules.d/65-cst-gpu-pm.rules                         644  root  data          root   cpu:core
 # bluetooth
 bluetooth/bt-ldac-watch                             ~/.local/lib/cst/bt-ldac-watch                                755  user  python-entry  user   bluetooth:ldac
 # swap
 swap/sysctl/99-swap-tuning.conf                     /etc/sysctl.d/99-swap-tuning.conf                             644  root  data          root   swap:core
+swap/tmpfiles/cst-mm-responsiveness.conf           /etc/tmpfiles.d/cst-mm-responsiveness.conf                   644  root  data          root   swap:core
 swap/tmpfiles/zswap.conf                            /etc/tmpfiles.d/zswap.conf                                    644  root  data          root   swap:core
 swap/units/machine.slice.d-10-swap-memory-low.conf  /etc/systemd/system/machine.slice.d/10-swap-memory-low.conf   644  root  unit          root   swap:core
+swap/units/uresourced.conf                          /etc/uresourced.conf                                          644  root  data          root   swap:core
 # toolchains
 toolchains/cst-toolchains                           ~/.local/lib/cst/cst-toolchains                               755  user  python-entry  user   toolchains:auto
 toolchains/rustc-wrapper                            ~/.local/libexec/cst/rustc-wrapper                            755  user  shell         user   toolchains:sccache
@@ -192,10 +227,12 @@ _COMMANDS: Final = {
     "btrfs:top-mount": "cst btrfs snapshots setup",
     "btrfs:docker-gc": "cst btrfs docker-gc enable",
     "btrfs:degraded-boot": "cst btrfs degraded-boot install",
+    "btrfs:iocost": "cst btrfs iocost apply",
     "btrfs:report-launcher": "cst btrfs install",
     "cpu:core": "cst cpu install",
     "cpu:gamemode": "cst cpu install",
     "cpu:docker-slice": "cst cpu docker-slice install",
+    "cpu:irq": "cst cpu irq apply",
     "cpu:toolbox": "cst cpu install",
     "bluetooth:ldac": "cst bluetooth apply",
     "swap:core": "cst swap apply",
@@ -213,6 +250,7 @@ COMPONENTS: Final[Mapping[Component, str]] = {c: _COMMANDS[c] for c in Component
 GENERATED_COMPONENTS: Final[Mapping[Component, Owner]] = {
     Component.BTRFS_DEGRADED_BOOT: Owner.ROOT,
     Component.BTRFS_REPORT_LAUNCHER: Owner.USER,
+    Component.CPU_IRQ: Owner.ROOT,
     Component.CPU_TOOLBOX: Owner.USER,
 }
 
@@ -240,7 +278,10 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         ".github/scripts/pin_invowk.py",
         "bluetooth/bt-helper",
         "bluetooth/bt-setup",
+        "btrfs/btrfs-cache",
+        "btrfs/btrfs-commit-interval",
         "btrfs/btrfs-compress",
+        "btrfs/btrfs-scrub-limit",
         "btrfs/btrfs-stall-watch",
         "btrfs/chrome-cache",
         "btrfs/tests/realbtrfs-snapshot-core.sh",
@@ -250,6 +291,7 @@ CHECKOUT_ONLY_EXECUTABLES: Final[frozenset[str]] = frozenset(
         "cpu/cpu-setup",
         "doctor/cst-doctor",
         "fix-anaconda-webui-btrfs-compress.sh",
+        "perf/cst-perf",
         "swap/cli.py",
         "tests/mutation/cst-mutation",
         "tests/uv-dev",

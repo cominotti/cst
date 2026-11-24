@@ -44,7 +44,7 @@ frozen `slots=True` dataclasses, `adapters.py` / `adapters/` for host I/O
 and subprocesses, `cli.py` / `cli/` for a program's commands, and, in the full
 profile only, `ports.py` / `ports/` for `Protocol` boundaries,
 `application.py` / `application/` for use cases, `wiring.py` and `presenter.py`. Only swap,
-doctor, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, docker-gc,
+doctor, `perf`, `cst_core`, toolchains, vm, `bluetooth/setup`, `cpu/setup` (with `wiring.py` only) and btrfs's bulk, docker-gc,
 docker-volumes-nocow and snapshot have the full profile (the list is `HEXAGONAL_PACKAGES`); in the other packages `cli.py` orchestrates the commands and some
 still do I/O there. `tests/test_architecture.py`
 enforces the import and dataclass invariants, and `CLI_CEILINGS` there caps
@@ -220,7 +220,7 @@ count in its `IO_BUDGETS`; a program that re-runs itself gets a
 
 ## Most helpers are Python scripts with no `.py` extension
 
-Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `toolchains/cst-toolchains`.
+Examples: `btrfs/btrfs-bulk`, `vm/cst-vm`, `doctor/cst-doctor`, `perf/cst-perf`, `toolchains/cst-toolchains`.
 
 - Tests load them with `tests/script_loader.py` (`load_script(path, name)`), which registers the module in `sys.modules` before running it (`@dataclass` needs that on Python 3.14) and returns a fresh module each call.
 - Tests of a converted program import its package. A test written against the old one-file namespace can use `tests/package_view.py` (`PackageView(cli, adapters, domain)`): a name set on it reaches every module that uses it, and `restore()` puts the real ones back.

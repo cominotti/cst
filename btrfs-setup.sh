@@ -25,7 +25,10 @@
 #       * stall recording: btrfs-stall-monitord (always on, read-only) + below
 #         (rpm-ostree layered), queried with `report`
 #       * automatic block-group reclaim (dynamic + periodic, data)
-#       * writeback limits vm.dirty_bytes 2 GiB / background 512 MiB
+#       * writeback limits: vm.dirty_bytes 2 GiB, background 512 MiB,
+#         writeback 15 s (1500 cs), expire 60 s (6000 cs)
+#       * journald write budget: 10-cst-write-budget.conf (15 min sync, 1 GiB max)
+#       * NVMe APST latency cap 0 us (cst-nvme-apst.conf + udev rule: no sleep pauses)
 #       * desktop alerts (btrfs-notify) for every component; one raised while
 #         no graphical session can show it (at boot, nobody logged in) is kept
 #         in /var/lib/cst-alerts/pending (7 days) and shown at the next login
@@ -153,6 +156,24 @@
 #                          `status` and `plan` work as your user (also inside a
 #                          toolbox); `apply` and `revert` need root on the host.
 #                          Never runs automatic `btrfs filesystem defragment`.
+#   commit-interval [status|plan [SECONDS|--revert]|apply [SECONDS]|revert] [--yes]
+#                          root btrfs `commit=N` interval (default 60s) across
+#                          /etc/fstab, rpm-ostree kargs, live mount, and
+#                          btrfs:top-mount (keeps flushoncommit untouched).
+#                          `status` and `plan` work in a toolbox; `apply` and
+#                          `revert` need root on the host.
+#   cache [status|plan|attach|detach] [--user NAME] [--no-cache] [--no-scratchpad] [--allow-nonempty]
+#                          multi-user bind mounts from a dedicated NVMe cache drive
+#                          (/var/mnt/cache/<user> -> ~/.cache and
+#                          /var/mnt/scratchpad/<user> -> ~/Scratchpad). `status` and
+#                          `plan` run in a toolbox; `attach` and `detach` need
+#                          root on the host.
+#   scrub-limit [status|plan [SIZE|off]|set [SIZE]|off]
+#                          per-device weekly scrub speed limit (SCRUB_LIMIT in
+#                          /etc/btrfs-setup/snapshots.conf + service drop-in).
+#                          Default SIZE is 500M. `status` and `plan` work as
+#                          your user (also in a toolbox); `set` and `off` need
+#                          root on the host.
 #   help
 #
 # Without a command it only prints this help and changes nothing; `install`
@@ -169,8 +190,11 @@ source "$(dirname "${SELF}")/cst-install.bash"
 UNIT_DIR="/etc/systemd/system"
 SYSCTL_FILE="/etc/sysctl.d/90-btrfs-writeback.conf"
 SYSCTL_SRC=btrfs/sysctl/90-btrfs-writeback.conf
+JOURNALD_DROPIN="/etc/systemd/journald.conf.d/10-cst-write-budget.conf"
 RECLAIM_FILE="/etc/tmpfiles.d/btrfs-automatic-reclaim.conf"
 RECLAIM_SRC=btrfs/tmpfiles/btrfs-automatic-reclaim.conf.in
+NVME_APST_FILE="/etc/tmpfiles.d/cst-nvme-apst.conf"
+NVME_APST_PARAM="/sys/module/nvme_core/parameters/default_ps_max_latency_us"
 BELOW_DROPIN="${UNIT_DIR}/below.service.d/10-cst.conf"
 DATA_DIR="/var/log/btrfs-stall-monitor"
 DEGRADED="${SRC}/btrfs-degraded-boot-setup.sh"
@@ -250,6 +274,20 @@ case "${cmd}" in
     compress-force)
         CST_PROG="${PROG} compress-force" exec python3 -I -B "${SRC}/btrfs-compress" "$@"
         ;;
+    commit-interval)
+        CST_PROG="${PROG} commit-interval" exec python3 -I -B "${SRC}/btrfs-commit-interval" "$@"
+        ;;
+    cache)
+        CST_PROG="${PROG} cache" exec python3 -I -B "${SRC}/btrfs-cache" "$@"
+        ;;
+    iocost)
+        # Python refuses in a container and elevates through sudo itself (apply, revert).
+        CST_PROG="${PROG} iocost" exec python3 -I -B "${SRC}/btrfs-iocost" "$@"
+        ;;
+    scrub-limit)
+        # Python refuses in a container and elevates through sudo itself (set, off).
+        CST_PROG="${PROG} scrub-limit" exec python3 -I -B "${SRC}/btrfs-scrub-limit" "$@"
+        ;;
     install|status|uninstall|test-alert|degraded-boot|crypt-perf|snapshots|bulk|docker-gc)
         ;;
     *)
@@ -278,8 +316,19 @@ if [[ -n "${target_user}" && "${target_user}" != root ]]; then
     shim="$(getent passwd "${target_user}" | cut -d: -f6)/.local/bin/btrfs-stall-report"
 fi
 
+# root_fs_uuid: the UUID of the root btrfs, chosen as cst doctor chooses it: the
+# filesystem of /sysroot (Silverblue), else of / (a host without /sysroot, such
+# as Fedora Workstation), else of /var, each only when it is btrfs. Nothing
+# (and status 0) when none of them is.
 root_fs_uuid() {
-    findmnt -rn -o UUID --target /sysroot 2>/dev/null | head -n1
+    local t uuid
+    for t in /sysroot / /var; do
+        uuid="$(findmnt -rn -o UUID --target "${t}" -t btrfs 2>/dev/null | head -n1 || true)"
+        if [[ -n "${uuid}" ]]; then
+            echo "${uuid}"
+            return 0
+        fi
+    done
 }
 
 # forget_timer_state UNIT...: for each timer among UNIT, forget its last run
@@ -617,11 +666,19 @@ status_space() {
 }
 
 status_mounts() {
-    local mnt opts o comp_opt tok missing want have
+    local mnt line opts uuid root_uuid o comp_opt tok missing want have
     local -a _toks
+    root_uuid="$(root_fs_uuid)"
     for mnt in /sysroot /var /var/home; do
-        opts="$(findmnt -rn -o OPTIONS -M "${mnt}" 2>/dev/null | head -n1)"
+        # OPTIONS never holds a blank (findmnt -r escapes it); a mount with no UUID prints none.
+        line="$(findmnt -rn -o OPTIONS,UUID -M "${mnt}" 2>/dev/null | head -n1)"
+        read -r opts uuid <<<"${line}"
         [[ -n "${opts}" ]] || continue
+        # A separate filesystem (a btrfs /var/home of its own): CST sets only the root's options.
+        if [[ -n "${uuid}" && -n "${root_uuid}" && "${uuid}" != "${root_uuid}" ]]; then
+            printf "  %-10s separate filesystem (not the root's): CST does not set its options\n" "${mnt}"
+            continue
+        fi
         missing=()
         comp_opt=""
         IFS=',' read -r -a _toks <<<"${opts}"
@@ -640,15 +697,49 @@ status_mounts() {
             printf '  %-10s ok (%s %s)\n' "${mnt}" "${comp_opt}" "${EXPECTED_OPTS[*]}"
         fi
     done
-    for o in dirty_bytes dirty_background_bytes; do
+    for o in dirty_bytes dirty_background_bytes dirty_writeback_centisecs dirty_expire_centisecs; do
         want="$(awk -v k="vm.${o}" '$1 == k {print $3}' "${SYSCTL_FILE}" 2>/dev/null)"
-        have="$(cat "/proc/sys/vm/${o}")"
+        have="$(cat "/proc/sys/vm/${o}" 2>/dev/null || echo '?')"
         if [[ -z "${want}" ]]; then
-            printf '  vm.%-22s %s (not managed: run install)\n' "${o}" "${have}"
+            printf '  vm.%-26s %s (not managed: run install)\n' "${o}" "${have}"
         elif [[ "${want}" == "${have}" ]]; then
-            printf '  vm.%-22s %s ok\n' "${o}" "${have}"
+            printf '  vm.%-26s %s ok\n' "${o}" "${have}"
         else
-            printf '  vm.%-22s %s DRIFT (expected %s; run install)\n' "${o}" "${have}" "${want}"
+            printf '  vm.%-26s %s DRIFT (expected %s; run install)\n' "${o}" "${have}" "${want}"
+        fi
+    done
+    local journald_dropin="${JOURNALD_DROPIN:-/etc/systemd/journald.conf.d/10-cst-write-budget.conf}"
+    if [[ -e "${journald_dropin}" ]]; then
+        printf '  %-29s %s\n' "journald write budget" "ok (${journald_dropin})"
+    else
+        printf '  %-29s %s\n' "journald write budget" "not managed (run install)"
+    fi
+    local nvme_param="${NVME_APST_PARAM:-/sys/module/nvme_core/parameters/default_ps_max_latency_us}"
+    local nvme_file="${NVME_APST_FILE:-/etc/tmpfiles.d/cst-nvme-apst.conf}"
+    if [[ -r "${nvme_param}" ]]; then
+        have="$(<"${nvme_param}")"
+        if [[ ! -e "${nvme_file}" ]]; then
+            printf '  %-25s %s us (not managed: run install)\n' "nvme default_ps_latency" "${have}"
+        elif [[ "${have}" == "0" ]]; then
+            printf '  %-25s %s us ok\n' "nvme default_ps_latency" "${have}"
+        else
+            printf '  %-25s %s us DRIFT (expected 0; run install)\n' "nvme default_ps_latency" "${have}"
+        fi
+    fi
+    # The same file (and 65-cst-nvme-apst.rules) sets each controller's latency tolerance to 0.
+    local qos_glob="${NVME_QOS_GLOB:-/sys/class/nvme/nvme*/power/pm_qos_latency_tolerance_us}"
+    local qos ctrl
+    for qos in ${qos_glob}; do
+        [[ -r "${qos}" ]] || continue
+        ctrl="${qos%/power/pm_qos_latency_tolerance_us}"
+        ctrl="${ctrl##*/}"
+        have="$(<"${qos}")"
+        if [[ ! -e "${nvme_file}" ]]; then
+            printf '  %-25s %s us (not managed: run install)\n' "${ctrl} latency tolerance" "${have}"
+        elif [[ "${have}" == "0" ]]; then
+            printf '  %-25s %s us ok\n' "${ctrl} latency tolerance" "${have}"
+        else
+            printf '  %-25s %s us DRIFT (expected 0; run install)\n' "${ctrl} latency tolerance" "${have}"
         fi
     done
 }
@@ -672,6 +763,8 @@ status() (
     btrfs scrub status /var 2>/dev/null | grep -E 'Scrub started|Status|Duration|Error summary' | cst_indent
     section "weekly scrub speed limit (per device)"
     status_scrub_limit "${uuid}"
+    section "blk-iocost"
+    python3 -I -B "${SRC}/btrfs-iocost" status 2>&1 | cst_indent
     section "last fstrim (Fedora's fstrim.timer)"
     journalctl -u fstrim.service -o short-iso --no-pager -n 20 2>/dev/null |
         grep -E 'trimmed|Failed|failed' | tail -n 4 | cst_indent
@@ -691,6 +784,13 @@ status() (
     status_mounts
     section "compression (compress-force)"
     python3 -I -B "${SRC}/btrfs-compress" status 2>&1 | cst_indent
+    section "commit interval (commit=60)"
+    python3 -I -B "${SRC}/btrfs-commit-interval" status 2>&1 | cst_indent
+    if mountpoint -q /var/mnt/cache 2>/dev/null || mountpoint -q /var/mnt/scratchpad 2>/dev/null ||
+        grep -qE 'managed-by: btrfs-cache|/var/mnt/(cache|scratchpad)' /etc/fstab 2>/dev/null; then
+        section "dedicated NVMe cache drive mounts"
+        python3 -I -B "${SRC}/btrfs-cache" status 2>&1 | cst_indent
+    fi
     section "degraded boot"
     if [[ -x "${DEGRADED}" ]]; then
         "${DEGRADED}" --status 2>/dev/null | sed -n '/==== summary/,$p' | sed '1d; s/^/  /'
@@ -716,6 +816,12 @@ status() (
     section "stalls, last hour (report --since '1 hour ago' --no-below)"
     python3 -I -B "${SRC}/btrfs-stall-report" --since '1 hour ago' --no-below 2>&1 | grep -E '^(recorded|verdict)' |
         cst_indent
+    local perf_tool
+    perf_tool="$(dirname "${SRC}")/perf/cst-perf"
+    if [[ -f "${perf_tool}" ]]; then
+        section "responsiveness diagnosis"
+        python3 -I -B "${perf_tool}" --axis io --compact 2>&1 | cst_indent || true
+    fi
     data="$(du -sh "${DATA_DIR}" 2>/dev/null | cut -f1)"
     echo
     echo "data: stall log ${data:-?}, below store $(du -sh /var/log/below/store 2>/dev/null | cut -f1)"
@@ -979,7 +1085,18 @@ uninstall() {
     cst_remove --component btrfs:below
     rm -fv "${OLD_BELOW_DROPIN}"
     remove_tuning_files
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+    fi
+    if [[ -w "${NVME_APST_PARAM}" ]]; then
+        printf '100000\n' > "${NVME_APST_PARAM}" 2>/dev/null || true
+    fi
+    for qos in /sys/class/nvme/nvme*/power/pm_qos_latency_tolerance_us; do
+        [[ -w "${qos}" ]] && printf '100000\n' > "${qos}" 2>/dev/null || true
+    done
     rmdir "$(dirname "${BELOW_DROPIN}")" 2>/dev/null || true
+    rmdir "$(dirname "${JOURNALD_DROPIN}")" 2>/dev/null || true
+    systemctl try-restart systemd-journald.service 2>/dev/null || true
     rm -rf /var/lib/btrfs-health-check
     remove_report_launcher
     systemctl daemon-reload
@@ -1019,7 +1136,13 @@ install_all() {
     install_scrub_limit "${scrub_limit}"
     # Always re-load: cheap, and corrects runtime drift (e.g. a tuned profile switch).
     sysctl -q -p "${SYSCTL_FILE}"
+    systemctl try-restart systemd-journald.service 2>/dev/null || true
     systemd-tmpfiles --create "${RECLAIM_FILE}"
+    systemd-tmpfiles --create "${NVME_APST_FILE}" 2>/dev/null || true
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || true
+        udevadm trigger --subsystem-match=nvme --action=change || true
+    fi
     install_report_launcher
     # shellcheck source=cst-link.bash
     source "$(dirname "${SELF}")/cst-link.bash"

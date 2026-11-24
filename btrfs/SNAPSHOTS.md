@@ -275,6 +275,21 @@ There are two kinds:
 
 > **Important:** files in these folders (except `Workspace`) are **not in any
 > snapshot and not in the NAS backup**. If you delete them, they are gone.
+>
+> **External mounts (`cst btrfs cache`):** if `~/.cache` (or `~/Workspace`) is
+> an explicit mountpoint (`mountpoint -q`, for example a bind mount from a
+> dedicated NVMe cache drive via `cst btrfs cache`), `snapshots plan`
+> and `snapshots status` show it as `done (external mount)` /
+> `ok (external mount)`, `put_aside` leaves its child caches (such as
+> `~/.cache/uv`) untouched, `planned_left` does not block snapshots waiting for
+> conversion, and the runtime never tries to snapshot an externally mounted
+> `~/Workspace` as a local subvolume. A planned folder that is a **symlink**
+> is no mount point here, even when it points to one (`mountpoint` follows the
+> link): `plan` shows it as to do, and the conversion skips it as "not a
+> directory (a symlink or file)". The child caches of a symlinked parent stay
+> where they are, as before. A planned cache (`aside`, such as `~/.cache/uv`)
+> that is itself a symlink is left alone: it is never moved or deleted, `plan`
+> does not list it, and the conversion does not wait for it.
 
 **What stays in /home snapshots** (examples): your documents, `Downloads`
 (except `Downloads/iso`, which is a link into `~/Bulk`), `Videos`,

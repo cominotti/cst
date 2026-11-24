@@ -66,7 +66,7 @@ from bluetooth.setup.domain import (
 from bluetooth.setup.ports import SetupConsolePort, SetupFilesPort
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.domain.units import ActiveState
+from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.ports import ClockPort, CommandResult, CommandRunnerPort, OutputMode, SystemdPort, UnitName
 
 
@@ -659,7 +659,7 @@ class Survey:
         ):
             if (row := rows.get(state)) is not None:
                 self.item(row[0], label, row[1])
-        if self.lw_enabled != "enabled" or self.lw_active != ActiveState.ACTIVE:
+        if self.lw_enabled != EnablementState.ENABLED or self.lw_active != ActiveState.ACTIVE:
             why = (
                 f"now {self.lw_enabled or 'not installed'}, {self.lw_active or 'inactive'}: apply enables and starts it"
             )

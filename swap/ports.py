@@ -27,6 +27,10 @@ class SwapSystemPort(Protocol):
         """`swapon --show`: its exit status and output."""
         ...
 
+    def sleep(self, seconds: float) -> None:
+        """Pause `seconds` while waiting for an asynchronous unit update."""
+        ...
+
 
 class SwapSettingsFacts(Protocol):
     """What swap.domain's resolve_settings asks of the machine about /etc/cst/swap.conf, as the reader

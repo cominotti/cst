@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 sys.dont_write_bytecode = True
 
 from cpu.game import cli as game_cli
+from cpu.game.adapters import host as game_host, power as game_power
 from cpu.game.adapters.host import read_settings, read_snapshot, user_id, user_name
 from cpu.game.adapters.profile import GameProfile, load_profile
 from cst_core.adapters import files as cst_files
@@ -166,6 +167,7 @@ class GameProfileCase(unittest.TestCase):
             run_systemd=os.path.join(t, "rs"),
             run_user=os.path.join(t, "ru"),
             sys_cpu=os.path.join(t, "sys-cpu"),
+            sys_drm=os.path.join(t, "sys-drm"),
             proc=os.path.join(t, "proc"),
         )
         os.makedirs(self.paths.run)
@@ -2176,6 +2178,178 @@ class FullRunFolderTest(GameProfileCase):
         self.assertIn("<5>game-profile: on: ", log)
         self.assertEqual(err.getvalue(), f"{self.state}: No space left on device\n" * 2)
         self.assertNotIn("epp ", self.read(self.state))
+
+
+class GameProfilePowerTest(GameProfileCase):
+    """Dynamic GPU discovery (render offload + connected fallback), AMD 3D_FULL_SCREEN, and game C-states."""
+
+    def _setup_gpus(self) -> tuple[str, str]:
+        pci1 = os.path.join(self.tmp, "pci", "0000:04:00.0")
+        pci3 = os.path.join(self.tmp, "pci", "0000:84:00.0")
+        self.write(os.path.join(pci1, "uevent"), "DRIVER=xe\nPCI_SLOT_NAME=0000:04:00.0\n")
+        self.write(os.path.join(pci1, "power", "control"), "auto\n")
+        self.write(os.path.join(pci3, "uevent"), "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:84:00.0\n")
+        self.write(os.path.join(pci3, "power", "control"), "auto\n")
+        self.write(os.path.join(pci3, "power_dpm_force_performance_level"), "auto\n")
+        self.write(
+            os.path.join(pci3, "pp_power_profile_mode"),
+            "PROFILE_INDEX(NAME)\n 0 BOOTUP_DEFAULT*:\n 1 3D_FULL_SCREEN :\n",
+        )
+        for node, target in (("card1", pci1), ("renderD128", pci1), ("card3", pci3), ("renderD130", pci3)):
+            ndir = os.path.join(self.paths.sys_drm, node)
+            os.makedirs(ndir, exist_ok=True)
+            os.symlink(target, os.path.join(ndir, "device"))
+        self.write(os.path.join(self.paths.sys_drm, "card1", "card1-DP-1", "status"), "disconnected\n")
+        self.write(os.path.join(self.paths.sys_drm, "card3", "card3-DP-7", "status"), "connected\n")
+        return pci1, pci3
+
+    def test_render_offload_gpu_boost_and_reverse_order_revert(self) -> None:
+        pci1, pci3 = self._setup_gpus()
+        fd_dir = os.path.join(self.paths.proc, "1", "fd")
+        os.makedirs(fd_dir, exist_ok=True)
+        os.symlink("/dev/dri/renderD128", os.path.join(fd_dir, "9"))
+
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "on\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+        self.assertIn(
+            f"sysfs {os.path.join(self.paths.sys_drm, 'card1', 'device', 'power', 'control')} auto",
+            self.read(self.state),
+        )
+
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+
+    def test_amd_profile_without_a_current_row_keeps_dpm_auto(self) -> None:
+        # pp_power_profile_mode with no "*" row: there is no profile to restore, so DPM is not forced to
+        # manual (it would stay there with the profile unchanged) and nothing is recorded for it.
+        _, pci3 = self._setup_gpus()
+        self.write(
+            os.path.join(pci3, "pp_power_profile_mode"),
+            "PROFILE_INDEX(NAME)\n 0 BOOTUP_DEFAULT :\n 1 3D_FULL_SCREEN :\n",
+        )
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power_dpm_force_performance_level")), "auto\n")
+        self.assertNotIn("power_dpm_force_performance_level", self.read(self.state))
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
+    def test_steam_client_render_fds_do_not_pick_the_game_gpu(self) -> None:
+        pci1, pci3 = self._setup_gpus()
+
+        def holds(pid: str, comm: str, node: str) -> None:
+            fd_dir = os.path.join(self.paths.proc, pid, "fd")
+            os.makedirs(fd_dir, exist_ok=True)
+            os.symlink(f"/dev/dri/{node}", os.path.join(fd_dir, "9"))
+            self.write(os.path.join(self.paths.proc, pid, "comm"), comm + "\n")
+
+        # Only steamwebhelper holds the iGPU (card1, no monitor): the connected dGPU (card3) is the one.
+        holds("1", "steamwebhelper", "renderD128")
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
+    def test_steam_shader_and_driver_helpers_do_not_pick_the_game_gpu(self) -> None:
+        # While a game loads, Steam's fossilize_replay and its driver probes hold the iGPU's render node
+        # in the Steam scope: they are the client, not the game; the connected dGPU (card3) is the one.
+        pci1, pci3 = self._setup_gpus()
+        for pid, comm in (("1", "fossilize_repla"), ("2", "vulkandriverque"), ("3", "gldriverquery")):
+            fd_dir = os.path.join(self.paths.proc, pid, "fd")
+            os.makedirs(fd_dir, exist_ok=True)
+            os.symlink("/dev/dri/renderD128", os.path.join(fd_dir, "9"))
+            self.write(os.path.join(self.paths.proc, pid, "comm"), comm + "\n")
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+
+    def test_connected_amd_fallback_3d_fullscreen_and_strict_write_order(self) -> None:
+        _, pci3 = self._setup_gpus()
+        writes: list[tuple[str, str]] = []
+        orig_write = game_host.write_sysfs_line
+
+        def tracked_write(path: str, value: str) -> bool:
+            writes.append((path.rsplit("/", 1)[-1], value))
+            return orig_write(path, value)
+
+        with (
+            unittest.mock.patch.object(game_power, "write_sysfs_line", side_effect=tracked_write),
+            unittest.mock.patch("cpu.game.adapters.profile.write_sysfs_line", side_effect=tracked_write),
+        ):
+            self.run_profile("on")
+            self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "on\n")
+            self.assertEqual(self.read(os.path.join(pci3, "power_dpm_force_performance_level")), "manual\n")
+            self.assertEqual(self.read(os.path.join(pci3, "pp_power_profile_mode")), "1\n")
+            self.assertEqual(
+                writes,
+                [("control", "on"), ("power_dpm_force_performance_level", "manual"), ("pp_power_profile_mode", "1")],
+            )
+            writes.clear()
+            self.run_profile("off")
+            self.assertEqual(
+                writes,
+                [("pp_power_profile_mode", "0"), ("power_dpm_force_performance_level", "auto"), ("control", "auto")],
+            )
+            self.assertEqual(self.read(os.path.join(pci3, "power", "control")), "auto\n")
+            self.assertEqual(self.read(os.path.join(pci3, "power_dpm_force_performance_level")), "auto\n")
+            self.assertEqual(self.read(os.path.join(pci3, "pp_power_profile_mode")), "0\n")
+
+    def test_tick_boosts_late_render_offload_without_duplicate_records(self) -> None:
+        pci1, pci3 = self._setup_gpus()
+        # Simulate card3 already controlled (on + manual/3D_FULL_SCREEN) during initial `on`.
+        self.write(os.path.join(pci3, "power", "control"), "on\n")
+        self.write(os.path.join(pci3, "power_dpm_force_performance_level"), "manual\n")
+        self.write(os.path.join(pci3, "pp_power_profile_mode"), " 0 BOOTUP_DEFAULT:\n 1 3D_FULL_SCREEN*:\n")
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+
+        fd_dir = os.path.join(self.paths.proc, "1", "fd")
+        os.makedirs(fd_dir, exist_ok=True)
+        os.symlink("/dev/dri/renderD128", os.path.join(fd_dir, "12"))
+        self.run_profile("tick")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "on\n")
+        recs_after_first = self.read(self.state)
+        self.run_profile("tick")
+        self.assertEqual(self.read(self.state), recs_after_first)
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
+
+    def test_game_cstates_on_p_cores_compose_with_baseline_disabled_states(self) -> None:
+        for cpu in ("0", "1", "12"):
+            for st, lat, dis in (("state0", "0", "0"), ("state1", "127", "0"), ("state2", "1048", "1")):
+                self.write(os.path.join(self.paths.sys_cpu, f"cpu{cpu}", "cpuidle", st, "latency"), f"{lat}\n")
+                self.write(os.path.join(self.paths.sys_cpu, f"cpu{cpu}", "cpuidle", st, "disable"), f"{dis}\n")
+
+        s = GameSettings(target_user=USER, p_cores="0-1", game_cstate_max_latency_us="50", game_zswap_writeback="yes")
+        self.run_profile("on", s)
+        for cpu in ("0", "1"):
+            self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, f"cpu{cpu}/cpuidle/state0/disable")), "0\n")
+            self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, f"cpu{cpu}/cpuidle/state1/disable")), "1\n")
+            self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, f"cpu{cpu}/cpuidle/state2/disable")), "1\n")
+        self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, "cpu12/cpuidle/state1/disable")), "0\n")
+
+        self.run_profile("off", s)
+        for cpu in ("0", "1"):
+            self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, f"cpu{cpu}/cpuidle/state1/disable")), "0\n")
+            # Pre-existing baseline-disabled C3_ACPI stays disabled after game ends.
+            self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, f"cpu{cpu}/cpuidle/state2/disable")), "1\n")
+
+        self._setup_gpus()
+        s_off = GameSettings(
+            target_user=USER,
+            p_cores="0-1",
+            gpu_pm_mode="off",
+            game_cstate_max_latency_us="off",
+            game_zswap_writeback="yes",
+        )
+        self.run_profile("on", s_off)
+        self.assertEqual(self.read(os.path.join(self.paths.sys_cpu, "cpu0/cpuidle/state1/disable")), "0\n")
+        self.assertEqual(self.read(os.path.join(self.tmp, "pci", "0000:84:00.0", "power", "control")), "auto\n")
+        self.run_profile("off", s_off)
 
 
 if __name__ == "__main__":

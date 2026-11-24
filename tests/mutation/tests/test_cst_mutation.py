@@ -37,6 +37,7 @@ _CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
+from tests.run_unit import HOST_GUARD_ENV, bytecode_files
 from tests.script_loader import load_script
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1039,6 +1040,37 @@ class RealBwrapTest(unittest.TestCase):
             self.assertEqual(got["sockets"], [])
             self.assertEqual(got["home_views"], [])
             self.assertEqual(got["home"], os.path.join(copy, ".home"))
+
+
+class RunByShebangTest(unittest.TestCase):
+    @unittest.skipUnless(os.access("/usr/bin/env", os.X_OK), "needs /usr/bin/env")
+    def test_it_writes_no_bytecode_into_the_checkout(self) -> None:
+        # Run by its shebang (`#!/usr/bin/env python3`, no -B), the cst_core it imports from the checkout
+        # must not leave __pycache__ there.
+        guard = os.environ.get(HOST_GUARD_ENV)  # the runner's refusing stubs stay first on PATH
+        path = ("" if guard is None else guard + os.pathsep) + "/usr/bin:/bin"
+        with tempfile.TemporaryDirectory(prefix="cst-mut-pyc-") as tmp:
+            copy = os.path.join(tmp, "cst")
+            shutil.copytree(
+                os.path.join(_CHECKOUT, "cst_core"),
+                os.path.join(copy, "cst_core"),
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+            os.makedirs(os.path.join(copy, "tests", "mutation"))
+            tool = os.path.join(copy, "tests", "mutation", "cst-mutation")
+            shutil.copy2(TOOL, tool)
+            r = subprocess.run(
+                [tool, "--help"],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                stdin=subprocess.DEVNULL,
+                env={"PATH": path, "HOME": tmp, "LC_ALL": "C.UTF-8"},
+                timeout=60,
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(sorted(bytecode_files(copy)), [])
 
 
 if __name__ == "__main__":

@@ -97,6 +97,11 @@ its own; through cst its help and hints say `cst MODULE ...`.
                          units, unseen alerts, btrfs chunk allocation).
                          Exit 1 if any WARN/ERROR
                          (doctor/cst-doctor; as your user, also in a toolbox)
+  cst perf [--json] [--compact] [--axis AXIS]
+                         read-only responsiveness snapshot and objective
+                         diagnosis across memory, cpu, io, and gpu.
+                         Exit 1 if any ATTENTION/BOTTLENECK
+                         (perf/cst-perf; as your user, also in a toolbox)
   cst status             the read-only status of every module; asks sudo
                          once when one of them needs root (inside a toolbox
                          those are skipped, with a note); ends with the

@@ -79,6 +79,18 @@ replace it until its tear-down; one its tear-down does not restore fails
 the run, found when the next module starts (the runner's hook is put back
 then) or after the last tear-down.
 
+A test runs in the same process as the tests after it (a worker runs many),
+so a signal disposition it changes (signal.signal: SIGPIPE back to SIG_DFL,
+a handler of its own) or a signal it blocks (signal.pthread_sigmask) changes
+every later test of that process, and one of them fails only in some orders.
+The runner notes every disposition and the main thread's mask when each test
+starts and compares them when it ends (after its cleanups): each difference
+fails the run, naming the test, the signal and the change ("signal SIGPIPE
+changed and not restored by NAME (SIG_IGN -> SIG_DFL)"), and the runner puts
+it back. A class or module set-up may change one until its tear-down; one
+left changed when the run (or a worker's batch) ends fails it, named by the
+first test that started with it. Put it back in the test: self.addCleanup.
+
 No test may write bytecode into the checkout. `python3 -I` ignores
 PYTHONDONTWRITEBYTECODE, so a child Python started on the checkout's code
 without -B writes __pycache__ folders there (root's, when the code runs as
@@ -101,12 +113,14 @@ import os
 import queue
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from types import FrameType
 from typing import Final, override
 import unittest
 from unittest import mock
@@ -319,6 +333,72 @@ _SHOWWARNING_ORIG: Final = "_showwarning_orig"
 
 type _UnraisableHook = Callable[[sys.UnraisableHookArgs], object]
 
+# A signal's disposition as signal.getsignal gives it: SIG_DFL or SIG_IGN, a Python handler, an int,
+# or None for a handler set outside Python.
+type _Disposition = Callable[[int, FrameType | None], object] | int | signal.Handlers | None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalState:
+    """What a test can change for every later test of its process: each signal's disposition, and the
+    main thread's mask of blocked signals."""
+
+    dispositions: dict[int, _Disposition]
+    mask: frozenset[int]
+
+
+def signal_state() -> SignalState:
+    """The dispositions and the mask now (a signal getsignal refuses is left out)."""
+    dispositions: dict[int, _Disposition] = {}
+    for signum in signal.valid_signals():
+        with contextlib.suppress(ValueError, OSError):
+            dispositions[signum] = signal.getsignal(signum)
+    return SignalState(dispositions, frozenset(signal.pthread_sigmask(signal.SIG_BLOCK, ())))
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:  # a real-time signal other than SIGRTMIN and SIGRTMAX
+        return f"SIGRTMIN+{signum - signal.SIGRTMIN}"
+
+
+def _disposition_text(disposition: _Disposition) -> str:
+    match disposition:
+        case signal.Handlers():
+            return disposition.name
+        case None:
+            return "a handler set outside Python"
+        case int():
+            return str(disposition)
+        case _:
+            return str(getattr(disposition, "__qualname__", repr(disposition)))
+
+
+def signal_changes(before: SignalState, after: SignalState) -> list[tuple[str, str]]:
+    """(what, how) for each change from before to after: ("signal SIGPIPE", "SIG_IGN -> SIG_DFL"), and
+    ("the signal mask", "+SIGUSR1") for the mask."""
+    changes = [
+        (f"signal {_signal_name(n)}", f"{_disposition_text(old)} -> {_disposition_text(after.dispositions.get(n))}")
+        for n, old in before.dispositions.items()
+        if after.dispositions.get(n) != old
+    ]
+    if after.mask != before.mask:
+        added = [f"+{_signal_name(n)}" for n in sorted(after.mask - before.mask)]
+        removed = [f"-{_signal_name(n)}" for n in sorted(before.mask - after.mask)]
+        changes.append(("the signal mask", " ".join(added + removed)))
+    return changes
+
+
+def restore_signal_state(state: SignalState) -> None:
+    """Put the dispositions (those set from Python) and the mask of state back."""
+    current = signal_state()
+    for signum, disposition in state.dispositions.items():
+        if disposition is not None and current.dispositions.get(signum) != disposition:
+            signal.signal(signum, disposition)
+    if current.mask != state.mask:
+        signal.pthread_sigmask(signal.SIG_SETMASK, state.mask)
+
 
 class LeakRecordingResult(unittest.TextTestResult):
     """A TextTestResult that also records every ResourceWarning (a file, socket or child process
@@ -326,11 +406,14 @@ class LeakRecordingResult(unittest.TextTestResult):
     (sys.unraisablehook: raised in a __del__, a weakref callback, ...; in lost_exceptions), with
     the test that was running. unittest only prints them, and such a test still passes; the
     runner fails the run on each one. A test that records warnings itself
-    (warnings.catch_warnings with record=True) keeps them: the hook does not see those."""
+    (warnings.catch_warnings with record=True) keeps them: the hook does not see those. A signal
+    disposition or the signal mask that a test, or a class or module fixture, leaves changed is
+    one error in signal_problems, and the runner puts it back."""
 
     leaks: list[str]
     lost_exceptions: list[str]
     hook_problems: list[str]
+    signal_problems: list[str]
 
     @override
     def startTestRun(self) -> None:
@@ -338,6 +421,12 @@ class LeakRecordingResult(unittest.TextTestResult):
         self.leaks = []
         self.lost_exceptions = []
         self.hook_problems = []
+        self.signal_problems = []
+        # Each test must end with the signals it started with; a class or module set-up may change
+        # them until its tear-down, so the run's own are compared once more when it ends.
+        self._signals_at_run = signal_state()
+        self._signals_at_test = self._signals_at_run
+        self._signal_fixture_where = ""
         self._in_replaced = False
         # A class or module set-up may replace sys.unraisablehook until its tear-down: the one
         # found in place at a startTest (its first test's), where, and in which module.
@@ -375,6 +464,11 @@ class LeakRecordingResult(unittest.TextTestResult):
     @override
     def startTest(self, test: unittest.TestCase) -> None:
         self._note_fixture_hook(test)
+        self._signals_at_test = signal_state()
+        if self._signals_at_test == self._signals_at_run:
+            self._signal_fixture_where = ""
+        elif not self._signal_fixture_where:
+            self._signal_fixture_where = f"a class or module set-up or tear-down before {test.id()}"
         self._hook_at_start = sys.unraisablehook
         self._running = test.id()
         self._keep_recording()
@@ -386,6 +480,7 @@ class LeakRecordingResult(unittest.TextTestResult):
         if sys.unraisablehook != self._hook_at_start:  # the test itself replaced it
             self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {test.id()}")
             sys.unraisablehook = self._hook_at_start
+        self._check_signals(test.id(), self._signals_at_test)
         self._keep_recording()
         super().stopTest(test)
 
@@ -398,6 +493,8 @@ class LeakRecordingResult(unittest.TextTestResult):
             where = self._fixture_where or "a class or module tear-down after the last test"
             self.hook_problems.append(f"sys.unraisablehook replaced and not restored by {where}")
             sys.unraisablehook = self._unraisable
+        where = self._signal_fixture_where or "a class or module set-up or tear-down after the last test"
+        self._check_signals(where, self._signals_at_run)
         self._keep_recording()
         gc.collect()
         gc.callbacks.remove(self._gc_phase)
@@ -405,6 +502,15 @@ class LeakRecordingResult(unittest.TextTestResult):
             hook.stop()
         sys.unraisablehook = self._unraisablehook
         super().stopTestRun()
+
+    def _check_signals(self, where: str, expected: SignalState) -> None:
+        """One error per signal (and for the mask) that differs from expected, and put it back, so the
+        rest of the process runs as before."""
+        changes = signal_changes(expected, signal_state())
+        for what, how in changes:
+            self.signal_problems.append(f"{what} changed and not restored by {where} ({how})")
+        if changes:
+            restore_signal_state(expected)
 
     def _keep_recording(self) -> None:
         """Put the "always" filter for ResourceWarning first again. A test that called
@@ -526,6 +632,7 @@ class _WorkerReport:
     leaks: tuple[str, ...]
     lost_exceptions: tuple[str, ...]
     hook_problems: tuple[str, ...]
+    signal_problems: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -547,6 +654,7 @@ class _ParallelTotals:
     leaks: list[str] = field(default_factory=list)
     lost_exceptions: list[str] = field(default_factory=list)
     hook_problems: list[str] = field(default_factory=list)
+    signal_problems: list[str] = field(default_factory=list)
     worker_errors: list[str] = field(default_factory=list)
 
 
@@ -616,6 +724,7 @@ def _decode_worker_report(line: str) -> _WorkerReport:
         leaks=_str_list_field(raw, "leaks"),
         lost_exceptions=_str_list_field(raw, "lost_exceptions"),
         hook_problems=_str_list_field(raw, "hook_problems"),
+        signal_problems=_str_list_field(raw, "signal_problems"),
     )
 
 
@@ -860,6 +969,7 @@ def _run_unit_payload(names: Sequence[str], verbosity: int) -> dict[str, object]
         "leaks": list(result.leaks),
         "lost_exceptions": list(result.lost_exceptions),
         "hook_problems": list(result.hook_problems),
+        "signal_problems": list(result.signal_problems),
     }
 
 
@@ -990,6 +1100,7 @@ def _record_report(report: _WorkerReport, totals: _ParallelTotals) -> None:
         totals.leaks.extend(report.leaks)
         totals.lost_exceptions.extend(report.lost_exceptions)
         totals.hook_problems.extend(report.hook_problems)
+        totals.signal_problems.extend(report.signal_problems)
 
 
 def _drain_worker(
@@ -1120,7 +1231,7 @@ def _run_in_process(repo: str, opts: RunOptions) -> int:
         skipped=[(test.id(), reason) for test, reason in result.skipped],
         leaks=result.leaks,
         lost=result.lost_exceptions,
-        extra_errors=result.hook_problems,
+        extra_errors=[*result.hook_problems, *result.signal_problems],
     )
     errors = _emit_gate_checks(repo, bytecode_before, findings)
     return 0 if result.wasSuccessful() and not errors else 1
@@ -1138,7 +1249,7 @@ def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]],
         skipped=sorted(totals.skipped),
         leaks=totals.leaks,
         lost=totals.lost_exceptions,
-        extra_errors=[*totals.hook_problems, *totals.worker_errors],
+        extra_errors=[*totals.hook_problems, *totals.signal_problems, *totals.worker_errors],
     )
     errors = _emit_gate_checks(repo, bytecode_before, findings)
     has_test_fail = bool(totals.failures or totals.errors or totals.unexpected_successes)

@@ -599,9 +599,10 @@ forget_pending() {
 put_aside() {
     local path="$1" dst
     [[ -d "${path}" && ! -L "${path}" ]] || return 0
-    # Only before the parent's conversion: once the parent is a subvolume the
-    # cache lives there legitimately (and mv would copy across subvolumes).
-    is_subvol "${path}" || is_subvol "$(dirname "${path}")" && return 0
+    # Only before the parent's conversion: once the parent is a subvolume or an external
+    # mountpoint (such as a dedicated cache drive), the cache lives there legitimately
+    # (and mv would fail or copy across filesystems).
+    is_subvol "${path}" || is_subvol "$(dirname "${path}")" || mountpoint -q "${path}" || mountpoint -q "$(dirname "${path}")" && return 0
     in_use "${path}" && { log 5 "aside: ${path}: in use, left for later"; return 1; }
     dst="${HOME_DIR}/.$(basename "${path}")-aside.pre-subvol-$(date +%Y%m%dT%H%M%S)"
     printf '%s\n' "${dst}" >>"${STATE}/drop-pending"
@@ -663,9 +664,13 @@ planned_left() {
     while read -r strategy path; do
         [[ -z "${path}" || "${strategy}" == \#* ]] && continue
         if [[ "${strategy}" == aside ]]; then
-            [[ -d "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+            # A link is never put aside (put_aside skips it): it is not left either.
+            [[ -d "${path}" && ! -L "${path}" ]] && ! is_subvol "${path}" && ! is_subvol "$(dirname "${path}")" &&
+                ! mountpoint -q "${path}" && ! mountpoint -q "$(dirname "${path}")" &&
                 printf '%s\n' "${path}"
-        elif [[ -e "${path}" || -d "$(dirname "${path}")" ]] && ! is_subvol "${path}" && ! skipped "${path}"; then
+        # A symlink is no mount point here (mountpoint follows it): it stays until convert_one skips it.
+        elif [[ -e "${path}" || -d "$(dirname "${path}")" ]] && ! is_subvol "${path}" &&
+            { [[ -L "${path}" ]] || ! mountpoint -q "${path}"; } && ! skipped "${path}"; then
             printf '%s\n' "${path}"
         fi
     done <"${PLAN}"

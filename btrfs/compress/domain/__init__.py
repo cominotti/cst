@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import re
 from typing import Final
 
-from cst_core.domain.text import HELP_WORDS, enum_member
+from cst_core.domain.text import unescape_mount_field
 
 DEFAULT_LEVEL: Final[int] = 1
 BTRFS_ZSTD_DEFAULT_LEVEL: Final[int] = 3
@@ -23,29 +23,23 @@ OSTREE_BOOTED_PATH: Final[str] = "/run/ostree-booted"
 TOP_MOUNT_UNIT_PATH: Final[str] = r"/etc/systemd/system/var-mnt-btrfs\x2dtop.mount"
 TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
 
-ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var", "/var/home", "/home"})
+# rpm-ostree mounts the booted deployment's root filesystem there too.
+_SYSROOT: Final = "/sysroot"
+ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", _SYSROOT, "/var", "/var/home", "/home"})
+# fstab: without a UUID=<root uuid> to compare, these targets are the root filesystem's; /home and
+# /var/home are its only when they name the same source as one of them (a separate btrfs /home is another
+# filesystem, never changed).
+_PRIMARY_ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", _SYSROOT, "/var"})
+_HOME_TARGETS: Final[frozenset[str]] = ROOT_TARGETS - _PRIMARY_ROOT_TARGETS
+# The root filesystem is the btrfs of the first of these targets that is one (/sysroot, else /, else /var):
+# pick_root_mounts picks the live root mounts by it, and the host adapter's root_uuid the fstab lines.
+ROOT_ANCHOR_TARGETS: Final[tuple[str, ...]] = (_SYSROOT, "/", "/var")
+_UUID_PREFIX: Final = "UUID="
+_SUBVOL_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 ROOTFLAGS_PREFIX: Final[str] = "rootflags="
 _BTRFS_FSTYPE: Final[str] = "btrfs"
 _ZSTD_ALGO: Final[str] = "zstd"
 _NON_WS_RE = re.compile(r"\S+")
-
-
-class CompressCommand(StrEnum):
-    """Supported subcommands of `btrfs-compress`."""
-
-    STATUS = "status"
-    PLAN = "plan"
-    APPLY = "apply"
-    REVERT = "revert"
-    HELP = "help"
-
-
-class CompressFlag(StrEnum):
-    """Supported long flags of `btrfs-compress`."""
-
-    REVERT = "--revert"
-    YES = "--yes"
-    LEVEL = "--level"
 
 
 class CompressMode(StrEnum):
@@ -141,6 +135,7 @@ class CompressPlan:
     kargs_edits: tuple[tuple[str, str], ...]
     remount_target: str | None
     new_top_mount_options: str | None
+    left_alone_notes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,24 +160,7 @@ class CompressStatusView:
     kargs_error: str
     booted_diff: tuple[str, str] | None
     coherence: CoherenceReport
-
-
-@dataclass(frozen=True, slots=True)
-class CompressArgs:
-    """Validated CLI arguments."""
-
-    command: CompressCommand
-    level: int | None = None
-    revert: bool = False
-    yes: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class ArgsError:
-    """Invalid CLI invocation."""
-
-    message: str
-    code: int = 2
+    left_alone_notes: tuple[str, ...]
 
 
 def format_compress_option(mode: CompressMode, level: int) -> str:
@@ -197,100 +175,6 @@ def matches_target_spec(spec: CompressSpec | None, target_mode: CompressMode, ta
     if spec.level is not None:
         return spec.level == target_level
     return target_level == BTRFS_ZSTD_DEFAULT_LEVEL
-
-
-def _parse_level_value(raw: str) -> int | ArgsError:
-    if not raw.isdigit():
-        return ArgsError(f"invalid --level value {raw!r}: expected an integer {MIN_ZSTD_LEVEL}..{MAX_ZSTD_LEVEL}")
-    val = int(raw)
-    if val < MIN_ZSTD_LEVEL or val > MAX_ZSTD_LEVEL:
-        return ArgsError(f"invalid --level {val}: must be between {MIN_ZSTD_LEVEL} and {MAX_ZSTD_LEVEL}")
-    return val
-
-
-def _parse_flag_token(tok: str) -> tuple[CompressFlag | None, str | None]:
-    if tok.startswith(f"{CompressFlag.LEVEL}="):
-        flag_str, inline = tok.split("=", 1)
-        return enum_member(CompressFlag, flag_str), inline
-    return enum_member(CompressFlag, tok), None
-
-
-def _consume_level(cmd: CompressCommand, inline: str | None, next_arg: str | None) -> tuple[int | ArgsError, int]:
-    if cmd == CompressCommand.STATUS:
-        return ArgsError("--level is not supported with `status`"), 0
-    if inline is not None:
-        return _parse_level_value(inline), 0
-    if next_arg is None:
-        return ArgsError("--level requires a value"), 0
-    return _parse_level_value(next_arg), 1
-
-
-def _validate_flag(
-    cmd: CompressCommand, tok: str, next_arg: str | None
-) -> tuple[CompressFlag, int | bool, int] | ArgsError:
-    flag, inline = _parse_flag_token(tok)
-    res: tuple[CompressFlag, int | bool, int] | ArgsError
-    match flag:
-        case CompressFlag.REVERT:
-            res = (
-                (CompressFlag.REVERT, True, 0)
-                if cmd == CompressCommand.PLAN
-                else ArgsError("--revert is only supported with `plan`")
-            )
-        case CompressFlag.YES:
-            res = (
-                (CompressFlag.YES, True, 0)
-                if cmd in (CompressCommand.APPLY, CompressCommand.REVERT)
-                else ArgsError(f"--yes is not supported with `{cmd}`")
-            )
-        case CompressFlag.LEVEL:
-            parsed, consumed = _consume_level(cmd, inline, next_arg)
-            res = parsed if isinstance(parsed, ArgsError) else (CompressFlag.LEVEL, parsed, consumed)
-        case None:
-            res = ArgsError(f"unknown or unexpected argument: {tok}")
-    return res
-
-
-def _parse_compress_flags(cmd: CompressCommand, rest: Sequence[str]) -> CompressArgs | ArgsError:
-    level: int | None = None
-    revert = False
-    yes = False
-    i = 0
-    while i < len(rest):
-        tok = rest[i]
-        if tok in HELP_WORDS:
-            return CompressArgs(command=CompressCommand.HELP)
-        next_arg = rest[i + 1] if i + 1 < len(rest) else None
-        step = _validate_flag(cmd, tok, next_arg)
-        if isinstance(step, ArgsError):
-            return step
-        flag, val, extra = step
-        match flag:
-            case CompressFlag.REVERT:
-                revert = bool(val)
-            case CompressFlag.YES:
-                yes = bool(val)
-            case CompressFlag.LEVEL:
-                level = int(val)
-        i += 1 + extra
-    return CompressArgs(command=cmd, level=level, revert=revert, yes=yes)
-
-
-def parse_compress_args(argv: Sequence[str]) -> CompressArgs | ArgsError:
-    """Parse argv (without program name) into `CompressArgs` or `ArgsError`."""
-    if not argv:
-        return CompressArgs(command=CompressCommand.STATUS)
-    head = argv[0]
-    if head in HELP_WORDS or head == CompressCommand.HELP:
-        return (
-            ArgsError(f"unexpected argument after {head}: {argv[1]}")
-            if len(argv) > 1
-            else CompressArgs(command=CompressCommand.HELP)
-        )
-    cmd = enum_member(CompressCommand, head)
-    if cmd is None:
-        return ArgsError(f"unknown command: {head}")
-    return _parse_compress_flags(cmd, argv[1:])
 
 
 def _is_compress_token(token: str) -> bool:
@@ -359,14 +243,30 @@ def rewrite_mount_options(options_str: str, target_option: str) -> str:
     return ",".join(out)
 
 
-def _unescape_fstab(field: str) -> str:
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+def _fstab_uuid(source: str) -> str | None:
+    """The UUID of a `UUID=...` fstab source (lower case), or None for another kind of source."""
+    return source[len(_UUID_PREFIX) :].lower() if source[: len(_UUID_PREFIX)].upper() == _UUID_PREFIX else None
 
 
-def _is_root_btrfs_entry(source: str, target: str, root_uuid: str) -> bool:
-    if target in ROOT_TARGETS:
+def _is_primary_root_entry(source: str, target: str, root_uuid: str) -> bool:
+    """An fstab line of the root filesystem on its own: UUID=<root_uuid> on any target (another UUID= is
+    another filesystem, whatever its target); without a UUID to compare, a target of /, /sysroot or /var."""
+    uuid = _fstab_uuid(source)
+    if uuid is not None and root_uuid:
+        return uuid == root_uuid.lower()
+    return target in _PRIMARY_ROOT_TARGETS
+
+
+def _root_fstab_sources(entries: Sequence[MountEntry], root_uuid: str) -> frozenset[str]:
+    return frozenset(e.source for e in entries if _is_primary_root_entry(e.source, e.target, root_uuid))
+
+
+def _is_root_btrfs_entry(source: str, target: str, root_uuid: str, root_sources: frozenset[str]) -> bool:
+    """/home and /var/home are the root filesystem's only when their source names it (Fedora's default:
+    a subvolume of it); a separate btrfs /home is never one."""
+    if _is_primary_root_entry(source, target, root_uuid):
         return True
-    return bool(root_uuid and source == f"UUID={root_uuid}")
+    return target in _HOME_TARGETS and source in root_sources
 
 
 def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
@@ -379,8 +279,8 @@ def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
             case [raw_src, raw_tgt, fstype, opts, *_] if fstype == _BTRFS_FSTYPE:
                 entries.append(
                     MountEntry(
-                        source=_unescape_fstab(raw_src),
-                        target=_unescape_fstab(raw_tgt),
+                        source=unescape_mount_field(raw_src),
+                        target=unescape_mount_field(raw_tgt),
                         fstype=_BTRFS_FSTYPE,
                         options=opts,
                     )
@@ -388,15 +288,40 @@ def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
     return tuple(entries)
 
 
-def parse_fstab_root_entries(fstab_text: str, root_uuid: str = "") -> tuple[MountEntry, ...]:
-    """Return btrfs entries in `/etc/fstab` belonging to the root filesystem."""
-    return tuple(
-        entry for entry in parse_proc_mounts(fstab_text) if _is_root_btrfs_entry(entry.source, entry.target, root_uuid)
+def separate_var_entries(fstab_text: str, root_uuid: str) -> tuple[MountEntry, ...]:
+    """The btrfs `/etc/fstab` lines of a separate filesystem at /var: those whose `UUID=` is that of the /var
+    line, when it is not the root's (empty without a root UUID, or a /var line of another kind). A CST
+    before `ROOT_ANCHOR_TARGETS` asked findmnt for /var first and took that filesystem for the root, so its
+    `apply` changed these lines; none is the root's, so nothing changes them back."""
+    if not root_uuid:
+        return ()
+    entries = parse_proc_mounts(fstab_text)
+    var_uuid = next((u for e in entries if e.target == "/var" and (u := _fstab_uuid(e.source)) is not None), None)
+    if var_uuid is None or var_uuid == root_uuid.lower():
+        return ()
+    return tuple(e for e in entries if _fstab_uuid(e.source) == var_uuid)
+
+
+def left_alone_note(entry: MountEntry, current: str) -> str:
+    """What `status` and `plan` say of a separate /var filesystem's fstab line that carries the option an
+    older CST's `apply` may have set there (`current`, as the feature describes it)."""
+    return (
+        f"/etc/fstab {entry.target} ({entry.source}) is a separate btrfs filesystem, not the root's, and has "
+        f"{current}: CST leaves it alone. An older CST took a separate btrfs /var for the root and may have "
+        "set that; if you did not, put that line's options back by hand."
     )
 
 
-def rewrite_fstab(fstab_text: str, target_option: str, root_uuid: str = "") -> str:
-    """Rewrite options on root btrfs `/etc/fstab` lines, preserving spacing, comments, and line ends."""
+def parse_fstab_root_entries(fstab_text: str, root_uuid: str = "") -> tuple[MountEntry, ...]:
+    """Return btrfs entries in `/etc/fstab` belonging to the root filesystem."""
+    entries = parse_proc_mounts(fstab_text)
+    sources = _root_fstab_sources(entries, root_uuid)
+    return tuple(e for e in entries if _is_root_btrfs_entry(e.source, e.target, root_uuid, sources))
+
+
+def rewrite_fstab_options(fstab_text: str, option_rewriter: Callable[[str], str], root_uuid: str = "") -> str:
+    """Rewrite options on root btrfs `/etc/fstab` lines using `option_rewriter`, keeping formatting."""
+    sources = _root_fstab_sources(parse_proc_mounts(fstab_text), root_uuid)
     out_lines: list[str] = []
     for raw_line in fstab_text.splitlines(keepends=True):
         stripped = raw_line.strip()
@@ -405,13 +330,18 @@ def rewrite_fstab(fstab_text: str, target_option: str, root_uuid: str = "") -> s
             continue
         match list(_NON_WS_RE.finditer(raw_line)):
             case [s_src, s_tgt, s_type, s_opt, *_] if s_type.group() == _BTRFS_FSTYPE and _is_root_btrfs_entry(
-                _unescape_fstab(s_src.group()), _unescape_fstab(s_tgt.group()), root_uuid
+                unescape_mount_field(s_src.group()), unescape_mount_field(s_tgt.group()), root_uuid, sources
             ):
-                new_opts = rewrite_mount_options(s_opt.group(), target_option)
+                new_opts = option_rewriter(s_opt.group())
                 out_lines.append(raw_line[: s_opt.start()] + new_opts + raw_line[s_opt.end() :])
             case _:
                 out_lines.append(raw_line)
     return "".join(out_lines)
+
+
+def rewrite_fstab(fstab_text: str, target_option: str, root_uuid: str = "") -> str:
+    """Rewrite options on root btrfs `/etc/fstab` lines, preserving spacing, comments, and line ends."""
+    return rewrite_fstab_options(fstab_text, lambda opts: rewrite_mount_options(opts, target_option), root_uuid)
 
 
 def extract_kargs_line(kargs_stdout: str) -> str:
@@ -429,15 +359,20 @@ def extract_rootflags_tokens(cmdline_or_kargs: str) -> tuple[str, ...]:
     return tuple(tok for tok in line.split() if tok.startswith(ROOTFLAGS_PREFIX))
 
 
-def rewrite_kargs_rootflags(kargs_stdout: str, target_option: str) -> tuple[tuple[str, str], ...]:
-    """Return `(old_token, new_token)` pairs for any `rootflags=` token needing an update."""
+def rewrite_kargs_options(kargs_stdout: str, option_rewriter: Callable[[str], str]) -> tuple[tuple[str, str], ...]:
+    """Return `(old_token, new_token)` pairs for any `rootflags=` token changed by `option_rewriter`."""
     edits: list[tuple[str, str]] = []
     for tok in extract_rootflags_tokens(kargs_stdout):
         val = tok.removeprefix(ROOTFLAGS_PREFIX)
-        new_val = rewrite_mount_options(val, target_option)
+        new_val = option_rewriter(val)
         if new_val != val:
             edits.append((tok, f"{ROOTFLAGS_PREFIX}{new_val}"))
     return tuple(edits)
+
+
+def rewrite_kargs_rootflags(kargs_stdout: str, target_option: str) -> tuple[tuple[str, str], ...]:
+    """Return `(old_token, new_token)` pairs for any `rootflags=` token needing an update."""
+    return rewrite_kargs_options(kargs_stdout, lambda val: rewrite_mount_options(val, target_option))
 
 
 def _extract_mount_lines(unit_text: str) -> list[tuple[str, str]]:
@@ -478,16 +413,29 @@ def top_mount_options_from_var(var_options: str) -> str:
     return ",".join(["subvolid=5", *kept])
 
 
+def _mount_device(source: str) -> str:
+    """A live mount's device: findmnt's SOURCE without its "[/subvolume]" part (btrfs shows one device
+    name for every mount of a filesystem)."""
+    return _SUBVOL_SUFFIX_RE.sub("", source)
+
+
 def pick_root_mounts(mounts: Sequence[MountEntry]) -> tuple[MountEntry, ...]:
-    """Filter `/proc/mounts` btrfs entries to root workstation mounts (`/sysroot`, `/var`, `/var/home`, `/`)."""
-    return tuple(m for m in mounts if m.target in ROOT_TARGETS)
+    """Filter `/proc/mounts` btrfs entries to root workstation mounts (`/sysroot`, `/var`, `/var/home`, `/`)
+    of the root filesystem: the device of /sysroot, else /, else /var. A separate btrfs /home is left out;
+    with none of those three on btrfs, nothing is a root mount."""
+    by_target = {m.target: m for m in mounts}
+    anchor = next((by_target[t] for t in ROOT_ANCHOR_TARGETS if t in by_target), None)
+    if anchor is None:
+        return ()
+    device = _mount_device(anchor.source)
+    return tuple(m for m in mounts if m.target in ROOT_TARGETS and _mount_device(m.source) == device)
 
 
 def pick_remount_target(mounts: Sequence[MountEntry]) -> MountEntry | None:
     """Choose the best live writable root btrfs mountpoint for `mount -o remount,...`."""
     by_target = {m.target: m for m in mounts}
     for allow_ro in (False, True):
-        for preferred in ("/var", "/var/home", "/sysroot", "/"):
+        for preferred in ("/var", "/var/home", _SYSROOT, "/"):
             entry = by_target.get(preferred)
             if entry is not None and (allow_ro or "ro" not in entry.options.split(",")):
                 return entry
@@ -503,43 +451,77 @@ def _layer(layer: LayerName, status: LayerStatus, current: str, target_opt: str,
     return LayerPlan(layer, status, current, target_opt, changed=status == LayerStatus.CHANGE, detail=detail)
 
 
+@dataclass(frozen=True, slots=True)
+class OptionLayerOps:
+    """Hooks parameterizing multi-layer planning for a root btrfs mount option."""
+
+    target_label: str
+    rewrite_opts: Callable[[str], str]
+    describe_options: Callable[[Sequence[str]], str]
+    describe_top: Callable[[str], str]
+    needs_live_change: Callable[[Sequence[MountEntry]], bool]
+    needs_top_change: Callable[[TopMountInfo], bool]
+    # True for options that carry what this feature's `apply` writes (a note for a separate /var's lines).
+    set_by_apply: Callable[[str], bool]
+    fstab_absent_current: str = "(no root btrfs entries)"
+    fstab_absent_detail: str = "no root btrfs entries in /etc/fstab"
+    kargs_absent_current: str = "(no rootflags= in kargs)"
+    kargs_absent_detail: str = "no rootflags= found in rpm-ostree kargs"
+    kargs_skip_detail: str = "non-ostree system (skipped)"
+    live_absent_detail: str = "no live root btrfs mount in /proc/mounts"
+
+
+@dataclass(frozen=True, slots=True)
+class RootOptionLayerPlan:
+    """Generic multi-layer plan result before feature-specific wrapping."""
+
+    layers: tuple[LayerPlan, ...]
+    new_fstab_text: str | None
+    kargs_edits: tuple[tuple[str, str], ...]
+    remount_target: str | None
+    new_top_mount_options: str | None
+    # A note per line of a separate /var filesystem that carries this feature's option (separate_var_entries).
+    left_alone_notes: tuple[str, ...]
+
+
 def _plan_fstab(
-    fstab_text: str | None, fstab_roots: tuple[MountEntry, ...], target_opt: str, root_uuid: str
+    fstab_text: str | None, fstab_roots: tuple[MountEntry, ...], root_uuid: str, ops: OptionLayerOps
 ) -> tuple[LayerPlan, str | None]:
     if fstab_text is None:
-        return _layer(LayerName.FSTAB, LayerStatus.ABSENT, "(missing)", target_opt, "/etc/fstab not present"), None
+        return _layer(
+            LayerName.FSTAB, LayerStatus.ABSENT, "(missing)", ops.target_label, "/etc/fstab not present"
+        ), None
     if not fstab_roots:
         return (
             _layer(
                 LayerName.FSTAB,
                 LayerStatus.ABSENT,
-                "(no root btrfs entries)",
-                target_opt,
-                "no root btrfs entries in /etc/fstab",
+                ops.fstab_absent_current,
+                ops.target_label,
+                ops.fstab_absent_detail,
             ),
             None,
         )
-    rewritten = rewrite_fstab(fstab_text, target_opt, root_uuid)
+    rewritten = rewrite_fstab_options(fstab_text, ops.rewrite_opts, root_uuid)
     changed = rewritten != fstab_text
-    specs = [sp for m in fstab_roots if (sp := effective_compress_spec(m.options)) is not None]
     status = LayerStatus.CHANGE if changed else LayerStatus.OK
     lp = _layer(
         LayerName.FSTAB,
         status,
-        _describe_specs(specs),
-        target_opt,
+        ops.describe_options([m.options for m in fstab_roots]),
+        ops.target_label,
         f"{len(fstab_roots)} root btrfs entry(ies) in /etc/fstab",
     )
     return lp, (rewritten if changed else None)
 
 
 def _plan_kargs(
-    *, is_ostree: bool, kargs_text: str | None, rootflags_toks: tuple[str, ...], target_opt: str
+    *, is_ostree: bool, kargs_text: str | None, rootflags_toks: tuple[str, ...], ops: OptionLayerOps
 ) -> tuple[LayerPlan, tuple[tuple[str, str], ...]]:
     if not is_ostree:
         return (
             _layer(
-                LayerName.KARGS, LayerStatus.NOT_APPLICABLE, "(not ostree)", target_opt, "non-ostree system (skipped)"
+                LayerName.KARGS, LayerStatus.NOT_APPLICABLE, "(not ostree)", ops.target_label, ops.kargs_skip_detail
             ),
             (),
         )
@@ -548,73 +530,82 @@ def _plan_kargs(
             _layer(
                 LayerName.KARGS,
                 LayerStatus.ABSENT,
-                "(no rootflags= in kargs)",
-                target_opt,
-                "no rootflags= found in rpm-ostree kargs",
+                ops.kargs_absent_current,
+                ops.target_label,
+                ops.kargs_absent_detail,
             ),
             (),
         )
-    edits = rewrite_kargs_rootflags(kargs_text, target_opt)
-    specs = [
-        sp for tok in rootflags_toks if (sp := effective_compress_spec(tok.removeprefix(ROOTFLAGS_PREFIX))) is not None
-    ]
+    edits = rewrite_kargs_options(kargs_text, ops.rewrite_opts)
     status = LayerStatus.CHANGE if edits else LayerStatus.OK
-    return _layer(LayerName.KARGS, status, _describe_specs(specs), target_opt, "rpm-ostree kargs rootflags="), edits
+    current = ops.describe_options([tok.removeprefix(ROOTFLAGS_PREFIX) for tok in rootflags_toks])
+    return _layer(LayerName.KARGS, status, current, ops.target_label, "rpm-ostree kargs rootflags="), edits
 
 
-def _plan_live(
-    live_roots: tuple[MountEntry, ...], target_mode: CompressMode, target_level: int, target_opt: str
-) -> tuple[LayerPlan, str | None, MountEntry | None]:
+def _plan_live(live_roots: tuple[MountEntry, ...], ops: OptionLayerOps) -> tuple[LayerPlan, str | None]:
     remount_entry = pick_remount_target(live_roots)
     if remount_entry is None:
         return (
-            _layer(
-                LayerName.LIVE,
-                LayerStatus.ABSENT,
-                "(not mounted)",
-                target_opt,
-                "no live root btrfs mount in /proc/mounts",
-            ),
-            None,
+            _layer(LayerName.LIVE, LayerStatus.ABSENT, "(not mounted)", ops.target_label, ops.live_absent_detail),
             None,
         )
-    live_specs = [sp for m in live_roots if (sp := effective_compress_spec(m.options)) is not None]
-    needs_remount = any(
-        not matches_target_spec(effective_compress_spec(m.options), target_mode, target_level) for m in live_roots
-    )
+    needs_remount = ops.needs_live_change(live_roots)
     status = LayerStatus.CHANGE if needs_remount else LayerStatus.OK
     lp = _layer(
-        LayerName.LIVE, status, _describe_specs(live_specs), target_opt, f"live remount via {remount_entry.target}"
+        LayerName.LIVE,
+        status,
+        ops.describe_options([m.options for m in live_roots]),
+        ops.target_label,
+        f"live remount via {remount_entry.target}",
     )
-    return lp, (remount_entry.target if needs_remount else None), remount_entry
+    return lp, (remount_entry.target if needs_remount else None)
 
 
-def _plan_top_mount(
-    top_mount: TopMountInfo | None,
-    remount_entry: MountEntry | None,
-    target_mode: CompressMode,
-    target_level: int,
-    target_opt: str,
-) -> tuple[LayerPlan, str | None]:
+def _plan_top_mount(top_mount: TopMountInfo | None, ops: OptionLayerOps) -> tuple[LayerPlan, str | None]:
+    """The top-mount unit's own Options= with only this feature's option rewritten (what only the unit
+    has stays; what the live /var has at the moment is not copied in)."""
     if top_mount is None or not top_mount.installed:
         return (
             _layer(
                 LayerName.TOP_MOUNT,
                 LayerStatus.NOT_APPLICABLE,
                 "(not installed)",
-                target_opt,
+                ops.target_label,
                 r"var-mnt-btrfs\x2dtop.mount not installed",
             ),
             None,
         )
-    top_spec = effective_compress_spec(top_mount.options)
-    cur = top_spec.raw if top_spec is not None else "(none)"
-    base_opts = remount_entry.options if remount_entry is not None else top_mount.options
-    desired_top = top_mount_options_from_var(rewrite_mount_options(base_opts, target_opt))
-    changed = (not matches_target_spec(top_spec, target_mode, target_level)) and desired_top != top_mount.options
+    cur = ops.describe_top(top_mount.options)
+    desired_top = ops.rewrite_opts(top_mount.options)
+    changed = ops.needs_top_change(top_mount) and desired_top != top_mount.options
     status = LayerStatus.CHANGE if changed else LayerStatus.OK
-    lp = _layer(LayerName.TOP_MOUNT, status, cur, target_opt, r"systemd unit var-mnt-btrfs\x2dtop.mount")
+    lp = _layer(LayerName.TOP_MOUNT, status, cur, ops.target_label, r"systemd unit var-mnt-btrfs\x2dtop.mount")
     return lp, (desired_top if changed else None)
+
+
+def plan_root_option_layers(snapshot: CompressSnapshot, ops: OptionLayerOps) -> RootOptionLayerPlan:
+    """Compute a 4-layer root btrfs option plan using feature-specific `ops` hooks."""
+    live_roots = pick_root_mounts(parse_proc_mounts(snapshot.proc_mounts_text or ""))
+    fstab_roots = parse_fstab_root_entries(snapshot.fstab_text or "", snapshot.root_uuid)
+    rootflags_toks = extract_rootflags_tokens(snapshot.kargs_text or "") if snapshot.is_ostree else ()
+    lp_fstab, new_fstab = _plan_fstab(snapshot.fstab_text, fstab_roots, snapshot.root_uuid, ops)
+    lp_kargs, kargs_edits = _plan_kargs(
+        is_ostree=snapshot.is_ostree, kargs_text=snapshot.kargs_text, rootflags_toks=rootflags_toks, ops=ops
+    )
+    lp_live, remount_target = _plan_live(live_roots, ops)
+    lp_top, new_top_opts = _plan_top_mount(snapshot.top_mount, ops)
+    return RootOptionLayerPlan(
+        layers=(lp_fstab, lp_kargs, lp_live, lp_top),
+        new_fstab_text=new_fstab,
+        kargs_edits=kargs_edits,
+        remount_target=remount_target,
+        new_top_mount_options=new_top_opts,
+        left_alone_notes=tuple(
+            left_alone_note(e, ops.describe_options([e.options]))
+            for e in separate_var_entries(snapshot.fstab_text or "", snapshot.root_uuid)
+            if ops.set_by_apply(e.options)
+        ),
+    )
 
 
 def build_plan(
@@ -635,30 +626,48 @@ def build_plan(
     target_level = level_override if level_override is not None else detect_existing_level(probe_specs)
     target_opt = format_compress_option(target_mode, target_level)
 
-    lp_fstab, new_fstab = _plan_fstab(snapshot.fstab_text, fstab_roots, target_opt, snapshot.root_uuid)
-    lp_kargs, kargs_edits = _plan_kargs(
-        is_ostree=snapshot.is_ostree,
-        kargs_text=snapshot.kargs_text,
-        rootflags_toks=rootflags_toks,
-        target_opt=target_opt,
-    )
-    lp_live, remount_target, remount_entry = _plan_live(live_roots, target_mode, target_level, target_opt)
-    lp_top, new_top_opts = _plan_top_mount(snapshot.top_mount, remount_entry, target_mode, target_level, target_opt)
+    def _describe_opts(opt_strings: Sequence[str]) -> str:
+        return _describe_specs([sp for o in opt_strings if (sp := effective_compress_spec(o)) is not None])
 
-    layers = (lp_fstab, lp_kargs, lp_live, lp_top)
+    def _describe_top(opts: str) -> str:
+        sp = effective_compress_spec(opts)
+        return sp.raw if sp is not None else "(none)"
+
+    core = plan_root_option_layers(
+        snapshot,
+        OptionLayerOps(
+            target_label=target_opt,
+            rewrite_opts=lambda opts: rewrite_mount_options(opts, target_opt),
+            describe_options=_describe_opts,
+            describe_top=_describe_top,
+            needs_live_change=lambda ms: any(
+                not matches_target_spec(effective_compress_spec(m.options), target_mode, target_level) for m in ms
+            ),
+            needs_top_change=lambda top: (
+                not matches_target_spec(effective_compress_spec(top.options), target_mode, target_level)
+            ),
+            set_by_apply=_has_compress_force,
+        ),
+    )
     return CompressPlan(
         target_mode=target_mode,
         target_level=target_level,
         target_option=target_opt,
         is_ostree=snapshot.is_ostree,
         root_uuid=snapshot.root_uuid,
-        layers=layers,
-        has_changes=any(lp.changed for lp in layers),
-        new_fstab_text=new_fstab,
-        kargs_edits=kargs_edits,
-        remount_target=remount_target,
-        new_top_mount_options=new_top_opts,
+        layers=core.layers,
+        has_changes=any(lp.changed for lp in core.layers),
+        new_fstab_text=core.new_fstab_text,
+        kargs_edits=core.kargs_edits,
+        remount_target=core.remount_target,
+        new_top_mount_options=core.new_top_mount_options,
+        left_alone_notes=core.left_alone_notes,
     )
+
+
+def _has_compress_force(options: str) -> bool:
+    spec = effective_compress_spec(options)
+    return spec is not None and spec.mode == CompressMode.COMPRESS_FORCE
 
 
 def _canonical_spec(spec: CompressSpec | None) -> str:
@@ -669,21 +678,29 @@ def _canonical_spec(spec: CompressSpec | None) -> str:
     return spec.raw
 
 
-def assess_coherence(snapshot: CompressSnapshot) -> CoherenceReport:
-    """Assess whether active layers agree on root btrfs compression."""
-    fstab_roots = parse_fstab_root_entries(snapshot.fstab_text or "", snapshot.root_uuid)
-    observed: list[tuple[str, CompressSpec | None]] = [
-        (f"fstab {entry.target}", effective_compress_spec(entry.options)) for entry in fstab_roots
+def collect_layer_options(snapshot: CompressSnapshot) -> list[tuple[str, str]]:
+    """Collect raw mount option strings across fstab, kargs rootflags=, live mounts, and top-mount."""
+    observed = [
+        (f"fstab {entry.target}", entry.options)
+        for entry in parse_fstab_root_entries(snapshot.fstab_text or "", snapshot.root_uuid)
     ]
     if snapshot.is_ostree and snapshot.kargs_text is not None:
         observed.extend(
-            ("kargs rootflags", effective_compress_spec(tok.removeprefix(ROOTFLAGS_PREFIX)))
+            ("kargs rootflags", tok.removeprefix(ROOTFLAGS_PREFIX))
             for tok in extract_rootflags_tokens(snapshot.kargs_text)
         )
     live_roots = pick_root_mounts(parse_proc_mounts(snapshot.proc_mounts_text or ""))
-    observed.extend((f"live {entry.target}", effective_compress_spec(entry.options)) for entry in live_roots)
+    observed.extend((f"live {entry.target}", entry.options) for entry in live_roots)
     if snapshot.top_mount is not None and snapshot.top_mount.installed:
-        observed.append(("top-mount", effective_compress_spec(snapshot.top_mount.options)))
+        observed.append(("top-mount", snapshot.top_mount.options))
+    return observed
+
+
+def assess_coherence(snapshot: CompressSnapshot) -> CoherenceReport:
+    """Assess whether active layers agree on root btrfs compression."""
+    observed: list[tuple[str, CompressSpec | None]] = [
+        (name, effective_compress_spec(opts)) for name, opts in collect_layer_options(snapshot)
+    ]
 
     if not observed:
         return CoherenceReport(

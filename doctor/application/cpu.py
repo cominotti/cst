@@ -5,6 +5,7 @@ boxes outside CST's rules."""
 from collections.abc import Iterator
 from typing import Final
 
+from cst_core.domain.units import LoadState
 from cpu.game.domain import GameRecordKind, Record, intended_records, newer_intended, records, state_uid
 from doctor.application.shared import check, conf_value, read_text, settings_file_warnings
 from doctor.domain import (
@@ -120,7 +121,7 @@ def unit_props(host: DoctorHostPort, base: list[str], unit: str, props: list[str
         if "=" in line:
             k, v = line.split("=", 1)
             vals[k] = "" if v == "[not set]" else v
-    if vals.get("LoadState") != "loaded":
+    if vals.get("LoadState") != LoadState.LOADED:
         return None
     return vals
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 import os
 import shlex
 import subprocess
@@ -185,12 +186,13 @@ swap_setup() {
     cpu_dropin_added=""
     rm -rf "$W"
     mkdir -p "$W/bin" "$W/orig" "$W/proc/sys/vm" "$W/proc/pressure" "$W/sys/module/zswap/parameters" \
+        "$W/sys/kernel/mm/transparent_hugepage" "$W/sys/kernel/mm/lru_gen" \
         "$W/sys/class/block/e2e-swap0" "$W/sys/class/block/e2e-dm0/dm"
     # 1. The checks.
     [[ ! -e /dev/e2e-swap0 && ! -e /dev/e2e-dm0 && ! -e /dev/mapper/swap0 ]]
     [[ ! -e /etc/cst/swap.conf ]]
     # 2. What swap_cleanup puts back.
-    for f in /etc/crypttab /etc/fstab "$REC"; do
+    for f in /etc/crypttab /etc/fstab /etc/uresourced.conf "$REC"; do
         if [[ -e "$f" ]]; then cp -a "$f" "$W/orig/"; fi
     done
     if [[ -e /etc/systemd/zram-generator.conf || -L /etc/systemd/zram-generator.conf ]]; then
@@ -208,7 +210,9 @@ swap_setup() {
     for p in $(sed -n 's|^w /sys/module/zswap/parameters/\([^ ]*\) .*|\1|p' "$SRC/tmpfiles/zswap.conf"); do
         echo N >"$W/sys/module/zswap/parameters/$p"
     done
-    for k in swappiness page-cluster watermark_boost_factor watermark_scale_factor; do echo 7 >"$W/proc/sys/vm/$k"; done
+    for k in swappiness page-cluster watermark_boost_factor watermark_scale_factor min_free_kbytes; do echo 7 >"$W/proc/sys/vm/$k"; done
+    echo "always defer [madvise] never" >"$W/sys/kernel/mm/transparent_hugepage/defrag"
+    echo 0 >"$W/sys/kernel/mm/lru_gen/min_ttl_ms"
     echo $((SIZE / 512)) >"$W/sys/class/block/e2e-swap0/size"
     echo swap0 >"$W/sys/class/block/e2e-dm0/dm/name"
     mkdir -p /dev/disk/by-partuuid /dev/mapper
@@ -261,16 +265,23 @@ swap_cleanup() {
         rm -rf "$W"
         return 0
     fi
+    # test_88 step 9's stand-in uresourced, when it failed before removing it.
+    if [[ -e "$W/orig/ures-standin" ]]; then
+        systemctl stop uresourced.service 2>/dev/null || true
+        rm -f /run/systemd/system/uresourced.service /run/systemd/system.control/user.slice.d/50-MemoryMin.conf
+    fi
     for f in crypttab fstab; do
         rm -f "/etc/$f.pre-swap-config.bak"
         if [[ -e "$W/orig/$f" ]]; then cp -a "$W/orig/$f" "/etc/$f"; else rm -f "/etc/$f"; fi
     done
     if [[ -e "$W/orig/installed.json" ]]; then cp -a "$W/orig/installed.json" "$REC"; else rm -f "$REC"; fi
+    rm -f /etc/uresourced.conf /etc/uresourced.conf.pre-swap-config.bak
+    if [[ -e "$W/orig/uresourced.conf" ]]; then cp -a "$W/orig/uresourced.conf" /etc/uresourced.conf; fi
     rm -f /etc/systemd/zram-generator.conf
     if [[ -e "$W/orig/zram-generator.conf" || -L "$W/orig/zram-generator.conf" ]]; then
         cp -a "$W/orig/zram-generator.conf" /etc/systemd/
     fi
-    rm -f /etc/tmpfiles.d/zswap.conf /etc/sysctl.d/99-swap-tuning.conf /etc/cst/swap.conf \
+    rm -f /etc/tmpfiles.d/zswap.conf /etc/tmpfiles.d/cst-mm-responsiveness.conf /etc/sysctl.d/99-swap-tuning.conf /etc/cst/swap.conf \
         "$DROPIN_DIR/10-swap-memory-low.conf" "$DROPIN_DIR/50-memory-low.conf" \
         /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
     rmdir /etc/cst 2>/dev/null || true
@@ -1054,9 +1065,20 @@ class Tier1SystemdE2ETest(unittest.TestCase):
         repo = self.CST_ROOT_MOUNT
         for extra_flags, subcmd in (
             ([], "/opt/cst/cst cpu install"),
+            ([], "/opt/cst/cst cpu irq apply"),
+            ([], "/opt/cst/cst cpu irq revert"),
+            ([], "/opt/cst/cst cpu power apply"),
+            ([], "/opt/cst/cst cpu power revert"),
             ([], "/opt/cst/cst btrfs install --no-below"),
             ([], "/opt/cst/cst btrfs compress-force apply --yes"),
             ([], "/opt/cst/cst btrfs compress-force revert --yes"),
+            ([], "/opt/cst/cst btrfs commit-interval apply --yes"),
+            ([], "/opt/cst/cst btrfs commit-interval revert --yes"),
+            ([], "/opt/cst/cst btrfs cache attach --user tester"),
+            ([], "/opt/cst/cst btrfs cache detach --user tester"),
+            ([], "/opt/cst/cst btrfs iocost apply"),
+            ([], "/opt/cst/cst btrfs iocost revert"),
+            ([], "/opt/cst/cst btrfs scrub-limit set 500M"),
             ([], "/opt/cst/cst swap apply"),
             (["--user", "tester"], "/opt/cst/cst bluetooth apply --no-restart --yes"),
         ):
@@ -1264,7 +1286,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             test -L "$link"
             # The removal of the unchecked auto off: no disable, no daemon-reload that worked.
             rm {self.TOOLCHAINS_INSTALLED}
-            test -L "$link" && test ! -e "$link"
+            test -L "$link"
+            test ! -e "$link"
             en_rc=0
             en="$(systemctl --user is-enabled cst-toolchains-prune.timer 2>&1)" || en_rc=$?
             ac_rc=0
@@ -1571,16 +1594,27 @@ grep -qxF "swap0 /dev/disk/by-partuuid/$PU /dev/urandom swap,cipher=aes-xts-plai
 [[ "$(stat -c %a /etc/crypttab)" == 600 ]]
 grep -qxF "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)" /etc/fstab
 cmp "$SRC/tmpfiles/zswap.conf" /etc/tmpfiles.d/zswap.conf
+cmp "$SRC/tmpfiles/cst-mm-responsiveness.conf" /etc/tmpfiles.d/cst-mm-responsiveness.conf
 cmp "$SRC/sysctl/99-swap-tuning.conf" /etc/sysctl.d/99-swap-tuning.conf
+cmp "$SRC/units/uresourced.conf" /etc/uresourced.conf
 cmp "$SRC/units/machine.slice.d-10-swap-memory-low.conf" "$DROPIN_DIR/10-swap-memory-low.conf"
 [[ "$(readlink /etc/systemd/zram-generator.conf)" == /dev/null ]]
 [[ "$(cat "$W/sys/module/zswap/parameters/compressor")" == zstd ]]
 [[ "$(cat "$W/proc/sys/vm/swappiness")" == 100 ]]
+[[ "$(cat "$W/proc/sys/vm/min_free_kbytes")" == 262144 ]]
+[[ "$(cat "$W/sys/kernel/mm/transparent_hugepage/defrag")" == defer+madvise ]]
+[[ "$(cat "$W/sys/kernel/mm/lru_gen/min_ttl_ms")" == 1000 ]]
 python3 -I - "$REC" <<'PY'
 import json, sys
 rec = json.load(open(sys.argv[1]))
 d = "/etc/systemd/system/machine.slice.d/"
-want = {"/etc/sysctl.d/99-swap-tuning.conf", d + "10-swap-memory-low.conf", "/etc/tmpfiles.d/zswap.conf"}
+want = {
+    "/etc/sysctl.d/99-swap-tuning.conf",
+    d + "10-swap-memory-low.conf",
+    "/etc/tmpfiles.d/cst-mm-responsiveness.conf",
+    "/etc/tmpfiles.d/zswap.conf",
+    "/etc/uresourced.conf",
+}
 assert want <= set(rec["files"]), sorted(rec["files"])
 assert d + "50-memory-low.conf" not in rec["files"]
 assert rec["components"]["swap:core"] == "done", rec["components"]
@@ -1599,7 +1633,8 @@ low=/sys/fs/cgroup/machine.slice/memory.low
 swap_run status
 [[ $rc == 0 ]] || fail "status"
 for row in "crypttab: swap0 line" "fstab: /dev/mapper/swap0 line" "machine.slice.d/10-swap-memory-low.conf" \
-    "tmpfiles.d/zswap.conf" "sysctl.d/99-swap-tuning.conf" "swap0 " "zram0 "; do
+    "tmpfiles.d/cst-mm-responsiveness.conf" "tmpfiles.d/zswap.conf" "sysctl.d/99-swap-tuning.conf" \
+    "uresourced.conf" "swap0 " "zram0 "; do
     grep -qF "  ok        $row" <<<"$out" || fail "status row $row"
 done
 [[ "$out" != *"  DIFF "* && "$out" != *"  REFUSE"* ]] || fail "status differs"
@@ -1646,6 +1681,38 @@ check_runtime_over
 rm -f /run/systemd/system.control/machine.slice.d/50-MemoryLow.conf
 systemctl daemon-reload
 [[ "$(systemctl show -P MemoryLow machine.slice)" == 51539607552 ]]
+
+# 9. uresourced's floor, where user.slice has a memory controller and no uresourced is installed: a
+# stand-in unit sets user.slice's MemoryMin as uresourced does (through systemd). MemTotal here is
+# 8000000 kB, so [Global] MaxMemoryMin=10% caps MemoryMin=1G to 819200000 bytes.
+ures_unit=/run/systemd/system/uresourced.service
+umin=/sys/fs/cgroup/user.slice/memory.min
+if [[ -e "$umin" ]] && [[ "$(systemctl show -P LoadState uresourced.service)" == not-found ]]; then
+    : >"$W/orig/ures-standin"
+    printf '[Service]\nExecStartPre=/usr/bin/systemctl set-property --runtime user.slice MemoryMin=819200000\nExecStart=/usr/bin/sleep infinity\n' >"$ures_unit"
+    systemctl daemon-reload
+    systemctl start uresourced.service
+    [[ "$(cat "$umin")" == 819200000 ]] || fail "the stand-in uresourced"
+    swap_run apply
+    [[ $rc == 0 ]] || fail "apply with uresourced's capped floor"
+    [[ "$out" != *"restarted: uresourced"* ]] || fail "restarted uresourced with the floor in place"
+    # /etc/uresourced.conf is current; the live floor drifted: apply restarts uresourced.
+    systemctl set-property --runtime user.slice MemoryMin=262144000
+    swap_run apply
+    [[ $rc == 0 ]] || fail "apply with a drifted uresourced floor"
+    grep -qF "restarted: uresourced.service" <<<"$out" || fail "uresourced not restarted on a drifted floor"
+    [[ "$(cat "$umin")" == 819200000 ]] || fail "the floor after the restart"
+    # A live 0 with no session in a seat's foreground (a server, this container) is no difference.
+    if ! grep -qs '^ACTIVE=.' /run/systemd/seats/*; then
+        systemctl set-property --runtime user.slice MemoryMin=0
+        swap_run status
+        [[ $rc == 0 ]] || fail "status with a 0 floor and no seat session"
+        grep -qF "no active seat session" <<<"$out" || fail "status row without a seat session"
+    fi
+    systemctl stop uresourced.service
+    rm -f "$ures_unit" /run/systemd/system.control/user.slice.d/50-MemoryMin.conf "$W/orig/ures-standin"
+    systemctl daemon-reload
+fi
 echo E2E-OK
 """,
             check=False,
@@ -2012,7 +2079,8 @@ echo E2E-OK
                 ut() {{ runuser -u tester -- env HOME=/home/tester USER=tester LOGNAME=tester \
                     XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }}
                 doc() {{ ut /opt/cst-rw/cst doctor 2>&1 || true; }}   # exits non-zero on a WARN
-                test -d "$ucg/e2eprobe.slice" && test -d "$ucg/app.slice/run-e2eprobe.service"
+                test -d "$ucg/e2eprobe.slice"
+                test -d "$ucg/app.slice/run-e2eprobe.service"
                 test -d "$ucg/user.slice/user-e2eok.slice"
                 # The doctor names the escaped boxes the real systemd made, and not user-<x>.slice.
                 d="$(doc)"
@@ -2478,6 +2546,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         # (dest under the stage, help argv, expected exit status), from tests/test_distribution.py
         entries = {
             "/usr/local/sbin/btrfs-bulk": ("--help", 2),
+            "/usr/local/sbin/btrfs-iocost": ("--help", 0),
             "/usr/local/sbin/btrfs-snapshot-core": ("--help", 0),
             "/usr/local/sbin/btrfs-snapshot-runtime": ("--help", 2),
             "/usr/local/sbin/btrfs-stall-monitord": ("--help", 0),
@@ -2487,6 +2556,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             "/usr/local/sbin/docker-gc": ("--help", 2),
             "/usr/local/sbin/docker-volumes-nocow": ("--help", 2),
             "/usr/local/bin/cpu-watch": ("--help", 2),
+            "/usr/local/sbin/cpu-irq": ("--help", 0),
+            "/usr/local/sbin/cpu-power": ("--help", 0),
             "/usr/local/sbin/cpu-vm-pin": ("--help", 2),
             "/usr/local/sbin/cpu-game-profile": ("--help", 2),
             "/home/tester/.local/lib/cst/bt-ldac-watch": ("--help", 0),
@@ -2749,7 +2820,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             /usr/bin/python3 -I "$tool" backup-timer off e2evm
             if systemctl is-enabled cst-vm-backup@e2evm.timer; then echo "still enabled" >&2; exit 1; fi
             if [ -e "$stamp" ]; then echo "off left $stamp" >&2; exit 1; fi
-            [ ! -e "$w/sbin/cst-vm" ] && [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
+            [ ! -e "$w/sbin/cst-vm" ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.service ]
             [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
             echo E2E-OK
             """,
@@ -2986,6 +3058,8 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         "btrfs-subvol-convert.service": 94,
         "cpu-game.service": 94,
         "cpu-game-watchdog.service": 94,
+        "cst-btrfs-iocost.service": 68,
+        "cst-cpu-power.service": 94,
         "cst-vm-backup@e2e.service": 94,
         # 23, not 21: no NoNewPrivileges= (it blocks the SELinux move into the
         # Docker domain on Fedora; see btrfs/README.md and test_unit_contract).
@@ -3079,6 +3153,7 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
         for name in (
             "btrfs-scrub-weekly.service",
             "below.service",
+            "irqbalance.service",
             "machine.slice",
             "user@e2e.service",
             "user@1000.service",
@@ -3663,7 +3738,8 @@ assert got.values["NAS_PATH"] == "/volume1/My Backups", got.values
             /usr/bin/python3 -I "$tool" backup-timer on e2emask >/dev/null
             systemctl is-enabled "$unit"
             /usr/bin/python3 -I "$tool" backup-timer off e2emask >/dev/null
-            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ] && [ ! -e "$w/sbin/cst-vm" ]
+            [ ! -e /etc/systemd/system/cst-vm-backup@.timer ]
+            [ ! -e "$w/sbin/cst-vm" ]
             echo E2E-OK-VM
             """,
         ).stdout
@@ -4127,6 +4203,273 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_126_btrfs_scrub_limit_and_nvme_apst_cycle(self) -> None:
+        """`cst btrfs scrub-limit plan/set/status/off` against the real /etc and systemd on the container,
+        plus verification that `cst-nvme-apst.conf` and `65-cst-nvme-apst.rules` install under `btrfs:core`.
+        A btrfs:core that an install marked done stays done after `set` writes its drop-in.
+        cst-nvme-apst.conf's `w-` lines do not fail systemd-tmpfiles when a write fails (the parameter is
+        a folder under --root here); the same lines with `w`, as before, do."""
+        c = self.SYSTEMD_CONTAINER
+        seed = "/etc/btrfs-setup/e2e-126-core-seed"
+        core_state = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json btrfs:core"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        rec = "/var/lib/cst/installed.json"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
+            # /etc/btrfs-setup when the test made it; then systemd forgets the unit and its drop-in.
+            "if [[ -e /var/tmp/e2e-126-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-126-made-etc; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
+            cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/btrfs-scrub-weekly.service
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-126-made-etc
+            install -d -m 0755 /etc/btrfs-setup
+            printf "HOME_SUBVOL='home'\\n" > {conf}
+            # btrfs:core as an install leaves it: a file of it recorded, and done.
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            [[ "$({core_state})" == *" done" ]]
+            # Help after a write subcommand needs no sudo (tester has none here).
+            runuser -u tester -- /opt/cst-rw/cst btrfs scrub-limit set --help | grep -qE '^Usage: (.*/)?cst btrfs scrub-limit '
+            /opt/cst-rw/cst btrfs scrub-limit plan 500M >/dev/null
+            [[ ! -e {dropin} ]] || {{ echo "plan wrote {dropin}" >&2; exit 1; }}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            absent SCRUB_LIMIT {conf}
+            /opt/cst-rw/cst btrfs scrub-limit set 500M
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            [[ -f {dropin} ]]
+            grep -qF '"{dropin}"' {rec}
+            [[ "$({core_state})" == *" done" ]]
+            systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 500M /var"
+            systemctl show -p ExecStopPost btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 0 /var"
+            again="$(/opt/cst-rw/cst btrfs scrub-limit set 500M)"
+            grep -qxF "unchanged: {conf}" <<<"$again"
+            grep -qxF "unchanged: {dropin}" <<<"$again"
+            st="$(/opt/cst-rw/cst btrfs scrub-limit status)"
+            grep -qF "service: 500M, as set" <<<"$st"
+            # cst doctor agrees: the limit in the service, no warning about it or SCRUB_LIMIT.
+            doc="$(/opt/cst-rw/cst doctor || true)"
+            grep -qF "info   weekly scrub: speed limit 500M per device" <<<"$doc"
+            if grep -qE "WARN +.*(weekly scrub|SCRUB_LIMIT)" <<<"$doc"; then echo "$doc" >&2; exit 1; fi
+            # A daemon-reload that fails puts snapshots.conf and the drop-in back as they were.
+            b=/var/tmp/e2e-126-bin
+            mkdir -p "$b"
+            printf '#!/bin/bash\\n[[ "$1" != daemon-reload ]] || exit 1\\nexec /usr/bin/systemctl "$@"\\n' >"$b/systemctl"
+            chmod +x "$b/systemctl"
+            rc=0; PATH="$b:$PATH" /opt/cst-rw/btrfs/btrfs-scrub-limit set 1G >"$b/out" 2>&1 || rc=$?
+            [[ $rc == 1 ]]
+            grep -qF "previous configuration restored." "$b/out"
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            grep -qF "btrfs scrub limit -a -l 500M /var" {dropin}
+            [[ "$({core_state})" == *" done" ]]
+            /opt/cst-rw/cst btrfs scrub-limit off
+            [[ ! -e {dropin} ]]
+            absent SCRUB_LIMIT {conf}
+            grep -qxF "HOME_SUBVOL='home'" {conf}
+            absent '"{dropin}"' {rec}
+            [[ "$({core_state})" == *" done" ]]
+            [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/tmpfiles/cst-nvme-apst.conf"
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/udev/65-cst-nvme-apst.rules"
+            d=/var/tmp/e2e-126-tmpfiles
+            rm -rf "$d" && mkdir -p "$d/sys/module/nvme_core/parameters/default_ps_max_latency_us"
+            systemd-tmpfiles --create --root="$d" - </opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf
+            sed 's/^w- /w /' /opt/cst-rw/btrfs/tmpfiles/cst-nvme-apst.conf >"$d/old.conf"
+            rc=0; systemd-tmpfiles --create --root="$d" - <"$d/old.conf" || rc=$?
+            [[ $rc != 0 ]] || {{ echo "a failed w write did not fail systemd-tmpfiles: the test cannot bite" >&2; exit 1; }}
+            echo E2E-SCRUB-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-SCRUB-OK", out)
+
+    @e2e_tags(E2ETag.CPU, E2ETag.INSTALL)
+    def test_127_cpu_power_unit_udev_and_lifecycle(self) -> None:
+        """`cst-cpu-power.service`, `65-cst-gpu-pm.rules`, `65-cst-nvme-apst.rules`, and
+        `cst cpu power` plan/status/apply/revert against the real systemd and udevadm."""
+        c = self.SYSTEMD_CONTAINER
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        dests = exec_bash(c, f"{installer} dests --component cpu:core").stdout.split()
+        if exec_bash(
+            c, " ".join(f"[[ ! -e {shlex.quote(d)} ]] || echo {shlex.quote(d)};" for d in dests)
+        ).stdout.strip():
+            self.skipTest("cpu:core files already exist on container (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"systemctl disable --now cst-cpu-power.service 2>/dev/null || true; "
+            f"{installer} remove --component cpu:core >/dev/null 2>&1 || true; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            {installer} install --set USER=tester --component cpu:core >/dev/null
+            {installer} srcs --component cpu:core | grep -qxF "cpu/cpu-power"
+            {installer} srcs --component cpu:core | grep -qxF "cpu/units/cst-cpu-power.service"
+            {installer} srcs --component cpu:core | grep -qxF "cpu/udev/65-cst-gpu-pm.rules"
+            udevadm verify --resolve-names=never --no-style \\
+                /etc/udev/rules.d/65-cst-gpu-pm.rules \\
+                /opt/cst-rw/btrfs/udev/65-cst-nvme-apst.rules
+            systemctl daemon-reload
+            systemctl start cst-cpu-power.service
+            [[ "$(systemctl show -P ActiveState cst-cpu-power.service)" == active ]]
+            /opt/cst-rw/cst cpu power help | grep -qF "GPU_PM_MODE"
+            runuser -u tester -- /opt/cst-rw/cst cpu power status | grep -qF "GPU_PM_MODE=always"
+            runuser -u tester -- /opt/cst-rw/cst cpu power plan | grep -qF "Dry run: nothing is changed."
+            /opt/cst-rw/cst cpu power apply | grep -qE "unchanged:|set:|skipped:"
+            # apply and revert wait for the game profile's run lock (flock(2) on /run/cpu-setup/lock).
+            mkdir -p /run/cpu-setup
+            for action in "apply --gpu-only" revert; do
+                (flock /run/cpu-setup/lock sleep 3) &
+                sleep 0.5
+                t0=$(date +%s); /usr/local/sbin/cpu-power $action >/dev/null; t1=$(date +%s)
+                (( t1 - t0 >= 2 )) || {{ echo "cpu-power $action did not wait for the run lock" >&2; exit 1; }}
+                wait
+            done
+            /opt/cst-rw/cst cpu power revert | grep -qE "unchanged:|reverted:|skipped:"
+            echo E2E-CPU-POWER-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CPU-POWER-OK", out)
+
+    @e2e_tags(E2ETag.CPU, E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_128a_cpu_irq_and_btrfs_iocost_lifecycle(self) -> None:
+        """`cst cpu irq` and `cst btrfs iocost` real-systemd drop-in, unit, udev, and revert lifecycle.
+
+        iocost: plan writes nothing; apply installs, enables and starts the service (ordered after udev
+        settle) and marks btrfs:iocost done last; a second apply rewrites nothing; with an older unit
+        installed, plan says apply updates the component (and changes nothing), apply rewrites it; the installed zipapp's
+        revert (no checkout beside it) removes the unit, the rule, itself and the record lines; a second
+        revert changes nothing. io.cost.qos is absent here (no blk-iocost in the container's cgroup), so
+        the writes are "skipped:", and udevd does not run, so the rules' reload is a note."""
+        c = self.SYSTEMD_CONTAINER
+        record = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json btrfs:iocost"
+        if exec_bash(
+            c,
+            "[[ ! -e /etc/cpu-setup/irqbalance.env ]] && [[ ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]] "
+            "&& [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service ]] || echo busy",
+        ).stdout.strip():
+            self.skipTest("irqbalance or btrfs:iocost files already present on container")
+        self.addCleanup(
+            exec_bash,
+            c,
+            "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1 || true; "
+            "/opt/cst-rw/cst cpu irq revert >/dev/null 2>&1 || true; "
+            "rm -f /run/systemd/system/irqbalance.service /tmp/e2e-128a-cpu.bak /tmp/e2e-128a-bad.out "
+            "/tmp/e2e-128a-plan.out /tmp/e2e-128a-apply.out /tmp/e2e-128a-apply2.out; "
+            "[[ ! -e /tmp/e2e-128a-cpu.orig ]] || mv /tmp/e2e-128a-cpu.orig /etc/cpu-setup/cpu-setup.conf; "
+            # What the test created when it was not there: its cpu-setup.conf, then the folder (if empty).
+            "if [[ -e /tmp/e2e-128a-cpu.newconf ]]; then rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.newconf; fi; "
+            "if [[ -e /tmp/e2e-128a-cpu.newdir ]]; then rmdir /etc/cpu-setup 2>/dev/null; rm -f /tmp/e2e-128a-cpu.newdir; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            rf"""
+            set -e
+            [[ -d /etc/cpu-setup ]] || touch /tmp/e2e-128a-cpu.newdir
+            if [[ -e /etc/cpu-setup/cpu-setup.conf ]]; then
+                cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-128a-cpu.orig
+            else
+                touch /tmp/e2e-128a-cpu.newconf
+            fi
+            last_cpu="$(( $(nproc) - 1 ))"
+            online_n="$(getconf _NPROCESSORS_ONLN)"
+            mkdir -p /etc/cpu-setup
+            printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+            runuser -u tester -- /opt/cst-rw/cst cpu irq status | grep -qF "BUILD_CPUS="
+            runuser -u tester -- /opt/cst-rw/cst cpu irq plan --no-pkg | grep -qF "Dry run: nothing is changed."
+            if (( last_cpu >= 2 )); then
+                /opt/cst-rw/cst cpu irq apply --no-pkg
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                grep -qxF "EnvironmentFile=-/etc/cpu-setup/irqbalance.env" /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf
+                printf '[Unit]\nDescription=e2e irqbalance\n[Service]\nEnvironmentFile=-/etc/sysconfig/irqbalance\nExecStart=/usr/bin/true\n' \
+                    >/run/systemd/system/irqbalance.service
+                systemctl daemon-reload
+                systemctl show -p EnvironmentFiles irqbalance.service | grep -qF "/etc/cpu-setup/irqbalance.env"
+                systemctl show -p DropInPaths irqbalance.service | grep -qF "10-cst-ban.conf"
+                /opt/cst-rw/cst cpu irq apply --no-pkg | grep -qE "unchanged:|skipped:"
+                # A BUILD_CPUS that is not a CPU list: apply refuses (exit 1) and keeps CST's files.
+                printf "BUILD_CPUS='%s-x'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+                rc=0; /opt/cst-rw/cst cpu irq apply --no-pkg >/tmp/e2e-128a-bad.out 2>&1 || rc=$?
+                [[ $rc == 1 ]]
+                grep -qF "ERROR: invalid BUILD_CPUS" /tmp/e2e-128a-bad.out
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                [[ -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                printf "BUILD_CPUS='%s'\n" "$last_cpu" >/etc/cpu-setup/cpu-setup.conf
+                /opt/cst-rw/cst cpu irq revert
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                rm -f /run/systemd/system/irqbalance.service
+            elif (( online_n <= 2 )); then
+                # Two online CPUs (or one): none can be banned (MIN_UNBANNED_CPUS = 2). apply says so and
+                # writes neither file; revert has nothing to remove.
+                /opt/cst-rw/cst cpu irq apply --no-pkg >/tmp/e2e-128a-apply2.out
+                grep -qF "only $online_n online CPUs; leaving all unbanned" /tmp/e2e-128a-apply2.out
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                /opt/cst-rw/cst cpu irq revert | grep -qxF "unchanged: no CST irqbalance files present"
+            fi
+
+            udevadm verify --resolve-names=never --no-style /opt/cst-rw/btrfs/udev/91-cst-iocost.rules
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "cgroup io:"
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "Dry run: nothing is changed."
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost apply --help | grep -qE '^Usage: (.*/)?cst btrfs iocost '
+            # --device writes one disk now: only with --live-only (exit 2 without, nothing written).
+            rc=0; runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --device sda >/dev/null 2>&1 || rc=$?
+            [[ $rc == 2 ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan --live-only | grep -qF "Dry run: nothing is changed."
+            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && "$({record})" == "- -" ]]
+            /opt/cst-rw/cst btrfs iocost apply
+            [[ "$(systemctl show -P ActiveState cst-btrfs-iocost.service)" == active ]]
+            [[ "$(systemctl is-enabled cst-btrfs-iocost.service)" == enabled ]]
+            systemctl show -P After cst-btrfs-iocost.service | tr ' ' '\n' | grep -qxF systemd-udev-settle.service
+            [[ -e /etc/udev/rules.d/91-cst-iocost.rules && -e /usr/local/sbin/btrfs-iocost ]]
+            [[ "$({record})" == *" done" ]]
+            [[ -e /run/btrfs-setup/iocost-managed.lock ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost status | grep -qF "(active, enabled)"
+            unit_before="$(stat -c '%i %Y' /etc/systemd/system/cst-btrfs-iocost.service)"
+            /opt/cst-rw/cst btrfs iocost apply
+            [[ "$(stat -c '%i %Y' /etc/systemd/system/cst-btrfs-iocost.service)" == "$unit_before" ]]
+            [[ "$({record})" == *" done" ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
+            # An upgrade: the installed unit is an older one. plan says apply updates it and changes nothing;
+            # apply rewrites it and marks btrfs:iocost done again; plan then finds it current.
+            printf '# an older CST\n' >>/etc/systemd/system/cst-btrfs-iocost.service
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan >/tmp/e2e-128a-plan.out
+            grep -qF "would update:  component btrfs:iocost (/etc/systemd/system/cst-btrfs-iocost.service)" /tmp/e2e-128a-plan.out
+            grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service
+            /opt/cst-rw/cst btrfs iocost apply >/tmp/e2e-128a-apply.out
+            grep -qF "written:   /etc/systemd/system/cst-btrfs-iocost.service" /tmp/e2e-128a-apply.out
+            if grep -qxF '# an older CST' /etc/systemd/system/cst-btrfs-iocost.service; then echo "apply left the older unit" >&2; exit 1; fi
+            [[ "$({record})" == *" done" ]]
+            runuser -u tester -- /opt/cst-rw/cst btrfs iocost plan | grep -qF "unchanged:     component btrfs:iocost (active, enabled)"
+            /usr/local/sbin/btrfs-iocost revert
+            [[ ! -e /etc/systemd/system/cst-btrfs-iocost.service && ! -e /etc/udev/rules.d/91-cst-iocost.rules ]]
+            [[ ! -e /usr/local/sbin/btrfs-iocost && ! -e /run/btrfs-setup/iocost-managed ]]
+            [[ "$({record})" == "- -" ]]
+            /opt/cst-rw/cst btrfs iocost revert
+            [[ "$({record})" == "- -" ]]
+            echo E2E-IRQ-IOCOST-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-IRQ-IOCOST-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
@@ -5293,8 +5636,13 @@ PY
             exec_bash,
             self.SYSTEMD_CONTAINER,
             f"""
+            /usr/bin/python3 -I -B /opt/cst-rw/cpu/cpu-irq revert >/dev/null 2>&1
             SUDO_USER=tester SUDO_UID=1000 SUDO_GID=1000 /opt/cst-rw/cst cpu uninstall >/dev/null 2>&1
-            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /run/systemd/system/irqbalance.service ]]; then
+                systemctl stop irqbalance.service
+                rm -f /run/systemd/system/irqbalance.service
+            fi
+            rm -f /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf /tmp/e2e-84-irq.out
             if [[ -e /tmp/e2e-84-conf.bak ]]; then mv /tmp/e2e-84-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
             rm -rf {old}
             systemctl daemon-reload
@@ -5312,10 +5660,11 @@ PY
             [[ "$(head -n1 /usr/local/sbin/cpu-game-profile)" == *bash* ]]
             # This version over it: the programs again (zipapps), nothing else.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-new.txt
+            power_run1="$(systemctl show -P InvocationID cst-cpu-power.service)"
             written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
 ' ' ')
-            # The game profile becomes a zipapp; cpu-watch and cpu-vm-pin carry this version's cst_core.
-            [[ "$written" == "/usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin " ]] \
+            # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, and cpu-vm-pin + new unit/udev rule.
+            [[ "$written" == "/etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /usr/local/bin/cpu-watch /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin " ]] \
                 || {{ echo "written over the previous version's install: $written" >&2; cat /tmp/e2e-84-new.txt >&2; exit 1; }}
             grep -q '^game profile: off' <<<"$(/usr/bin/python3 -I /usr/local/sbin/cpu-game-profile state)"  # no pipe: grep -q would cut it
             grep -q 'unchanged: /etc/systemd/system/cpu-game.service' /tmp/e2e-84-new.txt
@@ -5342,15 +5691,51 @@ PY
             fi
             # status (root): every section, exit 0 with a target user.
             st=$(as_root /opt/cst-rw/cst cpu status)
-            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "last measurements"; do
+            for s in "game profile" GameMode "baseline weights" VM Docker "memory experiments" "GPU runtime PM and CPU C-states" "irqbalance" "last measurements"; do
                 grep -qx "== $s" <<<"$st" || {{ echo "status without '$s'" >&2; exit 1; }}
             done
             # A second install writes nothing.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
+            # ...and still runs cpu-power apply again: cst-cpu-power.service, a oneshot that already ran, restarted.
+            systemctl -q is-active cst-cpu-power.service
+            power_run2="$(systemctl show -P InvocationID cst-cpu-power.service)"
+            [[ -n "$power_run1" && "$power_run2" != "$power_run1" ]] \
+                || {{ echo "cst-cpu-power.service not run again: $power_run1 / $power_run2" >&2; exit 1; }}
+            # The installed cpu-irq is a zipapp with no checkout beside it: apply and revert write and remove
+            # through the installer's use case in the program itself, and record cpu:irq: pending while no
+            # irqbalance.service runs the ban-list, done once one does.
+            last_cpu="$(( $(nproc) - 1 ))"
+            if (( last_cpu >= 2 )); then
+                cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-84-irq.conf
+                sed -i "s/^BUILD_CPUS=.*/BUILD_CPUS='$last_cpu'/" /etc/cpu-setup/cpu-setup.conf
+                /usr/local/sbin/cpu-irq apply --no-pkg >/tmp/e2e-84-irq.out
+                grep -qxF "pending:   cpu:irq (irqbalance.service is not there yet: run apply again once it is)" /tmp/e2e-84-irq.out
+                grep -qxF "IRQBALANCE_BANNED_CPULIST=$last_cpu" /etc/cpu-setup/irqbalance.env
+                irq_lines="$(/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json cpu:irq)"
+                [[ "$irq_lines" == "/etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf pending" ]] \
+                    || {{ echo "root's record for cpu:irq without irqbalance: $irq_lines" >&2; exit 1; }}
+                printf '[Unit]\nDescription=e2e irqbalance\n[Service]\nExecStart=/usr/bin/sleep infinity\n' \
+                    >/run/systemd/system/irqbalance.service
+                systemctl daemon-reload
+                /usr/local/sbin/cpu-irq apply --no-pkg >/tmp/e2e-84-irq.out
+                grep -qF "restarted: irqbalance.service (ban $last_cpu)" /tmp/e2e-84-irq.out
+                systemctl -q is-active irqbalance.service
+                irq_lines="$(/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} /var/lib/cst/installed.json cpu:irq)"
+                [[ "$irq_lines" == "/etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf done" ]] \
+                    || {{ echo "root's record for cpu:irq: $irq_lines" >&2; exit 1; }}
+                /usr/local/sbin/cpu-irq revert
+                [[ ! -e /etc/cpu-setup/irqbalance.env && ! -e /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf ]]
+                systemctl stop irqbalance.service
+                rm -f /run/systemd/system/irqbalance.service
+                systemctl daemon-reload
+                # Applied again: uninstall below reverts it.
+                /usr/local/sbin/cpu-irq apply --no-pkg >/dev/null
+                mv /tmp/e2e-84-irq.conf /etc/cpu-setup/cpu-setup.conf
+            fi
             # uninstall, twice.
             as_root /opt/cst-rw/cst cpu uninstall
-            for f in /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service                     /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules                     /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
+            for f in /etc/cpu-setup/irqbalance.env /etc/systemd/system/irqbalance.service.d/10-cst-ban.conf /usr/local/sbin/cpu-game-profile /usr/local/sbin/cpu-irq /usr/local/sbin/cpu-power /usr/local/sbin/cpu-vm-pin /etc/systemd/system/cpu-game.service /etc/systemd/system/cst-cpu-power.service /etc/udev/rules.d/65-cst-gpu-pm.rules /etc/systemd/system/machine.slice.d/10-cpu-setup.conf /etc/polkit-1/rules.d/50-cpu-setup-game.rules /home/tester/.config/systemd/user/user.slice.d/10-cpu-setup.conf; do
                 [[ ! -e "$f" ]] || {{ echo "uninstall left $f" >&2; exit 1; }}
             done
             if systemctl -q is-active cpu-game-watchdog.timer; then echo "the watchdog still runs" >&2; exit 1; fi
@@ -7091,12 +7476,17 @@ echo E2E-OK
     def test_157_btrfs_compress_force_plan_apply_revert_and_doctor(self) -> None:
         """`cst btrfs compress-force` updates real /etc/fstab, real btrfs:top-mount (verified by
         systemd-analyze verify + recorded in installed.json + reloaded by PID 1 systemd), kargs/mount
-        stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert."""
+        stubs, and checks out coherent with `cst doctor` across plan -> apply -> status -> apply -> revert.
+        A separate btrfs /var/home (its own UUID in fstab, dm-1 in the mounts) is never touched: its fstab
+        line stays byte for byte, its mount keeps its options and no remount names it. The top-mount's
+        Options= is rewritten in place: its own commit=120 stays through apply and revert."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-compress"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
         auto_unit = r"var-mnt-btrfs\x2dtop.automount"
         uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
+        home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
         self.addCleanup(
             exec_bash,
             c,
@@ -7129,8 +7519,8 @@ echo E2E-OK
             touch /run/ostree-booted
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
-            printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n' >/etc/fstab
-            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf '# test fstab\\nUUID={uuid} / btrfs subvol=root,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
             printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
             cp {w}/kargs {w}/proc/cmdline
 
@@ -7180,23 +7570,26 @@ for a in "$@"; do
     case "$a" in remount,*) opt="${{a#remount,}}" ;; esac
 done
 if [[ -n "$opt" ]]; then
+    # The kernel changes every mount of the remounted filesystem (its device), and only those.
     python3 -c '
 import sys
-p, opt = sys.argv[1], sys.argv[2]
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
 out = []
 for ln in lines:
     toks = ln.split()
-    toks[3] = ",".join([opt if t.startswith("compress") else t for t in toks[3].split(",")])
+    if toks[0] == dev:
+        toks[3] = ",".join([opt if t.startswith("compress") else t for t in toks[3].split(",")])
     out.append(" ".join(toks) + "\\n")
 open(p, "w").write("".join(out))
-' {w}/proc/mounts "$opt"
+' {w}/proc/mounts "$opt" "${{@: -1}}"
 fi
 EOF
             chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
 
             . /opt/cst-rw/cst-install.bash
-            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit" --component btrfs:top-mount
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120" --component btrfs:top-mount
             cst_mark btrfs:top-mount
             systemctl daemon-reload
 
@@ -7211,7 +7604,10 @@ EOF
             grep -q 'compress-force=zstd:1' /etc/fstab
             grep -q 'compress-force=zstd:1' {w}/kargs
             grep -q 'compress-force=zstd:1' {w}/proc/mounts
-            grep -q 'Options=.*compress-force=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF 'Options=subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,commit=120' "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
             systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
 
             second_out="$(/opt/cst-rw/cst btrfs compress-force apply)"
@@ -7227,8 +7623,543 @@ EOF
             grep -q 'compress=zstd:1' /etc/fstab
             grep -q 'compress=zstd:1' {w}/kargs
             grep -q 'compress=zstd:1' {w}/proc/mounts
-            grep -q 'Options=.*compress=zstd:1' "/etc/systemd/system/{top_unit}"
+            grep -qxF 'Options=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120' "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            if grep -qF /var/home {w}/calls; then echo "a remount or write named /var/home" >&2; exit 1; fi
             echo E2E-OK
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.DOCTOR)
+    def test_158_cst_perf_and_doctor_responsiveness_scoping(self) -> None:
+        """`cst perf` checks all four axes unconditionally while `cst doctor` scopes responsiveness
+        to axes whose CST module is installed/configured, surfacing Phase 4 fix commands when present."""
+        c = self.SYSTEMD_CONTAINER
+        perf_res = as_tester_bash(c, "/opt/cst-rw/cst perf --json", check=False)
+        self.assertIn(perf_res.returncode, (0, 1), perf_res.stdout + perf_res.stderr)
+        payload = json.loads(perf_res.stdout)
+        self.assertIn(payload["verdict"], {"OPTIMIZED", "ATTENTION", "BOTTLENECK"})
+        axis_names = {entry["axis"] for entry in payload["axes"]}
+        self.assertEqual(axis_names, {"memory", "cpu", "io", "gpu"})
+        self.assertNotEqual(next(a["verdict"] for a in payload["axes"] if a["axis"] == "memory"), "SKIP")
+
+        # The shared container also holds what other tests left (a pending alert, a user slice), so the
+        # doctor's exit status and totals depend on test order; what this test pins is the scoping: with
+        # no responsiveness module installed or configured, the section is not there at all.
+        clean = as_tester_bash(c, "/opt/cst-rw/cst doctor", check=False)
+        self.assertIn(clean.returncode, (0, 1), clean.stdout + clean.stderr)
+        self.assertIn("doctor: ", clean.stdout)
+        self.assertNotIn("== responsiveness", clean.stdout)
+        self.assertNotIn("responsiveness: ", clean.stdout)
+
+        doc_out = exec_bash(
+            c,
+            """
+            stage="$(mktemp -d)"
+            trap 'rm -rf "$stage"' EXIT
+            mkdir -p "$stage/etc/cpu-setup" "$stage/etc/sysctl.d" "$stage/run/systemd/units" \
+                     "$stage/sys/block/nvme0n1/queue" "$stage/sys/fs/cgroup/builds.slice"
+            printf "BUILD_CPUS='12-23'\\n" >"$stage/etc/cpu-setup/cpu-setup.conf"
+            printf 'vm.dirty_bytes = 268435456\\n' >"$stage/etc/sysctl.d/90-btrfs-writeback.conf"
+            ln -s deadbeef00112233445566778899aabb "$stage/run/systemd/units/invocation:irqbalance.service"
+            printf '[none]\\n' >"$stage/sys/block/nvme0n1/queue/scheduler"
+            printf '0\\n' >"$stage/sys/block/nvme0n1/queue/rotational"
+            : >"$stage/sys/fs/cgroup/io.cost.qos"
+            printf 'default 20\\n' >"$stage/sys/fs/cgroup/builds.slice/io.weight"
+            CST_DOCTOR_ROOT="$stage" CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I -B /opt/cst-rw/doctor/cst-doctor || true
+            """,
+        ).stdout
+        self.assertNotIn("irqbalance service is inactive", doc_out)
+        self.assertIn("irqbalance is active without banning BUILD_CPUS", doc_out)
+        self.assertIn("fix: cst cpu irq apply", doc_out)
+        self.assertIn("fix: cst btrfs iocost apply", doc_out)
+        self.assertNotIn("fix: sudo cst ", doc_out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR, E2ETag.INSTALL)
+    def test_159_btrfs_commit_interval_journald_and_below_interval(self) -> None:
+        """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
+        `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`.
+        A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it.
+        A separate btrfs /var (its own UUID, dm-2): plan changes nothing, apply, a second apply and revert change
+        only the root's / line; a commit= an older CST wrote on the /var line is named by status and revert and
+        left there.
+        The top-mount's Options= is rewritten in place: its own compress-force=zstd:3 stays (the live /var
+        has zstd:1)."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-commit"
+        top_unit = r"var-mnt-btrfs\x2dtop.mount"
+        auto_unit = r"var-mnt-btrfs\x2dtop.automount"
+        journald_dest = "/etc/systemd/journald.conf.d/10-cst-write-budget.conf"
+        uuid = "afed93e2-f4ac-43de-8a48-751b552435c7"
+        home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
+        home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"[[ ! -e {journald_dest} ]] || echo present").stdout.strip():
+            self.skipTest(f"{journald_dest} already present (another test's)")
+        # The cleanup removes the top-mount units: never ones the test did not make.
+        units = " ".join(shlex.quote(f"/etc/systemd/system/{u}") for u in (top_unit, auto_unit))
+        if exec_bash(c, f"for u in {units}; do [[ ! -e $u ]] || echo $u; done").stdout.strip():
+            self.skipTest("the btrfs top-mount unit or automount already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/installed.json.bak ]]; then cp -a {w}/installed.json.bak /var/lib/cst/installed.json; else rm -f /var/lib/cst/installed.json; fi
+            if [[ ! -f {w}/had-ostree-booted ]]; then rm -f /run/ostree-booted; fi
+            rm -f {shlex.quote(f"/etc/systemd/system/{top_unit}")} {shlex.quote(f"/etc/systemd/system/{auto_unit}")}
+            rm -f {journald_dest} && rmdir /etc/systemd/journald.conf.d 2>/dev/null || true
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
+            rm -rf {w} && mkdir -p {w}/bin {w}/proc
+            [[ ! -e /run/ostree-booted ]] || touch {w}/had-ostree-booted
+            touch /run/ostree-booted
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ ! -f /var/lib/cst/installed.json ]] || cp -a /var/lib/cst/installed.json {w}/installed.json.bak
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\nUUID={uuid} /var btrfs subvol=var,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n{home_line}\\n' >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var 0 0\\n{home_mount}\\n' >{w}/proc/mounts
+            printf 'ostree=/ostree/boot.1/fedora/abc/0 rhgb quiet root=UUID={uuid} rw rootflags=subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit\\n' >{w}/kargs
+            cp {w}/kargs {w}/proc/cmdline
+
+            cat >{w}/bin/rpm-ostree <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 1 && "$1" == "kargs" ]]; then cat {w}/kargs; exit 0; fi
+if [[ "${{1:-}}" == "kargs" ]]; then
+    shift
+    cur="$(cat {w}/kargs)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --delete=*) old="${{1#--delete=}}"; cur="${{cur//${{old}}/}}" ;;
+            --append=*) add="${{1#--append=}}"; cur="${{cur}} ${{add}}" ;;
+        esac
+        shift
+    done
+    printf '%s\\n' "$(echo "${{cur}}" | xargs)" >{w}/kargs
+    exit 0
+fi
+exit 1
+EOF
+            cat >{w}/bin/findmnt <<'EOF'
+#!/usr/bin/env bash
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then
+    # With {w}/uuid-by-target, each target has its own filesystem (or none: exit 1, as findmnt).
+    if [[ -f {w}/uuid-by-target ]]; then
+        while read -r t u; do if [[ "$t" == "${{@: -1}}" ]]; then echo "$u"; exit 0; fi; done <{w}/uuid-by-target
+        exit 1
+    fi
+    echo "{uuid}"; exit 0
+fi
+if [[ " $* " == *"OPTIONS"* ]]; then
+    while read -r src tgt _ opts _; do printf '%s %s %s\\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
+    exit 0
+fi
+exec /usr/bin/findmnt "$@"
+EOF
+            cat >{w}/bin/mount <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "mount $*" >>{w}/calls
+opt=""
+for a in "$@"; do case "$a" in remount,*) opt="${{a#remount,}}" ;; esac; done
+if [[ -n "$opt" ]]; then
+    # The kernel changes every mount of the remounted filesystem (its device), and only those.
+    python3 -c '
+import sys
+p, opt, target = sys.argv[1], sys.argv[2], sys.argv[3]
+val = int(opt.split("=", 1)[1])
+lines = open(p).read().splitlines(keepends=True)
+dev = next(ln.split()[0] for ln in lines if ln.split()[1] == target)
+out = []
+for ln in lines:
+    toks = ln.split()
+    if toks[0] == dev:
+        kept = [t for t in toks[3].split(",") if not t.startswith("commit=")]
+        if val != 30:
+            kept.append(opt)
+        toks[3] = ",".join(kept)
+    out.append(" ".join(toks) + "\\n")
+open(p, "w").write("".join(out))
+' {w}/proc/mounts "$opt" "${{@: -1}}"
+fi
+EOF
+            chmod +x {w}/bin/rpm-ostree {w}/bin/findmnt {w}/bin/mount
+
+            . /opt/cst-rw/cst-install.bash
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" --component btrfs:top-mount
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+
+            {installer} srcs --component btrfs:core | grep -qxF "btrfs/units/journald.conf.d/10-cst-write-budget.conf"
+            {installer} install btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
+            [[ -f {journald_dest} ]]
+            grep -qxF "SyncIntervalSec=15m" {journald_dest}
+            grep -qF -- "--interval 15" /opt/cst-rw/btrfs/units/below.service.d/10-cst.conf
+            grep -qxF "vm.dirty_expire_centisecs = 6000" /opt/cst-rw/btrfs/sysctl/90-btrfs-writeback.conf
+            {installer} remove btrfs/units/journald.conf.d/10-cst-write-budget.conf >/dev/null
+            [[ ! -e {journald_dest} ]]
+
+            export PATH="{w}/bin:$PATH" CST_BTRFS_COMMIT_PROC="{w}/proc"
+            /opt/cst-rw/cst btrfs commit-interval plan | grep -qF "commit=60"
+            absent "commit=60" /etc/fstab
+            /opt/cst-rw/cst btrfs commit-interval apply --yes
+            grep -qF "commit=60" /etc/fstab
+            grep -qF "flushoncommit" /etc/fstab
+            grep -qF "commit=60" {w}/kargs
+            grep -qF "commit=60" {w}/proc/mounts
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=60" "/etc/systemd/system/{top_unit}"
+            systemd-analyze verify --man=no --recursive-errors=no "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            /opt/cst-rw/cst btrfs commit-interval apply | grep -qF "nothing to do"
+            /opt/cst-rw/cst btrfs commit-interval status | grep -qF "coherent (commit=60)"
+            doc_out="$(/opt/cst-rw/cst doctor || true)"
+            grep -qF "ok     root btrfs commit interval: coherent (commit=60)" <<<"$doc_out"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            absent "commit=" /etc/fstab
+            absent "commit=" {w}/kargs
+            absent "commit=" {w}/proc/mounts
+            absent "commit=" "/etc/systemd/system/{top_unit}"
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
+            grep -qxF '{home_line}' /etc/fstab
+            grep -qxF '{home_mount}' {w}/proc/mounts
+            # cst doctor after the revert: every layer back to the kernel's default, no warning.
+            doc_after="$(/opt/cst-rw/cst doctor || true)"
+            if grep -qF "WARN   root btrfs commit interval" <<<"$doc_after"; then echo "$doc_after" >&2; exit 1; fi
+            if grep -qF /var/home {w}/calls; then echo "a remount named /var/home" >&2; exit 1; fi
+            # A commit= a mount refuses, only in the unit (fstab, kargs and the mounts are right already):
+            # plan changes nothing, revert replaces it, a second revert has nothing to do.
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=abc" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            /opt/cst-rw/cst btrfs commit-interval plan --revert >/dev/null
+            grep -qF ",commit=abc" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
+            # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so plan changes
+            # nothing, apply changes the / line and leaves the /var line byte for byte, a second apply has nothing
+            # to do, and revert puts the / line back and leaves the /var line again.
+            other=0b5e6a1d-0000-4000-8000-00000000beef
+            var_line="UUID=$other /var btrfs subvol=var,compress=zstd:3,noatime 0 0"
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n%s\\n' "$var_line" >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf '/sysroot {uuid}\\n/ {uuid}\\n/var %s\\n' "$other" >{w}/uuid-by-target
+            root_line="UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0"
+            var_mount="/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0"
+            cp /etc/fstab {w}/fstab.before
+            plan_out="$(/opt/cst-rw/cst btrfs commit-interval plan)"
+            grep -qF "Dry run, nothing changed." <<<"$plan_out"
+            if grep -qF "separate btrfs filesystem" <<<"$plan_out"; then echo "$plan_out" >&2; exit 1; fi
+            cmp -s /etc/fstab {w}/fstab.before
+            /opt/cst-rw/cst btrfs commit-interval apply --yes >/dev/null
+            grep -qxF "$var_line" /etc/fstab
+            grep -qxF "UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit,commit=60 0 0" /etc/fstab
+            grep -qxF "$var_mount" {w}/proc/mounts
+            /opt/cst-rw/cst btrfs commit-interval apply --yes | grep -qF "nothing to do"
+            grep -qxF "$var_line" /etc/fstab
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$root_line" /etc/fstab
+            grep -qxF "$var_line" /etc/fstab
+            grep -qxF "$var_mount" {w}/proc/mounts
+            # After an upgrade: an older CST took that /var for the root and wrote its commit=60 on the /var line.
+            # status and revert name the line, and revert leaves it (CST cannot tell its old write from yours).
+            old_var_line="UUID=$other /var btrfs subvol=var,compress=zstd:3,noatime,commit=60 0 0"
+            printf '%s\\n%s\\n' "$root_line" "$old_var_line" >/etc/fstab
+            note="note            /etc/fstab /var (UUID=$other) is a separate btrfs filesystem, not the root's, and has commit=60"
+            /opt/cst-rw/cst btrfs commit-interval status | grep -qF "$note"
+            revert_out="$(/opt/cst-rw/cst btrfs commit-interval revert --yes)"
+            grep -qF "nothing to do" <<<"$revert_out"
+            grep -qF "Note: /etc/fstab /var (UUID=$other) is a separate btrfs filesystem" <<<"$revert_out"
+            grep -qxF "$old_var_line" /etc/fstab
+            grep -qxF "$root_line" /etc/fstab
+            echo E2E-COMMIT-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-COMMIT-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.DOCTOR)
+    def test_160_btrfs_cache_attach_detach_and_doctor(self) -> None:
+        """`cst btrfs cache` per user, under a test root (CST_BTRFS_CACHE_ROOT), with real systemd and `cst doctor`.
+
+        findmnt, mount and umount are stand-ins that keep one mount table: findmnt answers the program's
+        `-J -l` call as the real one does (a bind's source "DEVICE[FSROOT]") and doctor's `-rn` call (any
+        mount whose FSROOT is not "/" shown as "DEVICE[FSROOT]", as findmnt prints SOURCE).
+        plan writes nothing; attach (again: nothing to do), --no-cache, --no-scratchpad and a home with a
+        space; the managed lines, copied to /etc/fstab, become mount units of systemd-fstab-generator at a
+        real daemon-reload (What, Where, Options, RequiresMountsFor); a non-empty target, then
+        --allow-nonempty; refused with fstab and the mounts unchanged: a symlinked target or source, a file
+        at the target (even with --allow-nonempty), the same UUID as the home, an fstab line CST does not
+        manage, a bind of another folder of the drive; a failing daemon-reload leaves fstab and the mounts
+        as they were, and one after which /etc/fstab cannot be put back says ROLLBACK INCOMPLETE and names
+        it; doctor's ok line; with a mount CST did not make on top of a bind, doctor's WARN and detach
+        refused; detach refused while /var/mnt/cache is not mounted; an /etc/fstab that cannot be read (a
+        link loop) refused by attach and detach and BLOCKED in plan, each with fstab and the mounts
+        unchanged; detach keeps the data, the other users' lines and a mount CST did
+        not make."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-btrfs-cache"
+        stub = r"""#!/usr/bin/python3 -I
+# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
+import json, os, sys
+w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+state = os.path.join(w, "mounts")
+prog, args = sys.argv[1], sys.argv[2:]
+rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
+def save():
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.writelines("\t".join(r) + "\n" for r in rows)
+def holding(path):
+    best = rows[0]
+    for r in rows:
+        t = r[1].rstrip("/") or "/"
+        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
+            best = r
+    return best
+if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
+    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
+    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
+elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
+    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
+    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
+    for r in rows:
+        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
+        print(esc(src), esc(r[1]), r[2], r[3])
+elif prog == "findmnt":
+    os.execv("/usr/bin/findmnt", ["findmnt", *args])
+elif prog == "mount" and args[:1] == ["--bind"]:
+    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
+    held = holding(src)
+    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
+    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
+    save()
+elif prog == "umount":
+    tgt = args[0].removeprefix(w)
+    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
+    if not idx:
+        sys.exit(32)
+    del rows[idx[-1]]
+    save()
+else:
+    sys.exit(2)
+"""
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"""
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            if [[ -f {w}/crypttab.bak ]]; then cp -a {w}/crypttab.bak /etc/crypttab; else rm -f /etc/crypttab; fi
+            systemctl daemon-reload || true
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            rm -rf {w} && mkdir -p {w}/bin {w}/fail {w}/fail2 {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad
+            for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do mkdir -p {w}/var/home/$u; done
+            mkdir -p "{w}/var/home/u four"
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ ! -f /etc/crypttab ]] || cp -a /etc/crypttab {w}/crypttab.bak
+            {{
+                echo "root:x:0:0:root:/root:/bin/bash"
+                n=1000
+                for u in u1 u2 u3 u5 u6 u7 u8 u9 u10 u11; do echo "$u:x:$n:$n::/var/home/$u:/bin/bash"; n=$((n + 1)); done
+                echo "u4:x:1100:1100::/var/home/u four:/bin/bash"
+            }} >{w}/etc/passwd
+            echo "cache UUID=dev-u /etc/cryptsetup-keys.d/cache.key nofail,discard" >{w}/etc/crypttab
+            cat >{w}/etc/fstab <<'EOF'
+/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,compress=zstd:1,nofail 0 0
+/dev/mapper/cache /var/mnt/scratchpad btrfs subvol=scratchpad,noatime,compress=zstd:1,nofail 0 0
+EOF
+            row() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime,compress=zstd:1 uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cp {w}/mounts {w}/mounts.drive
+            cat >{w}/bin/mnt-stub <<'STUB'
+{stub}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            printf '#!/bin/bash\\n[[ "$1" != daemon-reload ]] || exit 1\\nexec /usr/bin/systemctl "$@"\\n' >{w}/fail/systemctl
+            chmod +x {w}/fail/systemctl
+            # A daemon-reload that fails and leaves a folder that is not empty where /etc/fstab was.
+            printf '#!/bin/bash\\nif [[ "$1" == daemon-reload ]]; then rm -f %s; mkdir -p %s/x; exit 1; fi\\nexec /usr/bin/systemctl "$@"\\n' \
+                {w}/etc/fstab {w}/etc/fstab >{w}/fail2/systemctl
+            chmod +x {w}/fail2/systemctl
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            keep() {{ cp {w}/etc/fstab {w}/fstab.before; cp {w}/mounts {w}/mounts.before; }}
+            absent() {{ ! grep -qF -- "$1" "$2"; }}  # a call that fails stops the script (a bare "! grep" never does)
+            unchanged() {{ cmp -s {w}/etc/fstab {w}/fstab.before && cmp -s {w}/mounts {w}/mounts.before; }}
+            refused() {{  # refused NEEDLE ATTACH-ARGS...: exit 1, NEEDLE in the output, fstab and mounts unchanged
+                local needle="$1" rc=0
+                shift
+                keep
+                $cst btrfs cache attach "$@" >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "attach $* exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF -- "$needle" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                unchanged
+            }}
+            detach_refused() {{  # detach_refused NEEDLE DETACH-ARGS...: the same for detach
+                local needle="$1" rc=0
+                shift
+                keep
+                $cst btrfs cache detach "$@" >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "detach $* exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF -- "$needle" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                unchanged
+            }}
+
+            # plan writes nothing.
+            keep
+            $cst btrfs cache plan --user u1 | grep -qF "mkdir 0700 /var/mnt/cache/u1"
+            [[ ! -e {w}/var/mnt/cache/u1 ]]
+            unchanged
+
+            # attach, then again; --no-cache, --no-scratchpad; a home with a space.
+            $cst btrfs cache attach --user u1
+            $cst btrfs cache attach --user u1 | grep -qF "nothing to do"
+            [[ -d {w}/var/mnt/cache/u1 && -f {w}/var/mnt/scratchpad/u1/CACHEDIR.TAG ]]
+            grep -qF "user=u1 kind=cache" {w}/etc/fstab
+            grep -qF "user=u1 kind=scratchpad" {w}/etc/fstab
+            grep -qF "$(printf '%s\\t%s\\t' '/dev/mapper/cache[/cache/u1]' /var/home/u1/.cache)" {w}/mounts
+            $cst btrfs cache attach --user u2 --no-cache
+            absent "user=u2 kind=cache" {w}/etc/fstab
+            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            $cst btrfs cache attach --user u3 --no-scratchpad
+            grep -qF "user=u3 kind=cache" {w}/etc/fstab
+            absent "user=u3 kind=scratchpad" {w}/etc/fstab
+            $cst btrfs cache attach --user u4
+            grep -qF '/var/mnt/cache/u4 /var/home/u\\040four/.cache none bind,nofail' {w}/etc/fstab
+            $cst btrfs cache status --user u4 | grep -qF "/var/home/u four/.cache [active (fstab + mounted)]"
+
+            # A non-empty target is refused, then --allow-nonempty attaches it.
+            mkdir -p {w}/var/home/u5/.cache && echo keep >{w}/var/home/u5/.cache/f
+            refused "is non-empty" --user u5
+            $cst btrfs cache attach --user u5 --allow-nonempty
+
+            # The lines in /etc/fstab: systemd-fstab-generator makes their mount units at a real daemon-reload.
+            cp -a {w}/etc/fstab /etc/fstab
+            cp -a {w}/etc/crypttab /etc/crypttab
+            systemctl daemon-reload
+            for pair in "/var/mnt/cache/u1|/var/home/u1/.cache|/var/mnt/cache" \
+                "/var/mnt/scratchpad/u2|/var/home/u2/Scratchpad|/var/mnt/scratchpad" \
+                "/var/mnt/cache/u4|/var/home/u four/.cache|/var/mnt/cache"; do
+                IFS='|' read -r src tgt base <<<"$pair"
+                unit="$(systemd-escape --path --suffix=mount "$tgt")"
+                [[ -f "/run/systemd/generator/$unit" ]]
+                [[ "$(systemctl show -P What "$unit")" == "$src" ]]
+                [[ "$(systemctl show -P Where "$unit")" == "$tgt" ]]
+                systemctl show -P Options "$unit" | grep -qE '^bind,nofail(,|$)'
+                systemctl show -P RequiresMountsFor "$unit" | tr ' ' '\\n' | grep -qxF "$base"
+            done
+            doc_out="$($cst doctor || true)"
+            grep -qF "ok     btrfs cache: /var/mnt/cache, /var/mnt/scratchpad mounted" <<<"$doc_out"
+
+            # Refused, each with fstab and the mounts unchanged.
+            ln -s /tmp {w}/var/home/u6/.cache
+            refused "/var/home/u6/.cache is a symlink" --user u6 --no-scratchpad
+            ln -s /tmp {w}/var/mnt/cache/u7
+            refused "/var/mnt/cache/u7 is a symlink" --user u7 --no-scratchpad
+            echo file >{w}/var/home/u8/.cache
+            refused "exists and is not a folder" --user u8 --no-scratchpad --allow-nonempty
+            cp {w}/mounts {w}/mounts.real
+            sed -i 's/uuid-cache-2222/uuid-root-1111/' {w}/mounts
+            refused "same-filesystem" --user u11
+            cp {w}/mounts.real {w}/mounts
+            echo "/x /var/home/u9/.cache none bind 0 0" >>{w}/etc/fstab
+            refused "an /etc/fstab line CST does not manage" --user u9 --no-scratchpad
+            mkdir -p {w}/var/home/u10/.cache
+            row "/dev/mapper/cache[/cache/u1]" /var/home/u10/.cache btrfs rw uuid-cache-2222 /cache/u1 >>{w}/mounts
+            refused "a mount CST did not make" --user u10 --no-scratchpad
+
+            # A daemon-reload that fails: fstab and the mounts as they were, and it says so.
+            keep
+            rc=0; PATH="{w}/fail:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]]
+            grep -qF "mounts and /etc/fstab restored." {w}/out
+            unchanged
+            # ...and one after which /etc/fstab cannot be put back: the binds are taken back, and the message
+            # says ROLLBACK INCOMPLETE and names /etc/fstab instead of "restored.".
+            keep
+            rc=0; PATH="{w}/fail2:$PATH" $cst btrfs cache attach --user u11 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "attach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "ROLLBACK INCOMPLETE (cannot put /etc/fstab back:" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            absent "restored." {w}/out
+            [[ -d {w}/etc/fstab ]]
+            cmp -s {w}/mounts {w}/mounts.before
+            rm -rf {w}/etc/fstab && cp {w}/fstab.before {w}/etc/fstab
+            unchanged
+
+            # A mount CST did not make on top of u1's bind: doctor warns, and detach changes nothing (umount
+            # would take that mount away and leave CST's bind under it).
+            cp {w}/mounts {w}/mounts.ok
+            row tmpfs /var/home/u1/.cache tmpfs rw "" / >>{w}/mounts
+            doc_out="$($cst doctor || true)"
+            grep -qF "WARN   btrfs cache: /var/home/u1/.cache (user=u1) has a mount that is not CST's bind of /var/mnt/cache/u1" \
+                <<<"$doc_out" || {{ echo "$doc_out" >&2; exit 1; }}
+            grep -qF "btrfs cache status --user u1" <<<"$doc_out"
+            detach_refused "ERROR: /var/home/u1/.cache has a mount CST did not make on top of CST's bind of /var/mnt/cache/u1; unmount that one first, then run detach again" --user u1
+            cp {w}/mounts.ok {w}/mounts
+            # A bind of the drive's top level at u1's target: findmnt shows its SOURCE without [FSROOT] while the
+            # base shows "[/cache]", so it is not CST's bind of /var/mnt/cache/u1, and doctor warns.
+            row /dev/mapper/cache /var/home/u1/.cache btrfs rw uuid-cache-2222 / >>{w}/mounts
+            doc_out="$($cst doctor || true)"
+            warn="WARN   btrfs cache: /var/home/u1/.cache (user=u1) has a mount that is not CST's bind of /var/mnt/cache/u1"
+            grep -qF "$warn" <<<"$doc_out" || {{ echo "$doc_out" >&2; exit 1; }}
+            cp {w}/mounts.ok {w}/mounts
+            # /var/mnt/cache not mounted: CST cannot tell its bind from another mount, so detach changes nothing.
+            awk -F'\t' '$2 != "/var/mnt/cache"' {w}/mounts.ok >{w}/mounts
+            detach_refused "ERROR: /var/home/u1/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot tell whether it is its bind; mount /var/mnt/cache and run detach again" --user u1
+            cp {w}/mounts.ok {w}/mounts
+            # An /etc/fstab that cannot be read (a link loop) is not a missing one: attach and detach refuse,
+            # plan says BLOCKED, and nothing changes.
+            keep
+            mv {w}/etc/fstab {w}/fstab.real
+            ln -s fstab {w}/etc/fstab
+            for args in "attach --user u11" "detach --user u1"; do
+                rc=0; $cst btrfs cache $args >{w}/out 2>&1 || rc=$?
+                [[ $rc == 1 ]] || {{ echo "$args exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+                grep -qF "ERROR: cannot read /etc/fstab: Too many levels of symbolic links" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            done
+            plan_out="$($cst btrfs cache plan --user u11 2>&1 || true)"
+            grep -qF "BLOCKED: cannot read /etc/fstab" <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            [[ "$(readlink {w}/etc/fstab)" == fstab ]]
+            cmp -s {w}/mounts {w}/mounts.before
+            rm {w}/etc/fstab
+            mv {w}/fstab.real {w}/etc/fstab
+            unchanged
+
+            # detach: the data and the other users' lines stay; a mount CST did not make stays.
+            echo "keep-u1" >{w}/var/mnt/scratchpad/u1/data.txt
+            $cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
+            $cst btrfs cache detach --user u1
+            [[ -f {w}/var/mnt/scratchpad/u1/data.txt ]]
+            absent "user=u1" {w}/etc/fstab
+            grep -qF "user=u2 kind=scratchpad" {w}/etc/fstab
+            absent "/var/home/u1/" {w}/mounts
+            $cst btrfs cache detach --user u10 | grep -qF "kept: /var/home/u10/.cache has a mount CST did not make"
+            grep -qF "/var/home/u10/.cache" {w}/mounts
+            echo E2E-CACHE-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CACHE-OK", out)

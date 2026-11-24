@@ -9,7 +9,7 @@ import sys
 from typing import TextIO
 
 from btrfs.compress import presenter, wiring
-from btrfs.compress.domain import ArgsError, CompressCommand, parse_compress_args
+from btrfs.compress.domain.args import ArgsError, CompressCommand, parse_compress_args
 
 _HELP_TEXT = """\
 Root btrfs zstd compression mode across /etc/fstab, rpm-ostree kargs, live mount, and btrfs:top-mount.

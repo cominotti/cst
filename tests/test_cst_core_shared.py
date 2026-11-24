@@ -97,6 +97,7 @@ from cst_core.domain.text import (
     printf_q_words,
     read_fields,
     split,
+    unescape_mount_field,
 )
 from cst_core.domain.units import masked_refusal, render_timer, render_unit_file
 from cpu.setup.domain import conf_lines as cpu_setup_conf_lines
@@ -330,6 +331,21 @@ class AdaptersTest(unittest.TestCase):
         fs.write_atomic(out, text)
         with open(out, "rb") as fh:
             self.assertEqual(fh.read(), b"a\xffb\r\nc\n")
+
+    def test_the_byte_transparent_reader_can_raise_for_a_file_it_cannot_read(self) -> None:
+        # read_existing_text: a file there that cannot be read (a folder here) raises; one that is not
+        # there (no such file, a path through a file) gives None. read_text gives its default for both.
+        fs = core_files.LocalFileSystemAdapter()
+        p = self.path("f", b"a\xffb\r\n")
+        folder = self.path("folder")
+        os.mkdir(folder)
+        self.assertEqual(fs.read_existing_text(p), "a" + chr(0xDCFF) + "b\r\n")
+        self.assertIsNone(fs.read_existing_text(self.path("missing")))
+        self.assertIsNone(fs.read_existing_text(os.path.join(p, "below")))
+        with self.assertRaises(IsADirectoryError):
+            fs.read_existing_text(folder)
+        self.assertIsNone(fs.read_text(folder))
+        self.assertEqual(fs.read_text(self.path("missing"), "d"), "d")
 
     def test_ensure_dir_gives_exactly_the_mode_to_what_it_creates(self) -> None:
         existing = self.path("existing")
@@ -828,6 +844,27 @@ class WriteAtomicTest(unittest.TestCase):
         ):
             self.assertEqual(core_files._umask(), 0o077)
 
+    def test_ensure_dir_relabels_only_the_folders_it_creates_as_root(self) -> None:
+        existing = os.path.join(self.tmp, "existing")
+        os.mkdir(existing)
+        made = [os.path.join(existing, "a"), os.path.join(existing, "a", "b")]
+        for relabel, euid, labelled in ((True, 0, made), (False, 0, []), (True, 1000, [])):
+            shutil.rmtree(made[0], ignore_errors=True)
+            with (
+                self.subTest(relabel=relabel, euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.shutil, "which", return_value="/usr/sbin/restorecon"),
+                mock.patch.object(
+                    core_runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                ) as run,
+            ):
+                self.assertEqual(core_files.ensure_dir(made[1], 0o700, relabel=relabel), made)
+                self.assertEqual(core_files.ensure_dir(made[1], 0o700, relabel=relabel), [])
+                self.assertEqual(
+                    [c.args[0] for c in run.call_args_list],
+                    [["/usr/sbin/restorecon", "-F", "--", d] for d in labelled],
+                )
+
     def test_relabel_false_starts_no_restorecon_as_root(self) -> None:
         for relabel, calls in ((True, 1), (False, 0)):
             with (
@@ -869,6 +906,29 @@ class WriteAtomicTest(unittest.TestCase):
                 self.assertEqual(fchown.call_count, calls)
                 if calls:
                     self.assertEqual(fchown.call_args.args[1:], (0, 0))
+
+    def test_owner_ids_go_on_the_temporary_file_as_root(self) -> None:
+        # owner=(uid, gid): fchown of the file written, before the rename (a link put at dest
+        # meanwhile is never followed); not as another user.
+        seen: list[tuple[int, int, bool]] = []
+
+        def fchown(_fd: int, uid: int, gid: int) -> None:
+            seen.append((uid, gid, os.path.lexists(self.dest)))
+
+        for euid, calls in ((0, [(1234, 5678, False)]), (1000, [])):
+            seen.clear()
+            with (
+                self.subTest(euid=euid),
+                mock.patch.object(core_files.os, "geteuid", return_value=euid),
+                mock.patch.object(core_files.os, "fchown", side_effect=fchown),
+                mock.patch.object(core_files.shutil, "which", return_value=None),
+            ):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.dest)
+                core_files.write_atomic(self.dest, b"x", mode=0o644, owner=(1234, 5678))
+                self.assertEqual(seen, calls)
+                with open(self.dest, "rb") as fh:
+                    self.assertEqual(fh.read(), b"x")
 
     def test_a_link_at_dest_is_replaced_not_followed(self) -> None:
         target = os.path.join(self.tmp, "target")
@@ -1011,6 +1071,12 @@ class CommandRunnerTest(unittest.TestCase):
             timed_out.raise_cause()
         plain = core_ports.CommandResult(0, "", "", fault=core_ports.CommandFault.MISSING)
         self.assertIs(plain.raise_cause(), plain)  # a fake's fault without a cause: nothing to raise
+
+    def test_failure_names_the_command_and_why(self) -> None:
+        said = core_ports.CommandResult(1, "out\n", "  Access denied\n")
+        self.assertEqual(said.failure("systemctl daemon-reload"), "systemctl daemon-reload failed: Access denied")
+        silent = core_ports.CommandResult(124, "out\n", " \n", fault=core_ports.CommandFault.TIMEOUT)
+        self.assertEqual(silent.failure("udevadm control"), "udevadm control failed: exit 124")
 
     def test_the_defaults_reach_subprocess_run_as_before(self) -> None:
         # Only the arguments an option sets: a caller's test double that takes
@@ -1880,6 +1946,11 @@ class RegexTextTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "did not take part"):
             split(r"(-)|(\+)", "a-b")
 
+    def test_unescape_mount_field(self) -> None:
+        self.assertEqual(unescape_mount_field("a\\134b\\011c\\012d\\040e"), "a\\b\tc\nd e")
+        self.assertEqual(unescape_mount_field("/plain"), "/plain")
+        self.assertEqual(unescape_mount_field("\\0401\\9"), " 1\\9")
+
 
 class StdStreamsTest(unittest.TestCase):
     """cst_core.adapters.terminal: the standard streams, read when asked for."""
@@ -2427,6 +2498,210 @@ class ServiceNotifierTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertFalse(ServiceNotifier("/run/systemd/notify", open_socket=no_socket).ready())
         self.assertEqual(out.getvalue(), "<4>cannot notify systemd (READY): [Errno 24] Too many open files\n")
+
+
+class ManagedRuntimeHelpersTest(unittest.TestCase):
+    """installer_script_for, run_installer, probe_systemd_unit, and run_managed_cli."""
+
+    def test_installer_script_run_and_probe(self) -> None:
+        from cst_core.adapters.runtime import (
+            ManagedCliEnv,
+            ManagedCliSpec,
+            installer_script_for,
+            probe_systemd_unit,
+            run_installer,
+            run_managed_cli,
+        )
+        from cst_core.domain.text import parse_subcommand_head
+        from cst_core.ports import CommandResult
+        from enum import StrEnum
+
+        script = installer_script_for("", fallback_root="/tmp/cst-root")
+        self.assertEqual(script, "/tmp/cst-root/cst_core/installer.py")
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
+                self.calls.append(list(argv))
+                if argv[0] == "systemctl":
+                    return CommandResult(0, "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n", "")
+                return CommandResult(0, "written:   /etc/foo\n", "")
+
+        runner = _Runner()
+        rc, lines, err = run_installer(runner, script, ["text", "/etc/foo", "0644"], input_text="hi\n")
+        self.assertEqual((rc, lines, err), (0, ["written:   /etc/foo"], ""))
+        self.assertEqual(probe_systemd_unit(runner, "foo.service"), (True, "active", "enabled"))
+
+        class _Cmd(StrEnum):
+            STATUS = "status"
+            HELP = "help"
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec = ManagedCliSpec(
+            default_prog="cst foo",
+            parse=lambda a: parse_subcommand_head(a, _Cmd, default=_Cmd.STATUS, help_action=_Cmd.HELP),
+            format_usage=lambda p: f"usage: {p}\n",
+            is_help=lambda t: t[0] == _Cmd.HELP,
+            parse_error=lambda t: None if t[2] is None else (2, t[2]),
+            write_action=lambda _t: None,
+            elevation_reason="none",
+            execute=lambda _t, _env, *, read_only: (0, [f"ok ro={read_only}"]),
+        )
+        code = run_managed_cli(["status"], spec, ManagedCliEnv(env={}, out=out_s, err=err_s))
+        self.assertEqual((code, out_s.getvalue(), err_s.getvalue()), (0, "ok ro=True\n", ""))
+
+    def test_host_view_enforce_root_and_managed_cli_edges(self) -> None:
+        from cst_core.adapters.runtime import (
+            ManagedCliEnv,
+            ManagedCliSpec,
+            RootElevation,
+            enforce_host_root,
+            host_view_path,
+            lc_ctype_handover,
+            run_managed_cli,
+        )
+        from cst_core.domain.text import parse_subcommand_head
+        from enum import StrEnum
+        from typing import NoReturn
+
+        class _Ctx:
+            def __init__(self, *, container: bool, root: bool, prefix: str = "/custom-host") -> None:
+                self._c = container
+                self._r = root
+                self._p = prefix
+
+            def is_container(self) -> bool:
+                return self._c
+
+            def is_root(self) -> bool:
+                return self._r
+
+            def path(self, host_path: str) -> str:
+                return f"{self._p}/{host_path.lstrip('/')}" if self._c else host_path
+
+            def etc_dir(self) -> str:
+                return f"{self._p}/etc" if self._c else "/etc"
+
+            def host_run_dir(self, subpath: str) -> str:
+                return f"{self._p}/run/{subpath}" if self._c else f"/run/{subpath}"
+
+        self.assertEqual(host_view_path(_Ctx(container=True, root=False), "/etc/fstab"), "/custom-host/etc/fstab")
+        self.assertEqual(host_view_path(_Ctx(container=False, root=True), "/etc/fstab"), "/etc/fstab")
+
+        # Empty entry_file refuses without running sudo.
+        req_empty = RootElevation("cst foo", "apply", ("apply",), "", "writes config")
+        msg = enforce_host_root(req_empty, ctx=_Ctx(container=False, root=False))
+        self.assertIsNotNone(msg)
+        self.assertIn("entry script path", msg or "")
+
+        class _ElevatedError(RuntimeError):
+            def __init__(self, argv: list[str]) -> None:
+                super().__init__("elevated")
+                self.argv = argv
+
+        def _fake_elevate(argv: list[str]) -> NoReturn:
+            raise _ElevatedError(argv)
+
+        class _Cmd(StrEnum):
+            STATUS = "status"
+            APPLY = "apply"
+            HELP = "help"
+
+        def _make_spec(rc: int, lines: list[str]) -> ManagedCliSpec[tuple[_Cmd, Sequence[str], str | None]]:
+            def _exec(
+                _parsed: tuple[_Cmd, Sequence[str], str | None], _env: ManagedCliEnv, *, read_only: bool
+            ) -> tuple[int, list[str]]:
+                del read_only
+                return rc, lines
+
+            return ManagedCliSpec(
+                default_prog="cst foo",
+                parse=lambda a: parse_subcommand_head(a, _Cmd, default=_Cmd.STATUS, help_action=_Cmd.HELP),
+                format_usage=lambda p: f"usage: {p}\n",
+                is_help=lambda t: t[0] == _Cmd.HELP,
+                parse_error=lambda t: None if t[2] is None else (2, t[2]),
+                write_action=lambda t: t[0].value if t[0] == _Cmd.APPLY else None,
+                elevation_reason="writes config",
+                execute=_exec,
+            )
+
+        # Help and parse errors
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_ok = _make_spec(0, ["ok"])
+        self.assertEqual(run_managed_cli(["--help"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s)), 0)
+        self.assertEqual(out_s.getvalue(), "usage: cst foo\n")
+        out_s, err_s = io.StringIO(), io.StringIO()
+        self.assertEqual(run_managed_cli(["bogus"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s)), 2)
+        self.assertIn("unknown subcommand", err_s.getvalue())
+
+        # Container refusal & elevation hook
+        out_s, err_s = io.StringIO(), io.StringIO()
+        rc_c = run_managed_cli(
+            ["apply"], spec_ok, ManagedCliEnv(env={}, out=out_s, err=err_s, ctx=_Ctx(container=True, root=False))
+        )
+        self.assertEqual(rc_c, 1)
+        self.assertIn("not inside a toolbox/container", err_s.getvalue())
+        host_user_env = ManagedCliEnv(
+            entry_file="/tmp/fake-entry",
+            env={},
+            ctx=_Ctx(container=False, root=False),
+            elevate=_fake_elevate,
+        )
+        with self.assertRaises(_ElevatedError) as exc_info:
+            run_managed_cli(["apply"], spec_ok, host_user_env)
+        self.assertEqual(exc_info.exception.argv[0], "sudo")
+        self.assertIn("/tmp/fake-entry", exc_info.exception.argv)
+        # Root runs the system Python, whatever interpreter (a venv's, first in PATH) started this one;
+        # the arguments go on as they came, an empty one too.
+        venv_spec, venv_env = (
+            _make_spec(0, ["ok"]),
+            ManagedCliEnv(
+                entry_file="/tmp/fake-entry",
+                env={"CST_PROG": "cst foo bar"},
+                ctx=_Ctx(container=False, root=False),
+                elevate=_fake_elevate,
+            ),
+        )
+        with (
+            mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"),
+            self.assertRaises(_ElevatedError) as venv_exc,
+        ):
+            run_managed_cli(["apply", "", "--x"], venv_spec, venv_env)
+        self.assertEqual(
+            venv_exc.exception.argv,
+            [
+                "sudo",
+                "--",
+                "env",
+                "CST_PROG=cst foo bar",
+                lc_ctype_handover(),
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                os.path.realpath("/tmp/fake-entry"),
+                "apply",
+                "",
+                "--x",
+            ],
+        )
+
+        # Stderr routing: unprefixed failure -> stderr; explicit ERROR: -> ERROR to stderr, progress to stdout; Aborted -> stdout
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_unprefixed = _make_spec(1, ["systemctl enable failed"])
+        self.assertEqual(run_managed_cli(["status"], spec_unprefixed, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("", "systemctl enable failed\n"))
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_mixed = _make_spec(1, ["written: /etc/foo", "ERROR: boom"])
+        self.assertEqual(run_managed_cli(["status"], spec_mixed, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("written: /etc/foo\n", "ERROR: boom\n"))
+
+        out_s, err_s = io.StringIO(), io.StringIO()
+        spec_abort = _make_spec(1, ["Aborted; nothing changed."])
+        self.assertEqual(run_managed_cli(["status"], spec_abort, ManagedCliEnv(env={}, out=out_s, err=err_s)), 1)
+        self.assertEqual((out_s.getvalue(), err_s.getvalue()), ("Aborted; nothing changed.\n", ""))
 
 
 if __name__ == "__main__":

@@ -117,7 +117,13 @@ class Restic:
                 p.wait()
             raise
         finally:
+            # cancel() only asks: joined, so no thread of this process outlives the backup. A stop signal
+            # can go to any thread that does not block it, and Python then runs its handler in the main
+            # thread even inside signals_held (whose mask is the main thread's only): a stop during the
+            # torn record would cut the record short.
             timer.cancel()
+            timer.join()
+            p.stdout.close()
         if rc == -signal.SIGKILL:
             rc = ExitStatus.TIMED_OUT
         return rc, summary

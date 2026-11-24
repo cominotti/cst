@@ -3,6 +3,7 @@
 
 import re
 
+from cst_core.adapters import SystemClockAdapter
 from cst_core.ports import CommandResult, CommandRunnerPort, FileSystemPort
 
 
@@ -12,6 +13,7 @@ class LinuxSwapSystemAdapter:
     def __init__(self, runner: CommandRunnerPort, fs: FileSystemPort) -> None:
         self._runner = runner
         self._fs = fs
+        self._clock = SystemClockAdapter()
 
     def blockdev_size(self, dev_path: str) -> str:
         """The size `blockdev --getsize64` prints; CommandFailed when it fails (apply stops, as under set -e)."""
@@ -45,3 +47,7 @@ class LinuxSwapSystemAdapter:
     def swapon_show(self) -> CommandResult:
         """`swapon --show`: shown whatever its exit status (`swapon --show || true` before)."""
         return self._runner.run(["swapon", "--show"], check=False)
+
+    def sleep(self, seconds: float) -> None:
+        """Pause `seconds` while waiting for an asynchronous unit update."""
+        self._clock.sleep(seconds)

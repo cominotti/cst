@@ -60,6 +60,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, TextIO, override
 
+# The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path. Run by its
+# shebang (no -B), the cst_core imported from there would write __pycache__ into the checkout: nothing does.
+sys.dont_write_bytecode = True
+_CHECKOUT = Path(__file__).resolve().parents[2]
+if str(_CHECKOUT) not in sys.path:
+    sys.path.insert(0, str(_CHECKOUT))
+
+from cst_core.domain.text import unescape_mount_field
+
 PROG = "cst-mutation"
 EXIT_FAILED = 1
 EXIT_USAGE = 2
@@ -315,11 +324,6 @@ class Mount:
     fstype: str
 
 
-def _unescape(field: str) -> str:
-    # mountinfo writes a space as \040, a backslash as \134, and so on.
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
-
-
 def parse_mountinfo(text: str) -> list[Mount]:
     """The mounts in the format of /proc/self/mountinfo: `ID PARENT DEV ROOT POINT OPTIONS [TAGS] - TYPE ...`."""
     mounts = []
@@ -329,7 +333,9 @@ def parse_mountinfo(text: str) -> list[Mount]:
             continue
         dash = fields.index("-", 6)
         if dash + 1 < len(fields):
-            mounts.append(Mount(fields[2], _unescape(fields[3]), _unescape(fields[4]), fields[dash + 1]))
+            mounts.append(
+                Mount(fields[2], unescape_mount_field(fields[3]), unescape_mount_field(fields[4]), fields[dash + 1])
+            )
     return mounts
 
 

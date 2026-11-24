@@ -3,12 +3,15 @@
 
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import IO, Final, NamedTuple
 import glob
 import gzip
+import math
 import os
 import re
 import shutil
+import statistics
 import sys
 import time
 import zlib
@@ -274,11 +277,60 @@ def _pick(row: dict[str, object], *cands: str) -> object:
 
 
 def _rate_number(v: object) -> float:
-    """A rate of below's: a number, or the number a text starts with ("300.5 B/s"); else 0."""
+    """A rate of below's: a number, or the number a text starts with ("300.5 B/s"); else 0 (also for a
+    JSON NaN or Infinity, which parse_json accepts and which would make the whole total NaN)."""
     if isinstance(v, (int, float)):
-        return float(v)
+        return float(v) if math.isfinite(v) else 0.0
     m = re.match(r"\s*([\d.]+)", str(v or ""))
     return float(group(m, 1)) if m else 0.0
+
+
+# below records every 15 s (--interval 15, btrfs/units/below.service.d/10-cst.conf): a row without a
+# usable time counts that long.
+_DEFAULT_BELOW_INTERVAL_S: Final = 15.0
+_MIN_BELOW_INTERVAL_S: Final = 1.0
+_MAX_BELOW_INTERVAL_S: Final = 300.0
+_MIN_TIMESTAMPS_FOR_DELTA: Final = 2
+
+
+def _parse_below_timestamp(v: object) -> float | None:
+    """Parse numeric epoch or ISO datetime string from a `below dump` row (None: no usable time, also
+    NaN or an infinity). An ISO time without a zone is local time, as below prints it."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) if math.isfinite(v) else None
+    if not isinstance(v, str):
+        return None
+    text = v.strip()
+    if not text:
+        return None
+    try:
+        num = float(text)
+    except ValueError:
+        pass
+    else:
+        return num if math.isfinite(num) else None
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError, OverflowError, OSError:
+        return None
+
+
+def _below_sample_intervals(row_ts: Sequence[float | None]) -> tuple[dict[float, float], float]:
+    """Infer sample durations `(dt_by_timestamp, fallback_dt)` from `below dump` timestamps."""
+    unique_ts = sorted({ts for ts in row_ts if ts is not None})
+    if len(unique_ts) < _MIN_TIMESTAMPS_FOR_DELTA:
+        return {}, _DEFAULT_BELOW_INTERVAL_S
+    gaps = [
+        gap
+        for i in range(1, len(unique_ts))
+        if _MIN_BELOW_INTERVAL_S <= (gap := unique_ts[i] - unique_ts[i - 1]) <= _MAX_BELOW_INTERVAL_S
+    ]
+    typical = float(statistics.median(gaps)) if gaps else _DEFAULT_BELOW_INTERVAL_S
+    dt_by_ts: dict[float, float] = {unique_ts[0]: typical}
+    for i in range(1, len(unique_ts)):
+        delta = unique_ts[i] - unique_ts[i - 1]
+        dt_by_ts[unique_ts[i]] = delta if _MIN_BELOW_INTERVAL_S <= delta <= _MAX_BELOW_INTERVAL_S else typical
+    return dt_by_ts, typical
 
 
 def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[list[BelowItem] | None, str | None]:
@@ -321,12 +373,15 @@ def below_top(since: float, until: float, field: str, top: int = 8) -> tuple[lis
         elif isinstance(item, dict):
             flat.append(item)
     rows = flat
+    parsed_ts = [_parse_below_timestamp(_pick(row, "timestamp", "ts", "time")) for row in rows]
+    dt_by_ts, fallback_dt = _below_sample_intervals(parsed_ts)
     agg = {}
     want_write = field.endswith("wbytes_per_sec")
-    for row in rows:
+    for row, ts in zip(rows, parsed_ts, strict=True):
         comm = str(_pick(row, "comm", "name") or "?")
         cg = str(_pick(row, "cgroup") or "").rstrip("/").rsplit("/", 1)[-1][:40]
         rate = _rate_number(_pick(row, "wbytes", "write") if want_write else _pick(row, "rbytes", "read"))
-        agg[comm, cg] = agg.get((comm, cg), 0.0) + rate * 5.0  # below samples every 5 s
+        dt = dt_by_ts.get(ts, fallback_dt) if ts is not None else fallback_dt
+        agg[comm, cg] = agg.get((comm, cg), 0.0) + rate * dt
     items: list[BelowItem] = [{"comm": c, "cgroup": g, "bytes": int(v)} for (c, g), v in agg.items() if v > 0]
     return sorted(items, key=lambda x: -x["bytes"]), None

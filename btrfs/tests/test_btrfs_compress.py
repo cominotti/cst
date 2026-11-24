@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 import io
 import json
@@ -13,14 +13,12 @@ import subprocess
 import tempfile
 from typing import NoReturn, override
 import unittest
+from unittest import mock
 
 from btrfs.compress.adapters import CompressAdapterConfig, LinuxCompressHostAdapter
 from btrfs.compress.application import CompressService
 from btrfs.compress.cli import CompressCliStreams, compress_cli
 from btrfs.compress.domain import (
-    ArgsError,
-    CompressArgs,
-    CompressCommand,
     CompressMode,
     CompressSnapshot,
     CompressSpec,
@@ -31,20 +29,26 @@ from btrfs.compress.domain import (
     build_plan,
     effective_compress_spec,
     matches_target_spec,
-    parse_compress_args,
     parse_compress_spec,
+    parse_fstab_root_entries,
+    parse_proc_mounts,
     parse_top_mount_unit,
+    pick_root_mounts,
     rewrite_fstab,
     rewrite_kargs_rootflags,
     rewrite_mount_options,
+    separate_var_entries,
     top_mount_options_from_var,
 )
+from btrfs.compress.domain.args import ArgsError, CompressArgs, CompressCommand, parse_compress_args
 from btrfs.compress.presenter import render_compress_change, render_compress_plan, render_compress_status
 from btrfs.compress.wiring import CompressWiringOverrides
 from cst_core.adapters.files import LocalFileSystemAdapter
+from cst_core.application.install import InstallRefused, InstallRequest, InstallService
 from cst_core.domain.errors import Refused
+from cst_core.domain.install import InstallEntry
 from cst_core.domain.record import ROOT_RECORD
-from cst_core.ports import CommandFailed, CommandResult
+from cst_core.ports import CommandFailed, CommandResult, WriteFailed
 from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
@@ -107,6 +111,9 @@ class _FakeCtx:
 
     def is_root(self) -> bool:
         return self._root
+
+    def path(self, host_path: str) -> str:
+        return os.path.join(self._host_root, host_path.lstrip("/")) if self._host_root else host_path
 
     def etc_dir(self) -> str:
         return os.path.join(self._host_root, "etc") if self._host_root else "/etc"
@@ -178,7 +185,7 @@ class _FakeHost:
         if self.s.fail_remount is not None:
             return False, self.s.fail_remount
         if self.s.fake_remount_effect and self.s.proc_mounts is not None:
-            self.s.proc_mounts = _rewrite_fake_mounts(self.s.proc_mounts, option)
+            self.s.proc_mounts = _rewrite_fake_mounts(self.s.proc_mounts, option, target)
         return True, ""
 
     def update_top_mount(self, uuid: str, options: str) -> None:
@@ -194,11 +201,13 @@ class _FakeHost:
         return self.s.confirm_answer
 
 
-def _rewrite_fake_mounts(cur: str, option: str) -> str:
+def _rewrite_fake_mounts(cur: str, option: str, target: str = "/var") -> str:
+    """A remount of target, as the kernel applies it: every mount of that filesystem (its device) changes."""
+    device = next((ln.split()[0] for ln in cur.splitlines() if ln.split()[1:2] == [target]), None)
     updated: list[str] = []
     for ln in cur.splitlines(keepends=True):
         match ln.split():
-            case [_, _, "btrfs", opts, *_]:
+            case [src, _, "btrfs", opts, *_] if src == device:
                 updated.append(ln.replace(opts, rewrite_mount_options(opts, option), 1))
             case _:
                 updated.append(ln)
@@ -228,9 +237,27 @@ class _RecordingRunner:
             with open(mounts_path, encoding="utf-8") as fh:
                 cur = fh.read()
             with open(mounts_path, "w", encoding="utf-8") as fh:
-                fh.write(_rewrite_fake_mounts(cur, opt))
+                fh.write(_rewrite_fake_mounts(cur, opt, cmd[-1]))
             return CommandResult(0, "", "", tuple(cmd))
         return CommandResult(0, "", "", tuple(cmd))
+
+
+class _PerTargetRunner(_RecordingRunner):
+    """findmnt answers `--target T` from a mount table, as the real one does: the UUID of T's btrfs mount,
+    or exit 1 with no output when T is not mounted or not btrfs."""
+
+    def __init__(self, tmp_root: str, uuids: dict[str, str]) -> None:
+        super().__init__(tmp_root)
+        self.uuids = uuids
+
+    @override
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        cmd = list(argv)
+        if cmd[:2] == ["findmnt", "-rn"] and "--target" in cmd:
+            self.cmds.append(cmd)
+            uuid = self.uuids.get(cmd[cmd.index("--target") + 1], "")
+            return CommandResult(0 if uuid else 1, uuid + "\n" if uuid else "", "", tuple(cmd))
+        return super().run(argv, **kw)
 
 
 class DomainTests(unittest.TestCase):
@@ -376,6 +403,235 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(plan.target_option, "compress-force=zstd:1")
         self.assertEqual([lp.status for lp in plan.layers], [LayerStatus.CHANGE] * 4)
         self.assertEqual(plan.layers[0].current, "compress=zstd:1")
+
+
+OTHER_UUID = "0b5e6a1d-0000-4000-8000-00000000cafe"
+# A separate btrfs filesystem mounted at /var, not the root's.
+VAR_UUID = "0b5e6a1d-0000-4000-8000-00000000beef"
+# A separate btrfs filesystem mounted at /var/home (dm-1), next to the root filesystem (dm-0).
+SEPARATE_HOME_LINE = f"UUID={OTHER_UUID} /var/home       btrfs   subvol=home,compress=zstd:3,noatime 0 0\n"
+SEPARATE_HOME_FSTAB = "".join(
+    SEPARATE_HOME_LINE if "/var/home" in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True)
+)
+SEPARATE_HOME_MOUNTS = SAMPLE_PROC_MOUNTS.replace(
+    "/dev/dm-0 /var/home btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/home",
+    "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home",
+)
+
+
+class SeparateHomeTests(unittest.TestCase):
+    """A btrfs /home or /var/home that is another filesystem is never touched (only the root's lines and
+    mounts are); /home as a subvolume of the root filesystem (Fedora's default) still is."""
+
+    def test_its_fstab_line_is_kept_byte_for_byte(self) -> None:
+        for fstab, line in (
+            (SEPARATE_HOME_FSTAB, SEPARATE_HOME_LINE),
+            (
+                SEPARATE_HOME_FSTAB.replace(" /var/home       ", " /home           "),
+                SEPARATE_HOME_LINE.replace(" /var/home       ", " /home           "),
+            ),
+        ):
+            for root_uuid in (SAMPLE_UUID, ""):
+                with self.subTest(line=line, root_uuid=root_uuid):
+                    out = rewrite_fstab(fstab, "compress-force=zstd:1", root_uuid)
+                    self.assertIn(line, out)
+                    self.assertEqual(out.count("compress-force=zstd:1"), 2)  # / and /var
+                    self.assertEqual([e.target for e in parse_fstab_root_entries(fstab, root_uuid)], ["/", "/var"])
+
+    def test_live_mounts_are_the_root_filesystem_s(self) -> None:
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(SEPARATE_HOME_MOUNTS))], ["/sysroot", "/var"]
+        )
+        findmnt = (
+            "/dev/mapper/luks-a[/root] /sysroot btrfs ro,compress=zstd:1,subvol=/root 0 0\n"
+            "/dev/mapper/luks-a[/var] /var btrfs rw,compress=zstd:1,subvol=/var 0 0\n"
+            "/dev/mapper/luks-a[/home] /var/home btrfs rw,compress=zstd:1,subvol=/home 0 0\n"
+            "/dev/mapper/luks-b[/home] /home btrfs rw,compress=zstd:3,subvol=/home 0 0\n"
+        )
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(findmnt))], ["/sysroot", "/var", "/var/home"]
+        )
+
+    def test_fedora_s_default_home_subvolume_is_still_the_root_s(self) -> None:
+        self.assertEqual(
+            [m.target for m in pick_root_mounts(parse_proc_mounts(SAMPLE_PROC_MOUNTS))],
+            ["/sysroot", "/var", "/var/home"],
+        )
+        self.assertEqual(
+            [e.target for e in parse_fstab_root_entries(SAMPLE_FSTAB, SAMPLE_UUID)], ["/", "/var", "/var/home"]
+        )
+
+    def test_label_sources_match_by_their_text(self) -> None:
+        fstab = (
+            "LABEL=fedora / btrfs subvol=root,compress=zstd:1 0 0\n"
+            "LABEL=fedora /home btrfs subvol=home,compress=zstd:1 0 0\n"
+            "LABEL=data /var/home btrfs subvol=home,compress=zstd:1 0 0\n"
+        )
+        out = rewrite_fstab(fstab, "compress-force=zstd:1", SAMPLE_UUID).splitlines()
+        self.assertEqual(
+            out,
+            [
+                "LABEL=fedora / btrfs subvol=root,compress-force=zstd:1 0 0",
+                "LABEL=fedora /home btrfs subvol=home,compress-force=zstd:1 0 0",
+                "LABEL=data /var/home btrfs subvol=home,compress=zstd:1 0 0",
+            ],
+        )
+
+    def test_a_host_whose_only_btrfs_is_home_is_left_alone(self) -> None:
+        mounts = "/dev/dm-1 /home btrfs rw,compress=zstd:3,subvol=/home 0 0\n"
+        fstab = "UUID=1234 / ext4 defaults 0 1\n" + f"UUID={OTHER_UUID} /home btrfs subvol=home,compress=zstd:3 0 0\n"
+        self.assertEqual(pick_root_mounts(parse_proc_mounts(mounts)), ())
+        self.assertEqual(parse_fstab_root_entries(fstab, ""), ())
+        self.assertEqual(rewrite_fstab(fstab, "compress-force=zstd:1", ""), fstab)
+
+    def test_apply_and_revert_leave_the_separate_home_alone(self) -> None:
+        host = _FakeHost(_FakeState(fstab=SEPARATE_HOME_FSTAB, proc_mounts=SEPARATE_HOME_MOUNTS))
+        svc = CompressService(host)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertIn(SEPARATE_HOME_LINE, host.s.fstab or "")
+        self.assertIn(
+            "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home", host.s.proc_mounts or ""
+        )
+        self.assertFalse(any(c.startswith("remount:/var/home") for c in host.calls), host.calls)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.REVERT, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertEqual(host.s.fstab, SEPARATE_HOME_FSTAB)
+
+
+# A separate btrfs /var (dm-2, VAR_UUID) whose fstab line an older CST's apply changed: it took findmnt's /var
+# for the root, so it wrote compress-force=zstd:1 there and left the root's / line as it was.
+OLD_APPLY_VAR_LINE = f"UUID={VAR_UUID} /var btrfs subvol=var,compress-force=zstd:1,noatime 0 0\n"
+SEPARATE_VAR_FSTAB = "".join(
+    OLD_APPLY_VAR_LINE if " /var " in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True)
+)
+SEPARATE_VAR_MOUNTS = SAMPLE_PROC_MOUNTS.replace(
+    "/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var",
+    "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress-force=zstd:1,ssd,subvol=/var",
+)
+LEFT_ALONE = f"/etc/fstab /var (UUID={VAR_UUID}) is a separate btrfs filesystem, not the root's, and has"
+
+
+class SeparateVarUpgradeTests(unittest.TestCase):
+    """A separate btrfs /var's fstab line that an older CST's apply changed is never changed back (it is
+    not the root's), so status, plan, apply and revert say so."""
+
+    def test_the_separate_var_s_lines_are_those_of_its_uuid(self) -> None:
+        var_home = f"UUID={VAR_UUID} /var/home btrfs subvol=home,compress=zstd:3 0 0\n"
+        self.assertEqual(
+            [e.target for e in separate_var_entries(SEPARATE_VAR_FSTAB + var_home, SAMPLE_UUID)], ["/var", "/var/home"]
+        )
+        upper = SEPARATE_VAR_FSTAB.replace(VAR_UUID, VAR_UUID.upper())
+        self.assertEqual([e.target for e in separate_var_entries(upper, SAMPLE_UUID)], ["/var"])
+        for fstab, root_uuid in (
+            (SAMPLE_FSTAB, SAMPLE_UUID),  # /var is the root filesystem's
+            (SAMPLE_FSTAB, SAMPLE_UUID.upper()),
+            (SEPARATE_VAR_FSTAB, ""),  # no root UUID to compare
+            (SEPARATE_VAR_FSTAB.replace(f"UUID={VAR_UUID}", "LABEL=var"), SAMPLE_UUID),
+            ("".join(ln for ln in SAMPLE_FSTAB.splitlines(keepends=True) if " /var " not in ln), SAMPLE_UUID),
+        ):
+            with self.subTest(fstab=fstab, root_uuid=root_uuid):
+                self.assertEqual(separate_var_entries(fstab, root_uuid), ())
+
+    def test_status_and_plan_name_the_line_and_its_option(self) -> None:
+        svc = CompressService(_FakeHost(_FakeState(fstab=SEPARATE_VAR_FSTAB, proc_mounts=SEPARATE_VAR_MOUNTS)))
+        out = io.StringIO()
+        self.assertEqual(render_compress_status(svc.gather_status(), out), 0)
+        self.assertIn(f"  note            {LEFT_ALONE} compress-force=zstd:1: CST leaves it alone.", out.getvalue())
+        self.assertIn("if you did not, put that line's options back by hand.", out.getvalue())
+        for revert in (False, True):
+            with self.subTest(revert=revert):
+                out, err = io.StringIO(), io.StringIO()
+                res = svc.build_change_plan(CompressArgs(CompressCommand.PLAN, revert=revert))
+                self.assertEqual(render_compress_plan(res, "cst", out, err), 0, err.getvalue())
+                self.assertIn(f"Note: {LEFT_ALONE} compress-force=zstd:1", out.getvalue())
+
+    def test_apply_and_revert_leave_the_line_and_say_so(self) -> None:
+        host = _FakeHost(_FakeState(fstab=SEPARATE_VAR_FSTAB, proc_mounts=SEPARATE_VAR_MOUNTS))
+        svc = CompressService(host)
+        for command in (CompressCommand.REVERT, CompressCommand.APPLY, CompressCommand.APPLY):
+            with self.subTest(command=command):
+                out, err = io.StringIO(), io.StringIO()
+                rc = render_compress_change(svc.execute_change(CompressArgs(command, yes=True)), out, err)
+                self.assertEqual(rc, 0, err.getvalue())
+                self.assertIn(OLD_APPLY_VAR_LINE, host.s.fstab or "")
+                self.assertIn(f"Note: {LEFT_ALONE} compress-force=zstd:1", out.getvalue())
+        self.assertIn("nothing to do", out.getvalue())  # the second apply changes nothing, and says it again
+        self.assertIn(
+            "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress-force=zstd:1,ssd,subvol=/var", host.s.proc_mounts or ""
+        )
+        self.assertFalse(any(c.startswith("remount:/var:") for c in host.calls), host.calls)
+
+    def test_no_note_without_the_option_or_a_separate_var(self) -> None:
+        clean = SEPARATE_VAR_FSTAB.replace(
+            OLD_APPLY_VAR_LINE, f"UUID={VAR_UUID} /var btrfs subvol=var,compress=zstd:3 0 0\n"
+        )
+        for fstab in (clean, SAMPLE_FSTAB):
+            with self.subTest(fstab=fstab):
+                svc = CompressService(_FakeHost(_FakeState(fstab=fstab, proc_mounts=SEPARATE_VAR_MOUNTS)))
+                out, err = io.StringIO(), io.StringIO()
+                render_compress_status(svc.gather_status(), out)
+                render_compress_plan(svc.build_change_plan(CompressArgs(CompressCommand.PLAN)), "cst", out, err)
+                self.assertNotIn("separate btrfs filesystem", out.getvalue())
+
+
+class BootedKargsTests(unittest.TestCase):
+    def test_status_compares_the_last_rootflags(self) -> None:
+        # The kernel uses the last rootflags=: a difference in an earlier one is no difference.
+        head = f"ostree=/ostree/boot.1/fedora/abc/0 root=UUID={SAMPLE_UUID} rw "
+        last = "rootflags=subvol=root,degraded,compress=zstd:1,noatime,flushoncommit"
+        nxt = head + f"rootflags=subvol=root,compress=lzo {last}\n"
+        for booted, want in (
+            (head + f"rootflags=subvol=root {last}\n", None),
+            (
+                head + "rootflags=subvol=root,compress=lzo rootflags=subvol=root,compress-force=zstd:1\n",
+                ("rootflags=subvol=root,compress-force=zstd:1", last),
+            ),
+        ):
+            with self.subTest(booted=booted):
+                host = _FakeHost(_FakeState(kargs_text=nxt, proc_cmdline=booted))
+                self.assertEqual(CompressService(host).gather_status().booted_diff, want)
+
+
+class TopMountInPlaceTests(unittest.TestCase):
+    """apply rewrites only the compress option of the top-mount unit's own Options=: what only the unit has
+    stays, and what the live /var has (another tool's commit=) is not copied in."""
+
+    def test_apply_and_revert_keep_the_unit_s_other_options(self) -> None:
+        unit_opts = "subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit,commit=120"
+        state = _FakeState(
+            top_mount=TopMountInfo(installed=True, uuid=SAMPLE_UUID, options=unit_opts),
+            proc_mounts=SAMPLE_PROC_MOUNTS.replace("subvol=/var 0 0", "commit=45,subvol=/var 0 0"),
+        )
+        host = _FakeHost(state)
+        svc = CompressService(host)
+        plan = svc.build_change_plan(CompressArgs(CompressCommand.PLAN)).plan
+        assert plan is not None
+        want = "subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,commit=120"
+        self.assertEqual(plan.new_top_mount_options, want)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertIn(f"update_top_mount:{SAMPLE_UUID}:{want}", host.calls)
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", want)
+        out, err = io.StringIO(), io.StringIO()
+        self.assertEqual(
+            render_compress_change(svc.execute_change(CompressArgs(CompressCommand.REVERT, yes=True)), out, err),
+            0,
+            err.getvalue(),
+        )
+        self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", unit_opts)
 
 
 class ApplicationTests(unittest.TestCase):
@@ -697,7 +953,7 @@ class AdapterAndCliTests(unittest.TestCase):
             cfg, ctx=_FakeCtx(root=True, host_root=self.tmp), runner=runner, fs=LocalFileSystemAdapter()
         )
         self.assertEqual(adapter.root_uuid(), SAMPLE_UUID)
-        self.assertIn(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", "/var"], runner.cmds)
+        self.assertIn(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", "/sysroot"], runner.cmds)
 
         with self.assertRaises(CommandFailed):
             adapter.write_fstab("# modified\n")
@@ -716,6 +972,99 @@ class AdapterAndCliTests(unittest.TestCase):
             top_text = fh.read()
         self.assertIn("compress=zstd:1", top_text)
         self.assertNotIn("compress-force", top_text)
+
+    def test_the_root_uuid_is_sysroot_s_else_root_s_else_var_s(self) -> None:
+        # The order of cst doctor and btrfs-setup: a separate btrfs /var is not the root.
+        cases = (
+            ({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": VAR_UUID}, SAMPLE_UUID),
+            ({"/": "uuid-root", "/var": VAR_UUID}, "uuid-root"),
+            ({"/var": VAR_UUID}, VAR_UUID),
+            ({}, SAMPLE_UUID),  # no btrfs at any of them: the top mount unit's What=
+        )
+        for uuids, expected in cases:
+            with self.subTest(uuids=uuids):
+                self.assertEqual(self._adapter(_PerTargetRunner(self.tmp, uuids)).root_uuid(), expected)
+
+    def test_apply_with_a_separate_btrfs_var_changes_only_the_root_s_lines(self) -> None:
+        var_line = f"UUID={VAR_UUID} /var btrfs subvol=var,compress=zstd:3,noatime 0 0\n"
+        fstab = "".join(var_line if " /var " in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True))
+        with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
+            fh.write(fstab)
+        with open(os.path.join(self.tmp, "proc", "mounts"), "w", encoding="utf-8") as fh:
+            fh.write(
+                SAMPLE_PROC_MOUNTS.replace(
+                    "/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var",
+                    "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var",
+                )
+            )
+        adapter = self._adapter(
+            _PerTargetRunner(self.tmp, {"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": VAR_UUID})
+        )
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_compress_change(
+            CompressService(adapter).execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err
+        )
+        self.assertEqual(rc, 0, err.getvalue())
+        with open(os.path.join(self.tmp, "etc", "fstab"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines(keepends=True)
+        self.assertIn(var_line, lines)
+        root_line = next(line for line in lines if "\t\tbtrfs" in line)
+        self.assertIn("compress-force=zstd:1", root_line)
+
+    # update_top_mount: a failure while installing puts the previous unit back only when the unit on
+    # disk changed, and is raised either way.
+    def _adapter(self, runner: _RecordingRunner | None = None) -> LinuxCompressHostAdapter:
+        cfg = CompressAdapterConfig(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
+            fallback_root=REPO,
+            proc_dir=os.path.join(self.tmp, "proc"),
+            host_root=self.tmp,
+        )
+        return LinuxCompressHostAdapter(
+            cfg,
+            ctx=_FakeCtx(root=True, host_root=self.tmp),
+            runner=runner or _RecordingRunner(self.tmp),
+            fs=LocalFileSystemAdapter(),
+        )
+
+    def _unit(self) -> str:
+        with open(
+            os.path.join(self.tmp, "etc", "systemd", "system", r"var-mnt-btrfs\x2dtop.mount"), encoding="utf-8"
+        ) as fh:
+            return fh.read()
+
+    def test_a_failure_after_the_unit_was_written_restores_it(self) -> None:
+        # The record's lock cannot be taken: install has written the units when it fails.
+        os.makedirs(os.path.join(self.tmp, ROOT_RECORD.lstrip("/") + ".lock"))
+        adapter = self._adapter()
+        written: list[str] = []
+        real_install = InstallService.install
+
+        def spy(svc: InstallService, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
+            for line in real_install(svc, entries, req):
+                written.append(line)
+                yield line
+
+        with mock.patch.object(InstallService, "install", spy), self.assertRaises(WriteFailed):
+            adapter.update_top_mount(SAMPLE_UUID, "subvolid=5,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit")
+        self.assertTrue(any(line.startswith("written:") and "top.mount" in line for line in written), written)
+        self.assertIn("Options=subvolid=5,noatime,degraded,compress=zstd:1,ssd,flushoncommit\n", self._unit())
+
+    def test_a_failure_before_any_write_restores_nothing(self) -> None:
+        adapter = self._adapter()
+        calls: list[str] = []
+        real_install = InstallService.install
+
+        def refuse_first(svc: InstallService, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
+            calls.append(req.values.get("OPTIONS", "") if req.values is not None else "")
+            if len(calls) == 1:
+                raise InstallRefused("var-mnt-btrfs\\x2dtop.mount: refused by the unit verifier")
+            return real_install(svc, entries, req)
+
+        with mock.patch.object(InstallService, "install", refuse_first), self.assertRaises(InstallRefused):
+            adapter.update_top_mount(SAMPLE_UUID, "subvolid=5,compress-force=zstd:1")
+        self.assertEqual(calls, ["subvolid=5,compress-force=zstd:1"])  # no second install: nothing to restore
+        self.assertEqual(self._unit(), SAMPLE_TOP_MOUNT)
 
 
 class AnacondaScriptTest(unittest.TestCase):

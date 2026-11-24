@@ -48,13 +48,14 @@ does nothing by itself: it passes your command to one **module**.
 
 | Command | Module script | Folder | What it is for | Detailed documents |
 |---|---|---|---|---|
-| `cst btrfs ...` | `btrfs-setup.sh` | `btrfs/` | Storage: disk health, scrub, stall recording, writeback limits, Docker volumes, degraded boot, faster encryption, snapshots, NAS backup, `~/Bulk`, Docker cleanup | [btrfs/README.md](btrfs/README.md), and [btrfs/SNAPSHOTS.md](btrfs/SNAPSHOTS.md) for snapshots and the NAS backup |
-| `cst cpu ...` | `cpu-setup.sh` | `cpu/` | CPU: game profile, low priority for the VM, toolboxes and Docker, E-cores for builds, measurements | [cpu/README.md](cpu/README.md) |
-| `cst swap ...` | `swap-setup.sh` | `swap/` | Swap and memory: zswap, encrypted NVMe swap, zram off, swap settings, memory floor for the VM, swap status per cgroup | [swap/README.md](swap/README.md) |
+| `cst btrfs ...` | `btrfs-setup.sh` | `btrfs/` | Storage: disk health, scrub (`scrub-limit`), stall recording, writeback limits + journald budget, NVMe APST, `blk-iocost` QoS (`iocost`), `compress-force`, `commit-interval`, multi-user external NVMe cache drive (`cache`), Docker volumes, degraded boot, faster encryption, snapshots, NAS backup, `~/Bulk`, Docker cleanup | [btrfs/README.md](btrfs/README.md), and [btrfs/SNAPSHOTS.md](btrfs/SNAPSHOTS.md) for snapshots and the NAS backup |
+| `cst cpu ...` | `cpu-setup.sh` | `cpu/` | CPU & GPU power: game profile (with active-GPU boost and P-core C-state cap), low priority for the VM, toolboxes and Docker, E-cores for builds, baseline connected-GPU runtime PM & CPU C-state policy (`cst cpu power`), adaptive `irqbalance` ban-list (`cst cpu irq`), `ntsync` autoload, measurements | [cpu/README.md](cpu/README.md) |
+| `cst swap ...` | `swap-setup.sh` | `swap/` | Swap and memory: zswap, encrypted NVMe swap, zram off, swap and reclaim sysctls (`min_free_kbytes`, watermarks), THP/MGLRU sysfs knobs, `uresourced` `MemoryMin=1G` session floor, memory floor for the VM, swap status per cgroup | [swap/README.md](swap/README.md) |
 | `cst bluetooth ...` | `bluetooth-setup.sh` | `bluetooth/` | Bluetooth audio: LE Audio (BAP/LC3) ready in BlueZ but off in PipeWire by default, adaptive LDAC quality for the headset, checks of both | [bluetooth/README.md](bluetooth/README.md) |
 | `cst toolchains ...` | `toolchains-setup.sh` | `toolchains/` | Toolchain caches and settings: hourly pruning of cargo's build folders (old, orphaned, and the incremental part of idle ones) and a daily `uv cache prune`; cargo's `build-dir`, uv's `link-mode` and an opt-in lean debug info for Rust dev builds; a report of installed Rust toolchains (later also Go, npm and Maven caches). Runs as your user | [toolchains/README.md](toolchains/README.md) |
 | `cst vm ...` | `vm-setup.sh` | `vm/` | The libvirt VM `win11-devbox`: backups of its disks, UEFI variables and TPM state. The default goes to the NAS (`backup --nas`, restic, into the repository of the `/home` NAS backup), weekly by a timer (`backup-timer on`), with the VM running: a short-lived snapshot, quiesced through the QEMU guest agent when it answers, merged back afterwards; 4 weekly and 3 monthly copies kept, `--keep-tag NAME` until removed. A local copy (instant reflink copies on btrfs, or `--full` real copies, VM shut off) is the quick rollback before a risky upgrade. A list of the backups, and a status that shows the CPU mode, the CET/MBEC fix and whether QEMU/libvirt changed since the last backup. `tune plan`/`apply`: the recommended virtual hardware (disks on virtio-scsi with `cache='none'`, virtio network card, same MAC; Windows only after its virtio drivers are installed). `nocow plan`/`apply`: the VM image folders without copy-on-write (existing images are never converted). `backup`, `backup-timer on/off` and `tune apply` need root (they call sudo); `nocow apply` calls sudo only for `/var/lib/libvirt/images`; `list`, `status`, `backup-timer status`, `tune plan` and `nocow plan` run as your user, also in a toolbox | [vm/README.md](vm/README.md) |
-| `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk), settings of the running game profile that something undid since (drift) and its MemoryLow drop-ins left behind once it is off, slices of your user manager outside the boxes CST manages and `systemd-run --user` jobs next to the game, a host-passthrough VM still given CET/MBEC by QEMU 11, and QEMU/libvirt changed since the rollback deployment without a pinned rollback or a VM backup; most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
+| `cst doctor [--brief]` | none (`cst` runs `doctor/cst-doctor` itself) | `doctor/` | Read-only check-up: layered packages pinned to a version, local RPMs and replaced base packages, failed system and user units, desktop alerts you have not seen, how full btrfs is (chunks, automatic reclaim, unallocated space per disk), settings of the running game profile that something undid since (drift) and its MemoryLow drop-ins left behind once it is off, slices of your user manager outside the boxes CST manages and `systemd-run --user` jobs next to the game, a host-passthrough VM still given CET/MBEC by QEMU 11, responsiveness telemetry bottlenecks, and QEMU/libvirt changed since the rollback deployment without a pinned rollback or a VM backup; most problems with the command that fixes it. Runs as your user, also in a toolbox (the fixes are then marked "on the host") | [doctor/README.md](doctor/README.md) |
+| `cst perf [--compact] [--json] [--axis AXIS]` | none (`cst` runs `perf/cst-perf` itself) | `perf/` | Read-only 1-screen responsiveness snapshot and objective bottleneck diagnosis across `memory`, `cpu`, `io`, and `gpu` (exit 0 when healthy/skipped, 1 on `ATTENTION`/`BOTTLENECK`). Runs as your user, also in a toolbox | [perf/README.md](perf/README.md) |
 
 Three more commands belong to `cst` itself:
 
@@ -65,6 +66,9 @@ Three more commands belong to `cst` itself:
   `bluetooth`, `toolchains` and `vm` status also work there (`swap` without
   zswap's debug counters). Its last section is the short form of
   `cst doctor`: the summary line and the problems only.
+- `cst perf`: one-screen responsiveness snapshot and objective diagnosis across
+  memory, CPU/IRQs, I/O, and GPUs. Exit status 0 when healthy/skipped, 1 on
+  `ATTENTION`/`BOTTLENECK`. Details: [perf/README.md](perf/README.md).
 - `cst doctor`: a read-only check-up across the modules, with one line per
   check (`ok`, `info`, `WARN`, `ERROR`) and, under each problem, the exact
   command that fixes it. It never changes anything and needs no `sudo`.
@@ -234,6 +238,8 @@ Then, if you want a backup on the NAS:
 ```
 cst btrfs crypt-perf enable     # asks the passphrase of each disk
 cst btrfs compress-force plan   # dry run: force zstd compression across mount layers
+cst btrfs commit-interval plan  # dry run: align root btrfs commit=60 across mount layers
+cst btrfs cache plan            # dry run: attach ~/.cache & ~/Scratchpad to /var/mnt/{cache,scratchpad}
 cst btrfs docker-gc enable      # weekly, careful Docker cleanup
 ```
 
@@ -371,6 +377,10 @@ swap and memory, with counters since boot.
 | Degraded boot | `cst btrfs degraded-boot uninstall`, then reboot | [btrfs/README.md, section 8](btrfs/README.md#8-degraded-boot-start-the-pc-with-one-disk-dead) |
 | Faster encryption | `cst btrfs crypt-perf disable` | [btrfs/README.md, section 9](btrfs/README.md#9-crypt-perf-faster-encryption-path) |
 | Forced zstd compression | `cst btrfs compress-force revert` | [btrfs/README.md, section 9.1](btrfs/README.md#91-compress-force-skip-the-cheap-btrfs-compressibility-estimator) |
+| blk-iocost QoS on SSDs | `cst btrfs iocost revert` (removes the service and the udev rule, then resets the disks CST enabled; `--live-only` only resets them) | [btrfs/README.md, section 9.2](btrfs/README.md#92-iocost-enable-kernel-blk-iocost-qos-for-slice-ioweight) |
+| Root btrfs commit interval | `cst btrfs commit-interval revert` (back to the kernel's 30 s in every layer) | [btrfs/README.md, section 9.3](btrfs/README.md#93-commit-interval-coherent-commit60-across-root-btrfs-layers) |
+| Cache drive bind mounts | `cst btrfs cache detach [--user NAME]` (removes only that user's lines from `/etc/fstab`; the data on the drive stays) | [btrfs/README.md, section 9.4](btrfs/README.md#94-dedicated-nvme-cache-drive-cache) |
+| Weekly btrfs scrub limit | `cst btrfs scrub-limit off` | [btrfs/README.md, section 4.3](btrfs/README.md#43-weekly-scrub) |
 | Snapshots and NAS backup | `cst btrfs snapshots disable` (add `--purge` to delete the snapshots) | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#12-how-to-undo) |
 | One `~/Bulk` link | `cst btrfs bulk keep ID`, then remove the link and move the folder back by hand | [btrfs/SNAPSHOTS.md, section 12](btrfs/SNAPSHOTS.md#undo-one-bulk-link) |
 | Chrome's cache in RAM | `cst btrfs snapshots chrome-cache off` | [btrfs/SNAPSHOTS.md, section 3](btrfs/SNAPSHOTS.md#chrome-flatpak-its-cache-in-ram-not-a-subvolume) |
@@ -381,7 +391,7 @@ swap and memory, with counters since boot.
 | NOCOW image folders (`cst vm nocow apply`) | `chattr -C FOLDER` (`sudo` for `/var/lib/libvirt/images`); affects only files created later, like `+C` | [vm/README.md, section 9](vm/README.md#9-cst-vm-nocow-vm-image-folders-without-copy-on-write) |
 | VM backups | Local: nothing runs by itself; delete old backups by hand (`sudo rm -r /var/lib/libvirt/cst-backups/VM/TIMESTAMP`). NAS: `cst vm backup-timer off VM` stops the weekly run; the restic snapshots stay (tags `cst-vm`, `vm:VM`), and so do the entries of that VM in the record of torn NAS snapshots `/var/lib/cst/vm-nas-torn.json`, which only its next NAS backup takes out (by hand: vm/README.md, section 10.6) | [vm/README.md, sections 6 and 10](vm/README.md#10-the-nas-backup-the-default) |
 | CPU tools | `cst cpu uninstall` (and `docker-slice uninstall`, `experiment off NAME`) | [cpu/README.md, section 13](cpu/README.md#13-how-to-undo-everything) |
-| Swap and memory | No command: a few steps by hand (switching swap off needs free RAM) | [swap/README.md, section 8](swap/README.md#8-how-to-undo) |
+| Swap and memory | No command: a few steps by hand (`swapoff`, remove crypttab/fstab lines, remove `/etc/tmpfiles.d/{zswap,cst-mm-responsiveness}.conf`, `/etc/sysctl.d/99-swap-tuning.conf`, restore `.pre-swap-config.bak` for `/etc/uresourced.conf`) | [swap/README.md, section 8](swap/README.md#8-how-to-undo) |
 | Bluetooth audio | `cst bluetooth revert` (`--check` first shows what it would do) | [bluetooth/README.md, section 8](bluetooth/README.md#8-how-to-undo) |
 
 Each `uninstall` removes only its own parts. Some things stay on purpose

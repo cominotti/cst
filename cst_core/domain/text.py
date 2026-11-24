@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Small text rules shared by CST programs."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import re
@@ -67,6 +67,14 @@ def split(pattern: re.Pattern[str] | str, text: str, maxsplit: int = 0) -> list[
     return out
 
 
+def unescape_mount_field(field: str) -> str:
+    """A path field of /proc/mounts, /proc/self/mountinfo or /etc/fstab as the path it is: the kernel
+    and fstab write a space, a tab, a line break and a backslash as \\ and three octal digits
+    (\\040 \\011 \\012 \\134). One pass, so an escaped backslash before "040" stays a backslash and
+    the text 040."""
+    return _OCTAL_ESCAPE.sub(lambda m: chr(int(group(m, 1), 8)), field)
+
+
 def cgroup_v2_path(text: str) -> str | None:
     """The cgroup v2 ("unified") path in the text of a /proc/PID/cgroup: the rest of the first line
     that starts with "0::/", from its "/" on (on a hybrid system the cgroup v1 lines,
@@ -91,6 +99,9 @@ NO_WORDS: Final = frozenset({"no", "false", "off", "0"})
 # The words that ask a command for its help (cst and every module).
 HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
 
+# The line a plan prints to say it changed nothing (iocost, scrub-limit, cpu irq, cpu power).
+DRY_RUN_LINE: Final = "Dry run: nothing is changed."
+
 
 def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
     """The member of cls whose value is word (a word from outside: argv, a file, another program's
@@ -99,8 +110,28 @@ def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
     return next((m for m in cls if m == word), None)
 
 
+def parse_subcommand_head[E: StrEnum](
+    argv: Sequence[str],
+    enum_cls: type[E],
+    *,
+    default: E,
+    help_action: E,
+) -> tuple[E, Sequence[str], str | None]:
+    """Resolve the leading subcommand word against `enum_cls` and `HELP_WORDS` without side effects."""
+    if not argv:
+        return default, (), None
+    head = argv[0]
+    if head in HELP_WORDS:
+        return help_action, argv[1:], None
+    action = enum_member(enum_cls, head)
+    if action is None:
+        return default, (), f"unknown subcommand {head!r}"
+    return action, argv[1:], None
+
+
 _KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _READ_BLANKS: Final = re.compile(r"[ \t\n]+")
+_OCTAL_ESCAPE: Final = re.compile(r"\\([0-7]{3})")
 _BLANKS: Final = " \t"  # what bash splits words at (not \f, \v or NBSP: bash keeps them in a value)
 # Characters bash treats as syntax in an unquoted word; any of them makes the line a problem.
 _SHELL_SYNTAX: Final = frozenset(";&|<>()")

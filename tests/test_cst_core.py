@@ -52,6 +52,7 @@ from cst_core.domain.values import (
     format_bytes_decimal,
     format_bytes_gib_mib,
     format_bytes_human,
+    format_cpulist,
 )
 from cst_core.domain.units import ActiveState
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
@@ -174,6 +175,15 @@ class ValueObjectsTest(unittest.TestCase):
             CpuSet(frozenset())
         with self.assertRaises(DomainValidationError):
             CpuSet(frozenset({-1}))
+
+    def test_format_cpulist(self) -> None:
+        self.assertEqual(format_cpulist([0, 1, 2, 5, 8, 9, 10]), "0-2,5,8-10")
+        # Any order, a CPU named twice, none at all (cpu setup's split can be empty).
+        self.assertEqual(format_cpulist([13, 12, 6, 6, 0]), "0,6,12-13")
+        self.assertEqual(format_cpulist([]), "")
+        # What CpuSet.parse reads back as the same set.
+        cs = CpuSet.parse("0-3,6,12-13")
+        self.assertEqual(CpuSet.parse(format_cpulist(cs.cpus)), cs)
 
     def test_octal_mode_parse(self) -> None:
         self.assertEqual(OctalMode.parse("0600"), OctalMode(0o600))
@@ -1827,6 +1837,74 @@ class StateContractsTest(unittest.TestCase):
             ("~/" + PROG_REL, "~/" + DEFAULTS_REL, "~/" + WRAPPER_REL),
             (dest["toolchains/cst-toolchains"], dest["toolchains/toolchains.conf"], dest["toolchains/rustc-wrapper"]),
         )
+
+
+class CstPerfDispatchTest(unittest.TestCase):
+    """`cst perf` dispatches cleanly like `cst doctor` and steps down under sudo."""
+
+    def _run(self, port: _FakeDispatchPort, args: Sequence[str]) -> tuple[int, str, str]:
+        out = io.StringIO()
+        err = io.StringIO()
+        dispatcher = CstDispatcher(
+            port=port, repo_dir="/repo", self_path="/repo/cst", arg0="./cst", stdout=out, stderr=err
+        )
+        return dispatcher.dispatch(args), out.getvalue(), err.getvalue()
+
+    def test_perf_usage_mentions_cst_perf(self) -> None:
+        rc, stdout, _ = self._run(_FakeDispatchPort(), ["--help"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cst perf", stdout)
+
+    def test_perf_missing_entry_returns_one(self) -> None:
+        rc, _, stderr = self._run(_FakeDispatchPort(), ["perf"])
+        self.assertEqual(rc, 1)
+        self.assertIn("perf is not in this copy", stderr)
+
+    def test_perf_as_user_and_sudo_step_down(self) -> None:
+        port = _FakeDispatchPort(files={"/repo/perf/cst-perf"}, uid=1000, env={"CST_NAME": "cst", "KEEP": "1"})
+        rc, _, _ = self._run(port, ["perf", "--json"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(port.calls[0][0], ["python3", "-I", "-B", "/repo/perf/cst-perf", "--json"])
+        self.assertEqual((port.calls[0][1] or {}).get("CST_PROG"), "cst perf")
+
+        sudo_port = _FakeDispatchPort(
+            files={"/repo/perf/cst-perf"},
+            uid=0,
+            env={"CST_NAME": "cst", "SUDO_USER": "alice"},
+            passwd={"alice": (1000, "/home/alice")},
+        )
+        rc_sudo, _, _ = self._run(sudo_port, ["perf", "--compact"])
+        self.assertEqual(rc_sudo, 0)
+        argv = sudo_port.calls[0][0]
+        self.assertIn("/repo/perf/cst-perf", argv)
+        self.assertIn("--compact", argv)
+        self.assertIn("CST_PROG=cst perf", argv)
+
+
+class SubcommandHeadTest(unittest.TestCase):
+    def test_parse_subcommand_head_handles_default_help_member_and_unknown(self) -> None:
+        from enum import StrEnum
+        from cst_core.domain.text import parse_subcommand_head
+
+        class Act(StrEnum):
+            STATUS = "status"
+            APPLY = "apply"
+            HELP = "help"
+
+        self.assertEqual(
+            parse_subcommand_head([], Act, default=Act.STATUS, help_action=Act.HELP), (Act.STATUS, (), None)
+        )
+        self.assertEqual(
+            parse_subcommand_head(["--help", "x"], Act, default=Act.STATUS, help_action=Act.HELP),
+            (Act.HELP, ["x"], None),
+        )
+        self.assertEqual(
+            parse_subcommand_head(["apply", "--yes"], Act, default=Act.STATUS, help_action=Act.HELP),
+            (Act.APPLY, ["--yes"], None),
+        )
+        act, rest, err = parse_subcommand_head(["bogus"], Act, default=Act.STATUS, help_action=Act.HELP)
+        self.assertEqual((act, rest), (Act.STATUS, ()))
+        self.assertIn("unknown subcommand", err or "")
 
 
 if __name__ == "__main__":

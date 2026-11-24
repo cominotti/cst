@@ -91,12 +91,14 @@ def read_int(path: str, default: int | None = None) -> int | None:
     return int(text) if _INT.fullmatch(text) else default
 
 
-def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
+def ensure_dir(path: str, mode: int = 0o755, *, relabel: bool = False) -> list[str]:
     """Create the folder path and its missing parents; the folders it creates, in order.
 
     Each folder it creates gets exactly mode (chmod after mkdir: the umask
     does not reduce it, as os.makedirs's mode= is); a folder that is already
     there (or that another process creates meanwhile) is left as it is.
+    relabel=True: as root, each folder it creates gets its SELinux label
+    (restorecon, as write_atomic's relabel); an existing folder is not touched.
     """
     missing: list[str] = []
     p = os.path.abspath(path)
@@ -115,6 +117,8 @@ def ensure_dir(path: str, mode: int = 0o755) -> list[str]:
                 continue
             raise
         os.chmod(d, mode)
+        if relabel and os.geteuid() == 0:
+            _relabel(d)
         created.append(d)
     return created
 
@@ -234,10 +238,21 @@ class LocalFileSystemAdapter:
         write_atomic (surrogateescape), and line ends are kept as they are.
         """
         try:
-            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
-                return fh.read()
+            text = self.read_existing_text(path)
         except OSError:
             return default
+        return default if text is None else text
+
+    def read_existing_text(self, path: str) -> str | None:
+        """read_text's text, None only for a file that is not there (no such
+        file, or a path through a file): the OSError of one there that cannot
+        be read is raised, for a caller that must not take it for a missing
+        file (one that writes the file back)."""
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape", newline="") as fh:
+                return fh.read()
+        except FileNotFoundError, NotADirectoryError:
+            return None
 
     def read_first_line(self, path: str, default: str | None = None) -> str | None:
         """Read and strip file text from path, returning default on OSError."""
@@ -369,7 +384,7 @@ def write_atomic(
     *,
     mode: int | Literal["umask"],
     durable: bool | Literal["file"] = True,
-    owner: FileOwner = FileOwner.CALLER,
+    owner: FileOwner | tuple[int, int] = FileOwner.CALLER,
     relabel: bool = True,
 ) -> None:
     """Replace the file at path with data, atomically: path holds the old or the new file, never a part.
@@ -386,7 +401,10 @@ def write_atomic(
       file only (after a power loss the folder may still name the old file,
       never a part of the new one). False: no fsync.
     - owner: "caller" leaves the file to whoever writes it; "root" also makes
-      it 0:0 when running as root (the installer's files).
+      it 0:0 when running as root (the installer's files); a (uid, gid) pair
+      makes it that user's when running as root. The owner is set on the
+      temporary file before the rename, never by path, so a link someone puts
+      at path meanwhile is not followed.
     - relabel (the default): as root, the file is relabelled (restorecon); a
       failure is reported on stderr, not raised. False: the file keeps the
       label it gets from its folder, and no program is started.
@@ -402,8 +420,11 @@ def write_atomic(
     try:
         try:
             os.fchmod(fd, bits)
-            if owner == FileOwner.ROOT and os.geteuid() == 0:
-                os.fchown(fd, 0, 0)
+            if os.geteuid() == 0:
+                if isinstance(owner, tuple):
+                    os.fchown(fd, *owner)
+                elif owner == FileOwner.ROOT:
+                    os.fchown(fd, 0, 0)
             view = memoryview(content)
             while view:
                 view = view[os.write(fd, view) :]

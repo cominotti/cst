@@ -15,6 +15,7 @@ from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
 from cst_core.domain.values import ByteSize, format_bytes_human
 from cst_core.domain.units import ActiveState
+from perf.domain.models import PerfFinding
 from swap.ports import SwapSettingsFacts
 
 SWAP_MARKER: Final[str] = "# managed-by: swap-setup.sh (CST)"
@@ -668,8 +669,8 @@ class SettingsReport:
     """Comparison of live zswap, sysctl, and cgroup settings against desired values."""
 
     rows: tuple[SettingCheckRow, ...]
-    exp_name: str
-    exp_key: str
+    # (name, key) of each cpu experiment that is on and holds a setting away from CST's (an EXP row).
+    experiments: tuple[tuple[str, str], ...] = ()
     # The drop-in machine.slice's MemoryLow comes from when it is not CST's ("": CST's): its "over" row.
     override_source: str = ""
     cst_dropin: str = ""
@@ -678,11 +679,6 @@ class SettingsReport:
     def has_diff(self) -> bool:
         """Return True if any inspected setting differs from desired."""
         return any(row.state == SettingState.DIFF for row in self.rows)
-
-    @property
-    def has_exp(self) -> bool:
-        """Return True if a transient CPU experiment override is active."""
-        return any(row.state == SettingState.EXP for row in self.rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -756,6 +752,7 @@ class SwapStatusReport:
     devices: tuple[SwapDeviceRow, ...]
     cgroups: tuple[CgroupSwapRow, ...]
     psi_lines: tuple[str, ...]
+    diagnosis: tuple[PerfFinding, ...] | None = None
 
 
 def killed_text(prog: str, argv: Sequence[str], returncode: int) -> str:

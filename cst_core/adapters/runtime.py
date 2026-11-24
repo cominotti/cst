@@ -8,17 +8,71 @@ the same answer in both, so no program computes paths from `__file__` by
 itself.
 """
 
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import pwd
 import signal
 import stat
+from typing import NoReturn, Protocol, TextIO
 import zipfile
 
+from cst_core.adapters import SystemctlAdapter, SystemctlHost, terminal
+from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.install import expand_dest, manifest_by_src
+from cst_core.domain.units import LoadState
+from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, UnitName
 
 SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+@dataclass(frozen=True, slots=True)
+class RootElevation:
+    """Metadata for refusing container writes or re-executing a CST entry through `sudo`."""
+
+    prog: str
+    action: str
+    args: tuple[str, ...]
+    entry_file: str
+    reason: str
+
+
+def host_view_path(exec_ctx: ExecutionContextPort, host_path: str) -> str:
+    """Map an absolute host path through `/run/host` (or container prefix) inside a container."""
+    return exec_ctx.path(host_path)
+
+
+def enforce_host_root(
+    req: RootElevation,
+    *,
+    ctx: ExecutionContextPort | None = None,
+    elevate: Callable[[list[str]], NoReturn] | None = None,
+) -> str | None:
+    """Refuse container writes and re-exec through `sudo` when not root, on the system Python."""
+    exec_ctx = HostExecutionContext() if ctx is None else ctx
+    if exec_ctx.is_container():
+        return f"'{req.prog} {req.action}' must run on the host, not inside a toolbox/container ({req.reason})."
+    if not exec_ctx.is_root():
+        if not req.entry_file:
+            return f"'{req.prog} {req.action}' cannot elevate through sudo without an entry script path."
+        argv = [
+            "sudo",
+            "--",
+            "env",
+            f"CST_PROG={req.prog}",
+            lc_ctype_handover(),
+            SYSTEM_PYTHON,  # never the caller's interpreter (a venv's python3 first in PATH) as root
+            "-I",
+            "-B",
+            program_path(req.entry_file),
+            *req.args,
+        ]
+        if elevate is not None:
+            elevate(argv)
+        os.execvp("sudo", argv)
+    return None
 
 
 def running_archive(main_file: str) -> str | None:
@@ -235,3 +289,138 @@ def process_identity() -> tuple[bool, str]:
     whose install record a process such as the installer writes. Not $HOME: runuser keeps root's."""
     euid = os.geteuid()
     return euid == 0, pwd.getpwuid(euid).pw_dir
+
+
+def installer_script_for(entry_file: str, fallback_root: str = "") -> str:
+    """Locate `cst_core/installer.py` from `entry_file`'s checkout root or `fallback_root`."""
+    root = checkout_root(entry_file) or fallback_root
+    return os.path.join(root, "cst_core", "installer.py") if root else ""
+
+
+def run_installer(
+    runner: CommandRunnerPort,
+    script: str,
+    args: Sequence[str],
+    *,
+    input_text: str | None = None,
+) -> tuple[int, list[str], str]:
+    """Invoke `cst_core/installer.py` under `SYSTEM_PYTHON -I -B` and return `(rc, non_empty_lines, stderr)`."""
+    key, _, val = lc_ctype_handover().partition("=")
+    res = runner.run(
+        [SYSTEM_PYTHON, "-I", "-B", script, *args],
+        input_text=input_text,
+        env={key: val},
+        output=OutputMode.CAPTURE,
+    )
+    lines = [line for line in res.stdout.splitlines() if line.strip()]
+    return res.returncode, lines, res.stderr.strip()
+
+
+def probe_systemd_unit(runner: CommandRunnerPort, unit: str) -> tuple[bool, str, str]:
+    """Query `(unit_present, ActiveState, UnitFileState)` via `SystemctlAdapter(..., SHOW_ONLY)`."""
+    systemd = SystemctlAdapter(runner, on_host=SystemctlHost.SHOW_ONLY)
+    props = systemd.show(UnitName(unit), ("LoadState", "ActiveState", "UnitFileState"))
+    present = bool(props) and props.get("LoadState", LoadState.NOT_FOUND) != LoadState.NOT_FOUND
+    return present, props.get("ActiveState", "unknown"), props.get("UnitFileState", "unknown")
+
+
+class _CliExecutor[P](Protocol):
+    """Callback executing a validated CLI command with environment metadata and read-only flag."""
+
+    def __call__(self, parsed: P, env: ManagedCliEnv, /, *, read_only: bool) -> tuple[int, list[str]]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedCliEnv:
+    """Injected streams, environment, and execution context for `run_managed_cli`."""
+
+    entry_file: str = ""
+    env: Mapping[str, str] | None = None
+    out: TextIO | None = None
+    err: TextIO | None = None
+    ctx: ExecutionContextPort | None = None
+    runner: CommandRunnerPort | None = None
+    fallback_root: str = ""
+    elevate: Callable[[list[str]], NoReturn] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedCliSpec[P]:
+    """Behavioral hooks and metadata for a host-root-gated managed CLI entry."""
+
+    default_prog: str
+    parse: Callable[[Sequence[str]], P]
+    format_usage: Callable[[str], str]
+    is_help: Callable[[P], bool]
+    parse_error: Callable[[P], tuple[int, str] | None]
+    write_action: Callable[[P], str | None]
+    elevation_reason: str
+    execute: _CliExecutor[P]
+    resolve_prog: Callable[[str], str] | None = None
+    is_err_line: Callable[[int, str], bool] | None = None
+
+
+def _managed_prog[P](spec: ManagedCliSpec[P], env_map: Mapping[str, str]) -> str:
+    """The command's name in its messages: CST_PROG through spec.resolve_prog, else CST_PROG or the default."""
+    raw_prog = env_map.get("CST_PROG") or ""
+    if spec.resolve_prog is not None:
+        return spec.resolve_prog(raw_prog)
+    return raw_prog or spec.default_prog
+
+
+def _host_root_refusal[P](
+    spec: ManagedCliSpec[P], parsed: P, args: Sequence[str], cfg: ManagedCliEnv, prog: str
+) -> tuple[bool, str | None]:
+    """(whether the command writes, the refusal when a write cannot run here); a write run by a user
+    on the host is started again as root by enforce_host_root and does not come back."""
+    action = spec.write_action(parsed)
+    if action is None:
+        return False, None
+    req = RootElevation(prog, action, tuple(args), cfg.entry_file, spec.elevation_reason)
+    return True, enforce_host_root(req, ctx=cfg.ctx, elevate=cfg.elevate)
+
+
+def _explicit_error_line(code: int, line: str) -> bool:
+    return code != 0 and line.startswith("ERROR:")
+
+
+def _not_aborted_line(code: int, line: str) -> bool:
+    return code != 0 and not line.startswith("Aborted;")
+
+
+def _write_output_lines(
+    rc: int, lines: Sequence[str], is_err_line: Callable[[int, str], bool], out_fh: TextIO, err_fh: TextIO
+) -> None:
+    for line in lines:
+        target = err_fh if is_err_line(rc, line) else out_fh
+        target.write(f"{line}\n")
+
+
+def run_managed_cli[P](args: Sequence[str], spec: ManagedCliSpec[P], env: ManagedCliEnv | None = None) -> int:
+    """Execute one standardized CLI invocation with help, usage error, and host-root checks."""
+    cfg = ManagedCliEnv() if env is None else env
+    env_map = os.environ if cfg.env is None else cfg.env
+    prog = _managed_prog(spec, env_map)
+    out_fh = terminal.stdout() if cfg.out is None else cfg.out
+    err_fh = terminal.stderr() if cfg.err is None else cfg.err
+
+    parsed = spec.parse(args)
+    if (err_info := spec.parse_error(parsed)) is not None:
+        code, msg = err_info
+        err_fh.write(f"{prog}: {msg}\n\n{spec.format_usage(prog)}")
+        return code
+    if spec.is_help(parsed):
+        out_fh.write(spec.format_usage(prog))
+        return 0
+
+    writes, refusal = _host_root_refusal(spec, parsed, args, cfg, prog)
+    if refusal is not None:
+        err_fh.write(f"{refusal}\n")
+        return 1
+
+    rc, output_lines = spec.execute(parsed, cfg, read_only=not writes)
+    # Without an explicit ERROR: line, every line of a failure goes to stderr but an "Aborted;" one.
+    has_explicit_err = rc != 0 and any(line.startswith("ERROR:") for line in output_lines)
+    default_err_pred = _explicit_error_line if has_explicit_err else _not_aborted_line
+    _write_output_lines(rc, output_lines, spec.is_err_line or default_err_pred, out_fh, err_fh)
+    return rc

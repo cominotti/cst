@@ -9,6 +9,7 @@ from typing import Literal, TextIO, assert_never
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.values import format_bytes_human as human
 from cst_core.ports import CommandFailed, WriteFailed
+from perf.presenter import render_perf_findings_block
 from swap.application.apply import SwapApplicationService
 from swap.application.reports import MissingDesiredFileError
 from swap.domain import (
@@ -66,10 +67,10 @@ def render_settings(report: SettingsReport, out: TextIO = sys.stdout, *, header:
             f" {posixpath.basename(report.cst_dropin)} (drop-ins in file-name order, the last one wins). apply leaves it.",
             file=out,
         )
-    if report.has_exp:
+    for exp_name, exp_key in report.experiments:
         print(
-            f"  exp: the cpu experiment {report.exp_name} is on and sets {report.exp_key}; apply leaves it alone."
-            f" Back to the desired value: `cst cpu experiment off {report.exp_name}`, then apply",
+            f"  exp: the cpu experiment {exp_name} is on and sets {exp_key}; apply leaves it alone."
+            f" Back to the desired value: `cst cpu experiment off {exp_name}`, then apply",
             file=out,
         )
     return report.has_diff
@@ -224,6 +225,9 @@ def render_status(report: SwapStatusReport, out: TextIO = sys.stdout) -> int:
     render_devices(report.devices, out)
     render_cgroups(report.cgroups, out)
     render_psi(report.psi_lines, out)
+    if report.diagnosis is not None:
+        out.write("\n== diagnosis\n")
+        render_perf_findings_block(report.diagnosis, out)
     return 0
 
 

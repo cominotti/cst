@@ -35,7 +35,7 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_25`: `cst btrfs snapshots chrome-cache` on Chrome's `chrome-flags.conf` (the tool runs as the user through runuser): without the Flatpak, `apply` writes nothing; `status` changes nothing; `apply` adds the marker and the two flags after the user's own line, in a file the user owns; a second `apply` leaves the file as it is; `off` removes the flags and keeps a marker that a later `apply` respects; a second `off` changes nothing; the marker of a version named f44-tools counts as CST's.
 - `test_26`: `cst btrfs watch` as the user, with the installed `btrfs-stall-report` and an empty recording folder: usage errors exit 2 and `--list` says there are no runs; without the report program it exits 1 and records nothing; a run passes on the command's exit status, keeps its output in `workload.log`, saves the report of its window (NO DATA here, once the wait for the recorder runs out: about a minute) and adds a line to `runs.tsv` that `--list` shows.
 - `test_35`: `disable_timers` from `btrfs-setup.sh` (the snapshots, NAS and docker-gc disable paths, and `uninstall`) with the real systemd: a running `Persistent=` timer and a running service are both disabled and stopped although a unit named between them does not exist, the timer's stamp is forgotten, and the missing unit prints nothing.
-- `test_84`: `cst cpu install` as root for tester with the real systemd, over what the bash `cpu-setup.sh` of the last commit before its port installed (the previous version, from `tests/fixtures/legacy`, put into a copy of the checkout; of its `install.py` only the install manifest's table, put into this checkout's, which the rest of this `cst_core` imports): only the programs are written again (the game profile becomes a zipapp; `cpu-watch` and `cpu-vm-pin` carry the new `cst_core`), every unit, drop-in, rule and setting is `unchanged:`; the toolboxes' drop-ins are then in tester's install record (`cpu:toolbox`, done, no doctor `WARN`), the hwp file in root's only where the container has the knob; `status` shows every section; a second install writes nothing; `uninstall` removes the programs, units, rule and drop-ins with their record lines (none of `cpu:toolbox` or the hwp file is left) and stops the watchdog timer; a second uninstall, and the bash version's, find nothing left.
+- `test_84`: `cst cpu install` as root for tester with the real systemd, over what the bash `cpu-setup.sh` of the last commit before its port installed (the previous version, from `tests/fixtures/legacy`, put into a copy of the checkout; of its `install.py` only the install manifest's table, put into this checkout's, which the rest of this `cst_core` imports): only the programs are written again (the game profile becomes a zipapp; `cpu-watch` and `cpu-vm-pin` carry the new `cst_core`), every unit, drop-in, rule and setting is `unchanged:`; the toolboxes' drop-ins are then in tester's install record (`cpu:toolbox`, done, no doctor `WARN`), the hwp file in root's only where the container has the knob; `status` shows every section; a second install writes nothing and still runs `cst-cpu-power.service` again (a new `InvocationID`); `uninstall` removes the programs, units, rule and drop-ins with their record lines (none of `cpu:toolbox` or the hwp file is left) and stops the watchdog timer; a second uninstall, and the bash version's, find nothing left.
 - `test_85`: the game profile of that commit (bash, `tests/fixtures/legacy/game-profile@cfb496a`) and this one (Python), both ways with the real system and user managers: one switches it on, the other's `tick` adds no record and its `state` shows it on with no drift (the bash copy skips the format line `cst-game-intended 1` this version writes first), and with machine.slice's weight changed by hand its `state` shows the drift and its `tick` sets the weight again (each reads the other's records), the other's `off` restores machine.slice's weight and removes `game.state` and the `zz-cst-game.conf` drop-ins; each copy waits for a run lock the other kind holds (`flock` and Python's `fcntl.flock` on `/run/cpu-setup/lock`).
 - `test_86`: with a `cpu-setup.conf` line bash would expand (`BUILD_CPUS=$(nproc)`), the real game profile does not switch on (exit 1, the line in its output, no `game.state`, machine.slice's weight unchanged) and `state` names the line; the watchdog's `tick`, run as a unit while a GameMode client runs (a process mapping a file named `libgamemode`), does not start `cpu-game.service` (a stub in `/run` that records its starts), ends in success and names the line once (a second tick says nothing); `off` still works; with the line fixed, the tick starts the unit again, and `on` and `off` work. A by-hand mark there before the refused `on` is removed by it; with the line broken again after a tick found it fixed, the next tick names it again.
 - `test_87`: the real game profile's `off` after `on` for tester: a last line of `game.state` cut short (no newline, `existed 1`) is named and not undone (machine.slice's `IOWeight` goes back to its own value, not 1); with `TARGET_USER` changed to a line that sets nothing (`TARGET_USER="$(id -un tester)"`), the user manager's side is undone for tester, the uid `game.state` names (user.slice's `CPUWeight` back, its `user.control` override gone).
@@ -157,6 +157,31 @@ prints the fix, `chcon -R -t container_file_t <checkout>`.
 `invowk cmd test all` runs the fast gates (`invowk cmd check`: validate, audit,
 `test lint`, `test pylint`, `test types`, `test workflows`, `test unit`), then
 both tiers.
+
+## Checks that stop the script
+
+The suites run their scripts under `bash -euo pipefail`. set -e never stops a
+script on a negation (`! grep -qF x file`) or on the first command of an
+`A && B` list: such a line checks nothing when it fails, and the script goes
+on (only the script's last command sets its exit status). So:
+
+- a negative check is `absent NEEDLE FILE`, with
+  `absent() { ! grep -qF -- "$1" "$2"; }` defined in the script (a function's
+  status is its last command's, and a failing call stops the script), or
+  `if grep ...; then echo "..." >&2; exit 1; fi` (a regex, a here-string);
+- one check per line: `A` and `B` on two lines, or one `[[ ... && ... ]]`.
+
+`A && B` stays right where it is not a check: a loop's `&& break`, a
+condition that sets a variable (`[[ -e f ]] && was_off=1`), the body of a
+one-line function (`unchanged() { cmp ... && cmp ...; }`: the caller's line
+checks its status), or a line ending in `|| { ...; exit 1; }`.
+
+`tests/e2e/test_suite_scripts.py`, run with the unit tests, reads both suite
+files and names, file:line, each line that starts with `!` and each check
+(`[[`, `[`, `test`, `grep`, `cmp`, `!`) followed by `&&` and a second check,
+unless the line has an `||` list operator (one in quotes, in `[[ ... ]]` or in
+parentheses handles nothing) or is a one-line function. It does not see a check
+chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
 
 ## Mixed-version tests
 

@@ -10,8 +10,6 @@ from btrfs.compress.domain import (
     PROC_MOUNTS_PATH,
     TOP_MOUNT_UNIT_PATH,
     CoherenceReport,
-    CompressArgs,
-    CompressCommand,
     CompressMode,
     CompressPlan,
     CompressSnapshot,
@@ -24,8 +22,8 @@ from btrfs.compress.domain import (
     matches_target_spec,
     parse_proc_mounts,
     pick_root_mounts,
-    top_mount_options_from_var,
 )
+from btrfs.compress.domain.args import CompressArgs, CompressCommand
 from btrfs.compress.ports import CompressHostPort
 from cst_core.domain.errors import Refused
 from cst_core.ports import CommandFailed, WriteFailed
@@ -71,8 +69,9 @@ def _booted_kargs_diff(
         return None
     boot_rf = extract_rootflags_tokens(proc_cmdline)
     next_rf = extract_rootflags_tokens(snap.kargs_text)
-    if boot_rf and next_rf and boot_rf != next_rf:
-        return (boot_rf[0], next_rf[0])
+    # The kernel uses the last rootflags= of its command line.
+    if boot_rf and next_rf and boot_rf[-1] != next_rf[-1]:
+        return (boot_rf[-1], next_rf[-1])
     return None
 
 
@@ -144,6 +143,7 @@ class CompressService:
             kargs_error=kargs_err_msg,
             booted_diff=booted_diff,
             coherence=coherence,
+            left_alone_notes=plan_view.left_alone_notes,
         )
 
     def build_change_plan(self, args: CompressArgs) -> CompressPlanResult:
@@ -162,13 +162,8 @@ class CompressService:
         uuid = snap.top_mount.uuid or snap.root_uuid
         if not uuid:
             return f"Cannot update {TOP_MOUNT_UNIT_PATH}: root filesystem UUID unknown"
-        live_after = pick_root_mounts(parse_proc_mounts(self._host.read_proc_mounts() or ""))
-        var_entry = next((e for e in live_after if e.target == "/var"), None)
-        top_opts = (
-            top_mount_options_from_var(var_entry.options) if var_entry is not None else plan.new_top_mount_options
-        )
         try:
-            self._host.update_top_mount(uuid, top_opts)
+            self._host.update_top_mount(uuid, plan.new_top_mount_options)
         except (OSError, Refused, CommandFailed, WriteFailed, ValueError) as exc:
             return f"Failed to update {TOP_MOUNT_UNIT_PATH}: {exc}"
         msgs.append(f"Updated {TOP_MOUNT_UNIT_PATH} and reloaded systemd.")

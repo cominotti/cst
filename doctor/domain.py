@@ -132,8 +132,9 @@ _SCRUB_SIZE = re.compile(r"[0-9]+[KkMmGgTt]?")
 _SCRUB_LIMIT_LINE = re.compile(r"[ \t]*(?:export[ \t]+)?SCRUB_LIMIT(?![A-Za-z0-9_])")
 _SCRUB_DROPIN_LIMIT = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.MULTILINE)
 
-# swap's zswap settings as installed (INSTALL_MANIFEST), and where the kernel has them.
+# swap's zswap and memory responsiveness settings as installed (INSTALL_MANIFEST), and where the kernel has them.
 ZSWAP_CONF = HostPath("/etc/tmpfiles.d/zswap.conf")
+MM_RESPONSIVENESS_CONF = HostPath("/etc/tmpfiles.d/cst-mm-responsiveness.conf")
 ZSWAP_PARAMS = HostPath("/sys/module/zswap/parameters")
 # The partition swap manages (swap/domain.py, SETTINGS_REL), and the files an older CST marked a line in.
 SWAP_CONF = HostPath("/etc/" + SETTINGS_REL)
@@ -162,6 +163,33 @@ LIST_MAX = 5  # names shown per line, then "and N more"
 
 VIRSH_URI = "qemu:///system"
 CPU_CONF = HostPath(CPU_SETTINGS)
+URESOURCED_CONF = HostPath(_BY_SRC["swap/units/uresourced.conf"].dest)
+URESOURCED_CONF_BAK = HostPath(f"{URESOURCED_CONF}.pre-swap-config.bak")
+URESOURCED_CST_MARKER = "Managed by swap-setup.sh (CST)"
+# Host markers showing which CST modules are installed or configured for `doctor`'s responsiveness area.
+MEMORY_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    SWAP_CONF,
+    ZSWAP_CONF,
+    MM_RESPONSIVENESS_CONF,
+    SWAP_DROPIN,
+    HostPath(_BY_SRC["swap/sysctl/99-swap-tuning.conf"].dest),
+    URESOURCED_CONF_BAK,
+)
+CPU_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    CPU_CONF,
+    HostPath("/etc/cpu-setup/irqbalance.env"),
+    HostPath(_BY_SRC["cpu/units/cst-cpu-power.service"].dest),
+    HostPath(_BY_SRC["cpu/units/cpu-game.service"].dest),
+    HostPath("/etc/tmpfiles.d/cpu-setup-hwp-boost.conf"),
+)
+IO_RESPONSIVENESS_MARKERS: tuple[HostPath, ...] = (
+    SNAP_CONF,
+    RECLAIM_CONF,
+    SCRUB_UNIT,
+    HostPath(_BY_SRC["btrfs/sysctl/90-btrfs-writeback.conf"].dest),
+    HostPath(_BY_SRC["btrfs/tmpfiles/cst-nvme-apst.conf"].dest),
+    HostPath(_BY_SRC["btrfs/units/cst-btrfs-iocost.service"].dest),
+)
 CET_ISSUE = "https://gitlab.com/qemu-project/qemu/-/issues/3215"
 VM_INDEX_FORMAT = state_format(StateFormatKey.VM_INDEX)
 VM_INDEX = HostPath(VM_INDEX_FORMAT.path)

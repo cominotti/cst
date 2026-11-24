@@ -202,6 +202,52 @@ class ConvertTest(Base):
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(read(self.state_file("drop-pending")), "")
 
+    def test_put_aside_leaves_cache_alone_when_parent_is_an_external_mountpoint(self) -> None:
+        cache = self.tree(".cache")
+        uv = os.path.join(cache, "uv")
+        os.makedirs(os.path.join(uv, "wheels"))
+        self.machine(mountpoints=[cache])
+        self.plan(f"aside {uv}", f"copy {cache}")
+        r = self.run_prog("convert")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.isdir(os.path.join(uv, "wheels")))
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+
+    def test_a_symlink_to_a_mountpoint_is_planned_until_it_is_skipped(self) -> None:
+        real = self.tree("real-cache")
+        link = os.path.join(self.home, ".cache")
+        os.symlink(real, link)
+        # The fake mountpoint answers for the path it is given, as the real one does through a link.
+        self.machine(mountpoints=[link])
+        self.plan(f"copy {link}")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, f"{link}\n"))
+        self.assertEqual(self.run_prog("convert").returncode, 0)
+        self.assertEqual(read(self.state_file("skipped")), f"{link}\tnot a directory (a symlink or file)\n")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+
+    def test_an_aside_link_is_left_alone_and_never_left(self) -> None:
+        # put_aside skips a link, but planned_left listed it (test -d follows it): the boot flag stayed
+        # and convert-boot gave up after its retries, for a cache already somewhere else.
+        bulk_uv = self.tree("Bulk-uv")
+        cache = os.path.join(self.home, ".cache")
+        os.makedirs(cache)
+        link = os.path.join(cache, "uv")
+        os.symlink(bulk_uv, link)
+        self.plan(f"aside {link}")
+        self.write(BOOT_FLAG, "")
+        left = self.run_prog("planned-left")
+        self.assertEqual((left.returncode, left.stdout), (0, ""))
+        self.assertEqual(self.run_prog("convert").returncode, 0)
+        self.assertEqual(os.readlink(link), bulk_uv)
+        self.assertEqual(read(os.path.join(bulk_uv, "file")), "data\n")
+        self.assertEqual(self.leftovers(), [])
+        self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
+
     def test_a_busy_cache_stays_and_its_parent_is_still_cloned(self) -> None:
         cache = self.tree(".cache")
         uv = os.path.join(cache, "uv")
@@ -445,7 +491,9 @@ class ConvertBootTest(Base):
         self.assertEqual(self.notified(), [["-u", "critical", "-a", "btrfs-snapshot", title, body]])
         self.assertFalse(os.path.exists(self.path(BOOT_FLAG)))
         self.assertFalse(os.path.exists(self.state_file("boot-attempts")))
-        self.assertEqual(self.calls("mountpoint"), [])
+        # planned_left() checks mountpoint -q; no findmnt/btrfs proves convert_one() did not run.
+        self.assertEqual(self.calls("findmnt"), [])
+        self.assertEqual(self.calls("btrfs"), [])
 
     def test_an_empty_attempts_file_counts_as_none(self) -> None:
         self.plan(f"copy {self.tree('Workspace')}")
@@ -740,7 +788,7 @@ class BusyTest(Base):
 
     def test_an_escaped_backslash_before_040_is_a_backslash_not_a_blank(self) -> None:
         # One pass, left to right: \134040 is a backslash and the text 040 (the name a\040b), as
-        # bulk's unescape_mountinfo reads it; a sibling "a b" is not busy.
+        # cst_core's unescape_mount_field reads it; a sibling "a b" is not busy.
         self.mountinfo(f"30 1 0:42 /home {self.home_mount} rw - btrfs /dev/dm-0 rw\n")
         self.mounted_elsewhere("/home/u/a\\134040b")
         literal, blank = os.path.join(self.home, "a\\040b"), os.path.join(self.home, "a b")
