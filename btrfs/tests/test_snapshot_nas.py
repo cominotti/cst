@@ -145,6 +145,19 @@ class GateTest(Base):
         self.nas()
         self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
 
+    def test_a_last_success_past_int_s_digit_limit_is_skipped(self) -> None:
+        # isascii() and isdigit() took 5000 digits, and int() raised ValueError out of the staleness check.
+        self.conf(NAS_ENABLED="1", NAS_PATH="")
+        self.days_ago("nas-enabled-at", 3)
+        self.write(self.state_file("nas-last-ok"), "1" * 5000 + "\n")
+        rc, _lines, err = self.nas()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.notified(), [])
+        self.days_ago("nas-enabled-at", 9)
+        self.nas()
+        self.assertEqual(self.notified(), [self.stale("The NAS backup is not configured completely.", 9)])
+
     def test_another_nas_run_holds_its_lock(self) -> None:
         with self.hold_lock("run/btrfs-snapshot-nas.lock"):
             self.assertEqual(self.nas(), (0, [log(5, "another NAS run is active; skipped")], ""))

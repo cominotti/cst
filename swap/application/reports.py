@@ -11,7 +11,7 @@ from cst_core.application.install import InstallService
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState, inspect_managed_file
 from cst_core.domain.install import InstallEntry, manifest_by_src
 from cst_core.domain.plan import PlanItem
-from cst_core.domain.values import format_bytes_human as human
+from cst_core.domain.values import format_bytes_human as human, parse_whole_number
 from cst_core.ports import FileSystemPort, SystemdPort, UnitName
 from perf.application import collect_memory_from_reader
 from perf.domain.evaluate import evaluate_perf_memory
@@ -194,7 +194,10 @@ def _short_etc_path(etc_dir: str, path: str) -> str:
 
 def _low_text(low: str) -> str:
     """A cgroup's memory.low as status shows it: a size, or the text itself ("0", "max", "-")."""
-    return human(int(low)) if low.isdigit() and int(low) else low
+    number = parse_whole_number(low)  # ASCII digits only
+    if number is None or number == 0:
+        return low
+    return human(number)
 
 
 class _FileSettingsFacts:
@@ -611,8 +614,9 @@ class SwapReports:
                 "slice active, no memory.low (memory controller off)",
                 human(want_low),
             ), ""
-        ok = live_low.isdigit() and int(live_low) == want_low
-        live = human(int(live_low)) if live_low.isdigit() else live_low
+        live_bytes = parse_whole_number(live_low)  # ASCII digits only
+        ok = live_bytes == want_low
+        live = human(live_bytes) if live_bytes is not None else live_low
         return SettingCheckRow(SettingState.OK if ok else SettingState.DIFF, _MEMORY_LOW_ROW, live, human(want_low)), ""
 
     def _build_debug_report(self, hint: str) -> DebugSectionReport:
@@ -627,8 +631,8 @@ class SwapReports:
         rows: list[DebugCounterRow] = []
         for name in names:
             val = self._read_first(posixpath.join(self._env.zswap_debug_dir, name), "?")
-            if name == "pool_total_size" and val.isdigit():
-                val = f"{val} ({human(int(val))})"
+            if name == "pool_total_size" and (size := parse_whole_number(val)) is not None:
+                val = f"{val} ({human(size)})"
             rows.append(DebugCounterRow(name, val, DEBUG_HELP.get(name, "")))
         return DebugSectionReport(self._env.zswap_debug_dir, ZswapDebugStatus.OK, hint, tuple(rows))
 
@@ -679,7 +683,7 @@ class SwapReports:
         cur = self._fs.read_first_line(posixpath.join(path, "memory.swap.current"))
         if cur is None and path == self._env.cgroup_dir and "SwapTotal" in meminfo:
             cur = str(meminfo["SwapTotal"] - meminfo.get("SwapFree", 0))
-        return int(cur) if cur is not None and cur.isdigit() else None
+        return None if cur is None else parse_whole_number(cur)  # ASCII digits only
 
     def plan_report(self) -> SwapPlanReport:
         """Compute dry-run plan without modifying files or system state."""

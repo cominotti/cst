@@ -72,8 +72,9 @@ class ExamplesFromTest(MbtTestCase):
 
     def test_anything_else_stops_the_run_naming_the_variable(self) -> None:
         # "\N{SUPERSCRIPT TWO}": str.isdigit() takes it, int() does not.
-        for text in ("-1", "1.5", "\N{SUPERSCRIPT TWO}", "x", " 5"):
-            with self.subTest(text=text), self.assertRaises(SystemExit) as caught:
+        # 5000 digits: isascii() and isdigit() take them, int() raised ValueError ("Exceeds the limit").
+        for text in ("-1", "1.5", "\N{SUPERSCRIPT TWO}", "x", " 5", "1" * 5000):
+            with self.subTest(text=text[:10]), self.assertRaises(SystemExit) as caught:
                 profiles.examples_from({"CST_MBT_EXAMPLES": text}, MbtProfile.CI)
             self.assertEqual(str(caught.exception), f"CST_MBT_EXAMPLES={text!r}: expected a whole number")
 
@@ -89,6 +90,12 @@ class SeedFromTest(MbtTestCase):
         with self.assertRaises(SystemExit) as caught:
             profiles.seed_from({"CST_MBT_SEED": "x"})
         self.assertEqual(str(caught.exception), "CST_MBT_SEED='x': expected a whole number")
+
+    def test_a_seed_past_int_s_digit_limit_stops_the_run(self) -> None:
+        text = "1" * 5000
+        with self.assertRaises(SystemExit) as caught:
+            profiles.seed_from({"CST_MBT_SEED": text})
+        self.assertEqual(str(caught.exception), f"CST_MBT_SEED={text!r}: expected a whole number")
 
 
 class SettingsForTest(MbtTestCase):

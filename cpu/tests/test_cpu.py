@@ -719,9 +719,11 @@ class QuietTest(unittest.TestCase):
             (["--for", "0"], {}),
             (["--for", "1.5"], {}),
             (["--for"], {}),
+            (["--for", "9" * 20], {}),
             (["--for", "5", "--wait", "3"], {}),
             (["--wait", "2x"], {}),
             (["--wait", "0"], {}),
+            (["--wait", "9" * 400], {}),
             (["--cpu", "-1"], {}),
             (["--cpu", "abc"], {}),
             (["--write-mbps", "inf"], {}),
@@ -749,6 +751,17 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(
             [cpu_domain.duration(x) for x in ("120", "90s", "30m", "2h", "1.5h")], [120, 90, 1800, 7200, 5400]
         )
+        # Duration.parse_float's grammar: a fraction with no unit, d and w, blanks, any case.
+        self.assertEqual([cpu_domain.duration(x) for x in ("1.5", "1d", "1w", " 2 H ")], [1.5, 86400, 604800, 7200])
+
+    def test_a_duration_too_large_to_hold_is_a_usage_error(self) -> None:
+        # 400 digits passed the regex and float() gave inf: --wait inf never ran out, so a noisy machine
+        # kept quiet waiting for ever.
+        for text in ("9" * 400, f"{'9' * 400}h"):
+            with self.subTest(digits=len(text)), self.assertRaisesRegex(ValueError, "^not a duration"):
+                cpu_domain.duration(text)
+        with self.assertRaisesRegex(ValueError, "^not a duration"):
+            cpu_domain.quiet_args(["--wait", "9" * 400], {})
 
     def test_command_line_dispatch(self) -> None:
         r = subprocess.run(
@@ -1156,6 +1169,7 @@ class QuietNumbersTest(unittest.TestCase):
         )
         self.assertEqual((seconds, wait, as_json, limits["io-pressure"], limits["writes"]), (1, 120.0, True, 2.5, 40.0))
         self.assertEqual(q(["--for", "12", "--cpu", "3"], {})[0], 12)
+        self.assertEqual(q(["--for", str(sys.maxsize - 1)], {})[0], cpu_domain.MAX_WINDOW_SECONDS)
         for argv in (
             ["--for"],
             ["--for", "0"],
@@ -1169,6 +1183,35 @@ class QuietNumbersTest(unittest.TestCase):
                 q(argv, {})
         with self.assertRaises(ValueError):
             q([], {"QUIET_CPU_PCT": "-1"})
+        # ASCII digits only: an Arabic-Indic "3" was 3 seconds (or minutes), and 5000 digits reached int()'s
+        # own "Exceeds the limit" error instead of --for's message.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        for argv, message in (
+            (["--for", three], "^--for: a whole number"),
+            (["--for", "1" * 5000], "^--for: a whole number"),
+            # Above sys.maxsize, deque(maxlen=SECONDS + 1) raised OverflowError: a traceback, not exit 2.
+            (["--for", "9" * 20], "^--for: a whole number"),
+            (["--for", str(sys.maxsize)], "^--for: a whole number"),
+            (["--for", "1", "--wait", f"{three}m"], "^not a duration"),
+            (["--for", "1", "--wait", f"1.{three}h"], "^not a duration"),
+        ):
+            with self.subTest(argv=[a[:10] for a in argv]), self.assertRaisesRegex(ValueError, message):
+                q(argv, {})
+
+    def test_quiet_limits_take_ascii_numbers_only(self) -> None:
+        # float() took an Arabic-Indic "3" as 3.0, Unicode blanks and 1_0, where --for and --wait refuse them.
+        q = cpu_domain.quiet_args
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        for text in (three, f"1.{three}", "1_0", "\N{NO-BREAK SPACE}3", "\N{SUPERSCRIPT TWO}", "nan", "inf", "9e999"):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "^--cpu: a number above 0"):
+                    q(["--cpu", text], {})
+                with self.assertRaisesRegex(ValueError, "^QUIET_CPU_PCT: a number above 0"):
+                    q([], {"QUIET_CPU_PCT": text})
+        for text, value in (("3", 3.0), ("2.5", 2.5), (".5", 0.5), ("5.", 5.0), ("1e1", 10.0), (" 3\t", 3.0)):
+            with self.subTest(text=text):
+                self.assertEqual(q(["--cpu", text], {})[3]["cpu"], value)
+                self.assertEqual(q([], {"QUIET_CPU_PCT": text})[3]["cpu"], value)
 
     def test_busy_pct(self) -> None:
         window: list[cpu_domain.Readings] = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]

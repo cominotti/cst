@@ -14,14 +14,14 @@ from enum import StrEnum
 from itertools import islice
 import posixpath
 import re
-from typing import Literal, NamedTuple, NotRequired, TypedDict
+from typing import Final, Literal, NamedTuple, NotRequired, TypedDict
 import xml.etree.ElementTree as ET
 
 from cst_core.domain.contracts import CPU_SETTINGS, StateFormatKey, state_format
 from cst_core.domain.errors import Refused
 from cst_core.domain.libvirt_xml import keep_prefixes
 from cst_core.domain.text import group
-from cst_core.domain.values import HOUR, MINUTE
+from cst_core.domain.values import DomainValidationError, Duration, parse_whole_number
 
 URI = "qemu:///system"
 
@@ -484,11 +484,12 @@ def quiet_tests(window: Sequence[QuietSample], limits: Mapping[str, float]) -> l
 
 
 def duration(text: str) -> float:
-    """Seconds from 120, 90s, 30m or 2h."""
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text.strip())
-    if not m or float(m.group(1)) <= 0:
-        raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)")
-    return float(m.group(1)) * {"": 1, "s": 1, "m": MINUTE, "h": HOUR}[m.group(2)]
+    """Seconds from 120, 1.5, 90s, 30m, 2h, 1d or 1w (Duration.parse_float: ASCII digits, above 0 and
+    finite); ValueError with --wait's message for anything else."""
+    try:
+        return Duration.parse_float(text, allow_unitless=True, positive_only=True)
+    except DomainValidationError:
+        raise ValueError(f"not a duration: {text!r} (examples: 120, 90s, 30m, 2h)") from None
 
 
 def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, float | None, bool, dict[str, float]]:
@@ -526,21 +527,30 @@ def quiet_args(argv: Sequence[str], environ: Mapping[str, str]) -> tuple[int, fl
     return seconds, wait, as_json, limits
 
 
+# The longest --for window: quiet keeps SECONDS + 1 readings in a deque, whose maxlen is at most
+# sys.maxsize (2**63 - 1 on the 64-bit machines CST runs on; domain code does not read sys).
+MAX_WINDOW_SECONDS: Final = (1 << 63) - 2
+
+
 def _window_seconds(val: str) -> int:
-    """--for's value: a whole number of seconds, at least 1; ValueError for anything else."""
-    if not re.fullmatch(r"\d+", val) or int(val) < 1:
-        raise ValueError(f"--for: a whole number of seconds, at least 1 (got {val!r})")
-    return int(val)
+    """--for's value: a whole number of seconds, from 1 to MAX_WINDOW_SECONDS; ValueError for anything else."""
+    seconds = parse_whole_number(val)  # ASCII digits within int()'s digit limit
+    if seconds is None or not 1 <= seconds <= MAX_WINDOW_SECONDS:
+        raise ValueError(f"--for: a whole number of seconds, from 1 to {MAX_WINDOW_SECONDS} (got {val!r})")
+    return seconds
+
+
+# A limit's number: ASCII digits, a fraction and an exponent allowed, blanks around it (float() alone also
+# took every Unicode digit, Unicode blanks and 1_0).
+_LIMIT_NUMBER: Final = re.compile(r"[ \t]*(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?[ \t]*")
 
 
 def positive(text: str, what: str) -> float:
-    """TEXT as a finite number above 0, or ValueError naming WHAT."""
-    try:
+    """TEXT as a finite number above 0 (_LIMIT_NUMBER), or ValueError naming WHAT."""
+    if _LIMIT_NUMBER.fullmatch(text):
         v = float(text)
         if 0 < v < float("inf"):
             return v
-    except ValueError:
-        pass
     raise ValueError(f"{what}: a number above 0 (got {text!r})")
 
 

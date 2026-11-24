@@ -1060,6 +1060,32 @@ class BtrfsTest(Scratch):
             "WARN   btrfs /var: little unallocated space per device: at most /dev/mapper/luks-0 26.0 GiB", r.stdout
         )
 
+    def test_a_statfs_number_of_other_than_ascii_digits_is_not_read(self) -> None:
+        # isdigit() takes these: int() refused "²" (a traceback) and read "٣" as 3.
+        for statfs in ("4096 \N{SUPERSCRIPT TWO}\n", "\N{ARABIC-INDIC DIGIT THREE} 10\n", f"4096 {'1' * 5000}\n"):
+            with self.subTest(statfs=statfs[:12]):
+                self.fs()
+                with open(self.env["FIX_STATFS"], "w", encoding="utf-8") as f:
+                    f.write(statfs)
+                r = self.run_tool()
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn("not estimated: the filesystem size could not be read (stat -f /var)", r.stdout)
+
+    def test_read_int_takes_ascii_digits_only(self) -> None:
+        host = doc_adapters.Host(self.env, repo=REPO)
+        path = os.path.join(self.tmp, "value")
+        for text, want in (
+            ("42\n", 42),
+            ("\N{SUPERSCRIPT TWO}\n", None),
+            ("\N{ARABIC-INDIC DIGIT THREE}\n", None),
+            ("-1\n", None),
+            ("", None),
+        ):
+            with self.subTest(text=text):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                self.assertEqual(doc_btrfs.read_int(host, doc_domain.ViewPath(path)), want)
+
     def test_statfs_rounding_is_not_a_shrink(self) -> None:
         self.fs()
         with open(self.env["FIX_STATFS"], "w") as f:

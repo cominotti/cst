@@ -35,7 +35,7 @@ from btrfs.cache.domain import parse_all_mounts
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import YES_WORDS, ShellAssignments, group, parse_shell_assignments, unescape_mount_field
-from cst_core.domain.values import GIB, format_bytes_gib_mib
+from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
 from doctor.application.cpu import unit_props
 from doctor.application.shared import (
     check,
@@ -127,7 +127,7 @@ def read_int(host: DoctorHostPort, path: ViewPath) -> int | None:
             v = f.read(64).strip()
     except OSError:
         return None
-    return int(v) if v.isdigit() else None
+    return parse_whole_number(v)  # ASCII digits only: "²" or "٣" in a sysfs file is no number
 
 
 def btrfs_mounts(host: DoctorHostPort) -> dict[str, list[str]]:
@@ -179,10 +179,12 @@ def btrfs_device_bytes(host: DoctorHostPort, mnt: str, profiles: Mapping[str, Ma
     if not mnt or factor is None:
         return None
     rc, out, _ = host.run(["stat", "-f", "-c", "%S %b", mnt], timeout=15)
-    f = out.split() if rc == 0 else []
-    if len(f) != 2 or not all(x.isdigit() for x in f):
-        return None
-    return int(f[0]) * int(f[1]) * factor
+    fields = out.split() if rc == 0 else []
+    match [parse_whole_number(x) for x in fields]:  # ASCII digits only
+        case [int() as block, int() as blocks]:
+            return block * blocks * factor
+        case _:
+            return None
 
 
 def btrfs_devices(host: DoctorHostPort, base: ViewPath) -> tuple[list[tuple[str, str, int]], str]:
