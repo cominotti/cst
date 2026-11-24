@@ -8200,8 +8200,8 @@ STUB
         rec = "/var/lib/cst/installed.json"
         if exec_bash(c, f"for f in {conf} {dropin} {unit_file}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf, 10-cst-limit.conf or the scrub unit already exists (another test's)")
-        # The installer writes the drop-in with --component btrfs:core (pending in root's record): the
-        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        # The installer writes the drop-in's line into root's record (--component btrfs:core --keep-state):
+        # the record goes back as it was, so a later test in this container finds it as before.
         exec_bash(c, f"rm -f /var/tmp/e2e-161-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-161-rec; fi")
         self.addCleanup(
             exec_bash,
@@ -8342,8 +8342,8 @@ EOF
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
-        # The second set writes the drop-in with --component btrfs:core (pending in root's record): the
-        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        # The second set writes the drop-in's line into root's record (--component btrfs:core --keep-state):
+        # the record goes back as it was, so a later test in this container finds it as before.
         exec_bash(c, f"rm -f /var/tmp/e2e-162-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-162-rec; fi")
         self.addCleanup(
             exec_bash,
