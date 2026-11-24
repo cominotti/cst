@@ -173,6 +173,16 @@ class ShardingTest(unittest.TestCase):
         for bad in ("0/3", "4/3", "1/0", "2", "1/2/3", "a/b"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_shard(bad)
+        # isdigit() takes these: int() refused "²" with its own message, read Arabic-Indic "1/3" as 1/3, and refused
+        # 5000 digits ("Exceeds the limit"). Each is the --shard message now.
+        for bad in (
+            "\N{SUPERSCRIPT TWO}/3",
+            "\N{ARABIC-INDIC DIGIT ONE}/\N{ARABIC-INDIC DIGIT THREE}",
+            "1" * 5000 + "/3",
+            "-1/3",
+        ):
+            with self.subTest(bad=bad[:10]), self.assertRaisesRegex(ValueError, "^invalid --shard "):
+                parse_shard(bad)
 
         self.assertEqual(default_tier1_jobs(4, cpu_count=24), 1)
         self.assertEqual(default_tier1_jobs(75, cpu_count=24), 4)

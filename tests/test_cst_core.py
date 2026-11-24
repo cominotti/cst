@@ -116,6 +116,31 @@ class ValueObjectsTest(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             ByteSize.parse_iec("150")
 
+    def test_sizes_and_durations_are_ascii(self) -> None:
+        # \d matched every Unicode decimal digit, \s every Unicode blank, and IGNORECASE folded the long s
+        # (U+017F) to "s": systemd and bash read ASCII only.
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        for spec in (f"{three}G", "48G\N{NO-BREAK SPACE}", f"1{three}M"):
+            with self.subTest(spec=spec):
+                self.assertIsNone(ByteSize.parse(spec))
+        for spec in (f"{three}G", "1\N{KELVIN SIGN}", "\N{NO-BREAK SPACE}150G", f"0{three}"):
+            with self.subTest(spec=spec), self.assertRaisesRegex(DomainValidationError, "is not a size"):
+                ByteSize.parse_iec(spec)
+        for spec in (f"{three}m", "3\N{LATIN SMALL LETTER LONG S}", "3m\N{NO-BREAK SPACE}"):
+            with self.subTest(spec=spec), self.assertRaises(DomainValidationError):
+                Duration.parse(spec)
+        for spec in (f"{three}m", "3\N{LATIN SMALL LETTER LONG S}", f"1.{three}h"):
+            with self.subTest(spec=spec), self.assertRaises(DomainValidationError):
+                Duration.parse_float(spec)
+            with self.subTest(spec=spec, allow_unitless=True), self.assertRaises(DomainValidationError):
+                Duration.parse_float(spec, allow_unitless=True)
+        # The ASCII forms, any case and ASCII blanks, are unchanged.
+        self.assertEqual(ByteSize.parse(" 48G\t"), ByteSize(48 * 2**30))
+        self.assertEqual(ByteSize.parse_iec(" 1.5 GiB "), ByteSize(int(1.5 * 2**30)))
+        self.assertEqual(ByteSize.parse_iec("OFF"), ByteSize(0))
+        self.assertEqual(Duration.parse_float("3S"), 3.0)
+        self.assertEqual(Duration.parse(" 2h "), Duration(7200))
+
     def test_a_whole_number_is_ascii_digits_only(self) -> None:
         for text, want in (("0", 0), ("060", 60), ("300", 300)):
             with self.subTest(text=text):

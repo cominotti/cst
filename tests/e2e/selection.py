@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 """Selection helpers and domain tags for Docker E2E suites.
 
-Standard library only.
+Standard library and cst_core.domain.values only: CI runs this file on its
+runner's python3, 3.12 (tests/e2e/README.md, "The Python that runs these
+files").
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import fnmatch
 import os
 from typing import Final
 import unittest
+
+from cst_core.domain.values import parse_whole_number
 
 
 class E2ETag(StrEnum):
@@ -208,13 +212,14 @@ HOST_EXCLUSIVE_TESTS: Final[frozenset[str]] = frozenset({"test_10_cpu_quiet_read
 
 def parse_shard(raw: str) -> ShardSpec:
     """Parse an `I/N` shard specification (1 <= I <= N)."""
-    parts = raw.strip().split("/")
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
-        raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
-    index, total = int(parts[0]), int(parts[1])
-    if total < 1 or index < 1 or index > total:
-        raise ValueError(f"invalid --shard {raw!r} (expected 1 <= I <= N)")
-    return ShardSpec(index=index, total=total)
+    # ASCII digits only: a superscript or an Arabic-Indic digit is no number.
+    match [parse_whole_number(p) for p in raw.strip().split("/")]:
+        case [int() as index, int() as total] if 1 <= index <= total:
+            return ShardSpec(index=index, total=total)
+        case [int(), int()]:
+            raise ValueError(f"invalid --shard {raw!r} (expected 1 <= I <= N)")
+        case _:
+            raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
 
 
 def case_weight(case: unittest.TestCase, weights: Mapping[str, int] = TIER1_WEIGHTS) -> int:

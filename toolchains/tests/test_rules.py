@@ -1282,11 +1282,21 @@ class SccacheConfigTest(RulesBase):
         self.assertEqual(p("1.5G"), "1536M")
         self.assertEqual(p("2T"), "2T")
         self.assertEqual(p("100K"), "100K")
-        for bad in ("0", "off", "25"):
+        # An Arabic-Indic "40G" was written into the wrapper as 40G; it is a bad setting now.
+        arabic_40g = "\N{ARABIC-INDIC DIGIT FOUR}\N{ARABIC-INDIC DIGIT ZERO}G"
+        for bad in ("0", "off", "25", arabic_40g):
             with self.assertRaises(tcd_common.ConfigError, msg=bad):
                 p(bad)
         self.write_conf_raw("RUST_SCCACHE_CACHE_SIZE=0\n")
         _rc, _out = self.run_main("config", "plan", "--sccache")
+        self.assertIn("BAD SETTINGS", self.run_main("status")[1])
+        # As with any bad settings file, apply notes it and writes the defaults (25G), never 40G.
+        self.write_conf_raw(f"RUST_SCCACHE=yes\nRUST_SCCACHE_CACHE_SIZE={arabic_40g}\n")
+        _rc, out = self.run_main("config", "apply", "--sccache")
+        self.assertIn("BAD SETTINGS", out)
+        self.assertIn("RUST_SCCACHE_CACHE_SIZE", out)
+        self.assertIn("(sccache wrapper, cache size 25G)", out)
+        self.assertNotIn("40G", self.wrapper_file())
         self.assertIn("BAD SETTINGS", self.run_main("status")[1])
 
     def test_parse_args(self) -> None:

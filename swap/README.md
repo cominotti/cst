@@ -244,7 +244,11 @@ drop-in to a live `session.slice`. What the file asks is `[ActiveUser]
 MemoryMin` for each user with a session in a seat's foreground (logind's
 `/run/systemd/seats`, `ACTIVE_UID`; one user in front of two seats counts
 once), capped in total by `[Global] MaxMemoryMin`, as uresourced computes it.
-A greeter (the login screen, a uid below 1000) is no such user.
+A greeter (the login screen, a uid below 1000) is no such user; an
+`ACTIVE_UID` of other than ASCII digits (0-9) is no uid, so it counts as a user,
+as a seat without one does. A cgroup value (`memory.min`, `memory.low`,
+`memory.swap.current`) of other than ASCII digits is shown as it is and is no
+match.
 `user.slice memory.min` is inactive (`-`), not a difference, when uresourced
 is not active, and when it reads 0 while no such user is in front of a seat (a
 server, an ssh login, the login screen), since uresourced then protects nobody.

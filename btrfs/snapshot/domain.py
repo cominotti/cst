@@ -19,7 +19,7 @@ import datetime as dt
 import os
 import re
 from cst_core.domain.errors import Usage
-from cst_core.domain.values import DAY, HOUR
+from cst_core.domain.values import DAY, HOUR, parse_whole_number
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_BUSY, EXIT_REFUSED = 0, 1, 2, 3, 4
 DEFAULT_LOCK = "/run/btrfs-snapshot.lock"
@@ -449,14 +449,17 @@ def parse_subvolume_show(text: str) -> SubvolInfo:
         raise ParseError(f"bad UUID {found['uuid']!r}")
     if found["parent_uuid"] != "-" and not UUID_RE.fullmatch(found["parent_uuid"]):
         raise ParseError(f"bad Parent UUID {found['parent_uuid']!r}")
+    numbers: dict[str, int] = {}
     for key in ("generation", "cgen"):
-        if not found[key].isdigit():
+        number = parse_whole_number(found[key])  # ASCII digits only: "²" or "٣" is no generation
+        if number is None:
             raise ParseError(f"bad {key} {found[key]!r}")
+        numbers[key] = number
     return {
         "uuid": found["uuid"],
         "parent_uuid": None if found["parent_uuid"] == "-" else found["parent_uuid"],
-        "generation": int(found["generation"]),
-        "cgen": int(found["cgen"]),
+        "generation": numbers["generation"],
+        "cgen": numbers["cgen"],
     }
 
 
@@ -556,19 +559,20 @@ class LastRun:
 
 
 def parse_state(text: str) -> LastRun | None:
-    """'EPOCH [BOOT_ID BOOTTIME]' -> LastRun, or None if malformed."""
+    """'EPOCH [BOOT_ID BOOTTIME]' -> LastRun, or None if malformed (an EPOCH of other than ASCII digits too)."""
     parts = text.split()
-    if not parts or not parts[0].isdigit():
+    epoch = parse_whole_number(parts[0]) if parts else None
+    if epoch is None:
         return None
     if len(parts) == 1:
-        return LastRun(int(parts[0]))
+        return LastRun(epoch)
     if len(parts) != 3 or not UUID_RE.fullmatch(parts[1]):
         return None
     try:
         boottime = float(parts[2])
     except ValueError:
         return None
-    return LastRun(int(parts[0]), parts[1], boottime)
+    return LastRun(epoch, parts[1], boottime)
 
 
 def fmt_span(seconds: float) -> str:

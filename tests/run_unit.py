@@ -145,6 +145,7 @@ GATE_MODULES: Final = (
     "tests.test_distribution",
     "tests.test_docs",
     "tests.test_duplication",
+    "tests.test_e2e_host_python",
     "tests.test_entrypoints",
     "tests.test_fix_budgets",
     "tests.test_license_headers",

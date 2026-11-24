@@ -281,6 +281,14 @@ repository:
   group (`==0.17.5`): a different ruff that reads `pyproject.toml` (an
   editor's, one on `PATH`) refuses to run instead of linting or formatting
   by other rules. `tests/test_python_files.py` fails when the two differ.
+- **`[tool.ruff] per-file-target-version`**: the files CI runs on its
+  ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
+  and what they import) are formatted and linted as Python 3.12 (`py312`),
+  not as `requires-python`'s 3.15: `ruff format` would otherwise write
+  `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
+  error in them. `tests/test_e2e_host_python.py` finds that set from the
+  code and fails when a file of it has no `py312` entry
+  ([tests/e2e/README.md](../tests/e2e/README.md#the-python-that-runs-these-files)).
 - **`[tool.ruff.lint] typing-extensions = false`**: no ruff rule suggests,
   and no fix writes, an import from the third-party `typing_extensions`
   (by default ruff falls back to it for names newer than the target
