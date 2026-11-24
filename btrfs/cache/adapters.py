@@ -327,12 +327,17 @@ def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _Cac
         write_atomic(fstab_path, new_text, mode=_FSTAB_MODE)
     except OSError as exc:
         return _FstabFailure(f"cannot write {FSTAB_PATH}: {exc.strerror or exc}")
-    res = SystemctlAdapter(rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
-    if res.returncode == 0:
+    why = _reload_systemd(rt)
+    if why is None:
         return None
-    why = res.failure("systemctl daemon-reload")
     put_back = _put_fstab_back(fstab_path, previous)
     return _FstabFailure(why, () if put_back is None else (put_back,))
+
+
+def _reload_systemd(rt: _CacheMountRuntime) -> str | None:
+    """systemctl daemon-reload; None, or why it failed."""
+    res = SystemctlAdapter(rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+    return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
 
 
 def _put_fstab_back(fstab_path: str, previous: str | None) -> str | None:
@@ -349,11 +354,8 @@ def _put_fstab_back(fstab_path: str, previous: str | None) -> str | None:
 
 def _restore_fstab(fstab_path: str, previous: str | None, rt: _CacheMountRuntime) -> list[str]:
     """Put /etc/fstab back as it was and reload systemd; what of it failed."""
-    put_back = _put_fstab_back(fstab_path, previous)
-    if put_back is not None:
-        return [put_back]
-    res = SystemctlAdapter(rt.runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
-    return [] if res.returncode == 0 else [res.failure("systemctl daemon-reload")]
+    failed = _put_fstab_back(fstab_path, previous) or _reload_systemd(rt)
+    return [] if failed is None else [failed]
 
 
 def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
@@ -414,19 +416,14 @@ def _unbind_cst_mounts(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> tupl
 
 
 def _commit_fstab_or_undo(
-    snap: CacheMountSnapshot,
-    new_fstab: str,
-    rt: _CacheMountRuntime,
-    done: Sequence[CacheMountBinding],
-    *,
-    mounted: bool,
+    snap: CacheMountSnapshot, new_fstab: str, rt: _CacheMountRuntime, mounted: Sequence[CacheMountBinding]
 ) -> str | None:
-    """Write /etc/fstab and reload systemd; on a failure, take back this run's binds (done) and give
+    """Write /etc/fstab and reload systemd; on a failure, unmount the binds this run mounted and give
     the ERROR line."""
     failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
     if failed is None:
         return None
-    undo_errors = [*_undo(rt, done, mounted=mounted), *failed.undo_errors]
+    undo_errors = [*_undo(rt, mounted, mounted=True), *failed.undo_errors]
     return _error_after_undo(failed.cause, undo_errors)
 
 
@@ -452,7 +449,7 @@ def _apply_attach(
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_attach_fstab(cur_fstab, [p.binding for p in snap.bindings])
     if new_fstab != cur_fstab:
-        error = _commit_fstab_or_undo(snap, new_fstab, rt, mounted, mounted=True)
+        error = _commit_fstab_or_undo(snap, new_fstab, rt, mounted)
         if error is not None:
             return 1, [*lines, error]
     lines.extend(f"Mounted {b.source} -> {b.target}." for b in mounted)
