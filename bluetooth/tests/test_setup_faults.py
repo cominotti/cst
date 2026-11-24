@@ -78,7 +78,6 @@ UNITS = (BLUETOOTH_SERVICE, WIREPLUMBER_SERVICE)
 VENDOR = "[General]\n#Experimental = false\n"
 SAVE = "record save"
 SCRATCH = "write_user_file tmp."  # the scratch copy of main.conf every run writes (mktemp's file)
-FILE_POINTS = ("sudo mv", "write_user_file", "remove_file", "copy")  # the changes a service reads
 APPLY, REVERT = ("apply", "--yes"), ("revert", "--yes")
 
 
