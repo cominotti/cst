@@ -48,7 +48,6 @@ from btrfs.docker_volumes_nocow.domain import (
     NocowPaths,
     PostponedRecord,
     TreeScan,
-    oldest_first,
 )
 from btrfs.tests.fakes import entries, tree
 from btrfs.tests.test_docker_volumes_nocow import Base, fresh
@@ -69,6 +68,17 @@ from tests.fault_injection import (
 # Small volumes: the protocol is the same with 4 KiB as with 2 MiB, and each case builds them anew.
 SMALL = {"db/base/1": b"\x01" * 4096, "db/base/empty": b"", "README": b"hello volume\n"}
 VOLUMES = ("a", "b")
+OLD_COPY_PREFIX = "_data" + OLD_MARK
+
+
+def newest_old_copy(names: list[str]) -> str | None:
+    """The newest of a volume folder's old copies (_data.cow-old-N): the one with the highest N,
+    parsed here and not with production's oldest_first, so an ordering bug there cannot change what
+    the suite expects; None without one. The helper only makes names with a number."""
+    olds = {int(x.removeprefix(OLD_COPY_PREFIX)): x for x in names if x.startswith(OLD_COPY_PREFIX)}
+    return olds[max(olds)] if olds else None
+
+
 # The cases each class runs (a change of the protocol's calls moves them: pinned so it is seen).
 CASES_MIGRATION_KILL = 67  # 25 first faults, 42 with a second fault in recover()
 CASES_MIGRATION_FAIL = 55  # 25 and 30
@@ -216,12 +226,13 @@ class NocowFaultBase(Base):
         for name in VOLUMES:
             vol = os.path.join(self.vols, name)
             data = os.path.join(vol, "_data")
-            olds = oldest_first(x for x in os.listdir(vol) if x.startswith("_data" + OLD_MARK))
             if os.path.lexists(data):
                 self.assertEqual(tree(data), self.before[name], f"{when}: {name}/_data is not the original")
             else:
-                self.assertTrue(olds, f"{when}: {name} lost its data: {sorted(os.listdir(vol))}")
-                self.assertEqual(tree(os.path.join(vol, olds[-1])), self.before[name], f"{when}: {name} old copy")
+                newest = newest_old_copy(os.listdir(vol))
+                if newest is None:
+                    self.fail(f"{when}: {name} lost its data: {sorted(os.listdir(vol))}")
+                self.assertEqual(tree(os.path.join(vol, newest)), self.before[name], f"{when}: {name} old copy")
         if request_kept and self.fs.nocow(self.vols) and any(self.cow_data(n) for n in VOLUMES):
             self.assertTrue(os.path.exists(self.flag), f"{when}: +C on the volumes folder, CoW data left, no flag")
 
