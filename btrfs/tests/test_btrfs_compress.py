@@ -405,6 +405,8 @@ class DomainTests(unittest.TestCase):
 
 
 OTHER_UUID = "0b5e6a1d-0000-4000-8000-00000000cafe"
+# A separate btrfs filesystem mounted at /var, not the root's.
+VAR_UUID = "0b5e6a1d-0000-4000-8000-00000000beef"
 # A separate btrfs filesystem mounted at /var/home (dm-1), next to the root filesystem (dm-0).
 SEPARATE_HOME_LINE = f"UUID={OTHER_UUID} /var/home       btrfs   subvol=home,compress=zstd:3,noatime 0 0\n"
 SEPARATE_HOME_FSTAB = "".join(
@@ -894,36 +896,20 @@ class AdapterAndCliTests(unittest.TestCase):
         self.assertIn("compress=zstd:1", top_text)
         self.assertNotIn("compress-force", top_text)
 
-    def _per_target_adapter(self, uuids: dict[str, str]) -> LinuxCompressHostAdapter:
-        cfg = CompressAdapterConfig(
-            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
-            fallback_root=REPO,
-            proc_dir=os.path.join(self.tmp, "proc"),
-            host_root=self.tmp,
-        )
-        return LinuxCompressHostAdapter(
-            cfg,
-            ctx=_FakeCtx(root=True, host_root=self.tmp),
-            runner=_PerTargetRunner(self.tmp, uuids),
-            fs=LocalFileSystemAdapter(),
-        )
-
     def test_the_root_uuid_is_sysroot_s_else_root_s_else_var_s(self) -> None:
         # The order of cst doctor and btrfs-setup: a separate btrfs /var is not the root.
-        var_uuid = "0b5e6a1d-0000-4000-8000-00000000beef"
         cases = (
-            ({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": var_uuid}, SAMPLE_UUID),
-            ({"/": "uuid-root", "/var": var_uuid}, "uuid-root"),
-            ({"/var": var_uuid}, var_uuid),
+            ({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": VAR_UUID}, SAMPLE_UUID),
+            ({"/": "uuid-root", "/var": VAR_UUID}, "uuid-root"),
+            ({"/var": VAR_UUID}, VAR_UUID),
             ({}, SAMPLE_UUID),  # no btrfs at any of them: the top mount unit's What=
         )
         for uuids, expected in cases:
             with self.subTest(uuids=uuids):
-                self.assertEqual(self._per_target_adapter(uuids).root_uuid(), expected)
+                self.assertEqual(self._adapter(_PerTargetRunner(self.tmp, uuids)).root_uuid(), expected)
 
     def test_apply_with_a_separate_btrfs_var_changes_only_the_root_s_lines(self) -> None:
-        var_uuid = "0b5e6a1d-0000-4000-8000-00000000beef"
-        var_line = f"UUID={var_uuid} /var btrfs subvol=var,compress=zstd:3,noatime 0 0\n"
+        var_line = f"UUID={VAR_UUID} /var btrfs subvol=var,compress=zstd:3,noatime 0 0\n"
         fstab = "".join(var_line if " /var " in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True))
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
             fh.write(fstab)
@@ -934,7 +920,9 @@ class AdapterAndCliTests(unittest.TestCase):
                     "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var",
                 )
             )
-        adapter = self._per_target_adapter({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": var_uuid})
+        adapter = self._adapter(
+            _PerTargetRunner(self.tmp, {"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": VAR_UUID})
+        )
         out, err = io.StringIO(), io.StringIO()
         rc = render_compress_change(
             CompressService(adapter).execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err
@@ -948,7 +936,7 @@ class AdapterAndCliTests(unittest.TestCase):
 
     # update_top_mount: a failure while installing puts the previous unit back only when the unit on
     # disk changed, and is raised either way.
-    def _adapter(self) -> LinuxCompressHostAdapter:
+    def _adapter(self, runner: _RecordingRunner | None = None) -> LinuxCompressHostAdapter:
         cfg = CompressAdapterConfig(
             entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
             fallback_root=REPO,
@@ -958,7 +946,7 @@ class AdapterAndCliTests(unittest.TestCase):
         return LinuxCompressHostAdapter(
             cfg,
             ctx=_FakeCtx(root=True, host_root=self.tmp),
-            runner=_RecordingRunner(self.tmp),
+            runner=runner or _RecordingRunner(self.tmp),
             fs=LocalFileSystemAdapter(),
         )
 
