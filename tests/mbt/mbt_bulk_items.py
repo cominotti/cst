@@ -73,7 +73,7 @@ ITEM_IDS: Final = ("apps", "jetbrains", "avd", "iso")
 MAX_POINT: Final = 20
 
 
-class Shape(StrEnum):
+class BulkStartShape(StrEnum):
     """An item's shape at the start."""
 
     ABSENT = "absent"
@@ -87,28 +87,40 @@ class Shape(StrEnum):
 
 # The shapes that leave a move to make come first, and twice as often: a start with nothing to
 # move leaves the faults nothing to cut.
-SHAPES: Final[Mapping[str, tuple[Shape, ...]]] = {
-    "apps": (Shape.DATA, Shape.DATA, Shape.ABSENT, Shape.EMPTY, Shape.IN_PLACE),
-    "jetbrains": (Shape.DATA, Shape.DATA, Shape.ABSENT, Shape.EMPTY, Shape.IN_PLACE),
+SHAPES: Final[Mapping[str, tuple[BulkStartShape, ...]]] = {
+    "apps": (
+        BulkStartShape.DATA,
+        BulkStartShape.DATA,
+        BulkStartShape.ABSENT,
+        BulkStartShape.EMPTY,
+        BulkStartShape.IN_PLACE,
+    ),
+    "jetbrains": (
+        BulkStartShape.DATA,
+        BulkStartShape.DATA,
+        BulkStartShape.ABSENT,
+        BulkStartShape.EMPTY,
+        BulkStartShape.IN_PLACE,
+    ),
     "avd": (
-        Shape.DATA,
-        Shape.IN_PLACE_COW,
-        Shape.DATA,
-        Shape.IN_PLACE_COW,
-        Shape.ABSENT,
-        Shape.EMPTY,
-        Shape.IN_PLACE,
-        Shape.BOTH,
+        BulkStartShape.DATA,
+        BulkStartShape.IN_PLACE_COW,
+        BulkStartShape.DATA,
+        BulkStartShape.IN_PLACE_COW,
+        BulkStartShape.ABSENT,
+        BulkStartShape.EMPTY,
+        BulkStartShape.IN_PLACE,
+        BulkStartShape.BOTH,
     ),
     "iso": (
-        Shape.SUBVOLUME,
-        Shape.DATA,
-        Shape.SUBVOLUME,
-        Shape.DATA,
-        Shape.ABSENT,
-        Shape.EMPTY,
-        Shape.IN_PLACE,
-        Shape.BOTH,
+        BulkStartShape.SUBVOLUME,
+        BulkStartShape.DATA,
+        BulkStartShape.SUBVOLUME,
+        BulkStartShape.DATA,
+        BulkStartShape.ABSENT,
+        BulkStartShape.EMPTY,
+        BulkStartShape.IN_PLACE,
+        BulkStartShape.BOTH,
     ),
 }
 # What the start puts in an item's folder (avd: files only, no subfolder).
@@ -173,7 +185,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
         shapes=st.tuples(*(st.sampled_from(SHAPES[i]) for i in ITEM_IDS)),
         keep=st.sets(item_ids, max_size=1),
     )
-    def start(self, *, bulk: bool, shapes: tuple[Shape, ...], keep: set[str]) -> None:
+    def start(self, *, bulk: bool, shapes: tuple[BulkStartShape, ...], keep: set[str]) -> None:
         fx = self.fx
         use_tick_clock(fx)
         for ident in ITEM_IDS:
@@ -184,11 +196,11 @@ class BulkItemsMachine(RuleBasedStateMachine):
         chosen = dict(zip(ITEM_IDS, shapes, strict=True))
         for ident in ITEM_IDS:
             shape = chosen[ident]
-            in_place = shape in {Shape.IN_PLACE, Shape.IN_PLACE_COW}
-            if in_place and (not bulk or (ident == "jetbrains" and chosen["apps"] != Shape.IN_PLACE)):
-                shape = Shape.ABSENT
-            if shape == Shape.BOTH and not bulk:
-                shape = Shape.DATA
+            in_place = shape in {BulkStartShape.IN_PLACE, BulkStartShape.IN_PLACE_COW}
+            if in_place and (not bulk or (ident == "jetbrains" and chosen["apps"] != BulkStartShape.IN_PLACE)):
+                shape = BulkStartShape.ABSENT
+            if shape == BulkStartShape.BOTH and not bulk:
+                shape = BulkStartShape.DATA
             chosen[ident] = shape
             self.make(ident, shape)
         if keep:
@@ -197,33 +209,33 @@ class BulkItemsMachine(RuleBasedStateMachine):
         tick_wait(fx.tmp)
         arm_points(fx, self.plan, torn_rmtree=False)
 
-    def make(self, ident: str, shape: Shape) -> None:
+    def make(self, ident: str, shape: BulkStartShape) -> None:
         item, link = BY_ID[ident], self.link(ident)
         files = {rel: f"{ident}:{rel}" for rel in START_FILES[ident]}
         match shape:
-            case Shape.ABSENT:
+            case BulkStartShape.ABSENT:
                 return
-            case Shape.EMPTY:
+            case BulkStartShape.EMPTY:
                 os.mkdir(link)
                 self.fresh(link, nocow=False)
                 return
-            case Shape.BOTH:
+            case BulkStartShape.BOTH:
                 elsewhere = self.fx.user.u_mkdirs(self.fx.ctx.bulk, item.target, item.nocow)
                 self.put_file(elsewhere, "copied", f"{ident}:copied", nocow=item.nocow)
                 self.both.add(ident)
                 os.mkdir(link)
                 self.fresh(link, nocow=False)
                 top, nocow = link, False
-            case Shape.DATA | Shape.SUBVOLUME:
+            case BulkStartShape.DATA | BulkStartShape.SUBVOLUME:
                 os.mkdir(link)
                 self.fresh(link, nocow=False)
-                if shape == Shape.SUBVOLUME:
+                if shape == BulkStartShape.SUBVOLUME:
                     self.fx.subvols.add(inode(link))
                 top, nocow = link, False
-            case Shape.IN_PLACE | Shape.IN_PLACE_COW:
+            case BulkStartShape.IN_PLACE | BulkStartShape.IN_PLACE_COW:
                 top = self.fx.user.u_mkdirs(self.fx.ctx.bulk, item.target, item.nocow)
                 os.symlink(top, link)
-                nocow = shape == Shape.IN_PLACE and item.nocow
+                nocow = shape == BulkStartShape.IN_PLACE and item.nocow
         for rel, data in files.items():
             self.put_file(top, rel, data, nocow=nocow)
         self.model[ident] = files
