@@ -34,8 +34,9 @@ from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_
 from btrfs.cache.domain import parse_all_mounts
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import ShellAssignments, group, parse_shell_assignments, unescape_mount_field
+from cst_core.domain.text import YES_WORDS, ShellAssignments, group, parse_shell_assignments, unescape_mount_field
 from cst_core.domain.values import GIB, format_bytes_gib_mib
+from doctor.application.cpu import unit_props
 from doctor.application.shared import (
     check,
     conf_value,
@@ -517,6 +518,15 @@ def check_scrub_limit(host: DoctorHostPort) -> Iterator[Result]:
             WARN,
             f"weekly scrub: speed limit {installed or 'none'} in the service but {setting or 'none'} in "
             f"SCRUB_LIMIT of {SNAP_CONF}: run `cst btrfs install`",
+        )
+    # NeedDaemonReload yes: a change stopped before its daemon-reload, the scrub runs the limit loaded before.
+    unit = os.path.basename(SCRUB_UNIT)
+    if (unit_props(host, ["systemctl"], unit, ["NeedDaemonReload"]) or {}).get("NeedDaemonReload") in YES_WORDS:
+        yield Result(
+            WARN,
+            f"weekly scrub: systemd has not loaded {unit} as it is on disk (a change stopped before its "
+            "daemon-reload), so the scrub runs with the speed limit systemd loaded before",
+            "sudo systemctl daemon-reload",
         )
     limit = f"{installed} per device" if installed else "none (full speed; SCRUB_LIMIT, btrfs/README.md 4.3)"
     yield Result(INFO, f"weekly scrub: speed limit {limit}; now in sysfs: {live_scrub_limits(host)}")

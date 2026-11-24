@@ -8176,3 +8176,214 @@ STUB
             """,
         ).stdout
         self.assertIn("E2E-CACHE-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
+        """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before
+        its daemon-reload (the files written as that run writes them, through the installer, no reload),
+        with the real systemd: systemd flags the unit (NeedDaemonReload yes, the old ExecStartPre loaded),
+        and the command again, whose files are then "unchanged", exits 0 with the new limit loaded: for a
+        first-ever `set 500M`, a `set 1G` over it and an `off`. A run with nothing pending runs no
+        daemon-reload (a holder unit, changed on disk, keeps its loaded Description). The holder also keeps
+        the scrub unit loaded between the commands, so a `systemctl show` reads what systemd loaded
+        before, not the files afresh. In each flagged state `plan` shows the daemon-reload the command
+        then runs, and `status` and `cst doctor` say systemd has not loaded the drop-in; once loaded, none
+        does. Before,
+        the command again saw both files unchanged, ran no daemon-reload and left the old limit loaded."""
+        c = self.SYSTEMD_CONTAINER
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        holder = "/etc/systemd/system/cst-e2e-161-holder.service"
+        render = "/var/tmp/e2e-161-render.py"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        unit_file = "/etc/systemd/system/btrfs-scrub-weekly.service"
+        rec = "/var/lib/cst/installed.json"
+        if exec_bash(c, f"for f in {conf} {dropin} {unit_file}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf, 10-cst-limit.conf or the scrub unit already exists (another test's)")
+        # The installer writes the drop-in with --component btrfs:core (pending in root's record): the
+        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        exec_bash(c, f"rm -f /var/tmp/e2e-161-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-161-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails (an rmdir of a
+            # folder off already removed), or the rest of the machine stays changed.
+            "set +e; systemctl stop cst-e2e-161-holder.service 2>/dev/null; "
+            f"rm -f {holder} {conf} {dropin} {render} /var/tmp/e2e-161-out; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin}; rm -f {unit_file}; "
+            f"if [[ -e /var/tmp/e2e-161-rec ]]; then mv /var/tmp/e2e-161-rec {rec}; else rm -f {rec}; fi; "
+            "if [[ -e /var/tmp/e2e-161-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-161-made-etc; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            unit=btrfs-scrub-weekly.service
+            show() {{ systemctl show -P "$1" "${{2:-$unit}}"; }}
+            cat >{render} <<'EOF'
+import sys
+sys.path.insert(0, "/opt/cst-rw")
+from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_scrub_limit
+what, limit, conf = sys.argv[1], None if sys.argv[2] == "off" else sys.argv[2], sys.argv[3]
+if what == "dropin":
+    sys.stdout.write(render_scrub_dropin(limit))
+else:
+    try:
+        old = open(conf, encoding="utf-8").read()
+    except FileNotFoundError:
+        old = None
+    new = update_snapshots_conf_scrub_limit(old, limit)
+    open(conf, "w", encoding="utf-8").write(old if new is None else new)
+EOF
+            # What a run killed right after its installer leaves: both files as it writes them, no reload.
+            killed_after_installer() {{
+                /usr/bin/python3 -I -B {render} conf "$1" {conf}
+                if [[ $1 == off ]]; then
+                    {installer} remove-text {dropin} >/dev/null
+                else
+                    /usr/bin/python3 -I -B {render} dropin "$1" {conf} | {installer} text {dropin} 0644 --component btrfs:core >/dev/null
+                fi
+            }}
+            cannot_bite() {{ echo "the test cannot bite: $*" >&2; exit 1; }}
+            again() {{
+                rc=0; /opt/cst-rw/cst btrfs scrub-limit "$@" >/var/tmp/e2e-161-out 2>&1 || rc=$?
+                [[ $rc == 0 ]] || {{ echo "$* exit $rc" >&2; cat /var/tmp/e2e-161-out >&2; exit 1; }}
+                grep -qxF "unchanged: {conf}" /var/tmp/e2e-161-out || {{ cat /var/tmp/e2e-161-out >&2; exit 1; }}
+                if [[ $1 == set ]]; then grep -qxF "unchanged: {dropin}" /var/tmp/e2e-161-out; fi
+            }}
+            limit_loaded() {{ show ExecStartPre | grep -qF "btrfs scrub limit -a -l $1 /var"; }}
+            plan_reloads() {{
+                /opt/cst-rw/cst btrfs scrub-limit plan "$1" \
+                    | grep -qxF "  reload:    $unit (systemd has not loaded it as it is on disk) + systemctl daemon-reload"
+            }}
+            status_behind() {{
+                /opt/cst-rw/cst btrfs scrub-limit status | grep -qF "  systemd: has not loaded $unit as it is on disk"
+            }}
+            doctor_behind() {{
+                {{ env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true; }} \
+                    | grep -qF "WARN   weekly scrub: systemd has not loaded $unit as it is on disk"
+            }}
+            # plan, status and cst doctor in a flagged state say what the command will do; once loaded, nothing.
+            says_behind() {{
+                plan_reloads "$1" || {{ echo "plan $1 does not show the daemon-reload set runs" >&2; exit 1; }}
+                status_behind || {{ echo "status does not say systemd is behind" >&2; exit 1; }}
+                doctor_behind || {{ echo "cst doctor does not warn that systemd is behind" >&2; exit 1; }}
+            }}
+            says_loaded() {{
+                if plan_reloads "$1"; then echo "plan $1 shows a daemon-reload with nothing pending" >&2; exit 1; fi
+                if status_behind; then echo "status says systemd is behind after a reload" >&2; exit 1; fi
+                if doctor_behind; then echo "cst doctor warns that systemd is behind after a reload" >&2; exit 1; fi
+            }}
+
+            cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/$unit
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-161-made-etc
+            install -d -m 0755 /etc/btrfs-setup
+            printf '%s\n' '[Unit]' 'Description=before' "After=$unit" '[Service]' 'Type=oneshot' \
+                'RemainAfterExit=yes' 'ExecStart=/bin/true' >{holder}
+            systemctl daemon-reload
+            systemctl start cst-e2e-161-holder.service
+            [[ "$(show LoadState)" == loaded && -z "$(show ExecStartPre)" ]]
+
+            # 1. A first-ever set 500M killed after its installer (the .service.d folder is new).
+            killed_after_installer 500M
+            [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a new drop-in"
+            [[ -z "$(show ExecStartPre)" ]] || cannot_bite "a drop-in loaded without a reload"
+            says_behind 500M
+            again set 500M
+            limit_loaded 500M || {{ echo "set 500M again: systemd did not load the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
+            [[ "$(show NeedDaemonReload)" == no ]]
+            says_loaded 500M
+
+            # 2. A set 1G over it, killed after its installer (the drop-in rewritten).
+            killed_after_installer 1G
+            [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a rewritten drop-in"
+            limit_loaded 500M || cannot_bite "the 1G drop-in loaded without a reload"
+            says_behind 1G
+            again set 1G
+            limit_loaded 1G || {{ echo "set 1G again: systemd did not load the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
+            says_loaded 1G
+
+            # 3. Nothing pending: no daemon-reload (the holder's Description, changed on disk, stays as loaded).
+            sed -i 's/^Description=before$/Description=after/' {holder}
+            [[ "$(show NeedDaemonReload cst-e2e-161-holder.service)" == yes ]] || cannot_bite "the holder's change is not seen"
+            plan_out="$(/opt/cst-rw/cst btrfs scrub-limit plan 1G)"
+            if grep -q '^  reload:' <<<"$plan_out"; then echo "plan 1G shows a reload with nothing pending" >&2; echo "$plan_out" >&2; exit 1; fi
+            again set 1G
+            [[ "$(show Description cst-e2e-161-holder.service)" == before ]] \
+                || {{ echo "set 1G with nothing pending ran a daemon-reload" >&2; exit 1; }}
+
+            # 4. An off killed after its installer (the drop-in removed, its folder left).
+            killed_after_installer off
+            [[ ! -e {dropin} ]]
+            [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a removed drop-in"
+            limit_loaded 1G || cannot_bite "the drop-in's removal loaded without a reload"
+            says_behind off
+            again off
+            [[ -z "$(show ExecStartPre)" ]] || {{ echo "off again: systemd still has the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
+            says_loaded off
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_162_btrfs_scrub_limit_set_on_a_full_disk_is_an_error_line(self) -> None:
+        """`cst btrfs scrub-limit set 500M` with /etc/btrfs-setup full (a one-page tmpfs over it, used up)
+        and no snapshots.conf: exit 1, an `ERROR: cannot write ...snapshots.conf` line and no traceback,
+        no drop-in, root's install record as it was. With the tmpfs gone, the same command works. Before,
+        the full disk ended the command in a Python traceback."""
+        c = self.SYSTEMD_CONTAINER
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        rec = "/var/lib/cst/installed.json"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        # The second set writes the drop-in with --component btrfs:core (pending in root's record): the
+        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        exec_bash(c, f"rm -f /var/tmp/e2e-162-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-162-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails (the umount of a
+            # tmpfs the test already took away), or the rest of the machine stays changed.
+            "set +e; umount /etc/btrfs-setup 2>/dev/null; "
+            f"rm -f {conf} {dropin} /var/tmp/e2e-162-out; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin}; "
+            f"if [[ -e /var/tmp/e2e-162-rec ]]; then mv /var/tmp/e2e-162-rec {rec}; else rm -f {rec}; fi; "
+            "if [[ -e /var/tmp/e2e-162-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-162-made-etc; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            record() {{ if [[ -e {rec} ]]; then sha256sum <{rec}; else echo none; fi; }}
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-162-made-etc
+            install -d -m 0755 /etc/btrfs-setup
+            # /etc/btrfs-setup: one page of tmpfs, already used up.
+            mount -t tmpfs -o size=4k,mode=0755 tmpfs /etc/btrfs-setup
+            head -c 4096 /dev/zero >/etc/btrfs-setup/filler
+            if head -c 1 /dev/zero >>/etc/btrfs-setup/filler 2>/dev/null; then echo "the tmpfs is not full" >&2; exit 1; fi
+            before="$(record)"
+            rc=0; /opt/cst-rw/cst btrfs scrub-limit set 500M >/var/tmp/e2e-162-out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-162-out >&2; exit 1; }}
+            grep -qxF "ERROR: cannot write {conf}: No space left on device" /var/tmp/e2e-162-out \
+                || {{ cat /var/tmp/e2e-162-out >&2; exit 1; }}
+            if grep -q Traceback /var/tmp/e2e-162-out; then cat /var/tmp/e2e-162-out >&2; exit 1; fi
+            [[ ! -e {conf} ]]
+            [[ ! -e {dropin} ]]
+            [[ "$(record)" == "$before" ]]
+            umount /etc/btrfs-setup
+            /opt/cst-rw/cst btrfs scrub-limit set 500M
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            [[ -f {dropin} ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

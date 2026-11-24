@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+import contextlib
 import dataclasses
+import errno
 import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,6 +18,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
+from btrfs.scrub_limit import adapters as scrub_adapters
 from btrfs.scrub_limit.adapters import (
     ScrubPaths,
     scrub_limit_apply,
@@ -34,69 +38,30 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
+from btrfs.tests.fakes import ScrubFakeRunner
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
-from cst_core.ports import CommandResult
+from cst_core.ports import CommandFault, CommandResult
+from tests.fault_injection import no_space
 from tests.repo_files import REPO
 
 
-class _FakeRunner:
-    def __init__(self, *, installer_root: str = "") -> None:
-        self.calls: list[list[str]] = []
-        self.inputs: list[str | None] = []
-        self._installer_root = installer_root
-        # a part of the command line ("systemctl daemon-reload", "installer.py text") whose calls exit 1
-        self.fail_on: set[str] = set()
+@contextlib.contextmanager
+def _folder_fsync_fails(*, times: int) -> Generator[None]:
+    """os.fsync of a folder fails with EIO the first times calls (write_atomic's, after its rename)."""
+    real = os.fsync
+    left = [times]
 
-    def run(
-        self,
-        argv: Sequence[str],
-        *,
-        input_text: str | None = None,
-        **_kw: object,
-    ) -> CommandResult:
-        cmd = list(argv)
-        self.calls.append(cmd)
-        self.inputs.append(input_text)
-        if any(part in " ".join(cmd) for part in self.fail_on):
-            return CommandResult(1, "", "Access denied", argv=tuple(cmd))
-        if "installer.py" in " ".join(cmd):
-            return self._installer(cmd, input_text)
-        return CommandResult(0, "", "", argv=tuple(cmd))
+    def fsync(fd: int) -> None:
+        if left[0] and stat.S_ISDIR(os.fstat(fd).st_mode):
+            left[0] -= 1
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        real(fd)
 
-    def _installer(self, cmd: list[str], input_text: str | None) -> CommandResult:
-        if self._installer_root:
-            real = subprocess.run(
-                [sys.executable, "-I", "-B", cmd[3], cmd[4], "--root", self._installer_root, *cmd[5:]],
-                input=input_text,
-                capture_output=True,
-                text=True,
-                stdin=None if input_text is not None else subprocess.DEVNULL,
-                check=False,
-            )
-            return CommandResult(real.returncode, real.stdout, real.stderr, argv=tuple(cmd))
-        if "text" in cmd:
-            dest = cmd[cmd.index("text") + 1]
-            existed = os.path.exists(dest)
-            old = None
-            if existed:
-                with open(dest, encoding="utf-8") as fh:
-                    old = fh.read()
-            if old == input_text:
-                return CommandResult(0, f"unchanged: {dest}\n", "", argv=tuple(cmd))
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(input_text or "")
-            return CommandResult(0, f"written:   {dest}\n", "", argv=tuple(cmd))
-        if "remove-text" in cmd:
-            dest = cmd[cmd.index("remove-text") + 1]
-            if os.path.exists(dest):
-                os.remove(dest)
-                return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
-            return CommandResult(0, "", "", argv=tuple(cmd))
-        return CommandResult(0, "", "", argv=tuple(cmd))
+    with mock.patch.object(os, "fsync", fsync):
+        yield
 
 
 def _core_text(path: str, record: str) -> Placement:
@@ -113,7 +78,7 @@ def _core_text(path: str, record: str) -> Placement:
     )
 
 
-class _RecordingInstallerRunner(_FakeRunner):
+class _RecordingInstallerRunner(ScrubFakeRunner):
     """installer.py text, remove-text and mark as the installer runs them as root: the files written and
     removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
 
@@ -266,7 +231,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         with open(self.conf, "w", encoding="utf-8") as fh:
             fh.write("NAS_ENABLED=1\n")
 
-        rc_plan, plan_lines = scrub_limit_plan(self.paths, "500M")
+        rc_plan, plan_lines = scrub_limit_plan(self.paths, "500M", runner=ScrubFakeRunner())
         self.assertEqual(rc_plan, 0)
         self.assertIn("Dry run: nothing is changed.", plan_lines)
         self.assertTrue(any("500M" in line for line in plan_lines))
@@ -274,7 +239,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         with open(self.conf, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "NAS_ENABLED=1\n")
 
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         rc_set, set_lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc_set, 0, set_lines)
         self.assertIn(f"written:   {self.dropin}", set_lines)
@@ -295,7 +260,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         os.makedirs(dev_sysfs, exist_ok=True)
         with open(os.path.join(dev_sysfs, "scrub_speed_max"), "w", encoding="utf-8") as fh:
             fh.write("524288000\n")
-        rc_st, st_lines = scrub_limit_status(self.paths)
+        rc_st, st_lines = scrub_limit_status(self.paths, runner=ScrubFakeRunner())
         self.assertEqual(rc_st, 0)
         self.assertIn("setting: 500M", "\n".join(st_lines))
         self.assertIn("service: 500M, as set", "\n".join(st_lines))
@@ -340,7 +305,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     self._write(self.conf, conf)
                 if dropin is not None:
                     self._write(self.dropin, dropin)
-                runner = _FakeRunner()
+                runner = ScrubFakeRunner()
                 runner.fail_on = {"systemctl daemon-reload"}
                 rc, lines = scrub_limit_apply(self.paths, target, runner=runner)
                 self.assertEqual(rc, 1)
@@ -354,7 +319,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
 
     def test_a_failed_installer_restores_snapshots_conf(self) -> None:
         self._write(self.conf, "NAS_ENABLED=1\nSCRUB_LIMIT='1G'\n")
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         runner.fail_on = {"installer.py"}
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 1)
@@ -364,7 +329,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
 
     def test_a_rollback_that_fails_says_so(self) -> None:
         self._write(self.conf, "NAS_ENABLED=1\n")
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         runner.fail_on = {"systemctl daemon-reload", "installer.py remove-text"}
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 1)
@@ -458,9 +423,324 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(lines[-1], "ERROR: the installer could not mark btrfs:core done: Access denied")
 
+    def test_a_full_disk_at_a_new_snapshots_conf_is_an_error_line_with_nothing_written(self) -> None:
+        for broken in ("write_atomic", "ensure_dir"):
+            with self.subTest(broken=broken):
+                runner = ScrubFakeRunner()
+                with mock.patch.object(scrub_adapters, broken, side_effect=no_space()):
+                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+                self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
+                self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made: gone
+                self.assertFalse(os.path.exists(self.dropin))
+                self.assertEqual(runner.calls, [])  # no installer, no daemon-reload
+
+    def test_a_full_disk_at_an_existing_snapshots_conf_leaves_it_as_it_was(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner = ScrubFakeRunner()
+        with mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()):
+            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+        self.assertEqual(runner.calls, [])
+
+    def test_a_write_that_fails_after_its_rename_puts_snapshots_conf_back(self) -> None:
+        # write_atomic's fsync of the folder runs after its rename: the new text is in place when it fails.
+        for before in ("NAS_ENABLED=1\n", None):
+            with self.subTest(before=before):
+                if before is None:
+                    shutil.rmtree(os.path.dirname(self.conf), ignore_errors=True)
+                else:
+                    self._write(self.conf, before)
+                runner = ScrubFakeRunner()
+                with _folder_fsync_fails(times=1):
+                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+                self.assertEqual(rc, 1)
+                self.assertEqual(
+                    lines,
+                    [f"ERROR: cannot write {self.conf}: Input/output error; previous configuration restored."],
+                )
+                self.assertEqual(self._read(self.conf), before)
+                if before is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made
+                self.assertFalse(os.path.exists(self.dropin))
+                self.assertEqual(runner.calls, [])
+
+    def test_a_write_that_fails_after_its_rename_and_cannot_go_back_says_so(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner = ScrubFakeRunner()
+        with _folder_fsync_fails(times=2):  # the write and the rollback's
+            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines,
+            [
+                f"ERROR: cannot write {self.conf}: Input/output error; ROLLBACK INCOMPLETE ({self.conf}: Input/output error)"
+            ],
+        )
+        self.assertEqual(runner.calls, [])
+
+    def test_the_cli_says_a_full_disk_at_snapshots_conf_with_no_traceback(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        deps = ScrubCliDeps(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-scrub-limit"),
+            env={"CST_PROG": "cst btrfs scrub-limit"},
+            out=out,
+            err=err,
+            ctx=_FakeCtx(container=False, root=True),
+            runner=ScrubFakeRunner(),
+        )
+        with (
+            mock.patch.object(scrub_adapters, "scrub_paths_for", return_value=self.paths),
+            mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()),
+        ):
+            rc = run_scrub_limit_cli(["set", "500M"], deps=deps)
+        said = out.getvalue() + err.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn(f"ERROR: cannot write {self.conf}: No space left on device", said)
+        self.assertNotIn("Traceback", said)
+        self.assertIsNone(self._read(self.conf))
+
+    def _as_asked(self, limit: str | None) -> None:
+        """snapshots.conf and the drop-in as set LIMIT (off: None) writes them, as a run killed before its
+        daemon-reload left them."""
+        self._write(self.conf, update_snapshots_conf_scrub_limit("NAS_ENABLED=1\n", limit) or "")
+        if limit is not None:
+            self._write(self.dropin, render_scrub_dropin(limit))
+        elif os.path.exists(self.dropin):
+            os.remove(self.dropin)
+
+    def test_files_as_asked_and_systemd_behind_reloads_systemd(self) -> None:
+        for limit in ("500M", None):
+            with self.subTest(limit=limit):
+                self._as_asked(limit)
+                runner = ScrubFakeRunner()
+                runner.need_daemon_reload = "yes\n"
+                rc, lines = scrub_limit_apply(self.paths, limit, runner=runner)
+                self.assertEqual(rc, 0, lines)
+                self.assertIn(f"unchanged: {self.conf}", lines)
+                show = ["systemctl", "show", "-p", "NeedDaemonReload", "btrfs-scrub-weekly.service"]
+                self.assertIn(show, runner.calls)
+                self.assertEqual(runner.calls[runner.calls.index(show) + 1 :], [["systemctl", "daemon-reload"]])
+                self.assertEqual(
+                    lines[-1],
+                    "reloaded:  systemd had not loaded btrfs-scrub-weekly.service as it is on disk"
+                    " (an earlier run stopped)",
+                )
+
+    def test_files_as_asked_and_systemd_in_step_runs_no_daemon_reload(self) -> None:
+        self._as_asked("500M")
+        runner = ScrubFakeRunner()
+        runner.need_daemon_reload = "no\n"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 0, lines)
+        self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)
+        self.assertFalse(any(line.startswith("reloaded:") for line in lines), lines)
+
+    def test_files_as_asked_and_systemctl_cannot_say_reloads_systemd(self) -> None:
+        self._as_asked("500M")
+        runner = ScrubFakeRunner()
+        runner.fail_on = {"systemctl show"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(runner.calls[-1], ["systemctl", "daemon-reload"])
+        # Not "systemd had not loaded": nobody could say so.
+        self.assertEqual(
+            lines[-1],
+            "reloaded:  systemctl could not say whether systemd had loaded btrfs-scrub-weekly.service as it is on disk",
+        )
+
+    def _pid1_not_answering(self) -> tuple[ScrubFakeRunner, list[object]]:
+        """A runner whose systemctl show and daemon-reload time out (PID 1 does not answer): each call
+        with a time limit comes back as timed out; a daemon-reload with none would wait for ever, so the
+        test fails there. The list gets the timeout each daemon-reload was given."""
+        reloads: list[object] = []
+
+        class Stuck(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) in (["systemctl", "show"], ["systemctl", "daemon-reload"]):
+                    self.calls.append(list(argv))
+                    if argv[1] == "daemon-reload":
+                        reloads.append(kw.get("timeout"))
+                    if kw.get("timeout") is None:
+                        raise AssertionError(f"{' '.join(argv)} with no time limit: the run would hang")
+                    return CommandResult(
+                        124, "", f"timed out after {kw['timeout']}s", argv=tuple(argv), fault=CommandFault.TIMEOUT
+                    )
+                return super().run(argv, input_text=input_text, **kw)
+
+        return Stuck(), reloads
+
+    def test_a_pid_1_that_does_not_answer_does_not_hang_a_run_with_nothing_to_change(self) -> None:
+        self._as_asked("500M")
+        conf_before, dropin_before = self._read(self.conf), self._read(self.dropin)
+        runner, reloads = self._pid1_not_answering()
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1, lines)
+        self.assertEqual(reloads, [60])
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: timed out after 60s; snapshots.conf and the drop-in are as"
+            " asked, systemctl cannot say whether systemd has loaded them (run systemctl daemon-reload once it"
+            " works)",
+        )
+        self.assertEqual((self._read(self.conf), self._read(self.dropin)), (conf_before, dropin_before))
+
+    def test_a_pid_1_that_does_not_answer_does_not_hang_a_run_that_changes_only_snapshots_conf(self) -> None:
+        # The drop-in as asked, snapshots.conf without SCRUB_LIMIT: the reload is still this run's catch-up,
+        # with its time limit; when it fails, snapshots.conf goes back.
+        self._as_asked("500M")
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner, reloads = self._pid1_not_answering()
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1, lines)
+        self.assertEqual(reloads, [60])
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: timed out after 60s; previous configuration restored."
+            " (run systemctl daemon-reload once it works)",
+        )
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+
+    def test_a_reload_this_run_s_own_write_asks_for_keeps_no_time_limit(self) -> None:
+        # The drop-in written by this run: its daemon-reload is the one of every change, as before.
+        seen: list[object] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv) == ["systemctl", "daemon-reload"]:
+                    seen.append(kw.get("timeout"))
+                return super().run(argv, input_text=input_text, **kw)
+
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=Recording())
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(seen, [None])
+
+    def test_plan_cannot_say_and_set_gets_an_answer_runs_no_reload(self) -> None:
+        # plan from a toolbox may not reach the host's systemctl while set on the host does: plan's line
+        # says the reload depends on that answer, and set with "no" runs none.
+        self._as_asked("500M")
+        asking = ScrubFakeRunner()
+        asking.fail_on = {"systemctl show"}
+        _, plan = scrub_limit_plan(self.paths, "500M", runner=asking)
+        self.assertIn("unless set|off then gets an answer that it is", plan[-1])
+        applied = ScrubFakeRunner()
+        applied.need_daemon_reload = "no\n"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=applied)
+        self.assertEqual(rc, 0, lines)
+        self.assertNotIn(["systemctl", "daemon-reload"], applied.calls)
+
+    def test_plan_shows_the_daemon_reload_apply_runs(self) -> None:
+        # The drop-in as asked: apply reloads systemd only when NeedDaemonReload is yes or systemctl
+        # cannot say; plan shows the same reload, and with the same answers.
+        reload_line = {
+            "yes\n": "  reload:    btrfs-scrub-weekly.service (systemd has not loaded it as it is on disk)"
+            " + systemctl daemon-reload",
+            "no\n": None,
+            "fails": "  reload:    btrfs-scrub-weekly.service (systemctl cannot say whether it is loaded)"
+            " + systemctl daemon-reload, unless set|off then gets an answer that it is",
+        }
+        for limit in ("500M", None):
+            for answer, want in reload_line.items():
+                with self.subTest(limit=limit, answer=answer):
+                    self._as_asked(limit)
+
+                    def runner(answer: str = answer) -> ScrubFakeRunner:
+                        r = ScrubFakeRunner()
+                        if answer == "fails":
+                            r.fail_on = {"systemctl show"}
+                        else:
+                            r.need_daemon_reload = answer
+                        return r
+
+                    rc, plan = scrub_limit_plan(self.paths, limit, runner=runner())
+                    self.assertEqual(rc, 0, plan)
+                    self.assertEqual(
+                        [line for line in plan if line.startswith("  reload:")], [want] if want is not None else []
+                    )
+                    applied = runner()
+                    rc, lines = scrub_limit_apply(self.paths, limit, runner=applied)
+                    self.assertEqual(rc, 0, lines)
+                    self.assertEqual(["systemctl", "daemon-reload"] in applied.calls, want is not None)
+
+    def test_status_says_systemd_has_not_loaded_the_drop_in(self) -> None:
+        self._as_asked("500M")
+        line = (
+            "  systemd: has not loaded btrfs-scrub-weekly.service as it is on disk (run: sudo systemctl daemon-reload)"
+        )
+        for answer, shown in (("yes\n", True), ("no\n", False), ("fails", False)):
+            with self.subTest(answer=answer):
+                runner = ScrubFakeRunner()
+                if answer == "fails":
+                    runner.fail_on = {"systemctl show"}
+                else:
+                    runner.need_daemon_reload = answer
+                # The runner the command makes itself (no runner keyword: code without it fails by assertion).
+                with mock.patch.object(scrub_adapters, "SubprocessCommandRunner", return_value=runner):
+                    rc, lines = scrub_limit_status(self.paths)
+                self.assertEqual(rc, 0, lines)
+                self.assertEqual(line in lines, shown, lines)
+                self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)  # status changes nothing
+
+    def test_asking_systemd_whether_it_loaded_the_files_has_a_time_limit(self) -> None:
+        self._as_asked("500M")
+        seen: list[object] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) == ["systemctl", "show"]:
+                    seen.append(kw.get("timeout"))
+                return super().run(argv, input_text=input_text, **kw)
+
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=Recording())
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(seen, [20])
+
+    def test_the_question_to_systemd_is_read_in_the_c_locale_on_the_host_for_plan_and_status(self) -> None:
+        # SystemctlAdapter.show's read: the C locale (the answer is parsed), on the host from a toolbox for
+        # the read-only commands, never for set|off (which run on the host).
+        self._as_asked("500M")
+        seen: list[tuple[object, object]] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) == ["systemctl", "show"]:
+                    seen.append((kw.get("locale_c"), kw.get("on_host")))
+                return super().run(argv, input_text=input_text, **kw)
+
+        for name, call in (
+            ("status", lambda r: scrub_limit_status(self.paths, runner=r)),
+            ("plan", lambda r: scrub_limit_plan(self.paths, "500M", runner=r)),
+            ("set", lambda r: scrub_limit_apply(self.paths, "500M", runner=r)),
+        ):
+            with self.subTest(command=name):
+                seen.clear()
+                rc, lines = call(Recording())
+                self.assertEqual(rc, 0, lines)
+                self.assertEqual(seen, [(True, name != "set")])
+
+    def test_files_as_asked_and_a_failed_reload_says_systemd_has_not_loaded_them(self) -> None:
+        self._as_asked("500M")
+        conf_before, dropin_before = self._read(self.conf), self._read(self.dropin)
+        runner = ScrubFakeRunner()
+        runner.need_daemon_reload = "yes\n"
+        runner.fail_on = {"systemctl daemon-reload"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: Access denied; snapshots.conf and the drop-in are as asked,"
+            " systemd has not loaded them (run systemctl daemon-reload once it works)",
+        )
+        self.assertEqual((self._read(self.conf), self._read(self.dropin)), (conf_before, dropin_before))
+        self.assertEqual(sum("installer.py" in " ".join(c) for c in runner.calls), 1)  # its first call only
+
     def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
         os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back
-        rc, lines = scrub_limit_apply(self.paths, "500M", runner=_FakeRunner())
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=ScrubFakeRunner())
         self.assertEqual((rc, lines), (1, [f"ERROR: cannot read {self.dropin}"]))
         self.assertIsNone(self._read(self.conf))
 

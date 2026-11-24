@@ -792,9 +792,16 @@ class BtrfsTest(Scratch):
             f.write(f"4096 {fs_bytes // copies // 4096}\n")
         return base
 
-    def scrub(self, conf: str | None = None, dropin: str | None = None, live: int = 0) -> str:
-        """The scrub unit installed, snapshots.conf, the drop-in, and devinfo/1's limit now."""
+    def scrub(
+        self, conf: str | None = None, dropin: str | None = None, live: int = 0, need_reload: str | None = None
+    ) -> str:
+        """The scrub unit installed, snapshots.conf, the drop-in, and devinfo/1's limit now; need_reload:
+        what systemctl show says of the unit's NeedDaemonReload (None: systemctl cannot be asked)."""
         self.fs()
+        if need_reload is not None:
+            os.makedirs(os.path.join(self.env["FIX_SHOW"], "sys"), exist_ok=True)
+            with open(os.path.join(self.env["FIX_SHOW"], "sys", "btrfs-scrub-weekly.service"), "w") as f:
+                f.write(f"LoadState=loaded\nNeedDaemonReload={need_reload}\n")
         units = os.path.join(self.root, "etc", "systemd", "system")
         os.makedirs(os.path.join(units, "btrfs-scrub-weekly.service.d"))
         open(os.path.join(units, "btrfs-scrub-weekly.service"), "w").close()
@@ -829,6 +836,24 @@ class BtrfsTest(Scratch):
             f"info   weekly scrub: speed limit 1G per device; now in sysfs: {UUID[:8]} device 1 1.0 GiB/s", out
         )
         self.assertNotIn("WARN   weekly scrub", out)
+
+    def test_a_scrub_unit_systemd_has_not_loaded_as_it_is_on_disk_warns(self) -> None:
+        # A scrub-limit set killed after its installer and before its daemon-reload: the drop-in says 1G,
+        # systemd still runs the limit it loaded before.
+        warn = (
+            "WARN   weekly scrub: systemd has not loaded btrfs-scrub-weekly.service as it is on disk (a change "
+            "stopped before its daemon-reload), so the scrub runs with the speed limit systemd loaded before"
+        )
+        for answer, warned in (("yes", True), ("no", False), (None, False)):
+            with self.subTest(need_reload=answer):
+                self.setUp()
+                out = self.scrub(conf="SCRUB_LIMIT=1G\n", dropin="1G", need_reload=answer)
+                self.assertEqual(warn in out, warned, out)
+                self.assertEqual("fix: sudo systemctl daemon-reload\n" in out, warned, out)
+                self.assertIn(
+                    "systemctl show -p LoadState -p NeedDaemonReload btrfs-scrub-weekly.service", self.calls()
+                )
+                self.assert_read_only()
 
     def test_scrub_limit_not_installed_yet_warns(self) -> None:
         out = self.scrub(conf="SCRUB_LIMIT=500M\n")

@@ -32,6 +32,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import builtins
 import contextlib
+import errno
 import fcntl
 import gc
 import io
@@ -40,14 +41,13 @@ import os
 import re
 import shutil
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from typing import override
@@ -62,11 +62,11 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowPaths, postponed_line
+from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, postponed_line
+from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, entries, tree
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
 from cst_core.domain.shapes import object_of, parse_json
-from cst_core.ports import CommandFault, CommandResult
 from tests.probes import assert_replaced_durably, recorded_fsyncs
 from tests.script_loader import load_script
 
@@ -95,8 +95,6 @@ def load_program_fresh() -> ModuleType:
         vars(sys.modules["btrfs"])["docker_volumes_nocow"] = saved[PKG]
 
 
-NOCOW = 0x00800000  # FS_NOCOW_FL, what chattr +C sets
-OTHER = 0x00000080  # FS_NOATIME_FL: another attribute the helper must leave alone
 TAG = "docker-volumes-nocow"
 GIB = 1024**3
 
@@ -116,43 +114,8 @@ DATA_BYTES = sum(len(v) for v in DATA.values())
 DATA_ENTRIES = len(DATA) + len(LINKS) + len(FIFOS) + len(EMPTY_DIRS) + 3  # + db, db/base, db/wal
 
 
-class Crash(BaseException):
-    """The process dies at this point (kill, timeout, power loss)."""
-
-
 def ino(path: str) -> int:
     return os.lstat(path).st_ino
-
-
-def entries(top: str) -> Iterator[tuple[str, os.stat_result]]:
-    """(path, lstat) of every entry below top. Like the helper, os.walk lists
-    a symlink to a folder but does not enter it."""
-    for root, dirs, files in os.walk(top):
-        for name in dirs + files:
-            p = os.path.join(root, name)
-            yield p, os.lstat(p)
-
-
-def carries_flags(st: os.stat_result) -> bool:
-    """Folders and regular files: the entries whose NOCOW flag matters."""
-    return stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)
-
-
-def tree(top: str) -> dict[str, tuple[object, ...]]:
-    """Everything below top (and top's own mode), as comparable values."""
-    out: dict[str, tuple[object, ...]] = {".": ("dir", stat.S_IMODE(os.lstat(top).st_mode))}
-    for p, st in entries(top):
-        rel = os.path.relpath(p, top)
-        if stat.S_ISLNK(st.st_mode):
-            out[rel] = ("link", os.readlink(p))
-        elif stat.S_ISDIR(st.st_mode):
-            out[rel] = ("dir", stat.S_IMODE(st.st_mode))
-        elif stat.S_ISREG(st.st_mode):
-            with open(p, "rb") as f:
-                out[rel] = ("file", stat.S_IMODE(st.st_mode), f.read())
-        else:
-            out[rel] = ("other", stat.S_IFMT(st.st_mode), stat.S_IMODE(st.st_mode))
-    return out
 
 
 def cp_fails(src: str, dst: str) -> tuple[int, str]:
@@ -180,218 +143,6 @@ class OtherDevice:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self.st, name)
-
-
-class FakeSystem:
-    """The inode flags and the commands the helper runs, for one test."""
-
-    def __init__(self, root: str) -> None:
-        self.root = root
-        self.attrs: dict[tuple[int, int], int] = {}
-        self.labels: dict[tuple[int, int], bytes] = {}  # security.selinux of each inode; none by default
-        self.sets: list[str] = []  # paths whose flags the helper set (FS_IOC_SETFLAGS)
-        self.calls: list[list[str]] = []
-        self.docker_state = "inactive"
-        self.systemctl_rc = 0
-        self.systemctl_out_on_error = False  # a failing systemctl still prints docker_state
-        self.free = 1 << 50
-        self.btrfs_out: str | None = None  # None: a normal `btrfs filesystem usage -b` answer
-        self.chcon_rc = 0
-        self.syncs = 0
-        self.cp: Callable[[str, str], tuple[int, str]] = self.copy
-        self.notify = ""  # btrfs-notify's path in the test folder
-        self.missing: set[str] = set()  # programs that are not installed
-
-    # ---- the ioctls -------------------------------------------------------
-
-    def key(self, path: str) -> tuple[int, int]:
-        st = os.lstat(path)
-        return st.st_dev, st.st_ino
-
-    def set(self, path: str, nocow: bool, other: int = 0) -> None:
-        """Give path's inode these flags (the test's own setup, not recorded)."""
-        self.attrs[self.key(path)] = (NOCOW if nocow else 0) | other
-
-    def flags_of(self, path: str) -> int:
-        return self.attrs.get(self.key(path), 0)
-
-    def nocow(self, path: str) -> bool:
-        return bool(self.flags_of(path) & NOCOW)
-
-    def sets_below(self, top: str) -> list[str]:
-        """The paths at or below top whose flags the helper set."""
-        return [p for p in self.sets if p == top or p.startswith(top + os.sep)]
-
-    def ioctl(self, fd: int, request: int, arg: bytes | int = 0, mutate_flag: bool = True) -> bytes | int:
-        target = os.readlink(f"/proc/self/fd/{fd}")
-        if target != self.root and not target.startswith(self.root + os.sep):
-            raise AssertionError(f"ioctl on {target}, outside the test folder {self.root}")
-        st = os.fstat(fd)
-        key = (st.st_dev, st.st_ino)
-        if request == core_nocow.FS_IOC_GETFLAGS:
-            return struct.pack("l", self.attrs.get(key, 0))
-        if request == core_nocow.FS_IOC_SETFLAGS:
-            if not isinstance(arg, bytes):
-                raise AssertionError(f"SETFLAGS without a buffer: {arg!r}")
-            self.attrs[key] = struct.unpack("l", arg)[0]
-            self.sets.append(target)
-            return 0
-        raise AssertionError(f"unexpected ioctl request {request:#x}")
-
-    # ---- SELinux labels (os.getxattr) ---------------------------------------
-
-    def label(self, path: str, value: bytes | None) -> None:
-        """Give path's inode this label (None: no label)."""
-        if value is None:
-            self.labels.pop(self.key(path), None)
-        else:
-            self.labels[self.key(path)] = value
-
-    def label_of(self, path: str) -> bytes | None:
-        return self.labels.get(self.key(path))
-
-    def getxattr(self, path: str, attribute: str, *, follow_symlinks: bool = True) -> bytes:
-        if attribute != "security.selinux":
-            raise AssertionError(f"unexpected xattr {attribute} of {path}")
-        if follow_symlinks:
-            raise AssertionError(f"getxattr follows the link {path}")
-        if path != self.root and not path.startswith(self.root + os.sep):
-            raise AssertionError(f"getxattr on {path}, outside the test folder {self.root}")
-        value = self.labels.get(self.key(path))
-        if value is None:
-            raise OSError(61, "No data available", path)  # ENODATA
-        return value
-
-    def copy_label(self, src: str, dst: str) -> None:
-        """What cp -a and chcon --reference do with the label."""
-        self.label(dst, self.label_of(src))
-
-    # ---- the commands -----------------------------------------------------
-
-    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
-        """CommandRunnerPort.run: each command the helper may run, answered by the fake."""
-        args = list(argv)
-        self.calls.append(args)
-        not_found = self.not_found(args, kw)
-        if not_found is not None:
-            return not_found
-
-        def done(rc: int = 0, out: str = "", err: str = "") -> CommandResult:
-            return CommandResult(rc, out, err, argv=tuple(args))
-
-        if args[0] == "systemctl":
-            if args != ["systemctl", "show", "-P", "ActiveState", "docker.service"]:
-                raise AssertionError(f"unexpected systemctl call: {args}")
-            answers = self.systemctl_rc == 0 or self.systemctl_out_on_error
-            return done(self.systemctl_rc, self.docker_state + "\n" if answers else "")
-        if args[0] == "chcon":
-            if args[1:2] != ["--reference"] or len(args) != 4:
-                raise AssertionError(f"unexpected chcon call: {args}")
-            if self.chcon_rc == 0:
-                self.copy_label(args[2], args[3])
-                return done()
-            return done(self.chcon_rc, "", f"chcon: failed to change context of '{args[3]}': Operation not permitted\n")
-        if args[0] == "btrfs":
-            if args[:4] != ["btrfs", "filesystem", "usage", "-b"]:
-                raise AssertionError(f"unexpected btrfs call: {args}")
-            if self.btrfs_out is not None:
-                return done(1, self.btrfs_out, "ERROR: not a btrfs filesystem")
-            return done(
-                0,
-                "Overall:\n"
-                "    Device size:\t\t 2000398934016\n"
-                f"    Free (estimated):\t\t {self.free}\t(min: {self.free})\n"
-                "    Data ratio:\t\t\t      2.00\n",
-            )
-        if args[0] == "cp":
-            if args[:5] != ["cp", "-a", "--reflink=never", "--sparse=auto", "--"] or len(args) != 7:
-                raise AssertionError(f"unexpected cp call: {args}")
-            src, dst = args[5], args[6]
-            if not (src.endswith("/.") and dst.endswith("/")):
-                raise AssertionError(f"cp must copy the contents: {args}")
-            rc, err = self.cp(src[:-2], dst[:-1])
-            return done(rc, "", err)
-        if args[0] == self.notify:
-            return done()
-        raise AssertionError(f"unexpected command: {args}")
-
-    def not_found(self, args: list[str], kw: Mapping[str, object]) -> CommandResult | None:
-        """Checks the options of a command, and answers for one that is missing (None: it is installed).
-
-        stdin ours; systemctl's answer decoded strictly, cp's, chcon's and btrfs's leniently
-        (U+FFFD); btrfs-notify's output was never decoded."""
-        want = (
-            {"timeout": 60, "new_session": True}
-            if args[0] == self.notify
-            else {"stdin": "inherit", "decode_errors": "strict" if args[0] == "systemctl" else "replace"}
-        )
-        if kw != want:
-            raise AssertionError(f"{args[0]} run with {kw}, not {want}")
-        if args[0] not in self.missing:
-            return None
-        missing = FileNotFoundError(2, "No such file or directory", args[0])
-        return CommandResult(127, "", str(missing), argv=tuple(args), fault=CommandFault.MISSING, cause=missing)
-
-    def sync(self) -> None:
-        self.syncs += 1
-
-    def commands(self, name: str) -> list[list[str]]:
-        return [c for c in self.calls if c[0] == name]
-
-    # ---- the fake cp ------------------------------------------------------
-
-    def inherit(self, path: str) -> None:
-        """A new file or folder: btrfs gives it +C when its folder has +C."""
-        parent = self.nocow(os.path.dirname(path))
-        self.attrs[self.key(path)] = NOCOW if parent else 0
-
-    def copy(self, src: str, dst: str) -> tuple[int, str]:
-        """`cp -a SRC/. DST/`: the contents and SRC's own mode, times and label."""
-        self.copy_into(src, dst)
-        self.copy_label(src, dst)
-        st = os.lstat(src)
-        os.chmod(dst, stat.S_IMODE(st.st_mode))
-        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
-        return 0, ""
-
-    def copy_then(self, change: Callable[[str], object]) -> Callable[[str, str], tuple[int, str]]:
-        """A cp that copies, then spoils the copy with change(dst), and reports success."""
-
-        def cp(src: str, dst: str) -> tuple[int, str]:
-            self.copy(src, dst)
-            change(dst)
-            return 0, ""
-
-        return cp
-
-    def copy_into(self, src: str, dst: str, stop_after: int | None = None) -> int:
-        """Copy the entries of src into dst; with stop_after, raise Crash after that many."""
-        n = 0
-        for name in sorted(os.listdir(src)):
-            s, d = os.path.join(src, name), os.path.join(dst, name)
-            st = os.lstat(s)
-            if stat.S_ISLNK(st.st_mode):
-                os.symlink(os.readlink(s), d)
-            elif stat.S_ISDIR(st.st_mode):
-                os.mkdir(d)
-                self.inherit(d)
-                n += self.copy_into(s, d, None if stop_after is None else stop_after - n)
-            elif stat.S_ISREG(st.st_mode):
-                open(d, "wb").close()
-                self.inherit(d)  # +C is set while the file is still empty
-                shutil.copyfile(s, d)
-            elif stat.S_ISFIFO(st.st_mode):
-                os.mkfifo(d)
-            else:
-                raise AssertionError(f"fake cp: unexpected entry {s}")
-            if not stat.S_ISLNK(st.st_mode):
-                os.chmod(d, stat.S_IMODE(st.st_mode))
-            os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns), follow_symlinks=False)
-            self.copy_label(s, d)
-            n += 1
-            if stop_after is not None and n >= stop_after:
-                raise Crash(f"killed during the copy, after {n} entries")
-        return n
 
 
 class Commands:
@@ -1304,6 +1055,32 @@ class MigrateTest(Base):
         self.assertEqual(len(self.fs.commands("cp")), 2)
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
 
+    def test_a_flag_that_cannot_be_removed_does_not_start_the_request_over(self) -> None:
+        # The third boot gives up, but the flag cannot be removed (/etc read-only): the count of boots must
+        # stay with it. Without it the next boot started the request over (two more rewrites before Docker
+        # starts, then this again), and the alert was never sent.
+        top = self.volume("cow")
+        before = tree(top)
+        schedule(self)
+        self.set_attempts("2")
+        self.fs.cp = cp_fails
+        erofs = OSError(errno.EROFS, "Read-only file system")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "remove_flag", side_effect=erofs):
+            for boot in (3, 4, 5):
+                with self.subTest(boot=boot):
+                    rc, _out = self.call(lambda: self.cli.service.execute(NocowCommand.MIGRATE))
+                    self.assertEqual(rc, 0)  # the boot's run: logged, not failed
+                    self.assertEqual(read_attempts(self), "2")
+                    self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(self.fs.commands("cp"), [])  # no try started over
+        self.assertEqual(tree(top), before)
+        # /etc writable again: the next boot gives up and tells the user.
+        self.call(self.cli.migrate)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+        self.assertEqual(self.fs.commands("cp"), [])
+
     def test_attempts_counter_is_durable_before_the_rewrite_starts(self) -> None:
         # The counter was written with open("w") and no fsync, then the long rewrite
         # started; a hang or hard reset before the next btrfs commit lost the increment, so
@@ -1341,6 +1118,70 @@ class MigrateTest(Base):
         self.call(self.cli.migrate)
         self.assertEqual(read_attempts(self), "1")  # tried, not given up
         self.assertEqual(len(self.fs.commands("cp")), 1)
+
+    def test_a_count_left_without_its_flag_does_not_count_for_a_new_request(self) -> None:
+        # An older helper removed the flag, then the count of boots, and could stop between the two.
+        # Docker reinstalled later (the volumes folder without +C): the new request gets its two boots.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("1")
+        self.fs.cp = cp_fails
+        for boot, attempts in ((1, "1"), (2, "2")):
+            with self.subTest(boot=boot):
+                rc, out = self.call(self.cli.migrate)
+                self.assertEqual(rc, 0)
+                self.assertEqual(read_attempts(self), attempts)
+                self.assertTrue(os.path.exists(self.flag))
+                self.assertNotIn("Gave up", out)
+        self.assertEqual(len(self.fs.commands("cp")), 2)
+
+    def test_a_count_left_without_its_flag_is_reset_durably_before_the_flag(self) -> None:
+        # The flag is fsynced; the reset of the old count must be on disk before it, or a power loss
+        # right after could keep the flag and bring the old count back (a give-up with no try).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("2")
+        self.fs.cp = cp_fails
+        synced_at_flag: list[str] = []
+        real_request = nocow_adapters.NocowStateFiles.request_migration
+
+        def request(state: nocow_adapters.NocowStateFiles) -> None:
+            synced_at_flag.extend(synced)
+            real_request(state)
+
+        with (
+            recorded_fsyncs() as synced,
+            mock.patch.object(nocow_adapters.NocowStateFiles, "request_migration", request),
+        ):
+            self.call(self.cli.migrate)
+        assert_replaced_durably(self, self.attempts, synced_at_flag)
+        self.assertEqual(read_attempts(self), "1")  # this request's first boot
+
+    def test_a_count_that_cannot_be_reset_is_a_request_not_made(self) -> None:
+        # The old count cannot be reset: the request is not made (no flag, no +C, a journal line), so the
+        # next boot sees the same sign again; it never goes on with the old count.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("2")
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=denied):
+            rc, out = self.call(self.cli.migrate)
+        self.assertEqual(rc, 0)
+        self.assertIn("cannot schedule the migration ([Errno 13] Permission denied)", out)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertEqual(read_attempts(self), "2")
+        self.assertEqual(self.fs.commands("cp"), [])
+
+    def test_a_request_already_scheduled_keeps_its_count(self) -> None:
+        # The flag is there (the request is under way) but the volumes folder has no +C: the count stays.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("1")
+        self.fs.cp = cp_fails
+        self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "2")
 
     def test_attempts_file_is_closed(self) -> None:
         # The counter is read and written inside `with open(...)`: no file is

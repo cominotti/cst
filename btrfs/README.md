@@ -370,7 +370,40 @@ cst btrfs scrub-limit off
   that was not there is removed) and the command ends with
   `ERROR: ...; previous configuration restored.`, or with
   `ROLLBACK INCOMPLETE (...)` naming what could not be put back. A drop-in
-  that cannot be read stops the command before it writes anything.
+  that cannot be read stops the command before it writes anything. A full
+  disk, or another write error, at `snapshots.conf` ends the command with
+  `ERROR: cannot write /etc/btrfs-setup/snapshots.conf: ...` (exit 1)
+  before anything else is written; a folder the command made for it is
+  removed again. When the write fails after the new file took the old one's
+  place (the folder's fsync), the old `snapshots.conf` is put back and the
+  line ends with `previous configuration restored.` (or
+  `ROLLBACK INCOMPLETE (...)`).
+  When the drop-in is already as asked (`snapshots.conf` may still change),
+  `set` and `off` ask systemd whether it has loaded it (`NeedDaemonReload`
+  of `btrfs-scrub-weekly.service`, waiting at most 20 s for the answer) and
+  run `daemon-reload` if not: an earlier run that stopped after writing the
+  drop-in and before its `daemon-reload` left systemd with the old limit.
+  The command then says
+  `reloaded:  systemd had not loaded btrfs-scrub-weekly.service as it is on disk`.
+  When systemctl cannot say (it fails, or gives no answer in time), the
+  command reloads too, since exit 0 must mean systemd has the limit, and says
+  `reloaded:  systemctl could not say whether systemd had loaded ...`.
+  Such a catch-up `daemon-reload` waits at most a minute, so a PID 1 that
+  does not answer cannot hang a run that has nothing to change. A run with
+  nothing pending runs no `daemon-reload`. When the catch-up reload fails
+  and this run changed no file, the command ends with
+  `ERROR: ...; snapshots.conf and the drop-in are as asked, systemd has not loaded them`
+  (or `..., systemctl cannot say whether systemd has loaded them`), exit 1.
+  When this run did change `snapshots.conf`, it puts the old one back and
+  ends with `previous configuration restored.`, as for any failed reload.
+  `plan` asks systemd the same question and shows that reload
+  (`reload:    btrfs-scrub-weekly.service (...) + systemctl daemon-reload`;
+  when systemctl cannot say, the line adds
+  `unless set|off then gets an answer that it is`: `plan` in a toolbox asks
+  the host through `flatpak-spawn`, which can fail where `set` on the host
+  gets an answer), and `status` says
+  `systemd: has not loaded btrfs-scrub-weekly.service as it is on disk`
+  when systemd answers yes.
   Writing the drop-in sets `btrfs:core` pending in the install record; when
   `btrfs:core` was done before, `set` marks it done again once the drop-in is
   written and `daemon-reload` worked, so `cst doctor` does not ask for an
@@ -846,6 +879,20 @@ docker volume rm <name>         # or one volume by name
   before anyone has logged in, so the desktop alert is **kept and shown at
   your next login** (section 4.9). It is also in the journal
   (`journalctl -u docker-volumes-nocow`). Run `install` again to retry.
+  At the end of a migration, and when it gives up, the helper removes the
+  count of boots before the flag, so a boot that stops between the two
+  leaves the flag and the next boot just runs again. When giving up cannot
+  remove the flag (`/etc` read-only, say), the count is written back: the
+  next boot gives up again at once (the journal says why), instead of
+  starting the request over with two more rewrites. An older helper removed
+  the flag first: a stop between the two left a count without its flag, and
+  a later migration (Docker reinstalled, say) then gave up after one failed
+  boot. A new request (the volumes folder found without `+C` and no flag)
+  now resets such a count to 0 before it writes the flag, flushed to disk
+  first (a power loss must not keep the flag and bring the old count back),
+  so it gets its two boots also after an upgrade from that helper. When the
+  count cannot be reset, the request is not made (no flag, no `+C`, a
+  journal line), and the next boot tries again.
 - An interrupted copy (power loss) is cleaned up at the next boot; the original
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,
@@ -2650,7 +2697,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
 | `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). |
 | `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
-| `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the rollback of both files on a failure, and `btrfs:core` kept done in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
+| `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the check that systemd loaded them (`NeedDaemonReload`, which `status` and `plan` also ask, on the host from a toolbox), the rollback of both files on a failure, and `btrfs:core` kept done in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |
