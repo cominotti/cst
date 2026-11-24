@@ -1350,8 +1350,8 @@ def _resolve_affected_opts(repo: str, opts: RunOptions) -> RunOptions:
     print(f"[affected] {plan.reason} (base={plan.base[:12]})", file=sys.stderr)
     if plan.mbt_modules:
         print(
-            f"[affected] {len(plan.mbt_modules)} mbt module(s) not run here: "
-            "invowk cmd test affected (or test mbt --affected) runs them",
+            f"[affected] {len(plan.mbt_modules)} tests/mbt module(s) affected, left out of this run (they need uv): "
+            "`invowk cmd test affected` runs them after the unit tests; alone: `invowk cmd test mbt --affected`",
             file=sys.stderr,
         )
     return RunOptions(

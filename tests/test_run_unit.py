@@ -856,6 +856,26 @@ class ParseArgsAndJobsTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("unknown git revision", err.getvalue())
 
+    def test_affected_says_where_its_mbt_modules_run_without_asking_for_a_second_command(self) -> None:
+        # `invowk cmd test affected` runs --affected, then the mbt modules: the note must not send the
+        # developer to the command already running.
+        from tests.affected import AffectedPlan
+
+        plan = AffectedPlan("abc", ("swap/domain.py",), False, ("swap.tests.test_swap",), "1 file", ("tests.mbt.m",))
+        err = io.StringIO()
+        with (
+            mock.patch("tests.affected.git_changed_files", return_value=("abc", ["swap/domain.py"])),
+            mock.patch("tests.affected.select_affected", return_value=plan),
+            contextlib.redirect_stderr(err),
+        ):
+            opts = run_unit_module._resolve_affected_opts(REPO, RunOptions(affected=True))
+        self.assertEqual(opts.names, ("swap.tests.test_swap",))
+        note = (
+            "[affected] 1 tests/mbt module(s) affected, left out of this run (they need uv): "
+            "`invowk cmd test affected` runs them after the unit tests; alone: `invowk cmd test mbt --affected`"
+        )
+        self.assertEqual(err.getvalue().splitlines()[1:], [note])
+
     def test_list_affected_and_affected_cli(self) -> None:
         list_done = subprocess.run(
             [
