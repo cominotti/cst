@@ -7,8 +7,10 @@ the fake of setup_fakes.py; nothing real is touched.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 import json
 import os
+import re
 import shutil
 import time
 import unittest
@@ -30,12 +32,12 @@ from bluetooth.setup.domain import (
     parse_command_line,
     resolve,
 )
-from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine
+from bluetooth.tests.setup_fakes import DEV, ISO, MAC, REPO, Machine, SetupModel
 from bluetooth.tests.test_ldac_watch import cards, pw_dump
 from cst_core.domain.files import OwnedState
 from cst_core.adapters import SystemctlAdapter
 from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunner
-from cst_core.ports import SystemctlHost
+from cst_core.ports import CommandRunnerPort, SystemctlHost
 
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
 SELF = os.path.join(REPO, "bluetooth-setup.sh")
@@ -65,11 +67,12 @@ class Console:
 class Clock:
     """ClockPort whose sleeps return at once and are recorded."""
 
-    def __init__(self) -> None:
+    def __init__(self, now: float = 1_700_000_000.0) -> None:
         self.slept: list[float] = []
+        self.at = now
 
     def now(self) -> float:
-        return 1_700_000_000.0
+        return self.at
 
     def monotonic(self) -> float:
         return 0.0
@@ -78,17 +81,29 @@ class Clock:
         self.slept.append(seconds)
 
 
+@dataclass(frozen=True)
+class SetupDoubles:
+    """What a test puts in place of change()'s defaults: a runner, the files and host adapters, the
+    clock's time (None: FAKE's commands through the real runner, the real adapters, a fixed time)."""
+
+    runner: CommandRunnerPort | None = None
+    files: LocalSetupFiles | None = None
+    host: LocalBluetoothHostAdapter | None = None
+    now: float | None = None
+
+
 def change(
     m: Machine,
     *args: str,
     settings: dict[str, str] | None = None,
     show_timeout: float | None = None,
     container: bool = True,
+    doubles: SetupDoubles | None = None,
 ) -> tuple[Change, Console, Clock]:
     """The use cases over the fake machine, as inside a toolbox for the host commands (so the
     kernel ISO probe is the fake's), whatever the command; show_timeout: systemctl show's limit
     (cst_core's 20 s when None); container=False: the program believes it runs on the host (its
-    commands still go to the fake)."""
+    commands still go to the fake). doubles: a test's own runner, adapters or time."""
     paths = Paths(
         home=m.home, config=f"{m.home}/.config", etc=f"{m.root}/etc", usr_share=f"{m.root}/usr/share", checkout=REPO
     )
@@ -96,9 +111,12 @@ def change(
     assert isinstance(opts, Options)
     cfg = resolve(opts, {"DEVICE": MAC, **(settings or {})}, list(settings or {}), paths, "cst-t")
     assert not isinstance(cfg, Exit)
-    console, clock = Console(), Clock()
+    d = doubles or SetupDoubles()
+    console, clock = Console(), (Clock() if d.now is None else Clock(d.now))
     env = m.env(container=True)
-    runner = SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env)
+    runner = d.runner
+    if runner is None:
+        runner = SubprocessCommandRunner(HostExecutionContext(exists=lambda _path: True), base_env=env)
     machine = SetupMachine(
         runner=runner,
         systemd=SystemctlAdapter(runner, timeout=show_timeout),
@@ -106,8 +124,8 @@ def change(
         user_systemd=SystemctlAdapter(runner, user=True, on_host=SystemctlHost.LOCAL),
         clock=clock,
         console=console,
-        files=LocalSetupFiles(),
-        host=LocalBluetoothHostAdapter(),
+        files=LocalSetupFiles() if d.files is None else d.files,
+        host=LocalBluetoothHostAdapter() if d.host is None else d.host,
         container=container,
         bt_timeout=5,
         lc_ctype="",
@@ -520,6 +538,72 @@ class StepDownTest(unittest.TestCase):
         self.assertEqual(
             self.step_down({"SUDO_USER": "ghost"}, "plan"), (Exit(1, err="id: 'ghost': no such user\n"), [])
         )
+
+
+class SetupModelParityTest(unittest.TestCase):
+    """SetupModel (setup_fakes) answers apply and revert as FAKE does: the same command lines in the
+    same order, the same output, the same files, from two start states."""
+
+    def machine(self) -> Machine:
+        m = Machine(self)
+        m.put(m.main_conf, "[General]\n#Experimental = false\n")
+        m.services()
+        m.adapter()
+        m.flag("iso-socket")
+        m.put("wp-roles", "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n")
+        return m
+
+    def runs(self, m: Machine, *, model: bool) -> list[tuple[int | object, str, str, list[str]]]:
+        """apply --yes, then revert --yes: (exit, stdout, stderr, command lines) of each, as the test sees them."""
+        self.enterContext(mock.patch.dict(os.environ, {"PATH": f"{m.bin}:/usr/bin:/bin"}))
+        out: list[tuple[int | object, str, str, list[str]]] = []
+        for args in (("apply", "--yes"), ("revert", "--yes")):
+            if model:
+                twin = SetupModel(m)
+                run, console, _ = change(m, *args, doubles=SetupDoubles(runner=twin))
+                rc = run.run_command()
+                calls = twin.calls
+            else:
+                real = SubprocessCommandRunner(
+                    HostExecutionContext(exists=lambda _p: True), base_env=m.env(container=True)
+                )
+                with mock.patch.object(real, "run", wraps=real.run) as spy:
+                    run, console, _ = change(m, *args, doubles=SetupDoubles(runner=real))
+                    rc = run.run_command()
+                calls = [list(c.args[0]) for c in spy.call_args_list]
+            run.cleanup()
+            out.append((rc, *self.plain(m, console.stdout, console.stderr, calls)))
+        return out
+
+    @staticmethod
+    def plain(m: Machine, stdout: str, stderr: str, calls: list[list[str]]) -> tuple[str, str, list[str]]:
+        """The machine's folder and mktemp's file named alike on both sides."""
+
+        def norm(text: str) -> str:
+            return re.sub(r"\S*/tmp\.[A-Za-z0-9_]+", "<mktemp>", text).replace(m.tmp, "<machine>")
+
+        return norm(stdout), norm(stderr), [norm(" ".join(c)) for c in calls]
+
+    def files(self, m: Machine) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for top in (m.home, m.root):
+            for d, _dirs, names in os.walk(top):
+                for n in names:
+                    p = os.path.join(d, n)
+                    with open(p, encoding="utf-8", errors="replace") as f:
+                        out[os.path.relpath(p, m.tmp)] = f.read()
+        return out
+
+    def test_apply_then_revert_as_fake_does(self) -> None:
+        fake, model = self.machine(), self.machine()
+        on_fake = self.runs(fake, model=False)
+        on_model = self.runs(model, model=True)
+        for (rc_f, out_f, err_f, calls_f), (rc_m, out_m, err_m, calls_m) in zip(on_fake, on_model, strict=True):
+            self.assertEqual(calls_m, calls_f)
+            self.assertEqual((rc_m, out_m, err_m), (rc_f, out_f, err_f))
+        self.assertEqual(self.files(model), self.files(fake))
+        self.assertIn("restart:   bluetooth.service", on_model[0][1])
+        self.assertIn("restart:   bluetooth.service", on_model[1][1])
 
 
 if __name__ == "__main__":
