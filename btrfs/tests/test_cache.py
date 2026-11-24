@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 import io
 import json
 import os
-from pathlib import Path
-import posixpath
 import shutil
 import signal
 import stat
@@ -21,7 +19,6 @@ from btrfs.cache import adapters as cache_adapters
 from btrfs.cache.cli import main as cache_mount_main, run_cache_mount_cli
 from btrfs.cache.domain import (
     CACHE_BASE,
-    FINDMNT_COLUMNS,
     SCRATCHPAD_BASE,
     CACHE_MOUNT_MARKER,
     CacheMountAction,
@@ -45,126 +42,10 @@ from btrfs.cache.domain.health import (
     parse_crypttab_cache_issues,
 )
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
+from btrfs.tests.fakes import UUID_CACHE_DRIVE, CacheTestCtx, FakeMountRunner
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.ports import CommandResult
 from tests.repo_files import REPO
-
-UUID_ROOT = "11111111-1111-1111-1111-111111111111"
-UUID_CACHE_DRIVE = "22222222-2222-2222-2222-222222222222"
-
-
-class _TestCtx:
-    def __init__(self, *, container: bool = False, root: bool = True) -> None:
-        self._container = container
-        self._root = root
-
-    def is_container(self) -> bool:
-        return self._container
-
-    def is_root(self) -> bool:
-        return self._root
-
-    def path(self, host_path: str) -> str:
-        return f"/run/host/{host_path.lstrip('/')}" if self._container and host_path.startswith("/") else host_path
-
-    def etc_dir(self) -> str:
-        return "/run/host/etc" if self._container else "/etc"
-
-    def host_run_dir(self, subpath: str) -> str:
-        return f"/run/host/{subpath}" if self._container else f"/run/{subpath}"
-
-
-class _FakeMountRunner:
-    """findmnt, mount and umount over a list of mounts. findmnt answers `-J -l -o FINDMNT_COLUMNS` as the
-    real one does: a bind mount's source is "DEVICE[FSROOT]", its fsroot the folder it shows."""
-
-    def __init__(self, root: str, *, same_uuid: bool = False) -> None:
-        self.root = root
-        self.same_uuid = same_uuid
-        self.findmnt_fails = False
-        self.reload_fails = False
-        self.on_failed_reload: Callable[[], None] | None = None  # runs when a reload fails, before the answer
-        self.mount_fails: set[str] = set()
-        self.fstab_at_mount: list[str | None] = []
-        self.calls: list[list[str]] = []
-        self.mounts: list[dict[str, str | None]] = []
-        self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
-        self.add_mount("/dev/dm-0", "/var/home", fsroot="/home", uuid=UUID_ROOT)
-
-    def add_mount(
-        self,
-        dev: str,
-        tgt: str,
-        *,
-        fsroot: str,
-        uuid: str | None = UUID_CACHE_DRIVE,
-        bind: bool = False,
-    ) -> None:
-        """One mount: on btrfs with its UUID, or a tmpfs (no UUID); a bind shows its FSROOT in its source."""
-        self.mounts.append(
-            {
-                "source": f"{dev}[{fsroot}]" if bind else dev,
-                "target": tgt,
-                "fstype": "btrfs" if uuid is not None else "tmpfs",
-                "options": "rw,noatime,compress=zstd:1",
-                "uuid": uuid,
-                "fsroot": fsroot,
-            }
-        )
-
-    def _holding(self, path: str) -> dict[str, str | None]:
-        best = self.mounts[0]
-        for m in self.mounts:
-            tgt = str(m["target"]).rstrip("/") or "/"
-            if (tgt in (path, "/") or path.startswith(f"{tgt}/")) and len(tgt) >= len(str(best["target"]).rstrip("/")):
-                best = m
-        return best
-
-    def _findmnt_json(self) -> str:
-        fss = []
-        for m in self.mounts:
-            uuid = UUID_ROOT if self.same_uuid and m["uuid"] is not None else m["uuid"]
-            fss.append({**m, "uuid": uuid})
-        return json.dumps({"filesystems": fss}, indent=3)
-
-    def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
-        fstab = os.path.join(self.root, "etc", "fstab")
-        self.fstab_at_mount.append(
-            Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.isfile(fstab) else None
-        )
-        if tgt_path.removeprefix(self.root) in self.mount_fails:
-            return CommandResult(32, "", "mount: permission denied")
-        src = src_path.removeprefix(self.root)
-        held = self._holding(src)
-        rel = src.removeprefix(str(held["target"]).rstrip("/"))
-        dev = str(held["source"]).split("[", 1)[0]
-        fsroot = posixpath.normpath(f"{held['fsroot']}/{rel}")
-        self.add_mount(dev, tgt_path.removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
-        return CommandResult(0, "", "")
-
-    def _unbind(self, tgt_path: str) -> None:
-        logical_tgt = tgt_path.removeprefix(self.root)
-        for i in range(len(self.mounts) - 1, -1, -1):
-            if self.mounts[i]["target"] == logical_tgt:
-                del self.mounts[i]
-                break
-
-    def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
-        cmd = list(argv)
-        self.calls.append(cmd)
-        if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
-            if self.findmnt_fails:
-                return CommandResult(1, "", "findmnt: cannot read the mount table")
-            return CommandResult(0, self._findmnt_json(), "")
-        if cmd[-1:] == ["daemon-reload"] and self.reload_fails:
-            if self.on_failed_reload is not None:
-                self.on_failed_reload()
-            return CommandResult(1, "", "Failed to reload daemon")
-        if cmd[:2] == ["mount", "--bind"]:
-            return self._bind(cmd[2], cmd[3])
-        if cmd[:1] == ["umount"]:
-            self._unbind(cmd[1])
-        return CommandResult(0, "", "")
 
 
 class CacheMountDomainTests(unittest.TestCase):
@@ -481,7 +362,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             )
         with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
             fh.write("/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n")
-        self.runner = _FakeMountRunner(self.tmp)
+        self.runner = FakeMountRunner(self.tmp)
         self.runner.add_mount("/dev/mapper/cache", CACHE_BASE, fsroot="/cache")
         self.runner.add_mount("/dev/mapper/cache", SCRATCHPAD_BASE, fsroot="/scratchpad")
         self.entry = os.path.join(REPO, "btrfs", "btrfs-cache")
@@ -501,7 +382,7 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
                 env={"CST_BTRFS_CACHE_ROOT": self.tmp, "USER": user},
                 out=out,
                 err=err,
-                ctx=_TestCtx(container=container, root=root),
+                ctx=CacheTestCtx(container=container, root=root),
                 runner=self.runner,
             ),
         )

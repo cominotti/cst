@@ -34,69 +34,13 @@ from btrfs.scrub_limit.domain import (
     update_snapshots_conf_scrub_limit,
     validate_scrub_size,
 )
+from btrfs.tests.fakes import ScrubFakeRunner
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandResult
 from tests.repo_files import REPO
-
-
-class _FakeRunner:
-    def __init__(self, *, installer_root: str = "") -> None:
-        self.calls: list[list[str]] = []
-        self.inputs: list[str | None] = []
-        self._installer_root = installer_root
-        # a part of the command line ("systemctl daemon-reload", "installer.py text") whose calls exit 1
-        self.fail_on: set[str] = set()
-
-    def run(
-        self,
-        argv: Sequence[str],
-        *,
-        input_text: str | None = None,
-        **_kw: object,
-    ) -> CommandResult:
-        cmd = list(argv)
-        self.calls.append(cmd)
-        self.inputs.append(input_text)
-        if any(part in " ".join(cmd) for part in self.fail_on):
-            return CommandResult(1, "", "Access denied", argv=tuple(cmd))
-        if "installer.py" in " ".join(cmd):
-            return self._installer(cmd, input_text)
-        return CommandResult(0, "", "", argv=tuple(cmd))
-
-    def _installer(self, cmd: list[str], input_text: str | None) -> CommandResult:
-        if self._installer_root:
-            real = subprocess.run(
-                [sys.executable, "-I", "-B", cmd[3], cmd[4], "--root", self._installer_root, *cmd[5:]],
-                input=input_text,
-                capture_output=True,
-                text=True,
-                stdin=None if input_text is not None else subprocess.DEVNULL,
-                check=False,
-            )
-            return CommandResult(real.returncode, real.stdout, real.stderr, argv=tuple(cmd))
-        if "text" in cmd:
-            dest = cmd[cmd.index("text") + 1]
-            existed = os.path.exists(dest)
-            old = None
-            if existed:
-                with open(dest, encoding="utf-8") as fh:
-                    old = fh.read()
-            if old == input_text:
-                return CommandResult(0, f"unchanged: {dest}\n", "", argv=tuple(cmd))
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write(input_text or "")
-            return CommandResult(0, f"written:   {dest}\n", "", argv=tuple(cmd))
-        if "remove-text" in cmd:
-            dest = cmd[cmd.index("remove-text") + 1]
-            if os.path.exists(dest):
-                os.remove(dest)
-                return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
-            return CommandResult(0, "", "", argv=tuple(cmd))
-        return CommandResult(0, "", "", argv=tuple(cmd))
 
 
 def _core_text(path: str, record: str) -> Placement:
@@ -113,7 +57,7 @@ def _core_text(path: str, record: str) -> Placement:
     )
 
 
-class _RecordingInstallerRunner(_FakeRunner):
+class _RecordingInstallerRunner(ScrubFakeRunner):
     """installer.py text, remove-text and mark as the installer runs them as root: the files written and
     removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
 
@@ -274,7 +218,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         with open(self.conf, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "NAS_ENABLED=1\n")
 
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         rc_set, set_lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc_set, 0, set_lines)
         self.assertIn(f"written:   {self.dropin}", set_lines)
@@ -340,7 +284,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     self._write(self.conf, conf)
                 if dropin is not None:
                     self._write(self.dropin, dropin)
-                runner = _FakeRunner()
+                runner = ScrubFakeRunner()
                 runner.fail_on = {"systemctl daemon-reload"}
                 rc, lines = scrub_limit_apply(self.paths, target, runner=runner)
                 self.assertEqual(rc, 1)
@@ -354,7 +298,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
 
     def test_a_failed_installer_restores_snapshots_conf(self) -> None:
         self._write(self.conf, "NAS_ENABLED=1\nSCRUB_LIMIT='1G'\n")
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         runner.fail_on = {"installer.py"}
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 1)
@@ -364,7 +308,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
 
     def test_a_rollback_that_fails_says_so(self) -> None:
         self._write(self.conf, "NAS_ENABLED=1\n")
-        runner = _FakeRunner()
+        runner = ScrubFakeRunner()
         runner.fail_on = {"systemctl daemon-reload", "installer.py remove-text"}
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 1)
@@ -460,7 +404,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
 
     def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
         os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back
-        rc, lines = scrub_limit_apply(self.paths, "500M", runner=_FakeRunner())
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=ScrubFakeRunner())
         self.assertEqual((rc, lines), (1, [f"ERROR: cannot read {self.dropin}"]))
         self.assertIsNone(self._read(self.conf))
 
