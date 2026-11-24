@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 from typing import Final, override
 import unittest
@@ -1381,6 +1382,20 @@ class LongestFirstTest(unittest.TestCase):
             folder = os.path.join(tmp, "a-folder.json")
             os.mkdir(folder)
             self.assertEqual(run_unit_module.read_durations(folder), {})
+
+    def test_a_named_pipe_at_the_path_reads_as_none_without_waiting(self) -> None:
+        fifo = os.path.join(self.tmp(), "fifo.json")
+        os.mkfifo(fifo)
+        got: list[dict[str, float]] = []
+        reader = threading.Thread(target=lambda: got.append(run_unit_module.read_durations(fifo)), daemon=True)
+        reader.start()
+        reader.join(timeout=10)
+        waited = reader.is_alive()
+        if waited:  # a reader that waits for a writer: give it one that writes nothing, so the thread ends
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            reader.join(timeout=10)
+        self.assertFalse(waited, "read_durations waited on a named pipe for a writer")
+        self.assertEqual(got, [{}])
 
     def test_a_good_file_reads_back(self) -> None:
         path = os.path.join(self.tmp(), "good.json")

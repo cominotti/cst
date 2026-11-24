@@ -137,6 +137,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1087,11 +1088,17 @@ def durations_path(repo: str, environ: Mapping[str, str]) -> str | None:
 
 
 def read_durations(path: str | None) -> dict[str, float]:
-    """The seconds of each test in the durations file at path; {} for no path or a file it cannot use."""
+    """The seconds of each test in the durations file at path; {} for no path or a file it cannot use.
+
+    Only a regular file is read. It is opened without blocking, so a named pipe at the path does not wait
+    for a writer (a regular file reads the same either way).
+    """
     if path is None:
         return {}
     try:
-        with open(path, "rb") as f:
+        with open(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return {}
             data = _decode_json(f.read().decode("utf-8"))
     except OSError, ValueError, RecursionError:  # ValueError: not UTF-8, not JSON
         return {}
