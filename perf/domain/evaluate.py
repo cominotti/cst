@@ -37,6 +37,7 @@ from perf.domain.models import (
     EXIT_PERF_OK,
     GPU_PM_MODE_ALWAYS,
     GPU_PM_MODE_GAME,
+    GpuDeviceSample,
     GpuProbeSnapshot,
     HUMAN_UID_MIN,
     IRQ_ACTIVE_MIN_COUNT,
@@ -99,6 +100,11 @@ _SCHED_NONE: Final = "none"
 _MANAGED_NVME_QUEUE_RE: Final = re.compile(r"\bnvme[0-9]+q[1-9][0-9]*\b")
 _ZERO_HEX: Final = "0x0000"
 _ZERO_DEC: Final = "0"
+# The commands a finding names as its fix (PerfFinding.fix_command); doctor only tests them for truth.
+_FIX_SWAP_APPLY: Final = "cst swap apply"
+_FIX_CPU_INSTALL: Final = "cst cpu install"
+_FIX_CPU_IRQ_APPLY: Final = "cst cpu irq apply"
+_FIX_BTRFS_INSTALL: Final = "cst btrfs install"
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +167,7 @@ def _eval_memory_headroom(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
                     "memory-min-free",
                     f"vm.min_free_kbytes is low ({format_bytes_human(mem.min_free_bytes)}) for host RAM",
                     f"Current free reserve is below {format_bytes_human(target)} headroom.",
-                    ("Apply CST swap tuning to set vm.min_free_kbytes = 256 MiB.", "cst swap apply"),
+                    ("Apply CST swap tuning to set vm.min_free_kbytes = 256 MiB.", _FIX_SWAP_APPLY),
                 )
     if mem.watermark_scale_factor is not None:
         col.metric("vm.watermark_scale_factor", str(mem.watermark_scale_factor))
@@ -201,7 +207,7 @@ def _eval_memory_mm_policy(col: AxisCollector, mem: MemoryProbeSnapshot) -> None
                 "memory-thp-defrag",
                 f"THP defrag is {mem.thp_defrag!r} (synchronous compaction on page faults)",
                 "Apps requesting MADV_HUGEPAGE stall waiting for direct compaction.",
-                ("Switch THP defrag to defer+madvise so kcompactd compacts in background.", "cst swap apply"),
+                ("Switch THP defrag to defer+madvise so kcompactd compacts in background.", _FIX_SWAP_APPLY),
             )
     if mem.lru_gen_enabled is not None:
         ttl_str = f"{mem.lru_gen_min_ttl_ms} ms" if mem.lru_gen_min_ttl_ms is not None else "?"
@@ -218,11 +224,11 @@ def _eval_memory_mm_policy(col: AxisCollector, mem: MemoryProbeSnapshot) -> None
                 "memory-mglru-min-ttl",
                 "MGLRU min_ttl_ms is 0 (no thrashing floor)",
                 "Newly faulted working-set pages can be evicted immediately during bursts.",
-                (f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.", "cst swap apply"),
+                (f"Set lru_gen/min_ttl_ms to {MGLRU_RECOMMENDED_MIN_TTL_MS}-5000 ms.", _FIX_SWAP_APPLY),
             )
 
 
-def _eval_memory_zswap_and_psi(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_zswap(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     if mem.zswap_enabled is not None:
         z_state = "enabled" if mem.zswap_enabled else "disabled"
         z_extra = f", {mem.zswap_compressor}" if mem.zswap_compressor is not None else ""
@@ -233,8 +239,11 @@ def _eval_memory_zswap_and_psi(col: AxisCollector, mem: MemoryProbeSnapshot) -> 
                 "memory-zswap-disabled",
                 "zswap is disabled",
                 "Anonymous pages swap straight to disk instead of fast compressed RAM pool.",
-                ("Apply CST swap profile to enable zswap + encrypted swap0.", "cst swap apply"),
+                ("Apply CST swap profile to enable zswap + encrypted swap0.", _FIX_SWAP_APPLY),
             )
+
+
+def _eval_memory_psi(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     if mem.psi_some_avg60 is not None or mem.psi_full_avg60 is not None:
         some_s = f"{mem.psi_some_avg60:.2f}%" if mem.psi_some_avg60 is not None else "?"
         full_s = f"{mem.psi_full_avg60:.2f}%" if mem.psi_full_avg60 is not None else "?"
@@ -295,7 +304,7 @@ def _eval_memory_cgroups(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
                 "memory-session-floor-unset",
                 f"{sslice.name} has effective memory.min=0",
                 "Desktop compositor/shell lacks hard reclaim protection under pressure.",
-                ("Configure a hard MemoryMin floor on user/session slices via uresourced.", "cst swap apply"),
+                ("Configure a hard MemoryMin floor on user/session slices via uresourced.", _FIX_SWAP_APPLY),
             )
         elif sslice.current_bytes > headroom_cap and eff_min < SESSION_MIN_RECOMMENDED_BYTES:
             col.warn_fix(
@@ -305,7 +314,7 @@ def _eval_memory_cgroups(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
                     f"effective memory.min ({format_bytes_human(eff_min)})"
                 ),
                 "Effective session protection is capped below active Shell/compositor working set.",
-                ("Raise uresourced MemoryMin above active compositor footprint (1G).", "cst swap apply"),
+                ("Raise uresourced MemoryMin above active compositor footprint (1G).", _FIX_SWAP_APPLY),
             )
 
 
@@ -315,7 +324,8 @@ def evaluate_perf_memory(mem: MemoryProbeSnapshot) -> PerfAxisReport:
     _eval_memory_headroom(col, mem)
     _eval_memory_stalls(col, mem)
     _eval_memory_mm_policy(col, mem)
-    _eval_memory_zswap_and_psi(col, mem)
+    _eval_memory_zswap(col, mem)
+    _eval_memory_psi(col, mem)
     _eval_memory_cgroups(col, mem)
     return col.report()
 
@@ -369,7 +379,7 @@ def _eval_irq_build_overlap(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
             "Hardware interrupts routed onto build cores compete with heavy compilation/indexing.",
             (
                 "Configure irqbalance ban-list (`IRQBALANCE_BANNED_CPULIST`) or steer IRQs off BUILD_CPUS.",
-                "cst cpu irq apply",
+                _FIX_CPU_IRQ_APPLY,
             ),
         )
 
@@ -395,7 +405,7 @@ def _eval_cpu_kernel(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
                 "cpu-ntsync-absent",
                 "/dev/ntsync is not active",
                 "Wine/Proton falls back to higher-overhead fsync/esync syscall emulation.",
-                ("Load/autoload the `ntsync` kernel module via modules-load.d.", "cst cpu install"),
+                ("Load/autoload the `ntsync` kernel module via modules-load.d.", _FIX_CPU_INSTALL),
             )
 
 
@@ -410,63 +420,88 @@ def _expected_banned_cpus(build_cpus: CpuSet, online_cpus: CpuSet | None) -> fro
     return frozenset(wanted[len(wanted) - max_banned :] if len(wanted) > max_banned else wanted)
 
 
+def _eval_cpu_cstates(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
+    if not cpu.idle_states:
+        return
+    # The cap cpu-power applies: CPU_CSTATE_MAX_LATENCY_US when cpu-setup.conf sets it (off or 0: no
+    # cap), else 200 us with intel_idle (or an unknown driver) and none with any other (AMD's acpi_idle).
+    # A state cpu-power leaves on by design is no warning `cst cpu install` could clear. An invalid
+    # value is cpu-power's 200 us; its error is cpu-power's to report.
+    limit_us, _ = boot_cstate_limit_us(
+        cpu.cstate_setting,
+        explicit=bool(cpu.cstate_setting.strip()),
+        cpuidle_driver=cpu.cpuidle_driver or "",
+    )
+    worst_deep = None if limit_us is None else _worst_enabled_deep_cstate(cpu.idle_states, limit_us)
+    max_enabled = max((s.latency_us for s in cpu.idle_states if not s.disabled), default=0)
+    col.metric("cpuidle max enabled", f"{cpu.cpuidle_driver or 'cpuidle'}: {max_enabled} µs")
+    if worst_deep is not None:
+        col.warn_fix(
+            "cpu-deep-cstates",
+            (
+                f"Deep idle state {worst_deep.name} enabled "
+                f"({worst_deep.latency_us} µs >= {limit_us} µs, the cap cpu-power applies)"
+            ),
+            "Deep package/core C-states add wakeup tail latency spikes during interactive/gaming loads.",
+            ("Cap C-state latency via CPU_CSTATE_MAX_LATENCY_US (`cst cpu power`).", _FIX_CPU_INSTALL),
+        )
+
+
+def _irqbalance_ban_text(cpu: CpuProbeSnapshot) -> str:
+    if cpu.irqbalance_banned_cpus is None:
+        return "no ban-list"
+    return f"ban={format_perf_cpuset(cpu.irqbalance_banned_cpus)}"
+
+
+def _irqbalance_ban_missing(cpu: CpuProbeSnapshot) -> bool:
+    expected_ban = _expected_banned_cpus(cpu.build_cpus, cpu.online_cpus) if cpu.build_cpus is not None else frozenset()
+    return bool(expected_ban) and (
+        cpu.irqbalance_banned_cpus is None or not expected_ban.issubset(cpu.irqbalance_banned_cpus.cpus)
+    )
+
+
+def _eval_cpu_irqbalance(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
+    if cpu.irqbalance_active is None:
+        return
+    if cpu.irqbalance_active is False:
+        col.metric("irqbalance", "inactive")
+        col.warn_fix(
+            "cpu-irqbalance-inactive",
+            "irqbalance service is inactive",
+            "Hardware interrupts stay pinned statically instead of balancing across cores.",
+            ("Enable irqbalance with BUILD_CPUS excluded via `cst cpu irq`.", _FIX_CPU_IRQ_APPLY),
+        )
+        return
+    col.metric("irqbalance", f"active ({_irqbalance_ban_text(cpu)})")
+    if _irqbalance_ban_missing(cpu):
+        col.warn_fix(
+            "cpu-irqbalance-ban-missing",
+            "irqbalance is active without banning BUILD_CPUS",
+            "Movable hardware interrupts may still be steered onto busy build cores.",
+            ("Configure CST's adaptive irqbalance ban-list via `cst cpu irq`.", _FIX_CPU_IRQ_APPLY),
+        )
+
+
 def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate cpuidle wakeup latency, preemption mode, ntsync, and IRQ placement."""
     col = AxisCollector(PerfAxis.CPU)
-    if cpu.idle_states:
-        # The cap cpu-power applies: CPU_CSTATE_MAX_LATENCY_US when cpu-setup.conf sets it (off or 0: no
-        # cap), else 200 us with intel_idle (or an unknown driver) and none with any other (AMD's acpi_idle).
-        # A state cpu-power leaves on by design is no warning `cst cpu install` could clear. An invalid
-        # value is cpu-power's 200 us; its error is cpu-power's to report.
-        limit_us, _ = boot_cstate_limit_us(
-            cpu.cstate_setting,
-            explicit=bool(cpu.cstate_setting.strip()),
-            cpuidle_driver=cpu.cpuidle_driver or "",
-        )
-        worst_deep = None if limit_us is None else _worst_enabled_deep_cstate(cpu.idle_states, limit_us)
-        max_enabled = max((s.latency_us for s in cpu.idle_states if not s.disabled), default=0)
-        col.metric("cpuidle max enabled", f"{cpu.cpuidle_driver or 'cpuidle'}: {max_enabled} µs")
-        if worst_deep is not None:
-            col.warn_fix(
-                "cpu-deep-cstates",
-                (
-                    f"Deep idle state {worst_deep.name} enabled "
-                    f"({worst_deep.latency_us} µs >= {limit_us} µs, the cap cpu-power applies)"
-                ),
-                "Deep package/core C-states add wakeup tail latency spikes during interactive/gaming loads.",
-                ("Cap C-state latency via CPU_CSTATE_MAX_LATENCY_US (`cst cpu power`).", "cst cpu install"),
-            )
+    _eval_cpu_cstates(col, cpu)
     _eval_cpu_kernel(col, cpu)
-    if cpu.irqbalance_active is not None:
-        if cpu.irqbalance_active is False:
-            col.metric("irqbalance", "inactive")
-            col.warn_fix(
-                "cpu-irqbalance-inactive",
-                "irqbalance service is inactive",
-                "Hardware interrupts stay pinned statically instead of balancing across cores.",
-                ("Enable irqbalance with BUILD_CPUS excluded via `cst cpu irq`.", "cst cpu irq apply"),
-            )
-        else:
-            ban_txt = (
-                f"ban={format_perf_cpuset(cpu.irqbalance_banned_cpus)}"
-                if cpu.irqbalance_banned_cpus is not None
-                else "no ban-list"
-            )
-            col.metric("irqbalance", f"active ({ban_txt})")
-            expected_ban = (
-                _expected_banned_cpus(cpu.build_cpus, cpu.online_cpus) if cpu.build_cpus is not None else frozenset()
-            )
-            if expected_ban and (
-                cpu.irqbalance_banned_cpus is None or not expected_ban.issubset(cpu.irqbalance_banned_cpus.cpus)
-            ):
-                col.warn_fix(
-                    "cpu-irqbalance-ban-missing",
-                    "irqbalance is active without banning BUILD_CPUS",
-                    "Movable hardware interrupts may still be steered onto busy build cores.",
-                    ("Configure CST's adaptive irqbalance ban-list via `cst cpu irq`.", "cst cpu irq apply"),
-                )
+    _eval_cpu_irqbalance(col, cpu)
     _eval_irq_build_overlap(col, cpu)
     return col.report()
+
+
+def _io_weights_text(io: IoProbeSnapshot) -> str:
+    if not io.nonzero_slice_io_weights:
+        return "none"
+    return ", ".join(f"{name}={w}" for name, w in io.nonzero_slice_io_weights)
+
+
+def _iocost_qos_text(io: IoProbeSnapshot) -> str:
+    if io.iocost_qos_active is not True:
+        return "empty"
+    return f"configured ({io.iocost_enabled_devices} device(s))" if io.iocost_enabled_devices > 0 else "configured"
 
 
 def _eval_io_queues(col: AxisCollector, io: IoProbeSnapshot) -> None:
@@ -479,18 +514,8 @@ def _eval_io_queues(col: AxisCollector, io: IoProbeSnapshot) -> None:
         )
     has_non_default_weight = any(w != DEFAULT_CG_IO_WEIGHT for _, w in io.nonzero_slice_io_weights)
     if io.iocost_qos_active is not None or io.nonzero_slice_io_weights:
-        weights_txt = (
-            ", ".join(f"{name}={w}" for name, w in io.nonzero_slice_io_weights)
-            if io.nonzero_slice_io_weights
-            else "none"
-        )
-        if io.iocost_qos_active is True:
-            qos_txt = (
-                f"configured ({io.iocost_enabled_devices} device(s))" if io.iocost_enabled_devices > 0 else "configured"
-            )
-        else:
-            qos_txt = "empty"
-        col.metric("blk-iocost / io.weight", f"qos={qos_txt}; weights={weights_txt}")
+        weights_txt = _io_weights_text(io)
+        col.metric("blk-iocost / io.weight", f"qos={_iocost_qos_text(io)}; weights={weights_txt}")
         nvme_none = any(d.name.startswith("nvme") and d.scheduler == _SCHED_NONE for d in io.block_devices)
         if has_non_default_weight and io.iocost_qos_active is not True and (nvme_none or not io.block_devices):
             col.warn_fix(
@@ -507,7 +532,7 @@ def _eval_io_queues(col: AxisCollector, io: IoProbeSnapshot) -> None:
             )
 
 
-def _eval_io_nvme_and_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
+def _eval_io_nvme_apst(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.nvme_ps_max_latency_us is not None:
         col.metric("nvme APST max latency", f"{io.nvme_ps_max_latency_us} µs")
         if io.nvme_ps_max_latency_us > NVME_PS_MAX_LATENCY_WARN_US:
@@ -517,9 +542,12 @@ def _eval_io_nvme_and_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
                 "Allows deep NVMe Autonomous Power State Transitions with multi-ms wakeup pauses.",
                 (
                     "Tighten nvme_core.default_ps_max_latency_us (e.g. <= 10000 µs or 0 on desktop).",
-                    "cst btrfs install",
+                    _FIX_BTRFS_INSTALL,
                 ),
             )
+
+
+def _eval_io_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.dirty_background_bytes is not None and io.dirty_bytes is not None:
         bg_txt = format_bytes_human(io.dirty_background_bytes) if io.dirty_background_bytes else "0 (ratio)"
         lim_txt = format_bytes_human(io.dirty_bytes) if io.dirty_bytes else "0 (ratio)"
@@ -534,8 +562,11 @@ def _eval_io_nvme_and_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
                 "io-dirty-bytes-unbounded",
                 "vm.dirty_bytes / dirty_background_bytes are 0 (RAM-percentage defaults)",
                 "Large-RAM hosts accumulate gigabytes of dirty buffers before writeback starts.",
-                ("Bound dirty writeback in bytes (e.g. 512 MiB / 2 GiB via cst btrfs).", "cst btrfs install"),
+                ("Bound dirty writeback in bytes (e.g. 512 MiB / 2 GiB via cst btrfs).", _FIX_BTRFS_INSTALL),
             )
+
+
+def _eval_io_root_commit(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.root_btrfs_commit_s is not None:
         flush_txt = ", flushoncommit" if io.root_btrfs_flushoncommit else ""
         default_txt = (
@@ -564,7 +595,7 @@ def _eval_io_nvme_and_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
                 "io-dirty-expire-mismatch",
                 f"vm.dirty_expire_centisecs ({exp_s:g}s) is shorter than root btrfs commit ({io.root_btrfs_commit_s}s)",
                 "Kernel page expiry forces dirty pages to disk before the btrfs commit window closes.",
-                ("Apply CST writeback sysctl tuning so page expiry matches commit=60.", "cst btrfs install"),
+                ("Apply CST writeback sysctl tuning so page expiry matches commit=60.", _FIX_BTRFS_INSTALL),
             )
 
 
@@ -609,55 +640,69 @@ def evaluate_perf_io(io: IoProbeSnapshot) -> PerfAxisReport:
     """Evaluate block schedulers, blk-iocost coherence, NVMe APST, dirty writeback, and btrfs commits."""
     col = AxisCollector(PerfAxis.IO)
     _eval_io_queues(col, io)
-    _eval_io_nvme_and_dirty(col, io)
+    _eval_io_nvme_apst(col, io)
+    _eval_io_dirty(col, io)
+    _eval_io_root_commit(col, io)
     _eval_io_btrfs(col, io)
     return col.report()
+
+
+def _gpu_metric_text(dev: GpuDeviceSample, drv: str, outputs: str) -> str:
+    parts = [drv, f"outputs={outputs}"]
+    if dev.power_control is not None:
+        parts.append(f"pm={dev.power_control}({dev.runtime_status or '?'})")
+    if dev.dpm_force_level is not None:
+        parts.append(f"dpm={dev.dpm_force_level}")
+    if dev.power_profile_mode is not None:
+        parts.append(f"profile={dev.power_profile_mode}")
+    return ", ".join(parts)
+
+
+def _eval_gpu_runtime_pm(col: AxisCollector, gpu: GpuProbeSnapshot, dev: GpuDeviceSample) -> None:
+    drv = dev.driver or "?"
+    outputs = ",".join(dev.connected_outputs) if dev.connected_outputs else "none"
+    col.metric(dev.card, _gpu_metric_text(dev, drv, outputs))
+    pm_expected_on = gpu.gpu_pm_mode in (None, GPU_PM_MODE_ALWAYS) or (
+        gpu.gpu_pm_mode == GPU_PM_MODE_GAME and gpu.game_profile_active is True
+    )
+    if dev.connected_outputs and dev.power_control == _GPU_RUNTIME_CONTROL_AUTO and pm_expected_on:
+        col.warn_fix(
+            f"gpu-runtime-pm-{dev.card}",
+            (
+                f"Connected display GPU {dev.card} ({drv}, {outputs}) "
+                f"has power/control=auto (runtime_status={dev.runtime_status or '?'})"
+            ),
+            "Runtime PM auto can gate/sleep a display-driving GPU between compositor/game frames.",
+            ("Force power/control=on for GPUs with active monitors.", _FIX_CPU_INSTALL),
+        )
+
+
+def _eval_gpu_game_profile(col: AxisCollector, gpu: GpuProbeSnapshot, dev: GpuDeviceSample) -> None:
+    if (
+        dev.connected_outputs
+        and gpu.game_profile_active is True
+        and dev.power_profile_mode == _GPU_AMD_BOOTUP_PROFILE
+        and dev.dpm_force_level == _GPU_RUNTIME_CONTROL_AUTO
+    ):
+        fix_cmd = (
+            "cst cpu game off && cst cpu game on"
+            if gpu.game_profile_manual
+            else "sudo systemctl restart cpu-game.service"
+        )
+        col.warn_fix(
+            f"gpu-game-profile-{dev.card}",
+            f"Game mode active while {dev.card} remains on {dev.power_profile_mode}",
+            "GPU stays on conservative desktop clock-ramp heuristics under active game session.",
+            ("Switch active GPU pp_power_profile_mode to 3D_FULL_SCREEN / VR in game mode.", fix_cmd),
+        )
 
 
 def evaluate_perf_gpu(gpu: GpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate connected GPU runtime PM and AMD DPM power profile state."""
     col = AxisCollector(PerfAxis.GPU)
     for dev in gpu.gpus:
-        drv = dev.driver or "?"
-        outputs = ",".join(dev.connected_outputs) if dev.connected_outputs else "none"
-        parts = [drv, f"outputs={outputs}"]
-        if dev.power_control is not None:
-            parts.append(f"pm={dev.power_control}({dev.runtime_status or '?'})")
-        if dev.dpm_force_level is not None:
-            parts.append(f"dpm={dev.dpm_force_level}")
-        if dev.power_profile_mode is not None:
-            parts.append(f"profile={dev.power_profile_mode}")
-        col.metric(dev.card, ", ".join(parts))
-        pm_expected_on = gpu.gpu_pm_mode in (None, GPU_PM_MODE_ALWAYS) or (
-            gpu.gpu_pm_mode == GPU_PM_MODE_GAME and gpu.game_profile_active is True
-        )
-        if dev.connected_outputs and dev.power_control == _GPU_RUNTIME_CONTROL_AUTO and pm_expected_on:
-            col.warn_fix(
-                f"gpu-runtime-pm-{dev.card}",
-                (
-                    f"Connected display GPU {dev.card} ({drv}, {outputs}) "
-                    f"has power/control=auto (runtime_status={dev.runtime_status or '?'})"
-                ),
-                "Runtime PM auto can gate/sleep a display-driving GPU between compositor/game frames.",
-                ("Force power/control=on for GPUs with active monitors.", "cst cpu install"),
-            )
-        if (
-            dev.connected_outputs
-            and gpu.game_profile_active is True
-            and dev.power_profile_mode == _GPU_AMD_BOOTUP_PROFILE
-            and dev.dpm_force_level == _GPU_RUNTIME_CONTROL_AUTO
-        ):
-            fix_cmd = (
-                "cst cpu game off && cst cpu game on"
-                if gpu.game_profile_manual
-                else "sudo systemctl restart cpu-game.service"
-            )
-            col.warn_fix(
-                f"gpu-game-profile-{dev.card}",
-                f"Game mode active while {dev.card} remains on {dev.power_profile_mode}",
-                "GPU stays on conservative desktop clock-ramp heuristics under active game session.",
-                ("Switch active GPU pp_power_profile_mode to 3D_FULL_SCREEN / VR in game mode.", fix_cmd),
-            )
+        _eval_gpu_runtime_pm(col, gpu, dev)
+        _eval_gpu_game_profile(col, gpu, dev)
     return col.report()
 
 
