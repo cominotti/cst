@@ -8226,6 +8226,9 @@ STUB
             keep
             (cd {w}/var/home/u1/Scratchpad && exec sleep 300) >/dev/null 2>&1 &
             busy=$!
+            # The stand-in umount looks for it in /proc: wait until it is in the folder.
+            for _ in $(seq 1 100); do [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] && break; sleep 0.1; done
+            [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] || {{ echo "the busy process is not in Scratchpad" >&2; exit 1; }}
             rc=0; $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
             kill "$busy"; wait "$busy" || true
             [[ $rc == 1 ]] || {{ echo "busy detach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
