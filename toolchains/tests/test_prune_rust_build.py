@@ -1358,6 +1358,23 @@ class ApplyStepsTest(Base):
         self.assertIn(f"rust:build: leftover {name} in use (sleep (pid 77)): kept for now", out)
         self.assertTrue(os.path.isdir(os.path.join(self.root, name)))
 
+    def test_a_leftover_that_cannot_be_deleted_makes_the_run_exit_1(self) -> None:
+        # The line said "could not delete leftover" at the error priority and the run exited 0: the
+        # timer's service looked fine while the leftover stayed, unlike any other deletion that fails.
+        name = tcd_build.TRASH_PREFIX + "aa0123456789abcd-1"
+        os.makedirs(os.path.join(self.root, name, "debug"))
+        self.folder("bb/0123456789abcd", 1)  # kept: the run has nothing else to do
+        tree = self.use_tree()
+        with mock.patch.object(tree, "remove", return_value=(False, "Permission denied")):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"rust:build: could not delete leftover {name}: Permission denied", out)
+        self.assertIn("rust:build: done: deleted 0 folder(s)", out)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, name)))
+        rc_again, out_again = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc_again, 0, out_again)
+        self.assertIn(f"rust:build: deleted leftover {name}", out_again)
+
     def test_a_folder_that_keeps_changing_is_left_busy(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         tree = self.use_tree()
