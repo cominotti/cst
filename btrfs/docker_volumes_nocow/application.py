@@ -148,8 +148,10 @@ class DockerVolumesNocow:
             self.state.clear_postponed()
 
     def give_up(self) -> None:
-        self.state.remove_flag()
+        # The counter before the flag: a stop between the two leaves the flag (the next boot tries
+        # again), never a counter without its flag (a later request would give up without a try).
         self.state.remove_attempts()  # a later 'install' starts afresh
+        self.state.remove_flag()
         self.out.log(3, GAVE_UP)
         # At boot nobody is logged in yet: btrfs-notify keeps it and it is
         # shown at the next graphical login.
@@ -214,8 +216,8 @@ class DockerVolumesNocow:
         todo = self.pending(fix=True)
         self.out.log(5, f"rewriting {len(todo)} volume(s) without copy-on-write before Docker starts")
         if not self.rewrite(todo):
+            self.state.remove_attempts()  # before the flag, as in give_up
             self.state.remove_flag()
-            self.state.remove_attempts()
             self.out.log(5, "all Docker volumes are NOCOW now")
 
     def mark(self) -> bool:

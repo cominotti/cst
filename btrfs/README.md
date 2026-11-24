@@ -846,6 +846,12 @@ docker volume rm <name>         # or one volume by name
   before anyone has logged in, so the desktop alert is **kept and shown at
   your next login** (section 4.9). It is also in the journal
   (`journalctl -u docker-volumes-nocow`). Run `install` again to retry.
+  At the end of a migration, and when it gives up, the helper removes the
+  count of boots before the flag, so a boot that stops between the two
+  leaves the flag and the next boot just runs again. An older helper removed
+  the flag first: a stop between the two left a count without its flag, and
+  a later migration (Docker reinstalled, say) then gave up after one failed
+  boot.
 - An interrupted copy (power loss) is cleaned up at the next boot; the original
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,
