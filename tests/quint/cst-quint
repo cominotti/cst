@@ -63,6 +63,7 @@ if _CHECKOUT not in sys.path:
 
 from cst_core.domain.errors import ExitStatus
 from cst_core.domain.shapes import json_object, parse_json
+from cst_core.domain.values import format_bytes_human
 
 QUINT_VERSION: Final = "0.33.1"
 JVM_ARGS: Final = "-Xmx4g"
@@ -394,8 +395,9 @@ def normalize(text: str, description: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def mb(kb: int) -> str:
-    return f"{kb / 1024:.0f} MB"
+def rss(kb: int) -> str:
+    """wait4's largest resident set (KiB) in binary IEC units, as CST's other output gives sizes."""
+    return format_bytes_human(kb * 1024)
 
 
 def known(value: int | None) -> str:
@@ -439,12 +441,12 @@ class Session:
             largest, total = max(largest, ran.max_rss_kb), total + ran.seconds
             self.out(
                 f"{check.main}: {found.result}, {known(found.states)} states, depth {known(found.depth)}, "
-                f"{ran.seconds:.1f} s, largest RSS {mb(ran.max_rss_kb)} ({', '.join(check.invariants)})"
+                f"{ran.seconds:.1f} s, largest RSS {rss(ran.max_rss_kb)} ({', '.join(check.invariants)})"
             )
             if found.result != "ok":
                 status = EX_FAILED
                 self.out(ran.output.strip()[-6000:])
-        self.out(f"{len(checks)} instance(s) in {total:.1f} s, largest RSS of any run {mb(largest)}")
+        self.out(f"{len(checks)} instance(s) in {total:.1f} s, largest RSS of any run {rss(largest)}")
         return status
 
     def write_traces(self, work: str, quint: str, env: Mapping[str, str], jobs: Sequence[TraceJob]) -> int:

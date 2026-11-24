@@ -390,15 +390,15 @@ class MainTest(Base):
         self.assertTrue(cwd.startswith(os.path.join(self.cache, "work") + os.sep), cwd)
         self.assertEqual(env["QUINT_HOME"], os.path.join(self.cache, "quint-home"))
         self.assertEqual((env["JVM_ARGS"], env["TMPDIR"]), ("-Xmx4g", cwd))
-        self.assertIn("inst_a: ok, 63344 states, depth 68, 9.4 s, largest RSS 879 MB (p, q)", self.lines)
-        self.assertIn("2 instance(s) in 18.8 s, largest RSS of any run 879 MB", self.lines)
+        self.assertIn("inst_a: ok, 63344 states, depth 68, 9.4 s, largest RSS 878.9 MiB (p, q)", self.lines)
+        self.assertIn("2 instance(s) in 18.8 s, largest RSS of any run 878.9 MiB", self.lines)
         self.assertEqual(os.listdir(os.path.join(self.cache, "work")), [], "the work folder is removed")
         self.assertEqual(sorted(os.listdir(self.checkout)), ["specs", "tests"], "nothing written into the checkout")
 
     def test_a_violation_fails_and_prints_the_counterexample(self) -> None:
         self.run_.verdicts["inst_b"] = (1, VIOLATED)
         self.assertEqual(self.main(), 1)
-        self.assertIn("inst_b: violated, 25520 states, depth 28, 9.4 s, largest RSS 879 MB (p, q)", self.lines)
+        self.assertIn("inst_b: violated, 25520 states, depth 28, 9.4 s, largest RSS 878.9 MiB (p, q)", self.lines)
         self.assertIn("error: found a counterexample", self.output())
 
     def test_a_run_over_its_time_fails(self) -> None:
