@@ -18,6 +18,7 @@ from cst_core.domain.values import GIB, MIB
 from perf.adapters import LinuxPerfProbe, PerfPaths
 from perf.application import build_perf_report
 from perf.cli import main as perf_cli_main
+from perf.domain.axis import worst_perf_verdict
 from perf.domain.evaluate import (
     evaluate_perf_cpu,
     evaluate_perf_gpu,
@@ -26,7 +27,6 @@ from perf.domain.evaluate import (
     evaluate_perf_snapshot,
     perf_report_to_json,
     verdict_exit_code,
-    worst_perf_verdict,
 )
 from perf.domain.models import (
     ALL_PERF_AXES,

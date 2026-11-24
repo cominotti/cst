@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: MPL-2.0
 """Pure threshold evaluation and objective diagnosis rules for `cst perf`."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 import re
 from typing import Final
 
 from cst_core.domain.text import group
-from cst_core.domain.values import CpuSet, HOUR, format_bytes_human
+from cst_core.domain.values import CpuSet, format_bytes_human
 from cpu.power.domain import boot_cstate_limit_us
+from perf.domain.axis import (
+    AxisCollector,
+    VERDICT_RANK,
+    format_perf_cpuset,
+    hourly_rate,
+    rate_str,
+    worst_perf_verdict,
+)
 from perf.domain.models import (
     ALL_PERF_AXES,
     ALLOCSTALL_ATTENTION_PER_HOUR,
@@ -42,7 +50,6 @@ from perf.domain.models import (
     MEM_MIN_FREE_LARGE_RAM_BYTES,
     MEM_MIN_FREE_SMALL_RAM_BYTES,
     MGLRU_RECOMMENDED_MIN_TTL_MS,
-    MIN_UPTIME_FOR_RATE_SECONDS,
     MemoryProbeSnapshot,
     NVME_PS_MAX_LATENCY_WARN_US,
     PSI_MEM_FULL_BOTTLENECK_PCT,
@@ -66,13 +73,6 @@ from perf.domain.models import (
     TOP_ACTION_LIMIT,
     TOP_IRQ_DISPLAY_LIMIT,
 )
-
-_VERDICT_RANK: Final[dict[PerfVerdict, int]] = {
-    PerfVerdict.SKIP: 0,
-    PerfVerdict.OPTIMIZED: 1,
-    PerfVerdict.ATTENTION: 2,
-    PerfVerdict.BOTTLENECK: 3,
-}
 
 _THP_DEFRAG_PAUSE_MODES: Final[frozenset[str]] = frozenset({"always", "madvise"})
 _PREEMPT_GOOD_MODES: Final[frozenset[str]] = frozenset({"full", "lazy"})
@@ -137,74 +137,6 @@ _STALL_RULES: Final[tuple[_StallThreshold, ...]] = tuple(
 )
 
 
-class _AxisCollector:
-    """Collect ordered metrics and findings for a single axis cleanly."""
-
-    __slots__ = ("axis", "findings", "metrics", "seen")
-
-    def __init__(self, axis: PerfAxis) -> None:
-        self.axis = axis
-        self.metrics: list[PerfMetric] = []
-        self.findings: list[PerfFinding] = []
-        self.seen = False
-
-    def metric(self, label: str, value: str) -> None:
-        self.seen = True
-        self.metrics.append(PerfMetric(label, value))
-
-    def warn(self, finding_id: str, summary: str, detail: str, recommendation: str = "") -> None:
-        self.findings.append(PerfFinding(finding_id, self.axis, PerfVerdict.ATTENTION, summary, detail, recommendation))
-
-    def warn_fix(self, finding_id: str, summary: str, detail: str, guidance: tuple[str, str]) -> None:
-        recommendation, fix_command = guidance
-        self.findings.append(
-            PerfFinding(finding_id, self.axis, PerfVerdict.ATTENTION, summary, detail, recommendation, fix_command)
-        )
-
-    def add(self, finding: PerfFinding) -> None:
-        self.findings.append(finding)
-
-    def report(self) -> PerfAxisReport:
-        if not self.seen:
-            verdict = PerfVerdict.SKIP
-        elif not self.findings:
-            verdict = PerfVerdict.OPTIMIZED
-        else:
-            verdict = worst_perf_verdict(f.verdict for f in self.findings)
-        return PerfAxisReport(
-            axis=self.axis,
-            verdict=verdict,
-            metrics=tuple(self.metrics),
-            findings=tuple(self.findings),
-        )
-
-
-def format_perf_cpuset(cpuset: CpuSet) -> str:
-    """Format a `CpuSet` compactly using Linux range syntax (`0-7,12-23`)."""
-    nums = cpuset.sorted_cpus()
-    if not nums:
-        return ""
-    ranges: list[str] = []
-    start = end = nums[0]
-    for cpu in nums[1:]:
-        if cpu == end + 1:
-            end = cpu
-        else:
-            ranges.append(f"{start}-{end}" if start != end else str(start))
-            start = end = cpu
-    ranges.append(f"{start}-{end}" if start != end else str(start))
-    return ",".join(ranges)
-
-
-def worst_perf_verdict(verdicts: Iterable[PerfVerdict]) -> PerfVerdict:
-    """Return the most severe verdict among `verdicts`, or `SKIP` if empty."""
-    best = PerfVerdict.SKIP
-    for v in verdicts:
-        if _VERDICT_RANK[v] > _VERDICT_RANK[best]:
-            best = v
-    return best
-
-
 def verdict_exit_code(verdict: PerfVerdict) -> int:
     """Map overall `PerfVerdict` to process exit code (`0` OK/SKIP, `1` ATTENTION/BOTTLENECK)."""
     if verdict in (PerfVerdict.ATTENTION, PerfVerdict.BOTTLENECK):
@@ -212,18 +144,7 @@ def verdict_exit_code(verdict: PerfVerdict) -> int:
     return EXIT_PERF_OK
 
 
-def _hourly_rate(count: int, uptime_seconds: float | None) -> float | None:
-    if uptime_seconds is None or uptime_seconds < MIN_UPTIME_FOR_RATE_SECONDS:
-        return None
-    return count / (uptime_seconds / float(HOUR))
-
-
-def _rate_str(count: int, uptime_seconds: float | None) -> str:
-    rate = _hourly_rate(count, uptime_seconds)
-    return f"{count} ({rate:.1f}/h)" if rate is not None else str(count)
-
-
-def _eval_memory_headroom(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_headroom(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     if mem.mem_total_bytes is not None:
         avail = format_bytes_human(mem.mem_available_bytes) if mem.mem_available_bytes is not None else "?"
         col.metric("RAM available", f"{avail} / {format_bytes_human(mem.mem_total_bytes)}")
@@ -246,11 +167,11 @@ def _eval_memory_headroom(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None
         col.metric("vm.watermark_scale_factor", str(mem.watermark_scale_factor))
 
 
-def _eval_stall_counter(col: _AxisCollector, count: int | None, uptime: float | None, rule: _StallThreshold) -> None:
+def _eval_stall_counter(col: AxisCollector, count: int | None, uptime: float | None, rule: _StallThreshold) -> None:
     if count is None:
         return
-    col.metric(rule.label, _rate_str(count, uptime))
-    rate = _hourly_rate(count, uptime)
+    col.metric(rule.label, rate_str(count, uptime))
+    rate = hourly_rate(count, uptime)
     if rate is not None and rate >= rule.attn_rate:
         verdict = PerfVerdict.BOTTLENECK if rate >= rule.crit_rate else PerfVerdict.ATTENTION
         col.add(
@@ -265,14 +186,14 @@ def _eval_stall_counter(col: _AxisCollector, count: int | None, uptime: float | 
         )
 
 
-def _eval_memory_stalls(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_stalls(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     _eval_stall_counter(col, mem.allocstall_count, mem.uptime_seconds, _STALL_RULES[0])
     _eval_stall_counter(col, mem.compact_stall_count, mem.uptime_seconds, _STALL_RULES[1])
     if mem.workingset_refault_file is not None:
-        col.metric("workingset_refault_file", _rate_str(mem.workingset_refault_file, mem.uptime_seconds))
+        col.metric("workingset_refault_file", rate_str(mem.workingset_refault_file, mem.uptime_seconds))
 
 
-def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_mm_policy(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     if mem.thp_enabled is not None or mem.thp_defrag is not None:
         col.metric("THP", f"enabled={mem.thp_enabled or '?'} defrag={mem.thp_defrag or '?'}")
         if mem.thp_defrag in _THP_DEFRAG_PAUSE_MODES:
@@ -301,7 +222,7 @@ def _eval_memory_mm_policy(col: _AxisCollector, mem: MemoryProbeSnapshot) -> Non
             )
 
 
-def _eval_memory_zswap_and_psi(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_zswap_and_psi(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     if mem.zswap_enabled is not None:
         z_state = "enabled" if mem.zswap_enabled else "disabled"
         z_extra = f", {mem.zswap_compressor}" if mem.zswap_compressor is not None else ""
@@ -349,7 +270,7 @@ def _slice_uid(sslice: CgroupMemorySlice) -> int | None:
     return int(group(match, 1)) if match is not None else None
 
 
-def _eval_memory_cgroups(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
+def _eval_memory_cgroups(col: AxisCollector, mem: MemoryProbeSnapshot) -> None:
     entries = [
         (
             sslice,
@@ -390,7 +311,7 @@ def _eval_memory_cgroups(col: _AxisCollector, mem: MemoryProbeSnapshot) -> None:
 
 def evaluate_perf_memory(mem: MemoryProbeSnapshot) -> PerfAxisReport:
     """Evaluate memory pressure, reclaim stalls, THP, MGLRU, zswap, and cgroup floors."""
-    col = _AxisCollector(PerfAxis.MEMORY)
+    col = AxisCollector(PerfAxis.MEMORY)
     _eval_memory_headroom(col, mem)
     _eval_memory_stalls(col, mem)
     _eval_memory_mm_policy(col, mem)
@@ -422,7 +343,7 @@ def _irq_overlap_detail(line: IrqLineSample, build_set: frozenset[int]) -> str |
     return f"IRQ {line.irq_id} ({dev_name} on CPU {dom_cpu})"
 
 
-def _eval_irq_build_overlap(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
+def _eval_irq_build_overlap(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
     if cpu.build_cpus is None or not cpu.irq_lines:
         return
     build_spec = format_perf_cpuset(cpu.build_cpus)
@@ -453,7 +374,7 @@ def _eval_irq_build_overlap(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
         )
 
 
-def _eval_cpu_kernel(col: _AxisCollector, cpu: CpuProbeSnapshot) -> None:
+def _eval_cpu_kernel(col: AxisCollector, cpu: CpuProbeSnapshot) -> None:
     if cpu.preempt_mode is not None:
         col.metric("preempt", cpu.preempt_mode)
         if cpu.preempt_mode not in _PREEMPT_GOOD_MODES:
@@ -491,7 +412,7 @@ def _expected_banned_cpus(build_cpus: CpuSet, online_cpus: CpuSet | None) -> fro
 
 def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate cpuidle wakeup latency, preemption mode, ntsync, and IRQ placement."""
-    col = _AxisCollector(PerfAxis.CPU)
+    col = AxisCollector(PerfAxis.CPU)
     if cpu.idle_states:
         # The cap cpu-power applies: CPU_CSTATE_MAX_LATENCY_US when cpu-setup.conf sets it (off or 0: no
         # cap), else 200 us with intel_idle (or an unknown driver) and none with any other (AMD's acpi_idle).
@@ -548,7 +469,7 @@ def evaluate_perf_cpu(cpu: CpuProbeSnapshot) -> PerfAxisReport:
     return col.report()
 
 
-def _eval_io_queues(col: _AxisCollector, io: IoProbeSnapshot) -> None:
+def _eval_io_queues(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.block_devices:
         nvmes = [d for d in io.block_devices if d.name.startswith("nvme")]
         sample_devs = nvmes or list(io.block_devices)
@@ -586,7 +507,7 @@ def _eval_io_queues(col: _AxisCollector, io: IoProbeSnapshot) -> None:
             )
 
 
-def _eval_io_nvme_and_dirty(col: _AxisCollector, io: IoProbeSnapshot) -> None:
+def _eval_io_nvme_and_dirty(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.nvme_ps_max_latency_us is not None:
         col.metric("nvme APST max latency", f"{io.nvme_ps_max_latency_us} µs")
         if io.nvme_ps_max_latency_us > NVME_PS_MAX_LATENCY_WARN_US:
@@ -647,7 +568,7 @@ def _eval_io_nvme_and_dirty(col: _AxisCollector, io: IoProbeSnapshot) -> None:
             )
 
 
-def _eval_io_btrfs(col: _AxisCollector, io: IoProbeSnapshot) -> None:
+def _eval_io_btrfs(col: AxisCollector, io: IoProbeSnapshot) -> None:
     if io.btrfs_conf_present and io.btrfs_commits:
         col.metric("btrfs SCRUB_LIMIT", io.btrfs_scrub_limit if io.btrfs_scrub_limit is not None else "unset")
         if io.btrfs_scrub_limit is None or not io.btrfs_scrub_limit:
@@ -686,7 +607,7 @@ def _eval_io_btrfs(col: _AxisCollector, io: IoProbeSnapshot) -> None:
 
 def evaluate_perf_io(io: IoProbeSnapshot) -> PerfAxisReport:
     """Evaluate block schedulers, blk-iocost coherence, NVMe APST, dirty writeback, and btrfs commits."""
-    col = _AxisCollector(PerfAxis.IO)
+    col = AxisCollector(PerfAxis.IO)
     _eval_io_queues(col, io)
     _eval_io_nvme_and_dirty(col, io)
     _eval_io_btrfs(col, io)
@@ -695,7 +616,7 @@ def evaluate_perf_io(io: IoProbeSnapshot) -> PerfAxisReport:
 
 def evaluate_perf_gpu(gpu: GpuProbeSnapshot) -> PerfAxisReport:
     """Evaluate connected GPU runtime PM and AMD DPM power profile state."""
-    col = _AxisCollector(PerfAxis.GPU)
+    col = AxisCollector(PerfAxis.GPU)
     for dev in gpu.gpus:
         drv = dev.driver or "?"
         outputs = ",".join(dev.connected_outputs) if dev.connected_outputs else "none"
@@ -757,7 +678,7 @@ def evaluate_perf_snapshot(
             case PerfAxis.GPU:
                 axis_reports.append(evaluate_perf_gpu(snapshot.gpu))
     all_findings = [f for rep in axis_reports for f in rep.findings]
-    ranked = sorted(all_findings, key=lambda f: (-_VERDICT_RANK[f.verdict], f.axis.value, f.finding_id))
+    ranked = sorted(all_findings, key=lambda f: (-VERDICT_RANK[f.verdict], f.axis.value, f.finding_id))
     return PerfReport(
         verdict=worst_perf_verdict(rep.verdict for rep in axis_reports),
         uptime_seconds=snapshot.uptime_seconds,
