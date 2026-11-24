@@ -119,8 +119,7 @@ def parse_commit_token(token: str) -> int | None:
     reads it), or None."""
     if not token.startswith(_COMMIT_PREFIX):
         return None
-    val = parse_whole_number(token[len(_COMMIT_PREFIX) :])
-    return val if val is not None and val > 0 else None
+    return parse_whole_number(token[len(_COMMIT_PREFIX) :]) or None
 
 
 def extract_commit_seconds(options_str: str) -> tuple[int, ...]:
