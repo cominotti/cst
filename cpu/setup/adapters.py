@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst cpu`'s root commands on the machine: install, status, uninstall, game, vm-pin, docker-slice, experiment.
 
-CpuSetup carries what every step needs (the paths, the command runner, the
-checkout, the name to show, the target user) across the steps of a command.
-Each step runs what cpu-setup.sh ran, the way it ran it: the installer
-(cst_core/installer.py, through runuser for the user's files), systemctl,
-the checkout's programs. A command that cpu-setup.sh ran under set -e ends
-the command when it fails, with its exit status (Halt).
+CpuSetup carries what every step needs (the paths, the command runner, the checkout, the name to show, the
+target user) across the steps of a command. Each step runs what cpu-setup.sh ran, the way it ran it: the
+installer (cst_core/installer.py, through runuser for the user's files), systemctl, the checkout's programs.
+A command that cpu-setup.sh ran under set -e ends the command when it fails, with its exit status (Halt).
 """
 
 from collections.abc import Callable, Mapping, Sequence
