@@ -45,6 +45,11 @@ class _SystemctlScope(TypedDict, total=False):
     stdin: StdinMode
 
 
+def _show_props(text: str) -> dict[str, str]:
+    """One unit's PROP=VALUE lines of `systemctl show` as {prop: value} (a line without = is skipped)."""
+    return {key: value for key, sep, value in (line.partition("=") for line in text.splitlines()) if sep}
+
+
 class SystemctlAdapter:
     """SystemdPort implementation delegating to systemctl and systemd-escape.
 
@@ -143,25 +148,24 @@ class SystemctlAdapter:
         """Remove what systemd keeps for unit (what: state, cache, logs, ...); its exit status and output."""
         return self._systemctl("clean", f"--what={what}", unit, output=output)
 
+    def _show(self, head: Sequence[str], props: Sequence[str], target: str) -> CommandResult:
+        """`systemctl show -p PROP... TARGET` as show and show_units run it: on_host as the adapter's policy
+        says for show, the C locale, 20 s at most or the adapter's timeout."""
+        argv = [*head, "show", *(a for p in props for a in ("-p", p)), target]
+        timeout = 20 if self._timeout is None else self._timeout
+        scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
+        return self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
+
     def show_units(self, pattern: str, props: Sequence[str]) -> list[dict[str, str]] | None:
         """`systemctl show -p PROP... PATTERN`: one {prop: value} per unit the manager has loaded whose name
         matches the glob (a glob loads no unit on demand, as a unit name or a path would; ask for `Id` to
         know which unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or
         cannot start (no answer). As show: on the host from a toolbox unless the adapter's on_host is
         LOCAL, the C locale, 20 s at most or the adapter's timeout."""
-        argv = [*self._head, "show", *(a for p in props for a in ("-p", p)), pattern]
-        timeout = 20 if self._timeout is None else self._timeout
-        res = self._runner.run(
-            argv, check=False, timeout=timeout, locale_c=True, **_ScopeOptions(self._scope, on_host=self._show_on_host)
-        )
+        res = self._show(self._head, props, pattern)
         if res.returncode != 0:
             return None
-        units: list[dict[str, str]] = []
-        for block in res.stdout.split("\n\n"):
-            props_of = {key: value for key, sep, value in (line.partition("=") for line in block.splitlines()) if sep}
-            if props_of:
-                units.append(props_of)
-        return units
+        return [unit for block in res.stdout.split("\n\n") if (unit := _show_props(block))]
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""
@@ -174,10 +178,5 @@ class SystemctlAdapter:
         user's own manager (`systemctl --user`; an adapter whose scope is user already has it); {} when
         systemctl fails or cannot start. 20 s at most, or the adapter's timeout when it has one."""
         head = [*self._head, "--user"] if user and "--user" not in self._head else self._head
-        argv = [*head, "show", *(a for p in props for a in ("-p", p)), unit]
-        timeout = 20 if self._timeout is None else self._timeout
-        scope = _ScopeOptions(self._scope, on_host=self._show_on_host)
-        res = self._runner.run(argv, check=False, timeout=timeout, locale_c=True, **scope)
-        if res.returncode != 0:
-            return {}
-        return {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}
+        res = self._show(head, props, unit)
+        return _show_props(res.stdout) if res.returncode == 0 else {}
