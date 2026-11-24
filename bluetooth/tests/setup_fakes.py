@@ -417,7 +417,7 @@ BLUETOOTH_SERVICE = "bluetooth.service"
 WIREPLUMBER_SERVICE = "wireplumber.service"
 
 
-def _unified_diff(old: str, new: str) -> tuple[int, str, str]:
+def _unified_diff(old: str, new: str) -> Answer:
     """diff -u OLD NEW as the real diff answers it: 0 for the same text, 1 and the hunks otherwise."""
     with open(old, encoding="utf-8") as f:
         a = f.read().splitlines(keepends=True)
@@ -511,7 +511,7 @@ class SetupModel:
         rc, out, err = self.answer(args)
         return CommandResult(rc, out, err, argv=tuple(args))
 
-    def answer(self, args: list[str]) -> tuple[int, str, str]:
+    def answer(self, args: list[str]) -> Answer:
         if args[:1] == ["timeout"]:
             args = args[2:]
         handler = self.handlers().get(args[0] if args else "")
@@ -554,7 +554,7 @@ class SetupModel:
         rc, text = self.cat("wp-roles")
         return (0, text, "") if rc == 0 else (5, "", "")
 
-    def sudo(self, args: list[str]) -> tuple[int, str, str]:
+    def sudo(self, args: list[str]) -> Answer:
         how = _text_or_none(self.state(f"fail-sudo-{args[0]}"))
         if how is not None:
             if not how.strip().isdigit():
@@ -646,7 +646,7 @@ class SetupModel:
         self.loaded[unit] = self.disk(unit)
         self.started[unit] = self.clock
 
-    def busctl(self, args: list[str]) -> tuple[int, str, str]:
+    def busctl(self, args: list[str]) -> Answer:
         joined = " ".join(args)
         if "GetManagedObjects" in joined:
             rc, text = self.cat("objects.json")
@@ -657,7 +657,7 @@ class SetupModel:
             return (*self.cat(f"prop-{args[3]}-{args[4]}"), "")
         raise AssertionError(f"SetupModel: no such busctl command: {args}")
 
-    def bluetoothctl(self, args: list[str]) -> tuple[int, str, str]:
+    def bluetoothctl(self, args: list[str]) -> Answer:
         if args[:1] == ["info"]:
             rc, text = self.cat("bt-info")
             return (0, text, "") if rc == 0 else (1, f"Device {args[1]} not available\n", "")

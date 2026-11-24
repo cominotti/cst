@@ -60,6 +60,7 @@ import unittest
 from unittest import mock
 
 from cst_core.adapters import SystemClockAdapter
+from cst_core.domain.values import HOUR
 from toolchains import cli as tc_cli, wiring as tc_wiring
 from toolchains.adapters import build_tree as tc_build_tree
 from toolchains.adapters import home_files as tc_home_files
@@ -83,7 +84,6 @@ from tests.repo_files import REPO
 TOOL = os.path.join(REPO, "toolchains", "cst-toolchains")
 with open(TOOL, encoding="utf-8") as _fh:
     HELP = ast.get_docstring(ast.parse(_fh.read()), clean=False) or ""
-HOUR = 3600
 SETTINGS = "RUST_BUILD_ORPHANS=no\nRUST_BUILD_INCREMENTAL_IDLE=12h\nRUST_BUILD_MAX_TOTAL=off\n"
 FOREIGN = tcd_build.TRASH_PREFIX + "mine"  # another program's folder, not of CST's trash format
 INCS = ("debug/incremental", "x86_64-unknown-linux-gnu/debug/incremental")

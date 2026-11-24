@@ -241,7 +241,7 @@ class CacheFaultBase(unittest.TestCase):
         third = self.run_once(model) or (None, [])
         self.assertEqual(third[0], 0, f"{when}: the third run: {third}")
         self.assertIn("nothing to do", "\n".join(third[1]), f"{when}: the third run")
-        changing = [c for c in model.calls if c[:1] != ["findmnt"]]
+        changing = [c for c in model.calls if not reads(c)]
         self.assertEqual(changing, [], f"{when}: the third run changed something")
 
     def points(self, *faults: Fault) -> list[str]:
