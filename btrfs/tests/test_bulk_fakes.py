@@ -183,5 +183,42 @@ class RmtreePointTest(unittest.TestCase):
         self.assertFalse(os.path.lexists(path))
 
 
+class MachinePointsTest(unittest.TestCase):
+    """+C on a folder and the creation of ~/Bulk are points: a kill after one, a failure of one."""
+
+    @override
+    def setUp(self) -> None:
+        stub_fsync(self)
+        self.fx = BulkHome()
+        self.addCleanup(self.fx.close)
+        self.plan = FaultPlan(dead_after_kill=True)
+        arm_points(self.fx, self.plan, torn_rmtree=False)
+
+    def test_a_kill_after_mkdirs_mkdir_leaves_the_folder_without_c(self) -> None:
+        os.makedirs(self.fx.bulk_path("emulators/android"))
+        self.plan.arm((FaultMode.KILL, 3))
+        with self.assertRaises(Killed):
+            self.fx.user.u_mkdirs(self.fx.ctx.bulk, "emulators/android/avd", True)
+        self.assertEqual(self.plan.calls, ["chattr +C Bulk/emulators", "chattr +C Bulk/emulators/android", "os.mkdir"])
+        self.assertTrue(os.path.isdir(self.fx.bulk_path("emulators/android/avd")))
+        self.assertFalse(self.fx.is_nocow(self.fx.bulk_path("emulators/android/avd")))
+
+    def test_a_failing_chattr_raises_and_sets_no_c(self) -> None:
+        folder = self.fx.bulk_path("emulators")
+        os.makedirs(folder)
+        self.plan.arm((FaultMode.FAIL, 1))
+        with self.assertRaises(OSError):
+            self.fx.machine.set_nocow(folder)
+        self.assertEqual(self.plan.calls, ["chattr +C Bulk/emulators"])
+        self.assertFalse(self.fx.is_nocow(folder))
+
+    def test_a_kill_after_the_subvolume_leaves_it(self) -> None:
+        self.plan.arm((FaultMode.KILL, 1))
+        with self.assertRaises(Killed):
+            self.fx.machine.subvol_create(self.fx.bulk_path())
+        self.assertEqual(self.plan.calls, ["subvolume Bulk"])
+        self.assertTrue(self.fx.is_subvol(self.fx.bulk_path()))
+
+
 if __name__ == "__main__":
     unittest.main()

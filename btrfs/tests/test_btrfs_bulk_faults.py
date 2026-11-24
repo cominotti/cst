@@ -7,8 +7,9 @@ with os.fsync stubbed (what a kill leaves is checked here, not durability) and t
 two 0.05 s sleeps replaced by a wait for the filesystem's next ctime tick (bulk_fakes.tick_wait).
 Every call by which a run changes the home or the state files is a point of a FaultPlan
 (bulk_fakes.arm_points): the user adapter's renames, links, mkdirs, rmdirs, unlinks and created
-files, the state files' writes and removals, cp, and each deletion of a tree, torn in two when it
-holds two or more files (a kill half-way through it, the case the journal's "finishing" is for).
+files, the state files' writes and removals, cp, +C on a folder, the creation of ~/Bulk, and each
+deletion of a tree, torn in two when it holds two or more files (a kill half-way through it, the
+case the journal's "finishing" is for).
 The plan is dead after a kill (FaultPlan(dead_after_kill=True)): the copy's
 `except BaseException` cleanup does not run after a kill, as it does not on a real machine.
 
@@ -85,30 +86,30 @@ SECOND_MODES: Final[Mapping[FaultMode, tuple[FaultMode, ...]]] = {
 
 # The cases each class runs, and how many of them end in F1 (a change of the protocol's calls moves
 # them: pinned so it is seen).
-CASES_MOVE_KILL = (82, 9)
-CASES_MOVE_FAIL = (35, 3)
-CASES_MOVE_FAIL_FROM = (38, 3)
-CASES_NOCOW_REWRITE_KILL = (64, 6)
-CASES_NOCOW_REWRITE_FAIL = (29, 2)
-CASES_NOCOW_REWRITE_FAIL_FROM = (30, 2)
-CASES_NOCOW_FROM_HOME_KILL = (80, 9)
-CASES_NOCOW_FROM_HOME_FAIL = (33, 3)
-CASES_NOCOW_FROM_HOME_FAIL_FROM = (36, 3)
-CASES_SUBVOLUME_KILL = (22, 0)
-CASES_SUBVOLUME_FAIL = (12, 0)
-CASES_SUBVOLUME_FAIL_FROM = (12, 0)
-CASES_STALE_KILL = (82, 9)
-CASES_STALE_FAIL = (35, 3)
-CASES_STALE_FAIL_FROM = (38, 3)
-CASES_EMPTY_KILL = (3, 0)
-CASES_EMPTY_FAIL = (3, 0)
-CASES_EMPTY_FAIL_FROM = (3, 0)
-CASES_LATE_WRITE_KILL = (117, 22)
-CASES_LATE_WRITE_FAIL = (47, 9)
-CASES_LATE_WRITE_FAIL_FROM = (50, 9)
-CASES_CONFLICT_KILL = (35, 6)
-CASES_CONFLICT_FAIL = (15, 3)
-CASES_CONFLICT_FAIL_FROM = (18, 3)
+CASES_MOVE_KILL = (85, 9)
+CASES_MOVE_FAIL = (38, 3)
+CASES_MOVE_FAIL_FROM = (41, 3)
+CASES_NOCOW_REWRITE_KILL = (69, 6)
+CASES_NOCOW_REWRITE_FAIL = (34, 2)
+CASES_NOCOW_REWRITE_FAIL_FROM = (35, 2)
+CASES_NOCOW_FROM_HOME_KILL = (86, 9)
+CASES_NOCOW_FROM_HOME_FAIL = (39, 3)
+CASES_NOCOW_FROM_HOME_FAIL_FROM = (42, 3)
+CASES_SUBVOLUME_KILL = (25, 0)
+CASES_SUBVOLUME_FAIL = (15, 0)
+CASES_SUBVOLUME_FAIL_FROM = (15, 0)
+CASES_STALE_KILL = (85, 9)
+CASES_STALE_FAIL = (38, 3)
+CASES_STALE_FAIL_FROM = (41, 3)
+CASES_EMPTY_KILL = (6, 0)
+CASES_EMPTY_FAIL = (6, 0)
+CASES_EMPTY_FAIL_FROM = (6, 0)
+CASES_LATE_WRITE_KILL = (120, 22)
+CASES_LATE_WRITE_FAIL = (50, 9)
+CASES_LATE_WRITE_FAIL_FROM = (53, 9)
+CASES_CONFLICT_KILL = (38, 6)
+CASES_CONFLICT_FAIL = (18, 3)
+CASES_CONFLICT_FAIL_FROM = (21, 3)
 
 
 def quiet(fn: Callable[[], object]) -> str:
@@ -442,6 +443,9 @@ class MoveCutPointsTest(MoveBase):
             f"rmtree Programs{OLD_MARK}{stamp}",
             "os.remove",  # the journal
             "os.mkdir",  # ~/Bulk/apps/jetbrains, `after` apps
+            "chattr +C Bulk/emulators",  # every apply sets +C on the NOCOW folders again
+            "chattr +C Bulk/emulators/android",
+            "chattr +C Bulk/emulators/android/avd",
             "os.remove",  # the boot flag
         ]
         self.assertEqual(calls, want)

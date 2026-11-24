@@ -374,6 +374,8 @@ def arm_points(home: BulkHome, plan: FaultPlan, *, torn_rmtree: bool) -> None:
     - "write NAME": a state file's write_atomic (a journal, the boot flag, the keep file, the
       convert plan), by its file name;
     - "cp DEST": the copy (a fault answers exit 1: copy_tree's "copy failed");
+    - "chattr +C PATH": +C on a folder (set_nocow; a failure is its OSError);
+    - "subvolume PATH": the creation of ~/Bulk (subvol_create);
     - "rmtree PATH": the user adapter's u_rmtree, one call, also of a file or a link (its os.unlink
       is no point of its own); with torn_rmtree, a folder holding two or more files is two points,
       "rmtree-part PATH" (its first file in sorted walk order) and "rmtree PATH" (the rest): a
@@ -399,6 +401,17 @@ def arm_points(home: BulkHome, plan: FaultPlan, *, torn_rmtree: bool) -> None:
         ),
     )
     home.fake(home.user, "u_relabel", lambda path: True)
+    real_set_nocow, real_subvol_create = home.machine.set_nocow, home.machine.subvol_create
+    home.fake(
+        home.machine,
+        "set_nocow",
+        lambda path: plan.step(f"chattr +C {home.rel(path)}", functools.partial(real_set_nocow, path)),
+    )
+    home.fake(
+        home.machine,
+        "subvol_create",
+        lambda path: plan.step(f"subvolume {home.rel(path)}", functools.partial(real_subvol_create, path)),
+    )
     real_rmtree = home.user.u_rmtree
 
     def whole_rmtree(path: str) -> None:

@@ -206,8 +206,8 @@ states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
 old subvolume, a stale cache, an empty folder, a late write into the old
 tree, and writes on both sides). `arm_points` makes the user adapter's
 `os` calls (`FaultyOs`), the state files' writes and removals, cp
-(`FaultyRunner`) and each tree's deletion (torn in two) points of the
-plan, which is dead after a kill. After a kill every mode is tried again
+(`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
+tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
 inside the repair; after a failure or a full disk, only a kill. One known
 gap is let through by name and counted per class: a fault that cuts the
 deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
