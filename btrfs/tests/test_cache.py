@@ -296,6 +296,26 @@ class CacheMountDomainTests(unittest.TestCase):
         )
         self.assertEqual([f.message for f in found if "crypttab" in f.message], warn)
 
+    def test_crypttab_skips_comments_short_lines_and_lines_with_nofail(self) -> None:
+        crypt = (
+            "# cache UUID=x none discard\n"
+            "\n"
+            "cache\n"
+            "cache-a UUID=x none luks\n"
+            "luks-root UUID=y none luks\n"
+            "cache-b UUID=z none luks,nofail\n"
+            "mine UUID=q none luks\n"
+        )
+        self.assertEqual(
+            parse_crypttab_cache_issues(crypt, ["/dev/mapper/mine"]),
+            [
+                "/etc/crypttab entry 'cache-a' is missing 'nofail' (boot could stall if NVMe is absent)",
+                "/etc/crypttab entry 'mine' is missing 'nofail' (boot could stall if NVMe is absent)",
+            ],
+        )
+        self.assertEqual(parse_crypttab_cache_issues("", []), [])
+        self.assertEqual(parse_crypttab_cache_issues(None, []), [])
+
     def test_doctor_warns_when_a_managed_target_has_another_mount(self) -> None:
         # Any mount at the target counted as an active bind: a tmpfs, another drive or another user's
         # folder there gave the ok line, while status says "mounted (other source!)".
@@ -521,6 +541,39 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
             fstab_after = fh.read()
         self.assertNotIn("user=alice", fstab_after)
         self.assertIn("user=danilo kind=cache", fstab_after)
+
+    def test_status_names_each_base_state_and_the_other_users(self) -> None:
+        self.assertEqual(self._run(["attach", "--user", "alice"])[0], 0)
+        self.runner.mounts = [m for m in self.runner.mounts if m["target"] not in (CACHE_BASE, SCRATCHPAD_BASE)]
+        rc, out, err = self._run(["status"])
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(
+            out.split("\n")[1:],
+            [
+                "Dedicated cache drive mounts:",
+                "  /var/mnt/cache     in fstab (not mounted)",
+                "  /var/mnt/scratchpad not provisioned",
+                "  target user        danilo (uid=1000, home=/var/home/danilo)",
+                "  cache              /var/mnt/cache/danilo -> /var/home/danilo/.cache [not attached]",
+                "  scratchpad         /var/mnt/scratchpad/danilo -> /var/home/danilo/Scratchpad [not attached]",
+                "  other fstab users  alice",
+                "",
+            ],
+        )
+
+    def test_status_of_a_user_that_does_not_exist(self) -> None:
+        rc, out, err = self._run(["status", "--user", "cst-test-no-such-user"])
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(
+            out.split("\n")[1:],
+            [
+                "Dedicated cache drive mounts:",
+                f"  /var/mnt/cache     mounted (btrfs, uuid={UUID_CACHE_DRIVE})",
+                f"  /var/mnt/scratchpad mounted (btrfs, uuid={UUID_CACHE_DRIVE})",
+                "  target user        unavailable (user 'cst-test-no-such-user' does not exist)",
+                "",
+            ],
+        )
 
     def test_user_option_alone_shows_that_users_status(self) -> None:
         rc, out, err = self._run(["--user", "alice"])
