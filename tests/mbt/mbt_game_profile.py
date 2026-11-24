@@ -62,7 +62,6 @@ some point on (FullRunFolderTest), a failing daemon-reload, real systemd's merge
 from collections.abc import Callable, Sequence
 import contextlib
 from enum import StrEnum
-import functools
 import io
 import os
 import shutil
@@ -89,7 +88,7 @@ from cpu.game.domain import (
 )
 from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
 from cst_core.ports import CommandResult
-from tests.fault_injection import FaultMode, FaultPlan, FaultyRunner, Killed, stub_fsync
+from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
 from tests.mbt import profiles
 
 profiles.load()
@@ -222,26 +221,6 @@ class FaultyAtomic:
         return self.plan.step(f"write {path}", lambda: self.real(path, *args, **kw))
 
 
-class KillOnlyOs:
-    """The os module as the profile module sees it, KILL_ONLY_OS through plan as points of a kill only (a
-    failure armed there does not fire: the call runs)."""
-
-    def __init__(self, plan: FaultPlan) -> None:
-        self.plan = plan
-        self.path = os.path
-
-    def __getattr__(self, name: str) -> object:
-        real = getattr(os, name)
-        if name not in KILL_ONLY_OS:
-            return real
-
-        def call(*args: object, **kw: object) -> object:
-            effect = functools.partial(real, *args, **kw)
-            return self.plan.step(f"os.{name}", effect, lambda _err: effect())
-
-        return call
-
-
 def _changes(argv: Sequence[str]) -> bool:
     """The command is a point of the plan: set-property (every other command only reads, or is a
     daemon-reload, start or stop, which do not fail here)."""
@@ -350,7 +329,9 @@ class GameProfileMachine(RuleBasedStateMachine):
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             for module in (game_profile, game_host):
                 stack.enter_context(mock.patch.object(module, "open", faulty_open(self.plan), create=True))
-            stack.enter_context(mock.patch.object(game_profile, "os", KillOnlyOs(self.plan)))
+            stack.enter_context(
+                mock.patch.object(game_profile, "os", FaultyOs(self.plan, KILL_ONLY_OS, kill_only=True))
+            )
             atomic = FaultyAtomic(self.plan, game_profile.write_atomic)
             stack.enter_context(mock.patch.object(game_profile, "write_atomic", atomic))
             try:
