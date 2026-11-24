@@ -17,7 +17,11 @@ checked:
 - a run that returns 0 left the component done;
 - apply again, with no fault, returns 0 and leaves it done;
 - no exception gets out of apply: a failed save of the managed-devices file is exit 1 with an
-  `ERROR: cannot write PATH: REASON` line (the component stays pending).
+  `ERROR: cannot write PATH: REASON` line (the component stays pending);
+- the io.cost.qos line apply wrote stays CST's: after apply again, its device is in the
+  managed-devices file (apply saves the devices it is about to enable before it writes their
+  lines), so revert resets it. Before, a save that failed or a kill after the write left the line
+  enable=1 and unlisted, and the next apply kept it as a vendor's.
 
 A guard for a7c5e92 (iocost marks the component done last): on its parent these cases fail with
 "done before what it stands for".
@@ -52,7 +56,7 @@ from tests.fault_injection import (
 QOS_LINE = "259:1 enable=1 ctrl=auto"  # what apply writes for the fixture's NVMe disk
 READS = (["systemctl", "show"], ["udevadm", "info"])
 # The mutating calls of one apply from a fresh machine, and the cases of each mode family.
-POINTS = 7
+POINTS = 8
 CASES_FAIL_THEN_KILL = 1  # a failed step ends apply (it rolls nothing back): one later call, the qos write
 
 
@@ -64,6 +68,14 @@ def _installer_command(argv: Sequence[str]) -> str | None:
 def reads(argv: Sequence[str]) -> bool:
     """systemctl show, udevadm info and the installer's plan only read."""
     return list(argv[:2]) in READS or _installer_command(argv) == "plan"
+
+
+def read_or_empty(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
 
 
 def point_name(argv: Sequence[str]) -> str:
@@ -199,6 +211,7 @@ class IocostApplyFaultTest(unittest.TestCase):
         self.assertEqual(rc, 0, f"{when}: apply again: {lines}")
         self.assertTrue(self.machine.done, f"{when}: apply again, not done")
         self.assert_done_means_applied(f"{when}: apply again")
+        self.assertIn("259:1\n", read_or_empty(self.paths.managed_file), f"{when}: apply again: 259:1 is not CST's")
 
     def points(self, *faults: Fault) -> list[str]:
         """The mutating calls of one apply from a fresh machine with these faults."""

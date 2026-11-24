@@ -1605,7 +1605,12 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   A save of `/run/btrfs-setup/iocost-managed` that fails (a full or
   read-only `/run`), in `apply` or `revert`, is an `ERROR: cannot write
   /run/btrfs-setup/iocost-managed: REASON` line with exit 1; `apply` then
-  leaves `btrfs:iocost` pending.
+  leaves `btrfs:iocost` pending. `apply` saves the devices it is about to
+  enable there **before** it writes their `io.cost.qos` lines (and saves the
+  list again without the ones whose write failed): when that first save
+  fails it writes no line (`nothing was written to io.cost.qos`), so a line
+  CST wrote is always listed as CST's, and the next `apply` and `revert`
+  treat it as such, also after a later save failed or a kill.
   `revert` removes the files and their record lines itself, so the installed
   program (`/usr/local/sbin/btrfs-iocost revert`) works without a checkout;
   `apply` (not `--live-only`) installs from a checkout and, run from the

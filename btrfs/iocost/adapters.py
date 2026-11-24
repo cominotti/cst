@@ -243,12 +243,20 @@ def _saved(paths: IocostPaths, devnos: frozenset[str]) -> list[str]:
 
 def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan) -> tuple[int, list[str]]:
     """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write or the save
-    failed, lines)."""
+    failed, lines). apply saves the devices it is about to enable before it writes their lines, and
+    then the set without the ones whose write failed."""
     if not snap.qos_exists:
         # No blk-iocost here: nothing to reset, and nothing stays CST's.
         err = _saved(paths, frozenset()) if plan.revert_mode else []
         return (1 if err else 0), [f"skipped:   {paths.qos_path} unavailable", *err]
     managed = set(plan.next_managed)
+    if not plan.revert_mode and plan.writes and frozenset(managed) != snap.managed_devnos:
+        # Intent first: the devices apply is about to enable are CST's before their lines are written, so
+        # a save that fails (or a kill) after a write cannot leave a line CST wrote and no longer knows
+        # as its own (the next apply would keep it as a vendor's, and revert would never reset it).
+        err = _saved(paths, frozenset(managed))
+        if err:
+            return 1, [*err, "nothing was written to io.cost.qos"]
     out: list[str] = []
     rc = 0
     verb = "reverted:" if plan.revert_mode else "set:"
