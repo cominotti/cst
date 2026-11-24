@@ -39,6 +39,7 @@ import ast
 from collections.abc import Iterable, Mapping, Sequence
 import os
 from pathlib import PurePosixPath
+import posixpath
 import re
 import tomllib
 from typing import Final
@@ -92,8 +93,10 @@ _INVOWK_RUN: Final = re.compile(r"(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|(]\s*)(?:exec
 _JOB: Final = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
 _JOB_KEY: Final = re.compile(r"^    ([a-z-]+):\s*(.*?)\s*(?:#.*)?$")
 _LOCAL_ACTION: Final = re.compile(r"\buses:\s*\./(\.github/actions/[\w.-]+)\s*$")
-# The table of suite files run.py's load_suite() takes its argument from.
+# Path's attributes that name a folder above a path, and its methods that give the same file's path.
 _FOLDER_OF_FILE: Final = "parent"
+_PARENTS: Final = "parents"
+_SAME_PATH: Final = frozenset({"resolve", "absolute"})
 
 
 def _read(repo: str, rel: str) -> str:
@@ -114,17 +117,58 @@ def _module_files(repo: str, name: str) -> list[str]:
 
 def _folders(tree: ast.Module, rel: str) -> dict[str, str]:
     """Module-level names bound to a folder of the repository: NAME = Path(__file__).resolve().parent
-    (the file's folder) and NAME = OTHER / "sub" (a folder below a known one)."""
+    and its longer forms (_file_folder) and NAME = OTHER / "sub" (a folder below a known one)."""
     out: dict[str, str] = {}
     for node in tree.body:
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
             continue
         name, value = node.targets[0].id, node.value
-        if isinstance(value, ast.Attribute) and value.attr == _FOLDER_OF_FILE and "__file__" in ast.unparse(value):
-            out[name] = os.path.dirname(rel)
+        if (folder := _file_folder(value, rel)) is not None:
+            out[name] = folder
         elif (below := _below(value, out)) is not None:
             out[name] = below
     return out
+
+
+def _file_folder(node: ast.expr, rel: str) -> str | None:
+    """The repository folder Path(__file__) [.resolve() or .absolute()] followed by N .parent (or
+    .parents[N - 1]) names: N folders up from the file rel ("" for the top of the repository). None for
+    another form, or one that goes above the repository."""
+    ups = 0
+    while True:
+        if isinstance(node, ast.Attribute) and node.attr == _FOLDER_OF_FILE:
+            ups, node = ups + 1, node.value
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == _PARENTS
+            and isinstance(node.slice, ast.Constant)
+            and type(node.slice.value) is int
+            and node.slice.value >= 0
+        ):
+            ups, node = ups + node.slice.value + 1, node.value.value
+        else:
+            break
+    if (
+        isinstance(node, ast.Call)
+        and not node.args
+        and not node.keywords
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _SAME_PATH
+    ):
+        node = node.func.value
+    is_file_path = (
+        isinstance(node, ast.Call)
+        and _called_name(node.func) == "Path"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "__file__"
+    )
+    parts = rel.split("/")
+    if not is_file_path or ups == 0 or ups > len(parts) - 1:
+        return None
+    return "/".join(parts[: len(parts) - ups])
 
 
 def _below(node: ast.expr, folders: Mapping[str, str]) -> str | None:
@@ -137,7 +181,7 @@ def _below(node: ast.expr, folders: Mapping[str, str]) -> str | None:
         and isinstance(node.right, ast.Constant)
         and isinstance(node.right.value, str)
     ):
-        return f"{folders[node.left.id]}/{node.right.value}"
+        return posixpath.join(folders[node.left.id], node.right.value)
     return None
 
 
@@ -214,7 +258,7 @@ def _table_files(
             if not (isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name) and arg.value.id in tables):
                 return []
             names.add(arg.value.id)
-        return [f"{folders[value.left.id]}/{name}" for table in sorted(names) for name in tables[table]]
+        return [posixpath.join(folders[value.left.id], name) for table in sorted(names) for name in tables[table]]
     return []
 
 

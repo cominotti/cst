@@ -124,6 +124,12 @@ class PlantedTest(unittest.TestCase):
         for word in words:
             self.assertIn(word, problems[0])
 
+    def assert_checked_at(self, where: str, *, not_at: str) -> None:
+        """A problem starts with where (the file was checked there), and none names not_at."""
+        problems = gate.problems(self.repo)
+        self.assertTrue(any(p.startswith(where) for p in problems), problems)
+        self.assertFalse(any(not_at in p for p in problems), problems)
+
     def test_an_unparenthesized_except_is_reported_with_its_file_and_line(self) -> None:
         # Body on the handler's line: Python names the line where the handler ends.
         self.append("tests/e2e/selection.py", "\ntry:\n    pass\nexcept OSError, ValueError: pass\n")
@@ -168,6 +174,36 @@ class PlantedTest(unittest.TestCase):
         )
         line = self.line_of("tests/e2e/run.py", 'spec_from_file_location("x", path')
         self.assert_one_problem(f"tests/e2e/run.py:{line}:", "teach the gate this load")
+
+    def test_a_load_from_a_folder_two_levels_up_is_checked_in_that_folder(self) -> None:
+        # .parent.parent was taken as the file's own folder: tests/e2e/helper.py, not tests/helper.py.
+        self.append("tests/helper.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append(
+            "tests/e2e/run.py",
+            "\nTESTS_DIR = Path(__file__).resolve().parent.parent\n"
+            "\n\ndef helper() -> None:\n"
+            '    importlib.util.spec_from_file_location("helper", TESTS_DIR / "helper.py")\n',
+        )
+        self.assert_checked_at("tests/helper.py:3:", not_at="tests/e2e/helper.py")
+
+    def test_a_load_from_the_parents_of_the_file_is_checked_in_that_folder(self) -> None:
+        self.append("tests/helper.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append(
+            "tests/e2e/run.py",
+            "\nUP = Path(__file__).parents[1]\n"
+            "\n\ndef helper() -> None:\n"
+            '    importlib.util.spec_from_file_location("helper", UP / "helper.py")\n',
+        )
+        self.assert_checked_at("tests/helper.py:3:", not_at="tests/e2e/helper.py")
+
+    def test_a_folder_above_the_repository_is_a_load_the_gate_cannot_follow(self) -> None:
+        self.append(
+            "tests/e2e/run.py",
+            "\nOUT = Path(__file__).parents[3]\n"
+            "\n\ndef helper() -> None:\n"
+            '    importlib.util.spec_from_file_location("helper", OUT / "helper.py")\n',
+        )
+        self.assert_one_problem("tests/e2e/run.py:", "teach the gate this load")
 
     def test_a_new_suite_file_is_checked_too(self) -> None:
         self.replace(
