@@ -486,40 +486,36 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             elevated.append(argv)
             raise SystemExit(99)
 
+        deps = ScrubCliDeps(
+            entry_file=entry,
+            env={"CST_PROG": "cst btrfs scrub-limit"},
+            out=io.StringIO(),
+            err=io.StringIO(),
+            ctx=_FakeCtx(container=False, root=False),
+            elevate=_elevate,
+        )
         with self.assertRaises(SystemExit):
-            run_scrub_limit_cli(
-                ["set", "500M"],
-                deps=ScrubCliDeps(
-                    entry_file=entry,
-                    env={"CST_PROG": "cst btrfs scrub-limit"},
-                    out=io.StringIO(),
-                    err=io.StringIO(),
-                    ctx=_FakeCtx(container=False, root=False),
-                    elevate=_elevate,
-                ),
-            )
+            run_scrub_limit_cli(["set", "500M"], deps=deps)
         self.assertEqual(len(elevated), 1)
         self.assertEqual(elevated[0][0], "sudo")
 
         # The command line root runs, as the bash front's "sudo -- env CST_PROG=... SELF ARGS" ran it: the
         # system Python on this entry, every argument passed on.
         for args in (["set", "500M"], ["off"]):
+            deps = ScrubCliDeps(
+                entry_file=entry,
+                env={"CST_PROG": "cst btrfs scrub-limit"},
+                out=io.StringIO(),
+                err=io.StringIO(),
+                ctx=_FakeCtx(container=False, root=False),
+                elevate=_elevate,
+            )
             with (
                 self.subTest(args=args),
                 mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"),
                 self.assertRaises(SystemExit),
             ):
-                run_scrub_limit_cli(
-                    args,
-                    deps=ScrubCliDeps(
-                        entry_file=entry,
-                        env={"CST_PROG": "cst btrfs scrub-limit"},
-                        out=io.StringIO(),
-                        err=io.StringIO(),
-                        ctx=_FakeCtx(container=False, root=False),
-                        elevate=_elevate,
-                    ),
-                )
+                run_scrub_limit_cli(args, deps=deps)
             self.assertEqual(
                 elevated[-1],
                 [

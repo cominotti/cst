@@ -336,30 +336,26 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             seen.append(argv)
             raise SystemExit(0)
 
+        request = RootElevation(
+            "cst btrfs iocost", "apply", ("apply",), os.path.join(REPO, "btrfs", "btrfs-iocost"), "writes"
+        )
+        host_user = _FakeCtx(container=False, root=False)
         with self.assertRaises(SystemExit):
-            enforce_host_root(
-                RootElevation(
-                    "cst btrfs iocost", "apply", ("apply",), os.path.join(REPO, "btrfs", "btrfs-iocost"), "writes"
-                ),
-                ctx=_FakeCtx(container=False, root=False),
-                elevate=fake_elevate,
-            )
+            enforce_host_root(request, ctx=host_user, elevate=fake_elevate)
         self.assertEqual(seen[0][0], "sudo")
 
         # The command line root runs, as the bash front's "sudo -- env CST_PROG=... SELF ARGS" ran it: the
         # system Python on this entry, every argument passed on.
+        deps = IocostCliDeps(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-iocost"),
+            env={"CST_PROG": "cst btrfs iocost"},
+            out=io.StringIO(),
+            err=io.StringIO(),
+            ctx=_FakeCtx(container=False, root=False),
+            elevate=fake_elevate,
+        )
         with mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"), self.assertRaises(SystemExit):
-            run_iocost_cli(
-                ["apply", "--live-only", "--device", "nvme0n1"],
-                deps=IocostCliDeps(
-                    entry_file=os.path.join(REPO, "btrfs", "btrfs-iocost"),
-                    env={"CST_PROG": "cst btrfs iocost"},
-                    out=io.StringIO(),
-                    err=io.StringIO(),
-                    ctx=_FakeCtx(container=False, root=False),
-                    elevate=fake_elevate,
-                ),
-            )
+            run_iocost_cli(["apply", "--live-only", "--device", "nvme0n1"], deps=deps)
         self.assertEqual(
             seen[-1],
             [

@@ -2643,35 +2643,32 @@ class ManagedRuntimeHelpersTest(unittest.TestCase):
         )
         self.assertEqual(rc_c, 1)
         self.assertIn("not inside a toolbox/container", err_s.getvalue())
+        host_user_env = ManagedCliEnv(
+            entry_file="/tmp/fake-entry",
+            env={},
+            ctx=_Ctx(container=False, root=False),
+            elevate=_fake_elevate,
+        )
         with self.assertRaises(_ElevatedError) as exc_info:
-            run_managed_cli(
-                ["apply"],
-                spec_ok,
-                ManagedCliEnv(
-                    entry_file="/tmp/fake-entry",
-                    env={},
-                    ctx=_Ctx(container=False, root=False),
-                    elevate=_fake_elevate,
-                ),
-            )
+            run_managed_cli(["apply"], spec_ok, host_user_env)
         self.assertEqual(exc_info.exception.argv[0], "sudo")
         self.assertIn("/tmp/fake-entry", exc_info.exception.argv)
         # Root runs the system Python, whatever interpreter (a venv's, first in PATH) started this one;
         # the arguments go on as they came, an empty one too.
+        venv_spec, venv_env = (
+            _make_spec(0, ["ok"]),
+            ManagedCliEnv(
+                entry_file="/tmp/fake-entry",
+                env={"CST_PROG": "cst foo bar"},
+                ctx=_Ctx(container=False, root=False),
+                elevate=_fake_elevate,
+            ),
+        )
         with (
             mock.patch.object(sys, "executable", "/home/u/.venv/bin/python3"),
             self.assertRaises(_ElevatedError) as venv_exc,
         ):
-            run_managed_cli(
-                ["apply", "", "--x"],
-                _make_spec(0, ["ok"]),
-                ManagedCliEnv(
-                    entry_file="/tmp/fake-entry",
-                    env={"CST_PROG": "cst foo bar"},
-                    ctx=_Ctx(container=False, root=False),
-                    elevate=_fake_elevate,
-                ),
-            )
+            run_managed_cli(["apply", "", "--x"], venv_spec, venv_env)
         self.assertEqual(
             venv_exc.exception.argv,
             [

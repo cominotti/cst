@@ -223,8 +223,9 @@ class CpuPowerLifecycleTest(unittest.TestCase):
             elevated.append(argv)
             raise SystemExit(99)
 
+        host_user = _FakePowerCtx(container=False, root=False)
         with self.assertRaises(SystemExit):
-            enforce_host_root(req, ctx=_FakePowerCtx(container=False, root=False), elevate=_elevate)
+            enforce_host_root(req, ctx=host_user, elevate=_elevate)
         self.assertEqual(elevated[0][0], "sudo")
 
         r_help = subprocess.run(

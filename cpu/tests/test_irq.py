@@ -203,12 +203,10 @@ class CpuIrqLifecycleTest(unittest.TestCase):
             seen.append(argv)
             raise SystemExit(0)
 
+        request = RootElevation("cst cpu irq", "apply", ("apply",), os.path.join(REPO, "cpu", "cpu-irq"), "writes")
+        host_user = _FakeCtx(container=False, root=False)
         with self.assertRaises(SystemExit):
-            enforce_host_root(
-                RootElevation("cst cpu irq", "apply", ("apply",), os.path.join(REPO, "cpu", "cpu-irq"), "writes"),
-                ctx=_FakeCtx(container=False, root=False),
-                elevate=fake_elevate,
-            )
+            enforce_host_root(request, ctx=host_user, elevate=fake_elevate)
         self.assertEqual(seen[0][0], "sudo")
 
     def test_apply_no_pkg_and_rpm_ostree_and_revert(self) -> None:
