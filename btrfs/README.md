@@ -1723,6 +1723,29 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   mount the base, or unmount the other mount, and run `detach` again.
   `status` shows these two as `mounted (source not checked: base not
   mounted)` and `mounted (other source on top of CST's bind!)`.
+- **A run stopped before its reload:** a run killed (or the machine reset)
+  after it wrote `/etc/fstab` and before its `systemctl daemon-reload`
+  leaves systemd with the old `/etc/fstab` loaded. The same `attach` or
+  `detach` again finds nothing to write, so before it says "nothing to do"
+  it asks systemd, with one `systemctl show '*.mount'` (which lists the
+  mount units already loaded and loads none), whether it is behind: a unit
+  loaded from `/etc/fstab` that says `NeedDaemonReload=yes`, or a bind of
+  the run mounted, with its line in `/etc/fstab`, whose unit systemd still
+  took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`).
+  Then it runs the daemon-reload and says `reloaded: systemd had not
+  loaded /etc/fstab as it is on disk (an earlier run stopped)`; when
+  systemctl gives no answer it reloads too, and says so. `detach` reloads
+  before it unmounts; `attach` asks after the mounts it makes, and when
+  that reload fails it unmounts them again and says `ERROR:` with
+  `/etc/fstab is as asked` (its text is right; run `systemctl
+  daemon-reload` once it works). `plan` shows the same reload as
+  `Already attached for USER; systemd has not loaded /etc/fstab as it is
+  on disk: attach runs systemctl daemon-reload.` Two limits, on purpose:
+  systemd marks a reload as needed by the file's time, not its bytes, so
+  any other program's rewrite of `/etc/fstab` makes the next run reload
+  once more (harmless); and with no unit of `/etc/fstab` loaded at all
+  (an `/etc/fstab` systemd-fstab-generator makes no unit of) the answer is
+  "not behind".
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

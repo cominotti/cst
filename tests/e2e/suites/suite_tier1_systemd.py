@@ -8624,6 +8624,147 @@ EOF
         ).stdout
         self.assertIn("E2E-CACHE-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_177_btrfs_cache_run_again_after_one_killed_at_its_daemon_reload_reloads(self) -> None:
+        """`cst btrfs cache attach` and `detach` under a test root (CST_BTRFS_CACHE_ROOT, test_160's
+        findmnt, mount and umount stand-ins), each killed by SIGKILL at its daemon-reload, after it wrote
+        /etc/fstab (a systemctl shim on PATH copies the test root's fstab to the real /etc/fstab, then kills
+        the pid the test recorded), then run again, with the real systemd. The bases are tmpfs lines, which
+        systemd-fstab-generator accepts, so var-mnt-cache.mount is loaded from /etc/fstab before the kill and
+        the real `systemctl show` says NeedDaemonReload=yes after it (the test fails as "cannot bite"
+        otherwise). After the killed attach, plan says attach runs daemon-reload; the run again exits 0, says
+        "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
+        (NeedDaemonReload=no, the mount unit of ~/.cache made); a third run has nothing to do and reloads
+        nothing. After the killed detach, the run again reloads once, unmounts the binds and leaves no mount
+        unit of them; a third has nothing to do. Before, the run again said "nothing to do" (attach) or
+        only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
+        c = self.SYSTEMD_CONTAINER
+        w = "/var/tmp/e2e-177"
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"""
+            set +e
+            systemctl stop var-mnt-cache.mount var-mnt-scratchpad.mount
+            if [[ -f {w}/fstab.bak ]]; then cp -a {w}/fstab.bak /etc/fstab; else rm -f /etc/fstab; fi
+            systemctl daemon-reload
+            if [[ -f {w}/made-cache ]]; then rmdir /var/mnt/cache; fi
+            if [[ -f {w}/made-scratchpad ]]; then rmdir /var/mnt/scratchpad; fi
+            rm -rf {w}
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -euo pipefail
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            rm -rf {w} && mkdir -p {w}/bin {w}/kill {w}/sync {w}/etc {w}/var/mnt/cache {w}/var/mnt/scratchpad {w}/var/home/u1
+            [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
+            [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
+            [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
+            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
+            cat >{w}/etc/fstab <<'EOF'
+tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
+tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
+EOF
+            row() {{ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@"; }}
+            {{
+                row /dev/dm-0 / btrfs rw,noatime uuid-root-1111 /root
+                row /dev/dm-0 /var/home btrfs rw,noatime uuid-root-1111 /home
+                row /dev/mapper/cache /var/mnt/cache btrfs rw,noatime uuid-cache-2222 /cache
+                row /dev/mapper/cache /var/mnt/scratchpad btrfs rw,noatime uuid-cache-2222 /scratchpad
+            }} >{w}/mounts
+            cat >{w}/bin/mnt-stub <<'STUB'
+{CACHE_MOUNT_STUB}
+STUB
+            for p in findmnt mount umount; do
+                printf '#!/bin/bash\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\n' "$p" >{w}/bin/$p
+                chmod +x {w}/bin/$p
+            done
+            # Both shims hand systemd the test root's fstab at each daemon-reload; kill/ then kills the
+            # command (the pid this script recorded) before the reload runs, sync/ logs it and runs it.
+            cat >{w}/kill/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    for _ in $(seq 100); do [[ -s {w}/pid ]] && break; sleep 0.1; done
+    touch {w}/killed
+    kill -KILL "$(cat {w}/pid)"
+    sleep 5
+    exit 1
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    cp {w}/etc/fstab /etc/fstab || exit 1
+    echo reload >>{w}/reloads
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl
+            touch {w}/reloads
+            export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
+            cst=/opt/cst-rw/cst
+            behind() {{ systemctl show -P NeedDaemonReload var-mnt-cache.mount; }}
+            reloads() {{ wc -l <{w}/reloads; }}
+            # The bases in the real /etc/fstab, loaded and started: their units come from /etc/fstab.
+            cp {w}/etc/fstab /etc/fstab
+            systemctl daemon-reload
+            systemctl start var-mnt-cache.mount var-mnt-scratchpad.mount
+            [[ "$(systemctl show -P SourcePath var-mnt-cache.mount)" == /etc/fstab ]]
+            [[ "$(behind)" == no ]]
+            # killed ACTION: the command, killed by SIGKILL at its daemon-reload, after its /etc/fstab write.
+            killed() {{
+                rm -f {w}/pid {w}/killed
+                PATH="{w}/kill:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1 &
+                echo $! >{w}/pid
+                rc=0; wait $! || rc=$?
+                [[ $rc == 137 ]] || {{ echo "$1: the killed run exited $rc" >&2; cat {w}/out >&2; return 1; }}
+                [[ -e {w}/killed ]] || {{ echo "the test cannot bite: $1 was not killed at its daemon-reload" >&2; return 1; }}
+                [[ "$(behind)" == yes ]] || {{ echo "the test cannot bite: systemd says it has /etc/fstab loaded after the killed $1" >&2; return 1; }}
+            }}
+            # again ACTION: the run again reloads once and leaves systemd with /etc/fstab loaded; a third run
+            # has nothing to do and reloads nothing.
+            again() {{
+                local n rc=0
+                n=$(reloads)
+                PATH="{w}/sync:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1 || rc=$?
+                [[ $rc == 0 ]] || {{ echo "$1 again: exit $rc" >&2; cat {w}/out >&2; return 1; }}
+                grep -qF "reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)" {w}/out \
+                    || {{ echo "$1 again did not reload:" >&2; cat {w}/out >&2; return 1; }}
+                [[ $(reloads) == $((n + 1)) ]] || {{ echo "$1 again: $(($(reloads) - n)) reloads" >&2; return 1; }}
+                [[ "$(behind)" == no ]]
+                PATH="{w}/sync:$PATH" $cst btrfs cache "$1" --user u1 >{w}/out 2>&1
+                grep -qF "nothing to do" {w}/out || {{ cat {w}/out >&2; return 1; }}
+                [[ $(reloads) == $((n + 1)) ]] || {{ echo "a third $1 reloaded" >&2; return 1; }}
+            }}
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+
+            killed attach
+            grep -qF "user=u1 kind=cache" {w}/etc/fstab
+            [[ ! -e "$cache_unit" ]]
+            plan_out="$($cst btrfs cache plan --user u1)"
+            grep -qF "Already attached for u1; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload." \
+                <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            again attach
+            [[ -f "$cache_unit" ]] || {{ echo "no mount unit of ~/.cache after the reload" >&2; exit 1; }}
+            [[ "$(systemctl show -P SourcePath var-home-u1-.cache.mount)" == /etc/fstab ]]
+
+            killed detach
+            if grep -qF "user=u1" {w}/etc/fstab; then echo "a u1 line after the killed detach" >&2; exit 1; fi
+            grep -qF "/var/home/u1/.cache" {w}/mounts
+            again detach
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the detach" >&2; exit 1; fi
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit of ~/.cache after the detach's reload" >&2; exit 1; }}
+            echo E2E-CACHE-177-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-CACHE-177-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
     def test_161_btrfs_scrub_limit_set_again_loads_what_a_killed_run_wrote(self) -> None:
         """`cst btrfs scrub-limit set` and `off` after an earlier run that wrote both files and died before

@@ -4,17 +4,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import posixpath
 import re
 from typing import Final, TypedDict, TypeIs
 
-from btrfs.compress.domain import MountEntry
+from btrfs.compress.domain import FSTAB_PATH, MountEntry
+from cst_core.domain.units import LoadState
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
 from cst_core.domain.text import (
     HELP_WORDS,
+    YES_WORDS,
     enum_member,
     file_lines,
     group,
@@ -209,6 +211,9 @@ class CacheMountSnapshot:
     home_missing: bool = False
     fstab_error: str | None = None
     """Why /etc/fstab, which is there, could not be read (attach, detach and plan refuse)."""
+    fstab_behind: bool | None = False
+    """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab; None: systemctl
+    cannot say). Asked only by plan, and only when attach would write no /etc/fstab (False otherwise)."""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -709,6 +714,32 @@ def _plan_binding_line(probe: BindingProbe) -> str:
     return f"  {b.kind.value:<10} {b.source} -> {b.target}: {summary}"
 
 
+MOUNT_UNIT_PROPS: Final = ("Id", "LoadState", "SourcePath", "NeedDaemonReload", "Where")
+"""What systemd_behind_fstab reads of each loaded mount unit (systemctl show -p ... '*.mount')."""
+
+
+def systemd_behind_fstab(units: Sequence[Mapping[str, str]] | None, bindings: Sequence[BindingProbe]) -> bool | None:
+    """Whether systemd has not loaded /etc/fstab as it is on disk, from the mount units it has loaded
+    (MOUNT_UNIT_PROPS, a glob's answer: a unit loaded by the question itself would say a false no):
+    True when a unit systemd loaded from /etc/fstab says NeedDaemonReload=yes (any write of /etc/fstab
+    since the last reload), or when a bind of this run is mounted from its source with its managed line
+    in /etc/fstab while its unit (by Where) still comes from elsewhere (/proc/self/mountinfo: systemd
+    has not read /etc/fstab since that line was written); None when systemctl gave no answer; False
+    otherwise, also when no unit of /etc/fstab is loaded at all."""
+    if units is None:
+        return None
+    loaded = [u for u in units if u.get("LoadState") == LoadState.LOADED]
+    if any(
+        u.get("SourcePath") == FSTAB_PATH and u.get("NeedDaemonReload", "").strip().lower() in YES_WORDS for u in loaded
+    ):
+        return True
+    source_of = {u.get("Where", ""): u.get("SourcePath", "") for u in loaded}
+    return any(
+        p.mounted_from_source and p.in_fstab and source_of.get(p.binding.target, FSTAB_PATH) != FSTAB_PATH
+        for p in bindings
+    )
+
+
 def format_cache_mount_plan(
     snap: CacheMountSnapshot, prog: str, *, allow_nonempty: bool = False, seam_root: str = ""
 ) -> list[str]:
@@ -723,7 +754,15 @@ def format_cache_mount_plan(
         lines.extend(f"BLOCKED: {msg}" for msg in blockers)
         return lines
     if all(p.in_fstab and p.mounted_from_source for p in snap.bindings):
-        lines.append(f"Already attached for {snap.user.name}; nothing to do.")
+        if snap.fstab_behind is False:
+            lines.append(f"Already attached for {snap.user.name}; nothing to do.")
+        else:
+            why = (
+                f"systemd has not loaded {FSTAB_PATH} as it is on disk"
+                if snap.fstab_behind
+                else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
+            )
+            lines.append(f"Already attached for {snap.user.name}; {why}: attach runs systemctl daemon-reload.")
         return lines
     user_flag = f" --user {snap.user.name}"
     extra = " --allow-nonempty" if allow_nonempty else ""
