@@ -109,6 +109,7 @@ before changing that module.
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
 | Python dev tools: uv, ruff, ty, pinned versions, mutation testing, model checking with Quint | [docs/dev-tools.md](docs/dev-tools.md) |
 | How the code fits together: `cst` dispatch, modules, the install manifest, entry points, package layout and profile (light or full), static gates | [docs/architecture.md](docs/architecture.md) |
+| Formal verification, model checking, and MBT: applicable tools, target map, and rationale | [docs/next/formal-verification-and-mbt.md](docs/next/formal-verification-and-mbt.md) |
 | What `cst_core` already provides: reuse it before you write | [.agents/rules/reuse-primitives.md](.agents/rules/reuse-primitives.md) |
 
 ## Agent rules and skills
