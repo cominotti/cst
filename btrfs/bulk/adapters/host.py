@@ -233,7 +233,11 @@ class Host:
             except OSError:
                 continue
             for key, name in names.items():
-                found = re.findall(rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.MULTILINE)
+                # re.ASCII: digits 0-9 only, as btrfs-snapshot's guard_number reads them (an Arabic-Indic
+                # "300" there is no number, so the default stands; here too).
+                found = re.findall(
+                    rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.MULTILINE | re.ASCII
+                )
                 if found:
                     vals[key] = int(found[-1][1])
         return {k: v * BIG for k, v in vals.items()}

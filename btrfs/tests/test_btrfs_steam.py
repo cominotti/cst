@@ -816,6 +816,31 @@ class SteamTest(tb.BulkBase):
         self.fake(self.host, "snapshot_program", lambda: os.path.join(self.tmp, "absent"))
         self.assertEqual(self.host.snapshot_guard()["emergency"], 150 * bulk_domain.BIG)
 
+    def test_snapshot_guard_takes_ascii_digits_only(self) -> None:
+        # \d took every Unicode digit: an Arabic-Indic "300" was 300 GiB, where btrfs-snapshot's own reader
+        # (guard_number) refuses it and keeps its default.
+        three_hundred = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+        with open(os.path.join(self.paths.etc, "snapshots.conf"), "w", encoding="utf-8") as f:
+            f.write(f"SKIP_AT_OR_BELOW_GIB={three_hundred}\nEMERGENCY_AT_OR_BELOW_GIB='\N{ARABIC-INDIC DIGIT ZERO}'\n")
+        self.assertEqual(
+            self.host.snapshot_guard(),
+            {"pause": 250 * bulk_domain.BIG, "resume": 270 * bulk_domain.BIG, "emergency": 150 * bulk_domain.BIG},
+        )
+
+    def test_a_non_ascii_emergency_limit_does_not_lower_the_copy_floor(self) -> None:
+        # An Arabic-Indic "0" was read as 0: the floor fell to MARGIN, and a real copy went ahead that
+        # pushes free space down to btrfs-snapshot's emergency purge (150 GiB by its own reading).
+        with open(os.path.join(self.paths.etc, "snapshots.conf"), "w", encoding="utf-8") as f:
+            f.write("EMERGENCY_AT_OR_BELOW_GIB=\N{ARABIC-INDIC DIGIT ZERO}\n")
+        self.make_nocow(*self.NOCOW_PARTS)
+        sv = self.splan(copy=True)
+        c = sv["copy_bytes"]
+        self.fake(self.machine, "free_bytes", lambda path: c + bulk_domain.MARGIN + 10 * bulk_domain.BIG)
+        self.assertEqual(self.sapply(copy=True), 1, self.out)
+        self.assertIn("must stay free so the /home snapshots are not purged", self.out)
+        self.assertInMain()
+        self.assertEqual(self.journals(), [])
+
     def test_real_copy_keeps_the_snapshot_emergency_limit_free(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         sv = self.splan(copy=True)
