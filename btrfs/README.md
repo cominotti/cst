@@ -881,7 +881,10 @@ docker volume rm <name>         # or one volume by name
   (`journalctl -u docker-volumes-nocow`). Run `install` again to retry.
   At the end of a migration, and when it gives up, the helper removes the
   count of boots before the flag, so a boot that stops between the two
-  leaves the flag and the next boot just runs again. An older helper removed
+  leaves the flag and the next boot just runs again. When giving up cannot
+  remove the flag (`/etc` read-only, say), the count is written back: the
+  next boot gives up again at once (the journal says why), instead of
+  starting the request over with two more rewrites. An older helper removed
   the flag first: a stop between the two left a count without its flag, and
   a later migration (Docker reinstalled, say) then gave up after one failed
   boot. A new request (the volumes folder found without `+C` and no flag)

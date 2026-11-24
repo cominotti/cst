@@ -151,11 +151,17 @@ class DockerVolumesNocow:
         else:
             self.state.clear_postponed()
 
-    def give_up(self) -> None:
+    def give_up(self, attempts: int) -> None:
         # The counter before the flag: a stop between the two leaves the flag (the next boot tries
         # again), never a counter without its flag (a later request would give up without a try).
         self.state.remove_attempts()  # a later 'install' starts afresh
-        self.state.remove_flag()
+        try:
+            self.state.remove_flag()
+        except OSError:
+            # The flag stays, so the count goes back: without it the next boot would start the request
+            # over (two more rewrites, then this again, never the alert); with it, it gives up at once.
+            self.state.save_attempts(attempts)
+            raise
         self.out.log(3, GAVE_UP)
         # At boot nobody is logged in yet: btrfs-notify keeps it and it is
         # shown at the next graphical login.
@@ -211,7 +217,7 @@ class DockerVolumesNocow:
             return
         attempts = self.state.attempts()
         if attempts >= GIVE_UP_AFTER:
-            self.give_up()
+            self.give_up(attempts)
             return
         # Durable before the long rewrite starts: a hang or hard reset must still count this boot,
         # or "gave up after two boots" never trips.

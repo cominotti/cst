@@ -32,6 +32,7 @@ Run from the repository root (-B: no __pycache__ in the repository):
 
 import builtins
 import contextlib
+import errno
 import fcntl
 import gc
 import io
@@ -61,7 +62,7 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowPaths, postponed_line
+from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, postponed_line
 from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, entries, tree
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -1053,6 +1054,32 @@ class MigrateTest(Base):
         self.assertEqual(self.call(self.cli.migrate), (0, ""))
         self.assertEqual(len(self.fs.commands("cp")), 2)
         self.assertEqual(len(self.fs.commands(self.notify)), 1)
+
+    def test_a_flag_that_cannot_be_removed_does_not_start_the_request_over(self) -> None:
+        # The third boot gives up, but the flag cannot be removed (/etc read-only): the count of boots must
+        # stay with it. Without it the next boot started the request over (two more rewrites before Docker
+        # starts, then this again), and the alert was never sent.
+        top = self.volume("cow")
+        before = tree(top)
+        schedule(self)
+        self.set_attempts("2")
+        self.fs.cp = cp_fails
+        erofs = OSError(errno.EROFS, "Read-only file system")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "remove_flag", side_effect=erofs):
+            for boot in (3, 4, 5):
+                with self.subTest(boot=boot):
+                    rc, _out = self.call(lambda: self.cli.service.execute(NocowCommand.MIGRATE))
+                    self.assertEqual(rc, 0)  # the boot's run: logged, not failed
+                    self.assertEqual(read_attempts(self), "2")
+                    self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(self.fs.commands("cp"), [])  # no try started over
+        self.assertEqual(tree(top), before)
+        # /etc writable again: the next boot gives up and tells the user.
+        self.call(self.cli.migrate)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertIsNone(read_attempts(self))
+        self.assertEqual(len(self.fs.commands(self.notify)), 1)
+        self.assertEqual(self.fs.commands("cp"), [])
 
     def test_attempts_counter_is_durable_before_the_rewrite_starts(self) -> None:
         # The counter was written with open("w") and no fsync, then the long rewrite
