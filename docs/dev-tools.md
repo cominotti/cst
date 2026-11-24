@@ -39,14 +39,74 @@ with an error when `uv.lock` does not match `pyproject.toml`, and uv checks
 the hash of every package against the lock.
 
 The unit tests do not need any of this: `python3 -I -B tests/run_unit.py`
-still runs on the system Python with the standard library (in parallel across
-CPUs by default; pass `--jobs 1` to force a single process, or let it fall back
-to 1 automatically when run under `coverage.py`). For faster local iterations,
+still runs on the system Python with the standard library (in parallel by
+default, one worker per CPU the run may use: its CPU affinity, so a toolbox or
+cgroup pinned to 16 of 24 CPUs gets 16; pass `--jobs 1` to force a single
+process, or let it fall back to 1 automatically when run under `coverage.py`).
+`CST_TEST_JOBS=N` in the environment sets that default worker count for a
+run that passes no `--jobs` (`invowk cmd check` passes none): an explicit
+`--jobs N` wins over it, coverage's 1 too, and an empty value or 0 keeps the
+default; any value that is not a whole number stops the run with a usage error.
+On a workstation shared with other work, see
+[Test performance on a workstation](#test-performance-on-a-workstation). For faster local iterations,
 `invowk cmd test affected [--list] [--base REF]` (`tests/run_unit.py --affected`)
 selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
 shared files; `invowk cmd test e2e tier1` supports `--match`, `--tag`,
 `--list_tests`, `--shard I/N`, and `--jobs N`.
+
+## Test performance on a workstation
+
+What the defaults are, and how to run the suite on a machine that is doing
+other work at the same time (another test run, a build, an agent).
+
+- **Workers follow the CPU affinity.** With no `--jobs`, `tests/run_unit.py`
+  starts one worker per CPU it may run on (`os.process_cpu_count()`), not per
+  CPU of the machine. A toolbox pinned to 16 of 24 CPUs gets 16 workers. 24
+  workers there would buy 9% of wall time for 7% more CPU time and about 2
+  more CPUs held. CI runners have an affinity equal to their CPU count, so CI
+  does not change.
+- **`CST_TEST_JOBS=N` caps a run that passes no `--jobs`**, such as
+  `invowk cmd check`. An explicit `--jobs N` wins over it, and under
+  `coverage.py` the run is still a single process. Use it when something else
+  runs on the same machine; two agent runs on one 16-CPU machine use
+  `CST_TEST_JOBS=6`. The full suite at each worker count, under `nice -n 10`:
+
+  | workers | wall time | CPUs busy (average) |
+  |---:|---:|---:|
+  | 8 | 91 s | 5.6 |
+  | 12 | 68 s | 8.0 |
+  | 16 | 56 s | 10.5 |
+  | 24 | 51 s | 12.3 |
+
+  Each worker keeps less than one CPU busy: many tests wait on timers and on
+  fsync, not on the CPU.
+- **TMPDIR on tmpfs**: `TMPDIR=$(mktemp -d /tmp/cc.XXXXXX)` (on Fedora `/tmp` is
+  tmpfs), not a folder in the home. The suite fsyncs its temporary files. On a
+  btrfs home (RAID1 on dm-crypt, `flushoncommit`) one run wrote 0.65 to 1 GB
+  and caused 6,400 to 8,200 cache flushes per disk; on tmpfs, 47 to 73 MB and
+  226 to 314. The suite took 13% less wall time at 4 and 8 workers, and 8% less
+  at 16; the tests that fsync most were about 12 times faster. Keep the folder
+  name short: the tests bind unix sockets below it, whose path may be at most
+  108 bytes. Remove the folder when done. tmpfs is RAM: virtual
+  environments, caches, downloads and any output that can grow large (the
+  logs or results of a harness) stay under `~/.cache`. The peak RAM the folder
+  uses was not measured.
+- **`nice -n 10` for local test runs.** It cost nothing measurable when nothing
+  competed (at 8 to 24 workers the times with and without it were within each
+  other's spread). How much it helps the machine's other users was not
+  measured.
+
+Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
+a shared machine, with another project's load at times (the spread was 1% to
+3% at 8 workers or more, up to 39% at 2 to 4). The tree measured was not
+`main`: it was `main` plus the verification proof-of-concept tests (3,354
+tests), among them fsync-heavy fault-injection tests that `main` does not
+have. The "about 12 times" is those tests; the suite-level 8% to 13% was
+measured on that tree and may be smaller on `main`.
+
+Not adopted yet: queueing the longest work units first (6% to 12% less wall
+time in the same measurements), to be measured again later.
 
 ## Where the virtual environment lives
 

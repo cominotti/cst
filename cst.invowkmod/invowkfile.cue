@@ -62,7 +62,7 @@ cmds: [
 		category:    "test"
 		description: "Run all unit tests in parallel across CPU cores (with a socket as stdin, see tests/run_unit.py) without generating __pycache__"
 		flags: [
-			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto per CPU, 1 = single-process)"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto: CST_TEST_JOBS, else one per CPU of the affinity; 1 = single-process)"},
 		]
 		implementations: [{
 			platforms: [{name: "linux"}]
@@ -92,7 +92,7 @@ cmds: [
 		flags: [
 			{name: "base", description: "Git ref to diff against (default: merge-base with main, or HEAD)"},
 			{name: "list", type: "bool", default_value: "false", description: "List selected modules without running tests"},
-			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto per CPU, 1 = single-process)"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto: CST_TEST_JOBS, else one per CPU of the affinity; 1 = single-process)"},
 		]
 		implementations: [{
 			platforms: [{name: "linux"}]

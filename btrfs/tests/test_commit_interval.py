@@ -191,6 +191,21 @@ class CommitDomainTests(unittest.TestCase):
         self.assertEqual(parse_commit_args(["status", "extra"]).code, 2)
         self.assertEqual(parse_commit_args(["bogus"]).code, 2)
 
+    def test_the_range_bounds_are_inclusive(self) -> None:
+        # README: "range 15..300". Both ends are accepted, one past either end is refused.
+        for action in (CommitAction.APPLY, CommitAction.PLAN):
+            for seconds in (15, 300):
+                with self.subTest(action=action, seconds=seconds):
+                    self.assertEqual(
+                        parse_commit_args([str(action), str(seconds)]),
+                        CommitParsedArgs(action, seconds=seconds),
+                    )
+            for seconds in (14, 301):
+                with self.subTest(action=action, seconds=seconds):
+                    parsed = parse_commit_args([str(action), str(seconds)])
+                    self.assertEqual(parsed.code, 2)
+                    self.assertIn("out of range", parsed.error or "")
+
     def test_option_parsing_and_rewriting_keeps_flushoncommit(self) -> None:
         base = "subvol=var,compress-force=zstd:1,noatime,flushoncommit"
         self.assertEqual(effective_commit_seconds(base), 30)

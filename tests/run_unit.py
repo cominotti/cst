@@ -5,7 +5,12 @@
 Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affected | --list-affected] [--base REF] [NAME...]   (from anywhere)
 
 With no NAME it runs every unit test of the checkout across parallel worker
-processes (`default_jobs()`, 1 per CPU; automatically 1 under `coverage.py`).
+processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `coverage.py`).
+The worker count, first rule that applies (`requested_jobs()`): `-j N`/`--jobs N`
+with N >= 1; 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
+(unset, empty or 0: the next rule; any other value that is not a whole number
+is a usage error, when this rule is reached); one per CPU of the affinity. `invowk cmd check` passes no
+--jobs, so CST_TEST_JOBS is how a run on a shared machine caps the suite.
 A NAME is a test module, class or method as unittest names it (vm.tests.test_vm,
 vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
 runs one that way, so the socket gate below still applies. `--gates` runs
@@ -101,7 +106,7 @@ agent's worktree under .claude/worktrees, left out), and fails the run on
 each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 import contextlib
 import ctypes
@@ -598,6 +603,8 @@ _AFFECTED_FLAG: Final = "--affected"
 _LIST_AFFECTED_FLAG: Final = "--list-affected"
 _BASE_FLAG: Final = "--base"
 _WORKER_FDS_FLAG: Final = "--worker-fds"
+TEST_JOBS_ENV: Final = "CST_TEST_JOBS"
+"""The environment variable that sets the default worker count (`requested_jobs`)."""
 _ERR_LOAD_MODULE: Final = "unittest.loader"
 _SEP1: Final = "=" * 70
 _SEP2: Final = "-" * 70
@@ -734,11 +741,49 @@ def _coverage_active() -> bool:
     return sys.monitoring.get_tool(sys.monitoring.COVERAGE_ID) is not None
 
 
-def default_jobs() -> int:
-    """Default worker count when `-j`/`--jobs` is unset or 0 (1 under coverage.py)."""
+def jobs_from_env(environ: Mapping[str, str]) -> int | None:
+    """The worker count CST_TEST_JOBS asks for: None when it is unset, empty or 0 (the default applies).
+
+    Any other value that is not a whole number (ASCII digits only) is a usage error.
+    """
+    raw = environ.get(TEST_JOBS_ENV, "")
+    if not raw:
+        return None
+    invalid = SystemExit(f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)")
+    if not (raw.isascii() and raw.isdigit()):
+        raise invalid
+    try:
+        return int(raw) or None
+    except ValueError:  # past Python's limit on the digits int() converts
+        raise invalid from None
+
+
+def default_jobs(env_jobs: int | None = None) -> int:
+    """Default worker count when `-j`/`--jobs` is unset or 0 (1 under coverage.py).
+
+    `env_jobs` (CST_TEST_JOBS, from `jobs_from_env`) when given; else one per CPU this
+    process may run on (`os.process_cpu_count()`: the CPU affinity, as a toolbox or a
+    cgroup's cpuset narrows it), not per CPU of the machine (`os.cpu_count()`). It reads no
+    environment itself, so its own tests do not depend on the caller's CST_TEST_JOBS. A test that
+    starts a child runner on several work units passes `--jobs` to pick its path.
+    """
     if _coverage_active():
         return 1
-    return max(1, os.cpu_count() or 1)
+    if env_jobs is not None:
+        return env_jobs
+    return max(1, os.process_cpu_count() or 1)
+
+
+def requested_jobs(cli_jobs: int | None, environ: Mapping[str, str]) -> int:
+    """The worker count of a run: `-j N` with N >= 1 wins, then 1 under coverage.py, else the default.
+
+    The environment is read only when neither applies, so a bad CST_TEST_JOBS is no error then.
+    """
+    if cli_jobs is not None and cli_jobs >= 1:
+        return cli_jobs
+    if _coverage_active():
+        return 1
+    return default_jobs(jobs_from_env(environ))
 
 
 def _consume_value(args: Sequence[str], index: int, flag: str) -> tuple[str, int]:
@@ -1290,7 +1335,7 @@ def _run(repo: str, opts: RunOptions) -> int:
         except ValueError as exc:
             print(f"run_unit: {exc}", file=sys.stderr)
             return 2
-    requested = default_jobs() if active_opts.jobs is None or active_opts.jobs == 0 else active_opts.jobs
+    requested = requested_jobs(active_opts.jobs, os.environ)
     if requested <= 1:
         return _run_in_process(repo, active_opts)
     suite = _load_options(repo, active_opts)

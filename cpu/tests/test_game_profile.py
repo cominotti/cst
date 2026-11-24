@@ -2220,6 +2220,27 @@ class GameProfilePowerTest(GameProfileCase):
         self.run_profile("off")
         self.assertEqual(self.read(os.path.join(pci1, "power", "control")), "auto\n")
 
+    def test_card0_is_a_gpu_card(self) -> None:
+        # The DRM node card0 (number 0) is a card like card1: on a machine whose only GPU is card0,
+        # its connected display picks it and on keeps it out of runtime suspend.
+        pci0 = os.path.join(self.tmp, "pci", "0000:00:02.0")
+        self.write(os.path.join(pci0, "uevent"), "DRIVER=xe\nPCI_SLOT_NAME=0000:00:02.0\n")
+        self.write(os.path.join(pci0, "power", "control"), "auto\n")
+        node = os.path.join(self.paths.sys_drm, "card0")
+        os.makedirs(node, exist_ok=True)
+        os.symlink(pci0, os.path.join(node, "device"))
+        self.write(os.path.join(node, "card0-DP-1", "status"), "connected\n")
+
+        self.run_profile("on")
+        self.assertEqual(self.read(os.path.join(pci0, "power", "control")), "on\n")
+        self.assertIn(
+            f"sysfs {os.path.join(self.paths.sys_drm, 'card0', 'device', 'power', 'control')} auto",
+            self.read(self.state),
+        )
+
+        self.run_profile("off")
+        self.assertEqual(self.read(os.path.join(pci0, "power", "control")), "auto\n")
+
     def test_amd_profile_without_a_current_row_keeps_dpm_auto(self) -> None:
         # pp_power_profile_mode with no "*" row: there is no profile to restore, so DPM is not forced to
         # manual (it would stay there with the profile unchanged) and nothing is recorded for it.

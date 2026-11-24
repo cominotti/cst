@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tempfile
 import types
+from typing import override
 import unittest
 from unittest import mock
 
 from tests.repo_files import REPO, repo_files
+import tests.run_unit as run_unit_module
 from tests.run_unit import (
     BYTECODE_HINT,
     DEFAULT_CLASS_CHUNK,
@@ -560,7 +562,17 @@ class ResourceWarningGateTest(unittest.TestCase):
             with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
                 f.write(text)
         done = subprocess.run(
-            [sys.executable, "-B", os.path.join(REPO, "tests", "run_unit.py"), "probe_first", "probe_second"],
+            # --jobs 1: both modules in one process, so the runner itself must put its hook back between them
+            # (the parallel runner's version of this check is in ParallelRunnerTest).
+            [
+                sys.executable,
+                "-B",
+                os.path.join(REPO, "tests", "run_unit.py"),
+                "--jobs",
+                "1",
+                "probe_first",
+                "probe_second",
+            ],
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -848,9 +860,117 @@ class ParseArgsAndJobsTest(unittest.TestCase):
             mock.patch("sys.gettrace", return_value=None),
             mock.patch.object(sys.monitoring, "get_tool", return_value=None),
             mock.patch.dict(sys.modules, {"coverage": None}),
-            mock.patch("os.cpu_count", return_value=8),
+            mock.patch("os.process_cpu_count", return_value=8),
         ):
             self.assertEqual(default_jobs(), 8)
+
+    def test_default_jobs_counts_the_cpus_of_the_affinity_not_of_the_machine(self) -> None:
+        # A toolbox pinned to 16 of 24 CPUs: 24 workers would oversubscribe it.
+        with (
+            mock.patch("sys.gettrace", return_value=None),
+            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
+            mock.patch.dict(sys.modules, {"coverage": None}),
+        ):
+            with mock.patch("os.cpu_count", return_value=24), mock.patch("os.process_cpu_count", return_value=16):
+                self.assertEqual(default_jobs(), 16)
+            with mock.patch("os.process_cpu_count", return_value=None):
+                self.assertEqual(default_jobs(), 1)
+
+
+class TestJobsEnvTest(unittest.TestCase):
+    """CST_TEST_JOBS sets the default worker count; -j N wins over it.
+
+    The runner's new names are reached through the module object, not imported at the top: on a
+    runner without them only the tests that use them fail, and the wiring and CLI tests fail by
+    assertion.
+    """
+
+    @override
+    def setUp(self) -> None:
+        # Coverage off and an affinity of 16 CPUs, as the default tests above patch them.
+        self.enterContext(mock.patch("sys.gettrace", return_value=None))
+        self.enterContext(mock.patch.object(sys.monitoring, "get_tool", return_value=None))
+        self.enterContext(mock.patch.dict(sys.modules, {"coverage": None}))
+        self.enterContext(mock.patch("os.process_cpu_count", return_value=16))
+
+    def test_the_variable_sets_the_default_and_a_jobs_flag_wins(self) -> None:
+        cases: list[tuple[int | None, dict[str, str], int]] = [
+            (None, {}, 16),
+            (None, {"CST_TEST_JOBS": ""}, 16),
+            (None, {"CST_TEST_JOBS": "0"}, 16),
+            (None, {"CST_TEST_JOBS": "6"}, 6),
+            (None, {"CST_TEST_JOBS": "1"}, 1),
+            (None, {"CST_TEST_JOBS": "06"}, 6),
+            (None, {"CST_TEST_JOBS": "40"}, 40),
+            (4, {"CST_TEST_JOBS": "6"}, 4),
+            (0, {"CST_TEST_JOBS": "6"}, 6),
+            (0, {}, 16),
+            (4, {"CST_TEST_JOBS": "abc"}, 4),
+        ]
+        for cli, environ, want in cases:
+            with self.subTest(cli=cli, environ=environ):
+                self.assertEqual(run_unit_module.requested_jobs(cli, environ), want)
+
+    def test_a_value_that_is_not_a_whole_number_is_a_usage_error(self) -> None:
+        for raw in ("abc", "-1", "+3", "1.5", " 6", "6 ", "\N{SUPERSCRIPT TWO}"):
+            for cli in (None, 0):
+                with self.subTest(raw=raw, cli=cli), self.assertRaises(SystemExit) as caught:
+                    run_unit_module.requested_jobs(cli, {"CST_TEST_JOBS": raw})
+                text = str(caught.exception)
+                self.assertIn("CST_TEST_JOBS", text)
+                self.assertIn(repr(raw), text)
+
+    def test_a_number_past_the_digits_int_converts_is_the_same_usage_error(self) -> None:
+        raw = "9" * 5000  # int() refuses more than 4300 digits with a ValueError
+        with self.assertRaises(SystemExit) as caught:
+            run_unit_module.requested_jobs(None, {"CST_TEST_JOBS": raw})
+        self.assertTrue(str(caught.exception).startswith("run_unit: invalid CST_TEST_JOBS value '999"))
+
+    def test_coverage_wins_over_the_variable_and_a_jobs_flag_over_coverage(self) -> None:
+        with mock.patch("sys.gettrace", return_value=lambda *_a: None):
+            self.assertEqual(run_unit_module.requested_jobs(None, {"CST_TEST_JOBS": "6"}), 1)
+            self.assertEqual(run_unit_module.requested_jobs(3, {"CST_TEST_JOBS": "6"}), 3)
+
+    def test_under_coverage_the_variable_is_not_read(self) -> None:
+        # The documented order puts coverage.py before CST_TEST_JOBS: a bad value there is no error.
+        with mock.patch("sys.gettrace", return_value=lambda *_a: None):
+            for cli in (None, 0):
+                with self.subTest(cli=cli):
+                    self.assertEqual(run_unit_module.requested_jobs(cli, {"CST_TEST_JOBS": "abc"}), 1)
+
+    def test_a_run_with_no_jobs_flag_uses_the_variable(self) -> None:
+        units = [(f"dummy.mod{i}",) for i in range(5)]
+        with (
+            mock.patch.dict(os.environ, {"CST_TEST_JOBS": "3"}),
+            mock.patch.object(run_unit_module, "_load_options", return_value=unittest.TestSuite()),
+            mock.patch.object(run_unit_module, "plan_work_units", return_value=(units, False)),
+            mock.patch.object(run_unit_module, "_run_parallel", return_value=0) as parallel,
+            mock.patch.object(run_unit_module, "_run_in_process", return_value=0) as in_process,
+        ):
+            self.assertEqual(run_unit_module._run(REPO, RunOptions()), 0)
+        in_process.assert_not_called()
+        parallel.assert_called_once()
+        self.assertEqual(parallel.call_args.args[3], 3)
+
+    def test_the_runner_stops_on_a_bad_value_before_any_test(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                os.path.join(REPO, "tests", "run_unit.py"),
+                "tests.test_run_unit.ParseArgsAndJobsTest.test_parse_args_valid_flags",
+            ],
+            env={**os.environ, "CST_TEST_JOBS": "x"},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("invalid CST_TEST_JOBS value 'x'", proc.stderr)
+        self.assertNotIn("Ran ", proc.stderr)
 
 
 class PlanWorkUnitsTest(unittest.TestCase):

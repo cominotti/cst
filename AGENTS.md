@@ -134,7 +134,7 @@ Run from the repository root.
 
 ```
 invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (what CI runs)
-invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism)
+invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism; CST_TEST_JOBS=N sets the default worker count, --jobs wins)
 invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits)
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
 invowk cmd test arch                          # the static gates only (seconds)
