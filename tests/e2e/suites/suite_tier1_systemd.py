@@ -4637,6 +4637,40 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_176_btrfs_iocost_revert_whose_managed_file_cannot_be_removed_is_an_error_line(self) -> None:
+        """`cst btrfs iocost revert --live-only` as root with a folder where /run/btrfs-setup/iocost-managed
+        belongs (its unlink fails with EISDIR; the container has no io.cost.qos, so revert only removes
+        the file): exit 1, `ERROR: cannot write /run/btrfs-setup/iocost-managed: Is a directory` and no
+        traceback. With the folder gone, the same command exits 0. Before, the failed removal ended the
+        command in a Python traceback. A full tmpfs (test_162's trick) cannot make an unlink fail, and apply
+        never writes the file here (no io.cost.qos), so revert's removal is the save this tier can stage."""
+        c = self.SYSTEMD_CONTAINER
+        managed = "/run/btrfs-setup/iocost-managed"
+        if exec_bash(c, f"[[ ! -e {managed} ]] || echo busy").stdout.strip():
+            self.skipTest(f"{managed} already exists (another test's)")
+        self.addCleanup(exec_bash, c, f"set +e; rm -rf {managed} /var/tmp/e2e-176-out", check=False)
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /sys/fs/cgroup/io.cost.qos ]] || {{ echo "the test cannot bite: io.cost.qos is here" >&2; exit 1; }}
+            mkdir -p {managed}/x
+            rc=0; /opt/cst-rw/cst btrfs iocost revert --live-only >/var/tmp/e2e-176-out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-176-out >&2; exit 1; }}
+            grep -qxF "ERROR: cannot write {managed}: Is a directory" /var/tmp/e2e-176-out \
+                || {{ cat /var/tmp/e2e-176-out >&2; exit 1; }}
+            if grep -q Traceback /var/tmp/e2e-176-out; then cat /var/tmp/e2e-176-out >&2; exit 1; fi
+            [[ -d {managed}/x ]]
+            rm -rf {managed}
+            /opt/cst-rw/cst btrfs iocost revert --live-only >/dev/null
+            [[ ! -e {managed} ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and

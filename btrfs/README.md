@@ -1602,6 +1602,10 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
   so no udev event enables a disk again after its reset. The tracking file is
   removed, also on a kernel without `io.cost.qos` (nothing to reset there).
+  A save of `/run/btrfs-setup/iocost-managed` that fails (a full or
+  read-only `/run`), in `apply` or `revert`, is an `ERROR: cannot write
+  /run/btrfs-setup/iocost-managed: REASON` line with exit 1; `apply` then
+  leaves `btrfs:iocost` pending.
   `revert` removes the files and their record lines itself, so the installed
   program (`/usr/local/sbin/btrfs-iocost revert`) works without a checkout;
   `apply` (not `--live-only`) installs from a checkout and, run from the

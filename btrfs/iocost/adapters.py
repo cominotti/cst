@@ -231,13 +231,23 @@ def collect_iocost_snapshot(
     )
 
 
+def _saved(paths: IocostPaths, devnos: frozenset[str]) -> list[str]:
+    """_save_managed_devnos, or its ERROR line when the file cannot be written or removed (ENOSPC, a
+    read-only /run): `cannot write PATH: REASON`, as every write of CST says it."""
+    try:
+        _save_managed_devnos(paths.managed_file, devnos)
+    except OSError as exc:
+        return [f"ERROR: {WriteFailed(paths.managed_file, exc.strerror or str(exc))}"]
+    return []
+
+
 def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan) -> tuple[int, list[str]]:
-    """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write failed, lines)."""
+    """Write the plan's io.cost.qos lines and save the devices CST manages: (1 when a write or the save
+    failed, lines)."""
     if not snap.qos_exists:
-        if plan.revert_mode:
-            # No blk-iocost here: nothing to reset, and nothing stays CST's.
-            _save_managed_devnos(paths.managed_file, frozenset())
-        return 0, [f"skipped:   {paths.qos_path} unavailable"]
+        # No blk-iocost here: nothing to reset, and nothing stays CST's.
+        err = _saved(paths, frozenset()) if plan.revert_mode else []
+        return (1 if err else 0), [f"skipped:   {paths.qos_path} unavailable", *err]
     managed = set(plan.next_managed)
     out: list[str] = []
     rc = 0
@@ -256,8 +266,8 @@ def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan
     out.extend(f"unchanged: {item}" for item in plan.unchanged)
     out.extend(f"kept:      {item}" for item in plan.preexisting)
     out.extend(f"note:      {item}" for item in plan.notes)
-    _save_managed_devnos(paths.managed_file, frozenset(managed))
-    return rc, out
+    err = _saved(paths, frozenset(managed))
+    return (1 if err else rc), [*out, *err]
 
 
 def _locked(paths: IocostPaths, work: Callable[[], tuple[int, list[str]]]) -> tuple[int, list[str]]:

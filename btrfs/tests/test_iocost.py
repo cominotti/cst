@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 import dataclasses
+import errno
 import io
 import os
 import shutil
@@ -15,6 +16,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
+from btrfs.iocost import adapters as iocost_adapters
 from btrfs.iocost.adapters import (
     IocostPaths,
     apply_iocost,
@@ -963,6 +965,47 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"],
         )
         self.assertEqual(self.runner.calls, [])
+
+    # ---- a failed save of the managed-devices file is an ERROR line --------------------------
+    def test_apply_whose_save_of_the_managed_file_fails_is_an_error_line(self) -> None:
+        managed_dir = os.path.dirname(self.paths.managed_file)
+        real_ensure_dir = iocost_adapters.ensure_dir
+
+        seen: list[str] = []
+
+        def ensure_dir_refusing(path: str, mode: int) -> None:
+            # The lock lives in the same folder: its ensure_dir comes first and works (a folder there).
+            seen.append(path)
+            if seen.count(managed_dir) > 1:
+                raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+            real_ensure_dir(path, mode)
+
+        full = mock.patch.object(
+            iocost_adapters, "write_atomic", side_effect=OSError(errno.ENOSPC, "No space left on device")
+        )
+        read_only = mock.patch.object(iocost_adapters, "ensure_dir", ensure_dir_refusing)
+        for patch, reason in ((full, "No space left on device"), (read_only, "Read-only file system")):
+            with self.subTest(reason), patch:
+                self.runner = _FakeRunner()
+                rc, out = apply_iocost(self.paths, runner=self.runner)
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(out[-1], f"ERROR: cannot write {self.paths.managed_file}: {reason}")
+                self.assertIn("set:       ", "\n".join(out))  # the lines before it are kept
+                self.assertEqual(self._installer_words(), ["install"])  # not marked done: still pending
+                self.assertFalse(self._ran("systemctl", "enable"))
+
+    def test_revert_whose_removal_of_the_managed_file_fails_is_an_error_line(self) -> None:
+        # A folder where the file belongs: the snapshot reads no device of it, and its removal fails.
+        os.makedirs(os.path.join(self.paths.managed_file, "x"))
+        for qos in (True, False):
+            with self.subTest(qos=qos):
+                if not qos and os.path.exists(self.paths.qos_path):
+                    os.unlink(self.paths.qos_path)
+                rc, out = revert_iocost(self.paths, live_only=True, runner=self.runner)
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(out[-1], f"ERROR: cannot write {self.paths.managed_file}: Is a directory")
+                rc_full, out_full = revert_iocost(self.paths, runner=self.runner)
+                self.assertEqual((rc_full, out_full[-1]), (1, out[-1]))
 
     def test_revert_without_io_cost_qos_forgets_the_managed_disks(self) -> None:
         os.unlink(self.paths.qos_path)

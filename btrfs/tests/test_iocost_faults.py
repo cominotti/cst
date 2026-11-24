@@ -15,10 +15,9 @@ checked:
   installed, systemd reloaded after that, the service enabled, the udev rules reloaded (udevd
   runs here) and the io.cost.qos line written;
 - a run that returns 0 left the component done;
-- apply again, with no fault, returns 0 and leaves it done.
-
-An OSError that gets out of apply (a failed write of the managed-devices file: a traceback, exit
-1) counts as a run that failed; that gap is recorded for a change of its own, not checked here.
+- apply again, with no fault, returns 0 and leaves it done;
+- no exception gets out of apply: a failed save of the managed-devices file is exit 1 with an
+  `ERROR: cannot write PATH: REASON` line (the component stays pending).
 
 A guard for a7c5e92 (iocost marks the component done last): on its parent these cases fail with
 "done before what it stands for".
@@ -170,8 +169,6 @@ class IocostApplyFaultTest(unittest.TestCase):
                 return apply_iocost(self.paths, runner=runner)
             except Killed:
                 return None
-            except OSError as e:  # a traceback and exit 1 (see the module's docstring)
-                return 1, [f"Traceback: {e}"]
 
     def assert_done_means_applied(self, when: str) -> None:
         m = self.machine
@@ -182,11 +179,20 @@ class IocostApplyFaultTest(unittest.TestCase):
             self.assertTrue(m.udev_reloaded, f"{when}: done, udev rules not reloaded")
             self.assertTrue(self.qos_written(), f"{when}: done, io.cost.qos not written")
 
+    def failed_at(self, name: str) -> bool:
+        """Whether the last run's call named so was a failure the plan answered (FAIL, FAIL_FROM)."""
+        n = self.plan.calls.index(name) + 1 if name in self.plan.calls else 0
+        return n > 0 and self.plan.fault_at(n) in {FaultMode.FAIL, FaultMode.FAIL_FROM}
+
     def check(self, *faults: Fault) -> None:
         when = f"{faults}"
         self.start()
         result = self.run_once(*faults)
         self.assert_done_means_applied(when)
+        if result is not None and self.failed_at("managed file"):
+            self.assertEqual(result[0], 1, f"{when}: the managed file's save failed: {result[1]}")
+            self.assertIn(f"ERROR: cannot write {self.paths.managed_file}: No space left on device", result[1])
+            self.assertFalse(self.machine.done, f"{when}: the managed file's save failed, done")
         if result is not None and result[0] == 0:
             self.assertTrue(self.machine.done, f"{when}: exit 0, not done: {result[1]}")
         rc, lines = self.run_once() or (None, [])
