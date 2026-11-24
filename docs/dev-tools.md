@@ -639,12 +639,22 @@ not derive from it.
 - `mbt_snapshot_domain.py`: the snapshot retention plan, its safeguards and
   the circuit breaker, over generated policies, zones, timelines and clocks.
 - `mbt_profiles.py`: the profiles and the seeding themselves.
+- `mbt_cache_rollback.py`: `cst btrfs cache` attach and detach for two
+  users and the three kind selections, through the unit tests' fake
+  findmnt, mount and systemctl (`btrfs/tests/fakes.py`), with a bind mount
+  or the daemon-reload failing: `/etc/fstab` names exactly the mounted
+  binds, a failed command leaves `/etc/fstab` and the mounts as they were,
+  and the same command with no fault exits 0.
 
-These targets are in memory, so they do not depend on `TMPDIR`. A machine
-over adapters that write through `write_atomic` fsyncs every file, many
-times slower on the btrfs home than on tmpfs (the pilot measured about 20
-times; see [Test performance on a workstation](#test-performance-on-a-workstation)):
-stub the fsync in its fake, or run it with `TMPDIR` on tmpfs.
+The targets above the adapter machines are in memory, so they do not
+depend on `TMPDIR`. A machine over adapters that write through
+`write_atomic` fsyncs every file, many times slower on the btrfs home
+than on tmpfs (the pilot measured about 20 times; see
+[Test performance on a workstation](#test-performance-on-a-workstation)).
+The adapter machines write real files under a temporary folder; their
+TestCase stubs fsync
+(`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
+depend on `TMPDIR` either.
 
 ### Writing one: typing without ignore comments
 
