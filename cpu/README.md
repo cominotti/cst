@@ -1683,6 +1683,7 @@ this is harmless.
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
 | `game/domain/__init__.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
 | `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/adapters/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock |
 | `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
 | `game/cli.py` | The command line of `cpu-game-profile` |
