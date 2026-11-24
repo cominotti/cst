@@ -205,6 +205,34 @@ class PlantedTest(unittest.TestCase):
         )
         self.assert_one_problem("tests/e2e/run.py:", "teach the gate this load")
 
+    def test_a_module_a_relative_import_names_is_checked_too(self) -> None:
+        # imported_modules() leaves relative imports out: helper.py went unchecked on 3.12.
+        self.append("tests/e2e/helper.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append("tests/e2e/selection.py", "\nfrom .helper import f\n")
+        self.assert_one_problem("tests/e2e/helper.py:3:")
+
+    def test_a_module_a_relative_package_import_names_is_checked_too(self) -> None:
+        self.append("tests/e2e/helper.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append("tests/e2e/suites/suite_tier1_systemd.py", "\nfrom .. import helper\n")
+        self.assert_one_problem("tests/e2e/helper.py:3:")
+
+    def test_a_relative_import_above_the_repository_is_reported(self) -> None:
+        self.append("tests/e2e/selection.py", "\nfrom .... import x\n")
+        self.assert_one_problem("tests/e2e/selection.py:", "above the top of the repository")
+
+    def test_an_import_by_a_name_given_at_run_time_is_reported(self) -> None:
+        for code in (
+            'importlib.import_module("tests.e2e.helper")',
+            '__import__("tests.e2e.helper")',
+            'exec(open("tests/e2e/helper.py").read())',
+            'runpy.run_module("tests.e2e.helper")',
+        ):
+            with self.subTest(code=code):
+                self.setUp()
+                self.append("tests/e2e/selection.py", f"\n\ndef load() -> None:\n    {code}\n")
+                line = self.line_of("tests/e2e/selection.py", code)
+                self.assert_one_problem(f"tests/e2e/selection.py:{line}:", "given at run time")
+
     def test_a_new_suite_file_is_checked_too(self) -> None:
         self.replace(
             "tests/e2e/run.py",

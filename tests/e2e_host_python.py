@@ -10,10 +10,12 @@ B:` (3.14) or os.process_cpu_count (3.13) there passes every local gate and
 breaks every E2E shard in CI.
 
 host_closure() finds that set of files from the code: the entries
-(HOST_ENTRIES), every repository module they import (and its packages'
-__init__.py), and the files run.py loads by path (the load rules in
-_path_loads; a load the gate cannot follow is a problem, so it cannot slip
-out of the set). problems() checks:
+(HOST_ENTRIES), every repository module they import, by an absolute or a
+relative import (and its packages' __init__.py), and the files run.py loads
+by path (the load rules in _path_loads). A load the gate cannot follow is a
+problem, so it cannot slip out of the set: a load by path of another form,
+and an import by a name or text given at run time (importlib.import_module,
+__import__, exec, runpy.run_module). problems() checks:
 
 - the entries against CI: every `python3 ... FILE.py` of a job without a
   container (and of the composite actions), and of the invowk task each such
@@ -97,6 +99,8 @@ _LOCAL_ACTION: Final = re.compile(r"\buses:\s*\./(\.github/actions/[\w.-]+)\s*$"
 _FOLDER_OF_FILE: Final = "parent"
 _PARENTS: Final = "parents"
 _SAME_PATH: Final = frozenset({"resolve", "absolute"})
+# Calls that import or run code the import closure cannot see (importlib.import_module, runpy.run_module).
+_RUN_TIME_IMPORTS: Final = frozenset({"import_module", "__import__", "exec", "run_module"})
 
 
 def _read(repo: str, rel: str) -> str:
@@ -270,6 +274,36 @@ def _called_name(func: ast.expr) -> str | None:
     return None
 
 
+def _relative_modules(tree: ast.Module, rel: str) -> tuple[set[str], list[str]]:
+    """The dotted names the relative imports of the file rel name (from . import x: the package's x;
+    from .h import y: its h and h.y), as imported_modules() gives the absolute ones, and the problems: a
+    relative import that goes above the repository."""
+    package = rel.split("/")[:-1]
+    names: set[str] = set()
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.level):
+            continue
+        if node.level - 1 > len(package):
+            problems.append(f"{rel}:{node.lineno}: a relative import above the top of the repository")
+            continue
+        base = package[: len(package) - (node.level - 1)] + (node.module.split(".") if node.module is not None else [])
+        if base:
+            names.add(".".join(base))
+        names.update(".".join([*base, alias.name]) for alias in node.names if alias.name != "*")
+    return names, problems
+
+
+def _run_time_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """Each call that imports or runs code by a name or a text the import closure cannot see: (line, the
+    function called)."""
+    return sorted(
+        (node.lineno, name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and (name := _called_name(node.func)) in _RUN_TIME_IMPORTS
+    )
+
+
 def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list[str], list[str]]:
     """The files CI runs on its runner's python3 (sorted), and the problems met while finding them: a
     load by path the gate cannot follow, a file that is not there."""
@@ -287,8 +321,15 @@ def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list
         except (OSError, SyntaxError) as err:
             problems.append(f"{rel}: cannot read it as Python ({err})")
             continue
-        for name in sorted(imported_modules(text, rel)):
+        names, relative_problems = _relative_modules(tree, rel)
+        problems += relative_problems
+        for name in sorted(imported_modules(text, rel) | names):
             todo += _module_files(repo, name)
+        problems += [
+            f"{rel}:{line}: imports code by a name or text given at run time ({how}), which "
+            "tests/e2e_host_python.py cannot follow: import the module by its name"
+            for line, how in _run_time_imports(tree)
+        ]
         loads = _path_loads(tree, rel)
         problems += [
             f"{rel}:{line}: loads code by path in a form tests/e2e_host_python.py cannot follow: "
