@@ -109,15 +109,17 @@ shebang it has no -B), notes every .pyc of the checkout before the tests
 agent's worktree under .claude/worktrees, left out), and fails the run on
 each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 
-A parallel run queues its work units longest first. A run of the whole
-suite (no NAME, no --gates) writes how long each test took to
+A parallel run queues its work units longest first. A parallel run of the
+whole suite (no NAME, no --gates) writes how long each test took to
 ${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json, one file per
 checkout (`durations_path`), and the next parallel run, whole or named, puts
 the units with the most recorded seconds first (`order_units`: a test with
 no time yet counts as the average one), so a long unit does not start last.
 With no file, or one it cannot read, the order is the old one: most tests
-first. CI neither reads nor writes the file. Only the order changes: the
-same tests and gates run, with the same results.
+first. A run in one process (--jobs 1, CST_TEST_JOBS=1, a load error, a
+single unit) neither reads nor writes the file. CI neither reads nor writes
+the file. Only the order changes: the same tests and gates run, with the
+same results.
 """
 
 from collections.abc import Callable, Mapping, Sequence
