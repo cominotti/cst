@@ -124,6 +124,9 @@ one kind of task (`<name>/SKILL.md`): `cst-new-command`, `cst-new-helper`,
 description fits the task. `.claude/rules` and `.claude/skills` are links to
 these two folders, for Claude Code. `.agents/workflows/cst-change.js` (linked as
 `.claude/workflows`) runs one change to a reviewed branch; its header says how.
+In it, workflow agents call the advisor only in design and re-review.
+A stage restarted after a pause continues from what already exists, instead
+of starting over or stopping.
 
 ## Commands
 
