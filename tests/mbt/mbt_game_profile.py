@@ -50,7 +50,8 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
    cpuset delegated), and drift() lists no drift game.state holds a record of. Named gap (O2): a
    box whose record a faulted step wrote without its setting (its set-property failed, or the
    process died between the two) is never set again while the profile is on; such boxes are
-   asserted to stay as they are.
+   asserted to stay as they are until game.state is gone (an 'off' that ended, the tick's own
+   'off' too, or one killed after it removed the file), when the next 'on' handles them again.
 
 Not modelled: the lock between processes (one call at a time here), cpu-power, the GPU, a settings
 file with problem lines and a TARGET_USER without an account (the unit tests cover the refusals),
@@ -438,6 +439,14 @@ class GameProfileMachine(RuleBasedStateMachine):
             self.after_off("the tick's off", failed, killed=killed, was_on=was_on)
         elif "systemctl start --no-block cpu-game.service" in asked:
             self.call("on", ProfileFault.NONE, 1)
+        self.end_gaps()
+
+    def end_gaps(self) -> None:
+        """With game.state gone (an 'off' that ended, or one killed after it removed the file), the
+        named gaps of the session end: no record is left to skip a box by, so the next 'on' handles
+        every box again."""
+        if not os.path.exists(self.paths.state):
+            self.unset_boxes = set()
 
     # ---- rules -------------------------------------------------------------------------------
     @initialize(prior=st.booleans(), cpuset=st.booleans(), builds=st.booleans())
@@ -562,8 +571,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         was_on, before = os.path.exists(self.paths.state), self.view()
         killed, failed = self.call("off", fault, at)
         self.after_off("off", failed, killed=killed, was_on=was_on, before=before)
-        if not killed:
-            self.unset_boxes = set()
+        self.end_gaps()
 
     @precondition(lambda self: os.path.exists(self.paths.state))
     @rule()
@@ -626,6 +634,30 @@ class GameProfileMachineTest(profiles.MbtTestCase):
 
     def test_any_sequence_of_on_tick_and_off_keeps_the_invariants(self) -> None:
         profiles.run_machine(GameProfileMachine)
+
+    def replay(self, *steps: Callable[[GameProfileMachine], object]) -> None:
+        """A sequence of the machine's steps, in order, with its invariant after each: one that
+        Hypothesis found (or that its draws today miss), pinned whatever the draws become."""
+        machine = GameProfileMachine()
+        self.addCleanup(machine.teardown)
+        for step in steps:
+            step(machine)
+            machine.every_change_has_its_record()
+
+    def test_a_box_left_unset_is_handled_again_after_the_tick_s_off(self) -> None:
+        # O2's box (its set-property failed in a tick) ends with the session: the tick's own 'off'
+        # removes game.state, and the 'on' a later tick starts sets the box like any other.
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.scope(steam=True),
+            lambda m: m.tick(ProfileFault.FAIL, 3),  # the Steam scope's set-property
+            lambda m: m.game(running=False),
+            lambda m: m.tick(ProfileFault.NONE, 1),  # no client left: stop, then its 'off'
+            lambda m: m.game(running=True),
+            lambda m: m.tick(ProfileFault.NONE, 1),  # a client, profile off: start, then its 'on'
+            lambda m: m.tick(ProfileFault.NONE, 1),
+        )
 
 
 if __name__ == "__main__":
