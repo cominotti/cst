@@ -1375,6 +1375,27 @@ class ApplyStepsTest(Base):
         self.assertEqual(rc_again, 0, out_again)
         self.assertIn(f"rust:build: deleted leftover {name}", out_again)
 
+    def test_a_leftover_is_not_started_with_the_time_budget_nearly_used_up(self) -> None:
+        # The leftover's rm started with any time left (python:uv runs first), the budget stopped it
+        # and the run exited 1; a folder's rm is not started with less than RM_MARGIN left.
+        name = tcd_build.TRASH_PREFIX + "aa0123456789abcd-1"
+        os.makedirs(os.path.join(self.root, name, "debug"))
+        self.limits = tcd_prune.Limits(run_budget=0)
+        tree = self.use_tree()
+        with mock.patch.object(tree, "remove", return_value=(False, "stopped after 1s")) as remove:
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(remove.call_count, 0)
+        self.assertIn(
+            f"rust:build: leftover {name} kept: the run's time budget (0h) is nearly used up; the next run deletes it",
+            out,
+        )
+        self.assertTrue(os.path.isdir(os.path.join(self.root, name)))
+        self.limits = tcd_prune.Limits()
+        rc_again, out_again = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc_again, 0, out_again)
+        self.assertIn(f"rust:build: deleted leftover {name}", out_again)
+
     def test_a_leftover_that_cannot_be_deleted_counts_as_failed_in_status(self) -> None:
         # The run exited 1, but its saved summary said "failed": 0, so status showed the last run as
         # fine while the timer's service had failed.

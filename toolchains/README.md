@@ -812,7 +812,8 @@ after 30 (`TimeoutStartSec=30min`). On a busy disk, deleting tens of GiB
 can take long, so the run keeps to the budget
 itself: `python:uv` (at most 10 minutes) runs first, then `rust:build`;
 `rust:build` starts no new deletion with less than 2 minutes left (`stopped
-before ...: the run's time budget ...`) and stops an `rm` that is still
+before ...: the run's time budget ...`; for a leftover of an interrupted run,
+`leftover ... kept: the run's time budget ...`) and stops an `rm` that is still
 running when the budget ends (the folder was already renamed away: the next
 run deletes the rest as a leftover). A leftover that cannot be deleted gets
 an error line (`could not delete leftover ...`) and the run exits 1, as for

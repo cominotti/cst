@@ -227,7 +227,16 @@ class RustBuild(BaseTarget[RustPolicy]):
             if len(users.get(t.key, [])) > 0:
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
                 continue
-            ok, msg = self.machine.tree.remove(t.path, self.time_left())
+            left_s = self.time_left()
+            if left_s is not None and left_s < RM_MARGIN:
+                # As for a folder: no rm started that the budget would stop (and fail the run).
+                self.tsay(
+                    f"leftover {t.key} kept: the run's time budget ({span(self.limits.run_budget)}) is nearly "
+                    "used up; the next run deletes it",
+                    5,
+                )
+                continue
+            ok, msg = self.machine.tree.remove(t.path, left_s)
             failed += not ok
             self.tsay(
                 f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
