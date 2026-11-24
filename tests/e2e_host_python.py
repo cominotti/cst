@@ -266,7 +266,7 @@ def _jobs(text: str) -> dict[str, list[tuple[int, str]]]:
         if line and not line.startswith(" "):
             in_jobs, job = line.rstrip() == "jobs:", None
         elif in_jobs and (found := _JOB.match(line)) is not None:
-            job = jobs.setdefault(found.group(1), [])
+            job = jobs.setdefault(group(found, 1), [])
         elif job is not None:
             job.append((n, line))
     return jobs
@@ -309,7 +309,7 @@ def _runs(lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[
     for n, line in lines:
         files += _PYTHON_RUN.findall(line)
         for found in _INVOWK_RUN.finditer(line):
-            task = found.group(1).strip()
+            task = group(found, 1).strip()
             script = task_script(cue, task)
             if script is None:
                 problems.append(f"{where}:{n}: runs `invowk cmd {task}`, which is no task of {INVOWKFILE}")
@@ -347,7 +347,7 @@ def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
             problems += _not_entries(f"{rel} (job {job})", files)
             for _, line in body:  # an action's own files are reported once, at the action
                 if (uses := _LOCAL_ACTION.search(line)) is not None:
-                    files += action_files.get(uses.group(1), [])
+                    files += action_files.get(group(uses, 1), [])
             if not files:
                 continue
             runner = (_job_key(body, "runs-on") or "").strip("\"'")
