@@ -31,7 +31,7 @@ from btrfs.bulk.adapters.child import (
     is_str,
     is_user_read,
 )
-from btrfs.bulk.adapters.machine import HomeTree, Primitives, Progress, kind
+from btrfs.bulk.adapters.machine import HomeTree, Primitives, Progress, kind, listing
 from btrfs.bulk.domain import NOCOW_TOP, TAG_TEXT, FlatpakAccess, ItemJournal, LstatKind, Unexpected
 from btrfs.bulk.domain.steam import (
     CHUNK,
@@ -54,27 +54,6 @@ def idle_priority(machine: Primitives) -> None:
         os.nice(19)
     if shutil.which("ionice") is not None:
         machine.run(["ionice", "-c3", "-p", str(os.getpid())])
-
-
-def listing(top: str) -> list[tuple[str, str, int, int, int, str]]:
-    """(relpath, type, size, mtime_ns, mode, link target) of top and all
-    below it (lstat, no link followed)."""
-    out: list[tuple[str, str, int, int, int, str]] = []
-    stack = [(top, "")]
-    while stack:
-        path, rel = stack.pop()
-        st = os.lstat(path)
-        m, mode = st.st_mode, stat.S_IMODE(st.st_mode)
-        if stat.S_ISLNK(m):
-            out.append((rel, "l", 0, 0, mode, os.readlink(path)))
-        elif stat.S_ISREG(m):
-            out.append((rel, "f", st.st_size, st.st_mtime_ns, mode, ""))
-        elif stat.S_ISDIR(m):
-            out.append((rel, "d", 0, st.st_mtime_ns, mode, ""))
-            stack.extend((os.path.join(path, n), f"{rel}/{n}" if rel else n) for n in os.listdir(path))
-        else:
-            out.append((rel, "o", 0, st.st_mtime_ns, mode, str(stat.S_IFMT(m))))
-    return sorted(out)
 
 
 def read_full(fd: int, view: memoryview) -> int:
