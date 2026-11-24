@@ -380,6 +380,15 @@ class PlantedTest(unittest.TestCase):
                 self.replace(action, old, f"{old}; {form}")
                 self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
 
+    def test_a_quote_after_python3_closes_only_a_quote_opened_right_before_it(self) -> None:
+        # Any quote right after python3 was dropped as the end of a quoted "python3": in a message's text the
+        # word after it was read as the program, a false problem.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        self.replace(action, old, f'{old}; echo "use python3" tests/e2e/new.py')
+        self.assertEqual(gate.problems(self.repo), [])
+
     def test_a_program_named_at_run_time_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",

@@ -534,9 +534,10 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
     unnamed: list[str] = []
     for found in _PYTHON_WORD.finditer(line):
         rest, before = line[found.end() :], line[: found.start()]
-        if rest[:1] in _QUOTES:  # "python3" x.py: the quote closes the command word and the quotes python3 is in
-            rest, before = rest[1:], before[:-1]
-        opener, _ = _innermost_context(before, 0)
+        opener, start = _innermost_context(before, 0)
+        if rest[:1] == opener and start == found.start():  # "python3" x.py: the quote opened right before
+            rest, before = rest[1:], before[:-1]  # python3 closes the command word, and the quotes it is in
+            opener, _ = _innermost_context(before, 0)
         quote = opener if opener in _QUOTES else ""  # bash -c "python3 x.py"; echo "ok": the command ends at x.py
         program = python_program(rest, quote) if rest[:1].isspace() else None
         match program:
