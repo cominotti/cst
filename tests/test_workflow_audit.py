@@ -320,8 +320,8 @@ _LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error|needs)\s*:")
 _STEP = re.compile(r"^(\s*)-\s")
 
 
-def _uncommented(text: str) -> list[tuple[int, str]]:
-    """The numbered lines of a workflow, comment lines left out."""
+def uncommented_lines(text: str) -> list[tuple[int, str]]:
+    """The numbered lines of a workflow or an action, comment lines left out."""
     return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
 
 
@@ -363,7 +363,7 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     appear anywhere in the workflow. Comment lines are left out.
     """
     out: list[str] = []
-    lines = _uncommented(nightly)
+    lines = uncommented_lines(nightly)
     out += [
         f"{NIGHTLY}:{n}: a uv variable (`UV_...`) in the nightly; it can leave packages or vulnerabilities out "
         "of the audit"
@@ -438,7 +438,7 @@ def _mbt_variable_problems(path: str, lines: Iterable[tuple[int, str]]) -> list[
 
 
 def _mbt_ci_problems(ci: str) -> list[str]:
-    lines = _uncommented(ci)
+    lines = uncommented_lines(ci)
     out = _mbt_variable_problems(CI, lines)
     body = _jobs(lines).get(MBT_CI_JOB, [])
     runs = [n for n, line in body if MBT_CI_STEP.match(line)]
@@ -459,7 +459,7 @@ def _mbt_ci_problems(ci: str) -> list[str]:
 
 
 def _mbt_nightly_problems(nightly: str) -> list[str]:
-    lines = _uncommented(nightly)
+    lines = uncommented_lines(nightly)
     out = _mbt_variable_problems(NIGHTLY, lines)
     jobs = _jobs(lines)
     named = [name for name, lines in jobs.items() if any(MBT_NIGHTLY_STEP.match(line) for _, line in lines)]

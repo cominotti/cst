@@ -45,7 +45,7 @@ from typing import Final
 
 from cst_core.domain.imports import imported_modules, loads_code_by_path
 from cst_core.domain.text import group
-from tests.test_workflow_audit import INVOWKFILE, task_script
+from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines
 
 # The files CI starts with its runner's python3 (the rest of the closure is found from them).
 HOST_ENTRIES: Final = ("tests/e2e/image_digest.py", "tests/e2e/run.py")
@@ -257,17 +257,12 @@ def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list
     return sorted(seen), problems
 
 
-def _numbered(text: str) -> list[tuple[int, str]]:
-    """The numbered lines of a YAML file, comment lines left out."""
-    return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
-
-
 def _jobs(text: str) -> dict[str, list[tuple[int, str]]]:
     """The numbered lines of each job under a workflow's top-level jobs: key, by job name."""
     jobs: dict[str, list[tuple[int, str]]] = {}
     job: list[tuple[int, str]] | None = None
     in_jobs = False
-    for n, line in _numbered(text):
+    for n, line in uncommented_lines(text):
         if line and not line.startswith(" "):
             in_jobs, job = line.rstrip() == "jobs:", None
         elif in_jobs and (found := _JOB.match(line)) is not None:
@@ -286,21 +281,24 @@ def _job_key(body: Sequence[tuple[int, str]], key: str) -> str | None:
     return None
 
 
-def _yaml_files(repo: str, folder: str, name: str | None = None) -> list[str]:
+def _entries(repo: str, folder: str) -> list[str]:
+    """The names in a folder of the repository, sorted (none when it is not there)."""
     path = os.path.join(repo, folder)
-    if not os.path.isdir(path):
-        return []
-    out: list[str] = []
-    for entry in sorted(os.listdir(path)):
-        if name is None and entry.endswith((".yml", ".yaml")):
-            out.append(f"{folder}/{entry}")
-        elif name is not None:
-            out += [
-                f"{folder}/{entry}/{n}"
-                for n in ("action.yml", "action.yaml")
-                if os.path.isfile(os.path.join(path, entry, n))
-            ]
-    return out
+    return sorted(os.listdir(path)) if os.path.isdir(path) else []
+
+
+def _workflow_files(repo: str) -> list[str]:
+    return [f"{WORKFLOWS}/{e}" for e in _entries(repo, WORKFLOWS) if e.endswith((".yml", ".yaml"))]
+
+
+def _action_files(repo: str) -> list[str]:
+    """Each composite action's action.yml or action.yaml."""
+    return [
+        f"{ACTIONS}/{e}/{n}"
+        for e in _entries(repo, ACTIONS)
+        for n in ("action.yml", "action.yaml")
+        if os.path.isfile(os.path.join(repo, ACTIONS, e, n))
+    ]
 
 
 def _runs(lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
@@ -334,13 +332,13 @@ def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
     cue = _read(repo, INVOWKFILE)
     problems: list[str] = []
     action_files: dict[str, list[str]] = {}
-    for rel in _yaml_files(repo, ACTIONS, name="action.yml"):
-        files, found = _runs(_numbered(_read(repo, rel)), cue, rel)
+    for rel in _action_files(repo):
+        files, found = _runs(uncommented_lines(_read(repo, rel)), cue, rel)
         action_files[os.path.dirname(rel)] = files
         problems += found
         problems += _not_entries(rel, files)
     by_runner: dict[str, list[str]] = {}
-    for rel in _yaml_files(repo, WORKFLOWS):
+    for rel in _workflow_files(repo):
         for job, body in _jobs(_read(repo, rel)).items():
             if _job_key(body, "container") is not None:
                 continue
