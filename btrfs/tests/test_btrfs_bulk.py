@@ -15,6 +15,7 @@ or directly:
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -734,6 +735,107 @@ class BulkTest(BulkBase):
         self.run_crash("u_finish", "unlink", 0)  # switched, old tree not deleted yet
         self.assertLink("Programs", "apps")
         self.assertTrue([n for n in os.listdir(self.home) if ".bulk-old-" in n])
+        self.check_recovered()
+        self.assertIn("deleted the old copy", self.out)
+
+    def fail_in_rollback(self, os_name: str, real_os: Callable[..., object], after_calls: int) -> None:
+        """Inside user.u_rollback, the call of os.OS_NAME (REAL_OS) after `after_calls` successful ones
+        raises an OSError (EIO), once: a deletion or a rename that fails (the run goes on, the journal
+        stays)."""
+        real_fn = self.user.u_rollback
+        calls = {"n": 0}
+
+        def wrapped(*a: object, **k: object) -> object:
+            calls["n"] += 1
+            if calls["n"] == after_calls + 1:
+                raise OSError(errno.EIO, "Input/output error")
+            return real_os(*a, **k)
+
+        def patched(j: ItemJournal) -> bool:
+            with mock.patch.object(os, os_name, wrapped):
+                return real_fn(j)
+
+        self.fake(self.user, "u_rollback", patched)
+
+    def test_a_kill_while_a_rollback_deletes_the_copy_converges(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 0)  # the journal (with stamp2) written, no switch
+        self.run_crash("u_rollback", "unlink", 1)  # the repair deletes the copy; killed after one file
+        self.assertFalse(os.path.lexists(self.B("apps.bulk-new")))
+        self.assertTrue(os.path.isdir(self.B("apps.bulk-new" + bulk_domain.DROP_MARK)))
+        self.assertEqual(len(self.journals()), 1)
+        self.check_recovered()
+        self.assertIn("undid an interrupted move", self.out)
+        self.assertNotIn("was written to as well", self.out)
+
+    def test_a_copy_written_to_after_stamp2_keeps_its_name_and_the_journal(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 0)
+        self.write("Bulk/apps.bulk-new/mine", "mine")  # a write after the journal's stamp2
+        _deferred, problems = self.apply()
+        self.assertIn("apps", problems)
+        self.assertIn("was written to as well", self.out)
+        self.assertEqual(self.read("Bulk/apps.bulk-new/mine"), "mine")
+        self.assertFalse(os.path.lexists(self.B("apps.bulk-new" + bulk_domain.DROP_MARK)))
+        self.assertEqual(self.journals(), ["journal-apps.json"])
+        self.assertEqual(self.read("Programs/a"), "a")
+
+    def test_a_partly_deleted_copy_without_the_mark_still_needs_a_look(self) -> None:
+        # What an older CST left after a cut deletion: it cannot be told from a copy written to.
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 0)
+        os.unlink(self.B("apps.bulk-new/a"))
+        _deferred, problems = self.apply()
+        self.assertIn("apps", problems)
+        self.assertIn("was written to as well", self.out)
+        self.assertEqual(self.journals(), ["journal-apps.json"])
+        shutil.rmtree(self.B("apps.bulk-new"))  # what the docs say to do
+        self.check_recovered()
+
+    def test_a_failed_rename_to_the_mark_keeps_the_whole_copy_until_the_next_apply(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 0)
+        self.fail_in_rollback("rename", os.rename, 0)
+        _deferred, problems = self.apply()
+        self.assertIn("apps", problems)
+        self.assertEqual(self.read("Bulk/apps.bulk-new/sub/b"), "b")
+        self.assertFalse(os.path.lexists(self.B("apps.bulk-new" + bulk_domain.DROP_MARK)))
+        self.assertEqual(self.journals(), ["journal-apps.json"])
+        self.check_recovered()
+        self.assertNotIn("was written to as well", self.out)
+
+    def test_a_failed_deletion_of_the_marked_copy_is_finished_by_the_next_apply(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_commit", "rename", 0)
+        self.fail_in_rollback("unlink", os.unlink, 1)
+        _deferred, problems = self.apply()
+        self.assertIn("apps", problems)
+        self.assertIn("Input/output error", self.out)
+        self.assertFalse(os.path.lexists(self.B("apps.bulk-new")))
+        self.assertTrue(os.path.isdir(self.B("apps.bulk-new" + bulk_domain.DROP_MARK)))
+        self.assertEqual(self.journals(), ["journal-apps.json"])
+        self.check_recovered()
+        self.assertNotIn("was written to as well", self.out)
+
+    def test_drop_replaces_a_marked_folder_already_there(self) -> None:
+        self.write("Bulk/x.bulk-new/f", "f")
+        self.write("Bulk/x.bulk-new" + bulk_domain.DROP_MARK + "/g", "g")
+        self.user.u_drop(self.B("x.bulk-new"))
+        self.assertEqual([n for n in os.listdir(self.B()) if n.startswith("x.")], [])
+
+    def test_a_marked_leftover_is_deleted_by_the_next_move(self) -> None:
+        self.apply()  # the layout
+        os.unlink(self.H("Programs"))
+        os.rmdir(self.B("apps/jetbrains"))
+        os.rmdir(self.B("apps"))
+        self.setup_programs()
+        self.write("Bulk/apps.bulk-new" + bulk_domain.DROP_MARK + "/x", "x")  # e.g. after an older CST's repair
+        self.check_recovered()
+
+    def test_finishing_deletes_a_marked_leftover(self) -> None:
+        self.setup_programs()
+        self.run_crash("u_finish", "unlink", 0)  # switched, the old tree not deleted yet
+        self.write("Bulk/apps.bulk-new" + bulk_domain.DROP_MARK + "/x", "x")
         self.check_recovered()
         self.assertIn("deleted the old copy", self.out)
 
