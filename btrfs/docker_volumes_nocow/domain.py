@@ -47,8 +47,8 @@ class VolumeLeftovers:
     name: str
     folder: str
     has_data: bool
-    olds: tuple[str, ...] = ()
-    twin: bool = False
+    olds: tuple[str, ...]
+    twin: bool
 
 
 @dataclass(frozen=True, slots=True)
