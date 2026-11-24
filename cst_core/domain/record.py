@@ -218,10 +218,13 @@ def _named_states(files: Mapping[str, RecordedFile], states: Mapping[str, Compon
 
 
 def with_state(rec: InstallRecord, component: str, state: ComponentState) -> InstallRecord:
-    """rec with component in state; unchanged when the record has none of its files."""
+    """rec with component in state; unchanged when the record has none of its files.
+
+    As every write of the record, it drops the state of a component no recorded file names (one an older
+    CST left so), as with_files() and without_files() do."""
     if not any(f.component == component for f in rec.files.values()):
         return rec
-    return InstallRecord(rec.files, {**rec.components, component: state})
+    return InstallRecord(rec.files, _named_states(rec.files, {**rec.components, component: state}))
 
 
 def tree_lines(files: Mapping[str, str]) -> str:

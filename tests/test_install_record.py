@@ -218,6 +218,12 @@ class RecordDomainTest(unittest.TestCase):
         )
         self.assertEqual(with_files(rec, {"/etc/a": (_f(), True)}, keep=keep).components, {"m:t": "done"})
 
+    def test_a_mark_drops_a_state_an_older_cst_left_without_a_file(self) -> None:
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.PENDING, "m:gone": ComponentState.PENDING})
+        self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done"})
+        # A mark of a component with no file changes nothing (the installer then writes no record).
+        self.assertEqual(with_state(rec, "m:none", ComponentState.DONE), rec)
+
     def test_marked_and_without_files(self) -> None:
         rec = with_files(EMPTY_RECORD, {"/etc/a": (_f(), True), "/etc/b": (_f(component="m:u"), True)})
         self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done", "m:u": "pending"})
@@ -1278,6 +1284,21 @@ class InstallerRecordCliTest(unittest.TestCase):
         os.makedirs(os.path.dirname(self.record))
         Path(self.record).write_text(render_record(with_files(EMPTY_RECORD, {dest: (f, True)})))
         self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "pending"})
+        r = self.cli("mark", "--component", "btrfs:degraded-boot", "done")
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "done"})
+
+    def test_mark_of_a_record_an_older_cst_left_with_a_state_no_file_names(self) -> None:
+        # An older CST's with_files() kept the state of a component whose last file moved to another
+        # component; the next mark writes the record without it.
+        dest = "/etc/systemd/system/btrfs-degraded-boot-record.service"
+        f = RecordedFile(None, "btrfs:degraded-boot", GeneratedKind.TEXT, "aa", 0o644, Owner.ROOT, None, "c1", "aa")
+        old = InstallRecord(
+            {dest: f}, {"btrfs:degraded-boot": ComponentState.PENDING, "m:gone": ComponentState.PENDING}
+        )
+        os.makedirs(os.path.dirname(self.record))
+        Path(self.record).write_text(render_record(old))
+        self.assertEqual(self.doc(), old)
         r = self.cli("mark", "--component", "btrfs:degraded-boot", "done")
         self.assertEqual((r.returncode, r.stderr), (0, b""))
         self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "done"})

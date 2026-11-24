@@ -140,6 +140,29 @@ class RecordUpdateTest(profiles.MbtTestCase):
             rec = _apply(rec, step)
             self.assertEqual(set(rec.components), {f.component for f in rec.files.values()}, (step, rec))
 
+    @given(
+        st.lists(steps, max_size=8),
+        st.dictionaries(st.sampled_from(COMPONENTS), st.sampled_from(ComponentState)),
+        steps,
+    )
+    def test_a_write_drops_the_states_an_older_cst_left_without_a_file(
+        self, sequence: Sequence[Step], orphans: Mapping[str, ComponentState], step: Step
+    ) -> None:
+        # An older CST's with_files() could leave a state that no recorded file names: the next update of
+        # the record drops it; only a mark of a component with no file changes nothing (no write).
+        rec = EMPTY_RECORD
+        for earlier in sequence:
+            rec = _apply(rec, earlier)
+        named = {f.component for f in rec.files.values()}
+        old = InstallRecord(rec.files, {**{c: s for c, s in orphans.items() if c not in named}, **rec.components})
+        # The drawn step, and a mark of each component a file names (the setup command's last step).
+        for update in [step, *(Mark(c, ComponentState.DONE) for c in sorted(named))]:
+            new = _apply(old, update)
+            if isinstance(update, Mark) and update.component not in named:
+                self.assertEqual(new, old)
+            else:
+                self.assertEqual(set(new.components), {f.component for f in new.files.values()}, (update, new))
+
     @given(st.lists(steps, max_size=8), recordings())
     def test_recording_files_found_as_recorded_changes_nothing(
         self, sequence: Sequence[Step], files: dict[str, tuple[RecordedFile, bool]]
