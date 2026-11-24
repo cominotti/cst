@@ -59,13 +59,22 @@ import unittest
 
 from btrfs.bulk.application import items as bulk_items
 from btrfs.bulk.domain import BY_ID, ITEMS, ItemJournal
-from btrfs.tests.bulk_fakes import BulkHome, arm_points, inode, tick_wait, use_tick_clock
-from tests.fault_injection import ALL_MODES, Fault, FaultMode, FaultPlan, Killed, cut_points, every_fault, stub_fsync
+from btrfs.tests.bulk_fakes import (
+    OLD_MARK,
+    BulkHome,
+    arm_points,
+    data_places,
+    inode,
+    read_or_none,
+    run_armed,
+    tick_wait,
+    use_tick_clock,
+)
+from tests.fault_injection import ALL_MODES, FaultMode, FaultPlan, cut_points, every_fault, stub_fsync
 
 EVERY_ID: Final = frozenset(i.id for i in ITEMS)
 COPY_WRITTEN: Final = "was written to as well"
 CONFLICT: Final = "written to on both sides"
-OLD_MARK: Final = ".bulk-old-"
 # The second fault's modes, in recover(), after a first fault of each mode (the module's docstring).
 SECOND_MODES: Final[Mapping[FaultMode, tuple[FaultMode, ...]]] = {
     FaultMode.KILL: ALL_MODES,
@@ -121,14 +130,6 @@ def files_under(top: str) -> dict[str, str] | None:
             with open(p) as f:
                 found[os.path.relpath(p, top)] = f.read()
     return found
-
-
-def read_or_none(path: str) -> str | None:
-    try:
-        with open(path) as f:
-            return f.read()
-    except OSError:
-        return None
 
 
 def put_layout(fx: BulkHome) -> None:
@@ -208,31 +209,13 @@ class BulkFaultBase(unittest.TestCase):
             fx.close()
 
     # ---- runs ---------------------------------------------------------------------------------
-    def run_with(self, plan: FaultPlan, fn: Callable[[], object], *faults: Fault) -> list[str]:
-        """fn with these faults; a kill or an OSError ends it. The points it reached."""
-        plan.arm(*faults)
-        with contextlib.suppress(Killed, OSError):
-            quiet(fn)
-        calls = list(plan.calls)
-        plan.arm()
-        return calls
-
     def expected(self) -> dict[str, str]:
         return dict(self.FILES) | self.extra
 
-    def journal(self, fx: BulkHome) -> ItemJournal | None:
-        if not fx.state.jexists(self.ITEM):
-            return None
-        j = fx.state.jread_item(self.ITEM)
-        self.assertIsNotNone(j, "a journal btrfs-bulk cannot read")
-        return j
-
     # ---- the invariants -----------------------------------------------------------------------
     def assert_safe(self, fx: BulkHome, when: str) -> None:
-        j = self.journal(fx)
-        places = [fx.home_path(self.link())]
-        if j is not None:
-            places += [p for p in (j["old"], j["new"], j["target"]) if p]
+        j = fx.item_journal(self.ITEM)
+        places = data_places(fx.home_path(self.link()), j)
         for rel, data in self.expected().items():
             if not any(read_or_none(os.path.join(p, rel)) == data for p in places):
                 self.fail(f"{when}: {rel} lost (looked in {places})")
@@ -251,7 +234,7 @@ class BulkFaultBase(unittest.TestCase):
         self.assertNotIn("NEEDS A LOOK", fx.report()[1], when)
 
     def assert_conflict(self, fx: BulkHome, when: str) -> None:
-        j = self.journal(fx)
+        j = fx.item_journal(self.ITEM)
         assert j is not None, f"{when}: no conflict journal: {fx.out}"
         self.assertTrue(j.get("conflict", False), when)
         self.assertEqual(files_under(j["old"]), dict(self.FILES) | {"late": "late"}, when)
@@ -262,7 +245,7 @@ class BulkFaultBase(unittest.TestCase):
         """The known gap F1 (the module's docstring): only after a fault that cut a copy's deletion."""
         self.assertTrue(any(is_f1_point(n) for n in fired), f"{when}: journal kept: {fx.out}")
         self.assertIn(COPY_WRITTEN, fx.out, when)
-        j = self.journal(fx)
+        j = fx.item_journal(self.ITEM)
         assert j is not None
         if j["src"] != j["target"]:  # a move out of /home: the data is back there, in a real folder
             self.assertFalse(os.path.islink(fx.home_path(self.link())), when)
@@ -275,7 +258,7 @@ class BulkFaultBase(unittest.TestCase):
         for _ in range(self.SETTLE_APPLIES):
             fx.apply()
         f1 = 0
-        j = self.journal(fx)
+        j = fx.item_journal(self.ITEM)
         if j is not None and not j.get("conflict", False):
             self.assert_f1(fx, when, fired)
             f1 = 1
@@ -303,17 +286,17 @@ class BulkFaultBase(unittest.TestCase):
             when = f"{mode} at {k}"
             with self.subTest(k=k), self.home() as (fx, plan):
                 cases += 1
-                first = self.run_with(plan, fx.apply, (mode, k))
+                first = run_armed(plan, fx.apply, (mode, k))
                 self.assert_safe(fx, when)
-                steps = self.run_with(plan, lambda fx=fx: recover(fx.bulk))
+                steps = run_armed(plan, lambda fx=fx: recover(fx.bulk))
                 self.assert_safe(fx, f"{when}, recovered")
                 f1 += self.settle(fx, plan, when, [first[k - 1]])
             for mode2, j in every_fault(len(steps), SECOND_MODES[mode]):
                 when2 = f"{when}, then {mode2} at recover step {j} ({steps[j - 1]})"
                 with self.subTest(k=k, then=mode2.value, j=j), self.home() as (fx, plan):
                     cases += 1
-                    first = self.run_with(plan, fx.apply, (mode, k))
-                    rec = self.run_with(plan, lambda fx=fx: recover(fx.bulk), (mode2, j))
+                    first = run_armed(plan, fx.apply, (mode, k))
+                    rec = run_armed(plan, lambda fx=fx: recover(fx.bulk), (mode2, j))
                     self.assert_safe(fx, when2)
                     f1 += self.settle(fx, plan, when2, [first[k - 1], rec[j - 1]])
         return cases, f1
@@ -464,7 +447,7 @@ class MoveCutPointsTest(MoveBase):
 
     def test_a_kill_at_the_copy_leaves_the_whole_copy_and_no_journal(self) -> None:
         with self.home() as (fx, plan):
-            self.run_with(plan, fx.apply, (FaultMode.KILL, 3))
+            run_armed(plan, fx.apply, (FaultMode.KILL, 3))
             # A dead process runs no cleanup: the copy stays, with no journal (the next prepare deletes it).
             self.assertEqual(files_under(fx.bulk_path("apps.bulk-new")), dict(self.FILES))
             self.assertEqual(fx.journals(), [])

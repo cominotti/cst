@@ -21,6 +21,7 @@ depend on btrfs.bulk. Not collected as a test module (unittest finds test*.py).
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 import functools
 import io
 import json
@@ -38,11 +39,11 @@ from btrfs.bulk.adapters.machine import Primitives
 from btrfs.bulk.adapters.user import UserFiles
 from btrfs.bulk.application import items as bulk_items
 from btrfs.bulk.application.context import Bulk
-from btrfs.bulk.domain import BulkPaths
+from btrfs.bulk.domain import BulkPaths, ItemJournal
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.shapes import json_object
-from tests.fault_injection import FaultPlan, FaultyOs, FaultyRunner
+from tests.fault_injection import Fault, FaultPlan, FaultyOs, FaultyRunner, Killed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
@@ -54,6 +55,8 @@ type TreeEntry = tuple[str, str, str | bytes | int]
 USER_OS_POINTS: Final = ("rename", "symlink", "mkdir", "rmdir", "unlink", "open")
 # The ones of btrfs.bulk.adapters.state (its writes go through write_atomic, patched apart).
 STATE_OS_POINTS: Final = ("remove",)
+# What a move adds to the name of the old tree it parks until its journal is done.
+OLD_MARK: Final = ".bulk-old-"
 
 
 def inode(path: str) -> tuple[int, int]:
@@ -259,12 +262,49 @@ class BulkHome:
         with open(self.state.jpath(ident), "w") as f:
             json.dump(j, f)
 
+    def item_journal(self, ident: str) -> ItemJournal | None:
+        """The item's journal as btrfs-bulk reads it; None when it has none."""
+        if not self.state.jexists(ident):
+            return None
+        j = self.state.jread_item(ident)
+        if j is None:
+            raise AssertionError(f"{ident}: a journal btrfs-bulk cannot read")
+        return j
+
     def journals(self) -> list[str]:
         return (
             [f for f in os.listdir(self.paths.state) if f.startswith("journal-")]
             if os.path.isdir(self.paths.state)
             else []
         )
+
+
+def data_places(path: str, journal: ItemJournal | None) -> list[str]:
+    """Where an item's files may be: at its path, and while its journal exists, at the journal's
+    old, new and target paths."""
+    if journal is None:
+        return [path]
+    return [path, *(p for p in (journal["old"], journal["new"], journal["target"]) if p)]
+
+
+def read_or_none(path: str) -> str | None:
+    """The text of the file at path; None when it cannot be read (absent, a folder)."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def run_armed(plan: FaultPlan, fn: Callable[[], object], *faults: Fault) -> list[str]:
+    """fn() with these faults armed (none: no fault) and its output dropped; a kill or an OSError
+    ends it, as the program's traceback does. The points it reached; the plan is disarmed after."""
+    plan.arm(*faults)
+    with contextlib.suppress(Killed, OSError), contextlib.redirect_stdout(io.StringIO()):
+        fn()
+    calls = list(plan.calls)
+    plan.arm()
+    return calls
 
 
 def fresh_ctime(probe: str) -> int:

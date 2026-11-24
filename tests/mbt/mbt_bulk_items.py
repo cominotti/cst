@@ -42,8 +42,6 @@ and +C, flatpak, the boot counter.
 
 from collections.abc import Mapping
 from enum import StrEnum
-import io
-import contextlib
 import os
 import stat
 from typing import Final, override
@@ -53,15 +51,25 @@ from hypothesis import settings, strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
 from btrfs.bulk.application import items as bulk_items
-from btrfs.bulk.domain import BY_ID, ItemJournal
-from btrfs.tests.bulk_fakes import BulkHome, TreeEntry, arm_points, inode, tick_wait, use_tick_clock
-from tests.fault_injection import Fault, FaultMode, FaultPlan, Killed, stub_fsync
+from btrfs.bulk.domain import BY_ID
+from btrfs.tests.bulk_fakes import (
+    OLD_MARK,
+    BulkHome,
+    TreeEntry,
+    arm_points,
+    data_places,
+    inode,
+    read_or_none,
+    run_armed,
+    tick_wait,
+    use_tick_clock,
+)
+from tests.fault_injection import Fault, FaultMode, FaultPlan, stub_fsync
 from tests.mbt import profiles
 
 profiles.load()
 
 ITEM_IDS: Final = ("apps", "jetbrains", "avd", "iso")
-OLD_MARK: Final = ".bulk-old-"
 MAX_POINT: Final = 20
 
 
@@ -120,15 +128,6 @@ points = st.sampled_from(range(1, MAX_POINT + 1))  # each point as likely
 item_ids = st.sampled_from(ITEM_IDS)
 
 
-def quiet_run(plan: FaultPlan, fn: object, fault: Fault | None) -> None:
-    """fn() with fault armed; a kill or an OSError ends it (as the program's traceback does)."""
-    assert callable(fn)
-    plan.arm(*(() if fault is None else (fault,)))
-    with contextlib.suppress(Killed, OSError), contextlib.redirect_stdout(io.StringIO()):
-        fn()
-    plan.arm()
-
-
 @settings(stateful_step_count=40)
 class BulkItemsMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
@@ -167,13 +166,6 @@ class BulkItemsMachine(RuleBasedStateMachine):
         with open(p, "w") as f:
             f.write(data)
         self.fresh(p, nocow=nocow)
-
-    def journal(self, ident: str) -> ItemJournal | None:
-        if not self.fx.state.jexists(ident):
-            return None
-        j = self.fx.state.jread_item(ident)
-        assert j is not None, f"{ident}: a journal btrfs-bulk cannot read"
-        return j
 
     # ---- the start ----------------------------------------------------------------------------
     @initialize(
@@ -272,7 +264,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
 
     def run_apply(self, fault: Fault) -> None:
         kept = self.kept_paths()
-        quiet_run(self.plan, lambda: bulk_items.apply(self.fx.bulk), fault)
+        run_armed(self.plan, lambda: bulk_items.apply(self.fx.bulk), fault)
         self.assert_kept_unchanged(kept, f"apply ({fault})")
 
     # One rule per mode: Hypothesis turns a random subset of the rules off in each example (swarm
@@ -291,7 +283,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
 
     def run_recover(self, fault: Fault) -> None:
         kept = self.kept_paths()
-        quiet_run(self.plan, lambda: bulk_items.recover(self.fx.bulk), fault)
+        run_armed(self.plan, lambda: bulk_items.recover(self.fx.bulk), fault)
         self.assert_kept_unchanged(kept, f"recover ({fault})")
 
     # The same for recover: a recover right after a killed apply is the boot's first step, which
@@ -320,7 +312,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
         if not os.path.lexists(top):
             os.mkdir(top)
             self.fresh(top, nocow=False)
-            if self.journal(ident) is not None:
+            if self.fx.item_journal(ident) is not None:
                 self.stuck.add(ident)
         self.writes += 1
         data = f"{ident}:{name}:{self.writes}"
@@ -354,11 +346,11 @@ class BulkItemsMachine(RuleBasedStateMachine):
         out = fx.out
         for ident in ITEM_IDS:
             if ident in self.stuck:
-                assert self.journal(ident) is not None, f"{ident}: stuck, but its journal is gone: {out}"
+                assert self.fx.item_journal(ident) is not None, f"{ident}: stuck, but its journal is gone: {out}"
                 assert f"NEEDS A LOOK: {ident}: an interrupted move" in out, out
                 assert "created again" in out, out
                 continue
-            assert self.journal(ident) is None, f"{ident}: journal left: {out}"
+            assert self.fx.item_journal(ident) is None, f"{ident}: journal left: {out}"
             state = self.oracle(ident)
             after = BY_ID[ident].after
             waits = after is not None and after in self.kept
@@ -367,7 +359,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
         before = fx.tree()
         fx.apply()
         again = fx.out
-        quiet_run(self.plan, lambda: bulk_items.recover(fx.bulk), None)
+        run_armed(self.plan, lambda: bulk_items.recover(fx.bulk))
         assert fx.tree() == before, "a further apply or recover changed files"
         assert "done:" not in again, again
 
@@ -427,22 +419,14 @@ class BulkItemsMachine(RuleBasedStateMachine):
     @invariant()
     def no_data_lost(self) -> None:
         for ident in ITEM_IDS:
-            j = self.journal(ident)
-            places = [self.link(ident)]
-            if j is not None:
-                places += [p for p in (j["old"], j["new"], j["target"]) if p]
+            places = data_places(self.link(ident), self.fx.item_journal(ident))
             for rel, data in self.model[ident].items():
-                found = False
-                for top in places:
-                    p = os.path.join(top, rel)
-                    if os.path.isfile(p):
-                        with open(p) as f:
-                            found = found or f.read() == data
+                found = any(read_or_none(os.path.join(top, rel)) == data for top in places)
                 assert found, f"{ident}: {rel} lost (looked in {places})"
 
     @invariant()
     def nothing_parked_without_a_journal(self) -> None:
-        olds = {j["old"] for i in ITEM_IDS if (j := self.journal(i)) is not None}
+        olds = {j["old"] for i in ITEM_IDS if (j := self.fx.item_journal(i)) is not None}
         for root, dirs, names in os.walk(self.fx.home):
             for n in dirs + names:
                 p = os.path.join(root, n)
