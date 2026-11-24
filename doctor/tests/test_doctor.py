@@ -3768,7 +3768,13 @@ class InstallAreaTest(Scratch):
         self.install("btrfs:docker-gc")
         warns = self.warns()
         self.assertEqual(len(warns), 1, warns)
-        self.assertIn("btrfs:docker-gc: installed only in part", warns[0].message)
+        # The cause it names holds for every way a component stays pending: an interrupted setup command, or
+        # a file of it written by another command before the setup command ever ran (cst btrfs scrub-limit).
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was written and "
+            "`cst btrfs docker-gc enable` has not finished since)",
+        )
         self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
         self.mark("btrfs:docker-gc")
         with open(os.path.join(self.root, "etc/systemd/system/docker-gc.timer"), "a") as f:

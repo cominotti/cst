@@ -411,8 +411,9 @@ cst btrfs scrub-limit off
   (killed after the installer, before its `daemon-reload`), failed or rolled
   back leaves it as it was, and so does the run again. So `cst doctor` does
   not ask for an install that nothing needs. A `btrfs:core` that was never
-  installed becomes pending at the first drop-in, as before. A run stopped
-  before its `daemon-reload` is shown by `status`, `plan` and `cst doctor`
+  installed becomes pending at the first drop-in, as before (`cst doctor`
+  then asks for `cst btrfs install`, which installs the rest of it). A run
+  stopped before its `daemon-reload` is shown by `status`, `plan` and `cst doctor`
   (systemd has not loaded the drop-in, above), not by the install record.
   A record that an older CST left pending this way (a `set` killed after its
   installer, then run again) stays pending until `cst btrfs install`: the
