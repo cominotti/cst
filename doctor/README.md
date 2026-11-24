@@ -550,6 +550,9 @@ file: where it came from in CST, its component (the part of a module one
 command installs: `btrfs:core`, `btrfs:docker-gc`, ...), its sha256, mode and
 owner, a template's values, and the commit of the CST folder that installed
 it. A component is "pending" from the first write until its command finishes.
+A command that rewrites one file of a component outside that component's
+setup command (`cst btrfs scrub-limit`, for its drop-in of `btrfs:core`)
+leaves the component's state as it was.
 
 The `install` area compares three things: the record, the files as they are,
 and what this CST folder would install now.

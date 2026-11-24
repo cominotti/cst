@@ -8440,3 +8440,61 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_164_installer_text_keep_state_keeps_a_done_component_done(self) -> None:
+        """`installer.py text DEST 0644 --component btrfs:core --keep-state` as root on root's real install
+        record, with btrfs:core done (a seed text of it, marked done): a new text is `written:`, its record
+        line has the file's sha256 and btrfs:core stays done; the same call again is `unchanged:` and changes
+        no byte of the record; `text-plan` of it says `unchanged:`; `remove-text` removes the file and its
+        line and btrfs:core is still done (the seed remains). `cst doctor` never says btrfs:core is
+        installed only in part. Before, the installer refused the option (exit 2)."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-164-core-seed"
+        dest = "/etc/e2e-164-kept.conf"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        core = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:core"
+        line_sha = (
+            'import json, sys\nprint(json.load(open(sys.argv[1]))["files"].get(sys.argv[2], {}).get("sha256", "-"))\n'
+        )
+        if exec_bash(c, f"for f in {seed} {dest}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-164-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-164-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} {dest} /var/tmp/e2e-164-doc; "
+            f"if [[ -e /var/tmp/e2e-164-rec ]]; then mv /var/tmp/e2e-164-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            done_and_no_warning() {{
+                [[ "$({core})" == *" done" ]] || {{ echo "btrfs:core: $({core})" >&2; return 1; }}
+                /opt/cst-rw/cst doctor >/var/tmp/e2e-164-doc 2>&1 || true
+                if grep -qF "btrfs:core: installed only in part" /var/tmp/e2e-164-doc; then cat /var/tmp/e2e-164-doc >&2; return 1; fi
+            }}
+            keep() {{ {installer} "$1" {dest} 0644 --component btrfs:core --keep-state; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            done_and_no_warning
+            [[ "$(printf 'kept\\n' | keep text)" == "written:   {dest}" ]]
+            [[ "$(/usr/bin/python3 -I -c {shlex.quote(line_sha)} {rec} {dest})" == "$(sha256sum <{dest} | cut -d' ' -f1)" ]]
+            done_and_no_warning
+            before="$(sha256sum <{rec})"
+            [[ "$(printf 'kept\\n' | keep text)" == "unchanged: {dest}" ]]
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            [[ "$(printf 'kept\\n' | {installer} text-plan {dest} 0644 --component btrfs:core)" == "unchanged: {dest}" ]]
+            [[ "$({installer} remove-text {dest})" == "removed:   {dest}" ]]
+            [[ ! -e {dest} ]]
+            [[ "$({core})" == "{seed} done" ]]
+            done_and_no_warning
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

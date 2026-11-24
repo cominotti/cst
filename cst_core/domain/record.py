@@ -174,7 +174,9 @@ def render_record(rec: InstallRecord) -> str:
     return json.dumps(doc, indent=1, sort_keys=True) + "\n"
 
 
-def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]]) -> InstallRecord:
+def with_files(
+    rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]], *, keep: frozenset[str] = frozenset()
+) -> InstallRecord:
     """rec with each {dest: (file, written)} recorded.
 
     A component becomes "pending" when one of its files was written, or is
@@ -182,6 +184,11 @@ def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]
     record, adopted): its setup command marks it done when it finishes. A
     file found as recorded leaves its component's state alone, so a second
     run that changes nothing changes nothing in the record either.
+
+    A component in keep that rec has a state for keeps that state, done or
+    pending, whatever its files (`installer.py text --keep-state`: a command
+    that rewrites one file of a component outside its setup command); one
+    rec has no state for becomes pending as above.
 
     A component no recorded file names any more (its last file is now
     recorded under another component) loses its state, as in
@@ -191,7 +198,8 @@ def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]
     states = dict(rec.components)
     for dest, (f, written) in files.items():
         old = out.get(dest)
-        if written or old is None or not old.same_install(f):
+        kept = f.component in keep and f.component in rec.components
+        if not kept and (written or old is None or not old.same_install(f)):
             states[f.component] = ComponentState.PENDING
         out[dest] = f
     return InstallRecord(out, _named_states(out, states))
