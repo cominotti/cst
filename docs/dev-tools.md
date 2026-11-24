@@ -699,6 +699,18 @@ not derive from it.
   records keep their six fields. One known gap is let through by name: a
   field that is not UTF-8 (a cgroup folder's name the user made) reads back
   decoded with U+FFFD, so it never matches its record.
+- `mbt_game_profile.py`: a state machine over the game profile's `on`,
+  `tick` and `off` (through `locked`), with the unit tests' scratch and fake
+  systemctl, whose daemon-reload sets each value from the override files and
+  the drop-ins; between them the game starts and ends, Docker containers,
+  Steam scopes and boxes appear, settings drift and someone else reloads, and
+  each call may fail or die at any of its set-property calls and file writes:
+  every change has its record in `game.state`, an `off` with no fault
+  restores everything, `on` twice is `on` once, and a tick leaves no box
+  half handled. Two known gaps are let through by name: a set-property that
+  failed (or a process that died between the record and the set) is never
+  tried again while the profile is on, and an `off` whose undo step fails
+  still removes `game.state`, so that setting keeps the profile's value.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
