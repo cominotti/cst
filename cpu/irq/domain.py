@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from cst_core.domain.text import parse_subcommand_head
+from cst_core.domain.text import DRY_RUN_LINE, parse_subcommand_head
 from cst_core.domain.units import ActiveState
 from cst_core.domain.values import CpuSet
 
@@ -19,7 +19,6 @@ IRQBALANCE_SERVICE: Final = "irqbalance.service"
 MIN_UNBANNED_CPUS: Final = 2
 _NO_PKG_FLAG: Final = "--no-pkg"
 _BANNED_ENV_KEY: Final = "IRQBALANCE_BANNED_CPULIST"
-_DRY_RUN_LINE: Final = "Dry run: nothing is changed."
 # The command's name in its own messages, when CST_PROG does not give it.
 IRQ_PROG: Final = "cst cpu irq"
 
@@ -258,9 +257,9 @@ def format_irq_plan(snap: IrqSnapshot, *, no_pkg: bool = False) -> list[str]:
     lines.extend(f"note:      {n}" for n in snap.compute_notes)
     blocker = _irq_plan_blocker(snap)
     if blocker is not None:
-        return [*lines, blocker, _DRY_RUN_LINE]
+        return [*lines, blocker, DRY_RUN_LINE]
     lines.extend(_irq_config_lines(snap))
     optional = (_irq_package_line(snap, no_pkg=no_pkg), _irq_service_line(snap, no_pkg=no_pkg))
     lines.extend(line for line in optional if line is not None)
-    lines.append(_DRY_RUN_LINE)
+    lines.append(DRY_RUN_LINE)
     return lines

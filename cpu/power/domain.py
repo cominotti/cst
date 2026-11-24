@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from cst_core.domain.text import HELP_WORDS, enum_member
+from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, enum_member
 from cpu.game.domain import parse_cstate_limit_us
 
 DEFAULT_CPU_CSTATE_US: Final = 200
@@ -377,7 +377,7 @@ def format_power_status(snapshot: PowerSnapshot) -> list[str]:
 
 def format_power_plan(snapshot: PowerSnapshot, plan: PowerPlan, *, gpu_only: bool = False) -> list[str]:
     """Format dry-run `cpu-power plan` output."""
-    lines = ["Dry run: nothing is changed."]
+    lines = [DRY_RUN_LINE]
     lines.extend(f"WARN: {w}" for w in snapshot.config_warnings)
     if not plan.gpu_changes:
         lines.append(f"  unchanged: GPU runtime PM (GPU_PM_MODE={snapshot.gpu_mode.value})")

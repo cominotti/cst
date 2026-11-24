@@ -99,6 +99,9 @@ NO_WORDS: Final = frozenset({"no", "false", "off", "0"})
 # The words that ask a command for its help (cst and every module).
 HELP_WORDS: Final = frozenset({"help", "-h", "--help"})
 
+# The line a plan prints to say it changed nothing (iocost, scrub-limit, cpu irq, cpu power).
+DRY_RUN_LINE: Final = "Dry run: nothing is changed."
+
 
 def enum_member[E: StrEnum](cls: type[E], word: str) -> E | None:
     """The member of cls whose value is word (a word from outside: argv, a file, another program's

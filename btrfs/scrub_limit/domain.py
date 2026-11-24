@@ -10,7 +10,7 @@ import re
 from typing import Final
 
 from cst_core.domain.contracts import SNAPSHOTS_CONF
-from cst_core.domain.text import HELP_WORDS, ShellAssignments, group, parse_shell_assignments
+from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, ShellAssignments, group, parse_shell_assignments
 
 DEFAULT_SCRUB_LIMIT: Final = "500M"
 SCRUB_CONF_PATH: Final = SNAPSHOTS_CONF
@@ -230,7 +230,7 @@ def scrub_limit_plan_lines(
     target_limit: str | None,
 ) -> list[str]:
     """Format dry-run `cst btrfs scrub-limit plan` output."""
-    lines = ["Dry run: nothing is changed."]
+    lines = [DRY_RUN_LINE]
     new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
     if target_limit is None:
         if conf_text is None:

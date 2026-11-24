@@ -9,7 +9,7 @@ from enum import StrEnum
 import re
 from typing import Final
 
-from cst_core.domain.text import HELP_WORDS, parse_subcommand_head
+from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, parse_subcommand_head
 
 IOCOST_QOS_PATH: Final = "/sys/fs/cgroup/io.cost.qos"
 IOCOST_MODEL_PATH: Final = "/sys/fs/cgroup/io.cost.model"
@@ -401,7 +401,7 @@ def format_iocost_plan(
     component_changes: the component's files apply would write or record again (the installer's plan);
     None when that could not be asked (no checkout, or the installer's plan failed)."""
     if plan.error is not None:
-        return [f"ERROR: {plan.error}", "Dry run: nothing is changed."]
+        return [f"ERROR: {plan.error}", DRY_RUN_LINE]
     lines: list[str] = []
     if snap.io_controller_present is False:
         lines.append("WARN: cgroup v2 'io' controller is not listed in cgroup.controllers")
@@ -419,5 +419,5 @@ def format_iocost_plan(
     lines.extend(f"unchanged:     {u}" for u in plan.unchanged)
     lines.extend(f"pre-existing:  {p}" for p in plan.preexisting)
     lines.extend(f"note:          {n}" for n in plan.notes)
-    lines.append("Dry run: nothing is changed.")
+    lines.append(DRY_RUN_LINE)
     return lines
