@@ -1108,12 +1108,18 @@ def read_durations(path: str | None) -> dict[str, float]:
     if path is None:
         return {}
     try:
-        with open(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return {}
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return {}
+    try:  # the descriptor is ours to close: open() of a folder's descriptor raises and leaves it open
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return {}
+        with open(fd, "rb", closefd=False) as f:
             data = _decode_json(f.read().decode("utf-8"))
     except OSError, ValueError, RecursionError:  # ValueError: not UTF-8, not JSON
         return {}
+    finally:
+        os.close(fd)
     if not _is_unit_durations(data):
         return {}
     return {test_id: float(took) for test_id, took in data["seconds"].items()}

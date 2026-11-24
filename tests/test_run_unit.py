@@ -1384,6 +1384,21 @@ class LongestFirstTest(unittest.TestCase):
             os.mkdir(folder)
             self.assertEqual(run_unit_module.read_durations(folder), {})
 
+    def test_a_path_it_cannot_use_leaves_no_descriptor_open(self) -> None:
+        tmp = self.tmp()
+        folder = os.path.join(tmp, "a-folder.json")
+        os.mkdir(folder)
+        fifo = os.path.join(tmp, "fifo.json")
+        os.mkfifo(fifo)
+        bad = os.path.join(tmp, "bad.json")
+        with open(bad, "wb") as f:
+            f.write(b"not json")
+        before = len(os.listdir("/proc/self/fd"))
+        for path in (folder, fifo, bad, os.path.join(tmp, "missing.json")):
+            for _ in range(3):
+                self.assertEqual(run_unit_module.read_durations(path), {})
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
     def test_a_named_pipe_at_the_path_reads_as_none_without_waiting(self) -> None:
         fifo = os.path.join(self.tmp(), "fifo.json")
         os.mkfifo(fifo)
