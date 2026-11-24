@@ -154,20 +154,12 @@ class BulkItemsMachine(RuleBasedStateMachine):
     def target(self, ident: str) -> str:
         return self.fx.ctx.target(BY_ID[ident])
 
-    def is_subvol(self, path: str) -> bool:
-        return os.path.isdir(path) and not os.path.islink(path) and inode(path) in self.fx.subvols
-
-    def is_nocow(self, path: str) -> bool:
-        return inode(path) in self.fx.nocow
-
     def fresh(self, path: str, *, nocow: bool) -> None:
         """A file or folder an app or the start just made: +C as btrfs gives it (inherited from its
         folder), not what a recycled inode number had in the fake sets."""
-        key = inode(path)
-        self.fx.nocow.discard(key)
-        self.fx.subvols.discard(key)
+        self.fx.forget(path)
         if nocow:
-            self.fx.nocow.add(key)
+            self.fx.nocow.add(inode(path))
 
     def put_file(self, top: str, rel: str, data: str, *, nocow: bool) -> None:
         p = os.path.join(top, rel)
@@ -332,7 +324,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
                 self.stuck.add(ident)
         self.writes += 1
         data = f"{ident}:{name}:{self.writes}"
-        self.put_file(top, name, data, nocow=self.is_nocow(os.path.realpath(top)))
+        self.put_file(top, name, data, nocow=self.fx.is_nocow(os.path.realpath(top)))
         self.model[ident][name] = data
 
     @rule(ident=item_ids, on=st.booleans())
@@ -384,19 +376,19 @@ class BulkItemsMachine(RuleBasedStateMachine):
         """nocow_check's answer for a NOCOW item whose target is a folder: something lacks +C."""
         top = self.target(ident)
         for root, _dirs, names in os.walk(top):
-            if not self.is_nocow(root):
+            if not self.fx.is_nocow(root):
                 return True
             for n in names:
                 p = os.path.join(root, n)
                 st_ = os.lstat(p)
-                if stat.S_ISREG(st_.st_mode) and st_.st_size and not self.is_nocow(p):
+                if stat.S_ISREG(st_.st_mode) and st_.st_size and not self.fx.is_nocow(p):
                     return True
         parent = self.fx.ctx.bulk
         for part in os.path.dirname(BY_ID[ident].target).split("/"):
             parent = os.path.join(parent, part)
             if not os.path.isdir(parent) or os.path.islink(parent):
                 break
-            if not self.is_nocow(parent):
+            if not self.fx.is_nocow(parent):
                 return True
         return False
 
@@ -407,7 +399,7 @@ class BulkItemsMachine(RuleBasedStateMachine):
             return "kept"
         if item.after is not None and item.after in self.kept:
             real = os.path.isdir(link) and not os.path.islink(link)
-            data = real and not self.is_subvol(link) and bool(os.listdir(link))
+            data = real and not self.fx.is_subvol(link) and bool(os.listdir(link))
             return "unexpected" if data else "wait"
         if not os.path.lexists(link):
             return "link"
@@ -423,11 +415,11 @@ class BulkItemsMachine(RuleBasedStateMachine):
     def folder_oracle(self, ident: str, *, target_data: bool) -> str:
         """The oracle for an item whose path is a real folder."""
         link = self.link(ident)
-        if not self.is_subvol(link) and not os.listdir(link):
+        if not self.fx.is_subvol(link) and not os.listdir(link):
             return "move"
         if target_data:
             return "unexpected"  # data on both sides (none of these items is disposable)
-        if self.is_subvol(link):
+        if self.fx.is_subvol(link):
             return "move" if BY_ID[ident].nocow else "move-subvol"
         return "move"
 

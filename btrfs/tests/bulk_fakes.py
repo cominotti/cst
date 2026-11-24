@@ -116,21 +116,29 @@ class BulkHome:
         """owner.name is value until close()."""
         self.stack.enter_context(mock.patch.object(owner, name, value))
 
+    def is_subvol(self, p: str) -> bool:
+        """The fake is_subvol: p a folder (not followed) in subvols."""
+        try:
+            return stat.S_ISDIR(os.lstat(p).st_mode) and inode(p) in self.subvols
+        except OSError:
+            return False
+
+    def is_nocow(self, p: str) -> bool:
+        """The fake is_nocow: p (not followed) in nocow."""
+        return inode(p) in self.nocow
+
+    def forget(self, p: str) -> None:
+        """p (not followed) neither a fake subvolume nor +C: what a recycled inode number had."""
+        key = inode(p)
+        self.nocow.discard(key)
+        self.subvols.discard(key)
+
     def fake_primitives(self) -> None:
         """The fakes of what needs btrfs, root or the host, over the sets above."""
-
-        def is_subvol(p: str) -> bool:
-            try:
-                return stat.S_ISDIR(os.lstat(p).st_mode) and inode(p) in self.subvols
-            except OSError:
-                return False
 
         def subvol_create(p: str) -> None:
             os.mkdir(p, 0o755)
             self.subvols.add(inode(p))
-
-        def is_nocow(p: str) -> bool:
-            return inode(p) in self.nocow
 
         def set_nocow(p: str) -> None:
             self.nocow.add(inode(p))
@@ -149,9 +157,9 @@ class BulkHome:
                 p for p in paths if any(p == b or p.startswith(b + "/") or b.startswith(p + "/") for b in self.busy)
             }
 
-        self.fake(self.machine, "is_subvol", is_subvol)
+        self.fake(self.machine, "is_subvol", self.is_subvol)
         self.fake(self.machine, "subvol_create", subvol_create)
-        self.fake(self.machine, "is_nocow", is_nocow)
+        self.fake(self.machine, "is_nocow", self.is_nocow)
         self.fake(self.machine, "set_nocow", set_nocow)
         self.fake(self.machine, "copy_tree", copy_tree)
         self.fake(self.host, "busy_paths", busy_paths)
@@ -201,14 +209,10 @@ class BulkHome:
     def purge_tree(self, path: str) -> None:
         # Clear fake inode sets before deleting so recycled inodes on ext4/tmpfs do not look +C.
         if os.path.exists(path):
-            st = os.lstat(path)
-            self.nocow.discard((st.st_dev, st.st_ino))
-            self.subvols.discard((st.st_dev, st.st_ino))
+            self.forget(path)
             for root, dirs, files in os.walk(path):
                 for n in dirs + files:
-                    st = os.lstat(os.path.join(root, n))
-                    self.nocow.discard((st.st_dev, st.st_ino))
-                    self.subvols.discard((st.st_dev, st.st_ino))
+                    self.forget(os.path.join(root, n))
             shutil.rmtree(path)
 
     def apply(self) -> tuple[list[str], list[str]]:
