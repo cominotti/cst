@@ -21,8 +21,8 @@ for each of the two services:
   (lost_after_a_failed_save, below);
 - R2, resume: the same command again with no fault exits 0 and leaves each service running with
   what it reads, except one whose restart a faulted run lost after a failed save: after an apply,
-  `plan` says "no restart needed" for it (the documented outcome); after an apply the record
-  owes nothing;
+  `plan` says "no restart needed" for it (the documented outcome); after either command the
+  record owes nothing;
 - R3, never twice: the run that resumes restarts a service only when it read other files than are
   on disk (WirePlumber: or bluetoothd restarted after it) or the record owed it; a third run says
   "none needed", restarts nothing and changes nothing;
@@ -41,9 +41,8 @@ save that works, or the write fails too), some only when a failure is followed b
 Each run's clock is a minute after the one before, so each main.conf backup has a name of its own
 (revert takes the two keys from the oldest backup).
 
-After a revert, only apply resumes a restart the record owes (change.py: "apply resumes them"):
-revert again finds nothing to revert and says "none needed". So for the revert start, R2 accepts a
-restart owed in the record, which `plan` then shows as still owed (F-B2 in the out-of-scope notes).
+revert resumes a restart the record owes as apply does (change.py: "apply and revert resume
+them"), also when nothing is left to revert, so R2 holds for the revert start too.
 
 One class per start state and mode family (a work unit of tests/run_unit.py), the case counts pinned.
 """
@@ -110,7 +109,7 @@ APPLY_RESUME = Start(
     kill_then_fault=48,
     lost=0,
 )
-REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=11, fail_then_kill=11, kill_then_fault=186, lost=4)
+REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=11, fail_then_kill=11, kill_then_fault=225, lost=4)
 
 
 class FaultyFiles(LocalSetupFiles):
@@ -282,20 +281,16 @@ class SetupFaultBase(unittest.TestCase):
         self.assertEqual((result or (None, ""))[0], 0, f"{when}: the run again: {result}")
         for u, needed in self.model.restarts[first:]:
             self.assertTrue(needed or u in owed_before, f"{when}: the run again restarted {u} a second time")
-        owed = self.owed()
         for u in UNITS:
             if self.model.in_step(u):
                 continue
-            if s.command == REVERT and u in owed:
-                continue  # only apply resumes it (F-B2)
             self.assertIn(u, self.lost, f"{when}: the run again left {u} on old files, and no failed save lost it")
             if s.command == REVERT:
                 continue  # plan shows what apply would do, not revert
             plan = self.run_once(("plan",))
             label = "bluetooth.service" if u == BLUETOOTH_SERVICE else "wireplumber (your session)"
             self.assertRegex((plan or (0, ""))[1], rf"ok +{re.escape(label)} +no restart needed", f"{when}: plan")
-        if s.command == APPLY:
-            self.assertEqual(self.owed(), set(), f"{when}: the record still owes a restart after the run again")
+        self.assertEqual(self.owed(), set(), f"{when}: the record still owes a restart after the run again")
         third_from = len(self.model.restarts)
         third = self.run_once(s.command)
         self.assertEqual((third or (None, ""))[0], 0, f"{when}: the third run: {third}")

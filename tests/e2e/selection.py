@@ -189,6 +189,7 @@ TIER1_WEIGHTS: Final[Mapping[str, int]] = {
     "test_26_btrfs_watch_saves_the_report_of_a_run": 66,
     "test_78_docker_gc_recorder_stays_failed_on_a_state_of_a_newer_docker_gc": 60,
     "test_95_bluetooth_python_program_with_the_bash_one_runuser_and_le_audio": 50,
+    "test_179_bluetooth_revert_again_makes_the_restart_a_stopped_revert_owes": 40,
     "test_19_every_component_full_cycle_on_the_container_root": 33,
     "test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one": 27,
     "test_11_manifest_installs_and_every_entry_runs_from_root": 26,

@@ -127,7 +127,7 @@ class RunCliFilterTest(unittest.TestCase):
         rc, out, err = self._run_cli("--tier", "1", "--tag", "bluetooth", "--list-tests")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.calls, [])
-        self.assertIn("Tier 1 (8 tests):", out)
+        self.assertIn("Tier 1 (9 tests):", out)
         self.assertIn("test_80_bluetooth_second_apply_and_le_audio_cycle", out)
 
     def test_zero_match_and_invalid_tag_fail_fast(self) -> None:

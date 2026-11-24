@@ -991,6 +991,79 @@ class OwedBeforeTheWriteTest(SetupCase):
         self.assertEqual(m.run("plan").stdout.count("(still owed: an earlier run did not restart it)"), 2)
 
 
+class RevertResumesTest(SetupCase):
+    """revert makes the restarts the record owes, as apply does, also when nothing is left to revert."""
+
+    BT_RESTART: Final = "sudo systemctl restart bluetooth"
+    WP_RESTART: Final = "systemctl --user restart wireplumber"
+    OWED: Final = "(still owed: an earlier run did not restart it)"
+
+    def restarts(self, calls: Sequence[str]) -> list[str]:
+        return [c for c in calls if c in (self.BT_RESTART, self.WP_RESTART)]
+
+    def test_revert_again_after_a_stopped_one(self) -> None:
+        # Before, the second revert found nothing to revert and said "none needed": bluetoothd and
+        # WirePlumber stayed on the applied settings, and only an apply made the restarts.
+        m = self.machine()
+        m.adapter(listed=False)  # it answers the wait after the restart; the checks find none
+        m.put("bt-journal", BAP_REGISTERED)  # LE Audio on again after revert: the restart waits for it
+        m.run("apply", "--yes")
+        m.put("fail-sudo-systemctl", "PARENT-TERM")  # stopped at bluetoothd's restart
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, -signal.SIGTERM, r.text)
+        m.flag("fail-sudo-systemctl", on=False)
+        owed = {
+            "bluetooth.service": m.unit_inv("system", "bluetooth"),
+            "wireplumber.service": m.unit_inv("user", "wireplumber"),
+        }
+        self.assertEqual(json.loads(self.text(m.pending)), owed)
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn("would restart bluetooth.service (after asking) and wireplumber\n", r.stdout)
+        self.assertIn(
+            f"owed:      bluetooth.service {self.OWED}\nowed:      wireplumber.service {self.OWED}\n", r.stdout
+        )
+        self.assertEqual(json.loads(self.text(m.pending)), owed)
+        r = m.run("revert", "--yes")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"== restarts\nowed:      bluetooth.service {self.OWED}\n", r.stdout)
+        self.assertEqual(self.restarts(r.calls), [self.BT_RESTART, self.WP_RESTART])
+        self.assertFalse(os.path.exists(m.pending))
+        r = m.run("revert", "--yes")
+        self.assertTrue(r.stdout.endswith("== restarts\nnone needed\n"), r.stdout)
+        self.assertEqual(self.restarts(r.calls), [])
+        self.assertEqual(m.run("revert", "--check").returncode, 0)
+
+    def test_only_wireplumber_owed(self) -> None:
+        # Nothing to revert (no backup, no rule, no drop-in): WirePlumber's restart alone, with no
+        # question about Bluetooth (no terminal here, and no --yes).
+        m = self.machine(DONE)
+        m.put("bt-journal", BAP_REGISTERED)  # LE Audio on (no drop-in): the restart waits for it
+        m.put(m.pending, json.dumps({"wireplumber.service": "wp-0"}))
+        r = m.run("revert", "--check")
+        self.assertEqual(r.returncode, 10, r.text)
+        self.assertIn("would restart wireplumber\n", r.stdout)
+        self.assertNotIn("bluetooth.service (after asking)", r.stdout)
+        r = m.run("revert")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(f"== restarts\nowed:      wireplumber.service {self.OWED}\n", r.stdout)
+        self.assertEqual(self.restarts(r.calls), [self.WP_RESTART])
+        self.assertNotIn("No terminal to ask on", r.stdout)
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_no_restart_keeps_them_owed(self) -> None:
+        m = self.machine(DONE)
+        m.put(m.pending, json.dumps({"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"}))
+        r = m.run("revert", "--yes", "--no-restart")
+        self.assertEqual(r.returncode, 0, r.text)
+        self.assertIn(
+            "Not restarted (--no-restart). To finish: sudo systemctl restart bluetooth && systemctl --user restart wireplumber\n",
+            r.stdout,
+        )
+        self.assertEqual(self.restarts(r.calls), [])
+        self.assertEqual(json.loads(self.text(m.pending)), {"bluetooth.service": "bt-0", "wireplumber.service": "wp-0"})
+
+
 class InvocationReadTest(SetupCase):
     """One `systemctl show` per service for its state and invocation ID, read again only after CST
     restarts it (the BAP wait reads bluetoothd's at each look)."""

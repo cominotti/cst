@@ -5,7 +5,7 @@ The restarts a run owes are recorded before the write that needs them
 (Change.owe), so a run stopped after a write leaves the restart owed; the
 restarts that a run does not make (--no-restart, the question answered no,
 a restart that failed, a stop) stay owed in that record, which the next run
-reads (Survey.restart_state): apply resumes them.
+reads (Survey.restart_state): apply and revert resume them.
 """
 
 from collections.abc import Callable
@@ -566,6 +566,7 @@ class Change(Checks):
         mc = p.main_conf
         if not (f.is_file(mc) and not f.is_symlink(mc)):
             raise self.die(f"{mc} is missing or a symlink")
+        self.read_owed()  # before any change: what an earlier run (apply or revert) left owed
         changed_mc = self.revert_main_conf()
         self.save_headset()  # the rule goes next: it may be the only place that names the headset
         wp, le = self.revert_files()
@@ -573,19 +574,29 @@ class Change(Checks):
         self.lw_plan()
         lw = self.lw_ours_present()
         self.lw_remove()
+        bt = changed_mc or self.bt_owed
+        restart = bt or wp or le or self.wp_owed  # a bluetoothd restart takes WirePlumber's endpoints
         if check:
-            if changed_mc:
+            if bt:
                 self.out("would restart bluetooth.service (after asking) and wireplumber\n")
-            if not changed_mc and (wp or le):
+            elif restart:
                 self.out("would restart wireplumber\n")
-            return 10 if changed_mc or wp or lw or le else 0
+            self.owed_report()
+            return 10 if restart or lw else 0
         self.out("== restarts\n")
-        if not (changed_mc or wp or le):
+        if not restart:
             self.out("none needed\n")
             return 0
-        if self.do_restarts(bt=changed_mc, wp=True) == 2:
+        self.owed_report()
+        if self.do_restarts(bt=bt, wp=True) == 2:
             raise self.die(f"a restart failed (see above). Backup of main.conf: {self.backup or 'none taken'}")
         return 0
+
+    def owed_report(self) -> None:
+        """revert's line for each restart the record owes (plan's words)."""
+        for unit, owed in ((BLUETOOTH_UNIT, self.bt_owed), (WIREPLUMBER_UNIT, self.wp_owed)):
+            if owed:
+                self.out(f"owed:      {unit} (still owed: an earlier run did not restart it)\n")
 
     def revert_main_conf(self) -> bool:
         """The two keys back to the oldest backup's; whether main.conf changes."""
