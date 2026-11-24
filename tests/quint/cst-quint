@@ -180,8 +180,11 @@ type Exec = Callable[[Sequence[str], str, Mapping[str, str]], Ran]
 
 def execute(argv: Sequence[str], cwd: str, env: Mapping[str, str]) -> Ran:
     """Run argv to its end, its output (stdout and stderr) into a file of cwd; its exit status, output and
-    largest RSS (wait4's: the largest of the process and of its waited-for descendants, the JVM included)."""
-    with tempfile.TemporaryFile(mode="w+", prefix=".cst-quint-", suffix=".log", dir=cwd) as log:
+    largest RSS (wait4's: the largest of the process and of its waited-for descendants, the JVM included).
+    Bytes of the output that are not UTF-8 become U+FFFD, as cst_core's runner reads them."""
+    with tempfile.TemporaryFile(
+        mode="w+", encoding="utf-8", errors="replace", prefix=".cst-quint-", suffix=".log", dir=cwd
+    ) as log:
         t0 = time.monotonic()
         proc = subprocess.Popen(
             list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT

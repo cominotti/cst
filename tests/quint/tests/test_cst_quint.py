@@ -300,6 +300,17 @@ class ArgvTest(unittest.TestCase):
         self.assertNotIn("--seed", argv)
 
 
+class ExecuteTest(unittest.TestCase):
+    def test_output_that_is_not_utf8_is_read_with_replacement_characters(self) -> None:
+        # A child (curl, npm, the JVM, the replay) may print bytes that are not UTF-8: a path or a
+        # message in Latin-1. The run still gives its verdict, as cst_core's runner would.
+        with tempfile.TemporaryDirectory(prefix="cst-quint-test-") as cwd:
+            script = "import sys; sys.stdout.buffer.write(b'ok \\xff done\\n'); sys.exit(3)"
+            ran = M.execute([sys.executable, "-I", "-B", "-c", script], cwd, {"PATH": "/usr/bin:/bin"})
+            self.assertEqual((ran.returncode, ran.output), (3, "ok \N{REPLACEMENT CHARACTER} done\n"))
+            self.assertEqual(os.listdir(cwd), [], "the log file is gone")
+
+
 class VerdictTest(unittest.TestCase):
     def test_each_answer(self) -> None:
         cases = {
