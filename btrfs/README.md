@@ -370,7 +370,11 @@ cst btrfs scrub-limit off
   that was not there is removed) and the command ends with
   `ERROR: ...; previous configuration restored.`, or with
   `ROLLBACK INCOMPLETE (...)` naming what could not be put back. A drop-in
-  that cannot be read stops the command before it writes anything.
+  that cannot be read stops the command before it writes anything. A full
+  disk, or another write error, at `snapshots.conf` ends the command with
+  `ERROR: cannot write /etc/btrfs-setup/snapshots.conf: ...` (exit 1)
+  before anything else is written; a folder the command made for it is
+  removed again.
   Writing the drop-in sets `btrfs:core` pending in the install record; when
   `btrfs:core` was done before, `set` marks it done again once the drop-in is
   written and `daemon-reload` worked, so `cst doctor` does not ask for an

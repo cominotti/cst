@@ -15,6 +15,7 @@ from typing import NoReturn, override
 import unittest
 from unittest import mock
 
+from btrfs.scrub_limit import adapters as scrub_adapters
 from btrfs.scrub_limit.adapters import (
     ScrubPaths,
     scrub_limit_apply,
@@ -40,6 +41,7 @@ from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandResult
+from tests.fault_injection import no_space
 from tests.repo_files import REPO
 
 
@@ -401,6 +403,47 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         rc, lines = scrub_limit_apply(dataclasses.replace(self.paths, record_path=record), "500M", runner=runner)
         self.assertEqual(rc, 1)
         self.assertEqual(lines[-1], "ERROR: the installer could not mark btrfs:core done: Access denied")
+
+    def test_a_full_disk_at_a_new_snapshots_conf_is_an_error_line_with_nothing_written(self) -> None:
+        for broken in ("write_atomic", "ensure_dir"):
+            with self.subTest(broken=broken):
+                runner = ScrubFakeRunner()
+                with mock.patch.object(scrub_adapters, broken, side_effect=no_space()):
+                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+                self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
+                self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made: gone
+                self.assertFalse(os.path.exists(self.dropin))
+                self.assertEqual(runner.calls, [])  # no installer, no daemon-reload
+
+    def test_a_full_disk_at_an_existing_snapshots_conf_leaves_it_as_it_was(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner = ScrubFakeRunner()
+        with mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()):
+            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+        self.assertEqual(runner.calls, [])
+
+    def test_the_cli_says_a_full_disk_at_snapshots_conf_with_no_traceback(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        deps = ScrubCliDeps(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-scrub-limit"),
+            env={"CST_PROG": "cst btrfs scrub-limit"},
+            out=out,
+            err=err,
+            ctx=_FakeCtx(container=False, root=True),
+            runner=ScrubFakeRunner(),
+        )
+        with (
+            mock.patch.object(scrub_adapters, "scrub_paths_for", return_value=self.paths),
+            mock.patch.object(scrub_adapters, "write_atomic", side_effect=no_space()),
+        ):
+            rc = run_scrub_limit_cli(["set", "500M"], deps=deps)
+        said = out.getvalue() + err.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn(f"ERROR: cannot write {self.conf}: No space left on device", said)
+        self.assertNotIn("Traceback", said)
+        self.assertIsNone(self._read(self.conf))
 
     def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
         os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back

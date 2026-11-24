@@ -220,12 +220,21 @@ def _read_conf_and_dropin(paths: ScrubPaths) -> tuple[str | None, str | None, st
 
 
 def _apply_conf(paths: ScrubPaths, conf_text: str | None, target_limit: str | None) -> tuple[bool, bool, str]:
-    """Write SCRUB_LIMIT into snapshots.conf when it changes: (changed, its folder was absent, the line)."""
+    """Write SCRUB_LIMIT into snapshots.conf when it changes: (changed, its folder was absent, the line).
+
+    A write that fails (a full disk, say) leaves the file as it was, removes the folder again when this
+    run made it, and raises the OSError."""
     new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
     conf_changed = new_conf is not None and new_conf != conf_text
     made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
     if new_conf is not None and conf_changed:
-        _write_conf(paths.conf_path, new_conf)
+        try:
+            _write_conf(paths.conf_path, new_conf)
+        except OSError:
+            if made_dir:  # write_atomic removed its temporary file: the folder is empty again
+                with contextlib.suppress(OSError):
+                    os.rmdir(os.path.dirname(paths.conf_path))
+            raise
         verb = "written:" if conf_text is None else "updated:"
         note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
         return conf_changed, made_dir, f"{verb:<10} {paths.conf_path} ({note})"
@@ -281,7 +290,10 @@ def scrub_limit_apply(
         return 1, [read_error]
     # Writing the drop-in sets btrfs:core pending; a component install had finished stays done.
     core_done = _core_done(paths.record_path)
-    conf_changed, made_dir, conf_line = _apply_conf(paths, conf_text, target_limit)
+    try:
+        conf_changed, made_dir, conf_line = _apply_conf(paths, conf_text, target_limit)
+    except OSError as exc:  # nothing written yet: nothing to roll back
+        return 1, [f"ERROR: cannot write {paths.conf_path}: {exc.strerror or exc}"]
     out: list[str] = [conf_line]
 
     def restore_conf() -> str | None:

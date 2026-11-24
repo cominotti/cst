@@ -8163,3 +8163,56 @@ STUB
             """,
         ).stdout
         self.assertIn("E2E-CACHE-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_162_btrfs_scrub_limit_set_on_a_full_disk_is_an_error_line(self) -> None:
+        """`cst btrfs scrub-limit set 500M` with /etc/btrfs-setup full (a one-page tmpfs over it, used up)
+        and no snapshots.conf: exit 1, an `ERROR: cannot write ...snapshots.conf` line and no traceback,
+        no drop-in, root's install record as it was. With the tmpfs gone, the same command works. Before,
+        the full disk ended the command in a Python traceback."""
+        c = self.SYSTEMD_CONTAINER
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        rec = "/var/lib/cst/installed.json"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        self.addCleanup(
+            exec_bash,
+            c,
+            "umount /etc/btrfs-setup 2>/dev/null; "
+            f"rm -f {conf} {dropin} /var/tmp/e2e-162-out; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"{installer} forget-text {dropin}; "
+            "if [[ -e /var/tmp/e2e-162-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-162-made-etc; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            record() {{ if [[ -e {rec} ]]; then sha256sum <{rec}; else echo none; fi; }}
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-162-made-etc
+            install -d -m 0755 /etc/btrfs-setup
+            # /etc/btrfs-setup: one page of tmpfs, already used up.
+            mount -t tmpfs -o size=4k,mode=0755 tmpfs /etc/btrfs-setup
+            head -c 4096 /dev/zero >/etc/btrfs-setup/filler
+            if head -c 1 /dev/zero >>/etc/btrfs-setup/filler 2>/dev/null; then echo "the tmpfs is not full" >&2; exit 1; fi
+            before="$(record)"
+            rc=0; /opt/cst-rw/cst btrfs scrub-limit set 500M >/var/tmp/e2e-162-out 2>&1 || rc=$?
+            [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-162-out >&2; exit 1; }}
+            grep -qxF "ERROR: cannot write {conf}: No space left on device" /var/tmp/e2e-162-out \
+                || {{ cat /var/tmp/e2e-162-out >&2; exit 1; }}
+            if grep -q Traceback /var/tmp/e2e-162-out; then cat /var/tmp/e2e-162-out >&2; exit 1; fi
+            [[ ! -e {conf} ]]
+            [[ ! -e {dropin} ]]
+            [[ "$(record)" == "$before" ]]
+            umount /etc/btrfs-setup
+            /opt/cst-rw/cst btrfs scrub-limit set 500M
+            grep -qxF "SCRUB_LIMIT='500M'" {conf}
+            [[ -f {dropin} ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
