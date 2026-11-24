@@ -1163,7 +1163,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
 
     @e2e_tags(E2ETag.TOOLCHAINS)
     def test_04_toolchains_e2e_timer_config_and_prune(self) -> None:
-        """toolchains config apply, hourly systemd --user timer, service run, and auto off."""
+        """toolchains config apply, hourly systemd --user timer, service run (and its failure on a leftover
+        it cannot delete), and auto off."""
         # Configure cargo/uv settings & create stale cache under ~/.cache/cargo-build (cst-toolchains layout)
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -1201,11 +1202,69 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             JOURNAL_NAMED + "journal_named cst-toolchains _SYSTEMD_USER_UNIT=cst-toolchains-prune.service",
         )
         self.assertIn("E2E-JOURNAL-OK cst-toolchains", res.stdout)
+        self.toolchains_prune_fails_on_a_leftover_it_cannot_delete()
         self.toolchains_auto_off_without_a_user_manager()
         self.toolchains_auto_off()
         self.toolchains_auto_off_stops_an_orphan_timer()
         # Clean up demo workspace for later tests
         as_tester_bash(self.SYSTEMD_CONTAINER, "rm -rf /home/tester/work/demo")
+
+    def toolchains_prune_fails_on_a_leftover_it_cannot_delete(self) -> None:
+        """A leftover of an interrupted run (a folder with CST's trash name) that the timer's service
+        cannot delete, since root owns a folder in it: the real user service ends failed (Result
+        exit-code, exit status 1), the journal has the error line and status counts the run as failed.
+        Once the leftover can be deleted, the service succeeds and deletes it."""
+        trash = "/home/tester/.cache/cargo-build/.cst-toolchains-trash-ab0123456789abcd-1"
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            mkdir -p {trash}/held
+            echo data >{trash}/held/file
+            chown tester:tester {trash}
+            """,
+        )
+        unit = "cst-toolchains-prune.service"
+        res = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rc=0; systemctl --user start {unit} 2>/dev/null || rc=$?
+            [ "$rc" -ne 0 ] || {{ echo "the service ended fine with a leftover it cannot delete" >&2; exit 1; }}
+            echo "result: $(systemctl --user show -p Result --value {unit})" \
+                "exit: $(systemctl --user show -p ExecMainStatus --value {unit})"
+            test -f {trash}/held/file
+            /opt/cst-rw/cst toolchains status || true
+            """,
+        )
+        self.assertIn("result: exit-code exit: 1", res.stdout)
+        self.assertRegex(res.stdout, r"deleted 0 folder\(s\) \([^)]*\), 1 failed; left")
+        journal = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            journalctl --sync 2>/dev/null || true
+            for _ in $(seq 1 120); do
+                if journalctl -q --no-pager -o cat -t cst-toolchains | grep -F 'could not delete leftover'; then
+                    exit 0
+                fi
+                sleep 0.5
+            done
+            echo "no 'could not delete leftover' line in the journal" >&2
+            exit 1
+            """,
+        )
+        self.assertIn("rust:build: could not delete leftover .cst-toolchains-trash-ab0123456789abcd-1", journal.stdout)
+        exec_bash(self.SYSTEMD_CONTAINER, f"chown -R tester:tester {trash}")
+        again = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl --user reset-failed {unit}
+            systemctl --user start {unit}
+            echo "result: $(systemctl --user show -p Result --value {unit})"
+            test ! -e {trash}
+            /opt/cst-rw/cst toolchains status || true
+            """,
+        )
+        self.assertIn("result: success", again.stdout)
+        self.assertNotIn("failed; left", again.stdout)
 
     # What `auto on` installed (test_04 checks them after each `auto off`).
     TOOLCHAINS_INSTALLED = (
