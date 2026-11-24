@@ -7,9 +7,9 @@ test_docker_volumes_nocow (Base: the NOCOW ioctls, the commands, os.sync) and os
 the volume tree and of the state files goes through a FaultPlan. One migration of two volumes
 from a volumes folder without +C (Docker installed after btrfs-setup, no flag yet) has N such
 calls; for every mode and every k in 1..N the migration fails at the k-th call. Then the next
-boot's recover() runs, also with a second fault at each of its own steps (os.rename and
-shutil.rmtree inside the adapter's restore_interrupted: recover's logic is there, below the
-port), and then a whole migrate, with no fault.
+boot's recover() runs, also with a second fault at each of its own steps (tree.rename and
+tree.remove_tree, the steps recover decides in the application), and then a whole migrate,
+with no fault.
 
 Checked after each fault, after the recovery and at the end:
 - no data is lost: each volume's _data, if it is there, holds the original content; if it is
@@ -32,19 +32,23 @@ pinning its number of cases.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 import contextlib
 import functools
 import io
 import os
-import shutil
 import stat
 from typing import override
-from unittest import mock
 
 from btrfs.docker_volumes_nocow.adapters import DockerDaemons, LocalVolumeTree, NocowOutput, NocowStateFiles
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import OLD_MARK, NocowCommand, NocowPaths, PostponedRecord, TreeScan
+from btrfs.docker_volumes_nocow.domain import (
+    OLD_MARK,
+    NocowCommand,
+    NocowPaths,
+    PostponedRecord,
+    TreeScan,
+)
 from btrfs.tests.fakes import entries, tree
 from btrfs.tests.test_docker_volumes_nocow import Base, fresh
 from cst_core.adapters import SystemClockAdapter
@@ -64,6 +68,17 @@ from tests.fault_injection import (
 # Small volumes: the protocol is the same with 4 KiB as with 2 MiB, and each case builds them anew.
 SMALL = {"db/base/1": b"\x01" * 4096, "db/base/empty": b"", "README": b"hello volume\n"}
 VOLUMES = ("a", "b")
+OLD_COPY_PREFIX = "_data" + OLD_MARK
+
+
+def newest_old_copy(names: list[str]) -> str | None:
+    """The newest of a volume folder's old copies (_data.cow-old-N): the one with the highest N,
+    parsed here and not with production's oldest_first, so an ordering bug there cannot change what
+    the suite expects; None without one. The helper only makes names with a number."""
+    olds = {int(x.removeprefix(OLD_COPY_PREFIX)): x for x in names if x.startswith(OLD_COPY_PREFIX)}
+    return olds[max(olds)] if olds else None
+
+
 # The cases each class runs (a change of the protocol's calls moves them: pinned so it is seen).
 CASES_MIGRATION_KILL = 67  # 25 first faults, 42 with a second fault in recover()
 CASES_MIGRATION_FAIL = 55  # 25 and 30
@@ -156,22 +171,6 @@ class FaultyState(NocowStateFiles):
         self.plan.step("clear_postponed", super().clear_postponed)
 
 
-@contextlib.contextmanager
-def faulty_os(plan: FaultPlan, top: str) -> Generator[None]:
-    """os.rename and shutil.rmtree through plan while the block runs (the steps inside an adapter)."""
-    real_rename, real_rmtree = os.rename, shutil.rmtree
-
-    def rename(src: str, dst: str) -> None:
-        plan.step(f"os.rename {os.path.relpath(src, top)}", functools.partial(real_rename, src, dst))
-
-    def rmtree(path: str, *, ignore_errors: bool = False) -> None:
-        effect = functools.partial(real_rmtree, path, ignore_errors=ignore_errors)
-        plan.step(f"rmtree {os.path.relpath(path, top)}", effect, ignore_error if ignore_errors else None)
-
-    with mock.patch.object(os, "rename", rename), mock.patch.object(shutil, "rmtree", rmtree):
-        yield
-
-
 class NocowFaultBase(Base):
     """The fixture: a volumes folder without +C holding two copy-on-write volumes, no flag."""
 
@@ -206,10 +205,10 @@ class NocowFaultBase(Base):
         return self.quiet(functools.partial(self.service.execute, NocowCommand.MIGRATE))
 
     def recover(self, *faults: Fault) -> list[str]:
-        """The next boot's recover(), the steps inside the adapter through the plan: those steps.
+        """The next boot's recover(), its tree.rename and tree.remove_tree through the plan: those steps.
         An OSError there ends the boot, as the program logs it; Killed goes through."""
         self.plan.arm(*faults)
-        with faulty_os(self.plan, self.vols), contextlib.suppress(OSError):
+        with contextlib.suppress(OSError):
             self.quiet(self.service.recover)
         return list(self.plan.calls)
 
@@ -227,12 +226,13 @@ class NocowFaultBase(Base):
         for name in VOLUMES:
             vol = os.path.join(self.vols, name)
             data = os.path.join(vol, "_data")
-            olds = sorted(x for x in os.listdir(vol) if x.startswith("_data" + OLD_MARK))
             if os.path.lexists(data):
                 self.assertEqual(tree(data), self.before[name], f"{when}: {name}/_data is not the original")
             else:
-                self.assertTrue(olds, f"{when}: {name} lost its data: {sorted(os.listdir(vol))}")
-                self.assertEqual(tree(os.path.join(vol, olds[-1])), self.before[name], f"{when}: {name} old copy")
+                newest = newest_old_copy(os.listdir(vol))
+                if newest is None:
+                    self.fail(f"{when}: {name} lost its data: {sorted(os.listdir(vol))}")
+                self.assertEqual(tree(os.path.join(vol, newest)), self.before[name], f"{when}: {name} old copy")
         if request_kept and self.fs.nocow(self.vols) and any(self.cow_data(n) for n in VOLUMES):
             self.assertTrue(os.path.exists(self.flag), f"{when}: +C on the volumes folder, CoW data left, no flag")
 
