@@ -143,6 +143,26 @@ class SystemctlAdapter:
         """Remove what systemd keeps for unit (what: state, cache, logs, ...); its exit status and output."""
         return self._systemctl("clean", f"--what={what}", unit, output=output)
 
+    def show_units(self, pattern: str, props: Sequence[str]) -> list[dict[str, str]] | None:
+        """`systemctl show -p PROP... PATTERN`: one {prop: value} per unit the manager has loaded whose name
+        matches the glob (a glob loads no unit on demand, as a unit name or a path would; ask for `Id` to
+        know which unit each is), in systemctl's order; [] when it lists none; None when systemctl fails or
+        cannot start (no answer). As show: on the host from a toolbox unless the adapter's on_host is
+        LOCAL, the C locale, 20 s at most or the adapter's timeout."""
+        argv = [*self._head, "show", *(a for p in props for a in ("-p", p)), pattern]
+        timeout = 20 if self._timeout is None else self._timeout
+        res = self._runner.run(
+            argv, check=False, timeout=timeout, locale_c=True, **_ScopeOptions(self._scope, on_host=self._show_on_host)
+        )
+        if res.returncode != 0:
+            return None
+        units: list[dict[str, str]] = []
+        for block in res.stdout.split("\n\n"):
+            props_of = {key: value for key, sep, value in (line.partition("=") for line in block.splitlines()) if sep}
+            if props_of:
+                units.append(props_of)
+        return units
+
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""
         res = self._runner.run(["systemd-escape", "-p", f"--suffix={suffix}", path], check=True)
