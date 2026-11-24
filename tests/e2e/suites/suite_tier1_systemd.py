@@ -8026,7 +8026,12 @@ EOF
         unchanged; a detach whose second umount finds the target busy (umount's stand-in answers exit 32
         while a process has its folder there) exits 1 with fstab and the mounts as they were, after
         a real daemon-reload each way; detach keeps the data, the other users' lines and a mount CST did
-        not make."""
+        not make. Then u1 attached again, a busy ~/Scratchpad, and a mount of ~/.cache again that fails (a
+        mount wrapper that exits 1 for it): detach says ROLLBACK INCOMPLETE naming that mount, puts the
+        Scratchpad line back and no .cache line, in the test root's fstab and in the real /etc/fstab (a
+        systemctl stand-in copies the one to the other before each real daemon-reload), so
+        systemd-fstab-generator makes no mount unit for ~/.cache; a second detach converges and a third
+        has nothing to do."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
         stub = r"""#!/usr/bin/python3 -I
@@ -8306,6 +8311,52 @@ STUB
             absent "/var/home/u1/" {w}/mounts
             $cst btrfs cache detach --user u10 | grep -qF "kept: /var/home/u10/.cache has a mount CST did not make"
             grep -qF "/var/home/u10/.cache" {w}/mounts
+
+            # A bind that cannot be mounted again gets no line back. u1 attached again; ~/Scratchpad busy, so
+            # detach mounts ~/.cache again, and that mount fails (a wrapper that exits 1 for ~/.cache and
+            # otherwise runs the stand-in). The program's fstab is the test root's: the systemctl stand-in
+            # copies it to the real /etc/fstab before each real daemon-reload, so systemd-fstab-generator
+            # sees every text detach reloads.
+            mkdir -p {w}/fail3 {w}/sync
+            cat >{w}/fail3/mount <<'EOF'
+#!/bin/bash
+if [[ "${{!#}}" == {w}/var/home/u1/.cache ]]; then echo "mount: {w}/var/home/u1/.cache: permission denied." >&2; exit 1; fi
+exec {w}/bin/mount "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then cp {w}/etc/fstab /etc/fstab || exit 1; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/fail3/mount {w}/sync/systemctl
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+            scratch_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/Scratchpad)"
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1
+            [[ -f "$cache_unit" && -f "$scratch_unit" ]] || {{ echo "attach made no mount units for u1" >&2; exit 1; }}
+            (cd {w}/var/home/u1/Scratchpad && exec sleep 300) >/dev/null 2>&1 &
+            busy=$!
+            for _ in $(seq 1 100); do [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] && break; sleep 0.1; done
+            [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] || {{ echo "the busy process is not in Scratchpad" >&2; exit 1; }}
+            rc=0; PATH="{w}/fail3:{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            kill "$busy"; wait "$busy" || true
+            [[ $rc == 1 ]] || {{ echo "detach with ~/.cache not mounted again exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            incomplete="ERROR: umount /var/home/u1/Scratchpad failed: umount: {w}/var/home/u1/Scratchpad: target is busy.; ROLLBACK INCOMPLETE (mount --bind /var/mnt/cache/u1 /var/home/u1/.cache failed: mount: {w}/var/home/u1/.cache: permission denied.)"
+            grep -qF "$incomplete" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            cmp -s {w}/etc/fstab /etc/fstab
+            absent "user=u1 kind=cache" /etc/fstab || {{ echo "a .cache line is back in /etc/fstab:" >&2; cat /etc/fstab >&2; exit 1; }}
+            grep -qF "user=u1 kind=scratchpad" /etc/fstab || {{ echo "no Scratchpad line back in /etc/fstab" >&2; exit 1; }}
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit for ~/.cache after the daemon-reload" >&2; exit 1; }}
+            [[ -f "$scratch_unit" ]]
+            absent "/var/home/u1/.cache" {w}/mounts
+            grep -qF "$(printf '%s\\t%s\\t' '/dev/mapper/cache[/scratchpad/u1]' /var/home/u1/Scratchpad)" {w}/mounts
+            # A second detach converges: no u1 line, no u1 mount, no mount unit; a third has nothing to do.
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "second detach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            absent "user=u1" {w}/etc/fstab
+            absent "user=u1" /etc/fstab
+            [[ ! -e "$cache_unit" && ! -e "$scratch_unit" ]]
+            absent "/var/home/u1/" {w}/mounts
+            PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 | grep -qF "Nothing attached for u1; nothing to do."
             echo E2E-CACHE-OK
             """,
         ).stdout
