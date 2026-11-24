@@ -8,11 +8,13 @@ the fake of setup_fakes.py; nothing real is touched.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import errno
 import json
 import os
 import re
 import shutil
 import time
+from typing import override
 import unittest
 from unittest import mock
 
@@ -706,6 +708,68 @@ class BackupNameTest(InProcessCase):
         self.assertEqual(backup_order(1, "/e/main.conf.bak-20261124")[2], 0)
         self.assertEqual(backup_order(1, stamp + "-\u0663")[1:3], (stamp + "-\u0663", 0))
         self.assertLess(backup_order(1, stamp + "-99"), backup_order(2, stamp))
+
+
+class SavingHost(LocalBluetoothHostAdapter):
+    """The host adapter with each save of the record of restarts owed noted (the units it was given);
+    fail: each save raises OSError instead, as a ~/.local/state that cannot be written does."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.saves: list[tuple[str, ...]] = []
+        self.fail = fail
+
+    @override
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        if save:
+            self.saves.append(tuple(skipped))
+            if self.fail:
+                raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        return super().restart_pending(path, ids, skipped, save=save)
+
+
+class OwedBeforeTheWriteUnitTest(InProcessCase):
+    """The record of restarts owed is written before each write that needs a restart, never for a
+    renewal of comments; a record that cannot be written is warned of once, and the run goes on."""
+
+    def run_with(self, m: Machine, host: SavingHost, *args: str) -> tuple[int, str, str]:
+        log = os.path.join(m.state, "log")
+        if os.path.exists(log):
+            os.unlink(log)
+        run, console, _ = change(m, *args, doubles=SetupDoubles(host=host, now=self.NOW))
+        rc = run.run_command()
+        run.cleanup()
+        assert isinstance(rc, int), rc
+        return rc, console.stdout, console.stderr
+
+    def test_a_renewal_of_comments_owes_nothing(self) -> None:
+        m = self.machine()
+        self.run_one(m, "apply", "--yes")
+        for path in (m.wp_conf, m.le_conf):
+            m.put(path, self.text(path).replace("# managed-by", "# an older comment\n# managed-by", 1))
+        host = SavingHost()
+        rc, out, err = self.run_with(m, host, "apply", "--yes")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"adopted:   {m.wp_conf} (comments renewed, settings unchanged: no restart)\n", out)
+        self.assertIn(f"adopted:   {m.le_conf} (comments renewed, no restart)\n", out)
+        self.assertIn("== restarts\nnone needed\n", out)
+        self.assertEqual(host.saves, [])
+        shows = [c for c in m.read("log").splitlines() if c.startswith("systemctl") and "InvocationID" in c]
+        self.assertEqual(len(shows), 2, shows)  # plan's look at each service, no other
+        self.assertFalse(os.path.exists(m.pending))
+
+    def test_a_record_it_cannot_write(self) -> None:
+        m = self.machine()
+        host = SavingHost(fail=True)
+        rc, out, err = self.run_with(m, host, "apply", "--yes")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(err.count("WARNING: could not record the restarts still owed"), 1, err)
+        self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
+        calls = m.read("log").splitlines()
+        self.assertIn("sudo systemctl restart bluetooth", calls)
+        self.assertIn("systemctl --user restart wireplumber", calls)
+        # Each write tries again (main.conf; the rule; the drop-in), then the restarts', then the clearing one.
+        bt, wp = "bluetooth.service", "wireplumber.service"
+        self.assertEqual(host.saves, [(bt, wp), (wp,), (wp,), (wp, bt), ()])
 
 
 class SetupModelParityTest(unittest.TestCase):

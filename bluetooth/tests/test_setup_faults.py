@@ -16,24 +16,27 @@ of an applied machine. For each, every mode at every point, every FAIL followed 
 later point, and every kill followed by each fault at each point of the run that resumes, checked
 for each of the two services:
 - R1, after the faulted run: the service runs with what it reads now, or the record owes its
-  restart under its current invocation, or the run said it could not record the restarts still
-  owed, or the run returned and said how to finish ("To finish:", "Not restarted"), or a faulted
-  run of the case lost that service's restart in the window;
+  restart under its current invocation, or the run returned and said how to finish ("To finish:",
+  "Not restarted"), or a faulted run of the case lost that service's restart after a failed save
+  (lost_after_a_failed_save, below);
 - R2, resume: the same command again with no fault exits 0 and leaves each service running with
-  what it reads, except one whose restart a faulted run lost in the window: after an apply,
-  `plan` says "no restart needed" for it (the documented outcome, F-B1 below); after an apply
-  the record owes nothing;
+  what it reads, except one whose restart a faulted run lost after a failed save: after an apply,
+  `plan` says "no restart needed" for it (the documented outcome); after an apply the record
+  owes nothing;
 - R3, never twice: the run that resumes restarts a service only when it read other files than are
   on disk (WirePlumber: or bluetoothd restarted after it) or the record owed it; a third run says
   "none needed", restarts nothing and changes nothing;
 - no exception gets out of run_command but a kill.
 
-The window (F-B1 in the R5 out-of-scope notes; bluetooth/README.md, section 4: "a restart is owed
-to the next apply only once the run reached its restarts"): the record is saved only in
-do_restarts, after every write. A run that stops after a write took effect (main.conf for
-bluetoothd, a .conf of WirePlumber's folder for WirePlumber) and before a save of the record worked
-loses that service's restart; the cases are counted and pinned per class, so a fix shows up as a
-change of these numbers.
+The record is saved before each write that needs a restart (change.py's owe: main.conf owes
+bluetoothd and WirePlumber, a .conf of WirePlumber's folder WirePlumber) and again before the
+restarts; each save is a point named after the units it records. A restart is lost only when the
+save meant to record it failed (the run warns: bluetooth/README.md, section 4), a write of that
+service took effect after it, and no later save of that unit worked before the run stopped. A
+killed run prints nothing the test reads, so this is read from the trace of the faults
+(lost_after_a_failed_save), not from the run's warning. The cases where it happens are counted and
+pinned per class: none for a kill, a failure or a full disk alone (a failed save is followed by a
+save that works, or the write fails too), some only when a failure is followed by a kill.
 
 Each run's clock is a minute after the one before, so each main.conf backup has a name of its own
 (revert takes the two keys from the oldest backup).
@@ -63,7 +66,6 @@ from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.tests.setup_fakes import BLUETOOTH_SERVICE, WIREPLUMBER_SERVICE, Machine, SetupModel
 from bluetooth.tests.test_setup_units import DONE, SetupDoubles, change
 from tests.fault_injection import (
-    ALL_MODES,
     Fault,
     FaultMode,
     FaultPlan,
@@ -84,7 +86,7 @@ APPLY, REVERT = ("apply", "--yes"), ("revert", "--yes")
 @dataclass(frozen=True)
 class Start:
     """A start state: main.conf, the settings, the clean runs that make it, the command under
-    fault, and the pinned numbers: points, FAIL then KILL cases, kill then fault cases, window cases."""
+    fault, and the pinned numbers: points, FAIL then KILL cases, kill then fault cases, lost cases."""
 
     main_conf: str
     settings: tuple[tuple[str, str], ...]
@@ -93,11 +95,11 @@ class Start:
     points: int
     fail_then_kill: int
     kill_then_fault: int
-    window: tuple[int, int, int]  # the cases in the window, for KILL, FAIL and FAIL_FROM
+    lost: int  # the FAIL then KILL cases that lose a restart after a failed save (none in the others)
 
 
-APPLY_FRESH = Start(VENDOR, (), (), APPLY, points=12, fail_then_kill=3, kill_then_fault=228, window=(5, 4, 5))
-APPLY_WIREPLUMBER_ONLY = Start(DONE, (), (), APPLY, points=8, fail_then_kill=2, kill_then_fault=105, window=(3, 2, 3))
+APPLY_FRESH = Start(VENDOR, (), (), APPLY, points=13, fail_then_kill=13, kill_then_fault=312, lost=6)
+APPLY_WIREPLUMBER_ONLY = Start(DONE, (), (), APPLY, points=9, fail_then_kill=10, kill_then_fault=153, lost=2)
 APPLY_RESUME = Start(
     VENDOR,
     (),
@@ -106,9 +108,9 @@ APPLY_RESUME = Start(
     points=5,
     fail_then_kill=3,
     kill_then_fault=48,
-    window=(0, 0, 0),
+    lost=0,
 )
-REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=10, fail_then_kill=3, kill_then_fault=138, window=(3, 2, 3))
+REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=11, fail_then_kill=11, kill_then_fault=186, lost=4)
 
 
 class FaultyFiles(LocalSetupFiles):
@@ -149,7 +151,7 @@ class FaultyHost(LocalBluetoothHostAdapter):
     @override
     def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
         real = functools.partial(super().restart_pending, path, ids, skipped, save=save)
-        return self.plan.step(SAVE, real) if save else real()
+        return self.plan.step(" ".join((SAVE, *sorted(skipped))), real) if save else real()
 
 
 def changes(argv: Sequence[str]) -> bool:
@@ -174,7 +176,7 @@ class SetupFaultBase(unittest.TestCase):
         self.plan = FaultPlan()
         self.model = SetupModel(self.m)
         self.runs = 0  # each run a minute after the one before: its main.conf backup has a name of its own
-        self.lost: set[str] = set()  # the services whose restart a faulted run of this case lost in the window
+        self.lost: set[str] = set()  # the services whose restart a faulted run of this case lost after a failed save
 
     # ---- the fixture ------------------------------------------------------
     def fresh(self) -> None:
@@ -232,31 +234,43 @@ class SetupFaultBase(unittest.TestCase):
             recorded = {}
         return {u for u, inv in recorded.items() if inv == self.model.inv(u)}
 
-    def in_window(self) -> set[str]:
-        """The services whose files the last run changed with no save of the record working after it:
-        bluetoothd for main.conf (sudo mv), WirePlumber for a .conf of its folder."""
-        window: set[str] = set()
+    def lost_after_a_failed_save(self) -> set[str]:
+        """The services whose restart the last run lost: a save of the record meant to owe it failed,
+        then a write of that service took effect (bluetoothd: main.conf, sudo mv; WirePlumber: a .conf
+        of its folder), and no later save of that unit worked."""
+        unrecorded: set[str] = set()  # a failed save meant to owe them, and no save of them worked since
+        lost: set[str] = set()
         for i, name in enumerate(self.plan.calls, 1):
-            if self.plan.fault_at(i) in (FaultMode.FAIL, FaultMode.FAIL_FROM):
+            failed = self.plan.fault_at(i) in (FaultMode.FAIL, FaultMode.FAIL_FROM)
+            if name.startswith(SAVE):
+                units = set(name.removeprefix(SAVE).split())
+                if failed:
+                    unrecorded |= units
+                else:
+                    unrecorded -= units
+                    lost -= units
+                continue
+            if failed:
                 continue  # this change did not take effect
             word, _, rest = name.partition(" ")
             if name.startswith("sudo mv"):
-                window.add(BLUETOOTH_SERVICE)
+                written = BLUETOOTH_SERVICE
             elif word in ("write_user_file", "remove_file") and rest.endswith(".conf"):
-                window.add(WIREPLUMBER_SERVICE)
-            elif name == SAVE:
-                window.clear()
-        return window
+                written = WIREPLUMBER_SERVICE
+            else:
+                continue
+            if written in unrecorded:
+                lost.add(written)
+        return lost
 
     # ---- the checks ---------------------------------------------------------
     def assert_r1(self, result: tuple[int, str] | None, when: str) -> None:
-        self.lost |= self.in_window()
+        self.lost |= self.lost_after_a_failed_save()
         text = "" if result is None else result[1]
-        warned = "could not record the restarts still owed" in text
         hinted = result is not None and ("To finish:" in text or "Not restarted" in text)
         owed = self.owed()
         for u in UNITS:
-            ok = self.model.in_step(u) or u in owed or warned or hinted or u in self.lost
+            ok = self.model.in_step(u) or u in owed or hinted or u in self.lost
             self.assertTrue(ok, f"{when}: {u} runs with old files, and nothing owes its restart: {text}")
 
     def resume(self, when: str) -> None:
@@ -274,7 +288,7 @@ class SetupFaultBase(unittest.TestCase):
                 continue
             if s.command == REVERT and u in owed:
                 continue  # only apply resumes it (F-B2)
-            self.assertIn(u, self.lost, f"{when}: the run again left {u} on old files, outside the window")
+            self.assertIn(u, self.lost, f"{when}: the run again left {u} on old files, and no failed save lost it")
             if s.command == REVERT:
                 continue  # plan shows what apply would do, not revert
             plan = self.run_once(("plan",))
@@ -291,7 +305,7 @@ class SetupFaultBase(unittest.TestCase):
         self.assertEqual(changed, [], f"{when}: the third run changed something")
 
     def check(self, *faults: Fault, then: tuple[Fault, ...] = ()) -> bool:
-        """One case; whether a faulted run of it stopped in the window."""
+        """One case; whether a faulted run of it lost a restart after a failed save."""
         when = f"{faults}" + (f" then {then}" if then else "")
         self.fresh()
         self.assert_r1(self.run_once(self.start.command, *faults), when)
@@ -313,20 +327,20 @@ class SetupFaultBase(unittest.TestCase):
     def every(self, mode: FaultMode) -> None:
         calls = self.points()
         self.assertEqual(len(calls), self.start.points, calls)
-        window = 0
+        lost = 0
         for fault in every_fault(len(calls), (mode,)):
             with self.subTest(fault=fault, call=calls[fault[1] - 1]):
-                window += self.check(fault)
-        self.assertEqual(window, self.start.window[ALL_MODES.index(mode)], "cases in the window")
+                lost += self.check(fault)
+        self.assertEqual(lost, 0, "cases that lost a restart")
 
     def every_failure_then_a_kill(self) -> None:
-        cases = 0
+        cases = lost = 0
         for fail in every_fault(self.start.points, (FaultMode.FAIL,)):
             for kill in every_fault(len(self.points(fail)), (FaultMode.KILL,), after=fail[1]):
                 with self.subTest(fault=fail, then=kill):
                     cases += 1
-                    self.check(fail, kill)
-        self.assertEqual(cases, self.start.fail_then_kill)
+                    lost += self.check(fail, kill)
+        self.assertEqual((cases, lost), (self.start.fail_then_kill, self.start.lost))
 
     def every_kill_then_a_fault_in_the_resume(self) -> None:
         cases = 0

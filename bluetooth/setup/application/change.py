@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 """`cst bluetooth apply`, `revert` and `le-audio`: the changes, in bluetooth-setup.sh's order.
 
-The restarts that a run does not make (--no-restart, the question answered
-no, a restart that failed) stay owed in a record that the next run reads
-(Survey.restart_state): apply resumes them.
+The restarts a run owes are recorded before the write that needs them
+(Change.owe), so a run stopped after a write leaves the restart owed; the
+restarts that a run does not make (--no-restart, the question answered no,
+a restart that failed, a stop) stay owed in that record, which the next run
+reads (Survey.restart_state): apply resumes them.
 """
 
 from collections.abc import Callable
@@ -133,6 +135,9 @@ class Change(Checks):
         self.backup = bak
         self.out(f"backup:    {bak}\n")
         self.must(["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", *z, src, f"{mc}.new"])
+        self.owe(
+            BLUETOOTH_UNIT, WIREPLUMBER_UNIT
+        )  # bluetoothd reads main.conf; its restart takes WirePlumber's endpoints
         self.must(["sudo", "mv", "-f", f"{mc}.new", mc])
         self.out(f"written:   {mc}\n")
 
@@ -266,15 +271,35 @@ class Change(Checks):
         self.out(f"Restart cancelled. To finish later: {self.restart_hint()}\n")
         return False
 
+    def save_owed(self, *units: str) -> bool:
+        """The record saved, owing the units' restarts; False when it cannot be written (warned once a
+        run). The invocation IDs are read again first: a service that restarted by itself since they
+        were read may have read the old files."""
+        self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
+        if self.restart_state("save", *units) is not None:
+            return True
+        if not self.owed_warned:
+            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+            self.owed_warned = True
+        return False
+
+    def owe(self, *units: str) -> None:
+        """The restarts a write needs, recorded right before it: a run stopped after the write (and
+        before its restarts) leaves them owed, and the next run makes them. Once a run: a unit this
+        run's record owes already is not saved again. A save that fails is warned of, and the run goes
+        on (the next owe tries again); only then can a stop after the write lose the restart. A
+        service that restarts by itself between the save and the write reads the old files, and the
+        record no longer owes it: the window is that of one write."""
+        if self.recorded_owed.issuperset(units):
+            return
+        if self.save_owed(*units):
+            self.recorded_owed.update(units)
+
     def do_restarts(self, *, bt: bool, wp: bool) -> int:
         """0: done (or nothing to do); 1: cancelled at the question; 2: a restart failed."""
         if not (bt or wp):
             return 0
-        owed = [WIREPLUMBER_UNIT, *([BLUETOOTH_UNIT] if bt else [])]
-        # Read again since plan: a service that restarted by itself meanwhile may have read the old files.
-        self.forget_unit(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
-        if self.restart_state("save", *owed) is None:
-            self.err(f"WARNING: could not record the restarts still owed in {self.p.pending}\n")
+        self.save_owed(WIREPLUMBER_UNIT, *([BLUETOOTH_UNIT] if bt else []))
         if self.o.no_restart:
             hint = self.restart_hint() if bt else "systemctl --user restart wireplumber"
             self.out(f"Not restarted (--no-restart). To finish: {hint}\n")
@@ -369,6 +394,7 @@ class Change(Checks):
             self.out(f"unchanged: {p.main_conf} (Experimental and KernelExperimental already set in [General])\n")
         self.out(f"== WirePlumber: {self.wp_title()}\n")
         if self.legacy:
+            self.owe(WIREPLUMBER_UNIT)
             self.m.files.remove_file(p.legacy_wp_conf)
             self.out(f"removed:   {p.legacy_wp_conf} (older name of the same rule)\n")
         match self.wp_state:
@@ -380,6 +406,7 @@ class Change(Checks):
                 self.write_wp()
                 self.out(f"adopted:   {self.wp_conf} (comments renewed, settings unchanged: no restart)\n")
             case _:
+                self.owe(WIREPLUMBER_UNIT)
                 self.write_wp()
                 self.out(f"written:   {self.wp_conf} (LDAC {c.quality})\n")
         self.apply_le()
@@ -434,6 +461,8 @@ class Change(Checks):
                 self.out("unchanged: LE Audio off\n")
                 return
             f.make_dirs(self.p.wp_dir)
+            if self.le_change:  # not a renewal of comments (adopt): WirePlumber reads no comment
+                self.owe(WIREPLUMBER_UNIT)
             f.write_user_file(le, render_le_off(), 0o644)
             if self.le_state == LeState.ADOPT:
                 self.out(f"adopted:   {le} (comments renewed, no restart)\n")
@@ -442,6 +471,7 @@ class Change(Checks):
             return
         match self.le_state:
             case LeState.REMOVE:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(le)
                 self.out(f"removed:   {le} (LE Audio on)\n")
             case LeState.ABSENT:
@@ -599,6 +629,7 @@ class Change(Checks):
             if check:
                 self.out(f"would remove {self.wp_conf}\n")
             else:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(self.wp_conf)
                 self.out(f"removed:   {self.wp_conf}\n")
         self.out(f"== LE Audio: {p.le_conf}\n")
@@ -611,6 +642,7 @@ class Change(Checks):
             if check:
                 self.out(f"would remove {p.le_conf} (LE Audio on again)\n")
             else:
+                self.owe(WIREPLUMBER_UNIT)
                 f.remove_file(p.le_conf)
                 self.out(
                     f"removed:   {p.le_conf} (LE Audio on again; LE_AUDIO=off in the settings writes it again at the next apply)\n"

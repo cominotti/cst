@@ -145,6 +145,8 @@ case "$me" in
                 ;;
             show)
                 [[ -e "$S/hang-show" ]] && exec /usr/bin/sleep 30  # systemd does not answer
+                # term-show-when names a path: a look while it exists sends SIGTERM to the program.
+                if [[ -e "$S/term-show-when" && -e "$(cat "$S/term-show-when")" ]]; then kill -TERM "$PPID"; exit 1; fi
                 u="$(unit "$scope" "${!#}")"
                 case "$*" in
                     *ActiveState*)   # systemd prints ActiveState= before InvocationID=
@@ -660,6 +662,8 @@ class SetupModel:
         return (0, "active\n", "") if active else (3, "inactive\n", "")
 
     def show(self, scope: str, args: list[str]) -> Answer:
+        if self.has("term-show-when"):
+            raise AssertionError("SetupModel: term-show-when is FAKE's alone")
         u = self.prefix(scope, args[-1])
         joined = " ".join(args)
         if "ActiveState" in joined:

@@ -193,6 +193,7 @@ TIER1_WEIGHTS: Final[Mapping[str, int]] = {
     "test_101_bluetooth_keeps_the_headset_of_an_older_setup_and_works_without_one": 27,
     "test_11_manifest_installs_and_every_entry_runs_from_root": 26,
     "test_106_stall_monitor_upgrade_installs_the_program_before_the_unit": 20,
+    "test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed": 20,
     "test_104_stall_monitor_unit_is_active_only_after_ready": 17,
     "test_105_stall_monitor_is_restarted_when_its_pings_stop": 15,
     "test_13_degraded_boot_install_cycle": 14,

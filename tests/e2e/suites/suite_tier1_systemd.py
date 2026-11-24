@@ -9017,6 +9017,103 @@ EOF
         self.assertIn("E2E-CACHE-177-OK", out)
 
     @e2e_tags(E2ETag.BLUETOOTH)
+    def test_178_bluetooth_apply_stopped_after_its_writes_leaves_the_restart_owed(self) -> None:
+        """`cst bluetooth apply` as tester with the real user manager and WirePlumber, stopped by
+        SIGTERM after its writes and before its restarts (a `systemctl` shim on PATH, for that run
+        only, sends SIGTERM to the program at its first look at wireplumber.service once the LE Audio
+        drop-in exists: the look right before the restarts). main.conf is as apply leaves it, so no run
+        restarts bluetoothd. The record of restarts owed names
+        wireplumber.service under the InvocationID systemd gives it (bluetoothd does not run here: it
+        owes nothing), written before the writes; `plan` exits 10 with WirePlumber's restart still
+        owed; the next `apply` makes that restart (a new InvocationID), writes nothing and forgets the
+        record; `plan` then has nothing to do and a third `apply` restarts nothing. Before, the record
+        was written only at the restarts: none after the stop, and `plan` said no restart was needed."""
+        c = self.SYSTEMD_CONTAINER
+        self.addCleanup(
+            as_tester_bash,
+            c,
+            "/opt/cst-rw/cst bluetooth revert --yes --no-restart >/dev/null 2>&1 || true; "
+            "rm -rf /var/tmp/e2e-178 /home/tester/.config/cst/bluetooth.conf "
+            "/home/tester/.local/state/cst/bluetooth-restart-pending.json",
+            check=False,
+        )
+        # main.conf as apply leaves it: no run of this test restarts bluetoothd (a real restart in
+        # the shared container), even one the stop did not stop.
+        exec_bash(
+            c,
+            "mkdir -p /etc/bluetooth && printf '[General]\\nExperimental = true\\n"
+            "KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e\\n' >/etc/bluetooth/main.conf",
+        )
+        out = as_tester_bash(
+            c,
+            BT_STEPS
+            + r"""
+            set -E
+            TEST=test_178
+            trap 'echo "test_178 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            H=/home/tester
+            w=/var/tmp/e2e-178
+            wp="$H/.config/wireplumber/wireplumber.conf.d"
+            rule="$wp/50-bluez-00_11_22_33_44_55.conf"
+            le="$wp/90-cst-le-audio-off.conf"
+            owed_file="$H/.local/state/cst/bluetooth-restart-pending.json"
+            wp_id() { systemctl --user show -p InvocationID --value wireplumber.service; }
+            rm -rf "$w" "$owed_file" "$rule" "$le"
+            mkdir -p "$w/bin" "$H/.config/cst"
+            printf 'DEVICE=00:11:22:33:44:55\nLE_AUDIO=off\n' >"$H/.config/cst/bluetooth.conf"
+            # The shim: SIGTERM to its caller at a look at wireplumber.service once the drop-in exists.
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ -e '$le' && \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                '    kill -TERM "$PPID"' '    exit 1' 'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            chmod 0755 "$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id0="$(wp_id)"
+            [[ -n "$id0" ]]
+
+            # 1. apply, stopped after its writes, before its restarts.
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "stopped apply" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            if grep -q '^restart: ' <<<"$out"; then echo "test_178: the stopped apply restarted" >&2; exit 1; fi
+            [[ -f "$rule" && -f "$le" ]]
+            [[ "$(wp_id)" == "$id0" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record of the restart owed" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id0"
+
+            # 2. plan shows it owed.
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qE '^  ok +bluetooth.service +no restart needed$' <<<"$out"
+            grep -qE '^  restart +wireplumber \(your session\) ' <<<"$out"
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+
+            # 3. the next apply makes the restart, writes nothing and forgets the record.
+            step "apply after the stop" apply --yes
+            wp_restart_line="restart:   wireplumber (your session; audio stops for a moment)"
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            if grep -q '^restart:   bluetooth' <<<"$out"; then echo "test_178: bluetoothd restarted" >&2; exit 1; fi
+            no_writes "apply after the stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            id1="$(wp_id)"
+            [[ -n "$id1" && "$id1" != "$id0" ]]
+            [[ ! -e "$owed_file" ]]
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the restart" "$out"
+            [[ $rc == 0 ]]
+
+            # 4. a third apply restarts nothing.
+            step "third apply" apply --yes
+            no_writes "third apply" "$out"
+            grep -qxF "none needed" <<<"$out"
+            [[ "$(wp_id)" == "$id1" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BLUETOOTH)
     def test_180_bluetooth_main_conf_backups_never_replace_one_another(self) -> None:
         """main.conf's backups with the real GNU cp: a backup is never replaced. A backup of each
         second of the next two minutes is there already (each its own text, its mtime a day ahead, so
