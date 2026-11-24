@@ -316,9 +316,9 @@ class Recorder:
                 case _:
                     pass  # a decision of the code without a call (~no_torn, ~no_drop)
 
-    def port(self, *, events: bool = True) -> None:
+    def port(self) -> None:
         """Any port call: the environment acts first; a kill or a stop that came is raised here."""
-        if not self.started or self.holding or not events:
+        if not self.started or self.holding:
             return
         self.environment()
         if self.killed:
@@ -640,8 +640,7 @@ class Virsh:
         inactive = "--inactive" in args
         if not rec.ignored:
             rec.port()
-        elif inactive:
-            rec.port(events=False)
+        elif inactive:  # the second listing of the pair: no environment step before it
             if UNREADABLE.get(rec.listing, (False, False))[1]:
                 return 1, "", "error: failed to get domain"
         else:
