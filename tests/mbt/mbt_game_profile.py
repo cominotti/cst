@@ -98,6 +98,7 @@ from cpu.game.domain import (
 )
 from cpu.game.domain.leftovers import leftover_entries
 from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
+from cst_core.adapters.files import read_text
 from cst_core.ports import CommandResult
 from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
 from tests.mbt import profiles
@@ -401,7 +402,7 @@ class GameProfileMachine(RuleBasedStateMachine):
     def leftover_keys(self) -> set[tuple[str, str]]:
         """What game.leftovers holds, as failed_key names a point: ("prop", "MGR UNIT PROP"), ("file", PATH)."""
         out: set[tuple[str, str]] = set()
-        for _uid, rec in leftover_entries(self.read(self.paths.leftovers)):
+        for _uid, rec in leftover_entries(read_text(self.paths.leftovers, "")):
             match state_undo(rec):
                 case PropUndo(mgr=mgr, unit=unit, prop=prop):
                     out.add(("prop", f"{mgr} {unit} {prop}"))
@@ -412,12 +413,6 @@ class GameProfileMachine(RuleBasedStateMachine):
                 case None:
                     pass
         return out
-
-    def read(self, path: str) -> str:
-        if not os.path.exists(path):
-            return ""
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
 
     def after_off(
         self, what: str, failed: str | None, *, killed: bool, was_on: bool, before: View | None = None
@@ -457,7 +452,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         assert (keys, files) == (set(), set()), f"{what}: not restored: {sorted(keys)} {sorted(files)}"
         assert now.dropins == [], f"{what}: drop-ins left: {now.dropins}"
         assert not os.path.exists(self.paths.leftovers), (
-            f"{what}: game.leftovers left: {self.read(self.paths.leftovers)}"
+            f"{what}: game.leftovers left: {read_text(self.paths.leftovers, '')}"
         )
 
     def run_follow_up(self) -> None:
@@ -634,7 +629,7 @@ class GameProfileMachine(RuleBasedStateMachine):
     @invariant()
     def no_odd_box_is_named(self) -> None:
         """Point 5 of the docstring."""
-        text = self.state_text() + self.read(self.paths.leftovers)
+        text = self.state_text() + read_text(self.paths.leftovers, "")
         for name in self.odd:
             shown = name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")  # as game.state reads back
             assert shown not in text, f"a record names {shown!r}: {text}"
@@ -645,7 +640,7 @@ class GameProfileMachine(RuleBasedStateMachine):
     def every_change_has_its_record(self) -> None:
         now = self.view()
         keys, files = now.differences(self.base)
-        text = self.state_text() + self.read(self.paths.leftovers)  # off keeps what it could not undo there
+        text = self.state_text() + read_text(self.paths.leftovers, "")  # off keeps what it could not undo there
         for mgr, unit, prop in sorted(keys):
             dropin = os.path.join(self.paths.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
             same_file = now.overrides.get((mgr, unit, prop)) == self.base.overrides.get((mgr, unit, prop))
