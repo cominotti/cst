@@ -368,8 +368,8 @@ def core_text(path: str, record: str) -> Placement:
 class RecordingInstallerRunner(ScrubFakeRunner):
     """installer.py text and remove-text as the installer runs them as root: the files written and
     removed, and their lines and btrfs:core's state in one install record (a write sets it pending,
-    unless --keep-state keeps the state the record has). scrub-limit never marks btrfs:core: a mark call
-    fails the test."""
+    unless --keep-state keeps the state the record has). scrub-limit runs no other installer command: any
+    other (a mark of btrfs:core, a text-plan, a forget-text) fails the test."""
 
     def __init__(self, record: str) -> None:
         super().__init__()
@@ -393,7 +393,9 @@ class RecordingInstallerRunner(ScrubFakeRunner):
             written = self.svc.put(place, data, as_root=False, keep_state="--keep-state" in cmd)
             word_out = InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED
             return CommandResult(0, word_out.line(place.path) + "\n", "", argv=tuple(cmd))
-        return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
+        if word == "remove-text":
+            return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
+        raise AssertionError(f"scrub-limit ran an installer command this fake does not model: {cmd}")
 
 
 # ---- cache ---------------------------------------------------------------
