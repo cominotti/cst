@@ -31,6 +31,7 @@ from cpu.game.adapters.host import (
     user_name,
     write_sysfs_line,
 )
+from cpu.game.adapters.boxes import set_again
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
 from cpu.game.domain import (
@@ -326,18 +327,24 @@ class GameProfile:
         return False
 
     def protect_steam(self) -> None:
-        """MemoryLow for each Steam scope not handled yet (a game started after 'on')."""
+        """MemoryLow for each Steam scope not handled yet (a game started after 'on'); one handled already
+        is set again when its MemoryLow does not hold (set_again)."""
         for s in self.steam_scopes():
+            setting = f"MemoryLow={self.s.game_memory_low}"
             if has_prop_record(self.state_text(), "usr", s, "MemoryLow"):
+                set_again(self, "usr", s, [setting])
                 continue
-            self.setp("usr", s, f"MemoryLow={self.s.game_memory_low}")
+            self.setp("usr", s, setting)
 
     def pin_docker(self) -> None:
-        """The game's CPUs off for each Docker container not handled yet."""
+        """The game's CPUs off for each Docker container not handled yet; one handled already is set again
+        when its AllowedCPUs does not hold (set_again)."""
         for s in self.loose_docker_scopes():
+            setting = f"AllowedCPUs={self.s.build_cpus}"
             if has_prop_record(self.state_text(), "sys", s, "AllowedCPUs"):
+                set_again(self, "sys", s, [setting])
                 continue
-            self.setp("sys", s, f"AllowedCPUs={self.s.build_cpus}")
+            self.setp("sys", s, setting)
 
     def cpus_fallback(self, unit: str) -> None:
         """A user manager started before cpuset was delegated to it accepts AllowedCPUs but never
@@ -366,13 +373,15 @@ class GameProfile:
 
     def demote_escapes(self) -> None:
         """Idle-class (and off the game's E-cores, with cpuset delegated) for each box of
-        escaped_cgroups not handled yet; a box that holds a GameMode client is the game itself."""
+        escaped_cgroups not handled yet; a box that holds a GameMode client is the game itself. One handled
+        already is set again when a setting of it does not hold (set_again)."""
         settings = [IDLE_WEIGHT]
         if self.cpuset_delegated():
             settings.append(f"AllowedCPUs={self.s.build_cpus}")
         for d in self.escaped_cgroups():
             unit = os.path.basename(d).removeprefix("_")
             if self._recorded(unit, settings):
+                set_again(self, "usr", unit, settings, folder=d)
                 continue
             if self.gamemode_in(d):
                 continue

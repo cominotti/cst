@@ -7018,6 +7018,122 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_181_cpu_game_profile_tick_sets_a_handled_box_again_when_its_setting_does_not_hold(self) -> None:
+        """The real game profile, on for tester with BUILD_CPUS='0,2' (not contiguous: the real systemd shows
+        "0 2"). A box next to the game (a slice of the user manager's own, made by systemd-run --user)
+        whose record game.state holds with no setting (what a set-property that failed leaves): the tick
+        sets CPUWeight idle in the real user manager, its user.control override written, with no new
+        record. A systemd-run job straight in app.slice (run-e2e181.service) the tick sets; then its
+        transient override removed and a user daemon-reload (what a killed 'off' leaves): its CPUWeight
+        is its own again, and the next tick sets it idle again, with no new record. A Docker-named scope
+        of the system manager and a Steam-named scope of tester's user manager get AllowedCPUs and
+        MemoryLow. A further tick finds every value holding in the forms the real systemd shows (idle,
+        "0 2", the bytes of 16G): game.state byte for byte the same, every override file the same inode
+        and mtime, and its output names none of them. 'off' removes the overrides and both boxes of the
+        user manager get their own CPUWeight back. The old tick skipped every box it held a record of."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service 2>/dev/null || true
+            systemctl --user -M tester@ stop app-flatpak-com.valvesoftware.Steam-e2e181.scope 2>/dev/null || true
+            systemctl stop docker-e2e181.scope 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-181-conf.bak ]]; then mv /tmp/e2e-181-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-181-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0,2'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            steam=app-flatpak-com.valvesoftware.Steam-e2e181.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            wait_dir() { for _ in $(seq 50); do [[ -d "$1" ]] && break; sleep 0.1; done; test -d "$1"; }
+            touch /run/cpu-setup/manual
+            gp on
+            # A box whose set-property failed: its record, no setting.
+            systemd-run --user -M tester@ --quiet --slice=e2e181.slice --unit=e2e181-box sleep 300
+            wait_dir "$ucg/e2e181.slice"
+            own=$(ushow CPUWeight e2e181.slice)
+            [[ "$own" != idle ]]
+            rec='prop usr e2e181.slice CPUWeight new -'
+            printf '%s\n' "$rec" >>"$st"
+            # A systemd-run job straight in app.slice; a Docker-named scope of the system manager; a
+            # Steam-named scope of tester's (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=run-e2e181 sleep 300
+            wait_dir "$ucg/app.slice/run-e2e181.service"
+            job_own=$(ushow CPUWeight run-e2e181.service)
+            [[ "$job_own" != idle ]]
+            systemd-run --quiet --unit=e2e181-docker-launch systemd-run --scope --quiet --unit=docker-e2e181.scope sleep 300
+            systemd-run --user -M tester@ --quiet --unit=e2e181-steam-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --unit="$steam" sleep 300
+            for _ in $(seq 50); do
+                [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active \
+                    && "$(ushow ActiveState "$steam")" == active ]] && break
+                sleep 0.1
+            done
+            [[ "$(systemctl show -P ActiveState docker-e2e181.scope)" == active ]]
+            [[ "$(ushow ActiveState "$steam")" == active ]]
+            [[ "$(systemctl show -P Slice docker-e2e181.scope)" != builds.slice ]]
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight e2e181.slice)" == idle ]] || { echo "the box was not set again: $got" >&2; cat "$st" >&2; exit 1; }
+            grep -q "e2e181.slice: CPUWeight is '.*', not 'idle' (its set failed, or something undid it): set CPUWeight=idle again" <<<"$got" \
+                || { echo "tick: $got" >&2; cat "$st" >&2; exit 1; }
+            box_ov=/run/user/$uid/systemd/user.control/e2e181.slice.d/50-CPUWeight.conf
+            job_ov=/run/user/$uid/systemd/transient/run-e2e181.service.d/50-CPUWeight.conf
+            test -e "$box_ov"
+            test -e "$job_ov"
+            [[ "$(grep -cxF "$rec" "$st")" == 1 ]] || { echo "a second record of the box" >&2; cat "$st" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]]
+            [[ "$(systemctl show -P AllowedCPUs docker-e2e181.scope)" == "0 2" ]] \
+                || { echo "docker scope: $(systemctl show -P AllowedCPUs docker-e2e181.scope)" >&2; exit 1; }
+            [[ "$(ushow MemoryLow "$steam")" == 17179869184 ]] || { echo "steam scope: $(ushow MemoryLow "$steam")" >&2; exit 1; }
+            # What an 'off' killed after this undo leaves, after a reload: no override, its own value.
+            rm "$job_ov"
+            systemctl --user -M tester@ daemon-reload
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] \
+                || { echo "the reload kept $(ushow CPUWeight run-e2e181.service)" >&2; exit 1; }
+            lines=$(wc -l <"$st")
+            got=$(gp tick)
+            [[ "$(ushow CPUWeight run-e2e181.service)" == idle ]] || { echo "the job was not set again: $got" >&2; exit 1; }
+            grep -q "run-e2e181.service: CPUWeight is '.*', not 'idle' (its set failed, or something undid it)" <<<"$got" \
+                || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(wc -l <"$st")" == "$lines" ]] || { echo "a new record" >&2; cat "$st" >&2; exit 1; }
+            # Every value holds now, in the forms the real systemd shows: a tick writes nothing.
+            ovs=("$box_ov" "$job_ov" /run/systemd/transient/docker-e2e181.scope.d/50-AllowedCPUs.conf
+                "/run/user/$uid/systemd/transient/$steam.d/50-MemoryLow.conf")
+            sum=$(sha256sum "$st")
+            marks=$(stat -c '%i %y' "${ovs[@]}")
+            got=$(gp tick)
+            [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "game.state changed" >&2; exit 1; }
+            [[ "$(stat -c '%i %y' "${ovs[@]}")" == "$marks" ]] || { echo "an override was written again: $got" >&2; exit 1; }
+            if grep -qE 'e2e181|Steam' <<<"$got"; then echo "the tick named a box: $got" >&2; exit 1; fi
+            gp off
+            test ! -e "$box_ov" || { echo "the box's override is still there" >&2; exit 1; }
+            [[ "$(ushow CPUWeight e2e181.slice)" == "$own" ]] || { echo "the box's CPUWeight: not $own" >&2; exit 1; }
+            [[ "$(ushow CPUWeight run-e2e181.service)" == "$job_own" ]] || { echo "the job's CPUWeight: not $job_own" >&2; exit 1; }
+            systemctl --user -M tester@ stop e2e181-box.service run-e2e181.service "$steam"
+            systemctl stop docker-e2e181.scope
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a

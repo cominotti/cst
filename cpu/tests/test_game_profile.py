@@ -53,6 +53,7 @@ from cpu.game.domain import (
     game_settings,
     unheld,
 )
+from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
 from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.ports import CommandResult
 
@@ -379,6 +380,74 @@ class PureRulesTest(unittest.TestCase):
         self.assertEqual(unheld(drifts, held), [usr])  # another manager's record holds no other
         self.assertEqual(unheld(drifts, [("prop", "sys", "a.slice", "CPUWeight", "new")]), drifts)  # 5 fields
         self.assertEqual(unheld([cgw], [("cgw", "/f")]), [cgw])  # 2 fields: off undoes nothing
+
+    def test_a_setting_holds_as_systemd_reads_it(self) -> None:
+        cases = [
+            # MemoryLow: by its bytes; "infinity"; a percentage cannot be judged.
+            ("MemoryLow", "16G", "17179869184", True),
+            ("MemoryLow", "16G", "16G", True),
+            ("MemoryLow", "16G", "0", False),
+            ("MemoryLow", "16G", "", False),
+            ("MemoryLow", "16G", "infinity", False),
+            ("MemoryLow", "infinity", "infinity", True),
+            ("MemoryLow", "10%", "1717986918", None),
+            ("MemoryLow", "16G", "10%", None),
+            # AllowedCPUs: as a set of CPUs, commas or blanks between ranges; none at all differs.
+            ("AllowedCPUs", "12-23", "12-23", True),
+            ("AllowedCPUs", "12-23", "12-15 16-23", True),
+            ("AllowedCPUs", "0,2", "0 2", True),
+            ("AllowedCPUs", "12-23", "0-23", False),
+            ("AllowedCPUs", "12-23", "", False),
+            ("AllowedCPUs", "12-23", "x", None),
+            ("AllowedCPUs", "", "12-23", None),
+            # CPUWeight: "idle" or a whole number.
+            ("CPUWeight", "idle", "idle", True),
+            ("CPUWeight", "idle", "100", False),
+            ("CPUWeight", "10", "10", True),
+            ("CPUWeight", "10", "010", True),
+            ("CPUWeight", "idle", "", False),
+            ("CPUWeight", "idle", "weird", None),
+            ("CPUWeight", "\N{ARABIC-INDIC DIGIT THREE}", "3", None),  # a digit of another script is no weight
+            # Any other property is never judged.
+            ("IOWeight", "10", "50", None),
+        ]
+        for prop, value, now, want in cases:
+            self.assertIs(setting_holds(prop, value, now), want, (prop, value, now))
+
+    def test_the_settings_of_a_box_that_do_not_hold_and_their_words(self) -> None:
+        unset = unset_settings(
+            ["CPUWeight=idle", "AllowedCPUs=12-23", "MemoryLow=10%"],
+            {"CPUWeight": "100", "AllowedCPUs": "12-23", "MemoryLow": "0"},
+        )
+        self.assertEqual(unset, [Unset("CPUWeight", "idle", "100")])
+        self.assertEqual(unset_settings(["CPUWeight=idle"], {}), [Unset("CPUWeight", "idle", "")])
+        both = [Unset("MemoryLow", "16G", ""), Unset("AllowedCPUs", "0,2-3", "0-23")]
+        self.assertEqual(
+            set_again_text("a.scope", both, ok=True),
+            (
+                5,
+                (
+                    "a.scope: MemoryLow is '', not '17179869184'; AllowedCPUs is '0-23', not '0 2-3' "
+                    "(its set failed, or something undid it): set MemoryLow=16G AllowedCPUs=0,2-3 again"
+                ),
+            ),
+        )
+        self.assertEqual(
+            set_again_text("a.scope", both[:1], ok=False),
+            (4, "a.scope: MemoryLow is '', not '17179869184': could not set MemoryLow=16G again"),
+        )
+
+    def test_what_the_drift_repair_compares(self) -> None:
+        recs = intended_records(
+            "cst-game-intended 1\n"
+            "prop usr a.slice CPUWeight idle idle\n"
+            "prop usr a.slice AllowedCPUs 12-23 ''\n"
+            "prop sys a.slice MemoryLow 16G 17179869184\n"
+            "cgw /f 12-23 12-23\n"
+        )
+        self.assertEqual(intended_covers(recs, "usr", "a.slice"), frozenset({"CPUWeight"}))  # an empty SHOWN: none
+        self.assertEqual(intended_covers(recs, "sys", "a.slice"), frozenset({"MemoryLow"}))
+        self.assertEqual(intended_covers(recs, "usr", "b.slice"), frozenset())
 
     def test_the_state_files_are_the_registered_ones(self) -> None:
         p = GamePaths()
@@ -2019,6 +2088,206 @@ class GameProfileEscapesTest(GameProfileCase):
         self.assertIn("were still there: removed them", out)
         out, actions = self.run_profile("tick")
         self.assertEqual((out, actions), ("", []))
+
+
+class HandledBoxSetAgainTest(GameProfileCase):
+    """A box the tick handled already (game.state holds its record) whose setting does not hold: its
+    set-property failed (O2), or an 'off' that was killed undid it while the profile stayed on (O6). The
+    tick reads its recorded settings back and sets each one that does not hold again, with no new record;
+    when every one holds it writes nothing."""
+
+    STEAM = "app-flatpak-com.valvesoftware.Steam-1.scope"
+
+    def docker(self) -> None:
+        self.systemd.units["sys"] = ["docker-1.scope"]
+        self.set_now("sys", "docker-1.scope", Slice="system.slice")
+
+    def box(self, *parts: str, procs: Sequence[int] = ()) -> str:
+        d = os.path.join(self.ucg, *parts)
+        os.makedirs(d, exist_ok=True)
+        if procs:
+            self.write(os.path.join(d, "cgroup.procs"), "".join(f"{p}\n" for p in procs))
+        return d
+
+    def delegate(self) -> None:
+        self.write(os.path.join(self.ucg, "cgroup.subtree_control"), "cpuset cpu memory pids\n")
+
+    def failed_then_tick(self, mgr: str, unit: str) -> tuple[str, str, list[str]]:
+        """'on' with unit's set-property failing, then a tick with it working: (game.state after 'on', the
+        tick's output, its set-property calls)."""
+        self.systemd.fail_set.add((mgr, unit))
+        out, _ = self.run_profile("on")
+        self.assertIn(f"{unit}: could not set", out)
+        state = self.read(self.state)
+        self.systemd.fail_set.clear()
+        out, actions = self.run_profile("tick")
+        return state, out, self.sets(actions)
+
+    def test_a_docker_container_whose_set_failed_is_set_again_with_no_new_record(self) -> None:
+        self.docker()
+        state, out, sets = self.failed_then_tick("sys", "docker-1.scope")
+        self.assertEqual(sets, [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=12-23"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn(
+            "<5>game-profile: docker-1.scope: AllowedCPUs is '', not '12-23' (its set failed, or something undid "
+            "it): set AllowedCPUs=12-23 again\n",
+            out,
+        )
+        self.assertEqual(self.now("sys", "docker-1.scope", "AllowedCPUs"), "12-23")
+        _, actions = self.run_profile("tick")  # it holds now: nothing more
+        self.assertEqual(self.sets(actions), [])
+        self.run_profile("off")  # its "new" record still undoes it
+        self.assertFalse(os.path.exists(self.ctrl("sys", "docker-1.scope", "AllowedCPUs")))
+
+    def test_a_steam_scope_whose_set_failed_is_set_again(self) -> None:
+        self.systemd.units["usr"] = [self.STEAM]
+        state, out, sets = self.failed_then_tick("usr", self.STEAM)
+        self.assertEqual(sets, [f"{USR} set-property --runtime {self.STEAM} MemoryLow=16G"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn(f"{self.STEAM}: MemoryLow is '', not '17179869184'", out)
+
+    def test_systemd_run_jobs_whose_set_failed_get_both_settings_again(self) -> None:
+        self.delegate()
+        for unit in ("run-u7.service", "run-r1a2.scope"):
+            self.box("app.slice", unit)
+            self.systemd.fail_set.add(("usr", unit))
+        self.run_profile("on")
+        state = self.read(self.state)
+        for unit in ("run-u7.service", "run-r1a2.scope"):
+            self.assertIn(f"prop usr {unit} AllowedCPUs new -\n", state)
+        self.systemd.fail_set.clear()
+        _, actions = self.run_profile("tick")
+        self.assertEqual(
+            sorted(self.sets(actions)),
+            [
+                f"{USR} set-property --runtime run-r1a2.scope CPUWeight=idle AllowedCPUs=12-23",
+                f"{USR} set-property --runtime run-u7.service CPUWeight=idle AllowedCPUs=12-23",
+            ],
+        )
+        self.assertEqual(self.read(self.state), state)
+
+    def test_a_slice_next_to_the_game_whose_set_failed_in_on_is_set_again(self) -> None:
+        # Its set-property failed, so game.intended has no line for it and the drift repair cannot see it.
+        self.box("e2e.slice")
+        state, out, sets = self.failed_then_tick("usr", "e2e.slice")
+        self.assertNotIn("e2e.slice", self.read(self.intended))
+        self.assertEqual(sets, [f"{USR} set-property --runtime e2e.slice CPUWeight=idle"])
+        self.assertEqual(self.read(self.state), state)
+        self.assertIn("e2e.slice: CPUWeight is '', not 'idle'", out)
+        self.assertNotIn("drift:", out)
+
+    def test_a_steam_scope_a_killed_off_undid_is_set_again_and_off_still_undoes_it(self) -> None:
+        self.systemd.units["usr"] = [self.STEAM]
+        self.run_profile("on")
+        override = self.ctrl("usr", self.STEAM, "MemoryLow")
+        self.assertTrue(os.path.exists(override))
+        state = self.read(self.state)
+        # What an 'off' killed after this undo leaves, once a user daemon-reload ran: no override, the
+        # scope's own value, and game.state still there.
+        os.unlink(override)
+        self.set_now("usr", self.STEAM, MemoryLow="0")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime {self.STEAM} MemoryLow=16G"])
+        self.assertIn(f"{self.STEAM}: MemoryLow is '0', not '17179869184'", out)
+        self.assertEqual(self.read(self.state), state)
+        self.assertTrue(os.path.exists(override))
+        self.run_profile("off")
+        self.assertFalse(os.path.exists(override))
+
+    def test_with_every_setting_holding_a_tick_writes_and_says_nothing(self) -> None:
+        # Another project measures timing on these boxes: a tick that finds everything in place runs no
+        # set-property and changes no file.
+        self.delegate()
+        self.docker()
+        self.systemd.units["usr"] = [self.STEAM]
+        for parts in (("lushtext.slice",), ("background.slice",), ("app.slice", "run-u7.service")):
+            self.box(*parts)
+        self.run_profile("on")
+        files = (self.state, self.intended)
+        before = [self.read(f) for f in files]
+        for _ in range(2):
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+            self.assertEqual(out, "")
+            self.assertEqual([self.read(f) for f in files], before)
+
+    def test_a_setting_the_drift_repair_covers_is_left_to_it(self) -> None:
+        self.box("lushtext.slice")
+        self.run_profile("on")
+        self.assertIn("prop usr lushtext.slice CPUWeight idle idle\n", self.read(self.intended))
+        self.set_now("usr", "lushtext.slice", CPUWeight="100")
+        out, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime lushtext.slice CPUWeight=idle"])
+        self.assertIn("drift: lushtext.slice CPUWeight was '100'", out)
+        self.assertNotIn("its set failed", out)
+        # Not even asked about by the box check: the drift repair's own show is the only one.
+        shows = [a for a in actions if a.startswith(f"{USR} show") and a.endswith(" lushtext.slice")]
+        self.assertEqual(len(shows), 1, shows)
+
+    def test_a_box_that_holds_the_game_by_now_is_left_alone(self) -> None:
+        d = self.box("app.slice", "run-r9.scope")
+        self.systemd.fail_set.add(("usr", "run-r9.scope"))
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.write(os.path.join(d, "cgroup.procs"), "4242\n")
+        self.gamemode_pid("4242")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+
+    def test_a_unit_systemd_has_not_loaded_is_skipped(self) -> None:
+        self.docker()
+        self.systemd.fail_set.add(("sys", "docker-1.scope"))
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.systemd.not_loaded.add(("sys", "docker-1.scope"))
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [])
+
+    def test_a_set_that_fails_again_is_said_and_tried_again_at_the_next_tick(self) -> None:
+        self.docker()
+        self.systemd.fail_set.add(("sys", "docker-1.scope"))
+        self.run_profile("on")
+        state = self.read(self.state)
+        for _ in range(2):
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=12-23"])
+            self.assertIn(
+                "<4>game-profile: docker-1.scope: AllowedCPUs is '', not '12-23': could not set AllowedCPUs=12-23 "
+                "again\n",
+                out,
+            )
+            self.assertEqual(self.read(self.state), state)
+
+    def test_with_a_newer_game_intended_only_transient_units_are_set_again(self) -> None:
+        self.box("e2e.slice")
+        self.box("app.slice", "run-u7.service")
+        self.systemd.fail_set |= {("usr", "e2e.slice"), ("usr", "run-u7.service")}
+        self.run_profile("on")
+        self.systemd.fail_set.clear()
+        self.write(self.intended, "cst-game-intended 99\n")
+        _, actions = self.run_profile("tick")
+        self.assertEqual(self.sets(actions), [f"{USR} set-property --runtime run-u7.service CPUWeight=idle"])
+
+    def test_a_value_it_cannot_judge_is_not_set_again(self) -> None:
+        settings = dataclasses.replace(self.settings, game_memory_low="10%")
+        self.systemd.units["usr"] = [self.STEAM]
+        self.systemd.fail_set.add(("usr", self.STEAM))
+        self.run_profile("on", settings)
+        self.systemd.fail_set.clear()
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual([a for a in self.sets(actions) if "Steam" in a], [])
+
+    def test_a_settings_edit_while_on_reaches_the_handled_boxes_once(self) -> None:
+        self.docker()
+        self.run_profile("on")
+        state = self.read(self.state)
+        settings = dataclasses.replace(self.settings, build_cpus="14-23")
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [f"{SYS} set-property --runtime docker-1.scope AllowedCPUs=14-23"])
+        self.assertEqual(self.read(self.state), state)
+        _, actions = self.run_profile("tick", settings)
+        self.assertEqual(self.sets(actions), [])  # machine.slice keeps what 'on' set (its game.intended line)
+        self.assertEqual(self.now("sys", "machine.slice", "AllowedCPUs"), "12-23")
 
 
 class GameProfileWatchdogTest(GameProfileCase):

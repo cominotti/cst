@@ -658,8 +658,9 @@ setting even if it goes away (stopped, or unloaded once nothing uses it) and
 a later job makes it again: the runtime override stays in
 `/run/user/<uid>/systemd/user.control/<slice>.d/` until `off`. A box that
 holds a GameMode client (the game itself, started in such a box) is left
-alone. That check runs once, when the box is first picked up: a game started
-later in a box that is already idle stays idle until `off`, and so does a
+alone. That check runs when the box is first picked up, and again when the
+watchdog sets a box again (7.2): a game started later in a box that is
+already idle (its settings holding) stays idle until `off`, and so does a
 game that does not use GameMode (with `game on` by hand). Start such a game
 from the desktop or Steam, or with `--slice=app-NAME.slice`. Apps that GNOME
 or Flatpak start (`app-*.scope`) and `flatpak-session-helper.service` are
@@ -746,13 +747,28 @@ that has GameMode's library (`libgamemode`) loaded.
 - Profile on: Docker containers started in the meantime get `AllowedCPUs=12-23`,
   Steam scopes started in the meantime (the game's own) get `MemoryLow`, and
   other boxes next to the game that appeared in the meantime get the idle
-  class (7.1). A box it already handled is skipped, so `game.state` does not
-  grow at each run. Handled means that `game.state` holds a record of that
-  box and setting which `off` can read, compared field by field (manager,
-  unit, property): a line `off` cannot read (an unclosed quote) does not
-  count, and a unit name that `printf %q` writes quoted (systemd's `\x2d`)
-  still does. A setting of the profile that something undid in the
-  meantime is set again (section 7.5). When the user the profile acts for has
+  class (7.1). A box it already handled gets no new record, so `game.state`
+  does not grow at each run. Handled means that `game.state` holds a record
+  of that box and setting which `off` can read, compared field by field
+  (manager, unit, property): a line `off` cannot read (an unclosed quote)
+  does not count, and a unit name that `printf %q` writes quoted (systemd's
+  `\x2d`) still does. Each run reads the recorded settings of each handled
+  box back from systemd (one `systemctl show` per box) and sets again, with
+  `set-property` and no new record, each one whose value is not the
+  profile's: its `set-property` failed, or an `off` that was killed undid it
+  while the profile stayed on. The first record still says how `off` undoes
+  it. The journal says it at level notice (`UNIT: PROP is 'NOW', not 'WANT'
+  (its set failed, or something undid it): set PROP=VALUE again`), or at
+  level warning when that `set-property` fails too (tried again at the next
+  run). The value is the one the settings give now, so a `BUILD_CPUS` edited
+  while the profile is on reaches these boxes at the next run (the fixed
+  units keep what `on` set). When every value holds, the run changes
+  nothing and writes nothing. Left alone: a setting `game.intended` covers
+  (the drift repair sets it, section 7.5), every setting of a slice when
+  `game.intended` is of a newer format, a unit systemd has not loaded, a box
+  that holds a GameMode client by then, and a value the profile cannot
+  compare (a `GAME_MEMORY_LOW` given as a percentage). A setting of the
+  profile that something undid in the meantime is set again (section 7.5). When the user the profile acts for has
   no account (6.2: `TARGET_USER` names none, or the account was deleted
   while the profile was on), the Steam scopes and the boxes of its user
   manager are left alone (there is no such user manager); the journal says
@@ -922,7 +938,8 @@ What else the profile does about it:
   `prop sys user.slice MemoryLow 16G 17179869184`. A `cpuset.cpus` file it
   wrote directly (7.1) gets a `cgw` line. The transient units (the scopes
   of Docker containers and Steam, the `run-*.service` of `systemd-run`) are
-  not recorded: no drop-in can win over theirs. The slices made idle in the
+  not recorded: no drop-in can win over theirs; the watchdog's check of the
+  boxes it handled (7.2) sets them again instead. The slices made idle in the
   user manager (7.1) are recorded, so the repair covers them too.
 - Every watchdog run (`tick`, every 30 s) asks systemd once per unit and
   compares. Each setting that differs is set again with
@@ -1683,6 +1700,8 @@ this is harmless.
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
 | `game/domain/__init__.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
 | `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
+| `game/domain/boxes.py` | The watchdog's check of the boxes it handled, no I/O: whether a recorded setting still holds as systemd shows it (`MemoryLow` by its bytes, `AllowedCPUs` as a set of CPUs, `CPUWeight`), and the journal's words when it sets one again |
+| `game/adapters/boxes.py` | `set_again`: a handled box's recorded settings read back (one `systemctl show`) and each one that does not hold set again, with no new record |
 | `game/adapters/report.py` | `state`'s report (`show_state`): what is applied now and which settings drifted, read from one snapshot of the state files, with no lock |
 | `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |

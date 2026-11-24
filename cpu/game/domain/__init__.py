@@ -678,12 +678,25 @@ def drift_lines(
     return lines
 
 
+class BoxProp(StrEnum):
+    """The properties the tick sets on the boxes it handles (Docker and Steam scopes, the boxes next to the
+    game), which it reads back to judge whether they still hold (setting_holds)."""
+
+    MEMORY_LOW = "MemoryLow"
+    ALLOWED_CPUS = "AllowedCPUs"
+    CPU_WEIGHT = "CPUWeight"
+
+
 def escapes_in_state(recs: Sequence[Record]) -> str:
     """The boxes of the user manager the profile made idle, from game.state ("none" if none)."""
     out = [
         r[2]
         for r in recs
-        if len(r) >= 4 and r[0] == GameRecordKind.PROP and r[1] == "usr" and r[3] == "CPUWeight" and r[2] != USER_SLICE
+        if len(r) >= 4
+        and r[0] == GameRecordKind.PROP
+        and r[1] == "usr"
+        and r[3] == BoxProp.CPU_WEIGHT
+        and r[2] != USER_SLICE
     ]
     return " ".join(out) if out else "none"
 

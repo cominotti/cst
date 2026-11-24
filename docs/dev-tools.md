@@ -763,13 +763,11 @@ not derive from it.
   each call may fail or die at any of its set-property calls and file writes:
   every change has its record in `game.state`, an `off` with no fault
   restores everything, `on` twice is `on` once, and a tick leaves no box
-  half handled. Three known gaps are let through by name: a set-property that
-  failed (or a process that died between the record and the set) is never
-  tried again while the profile is on; an `off` whose undo step fails
-  still removes `game.state`, so that setting keeps the profile's value;
-  and an `off` killed after it undid a setting of a scope (a Docker
-  container's, a Steam game's) keeps that scope's record in `game.state`,
-  so while the profile stays on no tick sets it again.
+  half handled, also a box whose set-property failed (or whose process died
+  between the record and the set) and a scope whose setting an `off` that
+  was killed undid: the next tick sets them again. One known gap is let
+  through by name: an `off` whose undo step fails still removes
+  `game.state`, so that setting keeps the profile's value.
 - `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
   unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
   hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
