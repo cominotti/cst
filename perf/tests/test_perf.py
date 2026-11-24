@@ -44,6 +44,7 @@ from perf.domain.models import (
     IrqLineSample,
     MemoryProbeSnapshot,
     PerfAxis,
+    PerfAxisReport,
     PerfCliError,
     PerfProbeSnapshot,
     PerfVerdict,
@@ -506,6 +507,138 @@ class PerfEvaluatorTest(unittest.TestCase):
         )
         self.assertEqual([f.finding_id for f in manual_game.findings], ["gpu-game-profile-card3"])
         self.assertEqual(manual_game.findings[0].fix_command, "cst cpu game off && cst cpu game on")
+
+    def test_each_rule_writes_its_metric_texts_in_order(self) -> None:
+        # Pins the metric texts and findings of the rules that are split into helpers: moderate memory PSI
+        # (some only), zswap off with full PSI high, a GPU without power/control, the io queues with iocost
+        # configured, the dirty and commit texts with and without a cadence, irqbalance without a ban-list.
+        def axis(rep: PerfAxisReport) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+            return (
+                [(m.label, m.value) for m in rep.metrics],
+                [(f.finding_id, f.verdict.value, f.summary, f.fix_command) for f in rep.findings],
+            )
+
+        elevated = evaluate_perf_memory(
+            MemoryProbeSnapshot(zswap_enabled=True, zswap_compressor="zstd", psi_some_avg60=2.5)
+        )
+        self.assertEqual(
+            axis(elevated),
+            (
+                [("zswap", "enabled, zstd"), ("PSI memory avg60", "some=2.50% full=?")],
+                [("memory-psi-elevated", "ATTENTION", "Moderate memory pressure PSI avg60 (some=2.50%)", "")],
+            ),
+        )
+        zswap_off = evaluate_perf_memory(MemoryProbeSnapshot(zswap_enabled=False, psi_full_avg60=12.0))
+        self.assertEqual(
+            axis(zswap_off),
+            (
+                [("zswap", "disabled"), ("PSI memory avg60", "some=? full=12.00%")],
+                [
+                    ("memory-zswap-disabled", "ATTENTION", "zswap is disabled", "cst swap apply"),
+                    ("memory-psi-high", "BOTTLENECK", "Elevated memory PSI avg60 (some=?, full=12.00%)", ""),
+                ],
+            ),
+        )
+        gpu = evaluate_perf_gpu(
+            GpuProbeSnapshot(
+                gpus=(
+                    GpuDeviceSample("card0", None, None, ()),
+                    GpuDeviceSample(
+                        "card1", "amdgpu", None, ("DP-1", "HDMI-A-1"), "on", None, "auto", "3D_FULL_SCREEN"
+                    ),
+                )
+            )
+        )
+        self.assertEqual(
+            axis(gpu),
+            (
+                [
+                    ("card0", "?, outputs=none"),
+                    ("card1", "amdgpu, outputs=DP-1,HDMI-A-1, pm=on(?), dpm=auto, profile=3D_FULL_SCREEN"),
+                ],
+                [],
+            ),
+        )
+        io_ok = evaluate_perf_io(
+            IoProbeSnapshot(
+                block_devices=(
+                    BlockDeviceSample("sda", None, rotational=True),
+                    BlockDeviceSample("nvme0n1", "none", rotational=False),
+                ),
+                iocost_qos_active=True,
+                iocost_enabled_devices=2,
+                nonzero_slice_io_weights=(("a.slice", 100), ("b.slice", 50)),
+                nvme_ps_max_latency_us=5000,
+                dirty_background_bytes=512 * MIB,
+                dirty_bytes=0,
+                root_btrfs_commit_s=30,
+                root_btrfs_flushoncommit=False,
+            )
+        )
+        self.assertEqual(
+            axis(io_ok),
+            (
+                [
+                    ("block schedulers", "nvme0n1=none"),
+                    ("blk-iocost / io.weight", "qos=configured (2 device(s)); weights=a.slice=100, b.slice=50"),
+                    ("nvme APST max latency", "5000 µs"),
+                    ("dirty writeback", "bg=512.0 MiB, max=0 (ratio)"),
+                    ("root btrfs commit", "30s (default)"),
+                ],
+                [],
+            ),
+        )
+        io_warn = evaluate_perf_io(
+            IoProbeSnapshot(
+                nonzero_slice_io_weights=(("a.slice", 20),),
+                dirty_background_bytes=0,
+                dirty_bytes=2 * GIB,
+                dirty_writeback_cs=500,
+                dirty_expire_cs=1000,
+                root_btrfs_commit_s=30,
+                root_btrfs_flushoncommit=True,
+            )
+        )
+        self.assertEqual(
+            axis(io_warn),
+            (
+                [
+                    ("blk-iocost / io.weight", "qos=empty; weights=a.slice=20"),
+                    ("dirty writeback", "bg=0 (ratio), max=2.0 GiB, wb=5s, exp=10s"),
+                    ("root btrfs commit", "30s (default), flushoncommit"),
+                ],
+                [
+                    (
+                        "io-weight-no-iocost",
+                        "ATTENTION",
+                        "Cgroup io.weight is configured without blk-iocost QoS",
+                        "cst btrfs iocost apply",
+                    ),
+                    (
+                        "io-btrfs-commit-short",
+                        "ATTENTION",
+                        "Root btrfs commit interval is 30s with flushoncommit",
+                        "cst btrfs commit-interval apply",
+                    ),
+                    (
+                        "io-dirty-expire-mismatch",
+                        "ATTENTION",
+                        "vm.dirty_expire_centisecs (10s) is shorter than root btrfs commit (30s)",
+                        "cst btrfs install",
+                    ),
+                ],
+            ),
+        )
+        cpu = evaluate_perf_cpu(
+            CpuProbeSnapshot(
+                idle_states=(CpuIdleStateSample("C1", 2, disabled=False),),
+                irqbalance_active=True,
+            )
+        )
+        self.assertEqual(
+            axis(cpu),
+            ([("cpuidle max enabled", "cpuidle: 2 µs"), ("irqbalance", "active (no ban-list)")], []),
+        )
 
 
 class PerfScratchIntegrationTest(unittest.TestCase):
