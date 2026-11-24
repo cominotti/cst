@@ -225,26 +225,37 @@ def _read_conf_and_dropin(paths: ScrubPaths) -> tuple[str | None, str | None, st
     return conf_text, dropin_before, None
 
 
-def _apply_conf(paths: ScrubPaths, conf_text: str | None, target_limit: str | None) -> tuple[bool, bool, str]:
-    """Write SCRUB_LIMIT into snapshots.conf when it changes: (changed, its folder was absent, the line).
+def _conf_write_failed(paths: ScrubPaths, conf_text: str | None, exc: OSError, *, made_dir: bool) -> str:
+    """The ERROR line of a write of snapshots.conf that failed. A failure before write_atomic's rename (a
+    full disk) left the file as it was; one after it (the folder's fsync) left the new text there, which
+    goes back then. The folder this run made is removed again either way."""
+    cause = f"cannot write {paths.conf_path}: {exc.strerror or exc}"
+    now, unreadable = _read_optional_strict(paths.conf_path)
+    if not unreadable and now == conf_text:
+        if made_dir:  # write_atomic removed its temporary file: the folder is empty again
+            _remove_if_empty(os.path.dirname(paths.conf_path))
+        return f"ERROR: {cause}"
+    return _rolled_back(cause, [_restore_conf(paths, conf_text, made_dir=made_dir)], reload_hint=False)
 
-    A write that fails (a full disk, say) leaves the file as it was, removes the folder again when this
-    run made it, and raises the OSError."""
+
+def _apply_conf(
+    paths: ScrubPaths, conf_text: str | None, target_limit: str | None
+) -> tuple[bool, bool, str, str | None]:
+    """Write SCRUB_LIMIT into snapshots.conf when it changes: (changed, its folder was absent, the line,
+    the ERROR line of a write that failed, with snapshots.conf as it was before)."""
     new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
     conf_changed = new_conf is not None and new_conf != conf_text
     made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
     if new_conf is not None and conf_changed:
         try:
             _write_conf(paths.conf_path, new_conf)
-        except OSError:
-            if made_dir:  # write_atomic removed its temporary file: the folder is empty again
-                _remove_if_empty(os.path.dirname(paths.conf_path))
-            raise
+        except OSError as exc:
+            return conf_changed, made_dir, "", _conf_write_failed(paths, conf_text, exc, made_dir=made_dir)
         verb = "written:" if conf_text is None else "updated:"
         note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
-        return conf_changed, made_dir, f"{verb:<10} {paths.conf_path} ({note})"
+        return conf_changed, made_dir, f"{verb:<10} {paths.conf_path} ({note})", None
     suffix = " (absent)" if conf_text is None else ""
-    return conf_changed, made_dir, f"unchanged: {paths.conf_path}{suffix}"
+    return conf_changed, made_dir, f"unchanged: {paths.conf_path}{suffix}", None
 
 
 def _reload_or_roll_back(
@@ -332,10 +343,9 @@ def scrub_limit_apply(
         return 1, [read_error]
     # Writing the drop-in sets btrfs:core pending; a component install had finished stays done.
     core_done = _core_done(paths.record_path)
-    try:
-        conf_changed, made_dir, conf_line = _apply_conf(paths, conf_text, target_limit)
-    except OSError as exc:  # nothing written yet: nothing to roll back
-        return 1, [f"ERROR: cannot write {paths.conf_path}: {exc.strerror or exc}"]
+    conf_changed, made_dir, conf_line, write_error = _apply_conf(paths, conf_text, target_limit)
+    if write_error is not None:  # snapshots.conf as it was (or ROLLBACK INCOMPLETE), the drop-in not touched
+        return 1, [write_error]
     out: list[str] = [conf_line]
 
     def restore_conf() -> str | None:

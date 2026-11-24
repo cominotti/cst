@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+import contextlib
 import dataclasses
+import errno
 import io
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +46,22 @@ from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandResult
 from tests.fault_injection import no_space
 from tests.repo_files import REPO
+
+
+@contextlib.contextmanager
+def _folder_fsync_fails(*, times: int) -> Generator[None]:
+    """os.fsync of a folder fails with EIO the first times calls (write_atomic's, after its rename)."""
+    real = os.fsync
+    left = [times]
+
+    def fsync(fd: int) -> None:
+        if left[0] and stat.S_ISDIR(os.fstat(fd).st_mode):
+            left[0] -= 1
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        real(fd)
+
+    with mock.patch.object(os, "fsync", fsync):
+        yield
 
 
 def _core_text(path: str, record: str) -> Placement:
@@ -422,6 +441,42 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual((rc, lines), (1, [f"ERROR: cannot write {self.conf}: No space left on device"]))
         self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+        self.assertEqual(runner.calls, [])
+
+    def test_a_write_that_fails_after_its_rename_puts_snapshots_conf_back(self) -> None:
+        # write_atomic's fsync of the folder runs after its rename: the new text is in place when it fails.
+        for before in ("NAS_ENABLED=1\n", None):
+            with self.subTest(before=before):
+                if before is None:
+                    shutil.rmtree(os.path.dirname(self.conf), ignore_errors=True)
+                else:
+                    self._write(self.conf, before)
+                runner = ScrubFakeRunner()
+                with _folder_fsync_fails(times=1):
+                    rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+                self.assertEqual(rc, 1)
+                self.assertEqual(
+                    lines,
+                    [f"ERROR: cannot write {self.conf}: Input/output error; previous configuration restored."],
+                )
+                self.assertEqual(self._read(self.conf), before)
+                if before is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(self.conf)))  # the folder this run made
+                self.assertFalse(os.path.exists(self.dropin))
+                self.assertEqual(runner.calls, [])
+
+    def test_a_write_that_fails_after_its_rename_and_cannot_go_back_says_so(self) -> None:
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner = ScrubFakeRunner()
+        with _folder_fsync_fails(times=2):  # the write and the rollback's
+            rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines,
+            [
+                f"ERROR: cannot write {self.conf}: Input/output error; ROLLBACK INCOMPLETE ({self.conf}: Input/output error)"
+            ],
+        )
         self.assertEqual(runner.calls, [])
 
     def test_the_cli_says_a_full_disk_at_snapshots_conf_with_no_traceback(self) -> None:

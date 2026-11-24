@@ -374,7 +374,10 @@ cst btrfs scrub-limit off
   disk, or another write error, at `snapshots.conf` ends the command with
   `ERROR: cannot write /etc/btrfs-setup/snapshots.conf: ...` (exit 1)
   before anything else is written; a folder the command made for it is
-  removed again.
+  removed again. When the write fails after the new file took the old one's
+  place (the folder's fsync), the old `snapshots.conf` is put back and the
+  line ends with `previous configuration restored.` (or
+  `ROLLBACK INCOMPLETE (...)`).
   When both files are already as asked, `set` and `off` ask systemd
   whether it has loaded them (`NeedDaemonReload` of
   `btrfs-scrub-weekly.service`) and run `daemon-reload` if not: an earlier
