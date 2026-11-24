@@ -237,17 +237,34 @@ class PlantedTest(unittest.TestCase):
         self.assert_one_problem("tests/e2e/selection.py:", "above the top of the repository")
 
     def test_an_import_by_a_name_given_at_run_time_is_reported(self) -> None:
-        for code in (
-            'importlib.import_module("tests.e2e.helper")',
-            '__import__("tests.e2e.helper")',
-            'exec(open("tests/e2e/helper.py").read())',
-            'runpy.run_module("tests.e2e.helper")',
+        for imports, code in (
+            ("import importlib\n", 'importlib.import_module("tests.e2e.helper")'),
+            ("", '__import__("tests.e2e.helper")'),
+            ("", 'exec(open("tests/e2e/helper.py").read())'),
+            ("import runpy\n", 'runpy.run_module("tests.e2e.helper")'),
+            ("import importlib as il\n", 'il.import_module("tests.e2e.helper")'),
+            ("from importlib import import_module\n", 'import_module("tests.e2e.helper")'),
+            ("from runpy import run_module as rm\n", 'rm("tests.e2e.helper")'),
         ):
             with self.subTest(code=code):
                 self.setUp()
-                self.append("tests/e2e/selection.py", f"\n\ndef load() -> None:\n    {code}\n")
+                self.append("tests/e2e/selection.py", f"\n{imports}\n\ndef load() -> None:\n    {code}\n")
                 line = self.line_of("tests/e2e/selection.py", code)
                 self.assert_one_problem(f"tests/e2e/selection.py:{line}:", "given at run time")
+
+    def test_a_call_that_only_shares_a_run_time_import_s_name_is_no_problem(self) -> None:
+        # The old gate matched the method's last name: obj.exec(), self.run_module() and a repository
+        # function named run_module were false problems.
+        for imports, code in (
+            ("", "obj.exec(x)"),
+            ("", "self.run_module()"),
+            ("from tests.e2e.helper import run_module\n", "run_module()"),
+        ):
+            with self.subTest(code=code):
+                self.setUp()
+                self.append("tests/e2e/helper.py", "def run_module() -> None:\n    pass\n")
+                self.append("tests/e2e/selection.py", f"\n{imports}\n\ndef load() -> None:\n    {code}\n")
+                self.assertEqual(gate.problems(self.repo), [])
 
     def test_a_new_suite_file_is_checked_too(self) -> None:
         self.replace(

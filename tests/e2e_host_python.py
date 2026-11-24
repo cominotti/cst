@@ -16,7 +16,10 @@ relative import (and its packages' __init__.py), and the files run.py loads
 by path (the load rules in _path_loads). A load the gate cannot follow is a
 problem, so it cannot slip out of the set: a load by path of another form,
 and an import by a name or text given at run time (importlib.import_module,
-__import__, exec, runpy.run_module). problems() checks:
+__import__, exec, runpy.run_module, found by what the call names through the
+file's imports, not by the method's name: obj.exec() is none; a call through a
+name bound other than by an import, or through getattr, is not seen).
+problems() checks:
 
 - the entries against CI: every python3 command line of a job without a
   container (and of the composite actions), and of the invowk task each such
@@ -112,8 +115,11 @@ _LOCAL_ACTION: Final = re.compile(r"\buses:\s*\./(\.github/actions/[\w.-]+)\s*$"
 _FOLDER_OF_FILE: Final = "parent"
 _PARENTS: Final = "parents"
 _SAME_PATH: Final = frozenset({"resolve", "absolute"})
-# Calls that import or run code the import closure cannot see (importlib.import_module, runpy.run_module).
-_RUN_TIME_IMPORTS: Final = frozenset({"import_module", "__import__", "exec", "run_module"})
+# Calls that import or run code the import closure cannot see, by the dotted name the call resolves to through
+# the file's imports (_dotted: a name no import binds is builtins.NAME).
+_RUN_TIME_IMPORTS: Final = frozenset(
+    {"builtins.exec", "builtins.__import__", "importlib.import_module", "importlib.__import__", "runpy.run_module"}
+)
 
 
 def _read(repo: str, rel: str) -> str:
@@ -309,12 +315,34 @@ def _relative_modules(tree: ast.Module, rel: str) -> tuple[set[str], list[str]]:
 
 def _run_time_imports(tree: ast.Module) -> list[tuple[int, str]]:
     """Each call that imports or runs code by a name or a text the import closure cannot see: (line, the
-    function called)."""
+    function called, as its dotted name).
+
+    The callee is resolved through the file's imports, wherever they are (import importlib as il:
+    il.import_module is importlib.import_module; from runpy import run_module as rm: rm is
+    runpy.run_module; a bare exec or __import__ is the builtin), so obj.exec(...), self.run_module()
+    or a repository function named run_module is none. Not reported: a call through a name bound
+    other than by an import (m = importlib; m.import_module(x)) or through getattr."""
+    bound = dict(binding for node in ast.walk(tree) for binding in _import_bindings(node))
     return sorted(
         (node.lineno, name)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and (name := _called_name(node.func)) in _RUN_TIME_IMPORTS
+        if isinstance(node, ast.Call) and (name := _dotted(node.func, bound)) in _RUN_TIME_IMPORTS
     )
+
+
+def _import_bindings(node: ast.AST) -> list[tuple[str, str]]:
+    """The names an import statement binds and the dotted name each stands for (import os.path: os is
+    os; import os as o: o is os; from os import sep as s: s is os.sep); none for another node or a
+    relative import."""
+    if isinstance(node, ast.Import):
+        bindings: list[tuple[str, str]] = []
+        for alias in node.names:
+            top = alias.name.split(".", 1)[0]
+            bindings.append((top, top) if alias.asname is None else (alias.asname, alias.name))
+        return bindings
+    if isinstance(node, ast.ImportFrom) and not node.level and node.module is not None:
+        return [(alias.asname or alias.name, f"{node.module}.{alias.name}") for alias in node.names]
+    return []
 
 
 def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list[str], list[str]]:
@@ -579,18 +607,14 @@ def newer_names(tree: ast.AST, target: tuple[int, int]) -> list[tuple[int, str, 
         if isinstance(node, ast.Import):
             for alias in node.names:
                 hit(node.lineno, alias.name)
-                if alias.asname is None:  # import os.path binds os
-                    top = alias.name.split(".", 1)[0]
-                    bound[top] = top
-                else:
-                    bound[alias.asname] = alias.name
+            bound.update(_import_bindings(node))  # import os.path binds os
         elif isinstance(node, ast.ImportFrom):
             if node.level or node.module is None:
                 continue
             hit(node.lineno, node.module)
             for alias in node.names:
                 hit(node.lineno, f"{node.module}.{alias.name}")
-                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+            bound.update(_import_bindings(node))
         elif id(node) not in attribute_parts:
             dotted = _dotted(node, bound)
             if dotted is not None:
