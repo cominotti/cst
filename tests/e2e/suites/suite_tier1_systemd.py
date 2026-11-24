@@ -7737,7 +7737,14 @@ exit 1
 EOF
             cat >{w}/bin/findmnt <<'EOF'
 #!/usr/bin/env bash
-if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then echo "{uuid}"; exit 0; fi
+if [[ " $* " == *"--target"* ]] && [[ " $* " == *"UUID"* ]]; then
+    # With {w}/uuid-by-target, each target has its own filesystem (or none: exit 1, as findmnt).
+    if [[ -f {w}/uuid-by-target ]]; then
+        while read -r t u; do if [[ "$t" == "${{@: -1}}" ]]; then echo "$u"; exit 0; fi; done <{w}/uuid-by-target
+        exit 1
+    fi
+    echo "{uuid}"; exit 0
+fi
 if [[ " $* " == *"OPTIONS"* ]]; then
     while read -r src tgt _ opts _; do printf '%s %s %s\\n' "$src" "$tgt" "$opts"; done <{w}/proc/mounts
     exit 0
@@ -7825,6 +7832,17 @@ EOF
             /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
             grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
+            # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so apply changes
+            # the / line and leaves the /var line byte for byte.
+            other=0b5e6a1d-0000-4000-8000-00000000beef
+            var_line="UUID=$other /var btrfs subvol=var,compress=zstd:3,noatime 0 0"
+            printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n%s\\n' "$var_line" >/etc/fstab
+            printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0\\n' >{w}/proc/mounts
+            printf '/sysroot {uuid}\\n/ {uuid}\\n/var %s\\n' "$other" >{w}/uuid-by-target
+            /opt/cst-rw/cst btrfs commit-interval apply --yes >/dev/null
+            grep -qxF "$var_line" /etc/fstab
+            grep -qxF "UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit,commit=60 0 0" /etc/fstab
+            grep -qxF "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0" {w}/proc/mounts
             echo E2E-COMMIT-OK
             """,
         ).stdout

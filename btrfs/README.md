@@ -1424,7 +1424,10 @@ On failure at any step, prior changes are rolled back so the layers never drift.
 
 **Only the root filesystem:** `apply` and `revert` (here and in
 `commit-interval`, section 9.3) change only the root btrfs filesystem's
-`/etc/fstab` lines and mounts. An fstab line is the root's when its source is
+`/etc/fstab` lines and mounts. The root filesystem's UUID is that of the btrfs
+mounted at `/sysroot`, else at `/`, else at `/var`, as `cst doctor` and
+`btrfs-setup` find it, so a separate btrfs `/var` is not taken for the root.
+An fstab line is the root's when its source is
 `UUID=` of the root filesystem; a line with another `UUID=` is another
 filesystem, whatever its mount point. Without a UUID to compare (`LABEL=`,
 `/dev/...`), `/`, `/sysroot` and `/var` are the root's, and `/home` or

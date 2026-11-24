@@ -241,6 +241,24 @@ class _RecordingRunner:
         return CommandResult(0, "", "", tuple(cmd))
 
 
+class _PerTargetRunner(_RecordingRunner):
+    """findmnt answers `--target T` from a mount table, as the real one does: the UUID of T's btrfs mount,
+    or exit 1 with no output when T is not mounted or not btrfs."""
+
+    def __init__(self, tmp_root: str, uuids: dict[str, str]) -> None:
+        super().__init__(tmp_root)
+        self.uuids = uuids
+
+    @override
+    def run(self, argv: Sequence[str], **kw: object) -> CommandResult:
+        cmd = list(argv)
+        if cmd[:2] == ["findmnt", "-rn"] and "--target" in cmd:
+            self.cmds.append(cmd)
+            uuid = self.uuids.get(cmd[cmd.index("--target") + 1], "")
+            return CommandResult(0 if uuid else 1, uuid + "\n" if uuid else "", "", tuple(cmd))
+        return super().run(argv, **kw)
+
+
 class DomainTests(unittest.TestCase):
     def test_parse_args(self) -> None:
         self.assertEqual(parse_compress_args([]), CompressArgs(command=CompressCommand.STATUS))
@@ -856,7 +874,7 @@ class AdapterAndCliTests(unittest.TestCase):
             cfg, ctx=_FakeCtx(root=True, host_root=self.tmp), runner=runner, fs=LocalFileSystemAdapter()
         )
         self.assertEqual(adapter.root_uuid(), SAMPLE_UUID)
-        self.assertIn(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", "/var"], runner.cmds)
+        self.assertIn(["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", "/sysroot"], runner.cmds)
 
         with self.assertRaises(CommandFailed):
             adapter.write_fstab("# modified\n")
@@ -875,6 +893,58 @@ class AdapterAndCliTests(unittest.TestCase):
             top_text = fh.read()
         self.assertIn("compress=zstd:1", top_text)
         self.assertNotIn("compress-force", top_text)
+
+    def _per_target_adapter(self, uuids: dict[str, str]) -> LinuxCompressHostAdapter:
+        cfg = CompressAdapterConfig(
+            entry_file=os.path.join(REPO, "btrfs", "btrfs-compress"),
+            fallback_root=REPO,
+            proc_dir=os.path.join(self.tmp, "proc"),
+            host_root=self.tmp,
+        )
+        return LinuxCompressHostAdapter(
+            cfg,
+            ctx=_FakeCtx(root=True, host_root=self.tmp),
+            runner=_PerTargetRunner(self.tmp, uuids),
+            fs=LocalFileSystemAdapter(),
+        )
+
+    def test_the_root_uuid_is_sysroot_s_else_root_s_else_var_s(self) -> None:
+        # The order of cst doctor and btrfs-setup: a separate btrfs /var is not the root.
+        var_uuid = "0b5e6a1d-0000-4000-8000-00000000beef"
+        cases = (
+            ({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": var_uuid}, SAMPLE_UUID),
+            ({"/": "uuid-root", "/var": var_uuid}, "uuid-root"),
+            ({"/var": var_uuid}, var_uuid),
+            ({}, SAMPLE_UUID),  # no btrfs at any of them: the top mount unit's What=
+        )
+        for uuids, expected in cases:
+            with self.subTest(uuids=uuids):
+                self.assertEqual(self._per_target_adapter(uuids).root_uuid(), expected)
+
+    def test_apply_with_a_separate_btrfs_var_changes_only_the_root_s_lines(self) -> None:
+        var_uuid = "0b5e6a1d-0000-4000-8000-00000000beef"
+        var_line = f"UUID={var_uuid} /var btrfs subvol=var,compress=zstd:3,noatime 0 0\n"
+        fstab = "".join(var_line if " /var " in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True))
+        with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
+            fh.write(fstab)
+        with open(os.path.join(self.tmp, "proc", "mounts"), "w", encoding="utf-8") as fh:
+            fh.write(
+                SAMPLE_PROC_MOUNTS.replace(
+                    "/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var",
+                    "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var",
+                )
+            )
+        adapter = self._per_target_adapter({"/sysroot": SAMPLE_UUID, "/": SAMPLE_UUID, "/var": var_uuid})
+        out, err = io.StringIO(), io.StringIO()
+        rc = render_compress_change(
+            CompressService(adapter).execute_change(CompressArgs(CompressCommand.APPLY, yes=True)), out, err
+        )
+        self.assertEqual(rc, 0, err.getvalue())
+        with open(os.path.join(self.tmp, "etc", "fstab"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines(keepends=True)
+        self.assertIn(var_line, lines)
+        root_line = next(line for line in lines if "\t\tbtrfs" in line)
+        self.assertIn("compress-force=zstd:1", root_line)
 
     # update_top_mount: a failure while installing puts the previous unit back only when the unit on
     # disk changed, and is raised either way.

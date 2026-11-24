@@ -103,8 +103,9 @@ class LinuxCompressHostAdapter:
         return self._fs.exists(self._ostree_booted_path())
 
     def root_uuid(self) -> str:
-        """Return the root btrfs filesystem UUID, or "" when unknown."""
-        for target in ("/var", "/sysroot", "/"):
+        """Return the root btrfs filesystem UUID, or "" when unknown: the btrfs of /sysroot, else of /, else of
+        /var (the order of `pick_root_mounts`, cst doctor and btrfs-setup); else the top mount unit's."""
+        for target in ("/sysroot", "/", "/var"):
             res = self._runner.run(
                 ["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", target],
                 on_host=not self._host_root,
