@@ -1135,6 +1135,44 @@ class MigrateTest(Base):
                 self.assertNotIn("Gave up", out)
         self.assertEqual(len(self.fs.commands("cp")), 2)
 
+    def test_a_count_left_without_its_flag_is_reset_durably_before_the_flag(self) -> None:
+        # The flag is fsynced; the reset of the old count must be on disk before it, or a power loss
+        # right after could keep the flag and bring the old count back (a give-up with no try).
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("2")
+        self.fs.cp = cp_fails
+        synced_at_flag: list[str] = []
+        real_request = nocow_adapters.NocowStateFiles.request_migration
+
+        def request(state: nocow_adapters.NocowStateFiles) -> None:
+            synced_at_flag.extend(synced)
+            real_request(state)
+
+        with (
+            recorded_fsyncs() as synced,
+            mock.patch.object(nocow_adapters.NocowStateFiles, "request_migration", request),
+        ):
+            self.call(self.cli.migrate)
+        assert_replaced_durably(self, self.attempts, synced_at_flag)
+        self.assertEqual(read_attempts(self), "1")  # this request's first boot
+
+    def test_a_count_that_cannot_be_reset_is_a_request_not_made(self) -> None:
+        # The old count cannot be reset: the request is not made (no flag, no +C, a journal line), so the
+        # next boot sees the same sign again; it never goes on with the old count.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("2")
+        denied = PermissionError(errno.EACCES, "Permission denied")
+        with mock.patch.object(nocow_adapters.NocowStateFiles, "save_attempts", side_effect=denied):
+            rc, out = self.call(self.cli.migrate)
+        self.assertEqual(rc, 0)
+        self.assertIn("cannot schedule the migration ([Errno 13] Permission denied)", out)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertEqual(read_attempts(self), "2")
+        self.assertEqual(self.fs.commands("cp"), [])
+
     def test_a_request_already_scheduled_keeps_its_count(self) -> None:
         # The flag is there (the request is under way) but the volumes folder has no +C: the count stays.
         self.fs.set(self.vols, nocow=False)

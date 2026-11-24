@@ -888,8 +888,11 @@ docker volume rm <name>         # or one volume by name
   the flag first: a stop between the two left a count without its flag, and
   a later migration (Docker reinstalled, say) then gave up after one failed
   boot. A new request (the volumes folder found without `+C` and no flag)
-  now forgets such a count before it writes the flag, so it gets its two
-  boots also after an upgrade from that helper.
+  now resets such a count to 0 before it writes the flag, flushed to disk
+  first (a power loss must not keep the flag and bring the old count back),
+  so it gets its two boots also after an upgrade from that helper. When the
+  count cannot be reset, the request is not made (no flag, no `+C`, a
+  journal line), and the next boot tries again.
 - An interrupted copy (power loss) is cleaned up at the next boot; the original
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,

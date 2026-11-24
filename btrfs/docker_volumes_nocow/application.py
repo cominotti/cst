@@ -122,7 +122,9 @@ class DockerVolumesNocow:
             if not self.state.flag_exists() and self.state.attempts():
                 # A count of boots without its flag is not this request's (an older helper removed the
                 # flag, then the count, and could stop between the two): the request gets its two boots.
-                self.state.forget_attempts()
+                # Reset durably before the durable flag (a power loss must not bring the old count back
+                # beside it), and a reset that fails is this request failing, not a hidden error.
+                self.state.save_attempts(0)
             self.state.request_migration()
         except OSError as e:
             self.out.log(
