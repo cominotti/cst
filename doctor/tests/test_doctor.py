@@ -1482,6 +1482,28 @@ class BtrfsCompressionDoctorTest(Scratch):
         self.assertIn("WARN   root btrfs commit interval: drift across layers:", btrfs_text)
         self.assertIn("fix: cst btrfs commit-interval apply", btrfs_text)
 
+        # A commit= in /etc/fstab in digits the kernel does not read (U+00B2, which int() refuses; U+0663...,
+        # which int() reads as 300) is no number: fstab reads as the 30 s default, a drift from the others.
+        etc_fstab = os.path.join(self.root, "etc", "fstab")
+        arabic_300 = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+        for value in ("\N{SUPERSCRIPT TWO}", arabic_300):
+            with self.subTest(value=value):
+                self._setup_compression(
+                    fstab_opt="compress-force=zstd:1,commit=60",
+                    kargs_opt="compress-force=zstd:1,commit=60",
+                    live_opt="compress-force=zstd:1,commit=60",
+                    top_opt="compress-force=zstd:1,commit=60",
+                )
+                with open(etc_fstab, "w", encoding="utf-8") as f:
+                    f.write(
+                        f"UUID={UUID} /var btrfs subvol=var,degraded,compress-force=zstd:1,commit={value},noatime 0 0\n"
+                    )
+                bad_r = self.run_tool()
+                self.assertEqual(bad_r.returncode, 1, bad_r.stdout + bad_r.stderr)
+                bad_text = "\n".join(area_lines(bad_r.stdout, "btrfs"))
+                self.assertIn("WARN   root btrfs commit interval: drift across layers:", bad_text)
+                self.assertIn("fstab /var=commit=30 (default)", bad_text)
+
         self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
         r2 = self.run_tool()
         self.assertEqual(r2.returncode, 0, r2.stdout)

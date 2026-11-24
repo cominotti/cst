@@ -7699,7 +7699,8 @@ EOF
         only the root's / line; a commit= an older CST wrote on the /var line is named by status and revert and
         left there.
         The top-mount's Options= is rewritten in place: its own compress-force=zstd:3 stays (the live /var
-        has zstd:1)."""
+        has zstd:1). A commit= there in digits the kernel does not read is malformed: apply and revert
+        replace it, and status reads it without a traceback."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-commit"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
@@ -7709,6 +7710,9 @@ EOF
         home_line = "UUID=0b5e6a1d-0000-4000-8000-00000000cafe /var/home btrfs subvol=home,compress=zstd:3,noatime 0 0"
         home_mount = "/dev/dm-1 /var/home btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/home 0 0"
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        # Digits str.isdigit() takes but the kernel's commit= parser does not.
+        arabic_300 = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+        superscript_two = "\N{SUPERSCRIPT TWO}"
         if exec_bash(c, f"[[ ! -e {journald_dest} ]] || echo present").stdout.strip():
             self.skipTest(f"{journald_dest} already present (another test's)")
         # The cleanup removes the top-mount units: never ones the test did not make.
@@ -7860,6 +7864,28 @@ EOF
             /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
             grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
+            # A commit= in digits the kernel does not read (Arabic-Indic 300, which int() takes) next to a valid
+            # commit=60, only in the unit: plan changes nothing, apply replaces the token, a second apply has
+            # nothing to do, revert puts the unit back without commit=.
+            unit_line="Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit"
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit={arabic_300},commit=60" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            cp "/etc/systemd/system/{top_unit}" {w}/unit.before
+            /opt/cst-rw/cst btrfs commit-interval plan >/dev/null
+            cmp -s "/etc/systemd/system/{top_unit}" {w}/unit.before
+            /opt/cst-rw/cst btrfs commit-interval apply --yes >/dev/null
+            grep -qxF "$unit_line,commit=60" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval apply --yes | grep -qF "nothing to do"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$unit_line" "/etc/systemd/system/{top_unit}"
+            # A commit= int() refuses (superscript two): status reads it (no traceback), revert replaces it.
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit={superscript_two}" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            /opt/cst-rw/cst btrfs commit-interval status >/dev/null
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$unit_line" "/etc/systemd/system/{top_unit}"
             # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so plan changes
             # nothing, apply changes the / line and leaves the /var line byte for byte, a second apply has nothing
             # to do, and revert puts the / line back and leaves the /var line again.

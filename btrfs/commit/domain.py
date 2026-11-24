@@ -115,14 +115,12 @@ class CommitCoherenceReport:
 
 
 def parse_commit_token(token: str) -> int | None:
-    """Parse one `commit=N` mount option token (positive integer seconds), or None."""
+    """Parse one `commit=N` mount option token (positive integer seconds in ASCII digits, as the kernel
+    reads it), or None."""
     if not token.startswith(_COMMIT_PREFIX):
         return None
-    raw = token[len(_COMMIT_PREFIX) :]
-    if not raw.isdigit():
-        return None
-    val = int(raw)
-    return val if val > 0 else None
+    val = parse_whole_number(token[len(_COMMIT_PREFIX) :])
+    return val if val is not None and val > 0 else None
 
 
 def extract_commit_seconds(options_str: str) -> tuple[int, ...]:
@@ -142,7 +140,8 @@ def has_explicit_commit(options_str: str) -> bool:
 
 def has_malformed_commit(options_str: str) -> bool:
     """True when `options_str` holds a `commit=` token that is not a positive number of seconds
-    (`commit=abc`, `commit=0`, `commit=`): a mount refuses it, and rewrite_commit_options replaces it."""
+    (`commit=abc`, `commit=0`, `commit=`, digits other than ASCII 0-9): a mount refuses it, and
+    rewrite_commit_options replaces it."""
     return any(
         tok.startswith(_COMMIT_PREFIX) and parse_commit_token(tok) is None
         for tok in (t.strip() for t in options_str.split(","))

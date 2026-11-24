@@ -1563,9 +1563,11 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
 - SECONDS is written in ASCII digits (`plan 90`); anything else (`plan ²`,
   digits of another script) is a usage error (exit 2).
 - A `commit=` that is not a positive number of seconds (`commit=abc`,
-  `commit=0`, an empty `commit=`), which a mount refuses, is replaced in
-  every layer, the top-mount unit included, by `apply` and `revert`, even
-  when the valid `commit=` next to it already has the target.
+  `commit=0`, an empty `commit=`, digits other than ASCII 0-9), which a
+  mount refuses, is replaced in every layer, the top-mount unit included, by
+  `apply` and `revert`, even when the valid `commit=` next to it already
+  has the target. `status` and `cst doctor` read such a layer as the 30 s
+  default, unless a valid `commit=` sits next to it.
 
 ### 9.4 Dedicated NVMe cache drive (`cache`)
 
