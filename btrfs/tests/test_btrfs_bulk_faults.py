@@ -62,6 +62,7 @@ from btrfs.bulk.domain import BY_ID, ITEMS, ItemJournal
 from btrfs.tests.bulk_fakes import (
     OLD_MARK,
     BulkHome,
+    TreeEntry,
     arm_points,
     data_places,
     inode,
@@ -479,7 +480,7 @@ class LayoutTest(unittest.TestCase):
         put_layout(made)
         applied.apply()
 
-        def shape(fx: BulkHome) -> list[tuple[str, str, str | bytes | int]]:
+        def shape(fx: BulkHome) -> list[TreeEntry]:
             return [
                 (os.path.relpath(p, fx.tmp), k, v if k != "link" else os.path.relpath(str(v), fx.tmp))
                 for p, k, v in fx.tree()
