@@ -450,11 +450,7 @@ class Survey:
         self.le_plan()
         self.bearer_state = self._bearer_state()
         self.lw_plan()
-        self.owed = self.restart_state("show") or ""
-        owed = self.owed.split("\n")
-        self.bt_owed = BLUETOOTH_UNIT in owed
-        self.wp_owed = WIREPLUMBER_UNIT in owed
-        self.owed = self.owed.rstrip("\n")
+        self.read_owed()
         self.bt_restart = self.mc_changed or self.o.force or self.bt_owed
         # A bluetoothd restart takes WirePlumber's endpoints with it; a comment-only renewal restarts nothing.
         self.wp_restart = (
@@ -464,6 +460,15 @@ class Survey:
             or self.le_change
             or self.wp_state in (WpState.MISSING, WpState.CHANGE)
         )
+
+    def read_owed(self) -> None:
+        """The restarts the record owes while the services run with the IDs it names: owed (the units,
+        one per line), bt_owed and wp_owed."""
+        self.owed = self.restart_state("show") or ""
+        owed = self.owed.split("\n")
+        self.bt_owed = BLUETOOTH_UNIT in owed
+        self.wp_owed = WIREPLUMBER_UNIT in owed
+        self.owed = self.owed.rstrip("\n")
 
     def _bearer_state(self) -> BearerState:
         """What apply does with the headset's preferred bearer (BEARER)."""
