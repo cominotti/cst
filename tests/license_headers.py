@@ -79,6 +79,7 @@ _BY_SUFFIX: Final[dict[str, tuple[str, str]]] = {
     ".md": _MARKUP,
     ".mount": _HASH,
     ".py": _HASH,
+    ".qnt": _SLASHES,  # Quint specs
     ".rules": _SLASHES,  # polkit rules are JavaScript
     ".service": _HASH,
     ".sh": _HASH,
