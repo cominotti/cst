@@ -316,8 +316,19 @@ if [[ -n "${target_user}" && "${target_user}" != root ]]; then
     shim="$(getent passwd "${target_user}" | cut -d: -f6)/.local/bin/btrfs-stall-report"
 fi
 
+# root_fs_uuid: the UUID of the root btrfs, chosen as cst doctor chooses it: the
+# filesystem of /sysroot (Silverblue), else of / (a host without /sysroot, such
+# as Fedora Workstation), else of /var, each only when it is btrfs. Nothing
+# (and status 0) when none of them is.
 root_fs_uuid() {
-    findmnt -rn -o UUID --target /sysroot 2>/dev/null | head -n1
+    local t uuid
+    for t in /sysroot / /var; do
+        uuid="$(findmnt -rn -o UUID --target "${t}" -t btrfs 2>/dev/null | head -n1 || true)"
+        if [[ -n "${uuid}" ]]; then
+            echo "${uuid}"
+            return 0
+        fi
+    done
 }
 
 # forget_timer_state UNIT...: for each timer among UNIT, forget its last run

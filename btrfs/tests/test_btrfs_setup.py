@@ -1907,6 +1907,75 @@ class StatusMountsAndCompressDispatchTest(unittest.TestCase):
                 self.assertNotIn("separate filesystem", out)
                 self.assertIn("  /var       ok (compress=zstd:1 ", out)
 
+    # A findmnt stand-in over a mount table (TABLE: "TARGET FSTYPE UUID OPTIONS" lines) that reads its
+    # arguments as findmnt does: -o UUID or -o OPTIONS,UUID, --target or -M, and -t, which prints nothing
+    # and fails when the mount is of another type. A target not in the table fails, as findmnt
+    # --target does for a path that does not exist.
+    MOUNT_TABLE_FINDMNT = r"""
+findmnt() {
+    local cols="" target="" fstype="" m t u o
+    while (( $# )); do
+        case "$1" in
+            -o) cols="$2"; shift ;;
+            --target|-M) target="$2"; shift ;;
+            -t) fstype="$2"; shift ;;
+        esac
+        shift
+    done
+    while read -r m t u o; do
+        [[ "$m" == "$target" ]] || continue
+        [[ -z "$fstype" || "$fstype" == "$t" ]] || return 1
+        case "$cols" in
+            UUID) echo "$u" ;;
+            OPTIONS,UUID) echo "$o $u" ;;
+        esac
+        return 0
+    done <<<"$TABLE"
+    return 1
+}
+"""
+
+    def test_the_root_uuid_falls_back_to_root_then_var(self) -> None:
+        # root_fs_uuid asked only /sysroot: a host without it (Fedora Workstation) had no root UUID.
+        cases = {
+            "silverblue": ("/sysroot btrfs uuid-a o\n/ overlay - o\n/var btrfs uuid-a o", "uuid-a"),
+            "no /sysroot": ("/ btrfs uuid-w o\n/var/home btrfs uuid-h o", "uuid-w"),
+            "a root that is not btrfs": ("/ ext4 uuid-e o\n/var btrfs uuid-v o", "uuid-v"),
+            "no btrfs": ("/ ext4 uuid-e o", ""),
+        }
+        for name, (table, want) in cases.items():
+            with self.subTest(name):
+                script = "\n".join(
+                    [
+                        "set -Eeuo pipefail",
+                        shell_function(SETUP, "root_fs_uuid"),
+                        self.MOUNT_TABLE_FINDMNT,
+                        f"TABLE=$'{table}'",
+                        'uuid="$(root_fs_uuid)"',
+                        'echo "[$uuid]"',
+                    ]
+                )
+                r = subprocess.run(
+                    ["bash", "-c", script],
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmp},
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    check=False,
+                )
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, f"[{want}]\n", ""))
+
+    def test_a_separate_home_is_named_on_a_host_without_sysroot(self) -> None:
+        # Without /sysroot the root UUID was empty, so a separate btrfs /var/home was judged by the
+        # root's options ("MISSING: compress=zstd ...") while cst doctor took it for a separate filesystem.
+        full = "compress=zstd:1,flushoncommit,noatime,discard=async,degraded,space_cache=v2,ssd"
+        table = f"/ btrfs uuid-a {full}\n/var btrfs uuid-a {full}\n/var/home btrfs uuid-b noatime,ssd"
+        # status runs status_mounts with set +e +o pipefail: findmnt -M /sysroot fails here.
+        out = self._run_status_mounts("", self.MOUNT_TABLE_FINDMNT, f"TABLE=$'{table}'", "set +e +o pipefail")
+        self.assertIn("  /var       ok (compress=zstd:1 ", out)
+        self.assertIn("  /var/home  separate filesystem (not the root's): CST does not set its options", out)
+        self.assertNotIn("MISSING", out)
+
     def _nvme_lines(self, param: str | None, *, managed: bool, tolerances: Sequence[str] = ()) -> list[str]:
         """status_mounts' NVMe APST lines, with the kernel parameter holding PARAM (None: no such file) and
         controllers nvme0, nvme1, ... whose latency tolerance holds each of TOLERANCES."""

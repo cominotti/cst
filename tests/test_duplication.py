@@ -100,7 +100,8 @@ ALLOWED_SHELL_SAME_NAMES: Final[dict[str, str]] = {
     "is_subvol": "the installed btrfs-snapshot's check and setup-snapshots.bash's, which runs from the checkout",
     "lock": "btrfs-notify's queue lock vs btrfs-snapshot's run lock",
     "log": "each program's journal tag; the installed programs cannot source a shared file",
-    "root_fs_uuid": "a copy in btrfs-setup.sh and the degraded-boot setup: the same query; to share in a sourced file",
+    "root_fs_uuid": "btrfs-setup.sh's falls back from /sysroot to / and /var; the degraded-boot setup runs only "
+    "where /sysroot is btrfs (it refuses otherwise) and asks /sysroot alone; to share in a sourced file",
     "status": "each setup script's own status subcommand",
     "uninstall": "each setup script's own uninstall subcommand",
     "usage": "each script's help, printed from its own header",

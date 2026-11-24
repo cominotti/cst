@@ -937,7 +937,9 @@ How to read it:
 - `ok` after each mount: all expected mount options are there. Otherwise you see
   `MISSING:` and the names. A separate filesystem at `/var/home` (another UUID
   than the root's) is named as such and not checked: CST sets only the root's
-  options.
+  options. The root is the btrfs of `/sysroot`, else of `/` (a host without
+  `/sysroot`, such as Fedora Workstation), else of `/var`, as `cst doctor`
+  finds it; `install`, `status` and `crypt-perf` take its UUID the same way.
 - `ok` after `vm.dirty_*`: the live values match the file. Otherwise `DRIFT`.
 
 ---
