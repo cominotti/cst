@@ -234,7 +234,7 @@ def _irq_package_line(snap: IrqSnapshot, *, no_pkg: bool) -> str | None:
 
 def _irq_service_line(snap: IrqSnapshot, *, no_pkg: bool) -> str | None:
     """What the plan does to irqbalance.service when it will exist and a ban is wanted, or None."""
-    pkg_will_exist = snap.service_unit_present or (snap.rpm_ostree_present and not no_pkg and bool(snap.banned_cpulist))
+    pkg_will_exist = snap.service_unit_present or (snap.rpm_ostree_present and not no_pkg)
     if not (pkg_will_exist and snap.banned_cpulist):
         return None
     cfg_changed = snap.env_text != render_irq_env(snap.banned_cpulist) or snap.dropin_text != render_irq_dropin()
