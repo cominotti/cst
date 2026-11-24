@@ -422,10 +422,12 @@ class NasRun:
 
 
 class NasMergeBack(NamedTuple):
-    """What the merge back after a NAS backup could not do (problems) and how each overlay stood (how)."""
+    """What the merge back after a NAS backup could not do (problems), how each overlay stood (how),
+    and the disks it put back on their image (back: both listings show the image)."""
 
     problems: list[str]
     how: dict[str, VmOverlayKind]
+    back: frozenset[str]
 
 
 def nas_tags(vm: str, keep: str | None) -> list[str]:

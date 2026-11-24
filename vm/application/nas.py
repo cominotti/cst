@@ -139,13 +139,14 @@ def restic_ready(cfg: VmSettings, restic: ResticPort, nas: NasRepo) -> None:
 
 def commit_back(
     cfg: VmSettings, p: NasBackup, vm: str, overlaid: Mapping[str, tuple[str, str]]
-) -> tuple[list[str], dict[str, VmOverlayKind]]:
+) -> tuple[list[str], dict[str, VmOverlayKind], set[str]]:
     """virsh blockcommit --active --pivot for each overlay (also on a paused
     VM), then a check of the live and the persistent definition, then the
-    overlay file removed. Returns (problems, {target: how to recover}); no
-    problems: every disk is back on its image."""
+    overlay file removed. Returns (problems, {target: how to recover}, the
+    targets put back on their image); no problems: every disk is back on its image."""
     problems: list[str] = []
     how: dict[str, VmOverlayKind] = {}
+    back: set[str] = set()
     state = domain_state_or_none(p.commands, vm)
     if state not in LIVE_STATES:
         problems.append(
@@ -155,7 +156,7 @@ def commit_back(
         )
         for t, (base, _overlay) in overlaid.items():
             how[t] = overlay_kind(state, None, base)
-        return problems, how
+        return problems, how, back
     if state != "running":
         p.out.say(f"  {vm} is {state}: merging back anyway (a block job works on it)", flush=True)
     deadline = p.clock.monotonic() + cfg.commit_timeout
@@ -190,12 +191,13 @@ def commit_back(
                 "until both listings show the image"
             )
         else:
+            back.add(t)
             why = p.store.remove_overlay(overlay)
             if why is not None:
                 p.out.say(f"  note: {overlay}: not removed ({why}); {t} is back on {base}: remove it by hand")
             continue
         how[t] = overlay_kind(state, live_src, base)
-    return problems, how
+    return problems, how, back
 
 
 def find_overlays(p: NasBackup, vm: str, specs: Mapping[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
@@ -444,6 +446,7 @@ def _nas_merge_back(cfg: VmSettings, p: NasBackup, run: NasRun) -> NasMergeBack:
     ignored by the caller): what it could not do."""
     problems: list[str] = []
     how: dict[str, VmOverlayKind] = {}
+    back: set[str] = set()
     with p.commands.detached():
         if run.live:
             # What the VM really runs on, not only what take_snapshot saw.
@@ -454,11 +457,11 @@ def _nas_merge_back(cfg: VmSettings, p: NasBackup, run: NasRun) -> NasMergeBack:
                 problems.append(f"the disks could not be listed: {e!r}")
         if run.overlaid:
             try:
-                more, how = commit_back(cfg, p, run.vm, run.overlaid)
+                more, how, back = commit_back(cfg, p, run.vm, run.overlaid)
                 problems += more
             except Exception as e:  # noqa: BLE001 - reported loudly below
                 problems.append(f"the merge back failed: {e!r}")
-    return NasMergeBack(problems, how)
+    return NasMergeBack(problems, how, frozenset(back))
 
 
 def _nas_not_merged_back(
@@ -474,7 +477,9 @@ def _nas_not_merged_back(
     p.alert("VM backup: disk left on a snapshot overlay", body)
     if not run.overlaid:  # nothing known: the files this run could have made
         _add_overlay_files(p, run)
-    lines = overlay_recovery(run.vm, run.overlaid.items(), merge.how)
+    # A disk the merge back put back (both listings show its image) needs no command.
+    left = [(t, spec) for t, spec in run.overlaid.items() if t not in merge.back]
+    lines = overlay_recovery(run.vm, left, merge.how)
     msg = (
         "DISK NOT MERGED BACK:\n  "
         + "\n  ".join(merge.problems)

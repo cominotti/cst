@@ -443,11 +443,14 @@ module nas {
     }
   }
   // _nas_not_merged_back: the critical alert, then Refused with the recovery lines: each overlay the
-  // run knows (with the files of an unclear snapshot, or every file when it knows none).
+  // run knows (with the files of an unclear snapshot, or every file when it knows none), but none of
+  // the disks the merge back put back. Those are the known overlays with no recovery kind: by the
+  // alert, domstate or the check gave every other one its kind.
   action alert = all {
     s.pc == "alert",
     val known = if (s.failure == "uncertain") s.overlaid.union(fileTargets(s)) else s.overlaid // PS10
-    val named = if (known == Set()) fileTargets(s) else known
+    val back = s.overlaid.filter(t => s.how.get(t) == "")
+    val named = (if (known == Set()) fileTargets(s) else known).exclude(back)
     def kind(t: str): str = if (s.how.get(t) == "") "unknown" else s.how.get(t)
     all {
       s' = finish({ ...s, alerted: s.alerted.union(named.map(t => (t, s.r, kind(t)))) }, "refused"),

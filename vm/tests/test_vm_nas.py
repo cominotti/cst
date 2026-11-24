@@ -2885,6 +2885,60 @@ class NasUnclearSnapshotTest(unittest.TestCase):
         self.assertTrue(store.exists(overlay_b))
 
 
+class NasRecoveryLinesTest(unittest.TestCase):
+    """DISK NOT MERGED BACK gives the commands only for the disks still on an overlay: one the merge
+    back put back (both listings show its image, its overlay removed) is not named again."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    _timeout_hook = NasUnclearSnapshotTest._timeout_hook
+    disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+    overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _refusal(self, port: vm_app_nas.NasBackup) -> str:
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        return str(ctx.exception)
+
+    def test_a_disk_merged_back_is_not_named_when_another_disks_commit_fails(self) -> None:
+        def hook(
+            args: Sequence[str], _cmds: FakeNasCommands, _sigs: FakeNasSignals, _live: dict[str, str], _store: FakeNasStore
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "blockcommit" and args[2] == "vdb":
+                return 1, "", "error: block commit failed"
+            return None
+
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)], on_virsh=hook
+        )
+        msg = self._refusal(port)
+        self.assertIn("vdb: virsh blockcommit: error: block commit failed", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        self.assertIn(f"# vdb: the VM still runs on {self.overlay_b}", recovery)
+        self.assertNotIn("vda", recovery)
+        self.assertNotIn(self.overlay_a, recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_disk_merged_back_is_not_named_after_an_unclear_snapshot(self) -> None:
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", self.disk_a), ("vdb", self.disk_b)],
+            on_virsh=self._timeout_hook({"vda": self.overlay_a}, [self.overlay_a, self.overlay_b]),
+            clock=FakeNasMovingClock(),
+        )
+        msg = self._refusal(port)
+        self.assertIn(f"may still switch to it. Nothing was removed (kept: {self.overlay_b})", msg)
+        recovery = msg.split("by hand (read each line first):", 1)[1]
+        self.assertIn(self.overlay_b, recovery)
+        self.assertNotIn(self.overlay_a, recovery)
+        self.assertNotIn("vda", recovery)
+        self.assertEqual(store.removed, [self.overlay_a])
+        self.assertTrue(store.exists(self.overlay_b))
+        self.assertEqual(len(alerts), 1)
+
+
 class NasHeldStopThawTest(unittest.TestCase):
     """A stop held through a quiesced snapshot call is raised when the held block ends: the best-effort
     domfsthaw still runs before it whenever the call did not settle the guest's freeze."""
