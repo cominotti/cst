@@ -2850,7 +2850,9 @@ class NasUnclearSnapshotTest(unittest.TestCase):
 
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
         with self.assertRaises(Refused) as ctx:
-            vm_app_nas.nas_run(self._cfg(), dataclasses.replace(port, alert=alert), "win", None, nas, quiesce=False, live=True)
+            vm_app_nas.nas_run(
+                self._cfg(), dataclasses.replace(port, alert=alert), "win", None, nas, quiesce=False, live=True
+            )
         msg = str(ctx.exception)
         self.assertIn("DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within", msg)
         self.assertIn(overlay_a, msg.split("by hand (read each line first):", 1)[1])
@@ -2904,7 +2906,11 @@ class NasRecoveryLinesTest(unittest.TestCase):
 
     def test_a_disk_merged_back_is_not_named_when_another_disks_commit_fails(self) -> None:
         def hook(
-            args: Sequence[str], _cmds: FakeNasCommands, _sigs: FakeNasSignals, _live: dict[str, str], _store: FakeNasStore
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            _live: dict[str, str],
+            _store: FakeNasStore,
         ) -> tuple[int, str, str] | None:
             if args[0] == "blockcommit" and args[2] == "vdb":
                 return 1, "", "error: block commit failed"
@@ -2948,7 +2954,9 @@ class NasHeldStopThawTest(unittest.TestCase):
     disk_a = "/img/a.qcow2"
     overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
 
-    def _run(self, rc: int, *, switched: bool) -> tuple[Refused | vm_domain_backup.Stop, list[str], list[tuple[str, str]]]:
+    def _run(
+        self, rc: int, *, switched: bool
+    ) -> tuple[Refused | vm_domain_backup.Stop, list[str], list[tuple[str, str]]]:
         """nas_run of a running VM with a connected guest agent whose quiesced snapshot call answers rc
         (switching the disk or only making its file) while a stop is held; (what it raised, the virsh
         commands, the alerts)."""
@@ -2976,11 +2984,9 @@ class NasHeldStopThawTest(unittest.TestCase):
             disks, on_virsh=hook, signals=_StopAtHeldEnd(), clock=FakeNasMovingClock()
         )
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
-        try:
+        with self.assertRaises((Refused, vm_domain_backup.Stop)) as ctx:
             vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=True, live=True)
-        except (Refused, vm_domain_backup.Stop) as e:
-            return e, [c[0][0] for c in commands.virsh_log], alerts
-        self.fail("nas_run ended without a refusal or a stop")
+        return ctx.exception, [c[0][0] for c in commands.virsh_log], alerts
 
     def test_an_unclear_quiesced_snapshot_is_thawed_before_the_held_stop(self) -> None:
         raised, cmds, alerts = self._run(int(ExitStatus.TIMED_OUT), switched=False)
