@@ -54,8 +54,8 @@ import time
 from typing import Final
 
 QUINT_VERSION: Final = "0.33.1"
-TLC_CONFIG: Final = {"maxHeap": "-Xmx4g", "workers": 4}
 JVM_ARGS: Final = "-Xmx4g"
+TLC_CONFIG: Final = {"maxHeap": JVM_ARGS, "workers": 4}
 STAMP: Final = ".cst-quint-sha256"
 # Seconds each kind of run may take before it is stopped.
 TLC_TIMEOUT: Final = 300
@@ -326,11 +326,17 @@ class Verdict:
     depth: int | None
 
 
+def last_number(pattern: str, text: str) -> int | None:
+    """The number in pattern's one group at its last match in text, or None."""
+    found = re.findall(pattern, text)
+    return int(found[-1]) if found else None
+
+
 def verdict(ran: Ran) -> Verdict:
     # TLC prints its progress as it goes ("Progress(N) at ...: X states generated, Y distinct states found"):
     # the last such line is the total.
-    states = (re.findall(r"(\d+) distinct states found", ran.output) or [None])[-1]
-    depth = (re.findall(r"depth of the complete state graph search is (\d+)", ran.output) or [None])[-1]
+    states = last_number(r"(\d+) distinct states found", ran.output)
+    depth = last_number(r"depth of the complete state graph search is (\d+)", ran.output)
     if ran.returncode == TIMED_OUT:
         result = "timed out"
     elif ran.returncode == 0 and "[ok] No violation found" in ran.output:
@@ -339,7 +345,7 @@ def verdict(ran: Ran) -> Verdict:
         result = "violated"
     else:
         result = "failed"
-    return Verdict(result, int(states) if states is not None else None, int(depth) if depth is not None else None)
+    return Verdict(result, states, depth)
 
 
 def normalize(text: str, description: str) -> str:
