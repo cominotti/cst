@@ -605,6 +605,7 @@ The code is split into four layers under `doctor/`:
   `swap.py`, `vm.py`, `install.py`), each with its own probes.
   `registry.py` holds `AREAS` (the area modules in their output order),
   `CHECKS` (their checks, in that order), `wired_checks` and `run_checks`.
+  `findmnt.py` holds the btrfs area's two `findmnt` probes (the live mounts as /proc/mounts lines).
   `shared.py` holds what several areas use: the `@check` decorator, the settings-file readers, and `DoctorFacts`: what
   several checks ask (rpm-ostree with every deployment, through cst_core's
   one query `cst_core.domain.ostree`, the libvirt domains, each VM's
