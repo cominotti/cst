@@ -670,6 +670,28 @@ class BackupNameTest(InProcessCase):
         self.assertFalse(os.path.exists(base + "-1"))
         self.assertEqual(self.text(m.main_conf), VENDOR)
 
+    def test_no_free_name_stops_the_run(self) -> None:
+        # The second's name and -1 to -99 are taken: apply gives up before main.conf is written.
+        m = self.machine()
+        base = self.base(m)
+        planted = [base, *(f"{base}-{n}" for n in range(1, 100))]
+        for path in planted:
+            m.put(path, "taken\n")
+            os.utime(path, (2_000_000_000, 2_000_000_000))
+        rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(
+            f"cst-t: ERROR: no free name for a backup of {m.main_conf} ({base} and 99 more are taken)\n", err
+        )
+        self.assertEqual(self.sudo_cps(m), [])
+        calls = m.read("log").splitlines()
+        self.assertEqual([c for c in calls if c.startswith(("sudo install", "sudo mv"))], [])
+        self.assertFalse(os.path.exists(f"{base}-100"))
+        self.assertEqual(self.text(m.main_conf), VENDOR)
+        self.assertFalse(os.path.exists(m.pending))
+        for path in planted:
+            self.assertEqual(self.text(path), "taken\n", path)
+
     def test_the_oldest_backup(self) -> None:
         m = self.machine()
         base = self.base(m)
