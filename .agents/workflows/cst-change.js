@@ -84,6 +84,9 @@ export const meta = {
 // - The branch head is checked the same way: simplify reports the head it leaves (and a clean worktree), every
 //   reviewer the head it reviewed (it must be that one), and the fixer the head it gated and the head after
 //   everything (they must be equal for ready).
+// - What the simplify stage saw and may not fix (it changes no behaviour: a failing test or property, a bug) goes in
+//   its left_for_fix and reaches the fixer in both lanes (fixInput), tagged source "simplify"; no reviewer has to
+//   report it again (R6b's failing state-machine sequence reached nobody).
 
 // Restarts, the guard, the advisor and when to stop (2026-11-24, from the runs of 2026-11-22/24):
 // - A stage may run again after a usage-limit pause, with the same prompt. Implement decides from what exists
@@ -236,6 +239,12 @@ function fixerChangedCode(fix) {
 function guardCmd(qm) {
   return 'git -C ' + qm + ' rev-parse HEAD; git -C ' + qm + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + qm + ' diff HEAD --full-index | sha256sum; (cd ' + qm + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
 }
+// What the fixer gets: the reviewers' findings, then what the simplify stage left for the fix stage, tagged
+// source "simplify" (none without a simplify stage, as in mode "review", or without a list). Pure: tested below.
+function fixInput(reviewFindings, simp) {
+  const left = simp && Array.isArray(simp.left_for_fix) ? simp.left_for_fix : []
+  return [...reviewFindings, ...left.map((f) => ({ ...f, source: 'simplify' }))]
+}
 // A path as one shell word: as it is when it needs no quoting. Pure: tested below.
 function shq(s) { return /^[A-Za-z0-9_\/.,+:@%=-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'" }
 // Why the worktree path cannot work ('' when it can): inside the main checkout, its folder shows up in the guard's
@@ -352,6 +361,8 @@ function selftest() {
   const gc = guardCmd('/r/cst')
   eq([gc.includes('git -C /r/cst diff HEAD --full-index | sha256sum'), /\bdiff\b(?![^;|]*--full-index)/.test(gc)], [true, false], 'the guard names objects in full')
   eq(['git -C /r/cst rev-parse HEAD;', 'git -C /r/cst status --porcelain --untracked-files=all | sha256sum;', 'git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'].map((s) => gc.includes(s)), [true, true, true], 'the guard keeps its four readings')
+  const fa = { file: 'a', summary: 's', scenario: 'c' }, fb = { file: 'b', line: 3, summary: 't', scenario: 'd' }
+  eq([fixInput([fa], { left_for_fix: [fb] }), fixInput([fa], null), fixInput([fa], {}), fixInput([fa], { left_for_fix: 'x' }), fixInput([], { left_for_fix: [] })], [[fa, { ...fb, source: 'simplify' }], [fa], [fa], [fa], []], 'what the fixer gets')
   eq([guardChanges('a\nb', 'a\nb'), guardChanges(' M AGENTS.md\nh1  AGENTS.md', ' M AGENTS.md\nh2  AGENTS.md\n?? x'), guardChanges('', '')], [[], ['- h1  AGENTS.md', '+ h2  AGENTS.md', '+ ?? x'], []], 'guard changes')
   return 'ok'
 }
@@ -398,6 +409,8 @@ const GUARDED = { main_before: { type: 'string' }, main_after: { type: 'string' 
 const GREQ = ['main_before', 'main_after']
 const CHANGED = { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, status: { type: 'string' } }, required: ['path', 'status'] } }
 const GATED = { gated_head: { type: 'string' }, worktree_clean: { type: 'boolean' } }
+// One finding, as reviewers return it and as the simplify stage leaves it for the fix stage.
+const FINDING = { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] }
 
 let lastAfter = null
 const trail = []
@@ -458,8 +471,8 @@ if (MODE === 'new' || MODE === 'continue') {
   if (!impl.check_ok || !impl.worktree_clean) return stopped('implement', { impl })
 
   phase('Simplify')
-  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + QWT + ' diff ' + QBASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + QWT + ' && nice -n 10 invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits, and numstat, the verbatim output of "' + NUMSTAT_CMD + '". Commit every edit you keep: the review sees only commits. ' + GATE_TAIL,
-    { commits: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, changed_paths: CHANGED, numstat: { type: 'string' }, ...GATED }, ['commits', 'summary', 'changed_paths', 'numstat', 'gated_head', 'worktree_clean'])
+  simp = await guarded('simplify', 'Simplify', shared('simplify', false) + '\n\nStage: simplify, by hand (quality only: no bug hunting, no behaviour change). On "git -C ' + QWT + ' diff ' + QBASE + '...HEAD": reuse what cst_core provides (.agents/rules/reuse-primitives.md), remove needless code, keep each function at one level of abstraction. Commit each change as a refactor proven by the unchanged tests of what it touched ("cd ' + QWT + ' && nice -n 10 invowk cmd test module <module>"). Report what you changed and what you left on purpose, and return changed_paths exactly as "' + DIFF_CMD + '" prints them after your commits, and numstat, the verbatim output of "' + NUMSTAT_CMD + '". Commit every edit you keep: the review sees only commits. Report in left_for_fix each failing test, gate or property, and each bug, you saw and did not fix here (this stage changes no behaviour), with file, line, summary and a concrete scenario (the failing sequence or command); an empty list when there is none. ' + GATE_TAIL,
+    { commits: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' }, left_for_fix: { type: 'array', items: FINDING }, changed_paths: CHANGED, numstat: { type: 'string' }, ...GATED }, ['commits', 'summary', 'left_for_fix', 'changed_paths', 'numstat', 'gated_head', 'worktree_clean'])
   if (!simp) return stopped('simplify', { impl })
   if (!simp.worktree_clean) { log('simplify: the worktree has uncommitted edits: stopping'); return stopped('simplify', { impl, simp }) }
   changed = simp.changed_paths
@@ -486,7 +499,7 @@ const lines = numstatLines(numstat)
 const slow = fullReviewReason(changed, lines, pick.lenses)
 const LANE = slow ? 'full' : 'fast'
 log(slow ? 'full review: ' + slow : 'fast lane: ' + lines + ' changed line(s) of docs, tests and repository tooling')
-const FIND = { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string' } }, required: ['file', 'summary', 'scenario'] } } }
+const FIND = { findings: { type: 'array', items: FINDING } }
 const FORK_FINDINGS = "jq -c 'select(.type==\"assistant\") | .message.content[]? | select(.type==\"tool_use\" and .name==\"StructuredOutput\") | .input.findings' ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/*/subagents/agent-<agentId>.jsonl | tail -n 1 > $TMPDIR/fork-findings.json; jq length $TMPDIR/fork-findings.json"
 const REVIEWED = ' Report reviewed_head: what "git -C ' + QWT + ' rev-parse HEAD" prints when you start.'
 // What the fixer does with the findings, in both lanes.
@@ -510,17 +523,19 @@ if (LANE === 'full') {
   for (let i = 0; i < reviews.length; i++) if (!reviews[i] && !mainMoved()) { log('review ' + labels[i] + ': retrying once'); reviews[i] = await runReview(labels[i]) }
   const missing = labels.filter((l, i) => !reviews[i])
   if (missing.length) return stopped('review', { impl, simp, missing })
-  all = reviews.flatMap((r) => r.findings)
-  log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s)')
+  all = fixInput(reviews.flatMap((r) => r.findings), simp)
+  log(all.length + ' finding(s) from ' + reviews.length + ' reviewer(s) and the simplify stage')
 
   phase('Fix')
-  fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers (JSON): ' + JSON.stringify(all) + '\n' + FIX_RULES, FIX_PROPS, FIX_REQ)
+  fix = await guarded('fix', 'Fix', shared('fix', true) + '\n\nStage: fix. You wrote none of this code. Findings from the reviewers and from the simplify stage (source: simplify) (JSON): ' + JSON.stringify(all) + '\n' + FIX_RULES, FIX_PROPS, FIX_REQ)
   if (!fix) return stopped('fix', { impl, simp, findings: all })
 } else {
   // The fast lane: no code-review fork and no lens agents; one agent that did not write the change reviews it by
   // hand, then fixes what it confirmed, as the fixer does.
   phase('Fast lane')
-  fix = await guarded('review+fix', 'Fast lane', shared('review+fix', true) + '\n\nStage: review and fix, the fast lane (a change of at most ' + FAST_LINES + ' lines of docs, tests and repository tooling: one agent reviews it and fixes it). You wrote none of this code. Do not invoke the code-review or simplify skills. First review "git -C ' + QWT + ' diff ' + QBASE + '...HEAD" by hand, FINDINGS ONLY until your list is done: correctness, the repository rules, the proof the kind "' + A.kind + '" asks for, tests that would catch a regression, docs that follow the change. Report each finding in findings with file, line, summary and a concrete failure scenario.' + REVIEWED + ' Then take your findings as the fixer does. ' + FIX_RULES,
+  const left = fixInput([], simp)
+  const leftLine = left.length ? ' The simplify stage left these for the fix stage (JSON): ' + JSON.stringify(left) + '; verify them and put each in your findings with your own.' : ''
+  fix = await guarded('review+fix', 'Fast lane', shared('review+fix', true) + '\n\nStage: review and fix, the fast lane (a change of at most ' + FAST_LINES + ' lines of docs, tests and repository tooling: one agent reviews it and fixes it). You wrote none of this code. Do not invoke the code-review or simplify skills. First review "git -C ' + QWT + ' diff ' + QBASE + '...HEAD" by hand, FINDINGS ONLY until your list is done: correctness, the repository rules, the proof the kind "' + A.kind + '" asks for, tests that would catch a regression, docs that follow the change. Report each finding in findings with file, line, summary and a concrete failure scenario.' + REVIEWED + leftLine + ' Then take your findings as the fixer does. ' + FIX_RULES,
     { ...FIND, reviewed_head: { type: 'string' }, ...FIX_PROPS }, ['findings', 'reviewed_head', ...FIX_REQ])
   if (!fix) return stopped('review+fix', { impl, simp })
   if (!counted(fix, 'review+fix', HEAD, 'review+fix')) return stopped('review+fix', { impl, simp, fix })
