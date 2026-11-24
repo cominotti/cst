@@ -102,6 +102,8 @@ _PYTHON_WORD: Final = re.compile(r"(?<![\w./-])(?:[\w./-]*/)?python3(?:\.\d+)?(?
 _OPTION_WITH_ARGUMENT: Final = frozenset("mcXW")
 _MODULE_OPTION: Final = "m"
 _CODE_OPTION: Final = "c"
+# python3's long options that take the next word as their argument (or one after "="; the others take none).
+_LONG_OPTIONS_WITH_ARGUMENT: Final = frozenset({"--check-hash-based-pycs"})
 # The shell's tokens after python3, in order: a redirection (its target is the next word: >log, 2>&1, &>log, <in),
 # a word (its quoted parts, $(...), ${...} and ${{ ... }} kept whole, blanks and all), or what ends the command
 # (; | & ( ), or a quote no word closes: the end of the "..." python3 is in).
@@ -435,7 +437,8 @@ def python_program(text: str) -> tuple[ProgramKind, str] | None:
     (_command_words) and as Python reads its own options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD)
     for the first word that is no option, or None (-c's inline code, "-" for stdin, no program). An
     option cluster (-IB) goes on; -m, -c, -X and -W take the rest of their cluster or the next word;
-    "--" ends the options; another word that starts with "--" is a long option. Words after the
+    "--" ends the options; another word that starts with "--" is a long option, which takes the next word
+    when it is one of _LONG_OPTIONS_WITH_ARGUMENT (--check-hash-based-pycs MODE). Words after the
     program are the program's own (a -m there is not python3's)."""
     words = _command_words(text)
     i = 0
@@ -449,7 +452,11 @@ def python_program(text: str) -> tuple[ProgramKind, str] | None:
             return None
         if not word.startswith("-"):
             return ProgramKind.SCRIPT, word
-        option = None if word.startswith("--") else _option_with_argument(word)
+        if word.startswith("--"):
+            if word in _LONG_OPTIONS_WITH_ARGUMENT:
+                i += 1
+            continue
+        option = _option_with_argument(word)
         if option is None:
             continue
         letter, argument = option

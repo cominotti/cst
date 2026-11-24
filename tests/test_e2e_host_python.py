@@ -332,6 +332,7 @@ class PlantedTest(unittest.TestCase):
             'want="$(python3 -X dev -W error tests/e2e/new.py "${name}")"': "tests/e2e/new.py",
             "want=\"$(python3 -I -c 'print(1)'; python3 -m venv /tmp/v)\"": None,
             'want="$(python3 -IBm tests.e2e.image_digest "${name}")"': None,
+            'want="$(python3 --check-hash-based-pycs always tests/e2e/new.py)"': "tests/e2e/new.py",
         }
         for new, reported in cases.items():
             with self.subTest(line=new):
@@ -421,6 +422,9 @@ class CommandLineTest(unittest.TestCase):
             ("<in -m tests.e2e.run", ("module", "tests.e2e.run")),
             ('-I "tests/e2e/run.py"&&true', ("script", "tests/e2e/run.py")),
             ("-I|tee log", None),
+            ("--check-hash-based-pycs always tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("--check-hash-based-pycs=never tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("--version tests/e2e/run.py", ("script", "tests/e2e/run.py")),
         ):
             with self.subTest(line=line):
                 self.assertEqual(gate.python_program(line), want)
