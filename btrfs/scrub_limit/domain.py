@@ -17,7 +17,7 @@ SCRUB_CONF_PATH: Final = SNAPSHOTS_CONF
 SCRUB_DROPIN_PATH: Final = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
 
 _SCRUB_SIZE_RE: Final = re.compile(r"^[0-9]+[KkMmGgTt]?$")
-_SCRUB_ASSIGN_RE: Final = re.compile(r"^\s*(?:export\s+)?SCRUB_LIMIT(?:\s*=|\s*$)")
+_SCRUB_ASSIGN_RE: Final = re.compile(r"^\s*(?:export\s+)?SCRUB_LIMIT\s*(?:=|$)")
 _SCRUB_DROPIN_RE: Final = re.compile(r"^ExecStartPre=/usr/sbin/btrfs scrub limit -a -l (\S+) /var$", re.MULTILINE)
 _CONF_HEADER: Final = (
     "# Managed by btrfs-setup.sh (CST); read by /usr/local/sbin/btrfs-snapshot.\n"

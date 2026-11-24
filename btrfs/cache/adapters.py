@@ -116,9 +116,9 @@ def _resolve_target_user(requested: str | None, rt: _CacheMountRuntime) -> tuple
     username = requested or _default_username(rt.env_map)
     record: CacheMountUser | None = None
     if rt.seam_root:
-        passwd_path = f"{rt.seam_root.rstrip('/')}{_ACCOUNT_DB_PATH}"
-        if os.path.isfile(passwd_path):
-            record = _lookup_passwd_file(passwd_path, username)
+        account_db_path = f"{rt.seam_root.rstrip('/')}{_ACCOUNT_DB_PATH}"
+        if os.path.isfile(account_db_path):
+            record = _lookup_passwd_file(account_db_path, username)
     if record is None:
         try:
             pw = pwd.getpwnam(username)
