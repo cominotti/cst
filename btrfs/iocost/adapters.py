@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import os
 import re
 from typing import Final
@@ -170,10 +170,26 @@ def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDi
         output=OutputMode.CAPTURE,
     )
     if res.fault is not None or res.returncode != 0:
-        return replace(disk, udev_error=first_line(res.stderr) or f"exit {res.returncode}")
-    props = dict(line.partition("=")[::2] for line in res.stdout.splitlines() if "=" in line)
-    return replace(
-        disk, hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(), udev_ready=USEC_INITIALIZED_PROP in props
+        return BlockDisk(
+            name=disk.name,
+            devno=disk.devno,
+            rotational=disk.rotational,
+            scheduler=disk.scheduler,
+            model=disk.model,
+            hwdb_solution=disk.hwdb_solution,
+            udev_ready=disk.udev_ready,
+            udev_error=first_line(res.stderr) or f"exit {res.returncode}",
+        )
+    props = {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}
+    return BlockDisk(
+        name=disk.name,
+        devno=disk.devno,
+        rotational=disk.rotational,
+        scheduler=disk.scheduler,
+        model=disk.model,
+        hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(),
+        udev_ready=USEC_INITIALIZED_PROP in props,
+        udev_error=disk.udev_error,
     )
 
 

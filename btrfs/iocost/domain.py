@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 import re
 from typing import Final
@@ -140,7 +140,7 @@ def parse_iocost_qos(text: str) -> dict[str, IocostQosEntry]:
         devno = parts[0]
         if ":" not in devno:
             continue
-        kv = dict(item.partition("=")[0::2] for item in parts[1:] if "=" in item)
+        kv = {key: value for key, sep, value in (item.partition("=") for item in parts[1:]) if sep}
         enable_val = 1 if kv.get("enable") == "1" else 0
         ctrl_val = kv.get("ctrl", "auto")
         entries[devno] = IocostQosEntry(devno=devno, enable=enable_val, ctrl=ctrl_val, raw=line.strip())
@@ -179,16 +179,8 @@ def _consume_device_flag(rest: Sequence[str], idx: int) -> tuple[str | None, int
     return (norm or None), idx + 1, (None if norm else f"{_DEVICE_FLAG} device name cannot be empty")
 
 
-def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
-    """Parse CLI arguments after `btrfs-iocost` / `cst btrfs iocost`."""
-    action, rest, head_err = parse_subcommand_head(
-        argv, IocostAction, default=IocostAction.STATUS, help_action=IocostAction.HELP
-    )
-    if head_err is not None:
-        return IocostParsedArgs(action, error=head_err, code=2)
-    if any(tok in HELP_WORDS for tok in rest):
-        return IocostParsedArgs(IocostAction.HELP)
-
+def _parse_iocost_flags(action: IocostAction, rest: Sequence[str]) -> tuple[bool, str | None, str | None]:
+    """--live-only and --device of the arguments after the action: (live_only, device, error)."""
     live_only = False
     device: str | None = None
     idx = 0
@@ -208,6 +200,20 @@ def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
         else:
             err = f"{action.value}: unexpected argument {tok!r}"
             break
+    return live_only, device, err
+
+
+def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
+    """Parse CLI arguments after `btrfs-iocost` / `cst btrfs iocost`."""
+    action, rest, head_err = parse_subcommand_head(
+        argv, IocostAction, default=IocostAction.STATUS, help_action=IocostAction.HELP
+    )
+    if head_err is not None:
+        return IocostParsedArgs(action, error=head_err, code=2)
+    if any(tok in HELP_WORDS for tok in rest):
+        return IocostParsedArgs(IocostAction.HELP)
+
+    live_only, device, err = _parse_iocost_flags(action, rest)
     if err is None and device is not None and not live_only:
         # One disk now: without --live-only, apply would also install the service, which writes every disk.
         err = f"{_DEVICE_FLAG} needs {_LIVE_ONLY_FLAG} (it writes one disk now and installs nothing)"
@@ -216,75 +222,88 @@ def parse_iocost_args(argv: Sequence[str]) -> IocostParsedArgs:
     return IocostParsedArgs(action, live_only=live_only, device=device)
 
 
+@dataclass(frozen=True, slots=True)
+class _ApplyPlanLists:
+    """What plan_iocost_apply gathers, disk by disk."""
+
+    next_managed: set[str]
+    writes: list[IocostWriteOp] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
+    preexisting: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def _select_iocost_disks(snap: IocostSnapshot, target_device: str | None) -> list[BlockDisk] | None:
+    """The disks to plan: target_device's (None when it is not a whole disk), else every eligible one."""
+    if target_device is None:
+        return [d for d in snap.disks if is_auto_eligible_disk(d)]
+    matched = [d for d in snap.disks if d.name == target_device]
+    return matched or None
+
+
+def _plan_hwdb_disk(acc: _ApplyPlanLists, snap: IocostSnapshot, disk: BlockDisk) -> None:
+    entry = snap.qos_entries.get(disk.devno)
+    if disk.devno in snap.managed_devnos and entry is not None and (entry.enable, entry.ctrl) == (1, _CTRL_AUTO):
+        # CST's own write of earlier this boot is still there (udev never replaced it): it stays
+        # CST's, so revert resets it; the next boot leaves the disk to udev.
+        acc.unchanged.append(
+            f"{disk.devno} ({disk.name}: CST's enable=1 auto from earlier this boot, kept until revert"
+            f" or reboot; hwdb solution {disk.hwdb_solution})"
+        )
+        return
+    acc.preexisting.append(f"{disk.devno} ({disk.name}: hwdb solution {disk.hwdb_solution}; left to udev)")
+    acc.next_managed.discard(disk.devno)
+
+
+def _plan_iocost_disk(acc: _ApplyPlanLists, snap: IocostSnapshot, disk: BlockDisk, *, scan_all: bool) -> None:
+    # The scan of every disk (the boot service) leaves udev's own disks alone; one --device run is
+    # the udev rule's, which only matches a disk without a hwdb solution.
+    if scan_all and disk.hwdb_solution:
+        _plan_hwdb_disk(acc, snap, disk)
+        return
+    if scan_all and not disk.udev_ready:
+        acc.notes.append(f"{disk.name}: not processed by udev yet; the udev rule writes it when udev does")
+        return
+    if scan_all and disk.udev_error:
+        acc.notes.append(f"{disk.name}: udevadm info failed ({disk.udev_error}); judged without its hwdb solution")
+    entry = snap.qos_entries.get(disk.devno)
+    if entry is not None and entry.enable == 1:
+        if disk.devno in snap.managed_devnos:
+            acc.unchanged.append(f"{disk.devno} ({disk.name}: already enable=1 {entry.ctrl})")
+        else:
+            acc.preexisting.append(f"{disk.devno} ({disk.name}: pre-existing/vendor enable=1 {entry.ctrl}; kept)")
+        return
+    acc.next_managed.add(disk.devno)
+    acc.writes.append(
+        IocostWriteOp(
+            devno=disk.devno,
+            device_name=disk.name,
+            line=f"{disk.devno} {IOCOST_ENABLE_CTRL_AUTO}",
+            reason="non-rotational block disk" if not disk.rotational else "requested device",
+        )
+    )
+
+
 def plan_iocost_apply(snap: IocostSnapshot, *, target_device: str | None = None) -> IocostPlan:
     """Compute desired `io.cost.qos` writes while respecting pre-existing/vendor `enable=1` rows."""
-    if target_device is not None:
-        matched = [d for d in snap.disks if d.name == target_device]
-        if not matched:
-            return IocostPlan(
-                writes=(),
-                unchanged=(),
-                preexisting=(),
-                next_managed=snap.managed_devnos,
-                error=f"block device {target_device!r} not found as a whole disk under /sys/block",
-            )
-        selected = matched
-    else:
-        selected = [d for d in snap.disks if is_auto_eligible_disk(d)]
-
-    writes: list[IocostWriteOp] = []
-    unchanged: list[str] = []
-    preexisting: list[str] = []
-    notes: list[str] = []
-    next_managed = set(snap.managed_devnos)
-
-    for disk in selected:
-        # The scan of every disk (the boot service) leaves udev's own disks alone; one --device run is
-        # the udev rule's, which only matches a disk without a hwdb solution.
-        if target_device is None and disk.hwdb_solution:
-            entry = snap.qos_entries.get(disk.devno)
-            if (
-                disk.devno in snap.managed_devnos
-                and entry is not None
-                and (entry.enable, entry.ctrl) == (1, _CTRL_AUTO)
-            ):
-                # CST's own write of earlier this boot is still there (udev never replaced it): it stays
-                # CST's, so revert resets it; the next boot leaves the disk to udev.
-                unchanged.append(
-                    f"{disk.devno} ({disk.name}: CST's enable=1 auto from earlier this boot, kept until revert"
-                    f" or reboot; hwdb solution {disk.hwdb_solution})"
-                )
-                continue
-            preexisting.append(f"{disk.devno} ({disk.name}: hwdb solution {disk.hwdb_solution}; left to udev)")
-            next_managed.discard(disk.devno)
-            continue
-        if target_device is None and not disk.udev_ready:
-            notes.append(f"{disk.name}: not processed by udev yet; the udev rule writes it when udev does")
-            continue
-        if target_device is None and disk.udev_error:
-            notes.append(f"{disk.name}: udevadm info failed ({disk.udev_error}); judged without its hwdb solution")
-        entry = snap.qos_entries.get(disk.devno)
-        if entry is not None and entry.enable == 1:
-            if disk.devno in snap.managed_devnos:
-                unchanged.append(f"{disk.devno} ({disk.name}: already enable=1 {entry.ctrl})")
-            else:
-                preexisting.append(f"{disk.devno} ({disk.name}: pre-existing/vendor enable=1 {entry.ctrl}; kept)")
-            continue
-        next_managed.add(disk.devno)
-        writes.append(
-            IocostWriteOp(
-                devno=disk.devno,
-                device_name=disk.name,
-                line=f"{disk.devno} {IOCOST_ENABLE_CTRL_AUTO}",
-                reason="non-rotational block disk" if not disk.rotational else "requested device",
-            )
+    selected = _select_iocost_disks(snap, target_device)
+    if selected is None:
+        return IocostPlan(
+            writes=(),
+            unchanged=(),
+            preexisting=(),
+            next_managed=snap.managed_devnos,
+            error=f"block device {target_device!r} not found as a whole disk under /sys/block",
         )
+    acc = _ApplyPlanLists(next_managed=set(snap.managed_devnos))
+    for disk in selected:
+        _plan_iocost_disk(acc, snap, disk, scan_all=target_device is None)
     return IocostPlan(
-        writes=tuple(writes),
-        unchanged=tuple(unchanged),
-        preexisting=tuple(preexisting),
-        next_managed=frozenset(next_managed),
-        notes=tuple(notes),
+        writes=tuple(acc.writes),
+        unchanged=tuple(acc.unchanged),
+        preexisting=tuple(acc.preexisting),
+        next_managed=frozenset(acc.next_managed),
+        notes=tuple(acc.notes),
     )
 
 
@@ -321,13 +340,33 @@ def plan_iocost_revert(snap: IocostSnapshot) -> IocostPlan:
     )
 
 
+def _io_controller_text(snap: IocostSnapshot) -> str:
+    if snap.io_controller_present is True:
+        return "present"
+    if snap.io_controller_present is False:
+        return "absent"
+    return "unknown"
+
+
+def _iocost_disk_tag(snap: IocostSnapshot, disk: BlockDisk, entry: IocostQosEntry | None) -> str:
+    if disk.devno in snap.managed_devnos:
+        return "CST"
+    if disk.hwdb_solution:
+        return f"hwdb solution {disk.hwdb_solution}"
+    return "vendor/manual" if entry and entry.enable == 1 else "off"
+
+
+def _iocost_disk_line(snap: IocostSnapshot, disk: BlockDisk) -> str:
+    entry = snap.qos_entries.get(disk.devno)
+    tag = _iocost_disk_tag(snap, disk, entry)
+    state = f"enable={entry.enable} ctrl={entry.ctrl}" if entry is not None else "unset"
+    model = f" [{disk.model}]" if disk.model else ""
+    return f"  {disk.name:<10} ({disk.devno}, sched={disk.scheduler}){model}: {state} ({tag})"
+
+
 def format_iocost_status(snap: IocostSnapshot) -> list[str]:
     """Render readable `cst btrfs iocost status` lines."""
-    ctrl_txt = (
-        "present"
-        if snap.io_controller_present is True
-        else ("absent" if snap.io_controller_present is False else "unknown")
-    )
+    ctrl_txt = _io_controller_text(snap)
     active_count = sum(1 for e in snap.qos_entries.values() if e.enable == 1)
     by_devno = {d.devno: d for d in snap.disks}
     qos_state = "present" if snap.qos_exists else "absent"
@@ -341,17 +380,7 @@ def format_iocost_status(snap: IocostSnapshot) -> list[str]:
     eligible = [d for d in snap.disks if is_auto_eligible_disk(d)]
     if not eligible:
         lines.append("disks:       no non-rotational nvme/sd/vd disks found under /sys/block")
-    for d in eligible:
-        entry = snap.qos_entries.get(d.devno)
-        if d.devno in snap.managed_devnos:
-            tag = "CST"
-        elif d.hwdb_solution:
-            tag = f"hwdb solution {d.hwdb_solution}"
-        else:
-            tag = "vendor/manual" if entry and entry.enable == 1 else "off"
-        state = f"enable={entry.enable} ctrl={entry.ctrl}" if entry is not None else "unset"
-        model = f" [{d.model}]" if d.model else ""
-        lines.append(f"  {d.name:<10} ({d.devno}, sched={d.scheduler}){model}: {state} ({tag})")
+    lines.extend(_iocost_disk_line(snap, d) for d in eligible)
 
     extra = [e for devno, e in sorted(snap.qos_entries.items()) if devno not in {d.devno for d in eligible}]
     for entry in extra:
