@@ -123,6 +123,7 @@ class Restic:
             # torn record would cut the record short.
             timer.cancel()
             timer.join()
+            p.stdout.close()
         if rc == -signal.SIGKILL:
             rc = ExitStatus.TIMED_OUT
         return rc, summary

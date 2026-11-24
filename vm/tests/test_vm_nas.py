@@ -2777,5 +2777,47 @@ class ResticBackupThreadTest(unittest.TestCase):
         self.assertFalse(made[0].is_alive(), "the timer's thread is still running")
 
 
+class ResticBackupOutputTest(unittest.TestCase):
+    """Restic.backup closes the pipe it reads restic's output from, whether the backup ends or fails."""
+
+    class _Child:  # restic backup --json, its output a pipe
+        def __init__(self, text: str) -> None:
+            self.stdout = io.StringIO(text)
+            self.terminated = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            pass
+
+    class _Out:
+        def say(self, text: str, *, flush: bool = False) -> None:
+            if "not json" in text:
+                raise RuntimeError("the terminal went away")
+
+        def warn(self, text: str) -> None:
+            pass
+
+    def _backup(self, child: _Child) -> tuple[int, object]:
+        with mock.patch.object(vm_adapters_restic.subprocess, "Popen", return_value=child):
+            return vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, self._Out())
+
+    def test_the_output_is_closed_after_a_backup(self) -> None:
+        child = self._Child('{"message_type": "summary", "snapshot_id": "abc"}\n')
+        self.assertEqual(self._backup(child)[0], 0)
+        self.assertTrue(child.stdout.closed)
+
+    def test_the_output_is_closed_when_showing_it_fails(self) -> None:
+        child = self._Child("not json\n")
+        with self.assertRaisesRegex(RuntimeError, "the terminal went away"):
+            self._backup(child)
+        self.assertTrue(child.terminated)
+        self.assertTrue(child.stdout.closed)
+
+
 if __name__ == "__main__":
     unittest.main()
