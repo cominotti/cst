@@ -20,6 +20,7 @@ from btrfs.docker_volumes_nocow.domain import (
     PostponedRecord,
     StoredPostponed,
     TreeScan,
+    VolumeLeftovers,
     daemon_args,
     is_stored_postponed,
     service_wait_reason,
@@ -187,23 +188,21 @@ class LocalVolumeTree:
     def set_nocow(self, path: str, *, on: bool) -> None:
         set_nocow(path, on)
 
-    def restore_interrupted(self) -> Iterator[str]:
+    def leftovers(self) -> Iterator[VolumeLeftovers]:
         if not os.path.isdir(self.paths.volumes):
             return
         for name in os.listdir(self.paths.volumes):
             d = os.path.join(self.paths.volumes, name)
             if not os.path.isdir(d) or os.path.islink(d):
                 continue
-            data = os.path.join(d, "_data")
-            olds = sorted(x for x in os.listdir(d) if x.startswith("_data" + OLD_MARK))
-            if not os.path.lexists(data) and olds:
-                # Died between the two renames: the original goes back.
-                os.rename(os.path.join(d, olds[-1]), data)
-                olds = olds[:-1]
-                yield name
-            if os.path.isdir(data):
-                for x in olds + [x for x in os.listdir(d) if x == "_data" + NEW_SUFFIX]:
-                    shutil.rmtree(os.path.join(d, x), ignore_errors=True)
+            names = os.listdir(d)
+            yield VolumeLeftovers(
+                name,
+                d,
+                has_data=os.path.lexists(os.path.join(d, "_data")),
+                olds=tuple(sorted(x for x in names if x.startswith("_data" + OLD_MARK))),
+                twin="_data" + NEW_SUFFIX in names,
+            )
 
     def make_twin(self, data: str, new: str) -> None:
         if os.path.lexists(new):

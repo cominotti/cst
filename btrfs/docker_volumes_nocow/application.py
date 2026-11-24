@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from btrfs.docker_volumes_nocow.domain import (
     GAVE_UP,
     GIVE_UP_AFTER,
@@ -18,6 +20,7 @@ from btrfs.docker_volumes_nocow.domain import (
     label_mismatch,
     next_postponed,
     postponed_line,
+    recovery,
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
 from cst_core.ports import ClockPort
@@ -76,9 +79,18 @@ class DockerVolumesNocow:
         ]
 
     def recover(self) -> None:
-        """Leftovers of an interrupted migration (kill, timeout, power loss)."""
-        for name in self.tree.restore_interrupted():
-            self.out.log(4, f"{name}: restored the original after an interrupted migration")
+        """Undo what an interrupted migration (kill, timeout, power loss) left, one volume at a time: in
+        one that died between the two renames the original goes back; then, when _data is a folder,
+        the other old copies and the twin go."""
+        for v in self.tree.leftovers():
+            todo = recovery(v)
+            data = os.path.join(v.folder, "_data")
+            if todo.restore is not None:
+                self.tree.rename(os.path.join(v.folder, todo.restore), data)
+                self.out.log(4, f"{v.name}: restored the original after an interrupted migration")
+            if self.tree.is_dir(data):
+                for x in todo.remove:
+                    self.tree.remove_tree(os.path.join(v.folder, x), ignore_errors=True)
 
     # ---- one volume ------------------------------------------------------
     def migrate_one(self, data: str) -> None:

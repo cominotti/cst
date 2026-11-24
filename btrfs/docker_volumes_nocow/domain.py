@@ -38,6 +38,38 @@ NEW_SUFFIX = ".nocow-new"
 OLD_MARK = ".cow-old-"
 
 
+@dataclass(frozen=True, slots=True)
+class VolumeLeftovers:
+    """What an interrupted migration may have left in one volume's folder: whether _data is there
+    (a dangling link counts), its old copies (the _data.cow-old-* names, oldest first) and whether
+    its twin (_data.nocow-new) is."""
+
+    name: str
+    folder: str
+    has_data: bool
+    olds: tuple[str, ...] = ()
+    twin: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Recovery:
+    """What recover does in one volume: the old copy that goes back as _data (None: none), then the
+    entries removed when _data is a folder (the other old copies, oldest first, then the twin)."""
+
+    restore: str | None
+    remove: tuple[str, ...]
+
+
+def recovery(v: VolumeLeftovers) -> Recovery:
+    """A volume that died between the two renames (no _data, an old copy) gets its newest old copy
+    back. The other old copies and the twin go only once _data is a folder: the caller checks it
+    after the restore (the copy put back may be a file or a link)."""
+    twin = ("_data" + NEW_SUFFIX,) if v.twin else ()
+    if not v.has_data and v.olds:
+        return Recovery(v.olds[-1], v.olds[:-1] + twin)
+    return Recovery(None, v.olds + twin)
+
+
 class NocowCommand(StrEnum):
     """docker-volumes-nocow's commands (its first argument), in its usage's order."""
 
