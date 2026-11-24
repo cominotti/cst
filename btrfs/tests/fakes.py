@@ -31,7 +31,7 @@ from btrfs.cache.domain import FINDMNT_COLUMNS
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
-from cst_core.domain.install import GeneratedKind, Owner
+from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.ports import CommandFault, CommandResult
 
 # ---- docker-volumes-nocow ------------------------------------------------
@@ -357,7 +357,7 @@ def core_text(path: str, record: str) -> Placement:
         path=path,
         dest=path,
         record=record,
-        component="btrfs:core",
+        component=Component.BTRFS_CORE.value,
         src=None,
         kind=GeneratedKind.TEXT,
         owner=Owner.ROOT,
@@ -379,7 +379,8 @@ class RecordingInstallerRunner(ScrubFakeRunner):
     @override
     def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
         cmd = list(argv)
-        if "installer.py" not in " ".join(cmd) or any(part in " ".join(cmd) for part in self.fail_on):
+        joined = " ".join(cmd)
+        if "installer.py" not in joined or any(part in joined for part in self.fail_on):
             return super().run(argv, input_text=input_text, **kw)
         self.calls.append(cmd)
         word = cmd[4]
@@ -390,7 +391,8 @@ class RecordingInstallerRunner(ScrubFakeRunner):
             os.makedirs(os.path.dirname(place.path), exist_ok=True)
             data = (input_text or "").encode()
             written = self.svc.put(place, data, as_root=False, keep_state="--keep-state" in cmd)
-            return CommandResult(0, f"{'written:  ' if written else 'unchanged:'} {place.path}\n", "", argv=tuple(cmd))
+            word_out = InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED
+            return CommandResult(0, word_out.line(place.path) + "\n", "", argv=tuple(cmd))
         return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
 
 
