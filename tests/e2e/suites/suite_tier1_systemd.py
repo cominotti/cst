@@ -4233,11 +4233,16 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-126-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-126-rec; fi")
         self.addCleanup(
             exec_bash,
             c,
-            f"rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
-            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
+            # exec_bash runs bash -e: every step must run, also after one that fails (the rmdir fails when
+            # `off` removed the folder already). Root's record goes back as it was, without the seed's line.
+            "set +e; rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; "
+            f"rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"if [[ -e /var/tmp/e2e-126-rec ]]; then mv /var/tmp/e2e-126-rec {rec}; else rm -f {rec}; fi; "
+            "rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
             # /etc/btrfs-setup when the test made it; then systemd forgets the unit and its drop-in.
             "if [[ -e /var/tmp/e2e-126-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-126-made-etc; fi; "
             "systemctl daemon-reload",
