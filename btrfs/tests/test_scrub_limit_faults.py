@@ -55,7 +55,17 @@ from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_
 from btrfs.tests.fakes import SystemdModel, core_text, read, write
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.record import ComponentState
-from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyRunner, Killed, cut_points, every_fault, stub_fsync
+from tests.fault_injection import (
+    Fault,
+    FaultMode,
+    FaultPlan,
+    FaultyOs,
+    FaultyRunner,
+    Killed,
+    cut_points,
+    every_fault,
+    stub_fsync,
+)
 from tests.repo_files import REPO
 
 DROPIN_500M = render_scrub_dropin("500M")
@@ -104,28 +114,11 @@ def point_name(argv: Sequence[str]) -> str:
     return f"installer {argv[4]}" if "installer.py" in " ".join(argv) else " ".join(argv)
 
 
-class FaultyOs:
-    """The os module as scrub-limit's adapters see it, with os.remove and os.rmdir through a plan
-    (only that module's calls: the fake installer's own removals are another process's)."""
-
-    def __init__(self, plan: FaultPlan) -> None:
-        self.plan = plan
-        self.path = os.path
-
-    def remove(self, path: str) -> None:
-        self.plan.step("os.remove", functools.partial(os.remove, path))
-
-    def rmdir(self, path: str) -> None:
-        self.plan.step("os.rmdir", functools.partial(os.rmdir, path))
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(os, name)
-
-
 @contextlib.contextmanager
 def faulty_files(plan: FaultPlan) -> Generator[None]:
     """scrub-limit's own file calls through plan while the block runs: ensure_dir and write_atomic as
-    it imports them, os.remove and os.rmdir as it calls them."""
+    it imports them, os.remove and os.rmdir as it calls them (only that module's calls: the fake
+    installer's own removals are another process's)."""
     real_ensure, real_write = scrub_adapters.ensure_dir, scrub_adapters.write_atomic
 
     def ensure_dir(path: str, mode: int) -> None:
@@ -137,7 +130,7 @@ def faulty_files(plan: FaultPlan) -> Generator[None]:
     with (
         mock.patch.object(scrub_adapters, "ensure_dir", ensure_dir),
         mock.patch.object(scrub_adapters, "write_atomic", write_atomic),
-        mock.patch.object(scrub_adapters, "os", FaultyOs(plan)),
+        mock.patch.object(scrub_adapters, "os", FaultyOs(plan, ("remove", "rmdir"))),
     ):
         yield
 

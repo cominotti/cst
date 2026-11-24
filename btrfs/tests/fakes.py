@@ -477,7 +477,9 @@ class FakeMountRunner:
         self.reload_fails = False
         self.on_failed_reload: Callable[[], None] | None = None  # runs when a reload fails, before the answer
         self.mount_fails: set[str] = set()
+        self.umount_fails: set[str] = set()  # targets whose umount answers "target is busy" (exit 32)
         self.fstab_at_mount: list[str | None] = []
+        self.fstab_at_umount: list[str | None] = []
         self.calls: list[list[str]] = []
         self.mounts: list[dict[str, str | None]] = []
         self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
@@ -519,11 +521,12 @@ class FakeMountRunner:
             fss.append({**m, "uuid": uuid})
         return json.dumps({"filesystems": fss}, indent=3)
 
-    def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
+    def _fstab_now(self) -> str | None:
         fstab = os.path.join(self.root, "etc", "fstab")
-        self.fstab_at_mount.append(
-            Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.isfile(fstab) else None
-        )
+        return Path(fstab).read_text(encoding="utf-8", errors="surrogateescape") if os.path.isfile(fstab) else None
+
+    def _bind(self, src_path: str, tgt_path: str) -> CommandResult:
+        self.fstab_at_mount.append(self._fstab_now())
         if tgt_path.removeprefix(self.root) in self.mount_fails:
             return CommandResult(32, "", "mount: permission denied")
         src = src_path.removeprefix(self.root)
@@ -534,12 +537,16 @@ class FakeMountRunner:
         self.add_mount(dev, tgt_path.removeprefix(self.root), fsroot=fsroot, uuid=held["uuid"], bind=True)
         return CommandResult(0, "", "")
 
-    def _unbind(self, tgt_path: str) -> None:
+    def _unbind(self, tgt_path: str) -> CommandResult:
+        self.fstab_at_umount.append(self._fstab_now())
         logical_tgt = tgt_path.removeprefix(self.root)
+        if logical_tgt in self.umount_fails:
+            return CommandResult(32, "", "umount: target is busy")
         for i in range(len(self.mounts) - 1, -1, -1):
             if self.mounts[i]["target"] == logical_tgt:
                 del self.mounts[i]
                 break
+        return CommandResult(0, "", "")
 
     def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
         cmd = list(argv)
@@ -555,5 +562,5 @@ class FakeMountRunner:
         if cmd[:2] == ["mount", "--bind"]:
             return self._bind(cmd[2], cmd[3])
         if cmd[:1] == ["umount"]:
-            self._unbind(cmd[1])
+            return self._unbind(cmd[1])
         return CommandResult(0, "", "")

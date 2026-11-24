@@ -118,7 +118,12 @@ time in the same measurements), to be measured again later.
 
 Some protocols must survive a process that dies or a disk that fills up
 halfway: docker-volumes-nocow's boot migration, `cst btrfs scrub-limit set`
-and `off` with their rollback, `cst btrfs iocost apply`'s "done last".
+and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
+`cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
+that is not mounted), `cst toolchains prune apply rust:build` (a folder
+renamed to the trash before it is deleted, the leftovers of a run that
+died), and `cst bluetooth apply` and `revert` with their restarts and the
+record of the restarts still owed.
 `tests/fault_injection.py` tests them at every step, with the standard
 library only.
 
@@ -134,7 +139,8 @@ armed there, in one of three modes:
 - `FAIL_FROM`: that call and every later one fail (a full disk stays full).
 
 A plan can hold several faults: a `FAIL` and then a `KILL` at each later
-call is a run that dies while it rolls back. A port that reports a failure
+call is a run that dies while it rolls back, and a `FAIL` then a second
+`FAIL` one that fails again there (`btrfs/tests/test_cache_faults.py`). A port that reports a failure
 without raising passes `failed` (a command answers exit 1; `ignore_error`
 for an `ignore_errors=True` removal); `FaultyRunner` does that for a command
 runner. The test then checks its invariants after the fault, after the next
@@ -144,13 +150,23 @@ run (recovery), and at the end (the same command again converges).
 
 - Wrap each mutating call: subclass the real adapter and send each method
   through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
-  patch the names an adapter module calls (`ensure_dir`, `write_atomic`, a
-  proxy of `os`: `btrfs/tests/test_scrub_limit_faults.py`), or put
+  patch the names an adapter module calls (`ensure_dir`, `write_atomic`:
+  `btrfs/tests/test_cache_faults.py`), put `FaultyOs(plan, names)` in
+  place of a module's `os` (the functions named are points, the rest of
+  `os` as it is: `btrfs/tests/test_scrub_limit_faults.py`,
+  `toolchains/tests/test_prune_faults.py`), or put
   `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
   `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
 - Model the outside state the invariants need in the fake under it: what
   systemd has loaded and whether it needs a reload, the install record,
-  the service.
+  the service, what a daemon read at its last start. When the usual fake
+  is a shell script (bluetooth's FAKE), a run per command costs too much:
+  write a Python twin and a parity test that runs one scenario on both
+  and compares commands, exits, output and files (`SetupModel` and
+  `SetupModelParityTest` in `bluetooth/tests`).
+- Give each run its own clock time when the code names files by it (a
+  backup, a trash name): two runs in the same second would share a name a
+  real machine never shares.
 - Call `stub_fsync(self)` in `setUp`: these tests check what a kill leaves,
   not durability, and an fsync per write makes them many times slower on a
   btrfs home. The fsync probes of `tests/probes.py` stay for the tests that
@@ -168,11 +184,14 @@ its own `stop_after`); threads and timing (a thread that outlives a
 cancel is no failure at a call); the real systemd, btrfs and udev (the E2E
 tests, such as tier 1's `test_161` for scrub-limit's reload).
 
-**Cost.** The four modules (`tests.test_fault_injection`,
+**Cost.** The seven modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
-`btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`)
-together: 0.63 to 0.65 s wall at `--jobs 4` (3 runs, `nice -n 10`), with
-fsync stubbed, so about the same on tmpfs and on a btrfs home.
+`btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
+`btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
+`bluetooth.tests.test_setup_faults`) together: 2.3 to 2.4 s wall at
+`--jobs 4` (`nice -n 10 /usr/bin/python3 -I -B tests/run_unit.py --jobs 4`
+on the seven, 3 runs), with fsync stubbed, so about the same on tmpfs and
+on a btrfs home.
 
 ## Where the virtual environment lives
 

@@ -200,24 +200,49 @@ class RustBuild(BaseTarget[RustPolicy]):
             self.tsay(
                 f"{unreadable} Rust tool process(es) of yours could not be inspected; cargo's lock is still checked", 5
             )
-        self._remove_leftovers(trash, users)
+        leftovers_failed = self._remove_leftovers(trash, users)
         nbusy = self._report_busy(decide(folders, pol, now, {}, claimed), users)
         dev = self.machine.tree.device(root)
-        tally = _RunTally(root, dev, pol, claimed, cache, users, list(folders), nbusy)
+        tally = _RunTally(
+            root,
+            dev,
+            pol,
+            claimed,
+            cache,
+            users,
+            list(folders),
+            nbusy,
+            failed=leftovers_failed,
+            rc=1 if leftovers_failed else 0,
+        )
         self._prune_loop(tally, now)
         return self._finish(tally, before, len(folders), now)
 
-    def _remove_leftovers(self, trash: Sequence[Folder], users: Mapping[str, Sequence[tuple[int | str, str]]]) -> None:
-        """Delete what an interrupted run left (TRASH), unless a process uses it."""
+    def _remove_leftovers(self, trash: Sequence[Folder], users: Mapping[str, Sequence[tuple[int | str, str]]]) -> int:
+        """Delete what an interrupted run left (TRASH), unless a process uses it; how many that
+        nothing uses could not be deleted (each counts as a failed folder: the run exits 1, and the
+        saved summary, which status shows, counts it)."""
+        failed = 0
         for t in trash:
             if len(users.get(t.key, [])) > 0:
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
                 continue
-            ok, msg = self.machine.tree.remove(t.path, self.time_left())
+            left_s = self.time_left()
+            if left_s is not None and left_s < RM_MARGIN:
+                # As for a folder: no rm started that the budget would stop (and fail the run).
+                self.tsay(
+                    f"leftover {t.key} kept: the run's time budget ({span(self.limits.run_budget)}) is nearly "
+                    "used up; the next run deletes it",
+                    5,
+                )
+                continue
+            ok, msg = self.machine.tree.remove(t.path, left_s)
+            failed += not ok
             self.tsay(
                 f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
                 6 if ok else 3,
             )
+        return failed
 
     def _report_busy(
         self, plan: Sequence[tuple[Folder, FolderAction, str]], users: Mapping[str, Sequence[tuple[int | str, str]]]

@@ -1163,7 +1163,8 @@ class Tier1SystemdE2ETest(unittest.TestCase):
 
     @e2e_tags(E2ETag.TOOLCHAINS)
     def test_04_toolchains_e2e_timer_config_and_prune(self) -> None:
-        """toolchains config apply, hourly systemd --user timer, service run, and auto off."""
+        """toolchains config apply, hourly systemd --user timer, service run (and its failure on a leftover
+        it cannot delete), and auto off."""
         # Configure cargo/uv settings & create stale cache under ~/.cache/cargo-build (cst-toolchains layout)
         as_tester_bash(
             self.SYSTEMD_CONTAINER,
@@ -1201,11 +1202,69 @@ class Tier1SystemdE2ETest(unittest.TestCase):
             JOURNAL_NAMED + "journal_named cst-toolchains _SYSTEMD_USER_UNIT=cst-toolchains-prune.service",
         )
         self.assertIn("E2E-JOURNAL-OK cst-toolchains", res.stdout)
+        self.toolchains_prune_fails_on_a_leftover_it_cannot_delete()
         self.toolchains_auto_off_without_a_user_manager()
         self.toolchains_auto_off()
         self.toolchains_auto_off_stops_an_orphan_timer()
         # Clean up demo workspace for later tests
         as_tester_bash(self.SYSTEMD_CONTAINER, "rm -rf /home/tester/work/demo")
+
+    def toolchains_prune_fails_on_a_leftover_it_cannot_delete(self) -> None:
+        """A leftover of an interrupted run (a folder with CST's trash name) that the timer's service
+        cannot delete, since root owns a folder in it: the real user service ends failed (Result
+        exit-code, exit status 1), the journal has the error line and status counts the run as failed.
+        Once the leftover can be deleted, the service succeeds and deletes it."""
+        trash = "/home/tester/.cache/cargo-build/.cst-toolchains-trash-ab0123456789abcd-1"
+        exec_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            mkdir -p {trash}/held
+            echo data >{trash}/held/file
+            chown tester:tester {trash}
+            """,
+        )
+        unit = "cst-toolchains-prune.service"
+        res = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            rc=0; systemctl --user start {unit} 2>/dev/null || rc=$?
+            [ "$rc" -ne 0 ] || {{ echo "the service ended fine with a leftover it cannot delete" >&2; exit 1; }}
+            echo "result: $(systemctl --user show -p Result --value {unit})" \
+                "exit: $(systemctl --user show -p ExecMainStatus --value {unit})"
+            test -f {trash}/held/file
+            /opt/cst-rw/cst toolchains status || true
+            """,
+        )
+        self.assertIn("result: exit-code exit: 1", res.stdout)
+        self.assertRegex(res.stdout, r"deleted 0 folder\(s\) \([^)]*\), 1 failed; left")
+        journal = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            """
+            journalctl --sync 2>/dev/null || true
+            for _ in $(seq 1 120); do
+                if journalctl -q --no-pager -o cat -t cst-toolchains | grep -F 'could not delete leftover'; then
+                    exit 0
+                fi
+                sleep 0.5
+            done
+            echo "no 'could not delete leftover' line in the journal" >&2
+            exit 1
+            """,
+        )
+        self.assertIn("rust:build: could not delete leftover .cst-toolchains-trash-ab0123456789abcd-1", journal.stdout)
+        exec_bash(self.SYSTEMD_CONTAINER, f"chown -R tester:tester {trash}")
+        again = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            f"""
+            systemctl --user reset-failed {unit}
+            systemctl --user start {unit}
+            echo "result: $(systemctl --user show -p Result --value {unit})"
+            test ! -e {trash}
+            /opt/cst-rw/cst toolchains status || true
+            """,
+        )
+        self.assertIn("result: success", again.stdout)
+        self.assertNotIn("failed; left", again.stdout)
 
     # What `auto on` installed (test_04 checks them after each `auto off`).
     TOOLCHAINS_INSTALLED = (
@@ -8099,8 +8158,15 @@ EOF
         it; doctor's ok line; with a mount CST did not make on top of a bind, doctor's WARN and detach
         refused; detach refused while /var/mnt/cache is not mounted; an /etc/fstab that cannot be read (a
         link loop) refused by attach and detach and BLOCKED in plan, each with fstab and the mounts
-        unchanged; detach keeps the data, the other users' lines and a mount CST did
-        not make."""
+        unchanged; a detach whose second umount finds the target busy (umount's stand-in answers exit 32
+        while a process has its folder there) exits 1 with fstab and the mounts as they were, after
+        a real daemon-reload each way; detach keeps the data, the other users' lines and a mount CST did
+        not make. Then u1 attached again, a busy ~/Scratchpad, and a mount of ~/.cache again that fails (a
+        mount wrapper that exits 1 for it): detach says ROLLBACK INCOMPLETE naming that mount, puts the
+        Scratchpad line back and no .cache line, in the test root's fstab and in the real /etc/fstab (a
+        systemctl stand-in copies the one to the other before each real daemon-reload), so
+        systemd-fstab-generator makes no mount unit for ~/.cache; a second detach converges and a third
+        has nothing to do."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
         stub = r"""#!/usr/bin/python3 -I
@@ -8138,6 +8204,15 @@ elif prog == "mount" and args[:1] == ["--bind"]:
     rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
     save()
 elif prog == "umount":
+    # Busy, as the real umount says, while a process has its folder at or below the target.
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if cwd == args[0] or cwd.startswith(args[0] + "/"):
+            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
+            sys.exit(32)
     tgt = args[0].removeprefix(w)
     idx = [i for i, r in enumerate(rows) if r[1] == tgt]
     if not idx:
@@ -8343,6 +8418,24 @@ STUB
             mv {w}/fstab.real {w}/etc/fstab
             unchanged
 
+            # A busy target (a process whose folder is in it): detach removes the lines and reloads, unmounts
+            # ~/.cache, fails on ~/Scratchpad, then mounts ~/.cache again and puts the lines back; fstab and
+            # the mounts are as they were (the remount comes last in the table). Once the process ends,
+            # the same detach below works.
+            keep
+            (cd {w}/var/home/u1/Scratchpad && exec sleep 300) >/dev/null 2>&1 &
+            busy=$!
+            # The stand-in umount looks for it in /proc: wait until it is in the folder.
+            for _ in $(seq 1 100); do [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] && break; sleep 0.1; done
+            [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] || {{ echo "the busy process is not in Scratchpad" >&2; exit 1; }}
+            rc=0; $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            kill "$busy"; wait "$busy" || true
+            [[ $rc == 1 ]] || {{ echo "busy detach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "ERROR: umount /var/home/u1/Scratchpad failed: umount: {w}/var/home/u1/Scratchpad: target is busy.; mounts and /etc/fstab restored." {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            cmp -s {w}/etc/fstab {w}/fstab.before
+            cmp -s <(sort {w}/mounts) <(sort {w}/mounts.before)
+
             # detach: the data and the other users' lines stay; a mount CST did not make stays.
             echo "keep-u1" >{w}/var/mnt/scratchpad/u1/data.txt
             $cst btrfs cache status --user u1 | grep -qF "other fstab users  u2"
@@ -8353,6 +8446,52 @@ STUB
             absent "/var/home/u1/" {w}/mounts
             $cst btrfs cache detach --user u10 | grep -qF "kept: /var/home/u10/.cache has a mount CST did not make"
             grep -qF "/var/home/u10/.cache" {w}/mounts
+
+            # A bind that cannot be mounted again gets no line back. u1 attached again; ~/Scratchpad busy, so
+            # detach mounts ~/.cache again, and that mount fails (a wrapper that exits 1 for ~/.cache and
+            # otherwise runs the stand-in). The program's fstab is the test root's: the systemctl stand-in
+            # copies it to the real /etc/fstab before each real daemon-reload, so systemd-fstab-generator
+            # sees every text detach reloads.
+            mkdir -p {w}/fail3 {w}/sync
+            cat >{w}/fail3/mount <<'EOF'
+#!/bin/bash
+if [[ "${{!#}}" == {w}/var/home/u1/.cache ]]; then echo "mount: {w}/var/home/u1/.cache: permission denied." >&2; exit 1; fi
+exec {w}/bin/mount "$@"
+EOF
+            cat >{w}/sync/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then cp {w}/etc/fstab /etc/fstab || exit 1; fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {w}/fail3/mount {w}/sync/systemctl
+            cache_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/.cache)"
+            scratch_unit="/run/systemd/generator/$(systemd-escape --path --suffix=mount /var/home/u1/Scratchpad)"
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1
+            [[ -f "$cache_unit" && -f "$scratch_unit" ]] || {{ echo "attach made no mount units for u1" >&2; exit 1; }}
+            (cd {w}/var/home/u1/Scratchpad && exec sleep 300) >/dev/null 2>&1 &
+            busy=$!
+            for _ in $(seq 1 100); do [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] && break; sleep 0.1; done
+            [[ /proc/$busy/cwd -ef {w}/var/home/u1/Scratchpad ]] || {{ echo "the busy process is not in Scratchpad" >&2; exit 1; }}
+            rc=0; PATH="{w}/fail3:{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            kill "$busy"; wait "$busy" || true
+            [[ $rc == 1 ]] || {{ echo "detach with ~/.cache not mounted again exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            incomplete="ERROR: umount /var/home/u1/Scratchpad failed: umount: {w}/var/home/u1/Scratchpad: target is busy.; ROLLBACK INCOMPLETE (mount --bind /var/mnt/cache/u1 /var/home/u1/.cache failed: mount: {w}/var/home/u1/.cache: permission denied.)"
+            grep -qF "$incomplete" {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            cmp -s {w}/etc/fstab /etc/fstab
+            absent "user=u1 kind=cache" /etc/fstab || {{ echo "a .cache line is back in /etc/fstab:" >&2; cat /etc/fstab >&2; exit 1; }}
+            grep -qF "user=u1 kind=scratchpad" /etc/fstab || {{ echo "no Scratchpad line back in /etc/fstab" >&2; exit 1; }}
+            [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit for ~/.cache after the daemon-reload" >&2; exit 1; }}
+            [[ -f "$scratch_unit" ]]
+            absent "/var/home/u1/.cache" {w}/mounts
+            grep -qF "$(printf '%s\\t%s\\t' '/dev/mapper/cache[/scratchpad/u1]' /var/home/u1/Scratchpad)" {w}/mounts
+            # A second detach converges: no u1 line, no u1 mount, no mount unit; a third has nothing to do.
+            rc=0; PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "second detach exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            absent "user=u1" {w}/etc/fstab
+            absent "user=u1" /etc/fstab
+            [[ ! -e "$cache_unit" && ! -e "$scratch_unit" ]]
+            absent "/var/home/u1/" {w}/mounts
+            PATH="{w}/sync:$PATH" $cst btrfs cache detach --user u1 | grep -qF "Nothing attached for u1; nothing to do."
             echo E2E-CACHE-OK
             """,
         ).stdout
