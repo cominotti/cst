@@ -15,6 +15,7 @@ from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, ShellAssignments, gro
 DEFAULT_SCRUB_LIMIT: Final = "500M"
 SCRUB_CONF_PATH: Final = SNAPSHOTS_CONF
 SCRUB_DROPIN_PATH: Final = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+SCRUB_SERVICE: Final = "btrfs-scrub-weekly.service"  # the unit the drop-in extends
 
 _SCRUB_SIZE_RE: Final = re.compile(r"^[0-9]+[KkMmGgTt]?$")
 _SCRUB_ASSIGN_RE: Final = re.compile(r"^\s*(?:export\s+)?SCRUB_LIMIT\s*(?:=|$)")
@@ -55,6 +56,9 @@ class ScrubStatusSnapshot:
     dropin_path: str
     dropin_text: str | None
     live_sysfs: tuple[str, ...]
+    # NeedDaemonReload of SCRUB_SERVICE: True when systemd has not loaded its files as they are on disk;
+    # None when systemctl cannot say (nothing is shown then)
+    need_reload: bool | None = None
 
 
 def format_scrub_usage(prog: str) -> str:
@@ -216,9 +220,31 @@ def scrub_limit_status_lines(snapshot: ScrubStatusSnapshot) -> list[str]:
         fix = f"set {want}" if want else "off"
         svc_line = f"  service: {have or 'no limit'}, DIFFERS from setting (run: cst btrfs scrub-limit {fix})"
     lines = [want_line, svc_line]
+    if snapshot.need_reload is True:
+        lines.append(f"  systemd: has not loaded {SCRUB_SERVICE} as it is on disk (run: sudo systemctl daemon-reload)")
     if snapshot.live_sysfs:
         lines.append(f"  now in sysfs (bytes/s, 0 = no limit): {', '.join(snapshot.live_sysfs)}")
     return lines
+
+
+def scrub_limit_plan_reload_lines(
+    *, dropin_text: str | None, target_limit: str | None, need_reload: bool | None
+) -> list[str]:
+    """The plan's line for the daemon-reload set or off runs although the drop-in stays as it is (the
+    drop-in's own line names the reload when it changes): need_reload is NeedDaemonReload of SCRUB_SERVICE,
+    True when systemd has not loaded its files as they are on disk, None when systemctl cannot say (set|off
+    then asks again and reloads only if it cannot say either, or systemd answers yes: plan from a toolbox
+    asks the host through flatpak-spawn, which can fail where set|off on the host does not)."""
+    dropin_stays = dropin_text == (None if target_limit is None else render_scrub_dropin(target_limit))
+    if need_reload is False or not dropin_stays:
+        return []
+    if need_reload:
+        return [f"  reload:    {SCRUB_SERVICE} (systemd has not loaded it as it is on disk) + systemctl daemon-reload"]
+    unknown = (
+        f"  reload:    {SCRUB_SERVICE} (systemctl cannot say whether it is loaded) + systemctl daemon-reload,"
+        " unless set|off then gets an answer that it is"
+    )
+    return [unknown]
 
 
 def scrub_limit_plan_lines(

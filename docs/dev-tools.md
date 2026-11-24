@@ -104,12 +104,75 @@ Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
 a shared machine, with another project's load at times (the spread was 1% to
 3% at 8 workers or more, up to 39% at 2 to 4). The tree measured was not
 `main`: it was `main` plus the verification proof-of-concept tests (3,354
-tests), among them fsync-heavy fault-injection tests that `main` does not
-have. The "about 12 times" is those tests; the suite-level 8% to 13% was
-measured on that tree and may be smaller on `main`.
+tests), among them the fault injection tests in the form they had then, with
+every fsync real. `main` has had those tests since, with fsync stubbed
+([Fault injection tests](#fault-injection-tests)), so they no longer depend
+on where TMPDIR is. The "about 12 times" is those tests as they were then;
+the suite-level 8% to 13% was measured on that tree and may be smaller on
+`main`.
 
 Not adopted yet: queueing the longest work units first (6% to 12% less wall
 time in the same measurements), to be measured again later.
+
+## Fault injection tests
+
+Some protocols must survive a process that dies or a disk that fills up
+halfway: docker-volumes-nocow's boot migration, `cst btrfs scrub-limit set`
+and `off` with their rollback, `cst btrfs iocost apply`'s "done last".
+`tests/fault_injection.py` tests them at every step, with the standard
+library only.
+
+**What it does.** Every mutating call of a run (a port call, a module
+function an adapter calls, a command that changes something) goes through
+`FaultPlan.step`. A run with no fault lists them (`cut_points`); then, for
+each call in turn (`every_fault`), a fresh fixture runs again with the plan
+armed there, in one of three modes:
+
+- `KILL`: the call takes effect, then the process dies (`Killed`, a
+  `BaseException`, so the code's `except Exception` does not catch it);
+- `FAIL`: the call fails with ENOSPC and no effect; the run goes on;
+- `FAIL_FROM`: that call and every later one fail (a full disk stays full).
+
+A plan can hold several faults: a `FAIL` and then a `KILL` at each later
+call is a run that dies while it rolls back. A port that reports a failure
+without raising passes `failed` (a command answers exit 1; `ignore_error`
+for an `ignore_errors=True` removal); `FaultyRunner` does that for a command
+runner. The test then checks its invariants after the fault, after the next
+run (recovery), and at the end (the same command again converges).
+
+**How to add a target.**
+
+- Wrap each mutating call: subclass the real adapter and send each method
+  through `plan.step` (`btrfs/tests/test_docker_volumes_nocow_faults.py`),
+  patch the names an adapter module calls (`ensure_dir`, `write_atomic`, a
+  proxy of `os`: `btrfs/tests/test_scrub_limit_faults.py`), or put
+  `FaultyRunner(plan, inner, reads=...)` in front of a fake runner, with
+  `reads` naming the commands that only read (`btrfs/tests/test_iocost_faults.py`).
+- Model the outside state the invariants need in the fake under it: what
+  systemd has loaded and whether it needs a reload, the install record,
+  the service.
+- Call `stub_fsync(self)` in `setUp`: these tests check what a kill leaves,
+  not durability, and an fsync per write makes them many times slower on a
+  btrfs home. The fsync probes of `tests/probes.py` stay for the tests that
+  check durability.
+- One test class per start state and fault mode (or mode family): a class
+  of up to 10 tests is one work unit of `tests/run_unit.py`, so one big class
+  would run on one worker. Pin each class's number of cases with
+  `assertEqual`, so a change of the protocol's calls, or a loop that runs
+  nothing, is seen.
+
+**What it cannot model.** A power loss and writes not yet flushed (`KILL`
+keeps every call that finished; the fsync probes cover durability); a call
+torn half-way (each call is atomic here; the nocow fakes' `copy_into` has
+its own `stop_after`); threads and timing (a thread that outlives a
+cancel is no failure at a call); the real systemd, btrfs and udev (the E2E
+tests, such as tier 1's `test_161` for scrub-limit's reload).
+
+**Cost.** The four modules (`tests.test_fault_injection`,
+`btrfs.tests.test_docker_volumes_nocow_faults`,
+`btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`)
+together: 0.63 to 0.65 s wall at `--jobs 4` (3 runs, `nice -n 10`), with
+fsync stubbed, so about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
 
