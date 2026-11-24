@@ -109,9 +109,9 @@ class FakeRun:
         if "--out-itf" in args:
             with open(args[args.index("--out-itf") + 1], "w", encoding="utf-8") as f:
                 f.write(self.trace)
-            if "--invariant" in args:  # a witness: the run ends with a violation of its negation
-                return M.Ran(*self.witness, 200_000, 1.5)
-            return M.Ran(self.walk_status, "", 200_000, 1.5)
+            # A witness's run ends with a violation of its negation; a walk's with walk_status.
+            code, out = self.witness if "--invariant" in args else (self.walk_status, "")
+            return M.Ran(code, out, 200_000, 1.5)
         main = args[args.index("--main") + 1]
         code, out = self.verdicts.get(main, (0, OK))
         return M.Ran(code, out, 900_000, 9.4)
