@@ -188,8 +188,8 @@ class StepDownTest(unittest.TestCase):
 DONE = f"[General]\nExperimental = true\nKernelExperimental = {ISO}\n"
 CLASSIC = "classic|[ a2dp_sink a2dp_source hfp_hf hfp_ag ]\n"
 BAP_REGISTERED = "Endpoint registered: sender=:1.7 path=/MediaEndpointLE/BAPSink/lc3\n"
-HELP_SHA256 = "fb64a1365efa65790a1299e85279627d2340828584a7fcef22416f39edd1c9a6"
-USAGE_SHA256 = "e2b4c726f647f493f7f7d1690e60a00d5d4f5884b0f37aeb4fe95a0d140541a8"
+HELP_SHA256 = "024e16e4bf3bf117be2240efc15cb17a6f007bcaae54113ab9ab55d918420a08"
+USAGE_SHA256 = "9dd2a72a99899fde725a9245c38af75e42d2a058658c2e7d3757c2802563a128"
 LW = "cst-bt-ldac48.service"
 
 
