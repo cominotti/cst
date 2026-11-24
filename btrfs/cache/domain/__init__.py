@@ -210,9 +210,9 @@ class CacheMountSnapshot:
     fstab_error: str | None = None
     """Why /etc/fstab, which is there, could not be read (attach, detach and plan refuse)."""
     fstab_behind: bool | None = False
-    """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab, with the binds
-    attach would mount; None: systemctl cannot say). Asked only by plan, and only when attach would write
-    no /etc/fstab (False otherwise)."""
+    """Whether systemd has not loaded /etc/fstab as it is on disk (None: systemctl cannot say). Asked by
+    plan, only when attach would write no /etc/fstab (systemd_behind_fstab, with the binds attach would
+    mount), and by status (fstab_lines_unread, every managed line); False otherwise."""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -695,6 +695,13 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     other_users = sorted({e.user for e in snap.all_managed if snap.user is None or e.user != snap.user.name})
     if other_users:
         lines.append(f"  other fstab users  {', '.join(other_users)}")
+    if snap.fstab_behind is True:
+        lines.append(
+            f"  systemd            has not loaded {FSTAB_PATH} as it is on disk (an edit, or an attach or detach "
+            "that stopped before its daemon-reload): run that attach or detach again, or systemctl daemon-reload"
+        )
+    elif snap.fstab_behind is None:
+        lines.append(f"  systemd            cannot say whether it has loaded {FSTAB_PATH} (systemctl gave no answer)")
     return lines
 
 

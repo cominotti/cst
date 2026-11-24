@@ -47,7 +47,7 @@ from btrfs.cache.domain import (
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
-from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, systemd_behind_fstab
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread, systemd_behind_fstab
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
@@ -350,9 +350,14 @@ def _fstab_behind(snap: CacheMountSnapshot, rt: _CacheMountRuntime, mounting: Co
     """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab over the mount
     units it has loaded, one `systemctl show '*.mount'`, on the host from a toolbox as findmnt is; mounting:
     the targets attach mounts); None when systemctl gives no answer."""
+    return systemd_behind_fstab(_mount_units(rt), snap.bindings, mounting)
+
+
+def _mount_units(rt: _CacheMountRuntime) -> list[dict[str, str]] | None:
+    """The mount units systemd has loaded (MOUNT_UNIT_PROPS), one `systemctl show '*.mount'`, on the host
+    from a toolbox as findmnt is; None when systemctl gives no answer."""
     on_host = SystemctlHost.SHOW_ONLY if _from_toolbox(rt) else SystemctlHost.LOCAL
-    units = SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
-    return systemd_behind_fstab(units, snap.bindings, mounting)
+    return SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
 
 
 def _catch_up_reload(
@@ -611,6 +616,9 @@ def dispatch_cache_mount_cli_action(
     snap = _probe_snapshot(parsed, rt)
     match parsed.action:
         case CacheMountAction.STATUS:
+            if snap.mounts_error is None and snap.fstab_error is None:
+                targets = {e.target for e in snap.all_managed}
+                snap = replace(snap, fstab_behind=fstab_lines_unread(_mount_units(rt), targets))
             return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)
         case CacheMountAction.PLAN:
             if snap.user is not None:

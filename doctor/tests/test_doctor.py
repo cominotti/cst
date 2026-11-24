@@ -259,6 +259,7 @@ class Scratch(unittest.TestCase):
             "virsh -r -c qemu:///system domblklist ",
             "virsh -r -c qemu:///system domstate ",
             "systemctl show -p LoadState ",
+            "systemctl show -p Id -p LoadState ",
             "systemctl --user show -p LoadState ",
             "systemctl --user -M tester@ show -p LoadState ",
         )
@@ -1650,6 +1651,46 @@ class BtrfsCacheDoctorTest(Scratch):
         self.assertIn("WARN   btrfs cache: /var/mnt/cache has 'flushoncommit'", btrfs_text)
         self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
         self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
+
+    def test_systemd_behind_on_fstab_warns_with_the_reload(self) -> None:
+        # An attach or detach killed between its /etc/fstab write and its daemon-reload (or an edit): a unit
+        # systemd loaded from /etc/fstab says NeedDaemonReload=yes, or a bind with its line in /etc/fstab
+        # has a unit systemd took from /proc/self/mountinfo.
+        line = "/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 # managed-by: btrfs-cache (CST) user=danilo kind=cache\n"
+        self._put(
+            "etc", "fstab", text="/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n" + line
+        )
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
+        warn = (
+            "WARN   btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "
+            "`cst btrfs cache attach` or `detach` that stopped before its daemon-reload), so it keeps the mounts "
+            "of the /etc/fstab it loaded before"
+        )
+        base = "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload={}\nWhere=/var/mnt/cache\n"
+        bind = "Id=var-home-danilo-.cache.mount\nLoadState=loaded\nSourcePath={}\nNeedDaemonReload=no\nWhere=/var/home/danilo/.cache\n"
+        for name, answer, warned in (
+            ("flagged", base.format("yes"), True),
+            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), True),
+            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), False),
+            ("none", "", False),
+            ("no answer", None, False),
+        ):
+            with self.subTest(name):
+                show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
+                os.makedirs(os.path.dirname(show), exist_ok=True)
+                if answer is None:
+                    if os.path.exists(show):
+                        os.unlink(show)
+                else:
+                    with open(show, "w", encoding="utf-8") as fh:
+                        fh.write(answer)
+                out = self.run_tool().stdout
+                btrfs_text = "\n".join(area_lines(out, "btrfs"))
+                self.assertEqual(warn in btrfs_text, warned, btrfs_text)
+                self.assertEqual("fix: sudo systemctl daemon-reload" in btrfs_text, warned, btrfs_text)
+                self.assertIn(
+                    "systemctl show -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount", self.calls()
+                )
 
     def test_the_cache_drives_crypttab_line_is_found_through_its_dm_device(self) -> None:
         self._put("etc", "fstab", text="UUID=feed /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n")

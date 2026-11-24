@@ -1128,6 +1128,38 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         )
         self.assertEqual(self._reloads(), 0)
 
+    def test_status_says_when_systemd_has_not_loaded_fstab(self) -> None:
+        line = (
+            "  systemd            has not loaded /etc/fstab as it is on disk (an edit, or an attach or detach that "
+            "stopped before its daemon-reload): run that attach or detach again, or systemctl daemon-reload"
+        )
+        self.assertEqual(self._run(["attach"])[0], 0)
+        _, out, _ = self._run(["status"])
+        self.assertNotIn("  systemd  ", out)
+        self._killed_at_reload(["detach"])
+        _, out, _ = self._run(["status"])
+        self.assertIn(line, out)
+        # The base is no /etc/fstab line (no unit of /etc/fstab is loaded): only the binds' units, which
+        # systemd took from the mount table while their lines are in /etc/fstab, tell.
+        self.assertEqual(self._run(["detach"])[0], 0)
+        with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
+            fh.write("# no base line\n")
+        self.assertEqual(self._run(["attach"])[0], 0)
+        _, out, _ = self._run(["status"])
+        self.assertNotIn("  systemd  ", out)
+        self.runner.loaded_fstab = ((0, 0), "# no base line\n")  # what systemd read before the lines came
+        _, out, _ = self._run(["status"])
+        self.assertIn(line, out)
+        self.runner.show_fails = True
+        _, out, _ = self._run(["status"])
+        self.assertIn(
+            "  systemd            cannot say whether it has loaded /etc/fstab (systemctl gave no answer)", out
+        )
+        # status only reads.
+        self.runner.calls.clear()
+        self._run(["status"])
+        self.assertEqual(self._reloads(), 0)
+
     def test_a_catch_up_reload_that_fails_changes_nothing(self) -> None:
         self._killed_at_reload(["attach"])
         fstab, mounted = self._fstab(), sorted(self._mounted())

@@ -8664,7 +8664,8 @@ EOF
         the pid the test recorded), then run again, with the real systemd. The bases are tmpfs lines, which
         systemd-fstab-generator accepts, so var-mnt-cache.mount is loaded from /etc/fstab before the kill and
         the real `systemctl show` says NeedDaemonReload=yes after it (the test fails as "cannot bite"
-        otherwise). After the killed attach, plan says attach runs daemon-reload; with the binds unmounted by
+        otherwise). After the killed attach, `status` and `cst doctor` say systemd has not loaded /etc/fstab
+        (none does once the run again reloaded), plan says attach runs daemon-reload; with the binds unmounted by
         hand, an attach whose catch-up reload fails mounts them, then takes back only the mounts (exit 1, "the
         mounts this run made were taken back.": it wrote no /etc/fstab); the run again exits 0, says
         "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
@@ -8793,6 +8794,11 @@ EOF
             killed attach
             grep -qF "user=u1 kind=cache" {w}/etc/fstab
             [[ ! -e "$cache_unit" ]]
+            # status and cst doctor say systemd has not loaded /etc/fstab (the real one, which the shim wrote).
+            doc() {{ $cst doctor >{w}/doc 2>&1 || true; grep -qF "btrfs cache: systemd has not loaded /etc/fstab as it is on disk" {w}/doc; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            grep -qF "  systemd            has not loaded /etc/fstab as it is on disk" <<<"$st_out" || {{ echo "$st_out" >&2; exit 1; }}
+            doc || {{ echo "cst doctor does not warn that systemd has not loaded /etc/fstab" >&2; cat {w}/doc >&2; exit 1; }}
             plan_out="$($cst btrfs cache plan --user u1)"
             grep -qF "Already attached for u1; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload." \
                 <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
@@ -8807,6 +8813,9 @@ EOF
             [[ "$(behind)" == yes ]]
             again attach
             [[ -f "$cache_unit" ]] || {{ echo "no mount unit of ~/.cache after the reload" >&2; exit 1; }}
+            st_out="$($cst btrfs cache status --user u1)"
+            if grep -qF "  systemd   " <<<"$st_out"; then echo "$st_out" >&2; exit 1; fi
+            if doc; then echo "cst doctor still warns after the reload" >&2; cat {w}/doc >&2; exit 1; fi
             [[ "$(systemctl show -P SourcePath var-home-u1-.cache.mount)" == /etc/fstab ]]
 
             # u2's lines in the test root's /etc/fstab that systemd never read (an attach killed at its

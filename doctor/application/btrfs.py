@@ -31,8 +31,9 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
-from btrfs.cache.domain import parse_all_mounts
+from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
 from cst_core.domain.shapes import parse_json
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
@@ -724,6 +725,29 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")
 
 
+def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
+    """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
+    it has loaded, one `systemctl show '*.mount'`): an edit, or a cache attach or detach that stopped
+    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked."""
+    cmd = ["systemctl", "show", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
+    rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
+    if rc != 0:
+        return
+    units = [
+        unit
+        for block in out.split("\n\n")
+        if (unit := {k: v for k, sep, v in (line.partition("=") for line in block.splitlines()) if sep})
+    ]
+    if fstab_lines_unread(units, {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:
+        yield Result(
+            WARN,
+            "btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "
+            "`cst btrfs cache attach` or `detach` that stopped before its daemon-reload), so it keeps the mounts "
+            "of the /etc/fstab it loaded before",
+            "sudo systemctl daemon-reload",
+        )
+
+
 @check(CHECKS, "btrfs")
 def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     """Check the dedicated NVMe cache drive's mounts, crypttab `nofail`, and user bind mounts."""
@@ -758,5 +782,6 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None, dm_names):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
+    yield from _fstab_loaded_results(host, fstab_raw)
     if crypttab_unreadable and has_hints:
         yield Result(INFO, "btrfs cache: /etc/crypttab is not readable as this user (nofail not checked)")

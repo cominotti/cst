@@ -1774,6 +1774,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   the lines out, so only `NeedDaemonReload` could tell (an `attach` still
   sees its own binds' units). A bind mounted before the run with no unit
   at all proves nothing (a test root whose mounts systemd does not see).
+  `status` asks the same question over every managed line and says
+  `systemd has not loaded /etc/fstab as it is on disk ...: run that attach
+  or detach again, or systemctl daemon-reload` (or that systemctl gives no
+  answer), and `cst doctor` warns with the fix `sudo systemctl
+  daemon-reload`.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

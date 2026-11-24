@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """What systemd has loaded of /etc/fstab, from the mount units it lists: whether a cache attach or detach
-left it behind (an earlier run stopped between its /etc/fstab write and its daemon-reload). Pure: the
-caller asks `systemctl show -p MOUNT_UNIT_PROPS '*.mount'`."""
+left it behind (an earlier run stopped between its /etc/fstab write and its daemon-reload), for attach,
+plan, status and cst doctor. Pure: the caller asks `systemctl show -p MOUNT_UNIT_PROPS '*.mount'`."""
 
 from __future__ import annotations
 
@@ -15,6 +15,32 @@ from cst_core.domain.units import LoadState
 
 MOUNT_UNIT_PROPS: Final = ("Id", "LoadState", "SourcePath", "NeedDaemonReload", "Where")
 """What systemd_behind_fstab reads of each loaded mount unit (systemctl show -p ... '*.mount')."""
+
+
+def _loaded_units(units: Sequence[Mapping[str, str]]) -> list[Mapping[str, str]]:
+    return [u for u in units if u.get("LoadState") == LoadState.LOADED]
+
+
+def _reload_flagged(loaded: Sequence[Mapping[str, str]]) -> bool:
+    """A unit systemd loaded from /etc/fstab says NeedDaemonReload=yes (any write of /etc/fstab since the
+    last reload)."""
+    return any(
+        u.get("SourcePath") == FSTAB_PATH and u.get("NeedDaemonReload", "").strip().lower() in YES_WORDS for u in loaded
+    )
+
+
+def fstab_lines_unread(units: Sequence[Mapping[str, str]] | None, in_fstab: Collection[str]) -> bool | None:
+    """status's and cst doctor's reading of systemd_behind_fstab, over every managed line (in_fstab: their
+    targets): True when a unit systemd loaded from /etc/fstab says NeedDaemonReload=yes, or when a loaded
+    unit at the target of a managed line comes from elsewhere than /etc/fstab (/proc/self/mountinfo: a
+    mount systemd did not start, so the bind is mounted, while its line is in /etc/fstab); None when
+    systemctl gave no answer; False otherwise."""
+    if units is None:
+        return None
+    loaded = _loaded_units(units)
+    return _reload_flagged(loaded) or any(
+        u.get("Where", "") in in_fstab and u.get("SourcePath", "") != FSTAB_PATH for u in loaded
+    )
 
 
 def systemd_behind_fstab(
@@ -36,10 +62,8 @@ def systemd_behind_fstab(
     killed before its reload reads as not behind."""
     if units is None:
         return None
-    loaded = [u for u in units if u.get("LoadState") == LoadState.LOADED]
-    if any(
-        u.get("SourcePath") == FSTAB_PATH and u.get("NeedDaemonReload", "").strip().lower() in YES_WORDS for u in loaded
-    ):
+    loaded = _loaded_units(units)
+    if _reload_flagged(loaded):
         return True
     source_of = {u.get("Where", ""): u.get("SourcePath", "") for u in loaded}
 
