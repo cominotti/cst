@@ -88,9 +88,10 @@ export const meta = {
 //   (startAction): it creates the worktree, continues from it, or refuses; it never stops because its own earlier
 //   work is there. Simplify, fix and the fast lane are told the same. Decisions live on disk (the design note,
 //   commits), so a restart costs a re-read, not the work.
-// - The harness relays the owner's latest message to every agent and says it wins over the stage prompt, so a
-//   message that asks for the advisor can override a stage's "forbidden" sentence; the orchestrator words such
-//   messages with that in mind.
+// - The harness relays to every agent the owner's request that triggered the run, and says it wins over the stage
+//   prompt, so a request that asks for the advisor can override a stage's "forbidden" sentence; the orchestrator
+//   words such requests with that in mind. (Whether a message sent mid-run or before a resume is relayed too was
+//   not checked.)
 // - The guard's equality check stays on GUARD_CMD's four lines. Each agent also pastes GUARD_DETAIL_CMD (status
 //   lines and a hash per modified or untracked file), report only: when the guard stops a run, the log and the
 //   trail name what changed. Someone else's edit in the main checkout is never reverted, stashed or committed by
