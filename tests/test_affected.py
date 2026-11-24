@@ -7,12 +7,15 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import override
 import unittest
 
+import tests.affected as affected_module
 from tests.affected import (
     DOCS_GATES,
     E2E_UNIT_TESTS,
     INSTALL_TESTS,
+    AffectedPlan,
     format_plan,
     git_changed_files,
     resolve_base,
@@ -206,6 +209,107 @@ class SelectAffectedRulesTest(unittest.TestCase):
         self.assertFalse(plan.full_suite)
         self.assertIn("swap.tests.test_swap", plan.modules)
         self.assertIn("vm.tests.test_vm", plan.modules)
+
+
+class MbtSelectionTest(unittest.TestCase):
+    """The tests/mbt modules: selected apart (`mbt_modules`), never in the unit plan, never a full-suite fallback."""
+
+    FILES = (
+        "pyproject.toml",
+        "README.md",
+        "cst_core/__init__.py",
+        "cst_core/application/__init__.py",
+        "cst_core/application/install.py",
+        "btrfs/__init__.py",
+        "btrfs/snapshot/__init__.py",
+        "btrfs/snapshot/domain.py",
+        "btrfs/tests/__init__.py",
+        "btrfs/tests/test_snapshot.py",
+        "tests/__init__.py",
+        "tests/run_unit.py",
+        "tests/repo_files.py",
+        "tests/test_install.py",
+        "tests/mbt/__init__.py",
+        "tests/mbt/profiles.py",
+        "tests/mbt/mbt_install.py",
+        "tests/mbt/mbt_snap.py",
+    )
+
+    @override
+    def setUp(self) -> None:
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cst-aff-mbt-")))
+        texts = {
+            "cst_core/application/install.py": "X = 1\n",
+            "btrfs/snapshot/domain.py": "X = 1\n",
+            "btrfs/tests/test_snapshot.py": "import btrfs.snapshot.domain\n",
+            "tests/test_install.py": "import cst_core.application.install\n",
+            "tests/mbt/profiles.py": "from tests.repo_files import REPO\n",
+            "tests/mbt/mbt_install.py": (
+                "from cst_core.application import install\nfrom tests.mbt import profiles\nimport tests.test_install\n"
+            ),
+            "tests/mbt/mbt_snap.py": "from btrfs.snapshot import domain\nfrom tests.mbt import profiles\n",
+        }
+        for rel in self.FILES:
+            path = self.tmp / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(texts.get(rel, ""), encoding="utf-8")
+
+    def _plan(self, *changed: str) -> AffectedPlan:
+        return select_affected(list(changed), all_files=self.FILES, repo=str(self.tmp))
+
+    def test_only_mbt_files_count_as_mbt_test_modules(self) -> None:
+        for path, want in (
+            ("tests/mbt/mbt_install.py", True),
+            ("tests/mbt/profiles.py", False),
+            ("tests/mbt/__init__.py", False),
+            ("tests/mbt/sub/mbt_x.py", False),
+            ("tests/mbt/mbt_notes.md", False),
+            ("tests/mbt_x.py", False),
+            ("btrfs/tests/mbt_x.py", False),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(affected_module.is_mbt_test_file(path), want)
+
+    def test_a_changed_mbt_module_selects_itself_and_no_full_suite(self) -> None:
+        plan = self._plan("tests/mbt/mbt_install.py")
+        self.assertFalse(plan.full_suite)
+        self.assertEqual(plan.mbt_modules, ("tests.mbt.mbt_install",))
+        self.assertFalse([m for m in plan.modules if m.startswith("tests.mbt")], plan.modules)
+
+    def test_a_changed_target_selects_the_mbt_modules_that_reach_it(self) -> None:
+        plan = self._plan("btrfs/snapshot/domain.py")
+        self.assertFalse(plan.full_suite)
+        self.assertEqual(plan.mbt_modules, ("tests.mbt.mbt_snap",))
+        self.assertIn("btrfs.tests.test_snapshot", plan.modules)
+
+    def test_the_shared_profiles_select_every_mbt_module(self) -> None:
+        for path in ("tests/mbt/profiles.py", "tests/mbt/__init__.py"):
+            with self.subTest(path=path):
+                plan = self._plan(path)
+                self.assertFalse(plan.full_suite)
+                self.assertEqual(plan.mbt_modules, ("tests.mbt.mbt_install", "tests.mbt.mbt_snap"))
+
+    def test_a_unit_fake_an_mbt_module_imports_selects_it_too(self) -> None:
+        plan = self._plan("tests/test_install.py")
+        self.assertFalse(plan.full_suite)
+        self.assertIn("tests.test_install", plan.modules)
+        self.assertEqual(plan.mbt_modules, ("tests.mbt.mbt_install",))
+
+    def test_a_full_suite_fallback_selects_every_mbt_module(self) -> None:
+        for path in ("cst_core/application/install.py", "pyproject.toml", "tests/run_unit.py", "tests/repo_files.py"):
+            with self.subTest(path=path):
+                plan = self._plan(path)
+                self.assertTrue(plan.full_suite)
+                self.assertEqual(plan.mbt_modules, ("tests.mbt.mbt_install", "tests.mbt.mbt_snap"))
+
+    def test_docs_only_and_empty_changes_select_none(self) -> None:
+        self.assertEqual(self._plan("README.md").mbt_modules, ())
+        self.assertEqual(self._plan().mbt_modules, ())
+
+    def test_the_listed_plan_shows_the_mbt_modules(self) -> None:
+        listed = format_plan(self._plan("btrfs/snapshot/domain.py"))
+        self.assertIn("\n  mbt (1):\n    tests.mbt.mbt_snap", listed)
+        self.assertTrue(format_plan(self._plan("README.md")).endswith("\n  mbt: none"))
 
 
 class GitAffectedIntegrationTest(unittest.TestCase):

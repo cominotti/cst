@@ -88,7 +88,7 @@ cmds: [
 	{
 		name:        "test affected"
 		category:    "test"
-		description: "Run only the unit test modules statically affected by changes (plus static gates; falls back to the full suite for cst_core or shared files)"
+		description: "Run only the unit test modules statically affected by changes (plus static gates; falls back to the full suite for cst_core or shared files), then the affected tests/mbt modules (invowk cmd test mbt --affected, only when there are some)"
 		flags: [
 			{name: "base", description: "Git ref to diff against (default: merge-base with main, or HEAD)"},
 			{name: "list", type: "bool", default_value: "false", description: "List selected modules without running tests"},
@@ -99,15 +99,20 @@ cmds: [
 			runtimes: [{name: "native"}]
 			script: {content: """
 				set -euo pipefail
-				args=(-v)
+				base=()
+				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && base=(--base "${INVOWK_FLAG_BASE}")
 				if [[ "${INVOWK_FLAG_LIST:-false}" == "true" ]]; then
-					args+=(--list-affected)
-				else
-					args+=(--affected)
+					exec python3 -I -B tests/run_unit.py --list-affected "${base[@]}"
 				fi
-				[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
-				[[ -n "${INVOWK_FLAG_BASE:-}" ]] && args+=(--base "${INVOWK_FLAG_BASE}")
-				exec python3 -I -B tests/run_unit.py "${args[@]}"
+				jobs=()
+				[[ "${INVOWK_FLAG_JOBS:-0}" != "0" ]] && jobs=(--jobs "${INVOWK_FLAG_JOBS}")
+				python3 -I -B tests/run_unit.py -v --affected "${jobs[@]}" "${base[@]}"
+				# The tests/mbt modules need uv: asked for only when the change affects one, so a
+				# change that affects none runs without uv, as the unit tests do.
+				mbt="$(python3 -I -B tests/run_unit.py --list-affected-mbt "${base[@]}")"
+				if [[ -n "${mbt}" ]]; then
+					invowk cmd test mbt --affected "${jobs[@]}" "${base[@]}"
+				fi
 				"""}
 		}]
 	},
@@ -324,6 +329,8 @@ cmds: [
 			{name: "examples", type: "int", default_value: "0", description: "Examples per test (0 = the profile's: 100, or 500 for nightly)"},
 			{name: "seed", description: "Seed every test (replays a nightly run: its log prints the seed); default: none, or a new one printed for nightly"},
 			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto: CST_TEST_JOBS, else one per CPU of the affinity; 1 = single-process)"},
+			{name: "affected", type: "bool", default_value: "false", description: "Only the modules the change affects (tests/run_unit.py --list-affected-mbt)"},
+			{name: "base", description: "With --affected: the git ref to diff against (default: merge-base with main, or HEAD)"},
 		]
 		depends_on: {
 			tools: [{alternatives: ["uv"]}]
@@ -336,10 +343,25 @@ cmds: [
 				set -euo pipefail
 				# Named mbt_*.py, not test_*.py: the unit suite's discovery (standard library only) never imports them.
 				mods=()
-				for f in tests/mbt/mbt_*.py; do
-					m="${f%.py}"
-					mods+=("${m//\//.}")
-				done
+				if [[ "${INVOWK_FLAG_AFFECTED:-false}" == "true" ]]; then
+					base=()
+					[[ -n "${INVOWK_FLAG_BASE:-}" ]] && base=(--base "${INVOWK_FLAG_BASE}")
+					# An assignment, not a process substitution: a git error stops the task (set -e).
+					listed="$(python3 -I -B tests/run_unit.py --list-affected-mbt "${base[@]}")"
+					if [[ -z "${listed}" ]]; then
+						echo "mbt: no module affected"
+						exit 0
+					fi
+					mapfile -t mods <<< "${listed}"
+				elif [[ -n "${INVOWK_FLAG_BASE:-}" ]]; then
+					echo "test mbt: --base needs --affected" >&2
+					exit 2
+				else
+					for f in tests/mbt/mbt_*.py; do
+						m="${f%.py}"
+						mods+=("${m//\//.}")
+					done
+				fi
 				profile="${INVOWK_FLAG_PROFILE:-${CST_MBT_PROFILE:-}}"
 				[[ -n "${profile}" ]] && export CST_MBT_PROFILE="${profile}"
 				[[ "${INVOWK_FLAG_EXAMPLES:-0}" != "0" ]] && export CST_MBT_EXAMPLES="${INVOWK_FLAG_EXAMPLES}"

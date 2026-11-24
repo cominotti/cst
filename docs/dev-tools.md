@@ -54,7 +54,8 @@ On a workstation shared with other work, see
 `invowk cmd test affected [--list] [--base REF]` (`tests/run_unit.py --affected`)
 selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
-shared files; `invowk cmd test e2e tier1` supports `--match`, `--tag`,
+shared files, and then runs the affected `tests/mbt` modules (see
+[Property and model-based tests](#property-and-model-based-tests)); `invowk cmd test e2e tier1` supports `--match`, `--tag`,
 `--list_tests`, `--shard I/N`, and `--jobs N`.
 
 ## Test performance on a workstation
@@ -506,6 +507,12 @@ is not in the standard library, so they live apart from the unit suite:
   on uv's Python with the `mbt` group:
   `tests/uv-dev --group mbt python3 -I -B tests/run_unit.py`. `check`
   does not run it; CI runs it as a step of its own, after the fast gates.
+- `invowk cmd test affected` runs them too, after the affected unit tests:
+  the modules whose import closure reaches a changed file, or every one
+  when the unit selection falls back to the full suite (`tests/affected.py`
+  says why). It asks for uv only when the change affects one of them.
+  `invowk cmd test mbt --affected [--base REF]` runs only those, and
+  `--list` of `test affected` shows them under `mbt`.
 - ty resolves `import hypothesis` only when the group is in the tools'
   environment, so `invowk cmd test types` runs `tests/uv-dev --group mbt ty
   check`. Without it a fresh environment (CI) fails with
