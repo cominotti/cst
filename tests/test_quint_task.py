@@ -88,13 +88,21 @@ class QuintCiPathsTest(unittest.TestCase):
         return r.returncode == 0
 
     def test_a_change_to_what_the_job_runs_runs_it(self) -> None:
-        # The module the spec models, the spec and its traces, the replay, the tool, and what runs the
-        # tool: the job itself, the invowk task, the action that installs invowk.
+        # The code each spec models, the specs and their traces, the replays, the tool, and what runs
+        # the tool: the job itself, the invowk task, the action that installs invowk.
         for path in (
             "btrfs/docker_volumes_nocow/application.py",
             "btrfs/tests/quint/docker_volumes_nocow.qnt",
             "btrfs/tests/quint/traces/walk_ab.itf.json",
             "btrfs/tests/test_docker_volumes_nocow_replay.py",
+            "vm/application/nas.py",
+            "vm/adapters/restic.py",
+            "vm/adapters/backup.py",
+            "vm/domain/backup.py",
+            "vm/domain/__init__.py",
+            "vm/tests/quint/nas.qnt",
+            "vm/tests/quint/traces/walk_live1.itf.json",
+            "vm/tests/test_vm_nas_replay.py",
             "tests/quint/cst-quint",
             ".github/workflows/ci.yml",
             "cst.invowkmod/invowkfile.cue",
@@ -104,7 +112,16 @@ class QuintCiPathsTest(unittest.TestCase):
                 self.assertTrue(self.quint_path(path))
 
     def test_other_changes_skip_it(self) -> None:
-        for path in ("README.md", "btrfs/cache/adapters.py", ".github/workflows/nightly.yml", "tests/mbt/profiles.py"):
+        # The local backup and the docs do not run it.
+        for path in (
+            "README.md",
+            "btrfs/cache/adapters.py",
+            ".github/workflows/nightly.yml",
+            "tests/mbt/profiles.py",
+            "vm/application/backup.py",
+            "vm/README.md",
+            "vm/tests/test_vm_nas.py",
+        ):
             with self.subTest(path=path):
                 self.assertFalse(self.quint_path(path))
 

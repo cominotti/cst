@@ -46,7 +46,7 @@ def wants_links(unit_dir: str) -> list[str]:
 
 def stop_timeout(s: VmSettings) -> str:
     """A stop may arrive while the snapshot call is held (snapshot_timeout +
-    snapshot_settle), then the merge runs (commit_timeout, plus virsh's own
+    snapshot_settle, and the guest's thaw: 60 s), then the merge runs (commit_timeout, plus virsh's own
     300 s), then the checks and the alert: 30 minutes of margin."""
     stop = s.snapshot_timeout + s.snapshot_settle + s.commit_timeout + VIRSH_COMMIT_MARGIN + STOP_MARGIN
     return f"{(stop + MINUTE - 1) // MINUTE}min"

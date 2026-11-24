@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """cst-quint: model checking of CST's Quint specs with TLC, and the traces their replays read.
 
-A Quint spec (btrfs/tests/quint/*.qnt) models a protocol of a module step by step, with a crash or
-a fault after any step. TLC, through quint, explores every state the spec's instances can reach and
+A Quint spec (btrfs/tests/quint/*.qnt, vm/tests/quint/*.qnt) models a protocol of a module step by
+step, with a crash or a fault after any step. TLC, through quint, explores every state the spec's instances can reach and
 checks that each property holds in all of them. A replay test in the unit suite then runs traces of
 the spec (checked in, written by --traces) against the real code. See docs/dev-tools.md, "Model
 checking with Quint (optional)".
@@ -17,8 +17,9 @@ or by hand, from the checkout:
     nice -n 10 /usr/bin/python3 -I -B tests/quint/cst-quint [options]
 
 Options:
-    --instance NAME   only this instance (a module of the spec, such as nocow_ab)
-    --spec FILE       check FILE instead of the checked-in spec (a planted copy, say)
+    --instance NAME   only this instance (a module of a spec, such as nocow_ab or nas_live1)
+    --spec FILE       check FILE instead of the checked-in spec (a planted copy, say); with checks of
+                      several specs, only with --instance
     --traces          write the checked-in traces again (simulator and Apalache), then run the replay
     --keep            keep the work folder (it names it at the end)
 
@@ -135,7 +136,25 @@ class TraceJob:
 NOCOW_SPEC: Final = "btrfs/tests/quint/docker_volumes_nocow.qnt"
 NOCOW_PROPERTIES: Final = ("noDataLoss", "requestKept", "attemptsMatch", "boundedTries", "cleanRunConverges")
 NOCOW_INSTANCES: Final = ("nocow_ab", "nocow_a", "nocow_ab_boots", "nocow_ab_wide", "nocow_abc")
-CHECKS: Final[tuple[Check, ...]] = tuple(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES)
+NAS_SPEC: Final = "vm/tests/quint/nas.qnt"
+NAS_PROPERTIES: Final = (
+    "mergedOrAlerted",
+    "noOverlayLost",
+    "staleNamed",
+    "unreachableNoOverlay",
+    "noStacking",
+    "tornHandled",
+    "indexClean",
+    "goodKept",
+    "keepKept",
+    "consistentRead",
+    "indexInRepo",
+)
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed")
+CHECKS: Final[tuple[Check, ...]] = (
+    *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
+    *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),
+)
 # The checked-in traces of the nocow spec: two random walks, and the first trace the simulator finds
 # to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
 # value of the spec, or the negation of a step's label for a call with no witness of its own.
@@ -158,6 +177,39 @@ NOCOW_WITNESSES: Final = (
 NOCOW_APALACHE_WITNESSES: Final = (
     ("install_requested", "nocow_a", "neverInstallRequested", 4),
     ("install_request_failed", "nocow_a", "neverInstallRequestFailed", 4),
+)
+# The first trace (simulator, seed 7) to each witness of the NAS spec, on the smallest instance that reaches it.
+NAS_WITNESSES: Final = (
+    ("stray_dropped", "nas_mixed", "neverStrayDropped"),
+    ("timeout_all", "nas_mixed", "neverTimeoutAll"),
+    ("uncertain_alerted", "nas_mixed", "neverUncertainAlerted"),
+    ("stop_in_restic_merged", "nas_mixed", "neverStopInResticMerged"),
+    ("stop_held_snapshot", "nas_mixed", "neverStopHeldSnapshot"),
+    ("offline", "nas_mixed", "neverOffline"),
+    ("definition", "nas_mixed", "neverDefinition"),
+    ("commit_failed", "nas_mixed", "neverCommitFailed"),
+    ("back_beside_alerted", "nas_live2", "neverBackBesideAlerted"),
+    ("torn_forgotten", "nas_mixed", "neverTornForgotten"),
+    ("killed_refused", "nas_mixed", "neverKilledRefused"),
+    ("late_switch", "nas_mixed", "neverLateSwitch"),
+    ("indexed", "nas_mixed", "neverIndexed"),
+    ("ready_failed", "nas_mixed", "neverReadyFailed"),
+    ("listings_unreadable", "nas_mixed", "neverListingsUnreadable"),
+    ("live_listing_unreadable", "nas_mixed", "neverLiveListingUnreadable"),
+    ("remove_failed", "nas_mixed", "neverRemoveFailed"),
+    ("stop_after_commit", "nas_mixed", "neverStopAfterCommit"),
+    ("retention_failed", "nas_mixed", "neverRetentionFailed"),
+    ("started_during_read", "nas_shutoff", "neverStartedDuringRead"),
+    ("shut_off_same", "nas_shutoff", "neverShutOffSame"),
+    ("torn_forget_failed", "nas_shutoff", "neverTornForgetFailed"),
+    ("torn_drop_failed", "nas_shutoff", "neverTornDropFailed"),
+    ("torn_list_failed", "nas_shutoff", "neverTornListFailed"),
+)
+# Witnesses a run of step_ reaches only after several runs (a torn snapshot recorded, then retried): walks of
+# step_calm, the protocol without the environment's steps.
+NAS_CALM_WITNESSES: Final = (
+    ("torn_retried", "nas_shutoff", "neverTornRetried"),
+    ("retention_skipped", "nas_shutoff", "neverRetentionSkipped"),
 )
 TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
     TraceJob("walk_ab", NOCOW_SPEC, "nocow_ab", "simulator", 40, seed=1),
@@ -185,10 +237,23 @@ TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
         samples=100000,
         step="step_round_end",
     ),
+    TraceJob("walk_live1", NAS_SPEC, "nas_live1", "simulator", 60, seed=5),
+    TraceJob("walk_shutoff", NAS_SPEC, "nas_shutoff", "simulator", 60, seed=2),
+    *(
+        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=100000)
+        for name, main, invariant in NAS_WITNESSES
+    ),
+    *(
+        TraceJob(name, NAS_SPEC, main, "simulator", 40, seed=7, invariant=invariant, samples=100000, step="step_calm")
+        for name, main, invariant in NAS_CALM_WITNESSES
+    ),
 )
-TRACES_DIR: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs/tests/quint/traces"}
+TRACES_DIR: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs/tests/quint/traces", NAS_SPEC: "vm/tests/quint/traces"}
 # spec -> the unit test module that replays its traces
-REPLAYS: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs.tests.test_docker_volumes_nocow_replay"}
+REPLAYS: Final[Mapping[str, str]] = {
+    NOCOW_SPEC: "btrfs.tests.test_docker_volumes_nocow_replay",
+    NAS_SPEC: "vm.tests.test_vm_nas_replay",
+}
 
 
 class StepError(Exception):
@@ -536,6 +601,19 @@ class Seams:
     jobs: Sequence[TraceJob] = TRACE_JOBS
 
 
+def usage_problem(args: argparse.Namespace, chosen: Sequence[Check]) -> str | None:
+    """Why the command line cannot run (main exits 2 with it), or None; chosen: the checks --instance selects."""
+    if args.traces and (args.spec or args.instance):
+        return "cst-quint: --traces writes every trace of the checked-in specs: no --spec or --instance with it"
+    if not chosen and not args.traces:
+        return f"cst-quint: no instance {args.instance!r}" if args.instance else "cst-quint: no check is defined"
+    # A planted copy stands for one spec: checks of several specs would all run against it.
+    specs = sorted({c.spec for c in chosen})
+    if args.spec and len(specs) > 1:
+        return f"cst-quint: --spec needs --instance: the checks come from {', '.join(specs)}"
+    return None
+
+
 def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     s = Seams() if seams is None else seams
     checkout, run, which, out, checks, jobs = s.checkout, s.run, s.which, s.out, s.checks, s.jobs
@@ -545,12 +623,10 @@ def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     if missing:
         out(f"cst-quint: needs {', '.join(missing)} on PATH")
         return EX_USAGE
-    if args.traces and (args.spec or args.instance):
-        out("cst-quint: --traces writes every trace of the checked-in specs: no --spec or --instance with it")
-        return EX_USAGE
     chosen = [c for c in checks if args.instance is None or c.main == args.instance]
-    if not chosen and not args.traces:
-        out(f"cst-quint: no instance {args.instance!r}" if args.instance else "cst-quint: no check is defined")
+    problem = usage_problem(args, chosen)
+    if problem is not None:
+        out(problem)
         return EX_USAGE
     session = Session(checkout or checkout_root(), cache_root(env), run, env, out)
     os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)
