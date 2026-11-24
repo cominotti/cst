@@ -174,6 +174,7 @@ class _SnapshotCoreModule(Protocol):
         pins: Collection[str],
     ) -> list[_DecisionProto]: ...
     def is_mass_delete(self, count: int, owned: int) -> bool: ...
+    def mass_delete_limit(self, owned: int) -> int: ...
     def unexplained_deletions(
         self,
         decisions: Sequence[_DecisionProto],
@@ -1718,6 +1719,23 @@ class CircuitBreakerTests(CliTestCase):
         self.assertTrue(core.is_mass_delete(11, 100))
         self.assertFalse(core.is_mass_delete(21, 210))
         self.assertTrue(core.is_mass_delete(22, 210))
+
+    def test_the_limit_the_breaker_message_names(self) -> None:
+        # The number "(limit N)" of the refusal shows: max(5, 10 % of the owned snapshots, rounded down),
+        # and the breaker trips exactly above it.
+        for owned, limit in ((0, 5), (10, 5), (59, 5), (60, 6), (100, 10), (210, 21), (1000, 100)):
+            with self.subTest(owned=owned):
+                self.assertEqual(core.mass_delete_limit(owned), limit)
+                self.assertFalse(core.is_mass_delete(limit, owned))
+                self.assertTrue(core.is_mass_delete(limit + 1, owned))
+        # 60 to delete of 63 owned: the limit above the minimum, 6, in the message.
+        h = self.host("2026-10-13 14:07", gen=10)
+        self.add_history(h, "2026-06-01 00:00", "2026-06-03 11:00")  # 60, hourly
+        for e in ("home.20261013T1000", "home.20261013T1100", "home.20261013T1200"):
+            h.add_snapshot(e, "/top/home", 500 + int(e[-4:-2]))
+        self.assertEqual(self.cli(h, "prune", source="home=/top/home:1h", clock_ok=True), 4)
+        self.assertIn("circuit breaker: 60 of 63 snapshots would be deleted", self.out)
+        self.assertIn("(limit 6); check with", self.out)
 
     def test_five_pass(self) -> None:
         h, old = self.build(5)

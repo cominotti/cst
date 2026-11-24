@@ -133,9 +133,9 @@ of starting over or stopping.
 Run from the repository root.
 
 ```
-invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (what CI runs)
+invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (CI runs it, then test mbt)
 invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism; CST_TEST_JOBS=N sets the default worker count, --jobs wins)
-invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits)
+invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits), then the affected tests/mbt modules
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
 invowk cmd test arch                          # the static gates only (seconds)
 invowk cmd test docs                          # the docs gate only
@@ -148,11 +148,13 @@ invowk cmd test types                         # ty on the ty gate list + ruff's 
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
+invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] [--affected [--base REF]] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)
 invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
 
-- Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
+- Before a pull request, run `invowk cmd check` and `invowk cmd test mbt`
+  (CI's fast gates run both, mbt with `--profile ci`), and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
 - Budgets and ceilings (`IO_BUDGETS`, `RUFF_BUDGETS`, `CEILINGS`, the
@@ -170,7 +172,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
   ([docs/dev-tools.md, "Mutation testing"](docs/dev-tools.md#mutation-testing-optional)).
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
-  standard library. `test pylint`, `test types` and `test mutation` use uv,
+  standard library. `test pylint`, `test types`, `test mbt` and `test mutation` use uv,
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean, with every ty rule an error

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Run the unit tests in parallel across CPU cores with a socket as stdin (run-time gates).
 
-Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affected | --list-affected] [--base REF] [NAME...]   (from anywhere)
+Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affected | --list-affected | --list-affected-mbt] [--base REF] [NAME...]   (from anywhere)
 
 With no NAME it runs every unit test of the checkout across parallel worker
 processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `coverage.py`).
@@ -15,6 +15,10 @@ A NAME is a test module, class or method as unittest names it (vm.tests.test_vm,
 vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
 runs one that way, so the socket gate below still applies. `--gates` runs
 the static gate modules only (GATE_MODULES: `invowk cmd test arch`).
+`--affected` runs the unit modules a change affects (tests/affected.py),
+`--list-affected` prints that plan, and `--list-affected-mbt` prints only
+the tests/mbt modules it selects, one per line, for `invowk cmd test mbt
+--affected` (the unit run never runs them: they need Hypothesis).
 
 Skipped tests: the run lists every skipped test with its reason, and fails
 on a skip that EXPECTED_SKIPS does not name. A skip there is one that
@@ -601,6 +605,7 @@ DEFAULT_CLASS_CHUNK: Final = 10
 _JOBS_FLAG: Final = "--jobs"
 _AFFECTED_FLAG: Final = "--affected"
 _LIST_AFFECTED_FLAG: Final = "--list-affected"
+_LIST_AFFECTED_MBT_FLAG: Final = "--list-affected-mbt"
 _BASE_FLAG: Final = "--base"
 _WORKER_FDS_FLAG: Final = "--worker-fds"
 TEST_JOBS_ENV: Final = "CST_TEST_JOBS"
@@ -621,6 +626,7 @@ class RunOptions:
     gates: bool = False
     affected: bool = False
     list_affected: bool = False
+    list_affected_mbt: bool = False
     base: str | None = None
     names: tuple[str, ...] = ()
     worker_fds: tuple[int, int] | None = None
@@ -803,6 +809,7 @@ class _ParseAcc:
     gates: bool = False
     affected: bool = False
     list_affected: bool = False
+    list_affected_mbt: bool = False
     base: str | None = None
     names: list[str] = field(default_factory=list)
     worker_fds: tuple[int, int] | None = None
@@ -835,6 +842,10 @@ def _consume_simple_flag(tok: str, acc: _ParseAcc) -> bool:
         acc.affected = True
         acc.list_affected = True
         return True
+    if tok == _LIST_AFFECTED_MBT_FLAG:
+        acc.affected = True
+        acc.list_affected_mbt = True
+        return True
     return False
 
 
@@ -866,7 +877,8 @@ def _consume_arg(args: Sequence[str], index: int, acc: _ParseAcc) -> int:
     if tok.startswith("-"):
         raise SystemExit(
             f"run_unit: unknown option in {' '.join(args)} "
-            f"(use -v, -j/{_JOBS_FLAG} N, --gates, {_AFFECTED_FLAG}, {_LIST_AFFECTED_FLAG}, {_BASE_FLAG} or test names)"
+            f"(use -v, -j/{_JOBS_FLAG} N, --gates, {_AFFECTED_FLAG}, {_LIST_AFFECTED_FLAG}, {_LIST_AFFECTED_MBT_FLAG}, "
+            f"{_BASE_FLAG} or test names)"
         )
     acc.names.append(tok)
     return 1
@@ -883,13 +895,16 @@ def parse_args(args: Sequence[str]) -> RunOptions:
     if acc.affected and (acc.gates or acc.names):
         raise SystemExit(f"run_unit: {_AFFECTED_FLAG} takes neither --gates nor test names")
     if acc.base is not None and not acc.affected:
-        raise SystemExit(f"run_unit: {_BASE_FLAG} requires {_AFFECTED_FLAG} or {_LIST_AFFECTED_FLAG}")
+        raise SystemExit(
+            f"run_unit: {_BASE_FLAG} requires {_AFFECTED_FLAG}, {_LIST_AFFECTED_FLAG} or {_LIST_AFFECTED_MBT_FLAG}"
+        )
     return RunOptions(
         verbosity=acc.verbosity,
         jobs=acc.jobs,
         gates=acc.gates,
         affected=acc.affected,
         list_affected=acc.list_affected,
+        list_affected_mbt=acc.list_affected_mbt,
         base=acc.base,
         names=tuple(acc.names),
         worker_fds=acc.worker_fds,
@@ -1301,7 +1316,8 @@ def _run_parallel(repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]],
     return 0 if not has_test_fail and not errors else 1
 
 
-def _print_affected_plan(repo: str, base: str | None) -> int:
+def _print_affected_plan(repo: str, base: str | None, *, mbt_only: bool = False) -> int:
+    """Print the plan of the change since base (`--list-affected`); mbt_only: only its tests/mbt modules."""
     from tests.affected import format_plan, git_changed_files, select_affected
 
     try:
@@ -1310,8 +1326,20 @@ def _print_affected_plan(repo: str, base: str | None) -> int:
         print(f"run_unit: {exc}", file=sys.stderr)
         return 2
     plan = select_affected(changed, repo=repo, base=resolved_base)
-    print(format_plan(plan))
+    if mbt_only:
+        for mod in plan.mbt_modules:
+            print(mod)
+    else:
+        print(format_plan(plan))
     return 0
+
+
+def print_affected_mbt(repo: str, base: str | None) -> int:
+    """Print the tests/mbt modules the change since base affects, one per line (`--list-affected-mbt`).
+
+    `invowk cmd test affected` and `invowk cmd test mbt --affected` read it; it never imports Hypothesis.
+    """
+    return _print_affected_plan(repo, base, mbt_only=True)
 
 
 def _resolve_affected_opts(repo: str, opts: RunOptions) -> RunOptions:
@@ -1320,6 +1348,12 @@ def _resolve_affected_opts(repo: str, opts: RunOptions) -> RunOptions:
     resolved_base, changed = git_changed_files(repo, opts.base)
     plan = select_affected(changed, repo=repo, base=resolved_base)
     print(f"[affected] {plan.reason} (base={plan.base[:12]})", file=sys.stderr)
+    if plan.mbt_modules:
+        print(
+            f"[affected] {len(plan.mbt_modules)} tests/mbt module(s) affected, left out of this run (they need uv): "
+            "`invowk cmd test affected` runs them after the unit tests; alone: `invowk cmd test mbt --affected`",
+            file=sys.stderr,
+        )
     return RunOptions(
         verbosity=opts.verbosity,
         jobs=opts.jobs,
@@ -1363,6 +1397,8 @@ def main(argv: Sequence[str]) -> int:
     os.chdir(repo)
     if repo not in sys.path:
         sys.path.insert(0, repo)
+    if opts.list_affected_mbt:
+        return print_affected_mbt(repo, opts.base)
     if opts.list_affected:
         return _print_affected_plan(repo, opts.base)
     forbid_privilege_gain()

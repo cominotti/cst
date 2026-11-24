@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """tests/run_unit.py: what it loads (all, --gates, names), and its run-time gates."""
 
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -797,6 +799,89 @@ class ParseArgsAndJobsTest(unittest.TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises(SystemExit):
                 parse_args(bad)
+
+    def test_list_affected_mbt_takes_a_base_and_refuses_gates_or_names(self) -> None:
+        opts = parse_args(["--list-affected-mbt", "--base", "main"])
+        self.assertTrue(opts.affected)
+        self.assertEqual(opts.base, "main")
+        self.assertTrue(getattr(opts, "list_affected_mbt", False))
+        self.assertFalse(opts.list_affected)
+        for bad in (
+            ["--list-affected-mbt", "--gates"],
+            ["--list-affected-mbt", "mod"],
+            ["--list-affected-mbt", "--base"],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                parse_args(bad)
+
+    def test_list_affected_mbt_prints_only_the_affected_mbt_modules(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-ru-mbt-"))
+        files = {
+            "swap/__init__.py": "",
+            "swap/domain.py": "X = 1\n",
+            "tests/__init__.py": "",
+            "tests/mbt/__init__.py": "",
+            "tests/mbt/profiles.py": "",
+            "tests/mbt/mbt_swap.py": "from swap import domain\nfrom tests.mbt import profiles\n",
+            "tests/mbt/mbt_other.py": "from tests.mbt import profiles\n",
+        }
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", "-C", tmp, *args], capture_output=True, stdin=subprocess.DEVNULL, check=True)
+
+        git("init", "-q", "-b", "main")
+        git("add", ".")
+        git("-c", "user.email=t@example.com", "-c", "user.name=Test", "commit", "-q", "-m", "init")
+        with open(os.path.join(tmp, "swap", "domain.py"), "w", encoding="utf-8") as fh:
+            fh.write("X = 2\n")
+        print_affected_mbt = run_unit_module.print_affected_mbt
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = print_affected_mbt(tmp, "HEAD")
+        self.assertEqual((rc, out.getvalue()), (0, "tests.mbt.mbt_swap\n"))
+
+        git("checkout", "-q", "--", "swap/domain.py")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = print_affected_mbt(tmp, "HEAD")
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = print_affected_mbt(tmp, "no-such-ref-xyz")
+        self.assertEqual(rc, 2)
+        self.assertIn("unknown git revision", err.getvalue())
+
+    def test_affected_says_where_its_mbt_modules_run_without_asking_for_a_second_command(self) -> None:
+        # `invowk cmd test affected` runs --affected, then the mbt modules: the note must not send the
+        # developer to the command already running.
+        from tests.affected import AffectedPlan
+
+        plan = AffectedPlan(
+            base="abc",
+            changed=("swap/domain.py",),
+            full_suite=False,
+            modules=("swap.tests.test_swap",),
+            reason="1 file",
+            mbt_modules=("tests.mbt.m",),
+        )
+        err = io.StringIO()
+        with (
+            mock.patch("tests.affected.git_changed_files", return_value=("abc", ["swap/domain.py"])),
+            mock.patch("tests.affected.select_affected", return_value=plan),
+            contextlib.redirect_stderr(err),
+        ):
+            opts = run_unit_module._resolve_affected_opts(REPO, RunOptions(affected=True))
+        self.assertEqual(opts.names, ("swap.tests.test_swap",))
+        note = (
+            "[affected] 1 tests/mbt module(s) affected, left out of this run (they need uv): "
+            "`invowk cmd test affected` runs them after the unit tests; alone: `invowk cmd test mbt --affected`"
+        )
+        self.assertEqual(err.getvalue().splitlines()[1:], [note])
 
     def test_list_affected_and_affected_cli(self) -> None:
         list_done = subprocess.run(

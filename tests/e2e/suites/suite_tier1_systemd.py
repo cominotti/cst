@@ -2539,6 +2539,19 @@ for path, prefix in ((stage + "/var/lib/cst/installed.json", ""), (stage + "/hom
             [[ ! -e "$f" ]] || {{ echo "remove --component left $f" >&2; exit 1; }}
             grep -q docker-gc {stage}/var/lib/cst/installed.json && {{ echo "the record still lists docker-gc" >&2; exit 1; }}
             {installer} install --root {stage} --component btrfs:docker-gc >/dev/null
+            # A record of a newer CST: remove refuses before it changes anything; the files and that
+            # record stay as they are. The record put back, check passes again.
+            rec={stage}/var/lib/cst/installed.json
+            cp -p "$rec" /var/tmp/e2e-record-saved
+            printf '{{"format": 7}}' >"$rec"
+            newer="$(sha256sum <"$rec")"
+            rc=0; err="$({installer} remove --root {stage} --component btrfs:docker-gc 2>&1 >/dev/null)" || rc=$?
+            [[ "$rc" == 1 ]] || {{ echo "remove over a newer record did not refuse (exit $rc)" >&2; exit 1; }}
+            grep -qF "newer CST" <<<"$err" || {{ echo "remove over a newer record said: $err" >&2; exit 1; }}
+            [[ -e "$f" ]] || {{ echo "remove over a newer record removed $f" >&2; exit 1; }}
+            [[ "$(sha256sum <"$rec")" == "$newer" ]] || {{ echo "remove rewrote the newer record" >&2; exit 1; }}
+            cp -p /var/tmp/e2e-record-saved "$rec" && rm -f /var/tmp/e2e-record-saved
+            {installer} check --root {stage} --owner root {sets}
             echo E2E-RECORD-CYCLE
             """,
         ).stdout
