@@ -212,17 +212,14 @@ HOST_EXCLUSIVE_TESTS: Final[frozenset[str]] = frozenset({"test_10_cpu_quiet_read
 
 def parse_shard(raw: str) -> ShardSpec:
     """Parse an `I/N` shard specification (1 <= I <= N)."""
-    parts = raw.strip().split("/")
     # ASCII digits only: a superscript or an Arabic-Indic digit is no number.
-    numbers = [parse_whole_number(p) for p in parts]
-    if len(numbers) != 2:
-        raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
-    index, total = numbers
-    if index is None or total is None:
-        raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
-    if total < 1 or index < 1 or index > total:
-        raise ValueError(f"invalid --shard {raw!r} (expected 1 <= I <= N)")
-    return ShardSpec(index=index, total=total)
+    match [parse_whole_number(p) for p in raw.strip().split("/")]:
+        case [int() as index, int() as total] if 1 <= index <= total:
+            return ShardSpec(index=index, total=total)
+        case [int(), int()]:
+            raise ValueError(f"invalid --shard {raw!r} (expected 1 <= I <= N)")
+        case _:
+            raise ValueError(f"invalid --shard {raw!r} (expected I/N, e.g. 1/3)")
 
 
 def case_weight(case: unittest.TestCase, weights: Mapping[str, int] = TIER1_WEIGHTS) -> int:
