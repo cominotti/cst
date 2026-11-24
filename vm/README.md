@@ -1097,7 +1097,10 @@ its known gaps); the index holds no torn snapshot and loses an entry only
 on a listing it read (`indexClean`, `indexInRepo`); the retention never
 lets a torn snapshot take a good one's place and keeps the kept ones
 (`goodKept`, `keepKept`); only a consistent read is indexed
-(`consistentRead`). What it models, its gaps and its numbers:
+(`consistentRead`). Its traces are replayed against the real code
+(`vm/tests/test_vm_nas_replay.py`, in the unit suite), so a change of order
+in `nas.py` fails the unit tests until the spec follows it. What it models,
+its gaps and its numbers:
 [docs/dev-tools.md, "Model checking with Quint"](../docs/dev-tools.md#model-checking-with-quint-optional).
 
 For `tune`: the transform of a copy of the real `win11-devbox` definition

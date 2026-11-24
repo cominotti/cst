@@ -13,7 +13,8 @@ type Value = bool | int | str | list[Value] | dict[str, Value]
 
 
 def itf(value: object) -> Value:
-    """An ITF value as Python: {"#bigint": "N"} an int, {"#map": [[k, v], ...]} a dict, records and lists as they are."""
+    """An ITF value as Python: {"#bigint": "N"} an int, {"#set": [...]} and {"#tup": [...]} a list, {"#map": [[k, v],
+    ...]} a dict, records and lists as they are."""
     if isinstance(value, bool | str):
         return value
     if isinstance(value, list):
@@ -22,6 +23,11 @@ def itf(value: object) -> Value:
         raise AssertionError(f"not an ITF value: {value!r}")
     if "#bigint" in value:
         return int(str(value["#bigint"]))
+    if "#set" in value or "#tup" in value:  # a set (its items in the trace's order) or a tuple: a list
+        members = value.get("#set", value.get("#tup"))
+        if not isinstance(members, list):
+            raise AssertionError(f"not an ITF set or tuple: {value!r}")
+        return [itf(v) for v in members]
     if "#map" in value:
         pairs = value["#map"]
         if not isinstance(pairs, list):

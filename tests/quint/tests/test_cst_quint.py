@@ -434,6 +434,16 @@ class ChecksTest(unittest.TestCase):
                 self.assertIn(check.main, modules)
                 self.assertTrue(check.invariants)
 
+    def test_every_spec_has_its_traces_folder_and_its_replay(self) -> None:
+        specs = {c.spec for c in M.CHECKS} | {job.spec for job in M.TRACE_JOBS}
+        self.assertEqual(set(M.TRACES_DIR), specs)
+        self.assertEqual(set(M.REPLAYS), specs)
+        for spec, module in M.REPLAYS.items():
+            with self.subTest(spec=spec):
+                self.assertTrue(os.path.isfile(os.path.join(_CHECKOUT, *module.split(".")) + ".py"), module)
+        names = [(job.spec, job.name) for job in M.TRACE_JOBS]
+        self.assertEqual(len(names), len(set(names)), "two trace jobs of one spec write one file")
+
     def test_a_check_of_a_missing_module_is_found(self) -> None:
         # The test above reads the spec's modules with this pattern: it finds a module that is there, and
         # no other.

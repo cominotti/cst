@@ -1251,6 +1251,55 @@ listing shows the image (`noOverlayLost`), the retention before
 index dropping entries on a listing that failed (`indexClean`), and the
 two old paths of the fix (`mergedOrAlerted`).
 
+**The replay.** `vm/tests/test_vm_nas_replay.py`, in the unit suite,
+replays the checked-in traces of the NAS spec
+(`vm/tests/quint/traces/*.itf.json`) against the real code: `backup_nas`
+once per run of the trace, over the in-process fakes of
+`vm/tests/test_vm_nas.py` (libvirt, the files, restic, the stop signals,
+the clock), which serve a World: the VM's state, each disk's source in the
+live and the persistent definition, the overlay files, the repository's
+snapshots, the torn record and the index. Every port call the spec labels
+is recorded with the spec's label and gets the trace's outcome at its
+position (virsh's exit status, restic's answer, a record that fails); what
+libvirt and restic do on their own (which disks a snapshot switched, a
+pivot that leaves the definition on the overlay, which snapshots the
+retention forgets) is the spec's state after that step. A stop between two
+steps is raised by the code's next port call; one that came in a held block
+(the snapshot call and its poll, the torn record) at the block's end; one
+during the merge back is dropped. A kill makes that call and every later
+one raise, so the World stays as the kill left it; the guest and a late
+switch of libvirt change the World where the trace has them. After each run
+the calls must be the spec's, in its order, the run's end (done, refused,
+stopped, killed) the spec's, and the World the spec's state; after an alert
+the refusal must name the overlays the spec's alert named, each with its
+recovery kind, and a torn snapshot the spec says a message named must be in
+the run's message as `restic forget ID`. A second test checks that the
+traces, together, replay every recorded call and outcome of the spec.
+`CST_NAS_TRACES` names a folder of more traces to replay.
+
+The traces are two random walks (`nas_live1`, `nas_shutoff`), the first
+trace the simulator finds (seed 7, 40 steps) to each witness of the spec
+(`never...`: a stray file dropped, a snapshot that timed out, an unclear
+one alerted, each recovery kind, a failed commit, a listing that failed, a
+torn snapshot forgotten or not, a good run indexed, ...), and two from
+`step_calm`, the steps of `step_` without the environment's: a torn
+snapshot recorded by one run and retried by the next, and the retention
+skipped for it, which a walk of `step_` rarely reaches within its bounds.
+`TRACE_JOBS` in `tests/quint/cst-quint` lists them; about 500 KB in
+all, and the replay takes a fraction of a second. Planted reorders of
+`vm/application/nas.py` fail it: an overlay removed before the definition
+is checked, the retention before `retry_torn`, the forget before the
+record, `restic_ready` after the snapshot, the merge back with the stops
+not ignored.
+
+What the replay does not compare: the notes and the words of the messages
+(beyond the recovery kinds and the `restic forget` lines), the progress
+lines, the manifest and the staged files, the UEFI and TPM files read live,
+the `domfsthaw` calls, the poll's timing, the record's lock, the index
+entries' fields other than their snapshot, and the real signal masks (the
+fake signals port follows the modes of `StopSignals`; the tests of
+`vm/tests/test_vm_nas.py` that send `cst-vm` its signals cover them).
+
 **In CI.** The `quint` job of `.github/workflows/ci.yml` runs `invowk cmd
 test quint` when a pull request (or a push to main) changes a path under
 `btrfs/docker_volumes_nocow/`, `btrfs/tests/quint/`, `vm/tests/quint/` or
