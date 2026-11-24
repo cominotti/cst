@@ -242,6 +242,25 @@ class PlantedTest(unittest.TestCase):
         self.append("tests/e2e/suites/suite_new.py", "import annotationlib\n")
         self.assert_one_problem("tests/e2e/suites/suite_new.py:1:", "annotationlib")
 
+    def test_a_new_python_module_an_action_runs_with_dash_m_is_reported(self) -> None:
+        # Only python3 ... FILE.py was read: python3 -m added a host entry the gate neither followed nor reported.
+        self.append("tests/e2e/new.py", "")
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}"; python3 -I -B -m tests.e2e.new)"',
+        )
+        self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_an_entry_run_with_dash_m_and_a_standard_module_are_no_problem(self) -> None:
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -m venv /tmp/v; python3 -I -B -m tests.e2e.image_digest "${name}")"',
+        )
+        self.assertEqual(gate.problems(self.repo), [])
+        self.assertEqual(set(gate.host_runs(self.repo)[0]["ubuntu-24.04"]), set(gate.HOST_ENTRIES))
+
     def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",

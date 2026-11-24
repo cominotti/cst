@@ -17,7 +17,8 @@ problem, so it cannot slip out of the set: a load by path of another form,
 and an import by a name or text given at run time (importlib.import_module,
 __import__, exec, runpy.run_module). problems() checks:
 
-- the entries against CI: every `python3 ... FILE.py` of a job without a
+- the entries against CI: every `python3 ... FILE.py` (or `python3 -m NAME`
+  of a repository module) of a job without a
   container (and of the composite actions), and of the invowk task each such
   job runs, names a file of HOST_ENTRIES;
 - the runner of each job that runs one of them is in HOST_PYTHON_BY_RUNNER
@@ -87,8 +88,9 @@ ACTIONS: Final = ".github/actions"
 PYPROJECT: Final = "pyproject.toml"
 _BUILTINS: Final = "builtins"
 
-# A python3 command line and the repository .py file it runs.
+# A python3 command line and the repository .py file it runs, or the module it runs with -m.
 _PYTHON_RUN: Final = re.compile(r"\bpython3\b[^\n]*?\s([\w./-]+\.py)\b")
+_PYTHON_MODULE_RUN: Final = re.compile(r"\bpython3\b[^\n]*?\s-m\s*([\w.]+)")
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
 # command starts (a line, a run: key, after ; & | or an opening parenthesis), not in a message's text.
 _INVOWK_RUN: Final = re.compile(r"(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|(]\s*)(?:exec\s+)?invowk cmd((?: [a-z0-9][\w-]*)+)")
@@ -386,13 +388,26 @@ def _action_files(repo: str) -> list[str]:
     ]
 
 
-def _runs(lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
+def _python_runs(repo: str, line: str) -> list[str]:
+    """The repository .py files a line runs with python3: FILE.py, and python3 -m NAME's module (its
+    __main__.py for a package; a module that is no file of the repository, as pip or venv, is none)."""
+    files = [group(found, 1) for found in _PYTHON_RUN.finditer(line)]
+    for found in _PYTHON_MODULE_RUN.finditer(line):
+        parts = group(found, 1).split(".")
+        for candidate in ("/".join(parts) + ".py", "/".join([*parts, "__main__.py"])):
+            if os.path.isfile(os.path.join(repo, candidate)):
+                files.append(candidate)
+                break
+    return files
+
+
+def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
     """The repository .py files these lines run with python3, directly or through an invowk task, and the
     problems (an invowk task that is not in the invowkfile)."""
     files: list[str] = []
     problems: list[str] = []
     for n, line in lines:
-        files += _PYTHON_RUN.findall(line)
+        files += _python_runs(repo, line)
         for found in _INVOWK_RUN.finditer(line):
             task = group(found, 1).strip()
             script = task_script(cue, task)
@@ -401,7 +416,7 @@ def _runs(lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[
                 continue
             for script_line in script.splitlines():
                 if not script_line.lstrip().startswith("#"):
-                    files += _PYTHON_RUN.findall(script_line)
+                    files += _python_runs(repo, script_line)
     return files, problems
 
 
@@ -418,7 +433,7 @@ def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
     problems: list[str] = []
     action_files: dict[str, list[str]] = {}
     for rel in _action_files(repo):
-        files, found = _runs(uncommented_lines(_read(repo, rel)), cue, rel)
+        files, found = _runs(repo, uncommented_lines(_read(repo, rel)), cue, rel)
         action_files[os.path.dirname(rel)] = files
         problems += found
         problems += _not_entries(rel, files)
@@ -427,7 +442,7 @@ def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
         for job, body in _jobs(_read(repo, rel)).items():
             if _job_key(body, "container") is not None:
                 continue
-            files, found = _runs(body, cue, f"{rel} (job {job})")
+            files, found = _runs(repo, body, cue, f"{rel} (job {job})")
             problems += found
             problems += _not_entries(f"{rel} (job {job})", files)
             for _, line in body:  # an action's own files are reported once, at the action
