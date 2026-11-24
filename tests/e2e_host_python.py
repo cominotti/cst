@@ -46,6 +46,7 @@ unit tests run on /usr/bin/python3 without uv.
 
 import ast
 from collections.abc import Iterable, Mapping, Sequence
+from enum import StrEnum
 import os
 from pathlib import PurePosixPath
 import posixpath
@@ -120,6 +121,13 @@ _SAME_PATH: Final = frozenset({"resolve", "absolute"})
 _RUN_TIME_IMPORTS: Final = frozenset(
     {"builtins.exec", "builtins.__import__", "importlib.import_module", "importlib.__import__", "runpy.run_module"}
 )
+
+
+class ProgramKind(StrEnum):
+    """What a python3 command line runs (python_program): a module by its name, or a script by its path."""
+
+    MODULE = "module"
+    SCRIPT = "script"
 
 
 def _read(repo: str, rel: str) -> str:
@@ -412,26 +420,26 @@ def _action_files(repo: str) -> list[str]:
     ]
 
 
-def python_program(words: Sequence[str]) -> tuple[str, str] | None:
+def python_program(words: Sequence[str]) -> tuple[ProgramKind, str] | None:
     """What a python3 command line runs, read from the words after python3 as Python reads its own
-    options: ("module", NAME) for -m NAME, ("script", WORD) for the first word that is no option, or
+    options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD) for the first word that is no option, or
     None (-c's inline code, "-" for stdin, no program). An option cluster (-IB) goes on; -m, -c, -X and
     -W take the rest of their cluster or the next word; "--" ends the options; another word that starts
     with "--" is a long option. Words after the program are the program's own (a -m there is not
     python3's). A word that ends in ; | & ) or a quote ends the command."""
-    program: tuple[str, str] | None = None
+    program: tuple[ProgramKind, str] | None = None
     i = 0
     while i < len(words):
         word, ends = _command_word(words[i])
         i += 1
         following = None if ends or i >= len(words) else _command_word(words[i])
         if word == _END_OF_OPTIONS:
-            program = None if following is None else ("script", following[0])
+            program = None if following is None else (ProgramKind.SCRIPT, following[0])
             break
         if word in {"", _STDIN}:
             break
         if not word.startswith("-"):
-            program = ("script", word)
+            program = (ProgramKind.SCRIPT, word)
             break
         option = None if word.startswith("--") else _option_with_argument(word)
         if option is not None:
@@ -439,7 +447,7 @@ def python_program(words: Sequence[str]) -> tuple[str, str] | None:
             if not argument and following is not None:
                 (argument, ends), i = following, i + 1
             if letter == _MODULE_OPTION and argument:
-                program = ("module", argument)
+                program = (ProgramKind.MODULE, argument)
             if letter in {_MODULE_OPTION, _CODE_OPTION}:
                 break
         if ends:
@@ -476,15 +484,15 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
     for found in _PYTHON_WORD.finditer(line):
         program = python_program(line[found.end() :].split()) if line[found.end() : found.end() + 1].isspace() else None
         match program:
-            case ("module", name):
+            case (ProgramKind.MODULE, name):
                 parts = name.split(".")
                 for candidate in ("/".join(parts) + ".py", "/".join([*parts, "__main__.py"])):
                     if os.path.isfile(os.path.join(repo, candidate)):
                         files.append(candidate)
                         break
-            case ("script", word) if "$" in word or "`" in word:
+            case (ProgramKind.SCRIPT, word) if "$" in word or "`" in word:
                 unnamed.append(word)
-            case ("script", word):
+            case (ProgramKind.SCRIPT, word):
                 rel = posixpath.normpath(word)
                 inside = not rel.startswith(("/", "../")) and rel != ".."
                 if inside and (rel.endswith(".py") or os.path.isfile(os.path.join(repo, rel))):
