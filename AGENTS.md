@@ -133,7 +133,7 @@ of starting over or stopping.
 Run from the repository root.
 
 ```
-invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (what CI runs)
+invowk cmd check                              # every fast gate: validate, audit, test lint, pylint, types, workflows, unit (CI runs it, then test mbt)
 invowk cmd test unit                          # all unit tests in parallel across CPUs, socket as stdin (tests/run_unit.py; --jobs 1 disables parallelism; CST_TEST_JOBS=N sets the default worker count, --jobs wins)
 invowk cmd test affected [--list] [--base REF] # static --affected unit test selection from git diff + AST imports (falls back to full suite on cst_core/shared edits), then the affected tests/mbt modules
 invowk cmd test module vm.tests.test_vm       # one module, class or method, through tests/run_unit.py
@@ -153,7 +153,8 @@ invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
 
-- Before a pull request, run `invowk cmd check`, and `test e2e tier1` when
+- Before a pull request, run `invowk cmd check` and `invowk cmd test mbt`
+  (CI's fast gates run both, mbt with `--profile ci`), and `test e2e tier1` when
   the change adds or touches a tier 1 E2E test (if its container does not
   start, say so in the pull request).
 - Budgets and ceilings (`IO_BUDGETS`, `RUFF_BUDGETS`, `CEILINGS`, the
