@@ -12,7 +12,7 @@ import datetime as dt
 import unittest
 import zoneinfo
 
-from hypothesis import assume, given
+from hypothesis import given
 from hypothesis import strategies as st
 
 from btrfs.snapshot import domain as core
@@ -27,8 +27,10 @@ LOW = dt.datetime(2024, 1, 1)
 HIGH = dt.datetime(2028, 12, 31)
 LAST_EPOCH = 253_402_128_000  # 9999-12-29 00:00 UTC
 
-policy_values = st.one_of(st.integers(min_value=0, max_value=120), st.just("all"))
-policies = st.dictionaries(st.sampled_from(core.POLICY_UNITS), policy_values, min_size=1)
+counts = st.integers(min_value=0, max_value=120)
+policies = st.dictionaries(st.sampled_from(core.POLICY_UNITS), st.one_of(counts, st.just("all")), min_size=1)
+# Policies with no "all" unit, the ones policy_max_kept bounds: an "all" half the time would throw most away.
+bounded_policies = st.dictionaries(st.sampled_from(core.POLICY_UNITS), counts, min_size=1)
 zones = st.sampled_from(ZONES).map(zoneinfo.ZoneInfo)
 minutes = st.datetimes(min_value=LOW, max_value=HIGH).map(lambda w: w.replace(second=0, microsecond=0))
 
@@ -111,13 +113,13 @@ class PlanTest(profiles.MbtTestCase):
         now = newest_epoch(snaps, tz) + ahead
         self.assertLessEqual(kept(core.plan(snaps, now, small, tz)), kept(core.plan(snaps, now, large, tz)))
 
-    @given(timelines(), policies, zones, st.integers(min_value=0, max_value=400 * DAY))
+    @given(timelines(), bounded_policies, zones, st.integers(min_value=0, max_value=400 * DAY))
     def test_the_kept_count_stays_within_policy_max_kept(
         self, snaps: list[core.Snap], policy: dict[str, int | str], tz: zoneinfo.ZoneInfo, ahead: int
     ) -> None:
         limit = core.policy_max_kept(policy)
-        assume(limit is not None)
-        assert limit is not None  # assume() does not narrow the type for ty
+        self.assertIsNotNone(limit)
+        assert limit is not None  # for ty: assertIsNotNone does not narrow
         now = newest_epoch(snaps, tz) + ahead
         rows = core.plan(snaps, now, policy, tz)
         self.assertLessEqual(len(kept(rows)), limit)
