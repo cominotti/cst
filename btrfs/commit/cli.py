@@ -22,11 +22,11 @@ def _commit_write_action(parsed: CommitParsedArgs) -> str | None:
 
 
 def _resolve_commit_prog(raw: str) -> str:
-    return "cst btrfs commit-interval" if raw == "cst btrfs" else (raw or "cst btrfs commit-interval")
+    return commit_domain.COMMIT_PROG if raw == "cst btrfs" else (raw or commit_domain.COMMIT_PROG)
 
 
 _COMMIT_SPEC = ManagedCliSpec(
-    default_prog="cst btrfs commit-interval",
+    default_prog=commit_domain.COMMIT_PROG,
     parse=commit_domain.parse_commit_args,
     format_usage=commit_domain.format_commit_usage,
     is_help=lambda p: p.action == CommitAction.HELP,

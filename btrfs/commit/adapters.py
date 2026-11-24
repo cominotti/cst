@@ -8,6 +8,7 @@ import os
 from typing import Final
 
 from btrfs.commit.domain import (
+    COMMIT_PROG,
     DEFAULT_TARGET_COMMIT_S,
     KERNEL_DEFAULT_COMMIT_S,
     CommitAction,
@@ -175,7 +176,7 @@ def execute_commit_change(
     host: CompressHostPort,
     parsed: CommitParsedArgs,
     *,
-    prog: str = "cst btrfs commit-interval",
+    prog: str = COMMIT_PROG,
     seam_proc: str = "",
 ) -> tuple[int, list[str]]:
     """Run transactional `apply` or `revert` against `host` (`CompressHostPort`)."""
@@ -274,7 +275,7 @@ def dispatch_commit_cli_action(
     """Resolve host adapter and execute the requested `commit-interval` subcommand."""
     del read_only
     host, seam_proc, env_map = _host_for_env(env)
-    prog = env_map.get("CST_PROG") or "cst btrfs commit-interval"
+    prog = env_map.get("CST_PROG") or COMMIT_PROG
     match parsed.action:
         case CommitAction.STATUS:
             snap, kargs_ok, kargs_err = read_commit_snapshot(host)

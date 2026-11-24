@@ -25,6 +25,8 @@ DEFAULT_TARGET_COMMIT_S: Final = 60
 MIN_COMMIT_S: Final = 15
 MAX_COMMIT_S: Final = 300
 _COMMIT_PREFIX: Final = "commit="
+# The command's name in its own messages, when CST_PROG does not give it.
+COMMIT_PROG: Final = "cst btrfs commit-interval"
 
 
 class CommitAction(StrEnum):
@@ -208,9 +210,17 @@ def _flag_rejection(tok: str) -> str:
     return f"unknown or unexpected argument: {tok}"
 
 
-def _parse_commit_flags(action: CommitAction, rest: Sequence[str]) -> CommitParsedArgs:
-    if any(tok in HELP_WORDS for tok in rest):
-        return CommitParsedArgs(action=CommitAction.HELP)
+def _resolved_seconds(seconds: int | None, *, revert: bool) -> int:
+    """The commit interval a run sets: the kernel's default for a revert, else the one given or ours."""
+    if revert:
+        return KERNEL_DEFAULT_COMMIT_S
+    if seconds is None:
+        return DEFAULT_TARGET_COMMIT_S
+    return seconds
+
+
+def _scan_commit_flags(action: CommitAction, rest: Sequence[str]) -> tuple[int | None, bool, bool] | CommitParsedArgs:
+    """The arguments after the action: (seconds, revert, yes), or the usage error of the first bad one."""
     seconds: int | None = None
     revert = action == CommitAction.REVERT
     yes = False
@@ -226,10 +236,19 @@ def _parse_commit_flags(action: CommitAction, rest: Sequence[str]) -> CommitPars
             seconds = parsed
         else:
             return CommitParsedArgs(action=action, error=_flag_rejection(tok), code=2)
+    return seconds, revert, yes
+
+
+def _parse_commit_flags(action: CommitAction, rest: Sequence[str]) -> CommitParsedArgs:
+    if any(tok in HELP_WORDS for tok in rest):
+        return CommitParsedArgs(action=CommitAction.HELP)
+    scanned = _scan_commit_flags(action, rest)
+    if isinstance(scanned, CommitParsedArgs):
+        return scanned
+    seconds, revert, yes = scanned
     if revert and seconds is not None:
         return CommitParsedArgs(action=action, error="cannot combine seconds with --revert", code=2)
-    resolved = KERNEL_DEFAULT_COMMIT_S if revert else (DEFAULT_TARGET_COMMIT_S if seconds is None else seconds)
-    return CommitParsedArgs(action=action, seconds=resolved, revert=revert, yes=yes)
+    return CommitParsedArgs(action=action, seconds=_resolved_seconds(seconds, revert=revert), revert=revert, yes=yes)
 
 
 def parse_commit_args(argv: Sequence[str]) -> CommitParsedArgs:

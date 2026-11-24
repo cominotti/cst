@@ -23,15 +23,17 @@ OSTREE_BOOTED_PATH: Final[str] = "/run/ostree-booted"
 TOP_MOUNT_UNIT_PATH: Final[str] = r"/etc/systemd/system/var-mnt-btrfs\x2dtop.mount"
 TOP_MOUNT_UNIT_NAME: Final[str] = r"var-mnt-btrfs\x2dtop.mount"
 
-ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var", "/var/home", "/home"})
+# rpm-ostree mounts the booted deployment's root filesystem there too.
+_SYSROOT: Final = "/sysroot"
+ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", _SYSROOT, "/var", "/var/home", "/home"})
 # fstab: without a UUID=<root uuid> to compare, these targets are the root filesystem's; /home and
 # /var/home are its only when they name the same source as one of them (a separate btrfs /home is another
 # filesystem, never changed).
-_PRIMARY_ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var"})
+_PRIMARY_ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", _SYSROOT, "/var"})
 _HOME_TARGETS: Final[frozenset[str]] = ROOT_TARGETS - _PRIMARY_ROOT_TARGETS
 # The root filesystem is the btrfs of the first of these targets that is one (/sysroot, else /, else /var):
 # pick_root_mounts picks the live root mounts by it, and the host adapter's root_uuid the fstab lines.
-ROOT_ANCHOR_TARGETS: Final[tuple[str, ...]] = ("/sysroot", "/", "/var")
+ROOT_ANCHOR_TARGETS: Final[tuple[str, ...]] = (_SYSROOT, "/", "/var")
 _UUID_PREFIX: Final = "UUID="
 _SUBVOL_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 ROOTFLAGS_PREFIX: Final[str] = "rootflags="
@@ -433,7 +435,7 @@ def pick_remount_target(mounts: Sequence[MountEntry]) -> MountEntry | None:
     """Choose the best live writable root btrfs mountpoint for `mount -o remount,...`."""
     by_target = {m.target: m for m in mounts}
     for allow_ro in (False, True):
-        for preferred in ("/var", "/var/home", "/sysroot", "/"):
+        for preferred in ("/var", "/var/home", _SYSROOT, "/"):
             entry = by_target.get(preferred)
             if entry is not None and (allow_ro or "ro" not in entry.options.split(",")):
                 return entry
