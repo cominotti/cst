@@ -32,8 +32,10 @@ from cpu.game.adapters.host import (
     write_sysfs_line,
 )
 from cpu.game.adapters.boxes import set_again
+from cpu.game.adapters.leftovers import keep, read_kept, retry_kept, undo_entries, unit_gone
 from cpu.game.adapters.power import apply_game_cstates, apply_game_gpu, boost_p_cores
 from cpu.game.adapters.report import show_state
+from cpu.game.domain.leftovers import merged_entries, off_text
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -508,12 +510,15 @@ class GameProfile:
 
     def off(self) -> int:
         """Exact revert: the overrides 'on' created go (then daemon-reload), the ones that existed
-        before get their old value back; the MemoryLow drop-ins go also without a game.state."""
+        before get their old value back; the MemoryLow drop-ins go also without a game.state. What it
+        could not undo is kept in game.leftovers for the next 'off' and tick (retry_kept), and game.state
+        is removed anyway: it means the profile is on."""
         p = self.paths
         if not os.path.exists(p.state):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.manual)
             self.remove_leftover_dropins()
+            retry_kept(self, say=True)
             return 0
         reload = {"sys": self.remove_game_dropins(), "usr": False}
         text = self.state_text()
@@ -521,18 +526,22 @@ class GameProfile:
             self.log(4, f"{p.state} line {number}: no record 'off' can read, skipped: {line}")
         recs = records(text)
         self.user_from_state(recs)
-        # Newest first, so a property touched twice ends at its oldest value.
-        for rec in reversed(recs):
-            self._undo(rec, reload)
+        kept = read_kept(self, say=True)
+        failed = undo_entries(self, merged_entries(kept or [], recs), reload, say=True)
+        self.reload_managers(reload)
+        keep(self, failed, readable=kept is not None)
+        for f in (p.state, p.intended, p.manual, p.drift_warned):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(f)
+        self.log(5, off_text(len(failed) if kept is not None else 0, p.leftovers))
+        return 0
+
+    def reload_managers(self, reload: dict[str, bool]) -> None:
+        """daemon-reload each manager an undo removed an override of (reload: by manager)."""
         if reload["sys"]:
             self.ctl("sys", "daemon-reload")
         if reload["usr"]:
             self.ctl("usr", "daemon-reload")
-        for f in (p.state, p.intended, p.manual, p.drift_warned):
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(f)
-        self.log(5, "off: previous CPU, weight, memory, zswap writeback and EPP settings restored")
-        return 0
 
     def user_from_state(self, recs: Sequence[Record], *, say: bool = True) -> None:
         """'off' undoes the user manager's side for the user 'on' acted for, whose uid game.state names:
@@ -540,7 +549,11 @@ class GameProfile:
         The tick and 'state' act for that user too, quietly (say False: neither the line below nor id's
         "no such user" line, which 'off' says once: _lookup_uid), so what the tick sets in the user
         manager is what 'off' undoes."""
-        uid = state_uid(recs)
+        self.act_for(state_uid(recs), say=say)
+
+    def act_for(self, uid: str | None, *, say: bool = True) -> None:
+        """Act for the user with that uid in the user manager's side from now on (None: TARGET_USER as it
+        is): user_from_state's rule, also for the user a kept record of game.leftovers names."""
         if uid is None:
             return
         target = self.s.target_user
@@ -554,25 +567,33 @@ class GameProfile:
                 self.log(5, f"{why}: undoing for {name} (uid {uid}), the user 'on' acted for")
             self.s = dataclasses.replace(self.s, target_user=name)
 
-    def _undo(self, rec: Sequence[str], reload: dict[str, bool]) -> None:
-        """Undo one record of game.state (as state_undo reads it)."""
+    def undo_record(self, rec: Sequence[str], reload: dict[str, bool]) -> bool:
+        """Undo one record of game.state (as state_undo reads it); False when the undo failed: a file write
+        or set-property that failed, an override file there that cannot be removed. A unit that is gone is
+        no failure (unit_gone), nor is a record it cannot read (it is skipped)."""
         match state_undo(rec):
             case CgroupUndo(file=f, old=old) | SysfsUndo(file=f, old=old):
-                write_sysfs_line(f, old)
+                return write_sysfs_line(f, old)
             case EppUndo(cpu=cpu, old=old):
-                write_sysfs_line(self.paths.epp(cpu), old)
+                return write_sysfs_line(self.paths.epp(cpu), old)
             case PropUndo(mgr=mgr, unit=unit, prop=prop, mode=mode, old=old):
                 if mode == "new":
                     f = self.ctl_file(mgr, unit, prop, say=True)
-                    with contextlib.suppress(OSError):
+                    ok = True
+                    try:
                         os.unlink(f)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        ok = False
                     with contextlib.suppress(OSError):
                         os.rmdir(os.path.dirname(f))
                     reload[mgr] = True
-                else:
-                    self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+                    return ok
+                rc = self.ctl(mgr, "set-property", "--runtime", unit, f"{prop}={old}", quiet=True)
+                return rc == 0 or unit_gone(self, mgr, unit)
             case None:
-                pass
+                return True
 
     def drift(self, text: str) -> list[Drift]:
         """The settings in game.intended (its text) that no longer hold (one systemctl show per unit)."""
@@ -662,6 +683,7 @@ class GameProfile:
         unless it was switched off by hand while that client runs (suppress) or 'on' would refuse."""
         p = self.paths
         self.remove_leftover_dropins()
+        retry_kept(self, say=False)  # what an 'off' could not undo, now that the profile is off
         if not self.gamemode_client():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(p.suppress)

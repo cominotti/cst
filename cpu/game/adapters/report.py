@@ -12,6 +12,7 @@ import os
 from typing import TYPE_CHECKING
 
 from cpu.game.adapters.host import read_snapshot, read_stripped
+from cpu.game.adapters.leftovers import read_kept
 from cpu.game.domain import (
     APP_SLICE,
     BUILDS_SLICE,
@@ -24,6 +25,8 @@ from cpu.game.domain import (
     state_head,
     unreadable_report,
 )
+
+from cpu.game.domain.leftovers import leftovers_line
 
 if TYPE_CHECKING:
     from cpu.game.adapters.profile import GameProfile
@@ -50,6 +53,9 @@ def show_state(profile: GameProfile) -> int:
         profile.say_lines(unreadable_report(p, state_text or "", intended_text or "", judged=newer is None))
     first = first_cpu(s.build_cpus)
     profile.say(f"  EPP cpu0 {read_stripped(p.epp('0')) or ''}, cpu{first} {read_stripped(p.epp(first)) or ''}")
+    kept = read_kept(profile, say=False)
+    if kept is not None and kept:
+        profile.say(leftovers_line(kept, p.epp))
     if on:
         profile.say_lines(profile.drift_report(state_recs, intended_text, newer, manual=manual))
     return 0

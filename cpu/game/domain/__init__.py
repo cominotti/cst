@@ -39,6 +39,7 @@ class GameRecordKind(StrEnum):
     CGW = "cgw"  # a cgroup file written directly
     EPP = "epp"  # a CPU's energy/performance preference (game.state only)
     SYSFS = "sysfs"  # a generic sysfs file written directly and restored on off (game.state only)
+    USER = "user"  # the uid the user manager's records after it are for (game.leftovers only)
 
 
 _MANAGERS: Final[dict[str, Manager]] = {"sys": "sys", "usr": "usr"}
@@ -115,6 +116,11 @@ class GamePaths:
     def intended(self) -> str:
         """game.intended: what 'on' set, for the drift repair."""
         return posixpath.join(self.run, posixpath.basename(state_format(StateFormatKey.GAME_INTENDED).path))
+
+    @property
+    def leftovers(self) -> str:
+        """game.leftovers: the records 'off' could not undo, for the next 'off' and tick."""
+        return _in(self.run, posixpath.basename(state_format(StateFormatKey.GAME_LEFTOVERS).path))
 
     @property
     def manual(self) -> str:

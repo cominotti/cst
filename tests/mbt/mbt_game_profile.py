@@ -30,20 +30,21 @@ is no fault.
 Checked, relative to the baseline (the machine at the start: every runtime override file by the
 value it sets, every value systemd shows, every sysfs file; the drop-ins and the state files):
 1. Record cover, after every step: every override file, shown value and sysfs file that differs
-   from the baseline has a record in game.state that 'off' undoes (state_undo): so with no
-   game.state, nothing differs. The one exception is a MemoryLow of the memory chain that its
+   from the baseline has a record in game.state or game.leftovers that 'off' undoes (state_undo):
+   so with neither, nothing differs. The one exception is a MemoryLow of the memory chain that its
    zz-cst-game.conf drop-in sets after a daemon-reload: 'off' and the tick remove every such
    drop-in, with a record or without (a setp whose record could not be written is skipped, the
    drop-ins are written for the whole chain).
 2. Off restores: after an 'off' with no fault, whatever ran between (faults, kills, drift, outside
    reloads, more boxes): every override file and shown value as at the baseline (an 'existed'
    override comes back as its shown value: 16G as 17179869184), every sysfs file byte for byte, no
-   drop-in, no game.state, game.intended, manual or drift-warned. check_off runs such an off at
-   points Hypothesis chooses on a copy of the machine, and puts the machine back. After a kill
-   inside 'off', the next 'off' restores it. Named gap (O4): after a set-property or a sysfs write
-   that fails inside 'off', game.state is gone, every other undo is done, and that one setting keeps
-   the value it had before that 'off' (the profile's, unless an 'off' killed earlier undid it),
-   asserted exactly; it is then the machine's own (the baseline takes it).
+   drop-in, no game.state, game.intended, game.leftovers, manual or drift-warned. check_off runs
+   such an off at points Hypothesis chooses on a copy of the machine, and puts the machine back.
+   After a kill inside 'off', the next 'off' restores it. After a set-property or a sysfs write that
+   fails inside 'off' (O4): game.state is gone, every other undo is done, that one setting keeps the
+   value it had before that 'off', and game.leftovers holds exactly its record; the baseline does not
+   move, and after the next tick with no fault while the profile is off (or the next whole 'off')
+   every setting is at the baseline and game.leftovers is gone.
 3. On twice equals on once: 'on' with game.state there changes nothing and sets nothing.
 4. A tick leaves nothing half applied: after a tick with no fault while the profile stays on,
    every running Docker scope has AllowedCPUs = BUILD_CPUS and its record, every Steam scope its
@@ -79,14 +80,20 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, pr
 from cpu.game.adapters import host as game_host, profile as game_profile
 from cpu.game.adapters.profile import GameProfile
 from cpu.game.domain import (
+    CgroupUndo,
+    EppUndo,
     GameSettings,
+    PropUndo,
+    SysfsUndo,
     has_prop_record,
     has_sys_record,
     intended_records,
     manager_of,
     records,
+    state_undo,
     unheld,
 )
+from cpu.game.domain.leftovers import leftover_entries
 from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
 from cst_core.ports import CommandResult
 from tests.fault_injection import FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed, stub_fsync
@@ -377,17 +384,40 @@ class GameProfileMachine(RuleBasedStateMachine):
         assert keys <= skip, f"{what}: settings not restored: {sorted(keys - skip)}"
         assert files <= skip_files, f"{what}: sysfs files not restored: {sorted(files - skip_files)}"
         assert now.dropins == [], f"{what}: drop-ins left: {now.dropins}"
-        # With no game.state, off removes the by-hand mark and the drop-ins only.
+        # With no game.state, off removes the by-hand mark and the drop-ins only (and undoes the leftovers).
         p = self.paths
         files = (p.state, p.intended, p.manual, p.drift_warned) if was_on else (p.state, p.manual)
+        if not (skip or skip_files):
+            files = (*files, p.leftovers)
         left = [f for f in files if os.path.exists(f)]
         assert left == [], f"{what}: files left: {left}"
+
+    def leftover_keys(self) -> set[tuple[str, str]]:
+        """What game.leftovers holds, as failed_key names a point: ("prop", "MGR UNIT PROP"), ("file", PATH)."""
+        out: set[tuple[str, str]] = set()
+        for _uid, rec in leftover_entries(self.read(self.paths.leftovers)):
+            match state_undo(rec):
+                case PropUndo(mgr=mgr, unit=unit, prop=prop):
+                    out.add(("prop", f"{mgr} {unit} {prop}"))
+                case CgroupUndo(file=f) | SysfsUndo(file=f):
+                    out.add(("file", f))
+                case EppUndo(cpu=cpu):
+                    out.add(("file", self.paths.epp(cpu)))
+                case None:
+                    pass
+        return out
+
+    def read(self, path: str) -> str:
+        if not os.path.exists(path):
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
 
     def after_off(
         self, what: str, failed: str | None, *, killed: bool, was_on: bool, before: View | None = None
     ) -> None:
         """The checks after an 'off' (point 2 of the docstring; was_on: game.state was there; before: the
-        machine before it, for a fault), and O4's new baseline."""
+        machine before it, for a fault)."""
         if killed:
             return
         if failed is None:
@@ -401,17 +431,28 @@ class GameProfileMachine(RuleBasedStateMachine):
             mgr, unit, prop = which.split()
             skip = frozenset({(mgr, unit, prop)})
         skip_files = frozenset({which}) if kind == "file" else frozenset()
-        # O4: game.state is gone, every other undo done; the failed one is as it was before this off (the
-        # profile's value, unless an off killed earlier undid it already).
+        # O4: game.state is gone, every other undo done; the failed one is as it was before this off, and
+        # game.leftovers holds exactly its record, for the next off and tick.
         self.assert_restored(f"{what} (failed at {failed})", skip=skip, skip_files=skip_files, was_on=was_on)
         assert before is not None, f"{what}: a fault without the machine before it"
         now = self.view()
         for k in skip:
             was, after = (before.overrides.get(k), before.live.get(k)), (now.overrides.get(k), now.live.get(k))
-            assert was == after, f"O4 fixed? {failed}: {k} went from {was} to {after}"
+            assert was == after, f"{failed}: {k} went from {was} to {after}"
         for f in skip_files:
-            assert before.sysfs.get(f) == now.sysfs.get(f), f"O4 fixed? {failed}: {f} changed"
-        self.base = now  # the setting is the machine's own now
+            assert before.sysfs.get(f) == now.sysfs.get(f), f"{failed}: {f} changed"
+        kept = self.leftover_keys()
+        assert kept == {key}, f"{what} (failed at {failed}): game.leftovers holds {kept}, not {key}"
+
+    def assert_off_restored(self, what: str) -> None:
+        """With the profile off after a whole tick: every setting at the baseline, no drop-in, no game.leftovers."""
+        now = self.view()
+        keys, files = now.differences(self.base)
+        assert (keys, files) == (set(), set()), f"{what}: not restored: {sorted(keys)} {sorted(files)}"
+        assert now.dropins == [], f"{what}: drop-ins left: {now.dropins}"
+        assert not os.path.exists(self.paths.leftovers), (
+            f"{what}: game.leftovers left: {self.read(self.paths.leftovers)}"
+        )
 
     def run_follow_up(self) -> None:
         """A tick's start or stop of cpu-game.service: its ExecStart ('on') or ExecStop ('off'), no fault."""
@@ -530,9 +571,12 @@ class GameProfileMachine(RuleBasedStateMachine):
 
     @rule(fault=st.sampled_from(ProfileFault), at=st.integers(1, FEW_POINTS))
     def tick(self, fault: ProfileFault, at: int) -> None:
+        was_off = not os.path.exists(self.paths.state)
         killed, failed = self.call("tick", fault, at)
         if killed or failed is not None:
             return
+        if was_off:
+            self.assert_off_restored("a tick with the profile off")
         stays_on = os.path.exists(self.paths.state) and not [a for a in self.systemd.actions if "cpu-game.service" in a]
         if stays_on:
             self.assert_tick_whole()
@@ -578,7 +622,7 @@ class GameProfileMachine(RuleBasedStateMachine):
     def every_change_has_its_record(self) -> None:
         now = self.view()
         keys, files = now.differences(self.base)
-        text = self.state_text()
+        text = self.state_text() + self.read(self.paths.leftovers)  # off keeps what it could not undo there
         for mgr, unit, prop in sorted(keys):
             dropin = os.path.join(self.paths.unit_runtime, f"{unit}.d", "zz-cst-game.conf")
             same_file = now.overrides.get((mgr, unit, prop)) == self.base.overrides.get((mgr, unit, prop))
@@ -639,6 +683,26 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             lambda m: m.off(ProfileFault.KILL, 1),
             lambda m: m.reload("usr"),
             lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_tick(self) -> None:
+        # O4: the set-property that gives machine.slice its CPUWeight back fails inside 'off'; game.state
+        # is gone, and game.leftovers keeps that record, which the next tick while off undoes. The old
+        # profile dropped it with game.state: the setting stayed the game's until a reboot.
+        self.replay(
+            lambda m: m.start(prior=True, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.FAIL, 17),  # systemctl set-property --runtime machine.slice CPUWeight
+            lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_setting_an_off_could_not_undo_is_undone_by_the_next_off(self) -> None:
+        # O4: the same failed undo, then a whole 'off' with no game.state undoes the kept record.
+        self.replay(
+            lambda m: m.start(prior=True, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.FAIL, 17),
+            lambda m: m.off(ProfileFault.NONE, 1),
         )
 
 

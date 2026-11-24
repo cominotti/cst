@@ -7134,6 +7134,85 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_182_cpu_game_profile_keeps_an_undo_off_could_not_do_and_the_tick_retries_it(self) -> None:
+        """The real game profile, on for tester, with two more records in game.state whose undo fails: a sysfs
+        file under a path whose folder is a plain file (the write fails, ENOTDIR), and machine.slice's
+        CPUWeight set back to a value the real systemd refuses. 'off' exits 0, undoes everything else
+        (machine.slice gets its own CPUWeight back from on's record), removes game.state, names both in the
+        journal and keeps exactly the two records in game.leftovers; 'state' lists them. A tick while off
+        keeps both (the file byte for byte); once the folder is a folder, the next tick writes the old value
+        and keeps only the CPUWeight record, which the next 'off' keeps too. The old 'off' removed game.state
+        with both records in it and kept nothing."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-182-conf.bak ]]; then mv /tmp/e2e-182-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup /run/e2e182
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-182-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            lo=/run/cpu-setup/game.leftovers
+            own=$(systemctl show -P CPUWeight machine.slice)
+            touch /run/cpu-setup/manual
+            gp on
+            [[ "$(systemctl show -P CPUWeight machine.slice)" != "$own" ]]
+            mkdir -p /run/e2e182
+            printf 'a file, not a folder\n' >/run/e2e182/dir
+            knob=/run/e2e182/dir/knob
+            sys_rec="sysfs $knob OLD"
+            prop_rec='prop sys machine.slice CPUWeight existed bogus'
+            printf '%s\n' "$sys_rec" "$prop_rec" >>"$st"
+            got=$(gp off) || { echo "off failed: $got" >&2; exit 1; }
+            test ! -e "$st" || { echo "game.state is still there" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]] \
+                || { echo "machine.slice CPUWeight: $(systemctl show -P CPUWeight machine.slice), not $own" >&2; exit 1; }
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus: kept in $lo for the next off and tick" <<<"$got" \
+                || { echo "off: $got" >&2; exit 1; }
+            grep -qF "off: could not undo $knob = OLD: kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            grep -qF "except 2 setting(s) kept in $lo" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(head -n 1 "$lo")" == 'cst-game-leftovers 1' ]] || { cat "$lo" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$sys_rec"$'\n'"$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            gp state | grep -qF "leftovers: 2 setting(s) 'off' could not undo, retried by the next off and tick: $knob, machine.slice CPUWeight" \
+                || { gp state >&2; exit 1; }
+            # A tick while off: both still fail, the file stays byte for byte.
+            sum=$(sha256sum "$lo")
+            gp tick >/dev/null
+            [[ "$(sha256sum "$lo")" == "$sum" ]] || { echo "game.leftovers changed:" >&2; cat "$lo" >&2; exit 1; }
+            # The folder is a folder now: the next tick writes OLD and keeps only the CPUWeight record.
+            rm /run/e2e182/dir
+            mkdir /run/e2e182/dir
+            got=$(gp tick)
+            [[ "$(cat "$knob")" == OLD ]] || { echo "the knob was not written: $got" >&2; exit 1; }
+            grep -qF "undid $knob = OLD, kept in $lo by an earlier off" <<<"$got" || { echo "tick: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            # An 'off' with no game.state retries it too, and keeps it while it fails.
+            got=$(gp off)
+            grep -qF "off: could not undo machine.slice CPUWeight=bogus" <<<"$got" || { echo "off: $got" >&2; exit 1; }
+            [[ "$(tail -n +2 "$lo")" == "$prop_rec" ]] || { echo "game.leftovers:" >&2; cat "$lo" >&2; exit 1; }
+            [[ "$(systemctl show -P CPUWeight machine.slice)" == "$own" ]]
+            rm -f "$lo"
+            rm -rf /run/e2e182
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a

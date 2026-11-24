@@ -765,9 +765,10 @@ not derive from it.
   restores everything, `on` twice is `on` once, and a tick leaves no box
   half handled, also a box whose set-property failed (or whose process died
   between the record and the set) and a scope whose setting an `off` that
-  was killed undid: the next tick sets them again. One known gap is let
-  through by name: an `off` whose undo step fails still removes
-  `game.state`, so that setting keeps the profile's value.
+  was killed undid: the next tick sets them again. An `off` whose undo
+  step fails undoes everything else and keeps exactly that record in
+  `game.leftovers`, and the next tick while off (or the next `off`) puts
+  it back.
 - `mbt_swap_apply.py`: a state machine over `cst swap apply` through the
   unit tests' scratch and fakes (`swap/tests/test_swap.py`), over drawn and
   hand-edited settings, crypttab and fstab lines (CST's, an older CST's,
