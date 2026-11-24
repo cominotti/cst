@@ -652,6 +652,16 @@ not derive from it.
   `snapshots.conf` and the drop-in agree, a failed step leaves both files
   and their folders as they were, exit 0 means systemd loaded the limit,
   and btrfs:core's state never changes.
+- `mbt_iocost_apply.py`: `cst btrfs iocost` apply and revert, live or
+  not, with any one step failing (a file's write or removal, the
+  io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
+  the installer's mark), through a model of the installer (the real
+  `InstallService` in memory), systemd, udev and io.cost.qos: the component
+  is marked done only after every step it stands for (a7c5e92), exit 0
+  leaves the whole target, a vendor's io.cost.qos line stays, and apply or
+  revert again converges. One known gap is let through by name: a full
+  revert whose removal fails after its disable leaves btrfs:iocost done
+  with the service disabled, until the next full apply or revert.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
