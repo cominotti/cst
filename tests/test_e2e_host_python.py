@@ -342,6 +342,24 @@ class PlantedTest(unittest.TestCase):
                 else:
                     self.assert_one_problem("prep-e2e-runner/action.yml", reported, "HOST_ENTRIES")
 
+    def test_a_program_next_to_shell_punctuation_or_a_redirection_is_read(self) -> None:
+        # The words after python3 were split at blanks only: a program word with ; | > glued to it, one
+        # after a redirection or a quoted "python3" was no program, and the file went unchecked.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for form in (
+            "python3 tests/e2e/new.py|tee log",
+            "python3 tests/e2e/new.py>log",
+            "python3 tests/e2e/new.py;python3 -I tests/e2e/image_digest.py",
+            "python3 2>/dev/null tests/e2e/new.py",
+            "'python3' tests/e2e/new.py",
+        ):
+            with self.subTest(form=form):
+                self.setUp()
+                self.replace(action, old, f'want="$(python3 -I -B tests/e2e/image_digest.py "${{name}}"; {form})"')
+                self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
     def test_a_program_named_at_run_time_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",
@@ -393,9 +411,19 @@ class CommandLineTest(unittest.TestCase):
             ("-I; tests/e2e/run.py", None),
             ('-I -B "tests/e2e/run.py")', ("script", "tests/e2e/run.py")),
             ("", None),
+            # Shell punctuation inside a word, and redirections before or after the program.
+            ("tests/e2e/run.py|tee log", ("script", "tests/e2e/run.py")),
+            ("tests/e2e/run.py>log", ("script", "tests/e2e/run.py")),
+            ("tests/e2e/run.py;python3 x.py", ("script", "tests/e2e/run.py")),
+            ("2>/dev/null tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            (">log 2>&1 -I tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("&>log tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("<in -m tests.e2e.run", ("module", "tests.e2e.run")),
+            ('-I "tests/e2e/run.py"&&true', ("script", "tests/e2e/run.py")),
+            ("-I|tee log", None),
         ):
             with self.subTest(line=line):
-                self.assertEqual(gate.python_program(line.split()), want)
+                self.assertEqual(gate.python_program(line), want)
 
 
 class RuffTargetTest(unittest.TestCase):

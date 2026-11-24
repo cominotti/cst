@@ -55,7 +55,7 @@ import tomllib
 from typing import Final
 
 from cst_core.domain.imports import imported_modules, loads_code_by_path
-from cst_core.domain.text import group
+from cst_core.domain.text import group, group_or_none
 from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines, workflow_jobs
 
 # The files CI starts with its runner's python3 (the rest of the closure is found from them).
@@ -102,9 +102,19 @@ _PYTHON_WORD: Final = re.compile(r"(?<![\w./-])(?:[\w./-]*/)?python3(?:\.\d+)?(?
 _OPTION_WITH_ARGUMENT: Final = frozenset("mcXW")
 _MODULE_OPTION: Final = "m"
 _CODE_OPTION: Final = "c"
-# What ends a command word: the shell's ; | & ) and quotes, trimmed from both ends of a word.
-_WORD_END: Final = ";|&)"
+# The shell's tokens after python3, in order: a redirection (its target is the next word: >log, 2>&1, &>log, <in),
+# a word (its quoted parts, $(...), ${...} and ${{ ... }} kept whole, blanks and all), or what ends the command
+# (; | & ( ), or a quote no word closes: the end of the "..." python3 is in).
+_REDIRECT: Final = "redirect"
+_WORD: Final = "word"
+_END: Final = "end"
+_SHELL_TOKEN: Final = re.compile(
+    rf"(?P<{_REDIRECT}>\d*(?:&>>?|[<>]+&?))"
+    rf"|(?P<{_WORD}>(?:\"[^\"]*\"|'[^']*'|\$\{{\{{.*?\}}\}}|\$\([^()]*\)|\$\{{[^}}]*\}}|[^\s;|&()<>\"'])+)"
+    rf"|(?P<{_END}>[;|&()\"'])"
+)
 _QUOTES: Final = "\"'"
+_UNQUOTE: Final = str.maketrans("", "", _QUOTES)
 _STDIN: Final = "-"
 _END_OF_OPTIONS: Final = "--"
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
@@ -420,46 +430,54 @@ def _action_files(repo: str) -> list[str]:
     ]
 
 
-def python_program(words: Sequence[str]) -> tuple[ProgramKind, str] | None:
-    """What a python3 command line runs, read from the words after python3 as Python reads its own
-    options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD) for the first word that is no option, or
-    None (-c's inline code, "-" for stdin, no program). An option cluster (-IB) goes on; -m, -c, -X and
-    -W take the rest of their cluster or the next word; "--" ends the options; another word that starts
-    with "--" is a long option. Words after the program are the program's own (a -m there is not
-    python3's). A word that ends in ; | & ) or a quote ends the command."""
-    program: tuple[ProgramKind, str] | None = None
+def python_program(text: str) -> tuple[ProgramKind, str] | None:
+    """What a python3 command line runs, read from the text after python3 as the shell splits it
+    (_command_words) and as Python reads its own options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD)
+    for the first word that is no option, or None (-c's inline code, "-" for stdin, no program). An
+    option cluster (-IB) goes on; -m, -c, -X and -W take the rest of their cluster or the next word;
+    "--" ends the options; another word that starts with "--" is a long option. Words after the
+    program are the program's own (a -m there is not python3's)."""
+    words = _command_words(text)
     i = 0
     while i < len(words):
-        word, ends = _command_word(words[i])
+        word = words[i]
         i += 1
-        following = None if ends or i >= len(words) else _command_word(words[i])
+        following = words[i] if i < len(words) else None
         if word == _END_OF_OPTIONS:
-            program = None if following is None else (ProgramKind.SCRIPT, following[0])
-            break
+            return None if following is None else (ProgramKind.SCRIPT, following)
         if word in {"", _STDIN}:
-            break
+            return None
         if not word.startswith("-"):
-            program = (ProgramKind.SCRIPT, word)
-            break
+            return ProgramKind.SCRIPT, word
         option = None if word.startswith("--") else _option_with_argument(word)
-        if option is not None:
-            letter, argument = option
-            if not argument and following is not None:
-                (argument, ends), i = following, i + 1
-            if letter == _MODULE_OPTION and argument:
-                program = (ProgramKind.MODULE, argument)
-            if letter in {_MODULE_OPTION, _CODE_OPTION}:
-                break
-        if ends:
+        if option is None:
+            continue
+        letter, argument = option
+        if not argument and following is not None:
+            argument, i = following, i + 1
+        if letter == _MODULE_OPTION:
+            return (ProgramKind.MODULE, argument) if argument else None
+        if letter == _CODE_OPTION:
+            return None
+    return None
+
+
+def _command_words(text: str) -> list[str]:
+    """The words of the shell command text starts, without their quotes, up to what ends it (; | & ( ),
+    or the quote it is inside of: _SHELL_TOKEN). A redirection and its target are no words (>log,
+    2>/dev/null, &>log), wherever they are."""
+    words: list[str] = []
+    target = False
+    for token in _SHELL_TOKEN.finditer(text):
+        if group_or_none(token, _END) is not None:
             break
-    return program
-
-
-def _command_word(raw: str) -> tuple[str, bool]:
-    """A shell word without its quotes and the punctuation that ends a command, and whether it ended one."""
-    word = raw.strip(_QUOTES)
-    bare = word.rstrip(_WORD_END)
-    return bare.strip(_QUOTES), bare != word
+        if group_or_none(token, _REDIRECT) is not None:
+            target = True
+        elif target:
+            target = False
+        else:
+            words.append(group(token, _WORD).translate(_UNQUOTE))
+    return words
 
 
 def _option_with_argument(cluster: str) -> tuple[str, str] | None:
@@ -482,7 +500,9 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
     files: list[str] = []
     unnamed: list[str] = []
     for found in _PYTHON_WORD.finditer(line):
-        program = python_program(line[found.end() :].split()) if line[found.end() : found.end() + 1].isspace() else None
+        rest = line[found.end() :]
+        rest = rest[1:] if rest[:1] in _QUOTES else rest  # "python3" x.py: the quote closes the command word
+        program = python_program(rest) if rest[:1].isspace() else None
         match program:
             case (ProgramKind.MODULE, name):
                 parts = name.split(".")
