@@ -9666,3 +9666,69 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_187_swap_apply_refuses_a_folder_in_place_of_zswap_conf_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and a folder where
+        /etc/tmpfiles.d/zswap.conf goes (the test's own trap removes it before swap_cleanup runs): plan's
+        row of the file is "?" and says apply refuses it; apply exits 1 with "<file>: cannot be read:
+        nothing was changed" on stderr, and every file, link, mode and owner under /etc and the scratch
+        tree, and the install record, are as before (no crypttab line, no .pre-swap-config.bak, no
+        sysctl run). Before, apply wrote crypttab and fstab and started swap0's step first, and failed at
+        the zswap step. With the folder removed, the same apply works and a second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/tmpfiles.d/zswap.conf
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+conf_dir_made=""
+conf_back() {
+    if [[ -n "$conf_dir_made" ]]; then rm -rf "$CONF"; fi
+}
+trap 'conf_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -e "$CONF" && ! -L "$CONF" ]] || fail "$CONF is there before the test"
+mkdir -p "$CONF"
+conf_dir_made=1
+swap_run plan
+[[ $rc == 0 ]] || fail "plan with a folder in place of $CONF exited $rc"
+grep -qE "^  \?  +tmpfiles\.d/zswap\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF"
+s0="$(snap)"
+r0="$(record)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder in place of $CONF exited $rc"
+grep -qF "ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply reached swap0's step"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+[[ "$(record)" == "$r0" ]] || fail "a refused apply changed the install record"
+if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply ran sysctl"; fi
+
+# The folder removed: the same apply works, and a second one changes nothing.
+conf_back
+conf_dir_made=""
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with the folder removed exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+grep -qF "written:   $CONF" <<<"$out" || fail "$CONF written"
+[[ -f "$CONF" ]] || fail "$CONF is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
