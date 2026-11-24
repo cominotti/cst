@@ -269,11 +269,24 @@ def filter_host_scope(cases: Sequence[unittest.TestCase], scope: HostScope) -> l
     return parallel if scope == HostScope.PARALLEL else exclusive
 
 
+def _usable_cpus() -> int:
+    """The CPUs this process may run on: its CPU affinity (a pinned toolbox, a cgroup's cpuset), or every
+    CPU of the machine when the affinity cannot be read.
+
+    os.sched_getaffinity (Linux, where the E2E tests run), not os.process_cpu_count (Python 3.13 and
+    later): CI's tier 1 job runs this file on the python3 of its Ubuntu 24.04 host, 3.12."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except OSError:
+        return os.cpu_count() or 1
+
+
 def default_tier1_jobs(selected_count: int, cpu_count: int | None = None) -> int:
-    """Default parallel container count for local Tier 1 runs (`1` for small selections)."""
+    """Default parallel container count for local Tier 1 runs (`1` for small selections): half the CPUs
+    this process may run on (`cpu_count` when given), at most 4."""
     if selected_count <= 4:
         return 1
-    cpus = max(1, os.cpu_count() or 1) if cpu_count is None else max(1, cpu_count)
+    cpus = max(1, _usable_cpus()) if cpu_count is None else max(1, cpu_count)
     return min(4, max(1, cpus // 2), selected_count)
 
 

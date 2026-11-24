@@ -177,6 +177,22 @@ class ShardingTest(unittest.TestCase):
         self.assertEqual(default_tier1_jobs(75, cpu_count=24), 4)
         self.assertEqual(default_tier1_jobs(75, cpu_count=4), 2)
 
+    def test_default_jobs_count_the_cpu_affinity(self) -> None:
+        # A process pinned to 4 of 24 CPUs (a toolbox's cpuset) gets 2 containers, not 4.
+        with (
+            mock.patch.object(e2e_selection.os, "cpu_count", return_value=24),
+            mock.patch.object(e2e_selection.os, "sched_getaffinity", return_value=set(range(4))),
+        ):
+            self.assertEqual(default_tier1_jobs(75), 2)
+            self.assertEqual(default_tier1_jobs(75, cpu_count=24), 4)  # an explicit count still wins
+            self.assertEqual(default_tier1_jobs(4), 1)
+        # When the affinity cannot be read, every CPU of the machine counts.
+        with (
+            mock.patch.object(e2e_selection.os, "cpu_count", return_value=24),
+            mock.patch.object(e2e_selection.os, "sched_getaffinity", side_effect=OSError("no affinity")),
+        ):
+            self.assertEqual(default_tier1_jobs(75), 4)
+
         for argv in (
             ("--tier", "1", "--shard", "1/3", "--jobs", "2"),
             ("--tier", "1", "--jobs", "-1"),
