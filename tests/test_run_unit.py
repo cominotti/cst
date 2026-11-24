@@ -910,6 +910,12 @@ class TestJobsEnvTest(unittest.TestCase):
                 self.assertIn("CST_TEST_JOBS", text)
                 self.assertIn(repr(raw), text)
 
+    def test_a_number_past_the_digits_int_converts_is_the_same_usage_error(self) -> None:
+        raw = "9" * 5000  # int() refuses more than 4300 digits with a ValueError
+        with self.assertRaises(SystemExit) as caught:
+            run_unit_module.requested_jobs(None, {"CST_TEST_JOBS": raw})
+        self.assertTrue(str(caught.exception).startswith("run_unit: invalid CST_TEST_JOBS value '999"))
+
     def test_coverage_wins_over_the_variable_and_a_jobs_flag_over_coverage(self) -> None:
         with mock.patch("sys.gettrace", return_value=lambda *_a: None):
             self.assertEqual(run_unit_module.requested_jobs(None, {"CST_TEST_JOBS": "6"}), 1)

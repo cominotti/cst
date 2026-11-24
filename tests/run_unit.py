@@ -749,9 +749,13 @@ def jobs_from_env(environ: Mapping[str, str]) -> int | None:
     raw = environ.get(TEST_JOBS_ENV, "")
     if not raw:
         return None
+    invalid = SystemExit(f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)")
     if not (raw.isascii() and raw.isdigit()):
-        raise SystemExit(f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)")
-    return int(raw) or None
+        raise invalid
+    try:
+        return int(raw) or None
+    except ValueError:  # past Python's limit on the digits int() converts
+        raise invalid from None
 
 
 def default_jobs(env_jobs: int | None = None) -> int:
