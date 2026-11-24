@@ -30,9 +30,11 @@ for each of the two services:
 
 The record is saved before each write that needs a restart (change.py's owe: main.conf owes
 bluetoothd and WirePlumber, a .conf of WirePlumber's folder WirePlumber) and again before the
-restarts; each save is a point named after the units it records. A restart is lost only when the
-save meant to record it failed (the run warns: bluetooth/README.md, section 4), a write of that
-service took effect after it, and no later save of that unit worked before the run stopped. A
+restarts; each save records every unit the run's writes needed so far and is a point named after
+them. A restart is lost only when the save meant to record it failed (the run warns:
+bluetooth/README.md, section 4) and no earlier save of the run recorded that unit (a failed save
+leaves the file as it was), a write of that service took effect after it, and no later save of
+that unit worked before the run stopped. A
 killed run prints nothing the test reads, so this is read from the trace of the faults
 (lost_after_a_failed_save), not from the run's warning. The cases where it happens are counted and
 pinned per class: none for a kill, a failure or a full disk alone (a failed save is followed by a
@@ -97,8 +99,8 @@ class Start:
     lost: int  # the FAIL then KILL cases that lose a restart after a failed save (none in the others)
 
 
-APPLY_FRESH = Start(VENDOR, (), (), APPLY, points=13, fail_then_kill=13, kill_then_fault=312, lost=6)
-APPLY_WIREPLUMBER_ONLY = Start(DONE, (), (), APPLY, points=9, fail_then_kill=10, kill_then_fault=153, lost=2)
+APPLY_FRESH = Start(VENDOR, (), (), APPLY, points=15, fail_then_kill=28, kill_then_fault=399, lost=1)
+APPLY_WIREPLUMBER_ONLY = Start(DONE, (), (), APPLY, points=10, fail_then_kill=14, kill_then_fault=183, lost=2)
 APPLY_RESUME = Start(
     VENDOR,
     (),
@@ -109,7 +111,7 @@ APPLY_RESUME = Start(
     kill_then_fault=48,
     lost=0,
 )
-REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=11, fail_then_kill=11, kill_then_fault=225, lost=4)
+REVERT_APPLIED = Start(VENDOR, (), (APPLY,), REVERT, points=13, fail_then_kill=24, kill_then_fault=300, lost=1)
 
 
 class FaultyFiles(LocalSetupFiles):
@@ -238,14 +240,16 @@ class SetupFaultBase(unittest.TestCase):
         then a write of that service took effect (bluetoothd: main.conf, sudo mv; WirePlumber: a .conf
         of its folder), and no later save of that unit worked."""
         unrecorded: set[str] = set()  # a failed save meant to owe them, and no save of them worked since
+        recorded: set[str] = set()  # a save of this run that worked owes them (a failed one leaves that file)
         lost: set[str] = set()
         for i, name in enumerate(self.plan.calls, 1):
             failed = self.plan.fault_at(i) in (FaultMode.FAIL, FaultMode.FAIL_FROM)
             if name.startswith(SAVE):
                 units = set(name.removeprefix(SAVE).split())
                 if failed:
-                    unrecorded |= units
+                    unrecorded |= units - recorded
                 else:
+                    recorded |= units
                     unrecorded -= units
                     lost -= units
                 continue

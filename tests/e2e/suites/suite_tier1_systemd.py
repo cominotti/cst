@@ -9027,7 +9027,13 @@ EOF
         owes nothing), written before the writes; `plan` exits 10 with WirePlumber's restart still
         owed; the next `apply` makes that restart (a new InvocationID), writes nothing and forgets the
         record; `plan` then has nothing to do and a third `apply` restarts nothing. Before, the record
-        was written only at the restarts: none after the stop, and `plan` said no restart was needed."""
+        was written only at the restarts: none after the stop, and `plan` said no restart was needed.
+        Then WirePlumber restarts by itself between the rule's write and the drop-in's (the shim
+        restarts it at the first look at it once the rule exists and the drop-in does not) and the run
+        is stopped as before: the record owes WirePlumber under its new InvocationID (the save before
+        the drop-in's write read it again), `plan` exits 10, and the next `apply` restarts it once.
+        Before, that save was skipped (the record owed WirePlumber under the old ID already), and
+        nothing owed the restart after the stop."""
         c = self.SYSTEMD_CONTAINER
         self.addCleanup(
             as_tester_bash,
@@ -9108,6 +9114,40 @@ EOF
             no_writes "third apply" "$out"
             grep -qxF "none needed" <<<"$out"
             [[ "$(wp_id)" == "$id1" ]]
+
+            # 5. WirePlumber restarts by itself after the rule's write, before the drop-in's: the save
+            # before the drop-in's write owes it again, under its new InvocationID. The shim restarts it
+            # at the first look at it once the rule exists and the drop-in does not, then stops the run
+            # as above. Before, that look did not happen (the record owed WirePlumber already, under the
+            # old ID), and nothing owed its restart after the stop.
+            rm -f "$rule" "$le" "$owed_file" "$w/restarted"
+            printf '%s\n' '#!/bin/bash' \
+                "echo \"\$PPID \$(tr '\\\\0' ' ' </proc/\$PPID/cmdline) :: \$*\" >>$w/shim.log" \
+                "if [[ \" \$* \" == *' show '* && \" \$* \" == *' wireplumber.service '* ]]; then" \
+                "    if [[ -e '$rule' && ! -e '$le' && ! -e '$w/restarted' ]]; then" \
+                "        touch '$w/restarted'; /usr/bin/systemctl --user restart wireplumber.service" \
+                '    fi' \
+                "    if [[ -e '$le' ]]; then kill -TERM \"\$PPID\"; exit 1; fi" \
+                'fi' 'exec /usr/bin/systemctl "$@"' >"$w/bin/systemctl"
+            cat "$w/bin/systemctl" >&2
+            id2="$(wp_id)"
+            rc=0; out="$(PATH="$w/bin:$PATH" bt apply --yes 2>&1)" || rc=$?
+            show "apply stopped after WirePlumber restarted by itself" "$out"
+            [[ $rc == 143 ]] || { echo "test_178: the second stopped apply exited $rc" >&2; cat "$w/shim.log" >&2; exit 1; }
+            [[ -e "$w/restarted" ]] || { echo "test_178: no look at WirePlumber between the rule's write and the drop-in's" >&2; exit 1; }
+            [[ -f "$rule" && -f "$le" ]]
+            id3="$(wp_id)"
+            [[ -n "$id3" && "$id3" != "$id2" ]]
+            [[ -f "$owed_file" ]] || { echo "test_178: no record after the second stop" >&2; exit 1; }
+            python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1])) == {"wireplumber.service": sys.argv[2]}, open(sys.argv[1]).read()' "$owed_file" "$id3"
+            rc=0; out="$(bt plan 2>&1)" || rc=$?
+            show "plan after the second stop" "$out"
+            [[ $rc == 10 ]]
+            grep -qF "(still owed: an earlier run did not restart it)" <<<"$out"
+            step "apply after the second stop" apply --yes
+            [[ "$(grep -cxF "$wp_restart_line" <<<"$out")" == 1 ]]
+            no_writes "apply after the second stop" "$(grep -vxF "$wp_restart_line" <<<"$out" || true)"
+            [[ "$(wp_id)" != "$id3" && ! -e "$owed_file" ]]
             echo E2E-OK
             """,
         ).stdout

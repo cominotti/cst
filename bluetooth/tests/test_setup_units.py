@@ -6,7 +6,7 @@ check passes (the kernel ISO probe runs the real Python there), the waits of the
 the fake of setup_fakes.py; nothing real is touched.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import errno
 import json
@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 from bluetooth.adapters import LocalBluetoothHostAdapter
+from bluetooth.domain import parse_pending
 from bluetooth.setup import wiring
 from bluetooth.setup.adapters import LocalSetupFiles
 from bluetooth.setup.application.change import Change
@@ -680,9 +681,7 @@ class BackupNameTest(InProcessCase):
             os.utime(path, (2_000_000_000, 2_000_000_000))
         rc, out, err = self.run_one(m, "apply", "--yes", "--no-restart")
         self.assertEqual(rc, 1, out + err)
-        self.assertIn(
-            f"cst-t: ERROR: no free name for a backup of {m.main_conf} ({base} and 99 more are taken)\n", err
-        )
+        self.assertIn(f"cst-t: ERROR: no free name for a backup of {m.main_conf} ({base} and 99 more are taken)\n", err)
         self.assertEqual(self.sudo_cps(m), [])
         calls = m.read("log").splitlines()
         self.assertEqual([c for c in calls if c.startswith(("sudo install", "sudo mv"))], [])
@@ -749,6 +748,41 @@ class SavingHost(LocalBluetoothHostAdapter):
         return super().restart_pending(path, ids, skipped, save=save)
 
 
+class Stopped(BaseException):
+    """The run stopped at a save of the record, as a SIGTERM would stop it."""
+
+
+class StagedHost(SavingHost):
+    """SavingHost with a script for its saves (numbered from 0): one in fail_at raises OSError (a
+    ~/.local/state that cannot be written that once); after(n) runs once the n-th save is written (a
+    service that restarts by itself then); stop_when() true at a save stops the run there (Stopped),
+    before it is noted or written."""
+
+    def __init__(
+        self,
+        *,
+        fail_at: frozenset[int] = frozenset(),
+        after: Callable[[int], None] = lambda _n: None,
+        stop_when: Callable[[], bool] = lambda: False,
+    ) -> None:
+        super().__init__()
+        self.fail_at = fail_at
+        self.after = after
+        self.stop_when = stop_when
+
+    @override
+    def restart_pending(self, path: str, ids: tuple[str, str], skipped: Sequence[str], *, save: bool) -> str:
+        if not save:
+            return super().restart_pending(path, ids, skipped, save=save)
+        if self.stop_when():
+            raise Stopped
+        n = len(self.saves)
+        self.fail = n in self.fail_at
+        out = super().restart_pending(path, ids, skipped, save=save)
+        self.after(n)
+        return out
+
+
 class OwedBeforeTheWriteUnitTest(InProcessCase):
     """The record of restarts owed is written before each write that needs a restart, never for a
     renewal of comments; a record that cannot be written is warned of once, and the run goes on."""
@@ -789,9 +823,54 @@ class OwedBeforeTheWriteUnitTest(InProcessCase):
         calls = m.read("log").splitlines()
         self.assertIn("sudo systemctl restart bluetooth", calls)
         self.assertIn("systemctl --user restart wireplumber", calls)
-        # Each write tries again (main.conf; the rule; the drop-in), then the restarts', then the clearing one.
+        # Each write tries again (main.conf; the rule; the drop-in) with every unit owed so far, then
+        # the restarts', then the clearing one.
         bt, wp = "bluetooth.service", "wireplumber.service"
-        self.assertEqual(host.saves, [(bt, wp), (wp,), (wp,), (wp, bt), ()])
+        self.assertEqual(host.saves, [(bt, wp), (bt, wp), (bt, wp), (wp, bt), ()])
+
+    def stopped_apply(self, m: Machine, host: SavingHost) -> None:
+        """apply --yes, stopped by host (Stopped) at a save of the record."""
+        log = os.path.join(m.state, "log")
+        if os.path.exists(log):
+            os.unlink(log)
+        run, _console, _ = change(m, "apply", "--yes", doubles=SetupDoubles(host=host, now=self.NOW))
+        self.addCleanup(run.cleanup)
+        with self.assertRaises(Stopped):
+            run.run_command()
+
+    def test_a_failed_save_is_in_the_next_one(self) -> None:
+        # The save before main.conf's write fails once; the one before the rule's write still owes
+        # bluetoothd. The run stops at the restarts' save. Before, that save owed WirePlumber alone,
+        # and bluetoothd stayed on the old main.conf with nothing owing its restart.
+        m = self.machine()
+        host = StagedHost(fail_at=frozenset({0}), stop_when=lambda: os.path.exists(m.le_conf))
+        self.stopped_apply(m, host)
+        bt, wp = "bluetooth.service", "wireplumber.service"
+        self.assertEqual(host.saves[:2], [(bt, wp), (bt, wp)])
+        self.assertIn(f"KernelExperimental = {ISO}", self.text(m.main_conf))
+        self.assertEqual([c for c in m.read("log").splitlines() if " restart " in f" {c} "], [])
+        self.assertEqual(
+            parse_pending(self.text(m.pending)),
+            {bt: m.unit_inv("system", "bluetooth"), wp: m.unit_inv("user", "wireplumber")},
+        )
+
+    def test_a_service_that_restarted_since_an_earlier_save(self) -> None:
+        # WirePlumber restarts by itself right after the save before main.conf's write (it reads the
+        # old rule); the save before the rule's write owes it again, under its new invocation. The run
+        # stops at the restarts' save. Before, that save was skipped (the record owed WirePlumber
+        # already, under the old invocation), so nothing owed its restart after the stop.
+        m = self.machine()
+
+        def restarted_by_itself(n: int) -> None:
+            if n == 0:
+                m.unit("user", "wireplumber", inv="wp-by-itself")
+
+        host = StagedHost(after=restarted_by_itself, stop_when=lambda: os.path.exists(m.le_conf))
+        self.stopped_apply(m, host)
+        self.assertEqual(parse_pending(self.text(m.pending)).get("wireplumber.service"), "wp-by-itself")
+        rc, out, _ = self.run_one(m, "plan")
+        self.assertEqual(rc, 10, out)
+        self.assertEqual(out.count("(still owed: an earlier run did not restart it)"), 2, out)
 
 
 class SetupModelParityTest(unittest.TestCase):

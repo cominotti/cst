@@ -1092,6 +1092,8 @@ class InvocationReadTest(SetupCase):
                 self.WP,
                 self.BT,  # read again for the record of what is owed, before main.conf is written (either
                 self.WP,  # may have restarted meanwhile)
+                self.BT,  # again before the rule is written
+                self.WP,
                 self.BT,  # and again before the restarts
                 self.WP,
                 "sudo systemctl restart bluetooth",

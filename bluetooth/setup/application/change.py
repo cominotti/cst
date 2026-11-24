@@ -288,15 +288,15 @@ class Change(Checks):
 
     def owe(self, *units: str) -> None:
         """The restarts a write needs, recorded right before it: a run stopped after the write (and
-        before its restarts) leaves them owed, and the next run makes them. Once a run: a unit this
-        run's record owes already is not saved again. A save that fails is warned of, and the run goes
-        on (the next owe tries again); only then can a stop after the write lose the restart. A
-        service that restarts by itself between the save and the write reads the old files, and the
-        record no longer owes it: the window is that of one write."""
-        if self.recorded_owed.issuperset(units):
-            return
-        if self.save_owed(*units):
-            self.recorded_owed.update(units)
+        before its restarts) leaves them owed, and the next run makes them. Each save records every
+        restart this run's writes needed so far, under the invocation IDs read right before it: a unit
+        whose earlier save failed is in the next one, and a service that restarted by itself since an
+        earlier write is owed again under its new ID. A save that fails is warned of, and the run goes
+        on; only then can a stop after the write lose the restart. A service that restarts by itself
+        between the save and the write reads the old files, and the record no longer owes it: the
+        window is that of one write."""
+        self.owing.update(units)
+        self.save_owed(*sorted(self.owing))
 
     def do_restarts(self, *, bt: bool, wp: bool) -> int:
         """0: done (or nothing to do); 1: cancelled at the question; 2: a restart failed."""

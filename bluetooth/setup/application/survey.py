@@ -195,7 +195,7 @@ class Survey:
         self.wp_owed = False
         self.bt_restart = False
         self.wp_restart = False
-        self.recorded_owed: set[str] = set()  # the units this run's record owes a restart (Change.owe)
+        self.owing: set[str] = set()  # the units whose restart this run's writes need so far (Change.owe)
         self.owed_warned = False  # the run said it could not record the restarts still owed
         # (user, unit) -> (ActiveState, InvocationID), see unit_show: a system unit and a user unit
         # of the same name are two units.
