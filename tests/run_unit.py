@@ -752,6 +752,11 @@ def _ascii_whole_number(raw: str, invalid: str) -> int:
 
     str.isdigit also takes "²", which int() refuses, and a digit of another script, which
     int() reads; int() also refuses more digits than Python's limit (sys.get_int_max_str_digits).
+
+    The same rule as cst_core.domain.values.parse_whole_number, on purpose not imported from it: the
+    runner imports nothing of the checkout before the tests start, and its own tests run it from a
+    folder that holds only tests/run_unit.py (the bytecode tests of tests/test_run_unit.py), where
+    cst_core is not there. A change to that rule changes both.
     """
     if raw.isascii() and raw.isdigit():
         with contextlib.suppress(ValueError):

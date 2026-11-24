@@ -106,7 +106,8 @@ def parse_whole_number(text: str) -> int | None:
 
     None for a sign, blanks, "_", a digit int() refuses (U+00B2, superscript two), a digit of another
     script (U+0663, Arabic-Indic three, which int() would read as 3), or more digits than int() reads
-    (sys.get_int_max_str_digits): never a ValueError.
+    (sys.get_int_max_str_digits): never a ValueError. tests/run_unit.py keeps a copy of this rule
+    (_ascii_whole_number), since it cannot import cst_core: a change here changes it too.
     """
     if not (text.isascii() and text.isdigit()):
         return None
