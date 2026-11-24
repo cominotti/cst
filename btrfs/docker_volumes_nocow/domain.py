@@ -35,7 +35,8 @@ def is_config_reason(reason: object) -> bool:
 # A volume's data folder, in the volume's folder (Docker's name for it).
 DATA_DIR: Final = "_data"
 # Beside a volume's _data during its migration: the NOCOW copy being made, and the
-# original between the two renames (followed by the time it was moved aside).
+# original between the two renames, followed by a number (old_copy_name: the time it
+# was moved aside, or the newest old copy's number plus one when that is higher).
 NEW_SUFFIX = ".nocow-new"
 OLD_MARK = ".cow-old-"
 
