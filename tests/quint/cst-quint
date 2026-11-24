@@ -122,7 +122,10 @@ class TraceJob:
 
 
 # The checks and the traces of each spec (relative to the checkout).
-CHECKS: Final[tuple[Check, ...]] = ()
+NOCOW_SPEC: Final = "btrfs/tests/quint/docker_volumes_nocow.qnt"
+NOCOW_PROPERTIES: Final = ("noDataLoss", "requestKept", "attemptsMatch", "boundedTries", "cleanRunConverges")
+NOCOW_INSTANCES: Final = ("nocow_ab", "nocow_a", "nocow_ab_boots", "nocow_ab_wide", "nocow_abc")
+CHECKS: Final[tuple[Check, ...]] = tuple(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES)
 TRACE_JOBS: Final[tuple[TraceJob, ...]] = ()
 TRACES_DIR: Final[Mapping[str, str]] = dict[str, str]()
 REPLAYS: Final[Mapping[str, str]] = dict[str, str]()  # spec -> the unit test module that replays its traces

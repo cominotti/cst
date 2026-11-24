@@ -841,8 +841,9 @@ invowk cmd test quint --traces            # write the checked-in traces again, t
 invowk cmd test quint --keep              # keep the work folder (its path is printed)
 ```
 
-`invowk cmd check` does not run it. It needs node and npm, java (17 or later)
-and curl.
+`invowk cmd check` does not run it; CI runs it when a change touches what it
+checks, and the nightly runs it on main (see "In CI" below). It needs node and
+npm, java (17 or later) and curl.
 
 **The tools.** `tests/quint/cst-quint` puts every tool in place itself, under
 `${XDG_CACHE_HOME:-~/.cache}/cst-quint`, never in the checkout:
@@ -872,6 +873,101 @@ The unit tests in `tests/quint/tests/` check the checksums (a match, a
 mismatch, a folder without the stamp), the `npm ci` call, the command
 lines, the verdicts and the trace normalizer with a fake runner; no tool or
 network is used. `tests/test_quint_task.py` checks the task's flags.
+
+**What the spec models.** One action per call of
+`btrfs/docker_volumes_nocow/application.py` that changes the disk or the
+helper's files (the methods of `VolumeTreePort` and `NocowStatePort`), in
+the code's order: `install`'s `mark` (the flag written first, then +C on
+the volumes folder, then the count forgotten when nothing is left to copy)
+and `btrfs-setup.sh`'s touch of the flag after an exit 2; each boot's
+`migrate` (the recovery of an interrupted migration, volume by volume; the
+folder's +C and its request; the give-up check; the counter; the rewrite of
+each volume: twin, label, copy, sync, the two renames, the old copy's
+removal; `give_up`); and Docker recreating a volume. A crash can come after
+any step: a kill, or a power loss that also loses a copy not yet synced. A
+step can fail where the code checks the outcome (a rename, the flag's
+removal, the counter, the copy). The label each action leaves in `step` is
+the call the replay records from the real code, so the spec's traces can be
+replayed against it. A volume's folders hold contents, not files ("cow",
+"copy", "partial", "empty", "absent"). The spec's header lists what it does
+not model: `scan(fix)`, the postponed record, journal lines and alerts,
+`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+a failing `remove_tree`, containers writing during an install, and the
+durability of metadata. A power loss loses only a copy's unsynced content:
+the flag (`/etc`), the counter (`/var`) and the data root may be on
+different file systems and roll back apart, and the code keeps the pairs
+that matter in order by fsync (the flag before +C, the counter's reset
+before the flag), which the unit tests check instead.
+
+Five instances bound the search: two volumes (`nocow_ab`), one
+(`nocow_a`), two with boots only (`nocow_ab_boots`: no install, Docker
+never recreates a volume), two with more crashes and installs
+(`nocow_ab_wide`), three volumes (`nocow_abc`). Each allows
+`GIVE_UP_AFTER = 2` boots, as the code does. All five together take about
+a minute and a half and under 2 GB (about 6.4 million distinct states).
+
+**The properties**, checked in every state of every instance:
+
+- `noDataLoss`: each volume's `_data` holds the original or a complete
+  copy of it, or an old copy (the original, which the next boot's recovery
+  puts back) is there.
+- `requestKept`: +C on the volumes folder with copy-on-write data left
+  means the flag is there, unless the helper gave up. +C first and the flag
+  after would lose the request for good: no later boot looks again.
+- `attemptsMatch`: while the flag is there, the counter holds no boot its
+  round did not have (no early give-up).
+- `boundedTries`: at most `GIVE_UP_AFTER` rewrites in one round.
+- `cleanRunConverges`: a run with no fault and no crash that chose to
+  rewrite ends with every volume a NOCOW copy, no leftovers, no flag and no
+  counter.
+
+**Why two of them count per round, not per request.** The code removes the
+counter before the flag (at the give-up and when every volume is
+rewritten), so a later request never inherits a finished one's boots. A stop
+between the two removals leaves the flag with no counter, and the next boot
+starts that request's count over: up to `GIVE_UP_AFTER` more rewrites. The
+code also saves the counter before a rewrite starts, so a stop between the
+two counts a boot that rewrote nothing. "The counter equals the rewrites of
+this request" and "at most `GIVE_UP_AFTER` rewrites per request" therefore
+do not hold, on purpose. The spec states both per round instead, with ghost
+variables (not on disk) that change only on a decision or an outcome of the
+code, never on a write of the counter (a ghost that moved with the counter
+would make the properties hold by construction): a round starts at a new
+request (a flag created where there was none), at install's decision to
+request again, and at the decision to end the request (the give-up, or every
+volume rewritten); `boots` counts the round's boots that chose to rewrite,
+`rewrites` the rewrites started, and `carried` the count when the code
+decided to end the round (a failed removal of the flag puts it back). The
+witness `wNewRound` shows that a round started after a stop between the two
+removals is reachable. The properties still catch the orders that matter: a
+planted copy of the spec that removes the flag before the counter violates
+`attemptsMatch`, and one that saves the counter after the rewrite violates
+`boundedTries`.
+
+**Where `sync()` may go.** The copy is synced before `rename(_data,
+old)`. Moving the sync to just after that rename (still before
+`rename(new, _data)`) is safe, and the checker says so: a power loss before
+the second rename leaves the original as an old copy, which recovery puts
+back. Unsafe are the sync after the second rename, or no sync at all: a
+power loss then leaves a partial `_data` beside the old copy, the next
+boot's recovery sees a `_data` and removes the old copy, and
+`noDataLoss` fails.
+
+**A change of order in the module** changes the spec in the same commit
+(one action per call, in the code's order).
+
+**In CI.** The `quint` job of `.github/workflows/ci.yml` runs `invowk cmd
+test quint` when a pull request (or a push to main) changes a path under
+`btrfs/docker_volumes_nocow/`, `btrfs/tests/quint/` or `tests/quint/`, or
+`btrfs/tests/test_docker_volumes_nocow_replay.py`; `CI Status` accepts it
+skipped only when none changed. It runs on the runner host, as the runner's
+non-root user, with the runner's JDK 21 and node, and fetches its tools
+afresh (about 10 s; no GitHub cache, each download checked by its SHA-256).
+The nightly's `quint-nightly` job runs it on main too, which catches a
+drift of the runner or of a download between such changes. A pull request
+that changes the spec and its traces together passes the replay whatever
+the spec says; only TLC tells that the changed spec still holds its
+properties.
 
 ## Layout-only commits and `git blame`
 
