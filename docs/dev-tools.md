@@ -1006,7 +1006,10 @@ that breaks a property.
 **In CI.** The `quint` job of `.github/workflows/ci.yml` runs `invowk cmd
 test quint` when a pull request (or a push to main) changes a path under
 `btrfs/docker_volumes_nocow/`, `btrfs/tests/quint/` or `tests/quint/`, or
-`btrfs/tests/test_docker_volumes_nocow_replay.py`; `CI Status` accepts it
+`btrfs/tests/test_docker_volumes_nocow_replay.py`, or what runs the job
+(`.github/workflows/ci.yml`, `cst.invowkmod/invowkfile.cue`,
+`.github/actions/setup-invowk/`); `tests/test_quint_task.py` checks that
+list; `CI Status` accepts it
 skipped only when none changed. It runs on the runner host, as the runner's
 non-root user, with the runner's JDK 21 and node, and fetches its tools
 afresh (about 10 s; no GitHub cache, each download checked by its SHA-256).

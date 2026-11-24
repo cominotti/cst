@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""The script of `invowk cmd test quint`, run from invowkfile.cue under bash.
+"""The script of `invowk cmd test quint`, run from invowkfile.cue under bash, and the paths whose
+change makes CI's quint job run it.
 
 The script runs as it is, in a scratch "checkout" whose tests/quint/cst-quint is a stub that prints
 the arguments it was given, so no node, java or quint run here.
@@ -7,13 +8,15 @@ the arguments it was given, so no node, java or quint run here.
 
 import json
 import os
+import re
 import subprocess
+import textwrap
 import tempfile
 from typing import override
 import unittest
 
 from tests.repo_files import REPO
-from tests.test_workflow_audit import INVOWKFILE, task_script
+from tests.test_workflow_audit import CI, INVOWKFILE, task_script
 
 STUB = """import json, sys
 print(json.dumps(sys.argv[1:]))
@@ -62,6 +65,48 @@ class QuintTaskTest(unittest.TestCase):
         )
         self.assertEqual(got, ["--instance", "nocow_ab", "--spec", "/tmp/planted dir/spec.qnt", "--keep"])
         self.assertEqual(self.run_task(INVOWK_FLAG_TRACES="true"), ["--traces"])
+
+
+class QuintCiPathsTest(unittest.TestCase):
+    """ci.yml's quint_path, the shell function its changes job runs on each changed path."""
+
+    def quint_path(self, path: str) -> bool:
+        with open(os.path.join(REPO, CI), encoding="utf-8") as fh:
+            found = re.search(r"^( *)quint_path\(\) \{\n.*?^\1\}\n", fh.read(), re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(found, f"no quint_path() in {CI}")
+        func = textwrap.dedent(found.group(0)) if found else ""
+        r = subprocess.run(
+            ["bash", "-c", func + 'quint_path "$1"', "bash", path],
+            env={"PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+        self.assertIn(r.returncode, (0, 1), r.stderr)
+        return r.returncode == 0
+
+    def test_a_change_to_what_the_job_runs_runs_it(self) -> None:
+        # The module the spec models, the spec and its traces, the replay, the tool, and what runs the
+        # tool: the job itself, the invowk task, the action that installs invowk.
+        for path in (
+            "btrfs/docker_volumes_nocow/application.py",
+            "btrfs/tests/quint/docker_volumes_nocow.qnt",
+            "btrfs/tests/quint/traces/walk_ab.itf.json",
+            "btrfs/tests/test_docker_volumes_nocow_replay.py",
+            "tests/quint/cst-quint",
+            ".github/workflows/ci.yml",
+            "cst.invowkmod/invowkfile.cue",
+            ".github/actions/setup-invowk/action.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(self.quint_path(path))
+
+    def test_other_changes_skip_it(self) -> None:
+        for path in ("README.md", "btrfs/cache/adapters.py", ".github/workflows/nightly.yml", "tests/mbt/profiles.py"):
+            with self.subTest(path=path):
+                self.assertFalse(self.quint_path(path))
 
 
 if __name__ == "__main__":

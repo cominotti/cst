@@ -63,10 +63,13 @@ jobs:
           fi
 
           # The paths whose change the quint job checks with TLC: the module the
-          # Quint spec models, the spec and its traces, the replay, the task.
+          # Quint spec models, the spec and its traces, the replay, the tool, and
+          # what runs it (this workflow, the invowk task, the action that
+          # installs invowk).
           quint_path() {
             case "$1" in
               btrfs/docker_volumes_nocow/*|btrfs/tests/quint/*|tests/quint/*|btrfs/tests/test_docker_volumes_nocow_replay.py) return 0 ;;
+              .github/workflows/ci.yml|cst.invowkmod/invowkfile.cue|.github/actions/setup-invowk/*) return 0 ;;
               *) return 1 ;;
             esac
           }
