@@ -13,7 +13,7 @@ from typing import Final, Literal, TypedDict
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.plan import PlanItem
 from cst_core.domain.text import HELP_WORDS, enum_member, group, parse_shell_assignments
-from cst_core.domain.values import ByteSize, format_bytes_human
+from cst_core.domain.values import ByteSize, format_bytes_human, parse_whole_number
 from cst_core.domain.units import ActiveState
 from perf.domain.models import PerfFinding
 from swap.ports import SwapSettingsFacts
@@ -270,9 +270,10 @@ def sysfs_partition(
     if dev is None or not is_block(dev):
         return None
     sectors = first_line(posixpath.join(sys_dir, "class", "block", posixpath.basename(dev), "size"))
-    if sectors is None or not sectors.isdigit():
+    count = None if sectors is None else parse_whole_number(sectors)  # ASCII digits within int()'s limit
+    if count is None:
         return None
-    return dev, int(sectors) * SYSFS_SECTOR_BYTES
+    return dev, count * SYSFS_SECTOR_BYTES
 
 
 def resolve_settings(facts: SwapSettingsFacts, *, as_root: bool) -> SpecResolution:
@@ -492,14 +493,15 @@ def parse_proc_swaps(text: str) -> list[SwapDeviceEntry]:
         fields = line.split()
         if len(fields) < 5:
             continue
-        if not (fields[2].isdigit() and fields[3].isdigit()):
+        size_kib, used_kib = parse_whole_number(fields[2]), parse_whole_number(fields[3])
+        if size_kib is None or used_kib is None:  # ASCII digits within int()'s limit, else no row
             continue
         entries.append(
             SwapDeviceEntry(
                 device=fields[0],
                 swap_type=fields[1],
-                size_kib=int(fields[2]),
-                used_kib=int(fields[3]),
+                size_kib=size_kib,
+                used_kib=used_kib,
                 priority=fields[4],
             )
         )

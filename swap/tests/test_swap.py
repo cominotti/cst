@@ -147,6 +147,34 @@ class StatusMathTest(unittest.TestCase):
     def test_kv_skips_non_numbers(self) -> None:
         self.assertEqual(parse_kv("zswpout 5\nbad x\nshort\n"), {"zswpout": 5})
 
+    def test_sysfs_size_is_ascii_digits_within_the_digit_limit(self) -> None:
+        # The partition's size from sysfs: "2048" sectors is 1 MiB; a digit int() refuses ("²"), one of
+        # another script ("٣", which int() reads as 3) or more digits than int() reads is no number.
+        def part(size: str | None) -> tuple[str, int] | None:
+            return D.sysfs_partition(
+                "/dev/disk/by-partuuid/p",
+                resolve=lambda _p: "/dev/sda3",
+                is_block=lambda _p: True,
+                first_line=lambda p: size if p == "/sys/class/block/sda3/size" else None,
+                sys_dir="/sys",
+            )
+
+        self.assertEqual(part("2048"), ("/dev/sda3", 1048576))
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000, "-1", "", None):
+            with self.subTest(size=(bad or "")[:8]):
+                self.assertIsNone(part(bad))
+
+    def test_proc_swaps_skips_a_row_whose_sizes_are_no_ascii_number(self) -> None:
+        head = "Filename\tType\tSize\tUsed\tPriority\n"
+        good = "/dev/dm-0 partition 8388604 1024 -2\n"
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000):
+            for row in (f"/dev/zram0 partition {bad} 0 100\n", f"/dev/zram0 partition 10 {bad} 100\n"):
+                with self.subTest(row=row[:30]):
+                    entries = D.parse_proc_swaps(head + row + good)
+                    self.assertEqual(
+                        [(e.device, e.size_kib, e.used_kib) for e in entries], [("/dev/dm-0", 8388604, 1024)]
+                    )
+
     def test_share(self) -> None:
         self.assertEqual(share(1, 2), 0.5)
         self.assertEqual(share(-1, 2), -0.5)
