@@ -2546,7 +2546,9 @@ minutes after boot, the clock is not more than 24 hours ahead of the newest
 snapshot and the last successful run.
 
 The last successful run is recorded in `/var/lib/btrfs-snapshot/core-last-run`,
-only when the clock is synchronized. It never moves backwards.
+only when the clock is synchronized. It never moves backwards. A file whose
+time is not ASCII digits (0-9) is an unreadable state: no deletions and no new
+snapshot until it is removed.
 
 ### Circuit breaker
 
