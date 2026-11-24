@@ -313,6 +313,26 @@ _LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error|needs)\s*:")
 _STEP = re.compile(r"^(\s*)-\s")
 
 
+def _uncommented(text: str) -> list[tuple[int, str]]:
+    """The numbered lines of a workflow, comment lines left out."""
+    return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
+
+
+def _jobs(lines: Iterable[tuple[int, str]]) -> dict[str, list[tuple[int, str]]]:
+    """The numbered lines of each job of a workflow (the lines under `  NAME:`), by job name."""
+    jobs: dict[str, list[tuple[int, str]]] = {}
+    job: list[tuple[int, str]] | None = None
+    for n, line in lines:
+        found = _JOB.match(line)
+        if found is not None:
+            job = jobs.setdefault(found.group(1), [])
+        elif line and not line.startswith(" "):
+            job = None
+        elif job is not None:
+            job.append((n, line))
+    return jobs
+
+
 def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes).
 
@@ -324,23 +344,14 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     appear anywhere in the workflow. Comment lines are left out.
     """
     out: list[str] = []
-    lines = [(n, line) for n, line in enumerate(nightly.splitlines(), 1) if not line.lstrip().startswith("#")]
+    lines = _uncommented(nightly)
     out += [
         f"{NIGHTLY}:{n}: a uv variable (`UV_...`) in the nightly; it can leave packages or vulnerabilities out "
         "of the audit"
         for n, line in lines
         if "UV_" in line
     ]
-    jobs: dict[str, list[tuple[int, str]]] = {}
-    job: list[tuple[int, str]] | None = None
-    for n, line in lines:
-        found = _JOB.match(line)
-        if found is not None:
-            job = jobs.setdefault(found.group(1), [])
-        elif line and not line.startswith(" "):
-            job = None
-        elif job is not None:
-            job.append((n, line))
+    jobs = _jobs(lines)
     runs = [(name, n) for name, body in jobs.items() for n, line in body if UV_AUDIT_STEP.match(line)]
     if not runs:
         out.append(f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)")
