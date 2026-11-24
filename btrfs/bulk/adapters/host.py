@@ -23,6 +23,8 @@ from cst_core.domain.contracts import Urgency
 from cst_core.ports import CommandResult, CommandRunnerPort
 from btrfs.bulk.domain import BIG, BulkPaths, Ctx, LstatKind, PathChain
 from btrfs.bulk.domain.steam import PROC, RUN_USER, STEAM_APP, STEAM_COMMS
+from btrfs.snapshot_runtime.domain import guard_number
+from cst_core.domain.text import parse_snapshots_conf
 
 
 # btrfs-snapshot's test seam (every file below another folder): never handed on to the runs below.
@@ -215,10 +217,15 @@ class Host:
         snapshot at or below it, 'resume': they come back only above it,
         'emergency': at or below it the hourly run purges most of the snapshot
         history}. Read the way btrfs-snapshot gets them, so the two cannot drift
-        apart: its defaults (snapshot_program()), then snapshots.conf in the
-        settings folder, which overrides them (a plain KEY=NUMBER line, quotes
-        allowed; the last one wins). The built-in defaults if neither can be
-        read. btrfs-snapshot measures btrfs' "Free (estimated)", this program
+        apart: its defaults (snapshot_program(), a plain KEY=NUMBER line of
+        its text; the built-in defaults if it cannot be read), then each
+        setting snapshots.conf in the settings folder assigns, read with
+        btrfs-snapshot's own readers: parse_snapshots_conf (the last
+        assignment wins; a line that is a problem sets nothing) and
+        guard_number (bash's arithmetic). A value btrfs-snapshot's hourly run
+        cannot compare (BAD_NUMBER: its test is false; NOT_A_NUMBER: the run
+        stops first) and a negative one never trigger it: no limit, 0 here.
+        btrfs-snapshot measures btrfs' "Free (estimated)", this program
         statvfs: close, not the same, so MARGIN stays on top."""
         vals = {"pause": 250, "resume": 270, "emergency": 150}
         names = {
@@ -226,21 +233,26 @@ class Host:
             "resume": "RESUME_ABOVE_GIB",
             "emergency": "EMERGENCY_AT_OR_BELOW_GIB",
         }
-        for path in (self.snapshot_program(), self.paths.snapshots_conf):
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    text = f.read(1 << 20)
-            except OSError:
-                continue
-            for key, name in names.items():
-                # re.ASCII: digits 0-9 only, as btrfs-snapshot's guard_number reads them (an Arabic-Indic
-                # "300" there is no number, so the default stands; here too).
-                found = re.findall(
-                    rf"""^[ \t]*{name}=(["']?)(\d{{1,6}})\1[ \t]*(?:#.*)?$""", text, re.MULTILINE | re.ASCII
-                )
-                if found:
-                    vals[key] = int(found[-1][1])
+        program = self._read_settings_text(self.snapshot_program())
+        for key, name in names.items():
+            found = re.findall(rf"""^[ \t]*{name}=(["']?)([0-9]{{1,6}})\1[ \t]*(?:#.*)?$""", program, re.MULTILINE)
+            if found:
+                vals[key] = int(found[-1][1])
+        conf = parse_snapshots_conf(self._read_settings_text(self.paths.snapshots_conf)).values
+        for key, name in names.items():
+            if name in conf:
+                n = guard_number(conf[name])
+                vals[key] = n if isinstance(n, int) and n > 0 else 0
         return {k: v * BIG for k, v in vals.items()}
+
+    @staticmethod
+    def _read_settings_text(path: str) -> str:
+        """The first MiB of a settings file's text ("" when it cannot be read)."""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read(1 << 20)
+        except OSError:
+            return ""
 
     def alert(self, title: str, body: str) -> None:
         log(f"<4>btrfs-bulk: {title}: {body}")

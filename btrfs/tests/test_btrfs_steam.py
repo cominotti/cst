@@ -39,6 +39,7 @@ from btrfs.bulk.adapters import machine as bulk_machine, user as bulk_user
 from btrfs.bulk.adapters.machine import Primitives
 from btrfs.bulk.domain.steam import SteamSurvey
 from btrfs.bulk.application import commands as bulk_commands, items as bulk_items, steam as bulk_steam
+from btrfs.snapshot_runtime.domain import guard_number
 from tests.script_loader import load_script
 
 sys.dont_write_bytecode = True
@@ -816,30 +817,66 @@ class SteamTest(tb.BulkBase):
         self.fake(self.host, "snapshot_program", lambda: os.path.join(self.tmp, "absent"))
         self.assertEqual(self.host.snapshot_guard()["emergency"], 150 * bulk_domain.BIG)
 
-    def test_snapshot_guard_takes_ascii_digits_only(self) -> None:
-        # \d took every Unicode digit: an Arabic-Indic "300" was 300 GiB, where btrfs-snapshot's own reader
-        # (guard_number) refuses it and keeps its default.
+    def test_snapshot_guard_reads_snapshots_conf_as_btrfs_snapshot_does(self) -> None:
+        # A regex of its own: an Arabic-Indic "300" was 300 GiB (then, with re.ASCII, the 250 GiB default),
+        # where btrfs-snapshot's guard_number gives BAD_NUMBER, so its hourly run never pauses; "010" was 10,
+        # where bash's arithmetic reads 8.
         three_hundred = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
-        with open(os.path.join(self.paths.etc, "snapshots.conf"), "w", encoding="utf-8") as f:
-            f.write(f"SKIP_AT_OR_BELOW_GIB={three_hundred}\nEMERGENCY_AT_OR_BELOW_GIB='\N{ARABIC-INDIC DIGIT ZERO}'\n")
-        self.assertEqual(
-            self.host.snapshot_guard(),
-            {"pause": 250 * bulk_domain.BIG, "resume": 270 * bulk_domain.BIG, "emergency": 150 * bulk_domain.BIG},
-        )
+        conf = os.path.join(self.paths.etc, "snapshots.conf")
+        big = bulk_domain.BIG
+        for text, want in (
+            (f"SKIP_AT_OR_BELOW_GIB={three_hundred}\n", {"pause": 0, "resume": 270 * big, "emergency": 150 * big}),
+            (
+                "EMERGENCY_AT_OR_BELOW_GIB='\N{ARABIC-INDIC DIGIT ZERO}'\n",
+                {"pause": 250 * big, "resume": 270 * big, "emergency": 0},
+            ),
+            (
+                "SKIP_AT_OR_BELOW_GIB=010\nRESUME_ABOVE_GIB='2*30'\n",
+                {"pause": 8 * big, "resume": 60 * big, "emergency": 150 * big},
+            ),
+            ("EMERGENCY_AT_OR_BELOW_GIB=-5\nRESUME_ABOVE_GIB=abc\n", {"pause": 250 * big, "resume": 0, "emergency": 0}),
+            # A line that is a problem sets nothing, there and here; the last assignment wins.
+            (
+                'SKIP_AT_OR_BELOW_GIB=1 2\nEMERGENCY_AT_OR_BELOW_GIB=9\nEMERGENCY_AT_OR_BELOW_GIB="99"\n',
+                {"pause": 250 * big, "resume": 270 * big, "emergency": 99 * big},
+            ),
+            ("EMERGENCY_AT_OR_BELOW_GIB=\n", {"pause": 250 * big, "resume": 270 * big, "emergency": 0}),
+        ):
+            with self.subTest(text=text):
+                with open(conf, "w", encoding="utf-8") as f:
+                    f.write(text)
+                self.assertEqual(self.host.snapshot_guard(), want)
 
-    def test_a_non_ascii_emergency_limit_does_not_lower_the_copy_floor(self) -> None:
-        # An Arabic-Indic "0" was read as 0: the floor fell to MARGIN, and a real copy went ahead that
-        # pushes free space down to btrfs-snapshot's emergency purge (150 GiB by its own reading).
+    def test_snapshot_guard_agrees_with_btrfs_snapshot_s_hourly_test(self) -> None:
+        # For every value, bulk's limit is crossed exactly where btrfs-snapshot's hourly run, which compares
+        # (( free <= KEY * GIB )) through guard_number (checked against bash in test_snapshot_settings), acts.
+        values = ["250", " 250 ", "0250", "0", "", "-5", "+7", "0x10", "08", "abc", "2.5", "250GiB", "1+1", "2*125"]
+        values += ["2**7", "2#10010110", "1/0", "(250", "\N{ARABIC-INDIC DIGIT ZERO}", "\N{SUPERSCRIPT TWO}"]
+        values += ["\N{FULLWIDTH DIGIT TWO}"]
+        conf = os.path.join(self.paths.etc, "snapshots.conf")
+        for value in values:
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write(f"EMERGENCY_AT_OR_BELOW_GIB='{value}'\n")
+            limit = self.host.snapshot_guard()["emergency"]
+            n = guard_number(value)
+            for free in (1, 7, 8, 16, 128, 249, 250, 251, 2**20):
+                with self.subTest(value=value, free=free):
+                    purges = isinstance(n, int) and free <= n
+                    self.assertEqual(free * bulk_domain.BIG <= limit, purges)
+
+    def test_an_emergency_limit_btrfs_snapshot_cannot_read_leaves_only_the_margin(self) -> None:
+        # With re.ASCII alone an Arabic-Indic "0" fell back to the 150 GiB default and bulk refused a copy to
+        # prevent a purge btrfs-snapshot never starts with that value (BAD_NUMBER: its test is false).
         with open(os.path.join(self.paths.etc, "snapshots.conf"), "w", encoding="utf-8") as f:
             f.write("EMERGENCY_AT_OR_BELOW_GIB=\N{ARABIC-INDIC DIGIT ZERO}\n")
+        self.assertEqual(bulk_steam.steam_copy_floor(self.bulk), bulk_domain.MARGIN)
         self.make_nocow(*self.NOCOW_PARTS)
         sv = self.splan(copy=True)
         c = sv["copy_bytes"]
         self.fake(self.machine, "free_bytes", lambda path: c + bulk_domain.MARGIN + 10 * bulk_domain.BIG)
-        self.assertEqual(self.sapply(copy=True), 1, self.out)
-        self.assertIn("must stay free so the /home snapshots are not purged", self.out)
-        self.assertInMain()
-        self.assertEqual(self.journals(), [])
+        self.splan(copy=True)
+        self.assertIn("20.0 GiB stays free: the snapshot emergency purge at 0 MiB plus 20.0 GiB", self.out)
+        self.assertNotIn("NEEDS A LOOK", self.out)
 
     def test_real_copy_keeps_the_snapshot_emergency_limit_free(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
