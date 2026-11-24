@@ -23,11 +23,11 @@ each later point of that run (a run that dies, or fails again, while it rolls ba
 - I3: a non-zero exit leaves the mounts and /etc/fstab as at the start, or its last line says
   ROLLBACK INCOMPLETE (the folders and the tag an attach made may stay: btrfs/README.md 9.4);
 - I4: no traceback, and the same command again with no fault returns 0 and reaches the target; a
-  third run says "nothing to do" and runs no mount, umount or reload.
-
-Not checked: that systemd has loaded /etc/fstab after a killed run. An attach killed after its
-fstab write and before its daemon-reload says "nothing to do" when run again and runs no reload
-(F-C2 in the R5 out-of-scope notes; the generator reads /etc/fstab at the next boot anyway).
+  third run says "nothing to do" and runs no mount, umount or reload;
+- I5: exit 0 means systemd has loaded /etc/fstab as it is on disk (FakeMountRunner's view of it).
+  A run that left systemd behind (killed between its /etc/fstab write and its daemon-reload, or a
+  reload that failed) is followed by a run again that runs exactly one daemon-reload; any other run
+  again runs at most one.
 
 One class per start state (a work unit of tests/run_unit.py), one method per mode family, the case
 counts pinned.
@@ -105,7 +105,8 @@ def read(path: str) -> str | None:
 
 
 def reads(argv: Sequence[str]) -> bool:
-    return list(argv[:1]) == ["findmnt"]
+    """findmnt and systemctl show (which units systemd loaded) only read."""
+    return list(argv[:1]) == ["findmnt"] or list(argv[:2]) == ["systemctl", "show"]
 
 
 class CacheFaultBase(unittest.TestCase):
@@ -234,12 +235,19 @@ class CacheFaultBase(unittest.TestCase):
             rc, lines = result
             if rc == 0:
                 self.assert_target(model, f"{when}: exit 0")
+                self.assertTrue(model.view_current(), f"{when}: exit 0, systemd has not loaded /etc/fstab: {lines}")
             elif not incomplete:
                 self.assertEqual(self.mounts(model), start_mounts, f"{when}: exit {rc}: the mounts: {lines}")
                 self.assertEqual(read(self.fstab), start_fstab, f"{when}: exit {rc}: /etc/fstab: {lines}")
+        behind, reloads = not model.view_current(), model.reloads
         again = self.run_once(model)
         self.assertEqual((again or (None, []))[0], 0, f"{when}: the run again: {again}")
         self.assert_target(model, f"{when}: the run again")
+        self.assertTrue(model.view_current(), f"{when}: the run again, systemd has not loaded /etc/fstab: {again}")
+        ran = model.reloads - reloads
+        if behind:
+            self.assertEqual(ran, 1, f"{when}: the run again after systemd was left behind")
+        self.assertLessEqual(ran, 1, f"{when}: the run again reloaded {ran} times")
         model.calls.clear()
         third = self.run_once(model) or (None, [])
         self.assertEqual(third[0], 0, f"{when}: the third run: {third}")

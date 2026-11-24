@@ -548,8 +548,48 @@ class InstallServiceRecordTest(unittest.TestCase):
     def test_no_record_port_records_nothing(self) -> None:
         svc = InstallService(self.target, lambda e: self.payloads[e.src])
         self.assertEqual(list(svc.install([self.a], InstallRequest())), ["written:   /usr/local/sbin/a"])
-        svc.mark(self.ROOT, "m:t")
+        self.assertIsNone(svc.mark(self.ROOT, "m:t"))
         self.assertEqual(self.record.texts, {})
+
+    def test_mark_returns_the_state_the_record_had_before(self) -> None:
+        # A caller that marks a component pending for a while (iocost's revert) puts the old state back.
+        list(self.svc.install([self.a], InstallRequest()))
+        self.assertEqual(self.svc.mark(self.ROOT, "m:t"), "pending")
+        self.assertEqual(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING), "done")
+        self.assertEqual(self.record.doc().components, {"m:t": "pending"})
+        self.assertEqual(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING), "pending")
+        self.assertEqual(self.svc.mark(self.ROOT, "m:t"), "pending")
+        self.assertEqual(self.record.doc().components, {"m:t": "done"})
+
+    def test_mark_returns_none_when_the_record_has_no_state_for_the_component(self) -> None:
+        # No record file: None (JsonRecordTest: and no record file is made).
+        self.assertIsNone(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING))
+        # A record that lists none of its files (another component's): None, the record unchanged.
+        list(self.svc.install([self.a], InstallRequest()))
+        text = self.record.texts[self.ROOT]
+        self.assertIsNone(self.svc.mark(self.ROOT, "m:other", ComponentState.PENDING))
+        self.assertEqual(self.record.texts[self.ROOT], text)
+        # Its files listed but no state yet (a record an older CST left without one): None, then marked.
+        rec = parse_record(text)
+        self.record.texts[self.ROOT] = render_record(InstallRecord(rec.files, {}))
+        self.assertIsNone(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING))
+        self.assertEqual(self.record.doc().components, {"m:t": "pending"})
+        # A state the record keeps for a component none of whose files it lists (an older CST's, a hand
+        # edit): None, not that state, which has nothing behind it.
+        self.record.texts[self.ROOT] = render_record(InstallRecord({}, {"m:t": ComponentState.DONE}))
+        self.assertEqual(parse_record(self.record.texts[self.ROOT]).components, {"m:t": "done"})
+        self.assertIsNone(self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING))
+        # No record named (""): None, nothing read or written.
+        writes = self.record.writes
+        self.assertIsNone(self.svc.mark("", "m:t"))
+        self.assertEqual(self.record.writes, writes)
+
+    def test_mark_refuses_a_record_of_a_newer_cst_and_changes_nothing(self) -> None:
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaisesRegex(InstallRefused, "newer CST"):
+            self.svc.mark(self.ROOT, "m:t", ComponentState.PENDING)
+        self.assertEqual(self.record.texts, {self.ROOT: '{"format": 9, "files": {}}'})
+        self.assertEqual(self.record.writes, 0)
 
 
 class _Verifier:
@@ -666,6 +706,11 @@ class JsonRecordTest(unittest.TestCase):
 
     def add(self, dest: str) -> Callable[[InstallRecord], InstallRecord]:
         return lambda rec: with_files(rec, {dest: (_f(), True)})
+
+    def test_a_mark_without_a_record_file_returns_none_and_makes_no_record(self) -> None:
+        svc = InstallService(MemoryTarget(), lambda e: b"", record=self.port)
+        self.assertIsNone(svc.mark(self.path, "m:t", ComponentState.PENDING))
+        self.assertFalse(os.path.exists(self.path))
 
     def test_written_0644_in_folders_0755_whatever_the_umask(self) -> None:
         old = os.umask(0o077)

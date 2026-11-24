@@ -421,10 +421,22 @@ class InstallService:
         self._save([(place, data, written)], {}, frozenset({place.component}) if keep_state else frozenset())
         return written
 
-    def mark(self, record: str, component: str, state: ComponentState = ComponentState.DONE) -> None:
-        """The component's state in the record (done: its setup command finished)."""
-        if record:
-            self._update(record, lambda rec: with_state(rec, component, state))
+    def mark(self, record: str, component: str, state: ComponentState = ComponentState.DONE) -> ComponentState | None:
+        """The component's state in the record (done: its setup command finished). Returns the state the
+        record had for it before (None: no record, none of its files listed, or record "" or no record port),
+        so a caller that marks it pending for a while can put that state back."""
+        if not record:
+            return None
+        prior: list[ComponentState | None] = [None]
+
+        def change(rec: InstallRecord) -> InstallRecord:
+            # A state no listed file names (one an older CST or a hand edit left) has nothing behind it.
+            if any(f.component == component for f in rec.files.values()):
+                prior[0] = rec.components.get(component)
+            return with_state(rec, component, state)
+
+        self._update(record, change)
+        return prior[0]
 
     def forget(self, record: str, dests: Sequence[str]) -> None:
         """Drop these destinations from the record (their files were removed by their module)."""

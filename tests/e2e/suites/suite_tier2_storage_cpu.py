@@ -3059,8 +3059,24 @@ assert d["samples"] >= 1, d["samples"]
                 exit 0
             fi
 
+            # A save of the managed-devices file that fails (a folder where it belongs: the rename over it
+            # fails): apply saves the devices it is about to enable first, so it writes no line at all.
+            rm -rf /run/btrfs-setup/iocost-managed
+            mkdir -p /run/btrfs-setup/iocost-managed/x
+            rc=0; /opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name" >/var/tmp/e2e-23-out 2>&1 || rc=$?
+            rm -rf /run/btrfs-setup/iocost-managed
+            [[ $rc == 1 ]] || { echo "apply with the managed file unwritable: exit $rc" >&2; cat /var/tmp/e2e-23-out >&2; exit 1; }
+            grep -qF "ERROR: cannot write /run/btrfs-setup/iocost-managed: " /var/tmp/e2e-23-out
+            grep -qF "nothing was written to io.cost.qos" /var/tmp/e2e-23-out
+            if grep -q Traceback /var/tmp/e2e-23-out; then cat /var/tmp/e2e-23-out >&2; exit 1; fi
+            if grep -qE "^${devno} enable=1" /sys/fs/cgroup/io.cost.qos; then
+                echo "io.cost.qos has enable=1 for $devno after an apply whose save failed" >&2
+                exit 1
+            fi
+
             /opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name" >/dev/null
             grep -qE "^${devno} enable=1" /sys/fs/cgroup/io.cost.qos
+            grep -qx "$devno" /run/btrfs-setup/iocost-managed
 
             st="$(/opt/cst-rw/cst btrfs iocost status)"
             grep -qE "[1-9][0-9]* active device" <<<"$st"

@@ -21,6 +21,8 @@ UDEV_CONTROL: Final = "/run/udev/control"  # udevd's control socket: there only 
 # One run at a time (the boot service, the udev rule's per-disk runs, the commands): each holds this lock
 # from its read of io.cost.qos and the managed file to its save of the managed file.
 IOCOST_LOCK: Final = "/run/btrfs-setup/iocost-managed.lock"
+# Beside IOCOST_LOCK: held by a full apply and a full revert from their first step to their last.
+IOCOST_COMPONENT_LOCK_NAME: Final = "iocost-component.lock"
 IOCOST_LOCK_TIMEOUT_S: Final = 30.0  # inside the 180 s udev gives a RUN program
 # udev properties of a disk (`udevadm info -q property`): 90-iocost.rules' hwdb solution, and the stamp
 # udev sets once it has processed the device (without it, the device's rules have not run yet).

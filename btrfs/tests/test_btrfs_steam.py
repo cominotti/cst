@@ -909,6 +909,26 @@ class SteamTest(tb.BulkBase):
         self.splan("1628350", copy=True)
         self.assertNotIn("NOTE:", self.out)
 
+    def test_the_pause_note_says_where_btrfs_snapshot_resumes(self) -> None:
+        # btrfs-snapshot's hourly run stays paused at or below SKIP_AT_OR_BELOW_GIB too, so the snapshots come
+        # back only above the larger of the two limits. Before, the NOTE named RESUME_ABOVE_GIB alone: "resume
+        # above 100.0 GiB" with SKIP 250, where they stay paused up to 250 GiB.
+        self.make_nocow(*self.NOCOW_PARTS)
+        self.fake(self.machine, "free_bytes", lambda path: 200 * bulk_domain.BIG)
+        conf = os.path.join(self.paths.etc, "snapshots.conf")
+        for text, resume in (
+            ("SKIP_AT_OR_BELOW_GIB=250\nRESUME_ABOVE_GIB=100\n", "250.0 GiB"),
+            ("", "270.0 GiB"),  # the defaults: 250 and 270
+            ("RESUME_ABOVE_GIB=0\n", "250.0 GiB"),  # a limit read as 0 never holds them
+            ("SKIP_AT_OR_BELOW_GIB=210\nRESUME_ABOVE_GIB=230\n", "230.0 GiB"),
+        ):
+            with self.subTest(text=text):
+                with open(conf, "w", encoding="utf-8") as f:
+                    f.write(text)
+                self.splan(copy=True)
+                self.assertIn("NOTE: about 200.0 GiB free after all copies", self.out)
+                self.assertIn(f"and resume above {resume} (once old snapshots expire)", self.out)
+
     def test_failed_sync_keeps_the_original(self) -> None:
         self.make_nocow(*self.NOCOW_PARTS)
         real_run = cast(

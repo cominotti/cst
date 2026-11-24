@@ -31,12 +31,15 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.docker_volumes_nocow.domain import DAEMON_JSON, is_config_reason, is_stored_postponed
-from btrfs.cache.domain import parse_all_mounts
+from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
 from cst_core.domain.shapes import parse_json
-from cst_core.domain.text import YES_WORDS, ShellAssignments, group, parse_shell_assignments, unescape_mount_field
+from cst_core.domain.units import parse_show_units
+from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
 from doctor.application.cpu import unit_props
+from doctor.application.findmnt import findmnt_all_mounts, findmnt_root_btrfs_info
 from doctor.application.shared import (
     check,
     conf_value,
@@ -613,44 +616,6 @@ def check_docker_nocow_postponed(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(INFO, f"{msg}; tried again at the next boot")
 
 
-def _findmnt_to_octal_field(field: str) -> str:
-    """Convert `findmnt` hex escapes (`\\x20`) to `/proc/mounts` octal escapes (`\\040`)."""
-    return re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: f"\\{int(group(m, 1), 16):03o}", field)
-
-
-def _findmnt_root_btrfs_info(host: DoctorHostPort) -> tuple[str | None, str]:
-    """The live btrfs mounts as /proc/mounts lines, and the root filesystem's UUID: that of the mounts
-    pick_root_mounts takes (the device of /sysroot, else /, else /var), never a separate btrfs /home's."""
-    rc, out, _ = host.run(["findmnt", "-rn", "-t", "btrfs", "-o", "SOURCE,TARGET,OPTIONS,UUID"], timeout=15)
-    if rc != 0 or not out.strip():
-        return None, ""
-    lines: list[str] = []
-    uuids: list[tuple[str, str]] = []  # (target, UUID) of each line that has one
-    for raw in out.splitlines():
-        match raw.strip().split(None, 3):
-            case [src, tgt, opts, *rest]:  # rest: the UUID, when the line has one
-                esc_src, esc_tgt = _findmnt_to_octal_field(src), _findmnt_to_octal_field(tgt)
-                lines.append(f"{esc_src} {esc_tgt} btrfs {opts} 0 0\n")
-                if rest:
-                    uuids.append((unescape_mount_field(esc_tgt), rest[0]))
-    text = "".join(lines)
-    root_targets = {m.target for m in pick_root_mounts(parse_proc_mounts(text))}
-    root_uuid = next((uuid for tgt, uuid in uuids if tgt in root_targets), "")
-    return (text or None), root_uuid
-
-
-def _findmnt_all_mounts(host: DoctorHostPort) -> str | None:
-    rc, out, _ = host.run(["findmnt", "-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"], timeout=15)
-    if rc != 0 or not out.strip():
-        return None
-    lines: list[str] = []
-    for raw in out.splitlines():
-        match raw.strip().split(None, 3):
-            case [src, tgt, fstype, opts]:
-                lines.append(f"{_findmnt_to_octal_field(src)} {_findmnt_to_octal_field(tgt)} {fstype} {opts} 0 0\n")
-    return "".join(lines) or None
-
-
 _COMPRESSION_LABEL: Final[str] = "root btrfs compression"
 _COMMIT_INTERVAL_LABEL: Final[str] = "root btrfs commit interval"
 
@@ -670,7 +635,7 @@ def _read_root_btrfs_snapshot(host: DoctorHostPort) -> tuple[CompressSnapshot, b
     has_btrfs_proc = bool(pick_root_mounts(parse_proc_mounts(proc_mounts_raw)))
     if not (has_btrfs_fstab or has_btrfs_proc or top_text or _btrfs_sysfs_uuids(host, host.path(BTRFS_SYSFS))):
         return None
-    live_findmnt, root_uuid = _findmnt_root_btrfs_info(host)
+    live_findmnt, root_uuid = findmnt_root_btrfs_info(host)
     live_text = live_findmnt or proc_mounts_raw
     if not (
         parse_fstab_root_entries(fstab_raw, root_uuid) or pick_root_mounts(parse_proc_mounts(live_text)) or top_text
@@ -761,6 +726,26 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
         yield Result(OK, f"{_COMMIT_INTERVAL_LABEL}: {report.summary}")
 
 
+def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
+    """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
+    it has loaded, one `systemctl show '*.mount'`): an edit, or a cache attach or detach that stopped
+    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
+    where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a machine without
+    one is no warning of the cache's."""
+    cmd = ["systemctl", "show", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
+    rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
+    if rc != 0:
+        return
+    if fstab_lines_unread(parse_show_units(out), {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:
+        yield Result(
+            WARN,
+            "btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "
+            "`cst btrfs cache attach` or `detach` that stopped before its daemon-reload), so it keeps the mounts "
+            "of the /etc/fstab it loaded before",
+            "sudo systemctl daemon-reload",
+        )
+
+
 @check(CHECKS, "btrfs")
 def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     """Check the dedicated NVMe cache drive's mounts, crypttab `nofail`, and user bind mounts."""
@@ -779,7 +764,7 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
         crypttab_unreadable = True
     except OSError:
         pass
-    live_findmnt = _findmnt_all_mounts(host)
+    live_findmnt = findmnt_all_mounts(host)
     mounts_text = f"{proc_raw}\n{live_findmnt}" if live_findmnt is not None else proc_raw
     sev_map = {
         CacheMountFindingSeverity.OK: OK,
@@ -795,5 +780,7 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None, dm_names):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
+    if has_hints:
+        yield from _fstab_loaded_results(host, fstab_raw)
     if crypttab_unreadable and has_hints:
         yield Result(INFO, "btrfs cache: /etc/crypttab is not readable as this user (nofail not checked)")

@@ -484,6 +484,14 @@ class FakeMountRunner:
         self.mounts: list[dict[str, str | None]] = []
         self.add_mount("/dev/dm-0", "/", fsroot="/root", uuid=UUID_ROOT)
         self.add_mount("/dev/dm-0", "/var/home", fsroot="/home", uuid=UUID_ROOT)
+        # systemd's view of the test root's /etc/fstab: the file (its inode and mtime: a rewrite of the same
+        # bytes counts, as NeedDaemonReload goes by the file's time) and its text as the last daemon-reload
+        # loaded them; taken at the first command, as a systemd that booted with what is there then.
+        self.loaded_fstab: tuple[tuple[int, int] | None, str | None] | None = None
+        self.reloads = 0  # the daemon-reloads that worked
+        self.show_fails = False  # systemctl show answers exit 1: no answer
+        self.units_visible = True  # False: systemctl show lists no unit (test_160's systemd, which sees none)
+        self.before_reload: Callable[[], None] | None = None  # runs before a reload that works (a kill there)
 
     def add_mount(
         self,
@@ -548,17 +556,72 @@ class FakeMountRunner:
                 break
         return CommandResult(0, "", "")
 
-    def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
-        cmd = list(argv)
-        self.calls.append(cmd)
-        if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
-            if self.findmnt_fails:
-                return CommandResult(1, "", "findmnt: cannot read the mount table")
-            return CommandResult(0, self._findmnt_json(), "")
-        if cmd[-1:] == ["daemon-reload"] and self.reload_fails:
+    def _fstab_file(self) -> tuple[tuple[int, int] | None, str | None]:
+        """(inode and mtime, text) of the test root's /etc/fstab; (None, None) without one, and no text for
+        one that cannot be read (a test's)."""
+        try:
+            st = os.stat(os.path.join(self.root, "etc", "fstab"))
+            return (st.st_ino, st.st_mtime_ns), self._fstab_now()
+        except OSError:
+            return None, None
+
+    def view_current(self) -> bool:
+        """Whether systemd has loaded the test root's /etc/fstab as it is on disk."""
+        return self.loaded_fstab is None or self.loaded_fstab[0] == self._fstab_file()[0]
+
+    def _mount_units(self) -> CommandResult:
+        """`systemctl show -p ... '*.mount'`: a block per loaded unit. A unit of each line of the loaded
+        /etc/fstab (SourcePath=/etc/fstab, NeedDaemonReload=yes once the file changed since), and of each
+        other mount (SourcePath=/proc/self/mountinfo, as systemd loads a mount it did not start)."""
+        if self.show_fails:
+            return CommandResult(1, "", "Failed to connect to bus")
+        if not self.units_visible:
+            return CommandResult(0, "", "")
+        text = self.loaded_fstab[1] if self.loaded_fstab is not None else None
+        need = "no" if self.view_current() else "yes"
+        units: dict[str, tuple[str, str]] = {}
+        for line in (text or "").splitlines():
+            fields = line.split()
+            if fields and not fields[0].startswith("#") and len(fields) > 1:
+                units[fields[1]] = ("/etc/fstab", need)
+        for m in self.mounts:
+            units.setdefault(str(m["target"]), ("/proc/self/mountinfo", "no"))
+        blocks = [
+            f"Id={t.strip('/').replace('/', '-') or '-'}.mount\nLoadState=loaded\nSourcePath={src}\n"
+            f"NeedDaemonReload={nd}\nWhere={t}\n"
+            for t, (src, nd) in units.items()
+        ]
+        return CommandResult(0, "\n".join(blocks), "")
+
+    def _findmnt(self) -> CommandResult:
+        if self.findmnt_fails:
+            return CommandResult(1, "", "findmnt: cannot read the mount table")
+        return CommandResult(0, self._findmnt_json(), "")
+
+    def _daemon_reload(self) -> CommandResult:
+        """A reload that fails (reload_fails, after on_failed_reload), or one that works: before_reload runs
+        (a kill there), then systemd has loaded the test root's /etc/fstab as it is now."""
+        if self.reload_fails:
             if self.on_failed_reload is not None:
                 self.on_failed_reload()
             return CommandResult(1, "", "Failed to reload daemon")
+        if self.before_reload is not None:
+            self.before_reload()
+        self.loaded_fstab = self._fstab_file()
+        self.reloads += 1
+        return CommandResult(0, "", "")
+
+    def run(self, argv: Sequence[str], **_kwargs: object) -> CommandResult:
+        cmd = list(argv)
+        self.calls.append(cmd)
+        if self.loaded_fstab is None:
+            self.loaded_fstab = self._fstab_file()
+        if cmd == ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS]:
+            return self._findmnt()
+        if cmd[:2] == ["systemctl", "show"] and cmd[-1:] == ["*.mount"]:
+            return self._mount_units()
+        if cmd[-1:] == ["daemon-reload"]:
+            return self._daemon_reload()
         if cmd[:2] == ["mount", "--bind"]:
             return self._bind(cmd[2], cmd[3])
         if cmd[:1] == ["umount"]:

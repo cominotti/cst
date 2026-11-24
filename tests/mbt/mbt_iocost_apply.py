@@ -35,19 +35,12 @@ Checked:
    reset to enable=0 when CST managed it. Live-only: the io.cost.qos lines
    only. The vendor line never changes.
 3. btrfs:iocost done means its files are in place, systemd loaded the unit
-   and the service is enabled. The io.cost.qos line is not part of it:
-   revert --live-only leaves the component done with enable=0 (the boot
-   service writes it again). One known gap of revert is let through, the
-   revert gap: a full revert whose disable --now works and whose removal of
-   one of the component's files then fails returns with btrfs:iocost still
-   done in the install record, although the service is disabled, the files
-   removed before the failing one are gone with their record lines, and
-   systemd and udev were not reloaded. From such a revert until the next
-   full apply or revert that exits 0, this check is off as a whole (points 2
-   and 4 still check that both converge). A fix of revert (mark the component
-   pending before the disable, or enable the service again after a failed
-   removal) removes the exemption, and the machine then fails on the old
-   code.
+   and the service is enabled, after every step. The io.cost.qos line is not
+   part of it: revert --live-only leaves the component done with enable=0
+   (the boot service writes it again). A full revert marks the component
+   pending before its disable --now: a revert whose disable failed leaves
+   the state as it was (it changed nothing), and one that failed after its
+   disable worked leaves pending, or no state once its last file is gone.
 4. A step whose fault fired exits non-zero, with an ERROR line or the
    installer's own error line; a step with no fault, or whose fault did not
    fire, exits 0 from every state (apply again, and revert again, converge).
@@ -317,9 +310,6 @@ class IocostMachine(RuleBasedStateMachine):
         self.vendor = False
         self.qos_fault = False
         self.qos_fired = False
-        # The revert gap (the module's docstring, point 3): a full revert stopped after its disable, the
-        # component still done.
-        self.revert_left_done = False
 
     @override
     def teardown(self) -> None:
@@ -424,7 +414,6 @@ class IocostMachine(RuleBasedStateMachine):
         what = "apply (upgrade)" if upgrade else "apply"
         rc, lines = self._step(functools.partial(apply_iocost, self.paths, runner=self.host), what, fault, dest)
         if rc == 0:
-            self.revert_left_done = False
             self._assert_applied(lines)
 
     @rule(fault=st.sampled_from(LIVE_FAULTS))
@@ -437,16 +426,18 @@ class IocostMachine(RuleBasedStateMachine):
     @rule(fault=st.sampled_from(REVERT_FAULTS), dest=st.sampled_from(DESTS))
     def revert(self, fault: IocostStepFault, dest: str) -> None:
         managed = self._managed()
+        before, _ = self._component()
         run = functools.partial(revert_iocost, self.paths, runner=self.host, installer=self.svc)
         rc, lines = self._step(run, "revert", fault, dest)
         state, recorded = self._component()
         if rc == 0:
-            self.revert_left_done = False
             assert (state, recorded, self._in_place()) == (None, set(), []), f"revert exit 0 left {state} {recorded}"
             assert not self.host.enabled, f"revert exit 0, the service is enabled: {lines}"
             self._assert_reset(managed=managed, what="revert")
-        elif "disable" in self.host.events and state == ComponentState.DONE:
-            self.revert_left_done = True  # the revert gap (the module's docstring, point 3)
+        elif fault == IocostStepFault.DISABLE and self.host.fired:
+            assert state == before, f"revert ({fault}): the disable failed, btrfs:iocost {before} -> {state}: {lines}"
+        elif "disable" in self.host.events:
+            assert state in {ComponentState.PENDING, None}, f"revert ({fault} {dest}) after its disable left {state}"
 
     @rule(fault=st.sampled_from(LIVE_FAULTS))
     def revert_live_only(self, fault: IocostStepFault) -> None:
@@ -469,7 +460,7 @@ class IocostMachine(RuleBasedStateMachine):
     @invariant()
     def done_means_installed_loaded_and_enabled(self) -> None:
         state, _ = self._component()
-        if state != ComponentState.DONE or self.revert_left_done:
+        if state != ComponentState.DONE:
             return
         h = self.host
         assert self._in_place() == list(DESTS), f"btrfs:iocost done, files in place: {self._in_place()}"
