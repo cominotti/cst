@@ -18,7 +18,7 @@ def _irq_write_action(parsed: irq_domain.IrqParsedArgs) -> str | None:
 
 
 _IRQ_SPEC = ManagedCliSpec(
-    default_prog="cst cpu irq",
+    default_prog=irq_domain.IRQ_PROG,
     parse=irq_domain.parse_irq_args,
     format_usage=irq_domain.format_irq_usage,
     is_help=lambda p: p.action == IrqAction.HELP,
@@ -26,7 +26,7 @@ _IRQ_SPEC = ManagedCliSpec(
     write_action=_irq_write_action,
     elevation_reason="configures /etc/cpu-setup/irqbalance.env, systemd drop-in, and irqbalance.service",
     execute=irq_adapters.dispatch_irq_cli_action,
-    resolve_prog=lambda raw: "cst cpu irq" if raw == "cst cpu" else (raw or "cst cpu irq"),
+    resolve_prog=lambda raw: irq_domain.IRQ_PROG if raw == "cst cpu" else (raw or irq_domain.IRQ_PROG),
 )
 
 

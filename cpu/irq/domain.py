@@ -19,6 +19,9 @@ IRQBALANCE_SERVICE: Final = "irqbalance.service"
 MIN_UNBANNED_CPUS: Final = 2
 _NO_PKG_FLAG: Final = "--no-pkg"
 _BANNED_ENV_KEY: Final = "IRQBALANCE_BANNED_CPULIST"
+_DRY_RUN_LINE: Final = "Dry run: nothing is changed."
+# The command's name in its own messages, when CST_PROG does not give it.
+IRQ_PROG: Final = "cst cpu irq"
 
 
 class IrqAction(StrEnum):
@@ -188,6 +191,63 @@ def format_irq_status(snap: IrqSnapshot) -> list[str]:
     return lines
 
 
+def _irq_plan_blocker(snap: IrqSnapshot) -> str | None:
+    """The ERROR line that stops the plan before any file is judged, or None."""
+    if snap.build_cpus_error is not None:
+        return f"ERROR: {snap.build_cpus_error}"
+    if snap.online_cpus_raw is None:
+        return "ERROR: cannot read online CPUs from /sys/devices/system/cpu/online"
+    return None
+
+
+def _irq_config_lines(snap: IrqSnapshot) -> list[str]:
+    """What the plan does to irqbalance.env and the drop-in."""
+    if snap.banned_cpulist:
+        want_env = render_irq_env(snap.banned_cpulist)
+        want_dropin = render_irq_dropin()
+        return [
+            f"unchanged:   {snap.env_path}"
+            if snap.env_text == want_env
+            else f"would write: {snap.env_path} ({_BANNED_ENV_KEY}={snap.banned_cpulist})",
+            f"unchanged:   {snap.dropin_path}"
+            if snap.dropin_text == want_dropin
+            else f"would write: {snap.dropin_path}",
+        ]
+    return [
+        f"would remove: {label_path} (no BUILD_CPUS overlap)"
+        if content is not None
+        else f"unchanged:   {label_path} (absent)"
+        for label_path, content in ((snap.dropin_path, snap.dropin_text), (snap.env_path, snap.env_text))
+    ]
+
+
+def _irq_package_line(snap: IrqSnapshot, *, no_pkg: bool) -> str | None:
+    """How irqbalance gets installed when a ban needs it and it is not there, or None."""
+    if snap.service_unit_present or not snap.banned_cpulist:
+        return None
+    if no_pkg:
+        return "would skip:  rpm-ostree install irqbalance (--no-pkg)"
+    if snap.rpm_ostree_present:
+        return "would install: irqbalance via rpm-ostree install --idempotent --apply-live irqbalance"
+    return "WARN: irqbalance.service not installed and rpm-ostree missing; install irqbalance manually"
+
+
+def _irq_service_line(snap: IrqSnapshot, *, no_pkg: bool) -> str | None:
+    """What the plan does to irqbalance.service when it will exist and a ban is wanted, or None."""
+    pkg_will_exist = snap.service_unit_present or (snap.rpm_ostree_present and not no_pkg and bool(snap.banned_cpulist))
+    if not (pkg_will_exist and snap.banned_cpulist):
+        return None
+    cfg_changed = snap.env_text != render_irq_env(snap.banned_cpulist) or snap.dropin_text != render_irq_dropin()
+    if (
+        not snap.service_unit_present
+        or snap.service_enabled != "enabled"
+        or snap.service_active != ActiveState.ACTIVE
+        or cfg_changed
+    ):
+        return f"would enable & start/restart: {IRQBALANCE_SERVICE}"
+    return f"unchanged:   {IRQBALANCE_SERVICE} (enabled, active)"
+
+
 def format_irq_plan(snap: IrqSnapshot, *, no_pkg: bool = False) -> list[str]:
     """Render dry-run plan lines for `cst cpu irq plan` without side effects."""
     lines = [f"WARN: {w}" for w in snap.warnings]
@@ -196,57 +256,11 @@ def format_irq_plan(snap: IrqSnapshot, *, no_pkg: bool = False) -> list[str]:
         f"target ban={snap.banned_cpulist or 'none'}"
     )
     lines.extend(f"note:      {n}" for n in snap.compute_notes)
-
-    if snap.build_cpus_error is not None:
-        lines.append(f"ERROR: {snap.build_cpus_error}")
-        lines.append("Dry run: nothing is changed.")
-        return lines
-
-    if snap.online_cpus_raw is None:
-        lines.append("ERROR: cannot read online CPUs from /sys/devices/system/cpu/online")
-        lines.append("Dry run: nothing is changed.")
-        return lines
-
-    if snap.banned_cpulist:
-        want_env = render_irq_env(snap.banned_cpulist)
-        want_dropin = render_irq_dropin()
-        lines.append(
-            f"unchanged:   {snap.env_path}"
-            if snap.env_text == want_env
-            else f"would write: {snap.env_path} ({_BANNED_ENV_KEY}={snap.banned_cpulist})"
-        )
-        lines.append(
-            f"unchanged:   {snap.dropin_path}"
-            if snap.dropin_text == want_dropin
-            else f"would write: {snap.dropin_path}"
-        )
-    else:
-        for label_path, content in ((snap.dropin_path, snap.dropin_text), (snap.env_path, snap.env_text)):
-            lines.append(
-                f"would remove: {label_path} (no BUILD_CPUS overlap)"
-                if content is not None
-                else f"unchanged:   {label_path} (absent)"
-            )
-
-    pkg_will_exist = snap.service_unit_present or (snap.rpm_ostree_present and not no_pkg and bool(snap.banned_cpulist))
-    if not snap.service_unit_present and snap.banned_cpulist:
-        if no_pkg:
-            lines.append("would skip:  rpm-ostree install irqbalance (--no-pkg)")
-        elif snap.rpm_ostree_present:
-            lines.append("would install: irqbalance via rpm-ostree install --idempotent --apply-live irqbalance")
-        else:
-            lines.append("WARN: irqbalance.service not installed and rpm-ostree missing; install irqbalance manually")
-
-    if pkg_will_exist and snap.banned_cpulist:
-        cfg_changed = snap.env_text != render_irq_env(snap.banned_cpulist) or snap.dropin_text != render_irq_dropin()
-        if (
-            not snap.service_unit_present
-            or snap.service_enabled != "enabled"
-            or snap.service_active != ActiveState.ACTIVE
-            or cfg_changed
-        ):
-            lines.append(f"would enable & start/restart: {IRQBALANCE_SERVICE}")
-        else:
-            lines.append(f"unchanged:   {IRQBALANCE_SERVICE} (enabled, active)")
-    lines.append("Dry run: nothing is changed.")
+    blocker = _irq_plan_blocker(snap)
+    if blocker is not None:
+        return [*lines, blocker, _DRY_RUN_LINE]
+    lines.extend(_irq_config_lines(snap))
+    optional = (_irq_package_line(snap, no_pkg=no_pkg), _irq_service_line(snap, no_pkg=no_pkg))
+    lines.extend(line for line in optional if line is not None)
+    lines.append(_DRY_RUN_LINE)
     return lines
