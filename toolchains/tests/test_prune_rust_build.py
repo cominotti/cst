@@ -1375,6 +1375,22 @@ class ApplyStepsTest(Base):
         self.assertEqual(rc_again, 0, out_again)
         self.assertIn(f"rust:build: deleted leftover {name}", out_again)
 
+    def test_a_leftover_that_cannot_be_deleted_counts_as_failed_in_status(self) -> None:
+        # The run exited 1, but its saved summary said "failed": 0, so status showed the last run as
+        # fine while the timer's service had failed.
+        name = tcd_build.TRASH_PREFIX + "aa0123456789abcd-1"
+        os.makedirs(os.path.join(self.root, name, "debug"))
+        self.folder("bb/0123456789abcd", 1)  # kept: the run has nothing else to do
+        tree = self.use_tree()
+        with mock.patch.object(tree, "remove", return_value=(False, "Permission denied")):
+            rc, out = self.run_main("prune", "apply", "rust:build")
+        self.assertEqual(rc, 1, out)
+        saved = tc_home_files.read_state(self.home, "rust:build")
+        self.assertIsNotNone(saved)
+        self.assertEqual((saved or {}).get("failed"), 1)
+        _, st = self.run_main("status")
+        self.assertRegex(st, r"deleted 0 folder\(s\) \([^)]*\), 1 failed; left")
+
     def test_a_folder_that_keeps_changing_is_left_busy(self) -> None:
         self.folder("aa/0123456789abcd", 100)
         tree = self.use_tree()

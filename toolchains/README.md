@@ -816,7 +816,8 @@ before ...: the run's time budget ...`) and stops an `rm` that is still
 running when the budget ends (the folder was already renamed away: the next
 run deletes the rest as a leftover). A leftover that cannot be deleted gets
 an error line (`could not delete leftover ...`) and the run exits 1, as for
-a folder. Whatever is left is done by the next
+a folder; the run's summary counts it as failed (`status`: `N failed` in
+`rust:build`'s last run). Whatever is left is done by the next
 runs. A manual `prune apply` has the same budget.
 `auto on` writes, as your user:
 

@@ -203,20 +203,32 @@ class RustBuild(BaseTarget[RustPolicy]):
         leftovers_failed = self._remove_leftovers(trash, users)
         nbusy = self._report_busy(decide(folders, pol, now, {}, claimed), users)
         dev = self.machine.tree.device(root)
-        tally = _RunTally(root, dev, pol, claimed, cache, users, list(folders), nbusy, rc=1 if leftovers_failed else 0)
+        tally = _RunTally(
+            root,
+            dev,
+            pol,
+            claimed,
+            cache,
+            users,
+            list(folders),
+            nbusy,
+            failed=leftovers_failed,
+            rc=1 if leftovers_failed else 0,
+        )
         self._prune_loop(tally, now)
         return self._finish(tally, before, len(folders), now)
 
-    def _remove_leftovers(self, trash: Sequence[Folder], users: Mapping[str, Sequence[tuple[int | str, str]]]) -> bool:
-        """Delete what an interrupted run left (TRASH), unless a process uses it; True when one that
-        nothing uses could not be deleted (the run then exits 1, as for a folder)."""
-        failed = False
+    def _remove_leftovers(self, trash: Sequence[Folder], users: Mapping[str, Sequence[tuple[int | str, str]]]) -> int:
+        """Delete what an interrupted run left (TRASH), unless a process uses it; how many that
+        nothing uses could not be deleted (each counts as a failed folder: the run exits 1, and the
+        saved summary, which status shows, counts it)."""
+        failed = 0
         for t in trash:
             if len(users.get(t.key, [])) > 0:
                 self.tsay(f"leftover {t.key} in use ({users_text(users[t.key])}): kept for now", 5)
                 continue
             ok, msg = self.machine.tree.remove(t.path, self.time_left())
-            failed = failed or not ok
+            failed += not ok
             self.tsay(
                 f"deleted leftover {t.key} ({gib(t.size)})" if ok else f"could not delete leftover {t.key}: {msg}",
                 6 if ok else 3,
