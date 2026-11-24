@@ -519,10 +519,8 @@ def take_snapshot(cfg: VmSettings, p: NasBackup, run: NasRun) -> str:
         rc, err, unsure = _snapshot_attempt(cfg, p, run, quiesce=True)
         if run.overlaid:
             if rc != 0 or unsure:
-                if rc != 0:
+                if rc != 0:  # _snapshot_attempt thawed the guest
                     run.notes.append(f"virsh reported an error but the snapshot is in place: {err}")
-                    # best effort: never leave the guest frozen
-                    p.commands.virsh(("domfsthaw", run.vm), 60, detach=None)
                 return "crash-consistent"
             p.out.say("  snapshot taken with the guest's file systems frozen (quiesced, QEMU guest agent)")
             return "quiesced"
@@ -561,12 +559,14 @@ def _snapshot_attempt(cfg: VmSettings, p: NasBackup, run: NasRun, *, quiesce: bo
                 f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
                 f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
             )
-    if run.unclear:
-        if quiesce:
+        # In the block too: a stop held through the call is raised at its end, and the guest must not
+        # stay frozen. A quiesced call that did not answer, or that failed with a disk in place, leaves
+        # the freeze unknown.
+        if quiesce and (not settled or (rc != 0 and run.overlaid)):
             p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
+    if run.unclear:
         raise Uncertain(run.unclear[0])
     if not settled and quiesce:
-        p.commands.virsh(("domfsthaw", vm), 60, detach=None)
         run.notes.append(
             "virsh did not answer in time; the snapshot is in place, but whether the guest was frozen is unknown"
         )

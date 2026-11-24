@@ -46,7 +46,7 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from cst_core.adapters.zipapp import build_python_zipapp
-from cst_core.domain.errors import Refused, Usage
+from cst_core.domain.errors import ExitStatus, Refused, Usage
 from cst_core.domain.shapes import items_of
 from btrfs.tests.snapshot_fakes import RuntimeTest
 from cst_core.ports import ClockPort
@@ -2883,6 +2883,72 @@ class NasUnclearSnapshotTest(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertIn("may still switch to it", alerts[0][1])
         self.assertTrue(store.exists(overlay_b))
+
+
+class NasHeldStopThawTest(unittest.TestCase):
+    """A stop held through a quiesced snapshot call is raised when the held block ends: the best-effort
+    domfsthaw still runs before it whenever the call did not settle the guest's freeze."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+    disk_a = "/img/a.qcow2"
+    overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+
+    def _run(self, rc: int, *, switched: bool) -> tuple[Refused | vm_domain_backup.Stop, list[str], list[tuple[str, str]]]:
+        """nas_run of a running VM with a connected guest agent whose quiesced snapshot call answers rc
+        (switching the disk or only making its file) while a stop is held; (what it raised, the virsh
+        commands, the alerts)."""
+        disks = [("vda", self.disk_a)]
+
+        def hook(
+            args: Sequence[str],
+            _cmds: FakeNasCommands,
+            _sigs: FakeNasSignals,
+            live: dict[str, str],
+            store: FakeNasStore,
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "dumpxml":
+                chan = "<channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0' state='connected'/></channel>"
+                return 0, fake_nas_xml([(t, live[t]) for t, _ in disks]).replace("</devices>", f"{chan}</devices>"), ""
+            if args[0] == "snapshot-create-as":
+                self.assertIn("--quiesce", args)
+                store.overlays.add(self.overlay_a)
+                if switched:
+                    live["vda"] = self.overlay_a
+                return rc, "", ("" if rc == ExitStatus.TIMED_OUT else "error: internal error: unexpected answer")
+            return None
+
+        port, commands, _store, _signals, alerts = self._make_backup(
+            disks, on_virsh=hook, signals=_StopAtHeldEnd(), clock=FakeNasMovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        try:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=True, live=True)
+        except (Refused, vm_domain_backup.Stop) as e:
+            return e, [c[0][0] for c in commands.virsh_log], alerts
+        self.fail("nas_run ended without a refusal or a stop")
+
+    def test_an_unclear_quiesced_snapshot_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(int(ExitStatus.TIMED_OUT), switched=False)
+        self.assertIsInstance(raised, Refused)
+        self.assertIn("may still switch to it", str(raised))
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("snapshot-create-as"), cmds.index("domfsthaw"))
+        self.assertEqual(len(alerts), 1)
+
+    def test_a_quiesced_snapshot_that_timed_out_in_place_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(int(ExitStatus.TIMED_OUT), switched=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("domfsthaw"), cmds.index("blockcommit"))
+        self.assertEqual(alerts, [])
+
+    def test_a_quiesced_snapshot_that_failed_in_place_is_thawed_before_the_held_stop(self) -> None:
+        raised, cmds, alerts = self._run(1, switched=True)
+        self.assertIsInstance(raised, vm_domain_backup.Stop)
+        self.assertEqual(cmds.count("domfsthaw"), 1)
+        self.assertLess(cmds.index("domfsthaw"), cmds.index("blockcommit"))
+        self.assertEqual(alerts, [])
 
 
 class _LingeringTimer(threading.Timer):

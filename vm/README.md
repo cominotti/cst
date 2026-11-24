@@ -1065,7 +1065,9 @@ alert nor the refusal short, a second Ctrl-C does not reach the merging virsh
 (the fake cancels on SIGINT as the real one does), a VM paused at merge time
 is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert
-is sent), the recovery text per case (a definition still on a stale overlay:
+is sent), a stop held through a quiesced call that timed out or failed with
+the snapshot in place (the guest is thawed before the stop ends the read),
+the recovery text per case (a definition still on a stale overlay:
 `virsh edit`, never `qemu-img commit`), and the note for UEFI variables
 written during the read. The torn record (`TornRecordTest`, its path a
 scratch file through `CST_VM_TORN`): a torn snapshot restic does not forget
