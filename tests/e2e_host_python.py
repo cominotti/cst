@@ -107,17 +107,27 @@ _CODE_OPTION: Final = "c"
 _LONG_OPTIONS_WITH_ARGUMENT: Final = frozenset({"--check-hash-based-pycs"})
 # The shell's tokens after python3, in order: a redirection (its target is the next word: >log, 2>&1, &>log, <in),
 # a word (its quoted parts, $(...), ${...} and ${{ ... }} kept whole, blanks and all), or what ends the command
-# (; | & ( ), or a quote no word closes: the end of the "..." python3 is in).
+# (; | & ( ), or a quote no word closes). In a command inside quotes (bash -c "python3 x.py"; echo "ok"), that
+# quote opens no quoted part of a word: it closes the quotes python3 is in, and ends the command.
 _REDIRECT: Final = "redirect"
 _WORD: Final = "word"
 _END: Final = "end"
-_SHELL_TOKEN: Final = re.compile(
-    rf"(?P<{_REDIRECT}>\d*(?:&>>?|[<>]+&?))"
-    rf"|(?P<{_WORD}>(?:\"[^\"]*\"|'[^']*'|\$\{{\{{.*?\}}\}}|\$\([^()]*\)|\$\{{[^}}]*\}}|[^\s;|&()<>\"'])+)"
-    rf"|(?P<{_END}>[;|&()\"'])"
-)
 _QUOTES: Final = "\"'"
 _UNQUOTE: Final = str.maketrans("", "", _QUOTES)
+
+
+def _shell_token(inside: str) -> re.Pattern[str]:
+    """The shell's tokens after a python3 inside the quote `inside` ("" for none)."""
+    quoted = "".join(f"{q}[^{q}]*{q}|" for q in _QUOTES if q != inside)
+    return re.compile(
+        rf"(?P<{_REDIRECT}>\d*(?:&>>?|[<>]+&?))"
+        rf"|(?P<{_WORD}>(?:{quoted}\$\{{\{{.*?\}}\}}|\$\([^()]*\)|\$\{{[^}}]*\}}|[^\s;|&()<>\"'])+)"
+        rf"|(?P<{_END}>[;|&()\"'])"
+    )
+
+
+# By the quote python3 is in ("" for none).
+_SHELL_TOKENS: Final = {inside: _shell_token(inside) for inside in ("", *_QUOTES)}
 _STDIN: Final = "-"
 # The checkout's folder in a step, read as the top of the repository: ${{ github.workspace }}/ (GitHub's expression,
 # put in before the shell runs) or $GITHUB_WORKSPACE/.
@@ -444,15 +454,15 @@ def _action_files(repo: str) -> list[str]:
     ]
 
 
-def python_program(text: str) -> tuple[ProgramKind, str] | None:
+def python_program(text: str, inside: str = "") -> tuple[ProgramKind, str] | None:
     """What a python3 command line runs, read from the text after python3 as the shell splits it
-    (_command_words) and as Python reads its own options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD)
+    (_command_words, inside the quote `inside` when python3 is in one) and as Python reads its own options: (MODULE, NAME) for -m NAME, (SCRIPT, WORD)
     for the first word that is no option, or None (-c's inline code, "-" for stdin, no program). An
     option cluster (-IB) goes on; -m, -c, -X and -W take the rest of their cluster or the next word;
     "--" ends the options; another word that starts with "--" is a long option, which takes the next word
     when it is one of _LONG_OPTIONS_WITH_ARGUMENT (--check-hash-based-pycs MODE). Words after the
     program are the program's own (a -m there is not python3's)."""
-    words = _command_words(text)
+    words = _command_words(text, inside)
     i = 0
     while i < len(words):
         word = words[i]
@@ -481,13 +491,13 @@ def python_program(text: str) -> tuple[ProgramKind, str] | None:
     return None
 
 
-def _command_words(text: str) -> list[str]:
+def _command_words(text: str, inside: str = "") -> list[str]:
     """The words of the shell command text starts, without their quotes, up to what ends it (; | & ( ),
-    or the quote it is inside of: _SHELL_TOKEN). A redirection and its target are no words (>log,
-    2>/dev/null, &>log), wherever they are."""
+    a quote no word closes, or the quote `inside` that closes the quotes the command is in: _SHELL_TOKENS).
+    A redirection and its target are no words (>log, 2>/dev/null, &>log), wherever they are."""
     words: list[str] = []
     target = False
-    for token in _SHELL_TOKEN.finditer(text):
+    for token in _SHELL_TOKENS[inside].finditer(text):
         if group_or_none(token, _END) is not None:
             break
         if group_or_none(token, _REDIRECT) is not None:
@@ -523,9 +533,12 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
     files: list[str] = []
     unnamed: list[str] = []
     for found in _PYTHON_WORD.finditer(line):
-        rest = line[found.end() :]
-        rest = rest[1:] if rest[:1] in _QUOTES else rest  # "python3" x.py: the quote closes the command word
-        program = python_program(rest) if rest[:1].isspace() else None
+        rest, before = line[found.end() :], line[: found.start()]
+        if rest[:1] in _QUOTES:  # "python3" x.py: the quote closes the command word and the quotes python3 is in
+            rest, before = rest[1:], before[:-1]
+        opener, _ = _innermost_context(before, 0)
+        quote = opener if opener in _QUOTES else ""  # bash -c "python3 x.py"; echo "ok": the command ends at x.py
+        program = python_program(rest, quote) if rest[:1].isspace() else None
         match program:
             case (ProgramKind.MODULE, name):
                 parts = name.split(".")
