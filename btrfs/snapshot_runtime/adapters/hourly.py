@@ -246,13 +246,18 @@ def after_conversions(m: SnapshotRun) -> int:
         m.touch(f"{m.state}/paused")
         # Paused while free <= SKIP or (paused and free <= RESUME): they resume above the larger. Read
         # without at_or_below, which would stop the run on a RESUME the condition above never read.
-        limits = {"pause": guard_limit(s["SKIP_AT_OR_BELOW_GIB"]), "resume": guard_limit(s["RESUME_ABOVE_GIB"])}
+        # A RESUME that is a name stops the run once SKIP no longer holds: no number to name, the
+        # setting as written (what the alert said before).
+        above = s["RESUME_ABOVE_GIB"]
+        if guard_number(above) != GuardError.NOT_A_NUMBER:
+            limits = {"pause": guard_limit(s["SKIP_AT_OR_BELOW_GIB"]), "resume": guard_limit(above)}
+            above = str(snapshots_resume_above(limits))
         send_alert(
             m,
             AlertKind.PAUSED,
             Urgency.NORMAL,
             "Snapshots paused: low space",
-            f"{free // GIB} GiB free; hourly snapshots resume above {snapshots_resume_above(limits)} GiB. "
+            f"{free // GIB} GiB free; hourly snapshots resume above {above} GiB. "
             "Older snapshots still expire normally.",
         )
         prune_only(m)

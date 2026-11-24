@@ -775,7 +775,7 @@ class SpaceGuardTest(Base):
                     self.assertEqual(os.path.exists(self.state_file("paused")), paused)
                     self.assertEqual("snapshot" in [c[0] for c in self.core_calls()], not paused)
 
-    def paused_body(self, free: int, resume: int) -> str:
+    def paused_body(self, free: int, resume: int | str) -> str:
         return f"{free} GiB free; hourly snapshots resume above {resume} GiB. Older snapshots still expire normally."
 
     def test_the_paused_alert_names_where_snapshots_resume(self) -> None:
@@ -798,10 +798,11 @@ class SpaceGuardTest(Base):
 
     def test_the_paused_alert_reads_the_resume_limit_as_the_guard_does(self) -> None:
         # While SKIP holds, the guard never reads RESUME_ABOVE_GIB: one bash cannot compare is no
-        # error then (the run, its alert and its prune go on) and counts as no limit. An expression
-        # is its value.
+        # error then (the run, its alert and its prune go on) and counts as no limit. A name is
+        # named as written: once SKIP no longer holds, the run stops at it (exit 1), so no number is
+        # where snapshots resume. An expression is its value.
         for resume, free, paused, said in (
-            ("abc", 200, False, 250),
+            ("abc", 200, False, "abc"),
             ("1.5", 200, False, 250),
             ("2*150", 280, True, 300),
         ):
