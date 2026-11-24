@@ -28,6 +28,7 @@ _READ_FILES = (
     "cst.invowkmod/invowkfile.cue",
     "cst_core/__init__.py",
     "cst_core/domain/__init__.py",
+    "cst_core/domain/errors.py",
     "cst_core/domain/values.py",
     "pyproject.toml",
     "tests/__init__.py",
@@ -37,6 +38,7 @@ _READ_FILES = (
     "tests/e2e/selection.py",
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
+    "tests/quint/cst-quint",
 )
 
 
@@ -52,6 +54,7 @@ class CheckoutTest(unittest.TestCase):
             [
                 "cst_core/__init__.py",
                 "cst_core/domain/__init__.py",
+                "cst_core/domain/errors.py",
                 "cst_core/domain/values.py",
                 "tests/__init__.py",
                 "tests/e2e/__init__.py",
@@ -60,6 +63,7 @@ class CheckoutTest(unittest.TestCase):
                 "tests/e2e/selection.py",
                 "tests/e2e/suites/suite_tier1_systemd.py",
                 "tests/e2e/suites/suite_tier2_storage_cpu.py",
+                "tests/quint/cst-quint",
             ],
         )
 
@@ -261,6 +265,62 @@ class PlantedTest(unittest.TestCase):
         self.assertEqual(gate.problems(self.repo), [])
         self.assertEqual(set(gate.host_runs(self.repo)[0]["ubuntu-24.04"]), set(gate.HOST_ENTRIES))
 
+    def test_an_extensionless_program_a_host_job_runs_is_checked(self) -> None:
+        # The quint jobs run tests/quint/cst-quint through `invowk cmd test quint` on the runner's
+        # python3 (3.12): only python3 ... FILE.py was read, so a 3.14 line there passed the gate.
+        self.append("tests/quint/cst-quint", "\ntry:\n    pass\nexcept OSError, ValueError: pass\n")
+        line = self.line_of("tests/quint/cst-quint", "except OSError, ValueError:")
+        self.assert_one_problem(f"tests/quint/cst-quint:{line}:", "ubuntu-24.04, 3.12")
+
+    def test_a_new_extensionless_program_a_host_job_s_task_runs_is_reported(self) -> None:
+        self.append("tests/quint/cst-new", "import os\n")
+        self.replace(
+            "cst.invowkmod/invowkfile.cue",
+            "/usr/bin/python3 -I -B tests/quint/cst-quint ",
+            "/usr/bin/python3 -I -B tests/quint/cst-new ",
+        )
+        problems = gate.problems(self.repo)
+        self.assertEqual(len(problems), 2, problems)  # the quint job of ci.yml and of nightly.yml
+        for problem in problems:
+            self.assertIn("runs tests/quint/cst-new", problem)
+            self.assertIn("HOST_ENTRIES", problem)
+
+    def test_a_dash_m_after_the_script_is_the_script_s_argument(self) -> None:
+        # python3 stops reading its options at the script: the old gate took this -m as python3's.
+        self.append("tests/e2e/new.py", "")
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B tests/e2e/image_digest.py -m tests.e2e.new "${name}")"',
+        )
+        self.assertEqual(gate.problems(self.repo), [])
+
+    def test_options_with_an_argument_are_read_as_python3_reads_them(self) -> None:
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        cases = {
+            'want="$(python3 -X dev -W error tests/e2e/new.py "${name}")"': "tests/e2e/new.py",
+            "want=\"$(python3 -I -c 'print(1)'; python3 -m venv /tmp/v)\"": None,
+            'want="$(python3 -IBm tests.e2e.image_digest "${name}")"': None,
+        }
+        for new, reported in cases.items():
+            with self.subTest(line=new):
+                self.setUp()
+                self.replace(action, old, new)
+                if reported is None:
+                    self.assertEqual(gate.problems(self.repo), [])
+                else:
+                    self.assert_one_problem("prep-e2e-runner/action.yml", reported, "HOST_ENTRIES")
+
+    def test_a_program_named_at_run_time_is_reported(self) -> None:
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B "$tool" "${name}")"',
+        )
+        self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name", "$tool")
+
     def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",
@@ -288,6 +348,25 @@ class PlantedTest(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(head + job + tail)
         self.assert_one_problem("(job e2e-tier1)", "ubuntu-26.04", "HOST_PYTHON_BY_RUNNER")
+
+
+class CommandLineTest(unittest.TestCase):
+    def test_python3_s_options_are_read_as_python_reads_them(self) -> None:
+        for line, want in (
+            ("-I -B tests/e2e/run.py --tier 1", ("script", "tests/e2e/run.py")),
+            ("-IB tests/e2e/run.py -m x", ("script", "tests/e2e/run.py")),
+            ("-Xdev -W error -- -odd.py", ("script", "-odd.py")),
+            ("--version", None),
+            ("-I -m tests.e2e.run -c x", ("module", "tests.e2e.run")),
+            ("-Im tests.e2e.run", ("module", "tests.e2e.run")),
+            ("-c 'import x' tests/e2e/run.py", None),
+            ("- < tests/e2e/run.py", None),
+            ("-I; tests/e2e/run.py", None),
+            ('-I -B "tests/e2e/run.py")', ("script", "tests/e2e/run.py")),
+            ("", None),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(gate.python_program(line.split()), want)
 
 
 class RuffTargetTest(unittest.TestCase):

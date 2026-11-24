@@ -8,6 +8,10 @@
 ExitStatus names the exit statuses a shell gives that CST programs return or
 read; shell_exit_status turns a child's return code into the exit status a
 shell gives.
+
+CI runs this file on its runner's python3, 3.12 (tests/quint/cst-quint
+imports it): it stays 3.12 code that imports the standard library only.
+tests/test_e2e_host_python.py checks it.
 """
 
 from enum import IntEnum

@@ -2,12 +2,13 @@
 """The Python that CI runs on its runner's own python3, not in a container.
 
 CI's E2E jobs run tests/e2e/run.py (`invowk cmd test e2e tier1|tier2`) and
-tests/e2e/image_digest.py on the python3 of the ubuntu-24.04 runner, Python
-3.12, while every other gate runs on /usr/bin/python3 of Fedora (3.15) and
-ruff's target follows requires-python (>= 3.15). So these files, the ones
-they import and the files run.py loads by path are 3.12 code: `except A,
-B:` (3.14) or os.process_cpu_count (3.13) there passes every local gate and
-breaks every E2E shard in CI.
+tests/e2e/image_digest.py, and its quint jobs tests/quint/cst-quint (`invowk
+cmd test quint`), on the python3 of the ubuntu-24.04 runner, Python 3.12,
+while every other gate runs on /usr/bin/python3 of Fedora (3.15) and ruff's
+target follows requires-python (>= 3.15). So these files, the ones they import
+and the files run.py loads by path are 3.12 code: `except A, B:` (3.14) or
+os.process_cpu_count (3.13) there passes every local gate and breaks every
+E2E shard in CI.
 
 host_closure() finds that set of files from the code: the entries
 (HOST_ENTRIES), every repository module they import, by an absolute or a
@@ -17,10 +18,12 @@ problem, so it cannot slip out of the set: a load by path of another form,
 and an import by a name or text given at run time (importlib.import_module,
 __import__, exec, runpy.run_module). problems() checks:
 
-- the entries against CI: every `python3 ... FILE.py` (or `python3 -m NAME`
-  of a repository module) of a job without a
+- the entries against CI: every python3 command line of a job without a
   container (and of the composite actions), and of the invowk task each such
-  job runs, names a file of HOST_ENTRIES;
+  job runs, names a file of HOST_ENTRIES: the program it runs, read as python3
+  reads its own options (python_program: `python3 -I -B PROGRAM`, with or
+  without .py, or `python3 -m NAME` of a repository module; a program named
+  by a variable is a problem);
 - the runner of each job that runs one of them is in HOST_PYTHON_BY_RUNNER
   (the oldest python3 found is the target);
 - each file of the set parses with the target's grammar
@@ -52,7 +55,7 @@ from cst_core.domain.text import group
 from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines, workflow_jobs
 
 # The files CI starts with its runner's python3 (the rest of the closure is found from them).
-HOST_ENTRIES: Final = ("tests/e2e/image_digest.py", "tests/e2e/run.py")
+HOST_ENTRIES: Final = ("tests/e2e/image_digest.py", "tests/e2e/run.py", "tests/quint/cst-quint")
 
 # The python3 of each runner image a host job runs on: its (major, minor).
 HOST_PYTHON_BY_RUNNER: Final[Mapping[str, tuple[int, int]]] = {"ubuntu-24.04": (3, 12)}
@@ -88,9 +91,18 @@ ACTIONS: Final = ".github/actions"
 PYPROJECT: Final = "pyproject.toml"
 _BUILTINS: Final = "builtins"
 
-# A python3 command line and the repository .py file it runs, or the module it runs with -m.
-_PYTHON_RUN: Final = re.compile(r"\bpython3\b[^\n]*?\s([\w./-]+\.py)\b")
-_PYTHON_MODULE_RUN: Final = re.compile(r"\bpython3\b[^\n]*?\s-m\s*([\w.]+)")
+# python3 (or python3.N, by any path) as a command word: at a blank, or right after shell punctuation ("$(", "<(",
+# ";", "&&", a quote), not inside another word (libpython3.12, python3-pip).
+_PYTHON_WORD: Final = re.compile(r"(?<![\w./-])(?:[\w./-]*/)?python3(?:\.\d+)?(?![\w.-])")
+# python3's options that take an argument (the rest of their cluster, or the next word); -m and -c end the options.
+_OPTION_WITH_ARGUMENT: Final = frozenset("mcXW")
+_MODULE_OPTION: Final = "m"
+_CODE_OPTION: Final = "c"
+# What ends a command word: the shell's ; | & ) and quotes, trimmed from both ends of a word.
+_WORD_END: Final = ";|&)"
+_QUOTES: Final = "\"'"
+_STDIN: Final = "-"
+_END_OF_OPTIONS: Final = "--"
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
 # command starts (a line, a run: key, after ; & | or an opening parenthesis), not in a message's text.
 _INVOWK_RUN: Final = re.compile(r"(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|(]\s*)(?:exec\s+)?invowk cmd((?: [a-z0-9][\w-]*)+)")
@@ -372,17 +384,86 @@ def _action_files(repo: str) -> list[str]:
     ]
 
 
-def _python_runs(repo: str, line: str) -> list[str]:
-    """The repository .py files a line runs with python3: FILE.py, and python3 -m NAME's module (its
-    __main__.py for a package; a module that is no file of the repository, as pip or venv, is none)."""
-    files = [group(found, 1) for found in _PYTHON_RUN.finditer(line)]
-    for found in _PYTHON_MODULE_RUN.finditer(line):
-        parts = group(found, 1).split(".")
-        for candidate in ("/".join(parts) + ".py", "/".join([*parts, "__main__.py"])):
-            if os.path.isfile(os.path.join(repo, candidate)):
-                files.append(candidate)
+def python_program(words: Sequence[str]) -> tuple[str, str] | None:
+    """What a python3 command line runs, read from the words after python3 as Python reads its own
+    options: ("module", NAME) for -m NAME, ("script", WORD) for the first word that is no option, or
+    None (-c's inline code, "-" for stdin, no program). An option cluster (-IB) goes on; -m, -c, -X and
+    -W take the rest of their cluster or the next word; "--" ends the options; another word that starts
+    with "--" is a long option. Words after the program are the program's own (a -m there is not
+    python3's). A word that ends in ; | & ) or a quote ends the command."""
+    program: tuple[str, str] | None = None
+    i = 0
+    while i < len(words):
+        word, ends = _command_word(words[i])
+        i += 1
+        following = None if ends or i >= len(words) else _command_word(words[i])
+        if word == _END_OF_OPTIONS:
+            program = None if following is None else ("script", following[0])
+            break
+        if word in {"", _STDIN}:
+            break
+        if not word.startswith("-"):
+            program = ("script", word)
+            break
+        option = None if word.startswith("--") else _option_with_argument(word)
+        if option is not None:
+            letter, argument = option
+            if not argument and following is not None:
+                (argument, ends), i = following, i + 1
+            if letter == _MODULE_OPTION and argument:
+                program = ("module", argument)
+            if letter in {_MODULE_OPTION, _CODE_OPTION}:
                 break
-    return files
+        if ends:
+            break
+    return program
+
+
+def _command_word(raw: str) -> tuple[str, bool]:
+    """A shell word without its quotes and the punctuation that ends a command, and whether it ended one."""
+    word = raw.strip(_QUOTES)
+    bare = word.rstrip(_WORD_END)
+    return bare.strip(_QUOTES), bare != word
+
+
+def _option_with_argument(cluster: str) -> tuple[str, str] | None:
+    """The first option of a cluster (-IBm, -Xdev) that takes an argument, and the rest of the cluster
+    after it (its argument when not empty); None when no option of the cluster takes one."""
+    for at, letter in enumerate(cluster[1:], 2):
+        if letter in _OPTION_WITH_ARGUMENT:
+            return letter, cluster[at:]
+    return None
+
+
+def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
+    """The repository files a line runs with python3, and the program words it cannot name.
+
+    A script inside the repository counts when it ends in .py or is a file there without .py
+    (tests/quint/cst-quint); python3 -m NAME's module counts when it is one (NAME.py, or its __main__.py for a package; pip or
+    venv are none). A script word with a "$" or a backquote is a path given at run time: it is
+    returned in the second list, so the caller reports it. Any other word (a system program, an
+    absolute path, python3 in a message or a package list) is left out."""
+    files: list[str] = []
+    unnamed: list[str] = []
+    for found in _PYTHON_WORD.finditer(line):
+        program = python_program(line[found.end() :].split()) if line[found.end() : found.end() + 1].isspace() else None
+        match program:
+            case ("module", name):
+                parts = name.split(".")
+                for candidate in ("/".join(parts) + ".py", "/".join([*parts, "__main__.py"])):
+                    if os.path.isfile(os.path.join(repo, candidate)):
+                        files.append(candidate)
+                        break
+            case ("script", word) if "$" in word or "`" in word:
+                unnamed.append(word)
+            case ("script", word):
+                rel = posixpath.normpath(word)
+                inside = not rel.startswith(("/", "../")) and rel != ".."
+                if inside and (rel.endswith(".py") or os.path.isfile(os.path.join(repo, rel))):
+                    files.append(rel)
+            case _:
+                pass
+    return files, unnamed
 
 
 def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
@@ -391,7 +472,9 @@ def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> 
     files: list[str] = []
     problems: list[str] = []
     for n, line in lines:
-        files += _python_runs(repo, line)
+        found_files, unnamed = _python_runs(repo, line)
+        files += found_files
+        problems += [_unnamed_problem(f"{where}:{n}", word) for word in unnamed]
         for found in _INVOWK_RUN.finditer(line):
             task = group(found, 1).strip()
             script = task_script(cue, task)
@@ -400,8 +483,17 @@ def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> 
                 continue
             for script_line in script.splitlines():
                 if not script_line.lstrip().startswith("#"):
-                    files += _python_runs(repo, script_line)
+                    found_files, unnamed = _python_runs(repo, script_line)
+                    files += found_files
+                    problems += [_unnamed_problem(f"{where}:{n} (task {task})", word) for word in unnamed]
     return files, problems
+
+
+def _unnamed_problem(where: str, word: str) -> str:
+    return (
+        f"{where}: runs python3 with a program the gate cannot name ({word}): "
+        "name the file in the command line, so tests/e2e_host_python.py can check it"
+    )
 
 
 def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
