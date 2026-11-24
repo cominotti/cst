@@ -8174,7 +8174,8 @@ STUB
         daemon-reload (a holder unit, changed on disk, keeps its loaded Description). The holder also keeps
         the scrub unit loaded between the commands, so a `systemctl show` reads what systemd loaded
         before, not the files afresh. In each flagged state `plan` shows the daemon-reload the command
-        then runs and `status` says systemd has not loaded the drop-in; once loaded, neither does. Before,
+        then runs, and `status` and `cst doctor` say systemd has not loaded the drop-in; once loaded, none
+        does. Before,
         the command again saw both files unchanged, ran no daemon-reload and left the old limit loaded."""
         c = self.SYSTEMD_CONTAINER
         conf = "/etc/btrfs-setup/snapshots.conf"
@@ -8240,14 +8241,20 @@ EOF
             status_behind() {{
                 /opt/cst-rw/cst btrfs scrub-limit status | grep -qF "  systemd: has not loaded $unit as it is on disk"
             }}
-            # plan and status in a flagged state say what the command will do; once loaded, nothing.
+            doctor_behind() {{
+                {{ env HOME=/root CST_DOCTOR_CONTAINER=0 /usr/bin/python3 -I /opt/cst-rw/doctor/cst-doctor || true; }} \
+                    | grep -qF "WARN   weekly scrub: systemd has not loaded $unit as it is on disk"
+            }}
+            # plan, status and cst doctor in a flagged state say what the command will do; once loaded, nothing.
             says_behind() {{
                 plan_reloads "$1" || {{ echo "plan $1 does not show the daemon-reload set runs" >&2; exit 1; }}
                 status_behind || {{ echo "status does not say systemd is behind" >&2; exit 1; }}
+                doctor_behind || {{ echo "cst doctor does not warn that systemd is behind" >&2; exit 1; }}
             }}
             says_loaded() {{
                 if plan_reloads "$1"; then echo "plan $1 shows a daemon-reload with nothing pending" >&2; exit 1; fi
                 if status_behind; then echo "status says systemd is behind after a reload" >&2; exit 1; fi
+                if doctor_behind; then echo "cst doctor warns that systemd is behind after a reload" >&2; exit 1; fi
             }}
 
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/$unit
