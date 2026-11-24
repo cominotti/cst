@@ -38,6 +38,8 @@ from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
 _BTRFS_SYSFS: Final = "/sys/fs/btrfs"
+# seconds systemctl may take to say whether systemd loaded the scrub unit (as SystemctlAdapter.show's own)
+_SHOW_TIMEOUT: Final = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,8 +283,10 @@ def _reload_or_roll_back(
 
 def _systemd_behind(cmd_runner: CommandRunnerPort) -> bool:
     """Whether systemd has not loaded the scrub unit's files as they are on disk (NeedDaemonReload: an
-    earlier run wrote them and stopped before its daemon-reload); also when systemctl cannot say."""
-    r = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).show_value(SCRUB_SERVICE, "NeedDaemonReload")
+    earlier run wrote them and stopped before its daemon-reload); also when systemctl cannot say, or does
+    not within _SHOW_TIMEOUT (a PID 1 that does not answer must not hang a run with nothing to change)."""
+    systemctl = SystemctlAdapter(cmd_runner, timeout=_SHOW_TIMEOUT, on_host=SystemctlHost.LOCAL)
+    r = systemctl.show_value(SCRUB_SERVICE, "NeedDaemonReload")
     return r.returncode != 0 or r.stdout.strip().lower() in YES_WORDS
 
 

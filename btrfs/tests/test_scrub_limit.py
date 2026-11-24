@@ -544,6 +544,21 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertEqual(rc, 0, lines)
         self.assertEqual(runner.calls[-1], ["systemctl", "daemon-reload"])
 
+    def test_asking_systemd_whether_it_loaded_the_files_has_a_time_limit(self) -> None:
+        self._as_asked("500M")
+        seen: list[object] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) == ["systemctl", "show"]:
+                    seen.append(kw.get("timeout"))
+                return super().run(argv, input_text=input_text, **kw)
+
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=Recording())
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(seen, [20])
+
     def test_files_as_asked_and_a_failed_reload_says_systemd_has_not_loaded_them(self) -> None:
         self._as_asked("500M")
         conf_before, dropin_before = self._read(self.conf), self._read(self.dropin)

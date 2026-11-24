@@ -380,7 +380,8 @@ cst btrfs scrub-limit off
   `ROLLBACK INCOMPLETE (...)`).
   When both files are already as asked, `set` and `off` ask systemd
   whether it has loaded them (`NeedDaemonReload` of
-  `btrfs-scrub-weekly.service`) and run `daemon-reload` if not: an earlier
+  `btrfs-scrub-weekly.service`, waiting at most 20 s for the answer; no
+  answer counts as not loaded) and run `daemon-reload` if not: an earlier
   run that stopped after writing the drop-in and before its `daemon-reload`
   left systemd with the old limit. The command then says
   `reloaded:  systemd had not loaded btrfs-scrub-weekly.service as it is on disk`.
