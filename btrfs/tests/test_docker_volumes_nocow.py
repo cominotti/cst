@@ -1092,6 +1092,32 @@ class MigrateTest(Base):
         self.assertEqual(read_attempts(self), "1")  # tried, not given up
         self.assertEqual(len(self.fs.commands("cp")), 1)
 
+    def test_a_count_left_without_its_flag_does_not_count_for_a_new_request(self) -> None:
+        # An older helper removed the flag, then the count of boots, and could stop between the two.
+        # Docker reinstalled later (the volumes folder without +C): the new request gets its two boots.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("1")
+        self.fs.cp = cp_fails
+        for boot, attempts in ((1, "1"), (2, "2")):
+            with self.subTest(boot=boot):
+                rc, out = self.call(self.cli.migrate)
+                self.assertEqual(rc, 0)
+                self.assertEqual(read_attempts(self), attempts)
+                self.assertTrue(os.path.exists(self.flag))
+                self.assertNotIn("Gave up", out)
+        self.assertEqual(len(self.fs.commands("cp")), 2)
+
+    def test_a_request_already_scheduled_keeps_its_count(self) -> None:
+        # The flag is there (the request is under way) but the volumes folder has no +C: the count stays.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("1")
+        self.fs.cp = cp_fails
+        self.call(self.cli.migrate)
+        self.assertEqual(read_attempts(self), "2")
+
     def test_attempts_file_is_closed(self) -> None:
         # The counter is read and written inside `with open(...)`: no file is
         # left for the garbage collector to close (it warned "unclosed file").

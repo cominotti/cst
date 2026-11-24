@@ -119,6 +119,10 @@ class DockerVolumesNocow:
         another filesystem than /etc, and after a power loss +C must not stay while the flag
         is lost. False, with a log line, when that fails."""
         try:
+            if not self.state.flag_exists() and self.state.attempts():
+                # A count of boots without its flag is not this request's (an older helper removed the
+                # flag, then the count, and could stop between the two): the request gets its two boots.
+                self.state.forget_attempts()
             self.state.request_migration()
         except OSError as e:
             self.out.log(

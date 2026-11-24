@@ -872,7 +872,9 @@ docker volume rm <name>         # or one volume by name
   leaves the flag and the next boot just runs again. An older helper removed
   the flag first: a stop between the two left a count without its flag, and
   a later migration (Docker reinstalled, say) then gave up after one failed
-  boot.
+  boot. A new request (the volumes folder found without `+C` and no flag)
+  now forgets such a count before it writes the flag, so it gets its two
+  boots also after an upgrade from that helper.
 - An interrupted copy (power loss) is cleaned up at the next boot; the original
   is kept.
 - This service runs at every boot. So if Docker is installed after `install`,
