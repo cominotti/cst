@@ -52,6 +52,12 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
    process died between the two) is never set again while the profile is on; such boxes are
    asserted to stay as they are until game.state is gone (an 'off' that ended, the tick's own
    'off' too, or one killed after it removed the file), when the next 'on' handles them again.
+   Named gap (O6): an 'off' killed after it undid a setting of a transient box (a Docker or Steam
+   scope, a systemd-run scope: its override file removed, or set back) leaves that box's record in
+   game.state; while the profile stays on the tick skips the box (it has a record) and the drift
+   repair does not cover it (game.intended records no transient unit), so the setting stays
+   undone (after a daemon-reload, the box runs without it). Each such override file is asserted to
+   stay as the killed 'off' left it, until game.state is gone, as for O2.
 
 Not modelled: the lock between processes (one call at a time here), cpu-power, the GPU, a settings
 file with problem lines and a TARGET_USER without an account (the unit tests cover the refusals),
@@ -85,6 +91,7 @@ from cpu.game.domain import (
     intended_records,
     manager_of,
     records,
+    transient_unit,
     unheld,
 )
 from cpu.tests.test_game_profile import UID, USER, FakeSystemd, add_gamemode_pid, game_scratch, override_path
@@ -292,6 +299,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         self.scopes = 0
         self.boxes: dict[str, str] = {}  # unit -> its cgroup folder
         self.unset_boxes: set[Key] = set()  # O2: recorded by a faulted step, never set
+        self.undone_boxes: dict[Key, str | None] = {}  # O6: undone by a killed 'off': its override file then
         self.log = io.StringIO()
 
     @override
@@ -447,6 +455,25 @@ class GameProfileMachine(RuleBasedStateMachine):
         every box again."""
         if not os.path.exists(self.paths.state):
             self.unset_boxes = set()
+            self.undone_boxes = {}
+
+    def note_undone_boxes(self, before: View) -> None:
+        """O6: after an 'off' killed after some of its undos, each setting of a transient box (a Docker
+        or Steam scope, a systemd-run scope) whose override file that 'off' removed or set back while
+        game.state still holds its record, with the file's value it left (None: removed)."""
+        text, now = self.state_text(), self.view()
+        for mgr, unit, prop, _want in self.box_settings():
+            key = (mgr, unit, prop)
+            if (
+                not transient_unit(unit)
+                or key not in before.overrides
+                or now.overrides.get(key) == before.overrides[key]
+            ):
+                continue
+            manager = manager_of(mgr)
+            assert manager is not None
+            if has_prop_record(text, manager, unit, prop):
+                self.undone_boxes[key] = now.overrides.get(key)
 
     # ---- rules -------------------------------------------------------------------------------
     @initialize(prior=st.booleans(), cpuset=st.booleans(), builds=st.booleans())
@@ -571,6 +598,8 @@ class GameProfileMachine(RuleBasedStateMachine):
         was_on, before = os.path.exists(self.paths.state), self.view()
         killed, failed = self.call("off", fault, at)
         self.after_off("off", failed, killed=killed, was_on=was_on, before=before)
+        if killed:
+            self.note_undone_boxes(before)
         self.end_gaps()
 
     @precondition(lambda self: os.path.exists(self.paths.state))
@@ -588,9 +617,15 @@ class GameProfileMachine(RuleBasedStateMachine):
 
     # ---- checks ------------------------------------------------------------------------------
     def assert_tick_whole(self) -> None:
-        """Point 4 of the docstring, with O2's boxes as they are."""
+        """Point 4 of the docstring, with O2's and O6's boxes as they are."""
         text = self.state_text()
+        overrides = self.view().overrides
         for mgr, unit, prop, want in self.box_settings():
+            if (mgr, unit, prop) in self.undone_boxes:
+                left = self.undone_boxes[mgr, unit, prop]
+                now = overrides.get((mgr, unit, prop))
+                assert now == left, f"O6 fixed? {unit} {prop}: its override is {now}, the killed off left {left}"
+                continue
             if (mgr, unit, prop) in self.unset_boxes:
                 assert self.systemd.now(mgr, unit, prop) != want, f"O2 fixed? {unit} {prop} is set now"
                 continue
@@ -656,6 +691,22 @@ class GameProfileMachineTest(profiles.MbtTestCase):
             lambda m: m.tick(ProfileFault.NONE, 1),  # no client left: stop, then its 'off'
             lambda m: m.game(running=True),
             lambda m: m.tick(ProfileFault.NONE, 1),  # a client, profile off: start, then its 'on'
+            lambda m: m.tick(ProfileFault.NONE, 1),
+        )
+
+    def test_a_steam_scope_a_killed_off_undid_stays_undone_o6(self) -> None:
+        # Found by the simplify stage (Hypothesis 6.170.17); the ci profile's draws miss it today.
+        # The tick sets the Steam scope's MemoryLow; an 'off' killed at its first point (the unlink of
+        # that override) keeps game.state; after a user daemon-reload the scope has no MemoryLow, and
+        # the next tick does not set it again (O6).
+        self.replay(
+            lambda m: m.start(prior=False, cpuset=False, builds=False),
+            lambda m: m.on(ProfileFault.NONE, 1),
+            lambda m: m.scope(steam=True),
+            lambda m: m.off(ProfileFault.KILL, 5),  # at the last drop-in's unlink: no undo yet
+            lambda m: m.tick(ProfileFault.NONE, 1),
+            lambda m: m.off(ProfileFault.KILL, 1),
+            lambda m: m.reload("usr"),
             lambda m: m.tick(ProfileFault.NONE, 1),
         )
 
