@@ -5,6 +5,8 @@
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
 - scrub-limit (test_scrub_limit and its fault tests): ScrubFakeRunner, the installer and systemctl;
+  RecordingInstallerRunner, the installer's text, remove-text and mark through the real
+  InstallService and one install record; core_text, a generated text of btrfs:core;
 - cache (test_cache): FakeMountRunner, findmnt, mount and umount over a list of mounts;
   CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry.
 
@@ -23,9 +25,13 @@ import stat
 import struct
 import subprocess
 import sys
+from typing import override
 
 from btrfs.cache.domain import FINDMNT_COLUMNS
 from cst_core.adapters import nocow as core_nocow
+from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
+from cst_core.application.install import InstallService, Placement
+from cst_core.domain.install import GeneratedKind, Owner
 from cst_core.ports import CommandFault, CommandResult
 
 # ---- docker-volumes-nocow ------------------------------------------------
@@ -343,6 +349,49 @@ class ScrubFakeRunner:
                 return CommandResult(0, f"removed:   {dest}\n", "", argv=tuple(cmd))
             return CommandResult(0, "", "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
+
+
+def core_text(path: str, record: str) -> Placement:
+    """A generated text of btrfs:core at path, listed in record (as installer.py text --component writes it)."""
+    return Placement(
+        path=path,
+        dest=path,
+        record=record,
+        component="btrfs:core",
+        src=None,
+        kind=GeneratedKind.TEXT,
+        owner=Owner.ROOT,
+        mode=0o644,
+    )
+
+
+class RecordingInstallerRunner(ScrubFakeRunner):
+    """installer.py text, remove-text and mark as the installer runs them as root: the files written and
+    removed, and their lines and btrfs:core's state in one install record (a write sets it pending)."""
+
+    def __init__(self, record: str) -> None:
+        super().__init__()
+        self.record = record
+        self.svc = InstallService(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
+        self.marks = 0
+
+    @override
+    def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+        cmd = list(argv)
+        if "installer.py" not in " ".join(cmd) or any(part in " ".join(cmd) for part in self.fail_on):
+            return super().run(argv, input_text=input_text, **kw)
+        self.calls.append(cmd)
+        word = cmd[4]
+        if word == "mark":
+            self.marks += 1
+            self.svc.mark(self.record, cmd[cmd.index("--component") + 1])
+            return CommandResult(0, "", "", argv=tuple(cmd))
+        place = core_text(cmd[5], self.record)
+        if word == "text":
+            os.makedirs(os.path.dirname(place.path), exist_ok=True)
+            written = self.svc.put(place, (input_text or "").encode(), as_root=False)
+            return CommandResult(0, f"{'written:  ' if written else 'unchanged:'} {place.path}\n", "", argv=tuple(cmd))
+        return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
 
 
 # ---- cache ---------------------------------------------------------------
