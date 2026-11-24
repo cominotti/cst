@@ -102,27 +102,43 @@ def apply_game_cstates(profile: GameProfile) -> None:
                 _record_and_write_sys(profile, disable_path, _CSTATE_ENABLE, _CSTATE_DISABLE)
 
 
-def _game_pids(profile: GameProfile) -> list[str]:
+def _gamemode_pids(proc_dir: str) -> set[str]:
+    """The processes that have libgamemode mapped."""
+    return {
+        os.path.basename(os.path.dirname(maps))
+        for maps in sorted(glob.glob(os.path.join(glob.escape(proc_dir), "[0-9]*", "maps")))
+        if holds(maps, "libgamemode")
+    }
+
+
+def _cgroup_procs(folder: str) -> set[str]:
+    """The processes of a cgroup and of its children down to _MAX_CGROUP_WALK_DEPTH."""
     seen: set[str] = set()
-    proc_dir = profile.paths.proc
-    for maps in sorted(glob.glob(os.path.join(glob.escape(proc_dir), "[0-9]*", "maps"))):
-        if holds(maps, "libgamemode"):
-            seen.add(os.path.basename(os.path.dirname(maps)))
+    top = folder.rstrip("/").count("/")
+    for d, subdirs, files in os.walk(folder):
+        if d.rstrip("/").count("/") - top >= _MAX_CGROUP_WALK_DEPTH:
+            subdirs.clear()
+        if "cgroup.procs" in files:
+            lines = (read_text(os.path.join(d, "cgroup.procs")) or "").splitlines()
+            seen.update(line.strip() for line in lines if line.strip())
+    return seen
+
+
+def _scope_pids(profile: GameProfile, scope: str) -> set[str]:
+    """The processes of one Steam scope, from the cgroup systemd names for it."""
+    cg = profile.ask("usr", "show", "-P", "ControlGroup", scope).stdout.rstrip("\n")
+    if not cg:
+        return set()
+    folder = f"{profile.paths.cgroot}{cg}"
+    if not os.path.isdir(folder):
+        return set()
+    return _cgroup_procs(folder)
+
+
+def _game_pids(profile: GameProfile) -> list[str]:
+    seen = _gamemode_pids(profile.paths.proc)
     for scope in profile.steam_scopes():
-        cg = profile.ask("usr", "show", "-P", "ControlGroup", scope).stdout.rstrip("\n")
-        if not cg:
-            continue
-        folder = f"{profile.paths.cgroot}{cg}"
-        if not os.path.isdir(folder):
-            continue
-        top = folder.rstrip("/").count("/")
-        for d, subdirs, files in os.walk(folder):
-            if d.rstrip("/").count("/") - top >= _MAX_CGROUP_WALK_DEPTH:
-                subdirs.clear()
-            if "cgroup.procs" in files:
-                for line in (read_text(os.path.join(d, "cgroup.procs")) or "").splitlines():
-                    if line.strip():
-                        seen.add(line.strip())
+        seen |= _scope_pids(profile, scope)
     return sorted(seen)
 
 
@@ -156,6 +172,29 @@ def _connected_cards(sys_drm: str, cards: list[str]) -> list[str]:
     return connected
 
 
+def _pid_cards(profile: GameProfile, pid: str, dev_to_card: dict[str, str]) -> set[str]:
+    """The DRM cards whose render or card node one process holds open (none when its fds cannot be listed)."""
+    fd_dir = os.path.join(profile.paths.proc, pid, "fd")
+    try:
+        entries = os.listdir(fd_dir)
+    except OSError:
+        return set()
+    cards: set[str] = set()
+    for fd_name in entries:
+        try:
+            target = os.readlink(os.path.join(fd_dir, fd_name))
+        except OSError:
+            continue
+        m = _DRI_FD_RE.match(target)
+        if m is None:
+            continue
+        dev_path = os.path.join(profile.paths.sys_drm, m.group(1), "device")
+        card = dev_to_card.get(os.path.realpath(dev_path))
+        if card is not None:
+            cards.add(card)
+    return cards
+
+
 def active_game_gpu_cards(profile: GameProfile) -> list[str]:
     """Return sorted DRM `cardN` names the game's processes render on; without any, the connected display
     cards; without those, the cards the Steam client's own processes (_STEAM_CLIENT_COMMS) hold."""
@@ -168,26 +207,39 @@ def active_game_gpu_cards(profile: GameProfile) -> list[str]:
     for pid in _game_pids(profile):
         comm = read_stripped(os.path.join(profile.paths.proc, pid, "comm")) or ""
         found = client if comm in _STEAM_CLIENT_COMMS else matched
-        fd_dir = os.path.join(profile.paths.proc, pid, "fd")
-        try:
-            entries = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for fd_name in entries:
-            try:
-                target = os.readlink(os.path.join(fd_dir, fd_name))
-            except OSError:
-                continue
-            m = _DRI_FD_RE.match(target)
-            if m is None:
-                continue
-            dev_path = os.path.join(sys_drm, m.group(1), "device")
-            card = dev_to_card.get(os.path.realpath(dev_path))
-            if card is not None:
-                found.add(card)
+        found |= _pid_cards(profile, pid, dev_to_card)
     if matched:
         return sorted(matched, key=_card_number)
     return _connected_cards(sys_drm, cards) or sorted(client, key=_card_number)
+
+
+def _keep_gpu_awake(profile: GameProfile, dev_dir: str) -> None:
+    """power/control=on, its old value recorded first."""
+    pm_path = os.path.join(dev_dir, "power", "control")
+    if not os.access(pm_path, os.W_OK):
+        return
+    pm_old = read_stripped(pm_path) or ""
+    if pm_old and pm_old != _GPU_PM_ON:
+        _record_and_write_sys(profile, pm_path, pm_old, _GPU_PM_ON)
+
+
+def _switch_amd_fullscreen(profile: GameProfile, dev_dir: str) -> None:
+    """AMD DPM manual, then the 3D_FULL_SCREEN power profile, each old value recorded first."""
+    dpm_path = os.path.join(dev_dir, "power_dpm_force_performance_level")
+    prof_path = os.path.join(dev_dir, "pp_power_profile_mode")
+    if not (os.access(dpm_path, os.W_OK) and os.access(prof_path, os.W_OK)):
+        return
+    if has_sys_record(profile.state_text(), prof_path):
+        return
+    current_idx, fullscreen_idx = parse_amd_profile_modes(read_text(prof_path) or "")
+    # No current profile (no "*" row) means nothing to restore: DPM stays as it is, not manual.
+    if current_idx is None or fullscreen_idx is None or current_idx == fullscreen_idx:
+        return
+    dpm_old = read_stripped(dpm_path) or ""
+    if dpm_old and dpm_old != _DPM_MANUAL:
+        _record_and_write_sys(profile, dpm_path, dpm_old, _DPM_MANUAL)
+    if read_stripped(dpm_path) == _DPM_MANUAL:
+        _record_and_write_sys(profile, prof_path, current_idx, fullscreen_idx)
 
 
 def apply_game_gpu(profile: GameProfile) -> None:
@@ -196,23 +248,5 @@ def apply_game_gpu(profile: GameProfile) -> None:
     for card in active_game_gpu_cards(profile):
         dev_dir = os.path.join(profile.paths.sys_drm, card, "device")
         if pm_mode != GpuPmMode.OFF:
-            pm_path = os.path.join(dev_dir, "power", "control")
-            if os.access(pm_path, os.W_OK):
-                pm_old = read_stripped(pm_path) or ""
-                if pm_old and pm_old != _GPU_PM_ON:
-                    _record_and_write_sys(profile, pm_path, pm_old, _GPU_PM_ON)
-        dpm_path = os.path.join(dev_dir, "power_dpm_force_performance_level")
-        prof_path = os.path.join(dev_dir, "pp_power_profile_mode")
-        if not (os.access(dpm_path, os.W_OK) and os.access(prof_path, os.W_OK)):
-            continue
-        if has_sys_record(profile.state_text(), prof_path):
-            continue
-        current_idx, fullscreen_idx = parse_amd_profile_modes(read_text(prof_path) or "")
-        # No current profile (no "*" row) means nothing to restore: DPM stays as it is, not manual.
-        if current_idx is None or fullscreen_idx is None or current_idx == fullscreen_idx:
-            continue
-        dpm_old = read_stripped(dpm_path) or ""
-        if dpm_old and dpm_old != _DPM_MANUAL:
-            _record_and_write_sys(profile, dpm_path, dpm_old, _DPM_MANUAL)
-        if read_stripped(dpm_path) == _DPM_MANUAL:
-            _record_and_write_sys(profile, prof_path, current_idx, fullscreen_idx)
+            _keep_gpu_awake(profile, dev_dir)
+        _switch_amd_fullscreen(profile, dev_dir)
