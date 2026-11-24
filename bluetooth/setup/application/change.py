@@ -135,9 +135,8 @@ class Change(Checks):
         self.backup = bak
         self.out(f"backup:    {bak}\n")
         self.must(["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", *z, src, f"{mc}.new"])
-        self.owe(
-            BLUETOOTH_UNIT, WIREPLUMBER_UNIT
-        )  # bluetoothd reads main.conf; its restart takes WirePlumber's endpoints
+        # bluetoothd reads main.conf; its restart takes WirePlumber's endpoints.
+        self.owe(BLUETOOTH_UNIT, WIREPLUMBER_UNIT)
         self.must(["sudo", "mv", "-f", f"{mc}.new", mc])
         self.out(f"written:   {mc}\n")
 

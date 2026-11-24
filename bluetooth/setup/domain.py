@@ -410,8 +410,6 @@ def resolve(
     )
 
 
-# A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf, in capitals
-# (as every version wrote it: Config.device is upper case).
 # A backup of main.conf: main.conf.bak-YYYYmmdd-HHMMSS (the old script's names too), and -1, -2, ...
 # after it when a backup of that second has the name already (two runs in one second).
 BACKUP_SUFFIX: Final = re.compile(r"(.*\.bak-[0-9]{8}-[0-9]{6})-([0-9]+)")
@@ -444,6 +442,8 @@ def backup_order(mtime: float, name: str) -> tuple[int, str, int, str]:
     return int(mtime), group(m, 1), n, name
 
 
+# A WirePlumber rule CST writes for one headset: 50-bluez-<its address, _ for :>.conf, in capitals
+# (as every version wrote it: Config.device is upper case).
 RULE_NAME: Final = re.compile(r"50-bluez-((?:[0-9A-F]{2}_){5}[0-9A-F]{2})\.conf")
 
 
