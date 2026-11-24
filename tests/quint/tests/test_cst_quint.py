@@ -456,6 +456,28 @@ class MainTest(Base):
         self.assertEqual(self.main("--instance", "nope"), 2)
         self.assertIn("cst-quint: no instance 'nope'", self.lines)
 
+    def test_a_planted_spec_over_two_specs_needs_an_instance(self) -> None:
+        checks = (*self.checks, M.Check(spec="specs/t.qnt", main="inst_t", invariants=("r",)))
+        planted = os.path.join(self.tmp, "planted.qnt")
+        self.assertEqual(self.main("--spec", planted, checks=checks), 2)
+        self.assertEqual(
+            self.lines, ["cst-quint: --spec needs --instance: the checks come from specs/s.qnt, specs/t.qnt"]
+        )
+        self.assertEqual(self.run_.commands("tlc"), [])
+
+    def test_a_planted_spec_with_an_instance_replaces_only_its_spec(self) -> None:
+        checks = (*self.checks, M.Check(spec="specs/t.qnt", main="inst_t", invariants=("r",)))
+        planted = os.path.join(self.tmp, "planted.qnt")
+        self.assertEqual(self.main("--instance", "inst_t", "--spec", planted, checks=checks), 0)
+        [argv] = self.run_.commands("tlc")
+        self.assertEqual(argv[argv.index("--main") + 1], "inst_t")
+        self.assertEqual(argv[argv.index("verify") + 1], planted)
+        self.assertEqual(argv[argv.index("--invariant") + 1], "r")
+        self.run_.calls.clear()
+        self.assertEqual(self.main(checks=checks), 0, "without --spec every check runs against its own spec")
+        verified = [argv[argv.index("verify") + 1] for argv in self.run_.commands("tlc")]
+        self.assertEqual(verified, [os.path.join(self.checkout, "specs", n) for n in ("s.qnt", "s.qnt", "t.qnt")])
+
     def test_the_tlc_config_and_keep(self) -> None:
         self.assertEqual(self.main("--keep"), 0)
         [work] = os.listdir(os.path.join(self.cache, "work"))

@@ -18,7 +18,8 @@ or by hand, from the checkout:
 
 Options:
     --instance NAME   only this instance (a module of the spec, such as nocow_ab)
-    --spec FILE       check FILE instead of the checked-in spec (a planted copy, say)
+    --spec FILE       check FILE instead of the checked-in spec (a planted copy, say); with checks of
+                      several specs, only with --instance
     --traces          write the checked-in traces again (simulator and Apalache), then run the replay
     --keep            keep the work folder (it names it at the end)
 
@@ -551,6 +552,11 @@ def main(argv: Sequence[str], seams: Seams | None = None) -> int:
     chosen = [c for c in checks if args.instance is None or c.main == args.instance]
     if not chosen and not args.traces:
         out(f"cst-quint: no instance {args.instance!r}" if args.instance else "cst-quint: no check is defined")
+        return EX_USAGE
+    # A planted copy stands for one spec: checks of several specs would all run against it.
+    specs = sorted({c.spec for c in chosen})
+    if args.spec and len(specs) > 1:
+        out(f"cst-quint: --spec needs --instance: the checks come from {', '.join(specs)}")
         return EX_USAGE
     session = Session(checkout or checkout_root(), cache_root(env), run, env, out)
     os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)

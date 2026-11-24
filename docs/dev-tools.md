@@ -981,7 +981,7 @@ spec's properties hold in all of them.
 ```
 invowk cmd test quint                     # TLC on every instance, every property (a line per instance)
 invowk cmd test quint --instance nocow_ab # one instance
-invowk cmd test quint --spec FILE         # a planted copy of the spec instead of the checked-in one
+invowk cmd test quint --spec FILE         # a planted copy of the spec instead of the checked-in one (with --instance when the checks come from more than one spec)
 invowk cmd test quint --traces            # write the checked-in traces again, then run the replay
 invowk cmd test quint --keep              # keep the work folder (its path is printed)
 ```
