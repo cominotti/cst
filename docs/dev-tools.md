@@ -1169,8 +1169,8 @@ forget, the record's entry dropped), the merge back (`find_overlays`,
 overlay's removal, the alert), `retry_torn`, the retention and the index.
 Between any two steps the environment can stop the run (SIGTERM, Ctrl-C:
 it ends the run before the read, is the read's failure during it, waits for
-the end of a held block, is ignored during the merge back, and ends the run
-after it; one per run, as `on_signal` ignores the rest), kill it, shut the
+the end of a held block, is ignored during the merge back and its alert,
+and ends the run after it; one per run, as `on_signal` ignores the rest), kill it, shut the
 guest down, pause or resume it, start a shut-off VM during its read, or
 switch a disk late to a file of a snapshot that timed out (before the next
 run). The user can start or shut down the VM between runs. A disk's source

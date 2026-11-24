@@ -1060,7 +1060,8 @@ the keep tag, `forget`'s arguments, the index entries, the timer's units
 (the stop budget covers the merge's limit), and that the NAS constants match
 `btrfs/btrfs-snapshot`. They also check what a manual run can meet: a closed
 terminal during restic (on a pseudo-terminal) and a pipe without a reader
-still merge and alert, a second Ctrl-C does not reach the merging virsh
+still merge and alert, a SIGTERM while the alert is sent cuts neither the
+alert nor the refusal short, a second Ctrl-C does not reach the merging virsh
 (the fake cancels on SIGINT as the real one does), a VM paused at merge time
 is merged, a `snapshot-create-as` that does not answer (snapshot in place
 later: the backup goes on; never in place: the files are kept and an alert

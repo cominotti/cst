@@ -255,16 +255,18 @@ def nas_run(
     # Any failure, a stop included: the overlays are merged back first, then it is raised again.
     except BaseException as e:  # noqa: BLE001
         failure = e
-    # From here on no signal may cut the cleanup short, and no child may get one.
+    # From here on no signal may cut the cleanup short (the merge back, the alert and the refusal with
+    # the recovery lines), and no child may get one.
     with p.signals.ignored():
         merge = _nas_merge_back(cfg, p, run)
-    # The snapshot's unclear outcome, also when a stop held through its call came first or the merge
-    # back of another disk failed: libvirt may still switch a disk to an overlay file, so the alert names it.
-    if run.unclear:
-        merge.problems.extend(run.unclear)
-        _add_overlay_files(p, run)
-    if merge.problems:
-        raise _nas_not_merged_back(cfg, p, run, merge, failure)
+        # The snapshot's unclear outcome, also when a stop held through its call came first or the merge
+        # back of another disk failed: libvirt may still switch a disk to an overlay file, so the alert names it.
+        if run.unclear:
+            merge.problems.extend(run.unclear)
+            _add_overlay_files(p, run)
+        refused = _nas_not_merged_back(cfg, p, run, merge, failure) if merge.problems else None
+    if refused is not None:
+        raise refused
     if failure is not None:
         raise failure
     p.out.say(

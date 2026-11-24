@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping, Sequence
 import contextlib
+import dataclasses
 import fcntl
 import io
 import json
@@ -276,6 +277,10 @@ RPM_OSTREE = """#!/bin/sh
 echo '{"deployments": [{"booted": true, "checksum": "bbbb", "version": "45.1", "timestamp": 1794000000}]}'
 """
 NOTIFY = """#!/bin/sh
+if [ -e "$FIX/notify-term" ]; then
+  # A stop (the timer's unit stopped) while the alert is sent: SIGTERM to cst-vm, which runs it.
+  kill -TERM "$PPID"; sleep 1
+fi
 echo "notify $*" >>"$STUB_LOG"
 """
 SYSTEMCTL = """#!/bin/sh
@@ -943,6 +948,19 @@ class RobustnessTest(Nas):
         p = self.popen_tool(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=w)
         os.close(w)
         self.assertEqual(p.wait(60), 1)
+        self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
+        self.assertTrue(os.path.exists(self.overlay))
+
+    def test_a_stop_while_the_alert_is_sent_still_alerts_and_refuses(self) -> None:
+        # No stop came before (on_signal is still caught): a SIGTERM during btrfs-notify must not cut
+        # the alert or the refusal with the recovery lines short.
+        self.vm(agent="connected", fail=["commit"])
+        open(os.path.join(self.fix, "notify-term"), "w").close()
+        r = self.run_tool("backup", "win", "--nas")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("DISK NOT MERGED BACK:\n  sda: virsh blockcommit: error: block commit failed", r.stderr)
+        self.assertIn("domblklist win --details --inactive", r.stderr)
+        self.assertNotIn("stopped by signal", r.stderr)
         self.assertTrue([c for c in self.calls() if c.startswith("notify -u critical -a cst-vm")])
         self.assertTrue(os.path.exists(self.overlay))
 
@@ -2817,6 +2835,27 @@ class NasUnclearSnapshotTest(unittest.TestCase):
         self.assertEqual((store.dropped, store.removed), ([], []))
         self.assertTrue(store.exists(overlay_a), "never removed while libvirt may still switch to it")
         self.assertEqual([c for c in commands.virsh_log if c[0][0] == "blockcommit"], [])
+
+    def test_a_stop_while_the_alert_of_an_unclear_snapshot_is_sent_still_refuses(self) -> None:
+        disk_a = "/img/a.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        port, _commands, store, signals, alerts = self._make_backup(
+            [("vda", disk_a)], on_virsh=self._timeout_hook({}, [overlay_a]), clock=FakeNasMovingClock()
+        )
+
+        def alert(title: str, body: str) -> None:
+            alerts.append((title, body))
+            if not signals.ignored_active:  # on_signal still caught: a SIGTERM now raises Stop
+                raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), dataclasses.replace(port, alert=alert), "win", None, nas, quiesce=False, live=True)
+        msg = str(ctx.exception)
+        self.assertIn("DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within", msg)
+        self.assertIn(overlay_a, msg.split("by hand (read each line first):", 1)[1])
+        self.assertEqual(len(alerts), 1)
+        self.assertTrue(store.exists(overlay_a))
 
     def test_an_unclear_snapshot_is_named_when_the_merge_back_of_another_disk_fails(self) -> None:
         disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
