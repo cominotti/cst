@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 # Developer tools for this repository only: the ruff linter, the ty type
 # checker and the zizmor workflow audit (and, in their own groups, the
-# cosmic-ray mutation tester and coverage.py). CST
+# cosmic-ray mutation tester, coverage.py and Hypothesis for tests/mbt). CST
 # itself is not a Python package and installs nothing from here: its helpers
 # run on the system's /usr/bin/python3 with the standard library only.
 # See docs/dev-tools.md for the pinned versions, where the tools' virtual
@@ -19,6 +19,7 @@ requires-python = ">=3.15"
 dev = ["ruff==0.17.5", "ty==0.0.104", "zizmor==1.32.0"]
 mutation = ["cosmic-ray==8.9.0"]
 coverage = ["coverage==7.17.3"]
+mbt = ["hypothesis==6.170.17"]
 
 [tool.uv]
 package = false
@@ -268,6 +269,8 @@ typing-extensions = false
 "cpu/domain.py" = ["DTZ006"]
 "btrfs/snapshot/domain.py" = ["DTZ007"]
 "btrfs/tests/test_btrfs_snapshot_core.py" = ["DTZ001", "DTZ007"]
+# The property tests' bounds of generated snapshot names (naive local wall clock, as above).
+"tests/mbt/mbt_snapshot_domain.py" = ["DTZ001"]
 # SIM905 (above): docker-gc's Docker name lists are a triple-quoted word list
 # split at run time on purpose (about 200 words; a list literal would be
 # about 200 lines).

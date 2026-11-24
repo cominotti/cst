@@ -114,7 +114,7 @@ MAIN_RECORD = """\
 """
 
 
-class _MemoryRecord:
+class MemoryRecord:
     """InstallRecordPort in memory: {path: text}; writes counts the files written."""
 
     def __init__(self) -> None:
@@ -203,7 +203,7 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind=ArtifactKind.UNIT)
         self.u = entry("m/u", "~/.config/u", owner=Owner.USER)
         self.target = MemoryTarget()
-        self.record = _MemoryRecord()
+        self.record = MemoryRecord()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src], record=self.record, commit="c0ffee")
 
     def test_install_records_every_file_and_a_second_run_changes_nothing(self) -> None:
@@ -329,7 +329,7 @@ class InstallServiceRecordTest(unittest.TestCase):
                 self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["would record: /usr/local/sbin/a"], 0))
                 self.assertEqual(self.record.texts[self.ROOT], text)
 
-        class _Unreadable(_MemoryRecord):
+        class _Unreadable(MemoryRecord):
             @override
             def read(self, path: str) -> InstallRecord | None:
                 raise PermissionError(13, "Permission denied", path)
@@ -390,6 +390,56 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.assertEqual(list(self.svc.remove([self.svc.placement(self.a, req)])), ["removed:   /usr/local/sbin/a"])
         # A second removal finds nothing and says nothing.
         self.assertEqual(list(self.svc.remove([self.svc.placement(self.a, req)])), [])
+
+    def test_a_record_of_a_newer_cst_stops_the_remove_before_anything_changes(self) -> None:
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.u], req))
+        files = dict(self.target.files)
+        user_record = "/home/u/.local/state/cst/installed.json"
+        user_text = self.record.texts[user_record]
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaises(InstallRefused) as cm:
+            list(self.svc.remove([self.svc.placement(e, req) for e in (self.a, self.u)]))
+        self.assertEqual(self.target.files, files)
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+        self.assertEqual(self.record.texts[user_record], user_text)
+        self.assertEqual(
+            str(cm.exception),
+            f"{self.ROOT}: format 9, written by a newer CST (this one reads format 1): nothing was changed",
+        )
+
+    def test_a_newer_root_record_does_not_stop_a_remove_of_the_users_files_only(self) -> None:
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.u], req))
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        self.assertEqual(list(self.svc.remove([self.svc.placement(self.u, req)])), ["removed:   /home/u/.config/u"])
+        self.assertEqual(list(self.target.files), ["/usr/local/sbin/a"])
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+
+    def test_a_record_of_a_newer_cst_stops_forget_places_before_any_record_changes(self) -> None:
+        # The user's record sorts first (/home before /var): it is not rewritten before the root one refuses.
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.u], req))
+        user_record = "/home/u/.local/state/cst/installed.json"
+        user_text = self.record.texts[user_record]
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaises(InstallRefused) as cm:
+            self.svc.forget_places([self.svc.placement(e, req) for e in (self.a, self.u)])
+        self.assertEqual(self.record.texts[user_record], user_text)
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+        self.assertEqual(
+            str(cm.exception),
+            f"{self.ROOT}: format 9, written by a newer CST (this one reads format 1): nothing was changed",
+        )
+
+    def test_forget_places_drops_the_lines_of_each_record_and_leaves_the_files(self) -> None:
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.t, self.u], InstallRequest(home="/home/u", values={"UUID": "u-1"})))
+        files = dict(self.target.files)
+        self.svc.forget_places([self.svc.placement(e, req) for e in (self.a, self.u)])
+        self.assertEqual(self.target.files, files)
+        self.assertEqual(sorted(self.record.doc().files), ["/etc/t"])
+        self.assertEqual(self.record.doc("/home/u/.local/state/cst/installed.json").files, {})
 
     def test_put_and_forget_for_a_module_that_checks_its_files_itself(self) -> None:
         place = Placement(
@@ -744,6 +794,32 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertIn(b"newer CST", r.stderr)
         self.assertFalse(os.path.exists(self.stage + "/usr/local/sbin/docker-gc"))
 
+    def test_a_newer_record_refuses_the_remove_and_nothing_is_changed(self) -> None:
+        self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)
+        Path(self.record).write_text('{"format": 7}')
+        r = self.cli("remove", "--component", "btrfs:docker-gc")
+        for e in INSTALL_MANIFEST:
+            if e.component == "btrfs:docker-gc":
+                self.assertTrue(os.path.lexists(self.stage + e.dest), e.dest)
+        self.assertEqual(Path(self.record).read_text(), '{"format": 7}')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(b"newer CST", r.stderr)
+        self.assertIn(b"nothing was changed", r.stderr)
+        self.assertEqual(r.stdout, b"")
+
+    def test_a_newer_root_record_refuses_forget_before_the_users_record_changes(self) -> None:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+        sel = ("btrfs/docker-gc", "cpu/gamemode.ini", "--home", home)
+        self.assertEqual(self.cli("install", *sel).returncode, 0)
+        user_record = Path(self.stage + home + "/.local/state/cst/installed.json")
+        before = user_record.read_bytes()
+        Path(self.record).write_text('{"format": 7}')
+        r = self.cli("forget", *sel)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(b"newer CST", r.stderr)
+        self.assertEqual(user_record.read_bytes(), before)
+        self.assertEqual(Path(self.record).read_text(), '{"format": 7}')
+
     def test_forget_drops_the_record_line_and_leaves_the_file(self) -> None:
         self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)
         prog = self.stage + "/usr/local/sbin/docker-gc"
@@ -1005,7 +1081,7 @@ class InstallerRecordCliTest(unittest.TestCase):
             rc = installer.main(["forget", "--home", "/home/u", "--component", "cpu:gamemode"])
         self.assertEqual(rc, 1)
         self.assertIn("files of the user are forgotten as the user, not as root", err.getvalue())
-        service.return_value.forget.assert_not_called()
+        service.return_value.forget_places.assert_not_called()
 
     def test_generated_text_commands_as_root_refuse_another_accounts_home(self) -> None:
         # As root on the real root, text commands keep root's record whatever --home says: a --home of
@@ -1055,7 +1131,9 @@ class InstallerRecordCliTest(unittest.TestCase):
                 ):
                     self.assertEqual(installer.main(["forget-text", dest, *extra]), 0)
                     self.assertEqual(installer.main(["text-plan", "/etc/x", "0644", *extra]), 0)
-        self.assertEqual(service.forget.call_args_list[0].args[0], "/var/lib/cst/installed.json")
+        self.assertEqual(
+            [p.record for p in service.forget_places.call_args_list[0].args[0]], ["/var/lib/cst/installed.json"]
+        )
         self.assertEqual(len(service.plan_put.call_args_list), 2)
 
     def test_mark_of_a_component_of_generated_files_only(self) -> None:

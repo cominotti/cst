@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: MPL-2.0
 """Static `--affected` unit-test selection via repository structure, AST imports, and git diff.
 
+The Hypothesis modules of tests/mbt (mbt_*.py, run by `invowk cmd test mbt`
+on uv's Python) are selected apart, in `AffectedPlan.mbt_modules`; the unit
+plan's `modules` never holds one, since the unit runner's Python has no
+Hypothesis:
+
+- A path under tests/mbt/ never makes the unit plan fall back to the full
+  suite: the unit suite never imports it.
+- An mbt module is selected when its AST import closure reaches a changed
+  file (its own file, tests/mbt/profiles.py and tests/mbt/__init__.py
+  included); every mbt module is selected when the unit plan falls back to
+  the full suite (the runner, the pins, the invowkfile, CI or shared code
+  can change any test). A docs-only change and an empty change select none.
+
 Standard library only.
 """
 
@@ -39,6 +52,7 @@ _DOCS_ONLY_FILES: Final = frozenset({"LICENSE"})
 _DOCS_ONLY_PREFIXES: Final = (".agents/", ".claude/", "docs/")
 _NON_UNIT_TEST_PREFIXES: Final = ("tests/e2e/suites/", "tests/fixtures/")
 _E2E_PREFIX: Final = "tests/e2e/"
+MBT_PREFIX: Final = "tests/mbt/"
 _GIT_REV_PARSE: Final = "rev-parse"
 _GIT_VERIFY: Final = "--verify"
 _MAIN_BRANCH: Final = "main"
@@ -61,6 +75,7 @@ class AffectedPlan:
     full_suite: bool
     modules: tuple[str, ...]
     reason: str
+    mbt_modules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +84,8 @@ class _RepoIndex:
     valid_mods: set[str]
     rev: dict[str, set[str]]
     manifest_srcs: frozenset[str]
+    mbt_mods_by_file: dict[str, str]
+    mbt_rev: dict[str, set[str]]
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -131,11 +148,17 @@ def _is_standalone_test_file(path: str) -> bool:
     )
 
 
+def is_mbt_test_file(path: str) -> bool:
+    """True for a Hypothesis test module of tests/mbt (tests/mbt/mbt_*.py), which `invowk cmd test mbt` runs."""
+    name = path.removeprefix(MBT_PREFIX)
+    return path.startswith(MBT_PREFIX) and "/" not in name and name.startswith("mbt_") and name.endswith(".py")
+
+
 def _top_level_trigger(top: str, path: str) -> str | None:
     if top in _FULL_SUITE_ROOT_REASONS:
         return _FULL_SUITE_ROOT_REASONS[top]
     if top == "tests":
-        is_isolated = path.startswith(_E2E_PREFIX) or _is_standalone_test_file(path)
+        is_isolated = path.startswith((_E2E_PREFIX, MBT_PREFIX)) or _is_standalone_test_file(path)
         return None if is_isolated else "shared test infrastructure"
     return None if top in MODULE_ROOTS else "unclassified root"
 
@@ -240,7 +263,30 @@ def _build_repo_index(inventory: Sequence[str], repo: str) -> _RepoIndex:
     valid_mods = set(test_mods_by_file.values())
     rev = reverse_import_map(all_test_files, repo=repo, existing=existing)
     manifest_srcs = frozenset(entry.src for entry in INSTALL_MANIFEST)
-    return _RepoIndex(test_mods_by_file=test_mods_by_file, valid_mods=valid_mods, rev=rev, manifest_srcs=manifest_srcs)
+    mbt_mods_by_file = _mbt_modules_by_file(inventory)
+    mbt_rev = reverse_import_map(sorted(mbt_mods_by_file), repo=repo, existing=existing)
+    return _RepoIndex(
+        test_mods_by_file=test_mods_by_file,
+        valid_mods=valid_mods,
+        rev=rev,
+        manifest_srcs=manifest_srcs,
+        mbt_mods_by_file=mbt_mods_by_file,
+        mbt_rev=mbt_rev,
+    )
+
+
+def _mbt_modules_by_file(inventory: Iterable[str]) -> dict[str, str]:
+    return {rel: mod for rel in sorted(inventory) if is_mbt_test_file(rel) and (mod := module_of(rel)) is not None}
+
+
+def _affected_mbt(paths: Iterable[str], index: _RepoIndex) -> tuple[str, ...]:
+    """The tests/mbt modules a change of these paths affects: each changed one, and each whose imports reach one."""
+    mbt: set[str] = set()
+    for path in paths:
+        if path in index.mbt_mods_by_file:
+            mbt.add(index.mbt_mods_by_file[path])
+        mbt.update(index.mbt_rev.get(path, ()))
+    return tuple(sorted(mbt))
 
 
 def _apply_install_and_script_rules(path: str, index: _RepoIndex, selected: set[str]) -> None:
@@ -289,6 +335,7 @@ def select_affected(
         )
     if all(is_docs_only(p) for p in uniq):
         return AffectedPlan(base=base, changed=uniq, full_suite=False, modules=DOCS_GATES, reason="docs-only change")
+    inventory = _repo_inventory(uniq, all_files, repo)
     triggers = [(path, trigger) for path in uniq if (trigger := full_suite_trigger(path)) is not None]
     if triggers:
         path, trigger = triggers[0]
@@ -298,9 +345,10 @@ def select_affected(
             full_suite=True,
             modules=(),
             reason=f"fallback to full suite: {path} ({trigger})",
+            mbt_modules=tuple(sorted(_mbt_modules_by_file(inventory).values())),
         )
 
-    index = _build_repo_index(_repo_inventory(uniq, all_files, repo), repo)
+    index = _build_repo_index(inventory, repo)
     selected: set[str] = {m for m in GATE_MODULES if m in index.valid_mods}
     for path in uniq:
         _apply_path_rules(path, index, selected)
@@ -311,6 +359,7 @@ def select_affected(
         full_suite=False,
         modules=final_mods,
         reason=f"{len(final_mods)} module(s) selected for {len(uniq)} changed file(s)",
+        mbt_modules=_affected_mbt(uniq, index),
     )
 
 
@@ -327,4 +376,9 @@ def format_plan(plan: AffectedPlan) -> str:
     else:
         lines.append(f"  selected ({len(plan.modules)}):")
         lines.extend(f"    {mod}" for mod in plan.modules)
+    if plan.mbt_modules:
+        lines.append(f"  mbt ({len(plan.mbt_modules)}):")
+        lines.extend(f"    {mod}" for mod in plan.mbt_modules)
+    else:
+        lines.append("  mbt: none")
     return "\n".join(lines)

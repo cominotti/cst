@@ -22,13 +22,16 @@ Usage:
                                           generated content (stdin) to DEST, same rules; with
                                           --component, listed in the install record under C
   installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
-                                          removed: per file that was there
+                                          removed: per file that was there; a record of a newer
+                                          CST refuses before anything is removed (exit 1)
   installer.py remove-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files (--home: run as a user,
                                           the record in that home; as root, refused for a home
                                           not root's own, as for text, text-plan, forget-text)
   installer.py forget [OPTIONS] SRC...    drops the files' record lines and leaves the files as they
-                                          are (a file a setup script keeps); prints nothing
+                                          are (a file a setup script keeps); prints nothing; a
+                                          record of a newer CST refuses before any record is
+                                          changed (exit 1)
   installer.py forget-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files
   installer.py mark --component C done    C's setup command finished (the record says done; a
@@ -296,8 +299,7 @@ def _remove_or_forget(service: InstallService, command: str, places: Sequence[Pl
     forget or forget-text: only the record lines dropped, the files left alone."""
     if command not in (InstallerCommand.FORGET, InstallerCommand.FORGET_TEXT):
         return _stream(service.remove(places))
-    for record in sorted({p.record for p in places if p.record}):
-        service.forget(record, [p.dest for p in places if p.record == record])
+    service.forget_places(places)
     return 0
 
 

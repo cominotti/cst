@@ -26,6 +26,13 @@ what zizmor itself cannot:
   other gate and cannot be let through or skipped), with no uv variable
   (`UV_...`) in the workflow, and that task runs exactly UV_AUDIT_COMMAND:
   `uv audit --locked` on every dependency group;
+- ci.yml's fast-gates job runs `invowk cmd test mbt --profile ci` (the
+  Hypothesis tests of tests/mbt, derandomized) in a step with no `if:` or
+  `continue-on-error:` (nor on the job), and the nightly runs it with
+  `--profile nightly` in a job with no `if:`, `continue-on-error:` or
+  `needs:`; each on one line, nothing added (no `|| true`, no fewer
+  examples), and neither workflow names a variable of the task
+  (`CST_MBT_...`);
 - `invowk cmd check` runs `invowk cmd test workflows`, and that task runs
   exactly ZIZMOR_COMMAND: zizmor with --offline, the config file and
   --strict-collection (without it, a file zizmor cannot parse is skipped
@@ -51,7 +58,7 @@ import re
 import tempfile
 import unittest
 
-from cst_core.domain.text import group_or_none
+from cst_core.domain.text import group, group_or_none
 from tests.repo_files import REPO, repo_files
 
 CONFIG = ".github/zizmor.yml"
@@ -313,6 +320,38 @@ _LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error|needs)\s*:")
 _STEP = re.compile(r"^(\s*)-\s")
 
 
+def _uncommented(text: str) -> list[tuple[int, str]]:
+    """The numbered lines of a workflow, comment lines left out."""
+    return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
+
+
+def _jobs(lines: Iterable[tuple[int, str]]) -> dict[str, list[tuple[int, str]]]:
+    """The numbered lines of each job of a workflow (the lines under `  NAME:`), by job name."""
+    jobs: dict[str, list[tuple[int, str]]] = {}
+    job: list[tuple[int, str]] | None = None
+    for n, line in lines:
+        found = _JOB.match(line)
+        if found is not None:
+            job = jobs.setdefault(found.group(1), [])
+        elif line and not line.startswith(" "):
+            job = None
+        elif job is not None:
+            job.append((n, line))
+    return jobs
+
+
+def _step_starts(body: Iterable[tuple[int, str]]) -> list[int]:
+    """The first line of each step of a job's body (the `- ` items at the shallowest depth)."""
+    steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
+    depth = min((d for _, d in steps), default=0)
+    return [n for n, d in steps if d == depth]
+
+
+def _lenient_keys(lines: Iterable[tuple[int, str]], pattern: re.Pattern[str] = _LENIENT) -> list[tuple[int, str]]:
+    """The number and key of each line pattern matches (by default `if:`, `continue-on-error:` or `needs:`)."""
+    return [(n, group(m, 1)) for n, line in lines if (m := pattern.match(line)) is not None]
+
+
 def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     """Whether the nightly audits every locked package with uv audit, as text lines (empty: yes).
 
@@ -324,43 +363,115 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
     appear anywhere in the workflow. Comment lines are left out.
     """
     out: list[str] = []
-    lines = [(n, line) for n, line in enumerate(nightly.splitlines(), 1) if not line.lstrip().startswith("#")]
+    lines = _uncommented(nightly)
     out += [
         f"{NIGHTLY}:{n}: a uv variable (`UV_...`) in the nightly; it can leave packages or vulnerabilities out "
         "of the audit"
         for n, line in lines
         if "UV_" in line
     ]
-    jobs: dict[str, list[tuple[int, str]]] = {}
-    job: list[tuple[int, str]] | None = None
-    for n, line in lines:
-        found = _JOB.match(line)
-        if found is not None:
-            job = jobs.setdefault(found.group(1), [])
-        elif line and not line.startswith(" "):
-            job = None
-        elif job is not None:
-            job.append((n, line))
+    jobs = _jobs(lines)
     runs = [(name, n) for name, body in jobs.items() for n, line in body if UV_AUDIT_STEP.match(line)]
     if not runs:
         out.append(f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)")
     for name, at in runs:
         body = jobs[name]
-        for n, line in body:
-            lenient = _LENIENT.match(line)
-            if lenient is not None:
-                out.append(
-                    f"{NIGHTLY}:{n}: the job {name} has `{lenient.group(1)}:`; the job that runs uv audit may "
-                    "not, since it lets the nightly pass without the audit"
-                )
-        steps = [(n, len(m.group(1))) for n, line in body if (m := _STEP.match(line)) is not None]
-        depth = min((d for _, d in steps), default=0)
-        if any(n > at and d == depth for n, d in steps):
+        out += [
+            f"{NIGHTLY}:{n}: the job {name} has `{key}:`; the job that runs uv audit may "
+            "not, since it lets the nightly pass without the audit"
+            for n, key in _lenient_keys(body)
+        ]
+        if any(n > at for n in _step_starts(body)):
             out.append(
                 f"{NIGHTLY}:{at}: the uv audit step must be the last step of the job {name}: when it fails, "
                 "the steps after it do not run (give the audit a job of its own)"
             )
     return out + command_problems(cue, "ci uv-audit", UV_AUDIT_COMMAND, UV_AUDIT_WHY)
+
+
+CI = ".github/workflows/ci.yml"
+MBT_CI_JOB = "fast-gates"
+_MBT_RUN = r'^\s*(?:-\s+)?run:\s*runuser -u ci -- env "PATH=\$\{{PATH\}}" invowk cmd test mbt --profile {}\s*$'
+MBT_CI_STEP = re.compile(_MBT_RUN.format("ci"))
+MBT_NIGHTLY_STEP = re.compile(_MBT_RUN.format("nightly"))
+_MBT_SHOWN = 'run: runuser -u ci -- env "PATH=${{PATH}}" invowk cmd test mbt --profile {}'
+_STEP_LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error)\s*:")
+# A key of a job itself (`    if:`), not of one of its steps: a job's keys are indented by four spaces.
+_JOB_LENIENT = re.compile(r"^    (if|continue-on-error)\s*:")
+# The variables the mbt task reads, which a workflow could set past the exact run line (env: at any level,
+# or GITHUB_ENV): CST_MBT_EXAMPLES lowers the examples, CST_MBT_PROFILE or CST_MBT_SEED changes the draws.
+MBT_VARIABLE = "CST_MBT_"
+
+
+def _step_lines(body: Sequence[tuple[int, str]], at: int) -> list[tuple[int, str]]:
+    """The lines of the step of a job's body that holds line `at`."""
+    starts = _step_starts(body)
+    start = max((n for n in starts if n <= at), default=at)
+    end = min((n for n in starts if n > at), default=None)
+    return [(n, line) for n, line in body if n >= start and (end is None or n < end)]
+
+
+def mbt_step_problems(ci: str, nightly: str) -> list[str]:
+    """Whether CI and the nightly run the Hypothesis tests of tests/mbt, as text lines (empty: yes).
+
+    ci.yml's fast-gates job must have a step `run: runuser -u ci -- env
+    "PATH=${PATH}" invowk cmd test mbt --profile ci` (on one line, nothing
+    added: no `|| true`, no `--examples 5`), with no `if:` or
+    `continue-on-error:` in that step or on the fast-gates job itself; a
+    failure then fails fast-gates and CI Status. The nightly must run the
+    same task with `--profile nightly` in a job with no `if:`,
+    `continue-on-error:` or `needs:`. Neither workflow may name a variable
+    of the task (`CST_MBT_...`): the task leaves one set in an `env:` (or
+    GITHUB_ENV) alone, and it could lower the examples. Comment lines are
+    left out.
+    """
+    return _mbt_ci_problems(ci) + _mbt_nightly_problems(nightly)
+
+
+def _mbt_variable_problems(path: str, lines: Iterable[tuple[int, str]]) -> list[str]:
+    return [
+        f"{path}:{n}: a variable of the mbt task (`{MBT_VARIABLE}...`) in the workflow; it can lower the examples "
+        "or change the profile or the seed of the property tests"
+        for n, line in lines
+        if MBT_VARIABLE in line
+    ]
+
+
+def _mbt_ci_problems(ci: str) -> list[str]:
+    lines = _uncommented(ci)
+    out = _mbt_variable_problems(CI, lines)
+    body = _jobs(lines).get(MBT_CI_JOB, [])
+    runs = [n for n, line in body if MBT_CI_STEP.match(line)]
+    if not runs:
+        out.append(f"{CI}: the job {MBT_CI_JOB} has no step `{_MBT_SHOWN.format('ci')}` (on one line, nothing added)")
+    for at in runs:
+        out += [
+            f"{CI}:{n}: the mbt step has `{key}:`; it may not, since it lets CI pass without the property tests"
+            for n, key in _lenient_keys(_step_lines(body, at), _STEP_LENIENT)
+        ]
+    if runs:
+        out += [
+            f"{CI}:{n}: the job {MBT_CI_JOB} has `{key}:`; the job that runs the mbt step may not, since it lets "
+            "CI pass without the property tests"
+            for n, key in _lenient_keys(body, _JOB_LENIENT)
+        ]
+    return out
+
+
+def _mbt_nightly_problems(nightly: str) -> list[str]:
+    lines = _uncommented(nightly)
+    out = _mbt_variable_problems(NIGHTLY, lines)
+    jobs = _jobs(lines)
+    named = [name for name, lines in jobs.items() if any(MBT_NIGHTLY_STEP.match(line) for _, line in lines)]
+    if not named:
+        out.append(f"{NIGHTLY}: no step runs `{_MBT_SHOWN.format('nightly')}` (on one line, nothing added)")
+    for name in named:
+        out += [
+            f"{NIGHTLY}:{n}: the job {name} has `{key}:`; the job that runs the nightly "
+            "mbt profile may not, since it lets the nightly pass without it"
+            for n, key in _lenient_keys(jobs[name])
+        ]
+    return out
 
 
 _STEPS_HDR = re.compile(r"^(\s*)steps\s*:\s*(?:#.*)?$")
@@ -528,6 +639,37 @@ jobs:
           persist-credentials: false
       - name: Audit
         run: invowk cmd ci uv-audit
+"""
+
+GOOD_CI = """name: CI
+jobs:
+  fast-gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fast gates
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
+      # The property tests.
+      - name: Property tests
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci
+  e2e:
+    needs: [fast-gates]
+    steps:
+      - name: E2E
+        run: invowk cmd test e2e tier1
+"""
+GOOD_MBT_NIGHTLY = """name: Nightly
+jobs:
+  static-gates:
+    steps:
+      - name: Fast gates
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
+  mbt-nightly:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@abc # v7
+      - name: Property tests
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile nightly
 """
 
 
@@ -843,6 +985,143 @@ class WorkflowAuditTest(unittest.TestCase):
         ):
             with self.subTest(nightly=nightly):
                 self.assertEqual(uv_audit_problems(GOOD_CUE, nightly), want)
+
+    def test_ci_and_the_nightly_run_the_mbt_profiles(self) -> None:
+        self.assertEqual(mbt_step_problems(GOOD_CI, GOOD_MBT_NIGHTLY), [])
+        ci_none = [
+            (
+                f"{CI}: the job fast-gates has no step "
+                '`run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci` (on one line, nothing added)'
+            )
+        ]
+        nightly_none = [
+            (
+                f"{NIGHTLY}: no step runs "
+                '`run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile nightly` '
+                "(on one line, nothing added)"
+            )
+        ]
+        step = 'run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci\n'
+        for ci, want in (
+            (GOOD_CI.replace("      - name: Property tests\n        " + step, ""), ci_none),
+            (GOOD_CI.replace(step, "# " + step), ci_none),
+            (GOOD_CI.replace(step, step.replace("--profile ci", "--profile dev")), ci_none),
+            (GOOD_CI.replace(step, step.replace("--profile ci", "--profile ci || true")), ci_none),
+            (GOOD_CI.replace(step, step.replace("--profile ci", "--profile ci --examples 5")), ci_none),
+            # In another job: the e2e job needs fast-gates and is skipped with it.
+            (
+                GOOD_CI.replace("      - name: Property tests\n        " + step, "").replace(
+                    "        run: invowk cmd test e2e tier1\n", "        " + step
+                ),
+                ci_none,
+            ),
+            (
+                GOOD_CI.replace("        " + step, "        continue-on-error: true\n        " + step),
+                [
+                    (
+                        f"{CI}:10: the mbt step has `continue-on-error:`; it may not, since it lets CI pass "
+                        "without the property tests"
+                    )
+                ],
+            ),
+            (
+                GOOD_CI.replace("        " + step, "        if: false\n        " + step),
+                [f"{CI}:10: the mbt step has `if:`; it may not, since it lets CI pass without the property tests"],
+            ),
+        ):
+            with self.subTest(ci=ci):
+                self.assertEqual(mbt_step_problems(ci, GOOD_MBT_NIGHTLY), want)
+        nightly_step = step.replace("--profile ci", "--profile nightly")
+        lenient = (
+            "{}: the job mbt-nightly has `{}:`; the job that runs the nightly mbt profile may not, since it "
+            "lets the nightly pass without it"
+        )
+        for nightly, want in (
+            (GOOD_MBT_NIGHTLY.replace(nightly_step, "run: invowk cmd check\n"), nightly_none),
+            (GOOD_MBT_NIGHTLY.replace(nightly_step, step), nightly_none),
+            (GOOD_MBT_NIGHTLY.replace(nightly_step, nightly_step.replace("nightly", "nightly || true")), nightly_none),
+            (
+                GOOD_MBT_NIGHTLY.replace("  mbt-nightly:\n", "  mbt-nightly:\n    needs: static-gates\n"),
+                [lenient.format(f"{NIGHTLY}:8", "needs")],
+            ),
+            (
+                GOOD_MBT_NIGHTLY.replace("  mbt-nightly:\n", "  mbt-nightly:\n    if: false\n"),
+                [lenient.format(f"{NIGHTLY}:8", "if")],
+            ),
+            (
+                GOOD_MBT_NIGHTLY.replace(
+                    "        " + nightly_step, "        continue-on-error: true\n        " + nightly_step
+                ),
+                [lenient.format(f"{NIGHTLY}:13", "continue-on-error")],
+            ),
+        ):
+            with self.subTest(nightly=nightly):
+                self.assertEqual(mbt_step_problems(GOOD_CI, nightly), want)
+
+    def test_no_mbt_variable_and_no_lenient_fast_gates_job(self) -> None:
+        # The task leaves CST_MBT_EXAMPLES (and the other CST_MBT_ variables) alone when its flags are not
+        # given: one set anywhere in the workflow reaches the step, past the exact run line.
+        variable = (
+            "{}: a variable of the mbt task (`CST_MBT_...`) in the workflow; it can lower the examples or "
+            "change the profile or the seed of the property tests"
+        )
+        job_lenient = (
+            f"{CI}:4: the job fast-gates has `{{}}:`; the job that runs the mbt step may not, since it lets CI "
+            "pass without the property tests"
+        )
+        step = 'run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci\n'
+        for ci, want in (
+            (
+                GOOD_CI.replace("        " + step, "        env:\n          CST_MBT_EXAMPLES: '5'\n        " + step),
+                [variable.format(f"{CI}:11")],
+            ),
+            (
+                GOOD_CI.replace(
+                    "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    env:\n      CST_MBT_EXAMPLES: 5\n"
+                ),
+                [variable.format(f"{CI}:6")],
+            ),
+            (GOOD_CI.replace("jobs:\n", "env:\n  CST_MBT_PROFILE: dev\njobs:\n", 1), [variable.format(f"{CI}:3")]),
+            (
+                GOOD_CI.replace(
+                    '        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check\n',
+                    '        run: echo CST_MBT_EXAMPLES=5 >> "${GITHUB_ENV}"\n',
+                ),
+                [variable.format(f"{CI}:7")],
+            ),
+            # A comment line names it without setting it.
+            (
+                GOOD_CI.replace("      # The property tests.\n", "      # The property tests (no CST_MBT_EXAMPLES).\n"),
+                [],
+            ),
+            (
+                GOOD_CI.replace(
+                    "    runs-on: ubuntu-24.04\n", "    continue-on-error: true\n    runs-on: ubuntu-24.04\n"
+                ),
+                [job_lenient.format("continue-on-error")],
+            ),
+            (
+                GOOD_CI.replace("    runs-on: ubuntu-24.04\n", "    if: false\n    runs-on: ubuntu-24.04\n"),
+                [job_lenient.format("if")],
+            ),
+        ):
+            with self.subTest(ci=ci):
+                self.assertEqual(mbt_step_problems(ci, GOOD_MBT_NIGHTLY), want)
+        nightly = GOOD_MBT_NIGHTLY.replace(
+            "  mbt-nightly:\n    runs-on: ubuntu-24.04\n",
+            "  mbt-nightly:\n    runs-on: ubuntu-24.04\n    env:\n      CST_MBT_EXAMPLES: 5\n",
+        )
+        self.assertEqual(mbt_step_problems(GOOD_CI, nightly), [variable.format(f"{NIGHTLY}:10")])
+
+    def test_the_repository_runs_the_mbt_profiles(self) -> None:
+        with open(os.path.join(REPO, CI), encoding="utf-8") as fh:
+            ci = fh.read()
+        with open(os.path.join(REPO, NIGHTLY), encoding="utf-8") as fh:
+            nightly = fh.read()
+        found = mbt_step_problems(ci, nightly)
+        self.assertEqual(
+            found, [], "CI or the nightly does not run tests/mbt (see docs/dev-tools.md):\n" + "\n".join(found)
+        )
 
     def test_the_repository_keeps_the_audit_on(self) -> None:
         files = repo_files()
