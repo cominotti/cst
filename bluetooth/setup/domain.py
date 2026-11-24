@@ -20,6 +20,7 @@ from cst_core.domain.files import OwnedState
 from cst_core.domain.install import InstallReportWord
 from cst_core.domain.text import HELP_WORDS, enum_member, group
 from cst_core.domain.units import ActiveState
+from cst_core.domain.values import parse_whole_number
 
 
 # The marker of the rule apply-le-audio.sh wrote (revert removes that rule too).
@@ -511,11 +512,13 @@ def matches_a_line(info: str, pattern: str) -> bool:
 
 
 def senders_of(bus_list: str, pid: str) -> list[str]:
-    """busctl list --unique: the bus names of the process pid (awk '$2 == p {print $1}')."""
+    """busctl list --unique: the bus names of the process pid (awk '$2 == p {print $1}': as numbers when both
+    are ASCII digits, so "002" is pid 2; else as strings)."""
+    want = parse_whole_number(pid)
     out: list[str] = []
     for line in bus_list.split("\n"):
         f = line.split()
-        if len(f) >= 2 and (f[1] == pid or (f[1].isdigit() and pid.isdigit() and int(f[1]) == int(pid))):
+        if len(f) >= 2 and (f[1] == pid or (want is not None and parse_whole_number(f[1]) == want)):
             out.append(f[0])
     return out
 
