@@ -117,8 +117,9 @@ cleanup() {
     [[ -z "$user" ]] || kill "$user" 2>/dev/null || true
     systemctl stop e2e-nocow-boot.target docker.service e2e-dind.service 2>/dev/null || true
     rm -rf "$stub" "$dropin" "$target" "$wrap" "$fake" "$seen"
-    rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4"
+    rm -rf "$vols/e2e-cow" "$vols/e2e-cow2" "$vols/e2e-cow3" "$vols/e2e-cow4" "$vols/e2e-cow5" "$vols/e2e-cow6"
     rm -f "$flag" "$attempts" "$postponed"
+    [[ -d /etc/btrfs-setup || ! -e /etc/btrfs-setup ]] || rm -f /etc/btrfs-setup   # part 6's obstacle
     if [[ -d "$saved" ]]; then
         rm -rf /etc/btrfs-setup
         mv "$saved" /etc/btrfs-setup
@@ -381,6 +382,39 @@ all_nocow "$d4"
 test ! -e "$flag"
 test ! -e "$attempts"
 echo "E2E-NOCOW parts 4 and 5: migrated without /etc/btrfs-setup, and after install on an affected machine"
+
+# 6. The install's mark alone, as when `cst btrfs install` is killed right after it (btrfs-setup.sh's
+# own touch of the flag never runs): mark writes the flag before it sets +C, so the two come
+# together, and the next boot migrates. An older mark set +C and left the flag to install.
+rm -f "$flag" "$attempts"
+chattr -C "$vols"
+make_volume e2e-cow5
+d5="$vols/e2e-cow5/_data"
+before5="$(manifest "$d5")"
+ino5="$(stat -c %i "$d5")"
+rc=0; "$helper" mark || rc=$?
+[[ "$rc" == 1 ]]
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" == *C* ]]
+test -f "$flag"
+systemctl start docker-volumes-nocow.service
+[[ "$(systemctl show -P Result docker-volumes-nocow.service)" == success ]]
+[[ "$(manifest "$d5")" == "$before5" ]]
+[[ "$(stat -c %i "$d5")" != "$ino5" ]]
+all_nocow "$d5"
+[[ "$(ls -A "$vols/e2e-cow5")" == _data ]]
+test ! -e "$flag"
+test ! -e "$attempts"
+# 6b. The flag cannot be written (/etc/btrfs-setup is a file): mark exits 2 and the volumes folder
+# keeps no +C, so the next boot sees the request again. An older mark set +C and exited 1.
+chattr -C "$vols"
+make_volume e2e-cow6
+rm -rf /etc/btrfs-setup
+printf 'in the way\n' >/etc/btrfs-setup
+rc=0; "$helper" mark || rc=$?
+[[ "$rc" == 2 ]]
+[[ "$(lsattr -d "$vols" | awk '{print $1}')" != *C* ]]
+rm -f /etc/btrfs-setup
+echo "E2E-NOCOW part 6: mark writes the flag before +C, and sets no +C when it cannot"
 """
 
 

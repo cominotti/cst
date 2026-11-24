@@ -26,6 +26,11 @@ A migration from a count of boots an older helper left without its flag (the vol
 without +C again, as after Docker is reinstalled) is checked as the first one: its new request
 resets that count before it writes the flag, and every fault there still converges in one boot.
 
+An install (`cst btrfs install`: docker-volumes-nocow mark, then btrfs-setup.sh's own touch of the
+flag when mark exits non-zero, nothing more after a kill) on a volumes folder without +C that holds
+the two copy-on-write volumes, with a count an older helper left: every fault there keeps the
+request (mark writes the flag before +C), and the next boots converge.
+
 One class per start state and fault mode (each a work unit of tests/run_unit.py of its own), each
 pinning its number of cases.
 """
@@ -88,6 +93,7 @@ CASES_GIVE_UP = 4  # per mode: each of the boot's points, and the boot with no f
 CASES_STALE_KILL = 68
 CASES_STALE_FAIL = 56
 CASES_STALE_FAIL_FROM = 68
+CASES_INSTALL = 5  # per mode: each of the install's points
 
 
 class FaultyTree(LocalVolumeTree):
@@ -430,3 +436,65 @@ class StaleCountFailTest(StaleCountFaultBase):
 class StaleCountFailFromTest(StaleCountFaultBase):
     def test_every_full_disk_then_recover_then_migrate(self) -> None:
         self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_STALE_FAIL_FROM)
+
+
+class InstallFaultBase(NocowFaultBase):
+    """`cst btrfs install` on a volumes folder without +C (Docker installed after btrfs-setup) holding
+    the two copy-on-write volumes, no flag, and a count of boots an older helper left (so the reset is
+    one of the install's steps). The install is mark through the plan, then btrfs-setup.sh's rule: a
+    non-zero exit touches the flag (not flushed); a kill ends it there."""
+
+    @override
+    def arrange(self) -> None:
+        self.set_attempts("1\n")
+
+    def install(self, *faults: Fault) -> None:
+        self.plan.arm(*faults)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.service.execute(NocowCommand.MARK)
+        if rc:
+            os.makedirs(os.path.dirname(self.flag), exist_ok=True)
+            open(self.flag, "a").close()
+
+    def every_fault_at_install(self, mode: FaultMode) -> int:
+        """Each point of the install failing in mode: the request kept, then two boots converge."""
+        n = len(cut_points(self.plan, self.install))
+        cases = 0
+        for _mode, k in every_fault(n, (mode,)):
+            with self.subTest(mode=mode.value, k=k):
+                cases += 1
+                fresh(self)
+                with contextlib.suppress(Killed):
+                    self.install((mode, k))
+                self.assert_safe(f"install, {mode} at {k}")
+                self.boot()
+                self.boot()
+                self.assert_converged(f"install, {mode} at {k}")
+        return cases
+
+
+class InstallCutPointsTest(InstallFaultBase):
+    def test_the_request_is_written_before_nocow_is_set(self) -> None:
+        calls = cut_points(self.plan, self.install)
+        self.assertEqual(
+            calls, ["save_attempts 0", "request_migration", "set_nocow . True", "scan-fix a/_data", "scan-fix b/_data"]
+        )
+        self.assertTrue(os.path.exists(self.flag))
+        self.boot()
+        self.assert_converged("no fault")
+
+
+class InstallKillTest(InstallFaultBase):
+    def test_every_kill_at_install_then_boot(self) -> None:
+        self.assertEqual(self.every_fault_at_install(FaultMode.KILL), CASES_INSTALL)
+
+
+class InstallFailTest(InstallFaultBase):
+    def test_every_failure_at_install_then_boot(self) -> None:
+        self.assertEqual(self.every_fault_at_install(FaultMode.FAIL), CASES_INSTALL)
+
+
+class InstallFailFromTest(InstallFaultBase):
+    def test_every_full_disk_at_install_then_boot(self) -> None:
+        self.assertEqual(self.every_fault_at_install(FaultMode.FAIL_FROM), CASES_INSTALL)

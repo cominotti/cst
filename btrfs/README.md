@@ -822,7 +822,14 @@ docker volume rm <name>         # or one volume by name
 - `+C` only works on **empty** files. Files that already hold data must be
   copied to become NOCOW. That cannot happen while containers use them, so for
   those `install` only leaves a flag file `/etc/btrfs-setup/docker-nocow-pending`.
-  It also resets the counter of attempts (see below).
+  Its `mark` writes that file itself and flushes it to disk **before** it sets
+  `+C` on the volumes folder (the same order as the boot, below), and resets
+  the counter of attempts to 0 (see below), flushed too, so a power loss
+  cannot bring an old count back beside the new flag. When it cannot write
+  either, the folder keeps no `+C`, the journal says why, and the next boot
+  asks again. One gap is left: a container that writes into a volume during
+  the few milliseconds between mark's two looks at the volumes is asked for
+  after `+C` (still flushed), so a kill exactly there can lose that request.
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
   starts**. For each volume with copy-on-write data it makes a full NOCOW copy
   (the empty copy folder first gets the volume folder's SELinux label with
@@ -924,6 +931,12 @@ docker volume rm <name>         # or one volume by name
   copy-on-write data, install creates the folder and the flag, and the next
   boot migrates the volumes (the same `install` also puts the fixed helper in
   place).
+- Older copies of `install` also set `+C` first: `mark` set it, and the
+  flag was written after `mark` ended, without a flush. An install killed or
+  powered off between the two left `+C`, copy-on-write volumes and no flag.
+  `status` then shows `migration not scheduled`, `cst doctor` shows
+  nothing, and no boot asks again. Run `cst btrfs install` once: it schedules
+  the migration again.
 
 Note: `cst cpu docker-slice install` also edits
 `/etc/docker/daemon.json` (it adds `cgroup-parent`, see
@@ -2587,8 +2600,8 @@ journalctl -u docker-volumes-nocow
 Common causes are low free space or a copy error. The volumes are still usable
 (copy-on-write). Fix the cause and run `install` again; the migration is then
 tried again at the next boot (two more attempts). With no "gave up" line in the
-journal, an older helper may have lost the request (section 4.10): `install`
-schedules it again too.
+journal, an older helper or an older `install` that was stopped half-way may
+have lost the request (section 4.10): `install` schedules it again too.
 
 ### Docker volumes: `migration postponed at N boot(s) in a row`
 

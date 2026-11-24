@@ -5158,6 +5158,69 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_170_docker_volumes_nocow_mark_writes_the_flag_before_it_tries_nocow(self) -> None:
+        """docker-volumes-nocow mark (the checkout's program, as root in the container: `cst btrfs
+        install` killed right after mark, so btrfs-setup.sh's own touch of the flag never runs) on a
+        data root of the test's own on a tmpfs, holding one volume with data and a count of boots an
+        older helper left. The container has no btrfs, so +C cannot be set: tmpfs answers the flags
+        ioctl and refuses NOCOW (EOPNOTSUPP), which the test checks first. That refusal is the witness
+        of the order: mark exits 2, yet the flag exists (written before +C was tried), the volumes
+        folder has no NOCOW flag and the count was reset to 0. Before, mark tried +C first, failed
+        there, and left no flag."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-170-docker"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} /var/lib/docker-volumes-nocow /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-170-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-170-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-170-made-docker /var/tmp/e2e-170-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_170 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            flags() {{   # the inode flags of $1 (FS_IOC_GETFLAGS), through cst_core's own reader
+                /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.adapters.nocow import inode_flags; print(inode_flags(sys.argv[1], directory=True))' "$1"
+            }}
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state=/var/lib/docker-volumes-nocow
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-170-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-170-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p "$vols/v/_data"
+            printf 'data\n' >"$vols/v/_data/file"
+            # The precondition: this file system answers the flags ioctl and refuses NOCOW.
+            [[ "$(flags "$vols")" == 0 ]] || {{ echo "tmpfs gave flags $(flags "$vols")" >&2; exit 1; }}
+            if /usr/bin/python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/cst-rw"); from cst_core.adapters.nocow import set_nocow; set_nocow(sys.argv[1], directory=True)' "$vols" 2>/dev/null; then
+                echo "this kernel's tmpfs accepts NOCOW: the test cannot show the order here" >&2; exit 1
+            fi
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$state"
+            printf '1\n' >"$state/attempts"
+            rc=0; out="$($prog mark 2>&1)" || rc=$?
+            echo "test_170 mark: rc=$rc $out" >&2
+            [[ "$rc" == 2 ]]
+            [[ -e "$flag" ]] || {{ echo "no flag: mark tried +C before it wrote the request" >&2; exit 1; }}
+            [[ "$(flags "$vols")" == 0 ]]
+            [[ "$(cat "$state/attempts")" == 0 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
