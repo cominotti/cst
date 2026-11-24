@@ -56,6 +56,8 @@ LICENSE_EXEMPT: Final[dict[str, str]] = {
         "installs as the previous version (tests/e2e/README.md, Mixed-version tests), except that a personal or "
         "private value in one is replaced by an invented one"
     ),
+    "tests/quint/package.json": "JSON has no comments (npm's manifest of the quint pin, for npm ci)",
+    "tests/quint/package-lock.json": "JSON has no comments (npm's lock of the quint pin: every package and its hash)",
     "doctor/tests/fixtures/db-booted.txt": (
         "captured `rpm-ostree db list` output, copied whole into a fake package database"
     ),

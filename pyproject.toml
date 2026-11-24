@@ -71,6 +71,7 @@ extend-include = [
     "doctor/cst-doctor",
     "perf/cst-perf",
     "tests/mutation/cst-mutation",
+    "tests/quint/cst-quint",
     "toolchains/cst-toolchains",
     "vm/cst-vm",
 ]
@@ -398,6 +399,7 @@ include = [
     "doctor/cst-doctor",
     "perf/cst-perf",
     "tests/mutation/cst-mutation",
+    "tests/quint/cst-quint",
     "toolchains/cst-toolchains",
     "vm/cst-vm",
 ]

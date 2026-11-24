@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools: uv, ruff, ty, zizmor, coverage.py, Hypothesis, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, coverage.py, Hypothesis, cosmic-ray, Quint
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -15,6 +15,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [coverage.py](https://coverage.readthedocs.io/) 7.17.3 | statement and branch coverage of the unit suite, for `invowk cmd test coverage` (its own `coverage` group; the nightly runs it; see "Coverage") | `pyproject.toml`, `uv.lock` |
 | [Hypothesis](https://hypothesis.readthedocs.io/) 6.170.17 | property and state-machine tests of `tests/mbt`, for `invowk cmd test mbt` (its own `mbt` group; CI runs it on every pull request and in the nightly; see "Property and model-based tests") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
+| [Quint](https://quint-lang.org/) 0.33.1, [Apalache](https://apalache-mc.org/) 0.62.4 (its jar also runs TLC), Quint's evaluator 0.7.1 | model checking of the Quint specs with TLC, and the traces their replay tests read, for the optional `invowk cmd test quint` (not through uv: npm and two downloads checked by SHA-256, in `~/.cache/cst-quint`; see "Model checking with Quint") | `tests/quint/package.json` and `package-lock.json`; `tests/quint/cst-quint` (the two downloads) |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
 unchanged code. That is why it is pinned exactly and upgraded on purpose (see
@@ -821,6 +822,56 @@ cannot, so it is skipped there): the copy is writable; a write under
 outside stays empty; and, six folders deep under `/run`, `/tmp`, the home
 folders, `/var/mnt`, `/mnt` and `/media`, there is no Unix socket and no
 folder that is the real home.
+
+## Model checking with Quint (optional)
+
+A unit test checks the runs someone thought of. A model checker checks every
+run a model of the protocol can take. CST has one such model:
+`btrfs/tests/quint/docker_volumes_nocow.qnt`, a [Quint](https://quint-lang.org/)
+spec of docker-volumes-nocow's install and boot migration, with a crash or a
+fault after any step. TLC (the TLA+ model checker, run through quint)
+explores every state each instance of the spec can reach and checks that the
+spec's properties hold in all of them.
+
+```
+invowk cmd test quint                     # TLC on every instance, every property (a line per instance)
+invowk cmd test quint --instance nocow_ab # one instance
+invowk cmd test quint --spec FILE         # a planted copy of the spec instead of the checked-in one
+invowk cmd test quint --traces            # write the checked-in traces again, then run the replay
+invowk cmd test quint --keep              # keep the work folder (its path is printed)
+```
+
+`invowk cmd check` does not run it. It needs node and npm, java (17 or later)
+and curl.
+
+**The tools.** `tests/quint/cst-quint` puts every tool in place itself, under
+`${XDG_CACHE_HOME:-~/.cache}/cst-quint`, never in the checkout:
+
+- quint 0.33.1 with `npm ci --ignore-scripts` from `tests/quint/package.json`
+  and `package-lock.json` (the lock pins every package with its hash, which
+  `npm ci` checks), into a folder named after the lock's hash;
+- the two programs quint would otherwise download on first use without any
+  check: Apalache 0.62.4 (`apalache.tgz`, whose jar also runs TLC) and the
+  Rust evaluator 0.7.1. Each download is checked against the SHA-256 written
+  in `cst-quint`; a mismatch removes it and stops with both hashes. They are
+  unpacked into `QUINT_HOME` (`~/.cache/cst-quint/quint-home`), where quint
+  finds them and fetches nothing. A tool already there is used only when the
+  stamp beside it records the hash that was checked.
+
+About 240 MB in all, fetched once. quint, Apalache and TLC run from a new
+work folder under `~/.cache/cst-quint/work` (they write `_apalache-out/` in
+the folder they run in, and quint's TLC translation goes to `TMPDIR`, which
+is set to it), removed at the end. Every run is under `nice -n 10` and a time
+limit (TLC 5 minutes per instance, Apalache 10 minutes, the simulator 5). TLC
+gets an explicit config, `{"maxHeap": "-Xmx4g", "workers": 4}`, and
+`JVM_ARGS=-Xmx4g`: quint's defaults are an 8 GB heap and a worker per CPU.
+Each line gives the instance's verdict, its distinct states, the depth, the
+time and the largest resident memory of its process tree (the JVM included).
+
+The unit tests in `tests/quint/tests/` check the checksums (a match, a
+mismatch, a folder without the stamp), the `npm ci` call, the command
+lines, the verdicts and the trace normalizer with a fake runner; no tool or
+network is used. `tests/test_quint_task.py` checks the task's flags.
 
 ## Layout-only commits and `git blame`
 

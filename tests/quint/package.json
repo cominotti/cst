@@ -1,0 +1,8 @@
+{
+  "name": "cst-quint",
+  "private": true,
+  "description": "The pinned Quint of invowk cmd test quint (tests/quint/cst-quint installs it with npm ci --ignore-scripts)",
+  "dependencies": {
+    "@informalsystems/quint": "0.33.1"
+  }
+}
