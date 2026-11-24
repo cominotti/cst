@@ -1036,6 +1036,63 @@ stop_server() {
 """
 
 
+# findmnt, mount and umount stand-ins over one mount table, for `cst btrfs cache` under a test root
+# (CST_BTRFS_CACHE_ROOT=W): the script goes to W/bin/mnt-stub, and W/bin/findmnt, mount and umount run it.
+CACHE_MOUNT_STUB = r"""#!/usr/bin/python3 -I
+# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
+import json, os, sys
+w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+state = os.path.join(w, "mounts")
+prog, args = sys.argv[1], sys.argv[2:]
+rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
+def save():
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.writelines("\t".join(r) + "\n" for r in rows)
+def holding(path):
+    best = rows[0]
+    for r in rows:
+        t = r[1].rstrip("/") or "/"
+        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
+            best = r
+    return best
+if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
+    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
+    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
+elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
+    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
+    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
+    for r in rows:
+        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
+        print(esc(src), esc(r[1]), r[2], r[3])
+elif prog == "findmnt":
+    os.execv("/usr/bin/findmnt", ["findmnt", *args])
+elif prog == "mount" and args[:1] == ["--bind"]:
+    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
+    held = holding(src)
+    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
+    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
+    save()
+elif prog == "umount":
+    # Busy, as the real umount says, while a process has its folder at or below the target.
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        if cwd == args[0] or cwd.startswith(args[0] + "/"):
+            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
+            sys.exit(32)
+    tgt = args[0].removeprefix(w)
+    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
+    if not idx:
+        sys.exit(32)
+    del rows[idx[-1]]
+    save()
+else:
+    sys.exit(2)
+"""
+
+
 class Tier1SystemdE2ETest(unittest.TestCase):
     SYSTEMD_CONTAINER: ClassVar[str] = ""
     NAS_CONTAINER: ClassVar[str] = ""
@@ -8292,59 +8349,6 @@ EOF
         has nothing to do."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-cache"
-        stub = r"""#!/usr/bin/python3 -I
-# findmnt, mount and umount over one table (W/mounts: SOURCE TARGET FSTYPE OPTIONS UUID FSROOT, tab-separated).
-import json, os, sys
-w = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-state = os.path.join(w, "mounts")
-prog, args = sys.argv[1], sys.argv[2:]
-rows = [ln.rstrip("\n").split("\t") for ln in open(state, encoding="utf-8") if ln.strip()]
-def save():
-    with open(state, "w", encoding="utf-8") as fh:
-        fh.writelines("\t".join(r) + "\n" for r in rows)
-def holding(path):
-    best = rows[0]
-    for r in rows:
-        t = r[1].rstrip("/") or "/"
-        if (path == t or t == "/" or path.startswith(t + "/")) and len(t) >= len(best[1].rstrip("/")):
-            best = r
-    return best
-if prog == "findmnt" and args == ["-J", "-l", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS,UUID,FSROOT"]:
-    keys = ("source", "target", "fstype", "options", "uuid", "fsroot")
-    print(json.dumps({"filesystems": [{k: (v or None) for k, v in zip(keys, r)} for r in rows]}, indent=3))
-elif prog == "findmnt" and args == ["-rn", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS"]:
-    # As findmnt prints SOURCE: "DEVICE[FSROOT]" when the mount's root is not the filesystem's top ("/").
-    esc = lambda s: s.replace("\\", "\\x5c").replace(" ", "\\x20")
-    for r in rows:
-        src = r[0] if "[" in r[0] or r[5] in ("", "/") else r[0] + "[" + r[5] + "]"
-        print(esc(src), esc(r[1]), r[2], r[3])
-elif prog == "findmnt":
-    os.execv("/usr/bin/findmnt", ["findmnt", *args])
-elif prog == "mount" and args[:1] == ["--bind"]:
-    src, tgt = args[1].removeprefix(w), args[2].removeprefix(w)
-    held = holding(src)
-    fsroot = os.path.normpath(held[5] + "/" + src.removeprefix(held[1].rstrip("/")))
-    rows.append([held[0].split("[")[0] + "[" + fsroot + "]", tgt, held[2], held[3], held[4], fsroot])
-    save()
-elif prog == "umount":
-    # Busy, as the real umount says, while a process has its folder at or below the target.
-    for pid in filter(str.isdigit, os.listdir("/proc")):
-        try:
-            cwd = os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
-            continue
-        if cwd == args[0] or cwd.startswith(args[0] + "/"):
-            print(f"umount: {args[0]}: target is busy.", file=sys.stderr)
-            sys.exit(32)
-    tgt = args[0].removeprefix(w)
-    idx = [i for i, r in enumerate(rows) if r[1] == tgt]
-    if not idx:
-        sys.exit(32)
-    del rows[idx[-1]]
-    save()
-else:
-    sys.exit(2)
-"""
         self.addCleanup(
             exec_bash,
             c,
@@ -8385,7 +8389,7 @@ EOF
             }} >{w}/mounts
             cp {w}/mounts {w}/mounts.drive
             cat >{w}/bin/mnt-stub <<'STUB'
-{stub}
+{CACHE_MOUNT_STUB}
 STUB
             for p in findmnt mount umount; do
                 printf '#!/bin/bash\\nexec /usr/bin/python3 -I {w}/bin/mnt-stub %s "$@"\\n' "$p" >{w}/bin/$p
