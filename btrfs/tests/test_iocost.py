@@ -22,6 +22,7 @@ from btrfs.iocost.adapters import (
     iocost_paths_for,
     plan_iocost,
     revert_iocost,
+    with_udev_properties,
 )
 from btrfs.iocost.cli import IocostCliDeps, run_iocost_cli
 from btrfs.iocost.domain import (
@@ -180,6 +181,37 @@ class BtrfsIocostDomainTest(unittest.TestCase):
         self.assertFalse(is_auto_eligible_disk(BlockDisk("sdb", "8:16", rotational=True, scheduler="bfq")))
         self.assertFalse(is_auto_eligible_disk(BlockDisk("loop0", "7:0", rotational=False, scheduler="none")))
         self.assertFalse(is_auto_eligible_disk(BlockDisk("dm-0", "253:0", rotational=False, scheduler="none")))
+
+
+class WithUdevPropertiesTest(unittest.TestCase):
+    """with_udev_properties sets the three udev fields and carries every other field of BlockDisk over."""
+
+    def _disk(self) -> BlockDisk:
+        """A disk whose every field holds a value other than its default: a field the helper drops comes
+        back as its default and the comparison shows it. A new field of another type needs a value here."""
+        values: dict[str, object] = {}
+        for f in dataclasses.fields(BlockDisk):
+            if f.type in (bool, "bool"):
+                values[f.name] = f.default is not True
+            elif f.type in (str, "str"):
+                values[f.name] = f"{f.name}-of-the-disk"
+            else:
+                self.fail(f"BlockDisk.{f.name} is {f.type}: give it a value here")
+        return dataclasses.replace(BlockDisk(name="", devno="", rotational=False, scheduler=""), **values)
+
+    def test_a_disk_udev_answers_for_keeps_its_other_fields(self) -> None:
+        disk = self._disk()
+        runner = _FakeRunner()
+        runner.udev_props[disk.name] = "IOCOST_SOLUTIONS=isolation\nUSEC_INITIALIZED=1234\n"
+        got = with_udev_properties(runner, disk)
+        self.assertEqual(got, dataclasses.replace(disk, hwdb_solution="isolation", udev_ready=True))
+
+    def test_a_disk_udevadm_fails_for_keeps_its_other_fields(self) -> None:
+        disk = self._disk()
+        runner = _FakeRunner()
+        runner.udev_failure = (4, "Unknown device\n")
+        got = with_udev_properties(runner, disk)
+        self.assertEqual(got, dataclasses.replace(disk, udev_error="Unknown device"))
 
 
 class BtrfsIocostLifecycleTest(unittest.TestCase):
