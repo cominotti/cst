@@ -7682,6 +7682,9 @@ EOF
         """`cst btrfs commit-interval` updates real fstab + top-mount coherently with `cst doctor`,
         `10-cst-write-budget.conf` installs/removes under `btrfs:core`, and below uses `--interval 15`.
         A separate btrfs /var/home (its own UUID, dm-1) keeps its fstab line and mount, and no remount names it.
+        A separate btrfs /var (its own UUID, dm-2): plan changes nothing, apply, a second apply and revert change
+        only the root's / line; a commit= an older CST wrote on the /var line is named by status and revert and
+        left there.
         The top-mount's Options= is rewritten in place: its own compress-force=zstd:3 stays (the live /var
         has zstd:1)."""
         c = self.SYSTEMD_CONTAINER
@@ -7844,17 +7847,42 @@ EOF
             /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
             grep -qxF "Options=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit" "/etc/systemd/system/{top_unit}"
             /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
-            # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so apply changes
-            # the / line and leaves the /var line byte for byte.
+            # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so plan changes
+            # nothing, apply changes the / line and leaves the /var line byte for byte, a second apply has nothing
+            # to do, and revert puts the / line back and leaves the /var line again.
             other=0b5e6a1d-0000-4000-8000-00000000beef
             var_line="UUID=$other /var btrfs subvol=var,compress=zstd:3,noatime 0 0"
             printf 'UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\\n%s\\n' "$var_line" >/etc/fstab
             printf '/dev/dm-0 /sysroot btrfs ro,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/root 0 0\\n/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0\\n' >{w}/proc/mounts
             printf '/sysroot {uuid}\\n/ {uuid}\\n/var %s\\n' "$other" >{w}/uuid-by-target
+            root_line="UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0"
+            var_mount="/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0"
+            cp /etc/fstab {w}/fstab.before
+            plan_out="$(/opt/cst-rw/cst btrfs commit-interval plan)"
+            grep -qF "Dry run, nothing changed." <<<"$plan_out"
+            if grep -qF "separate btrfs filesystem" <<<"$plan_out"; then echo "$plan_out" >&2; exit 1; fi
+            cmp -s /etc/fstab {w}/fstab.before
             /opt/cst-rw/cst btrfs commit-interval apply --yes >/dev/null
             grep -qxF "$var_line" /etc/fstab
             grep -qxF "UUID={uuid} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit,commit=60 0 0" /etc/fstab
-            grep -qxF "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress=zstd:3,ssd,subvol=/var 0 0" {w}/proc/mounts
+            grep -qxF "$var_mount" {w}/proc/mounts
+            /opt/cst-rw/cst btrfs commit-interval apply --yes | grep -qF "nothing to do"
+            grep -qxF "$var_line" /etc/fstab
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$root_line" /etc/fstab
+            grep -qxF "$var_line" /etc/fstab
+            grep -qxF "$var_mount" {w}/proc/mounts
+            # After an upgrade: an older CST took that /var for the root and wrote its commit=60 on the /var line.
+            # status and revert name the line, and revert leaves it (CST cannot tell its old write from yours).
+            old_var_line="UUID=$other /var btrfs subvol=var,compress=zstd:3,noatime,commit=60 0 0"
+            printf '%s\\n%s\\n' "$root_line" "$old_var_line" >/etc/fstab
+            note="note            /etc/fstab /var (UUID=$other) is a separate btrfs filesystem, not the root's, and has commit=60"
+            /opt/cst-rw/cst btrfs commit-interval status | grep -qF "$note"
+            revert_out="$(/opt/cst-rw/cst btrfs commit-interval revert --yes)"
+            grep -qF "nothing to do" <<<"$revert_out"
+            grep -qF "Note: /etc/fstab /var (UUID=$other) is a separate btrfs filesystem" <<<"$revert_out"
+            grep -qxF "$old_var_line" /etc/fstab
+            grep -qxF "$root_line" /etc/fstab
             echo E2E-COMMIT-OK
             """,
         ).stdout
