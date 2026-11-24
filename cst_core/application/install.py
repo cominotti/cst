@@ -213,8 +213,8 @@ class InstallService:
         return places, self._read_records({p.record for p, _ in places})
 
     def _read_records(self, records: set[str], outcome: str = "nothing was changed") -> dict[str, InstallRecord]:
-        """Each record, read once, as it is now. A record of a newer CST stops the call before any write (it
-        is never rewritten by an older one); outcome ends the refusal (what the call left undone). No record
+        """Each record, read once, as it is now. A record of a newer CST stops the call before any write or
+        removal (it is never rewritten by an older one); outcome ends the refusal (what the call left undone). No record
         yet, or one that is no record (install starts it again), is empty; a record that cannot be read is
         left out (plan cannot tell; the update after the files says why)."""
         found: dict[str, InstallRecord] = {}
@@ -421,7 +421,10 @@ class InstallService:
         """Remove each file (a link itself) and its line in the record, in the reverse of the order given
         (install writes in that order: what uses an earlier file goes before it); `removed:   PATH` for
         each that was there. Works without a record (an install from before it): the files are the manifest's.
-        A program with a SettingsStep that is there runs it first, while its settings file is missing."""
+        A record of a newer CST stops the call before anything changes (_read_records): no settings step,
+        no removal. A program with a SettingsStep that is there runs it first, while its settings file is
+        missing."""
+        self._read_records({p.record for p in places if p.record})
         yield from self._settings_steps(
             [p for p in places if (p.src or "") in SETTINGS_STEPS and self._target.current(p.path) is not None]
         )

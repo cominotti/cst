@@ -391,6 +391,31 @@ class InstallServiceRecordTest(unittest.TestCase):
         # A second removal finds nothing and says nothing.
         self.assertEqual(list(self.svc.remove([self.svc.placement(self.a, req)])), [])
 
+    def test_a_record_of_a_newer_cst_stops_the_remove_before_anything_changes(self) -> None:
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.u], req))
+        files = dict(self.target.files)
+        user_record = "/home/u/.local/state/cst/installed.json"
+        user_text = self.record.texts[user_record]
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        with self.assertRaises(InstallRefused) as cm:
+            list(self.svc.remove([self.svc.placement(e, req) for e in (self.a, self.u)]))
+        self.assertEqual(self.target.files, files)
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+        self.assertEqual(self.record.texts[user_record], user_text)
+        self.assertEqual(
+            str(cm.exception),
+            f"{self.ROOT}: format 9, written by a newer CST (this one reads format 1): nothing was changed",
+        )
+
+    def test_a_newer_root_record_does_not_stop_a_remove_of_the_users_files_only(self) -> None:
+        req = InstallRequest(home="/home/u")
+        list(self.svc.install([self.a, self.u], req))
+        self.record.texts[self.ROOT] = '{"format": 9, "files": {}}'
+        self.assertEqual(list(self.svc.remove([self.svc.placement(self.u, req)])), ["removed:   /home/u/.config/u"])
+        self.assertEqual(list(self.target.files), ["/usr/local/sbin/a"])
+        self.assertEqual(self.record.texts[self.ROOT], '{"format": 9, "files": {}}')
+
     def test_put_and_forget_for_a_module_that_checks_its_files_itself(self) -> None:
         place = Placement(
             "/t/u.service",
@@ -743,6 +768,19 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn(b"newer CST", r.stderr)
         self.assertFalse(os.path.exists(self.stage + "/usr/local/sbin/docker-gc"))
+
+    def test_a_newer_record_refuses_the_remove_and_nothing_is_changed(self) -> None:
+        self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)
+        Path(self.record).write_text('{"format": 7}')
+        r = self.cli("remove", "--component", "btrfs:docker-gc")
+        for e in INSTALL_MANIFEST:
+            if e.component == "btrfs:docker-gc":
+                self.assertTrue(os.path.lexists(self.stage + e.dest), e.dest)
+        self.assertEqual(Path(self.record).read_text(), '{"format": 7}')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(b"newer CST", r.stderr)
+        self.assertIn(b"nothing was changed", r.stderr)
+        self.assertEqual(r.stdout, b"")
 
     def test_forget_drops_the_record_line_and_leaves_the_file(self) -> None:
         self.assertEqual(self.cli("install", "--component", "btrfs:docker-gc").returncode, 0)

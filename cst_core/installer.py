@@ -22,7 +22,8 @@ Usage:
                                           generated content (stdin) to DEST, same rules; with
                                           --component, listed in the install record under C
   installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
-                                          removed: per file that was there
+                                          removed: per file that was there; a record of a newer
+                                          CST refuses before anything is removed (exit 1)
   installer.py remove-text DEST... [--home DIR] [--root DIR]
                                           the same for generated files (--home: run as a user,
                                           the record in that home; as root, refused for a home
