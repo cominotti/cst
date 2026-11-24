@@ -14,6 +14,11 @@ runs again with the plan armed at k:
 A plan can hold several faults: a FAIL at k and a KILL at a later j is a run that fails, then dies
 while it rolls back.
 
+FaultPlan(dead_after_kill=True): once a KILL has fired, every later call raises Killed again, with
+no effect and no record, as a dead process runs no handler. For code that catches BaseException to
+clean up (`except BaseException: remove(new); raise`): without it, that cleanup runs after the
+kill, which a real kill never does.
+
 A port whose contract reports a failure in another way (a command result with a non-zero exit, an
 `ignore_errors` removal) passes `failed`, which gives the port's answer for that failure.
 FaultyRunner does that for a command runner: the commands that only read go to the inner runner
@@ -72,10 +77,13 @@ class FaultPlan:
 
     faults: tuple[Fault, ...] = ()
     calls: list[str] = field(default_factory=list)
+    # True: after a KILL fired, the process is dead (see the module's docstring).
+    dead_after_kill: bool = field(default=False, kw_only=True)
+    dead: bool = field(default=False, init=False)
 
     def arm(self, *faults: Fault) -> FaultPlan:
-        """A new run: no call seen yet; these faults (none: a run that records only)."""
-        self.faults, self.calls = faults, []
+        """A new run: no call seen yet, alive again; these faults (none: a run that records only)."""
+        self.faults, self.calls, self.dead = faults, [], False
         return self
 
     def fault_at(self, n: int) -> FaultMode | None:
@@ -87,6 +95,8 @@ class FaultPlan:
 
     def step[T](self, name: str, effect: Callable[[], T], failed: Callable[[OSError], T] | None = None) -> T:
         """Run one mutating call (effect) as the plan says; name is what the trace records."""
+        if self.dead:
+            raise Killed(f"dead: {name} never ran")
         self.calls.append(name)
         n = len(self.calls)
         mode = self.fault_at(n)
@@ -97,6 +107,7 @@ class FaultPlan:
             return failed(err)
         result = effect()
         if mode == FaultMode.KILL:
+            self.dead = self.dead_after_kill
             raise Killed(f"killed after call {n}: {name}")
         return result
 
