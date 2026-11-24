@@ -8483,6 +8483,9 @@ EOF
             printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
             {installer} mark --component btrfs:core done
             done_and_no_warning
+            # btrfs:core's files and state now: the seed, and any file of it an earlier test in this
+            # container left in root's record.
+            start="$({core})"
             [[ "$(printf 'kept\\n' | keep text)" == "written:   {dest}" ]]
             [[ "$(/usr/bin/python3 -I -c {shlex.quote(line_sha)} {rec} {dest})" == "$(sha256sum <{dest} | cut -d' ' -f1)" ]]
             done_and_no_warning
@@ -8492,7 +8495,7 @@ EOF
             [[ "$(printf 'kept\\n' | {installer} text-plan {dest} 0644 --component btrfs:core)" == "unchanged: {dest}" ]]
             [[ "$({installer} remove-text {dest})" == "removed:   {dest}" ]]
             [[ ! -e {dest} ]]
-            [[ "$({core})" == "{seed} done" ]]
+            [[ "$({core})" == "$start" ]]
             done_and_no_warning
             echo E2E-OK
             """,
@@ -8581,6 +8584,9 @@ EOF
             printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
             {installer} mark --component btrfs:core done
             core_done start
+            # btrfs:core's files and state now: the seed, and any file of it an earlier test in this
+            # container left in root's record.
+            start="$({core})"
             killed_then_again set 500M
             systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 500M /var"
             killed_then_again set 1G
@@ -8588,7 +8594,7 @@ EOF
             killed_then_again off
             [[ ! -e {dropin} ]]
             [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
-            [[ "$({core})" == "{seed} done" ]]
+            [[ "$({core})" == "$start" ]]
             echo E2E-OK
             """,
         ).stdout
