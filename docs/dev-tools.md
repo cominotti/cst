@@ -88,9 +88,10 @@ other work at the same time (another test run, a build, an agent).
   226 to 314. The suite took 13% less wall time at 4 and 8 workers, and 8% less
   at 16; the tests that fsync most were about 12 times faster. Keep the folder
   name short: the tests bind unix sockets below it, whose path may be at most
-  108 bytes. Remove the folder when done. Virtual environments, caches and
-  downloads stay under `~/.cache`. The peak RAM the folder uses was not
-  measured.
+  108 bytes. Remove the folder when done. tmpfs is RAM: virtual
+  environments, caches, downloads and any output that can grow large (the
+  logs or results of a harness) stay under `~/.cache`. The peak RAM the folder
+  uses was not measured.
 - **`nice -n 10` for local test runs.** It cost nothing measurable when nothing
   competed (at 8 to 24 workers the times with and without it were within each
   other's spread). How much it helps the machine's other users was not
