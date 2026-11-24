@@ -2768,7 +2768,7 @@ class ResticBackupThreadTest(unittest.TestCase):
                 pass
 
         with (
-            mock.patch.object(vm_adapters_restic.subprocess, "Popen", lambda *_a, **_k: _Child()),
+            mock.patch.object(vm_adapters_restic.subprocess, "Popen", autospec=True, return_value=_Child()),
             mock.patch.object(vm_adapters_restic.threading, "Timer", lingering),
         ):
             rc, summary = vm_adapters_restic.Restic(lambda *_: (0, "", "")).backup({}, ["backup"], 60, _Out())
