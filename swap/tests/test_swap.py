@@ -1894,6 +1894,41 @@ class SwapSettingsTest(_SwapScratch):
                             )
                         self.assertTrue(line.startswith("  ?  "), line)
 
+    def test_root_in_a_toolbox_is_still_sent_to_the_host_s_root(self) -> None:
+        # sudo cst swap plan in a toolbox: its root is root of the user namespace only, and the host's
+        # root-only files are closed to it. On the host, --root reads them: the notes say so, as for a user,
+        # and none says "even as root" or that apply stops.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        box = dataclasses.replace(self.env, as_root=True, in_container=True)
+        rows = {self.env.crypttab: "crypttab: swap0 line", self.env.fstab: "fstab: /dev/mapper/swap0 line"}
+        for path, row in rows.items():
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                with self.subTest(path=path, cmd=cmd):
+                    self.env = box
+                    rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={path}))
+                    self.assertEqual(rc, 0, err)
+                    line = next(x for x in out.splitlines() if row in x)
+                    self.assertEqual(
+                        line.split(row, 1)[1].strip(), f"needs root to read: on the host, cst swap {cmd} --root"
+                    )
+                    self.assertNotIn("even as root", out)
+        # No swap.conf, the fstab line of an older CST, a crypttab closed to it.
+        os.remove(self.env.settings_path)
+        self.assertIn(
+            "  ?         cst/swap.conf                          not written yet; an older CST set up swap0 (fstab):"
+            " apply writes it from crypttab, which needs root to read: on the host, cst swap plan --root",
+            self._plan_text(box, unreadable={self.env.crypttab}),
+        )
+        # A swap.conf closed to it: asked for --root, not refused.
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  ?         cst/swap.conf                          cannot be read as this user:", out)
+        self.assertNotIn("REFUSE    cst/swap.conf", out)
+
     def test_as_root_an_older_install_whose_crypttab_it_cannot_read_says_apply_refuses(self) -> None:
         # No /etc/cst/swap.conf, the fstab line an older CST wrote, and a crypttab root may not read:
         # the swap.conf row does not ask for --root, and apply stops with it before any write.
@@ -2953,8 +2988,18 @@ class SwapWiringTest(unittest.TestCase):
                 seats_dir="/x/run/systemd/seats",
                 prog="cst swap",
                 install_record="/x/var/lib/cst/installed.json",
+                in_container=True,
             ),
         )
+
+    def test_root_in_a_toolbox_is_not_the_host_s_root(self) -> None:
+        # Root of a toolbox's user namespace: the host's root-only files may be closed to it, so its notes
+        # still send the user to --root on the host (cst doctor's rule: uid 0 and no container).
+        for container, root, host_root in ((True, True, False), (False, True, True), (True, False, False)):
+            with self.subTest(container=container, root=root):
+                ctx = _FakeContext(container=container, root=root, etc_dir="/x/etc", run_dir="/x/run")
+                env = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere")
+                self.assertEqual((env.as_root, env.in_container, env.host_root), (root, container, host_root))
 
 
 class SwapStatusDiagnosisTest(_SwapScratch):

@@ -116,8 +116,16 @@ class SwapEnvironment:
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+    # Whether this runs in a toolbox or a container: its root is root of that user namespace only, so a
+    # file it cannot read may be one the host's root reads (on the host, --root).
+    in_container: bool = False
     # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
     test_seam: tuple[tuple[str, str, str], ...] = ()
+
+    @property
+    def host_root(self) -> bool:
+        """Root of the host, whom --root cannot help with a file it cannot read (cst doctor's rule too)."""
+        return self.as_root and not self.in_container
 
     @property
     def uresourced_view(self) -> UresourcedView:
@@ -192,10 +200,11 @@ class SwapEnvironment:
 _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
 
 
-def _marked_line_note(state: ManagedState, swap_name: str, prog: str, verb: str, *, as_root: bool) -> str:
+def _marked_line_note(state: ManagedState, swap_name: str, prog: str, verb: str, *, host_root: bool) -> str:
     """The note of the crypttab or fstab row: state_note's, except a file that cannot be read when the
-    reader already runs as root (as_root), which apply refuses before it writes anything."""
-    if as_root and state == OwnedState.UNREADABLE:
+    reader already runs as the host's root (host_root; root in a toolbox is not), which apply refuses
+    before it writes anything."""
+    if host_root and state == OwnedState.UNREADABLE:
         return _ROOT_CANNOT_READ
     return state_note(state, swap_name, prog, verb)
 
@@ -356,7 +365,7 @@ class SwapReports:
         """The partition from /etc/cst/swap.conf, or the one an older CST set up (swap.domain's
         resolve_settings, over this file system)."""
         facts = _FileSettingsFacts(self._fs, self._env, self._partition_size_sysfs)
-        return resolve_settings(facts, as_root=self._env.as_root)
+        return resolve_settings(facts, as_root=self._env.host_root)
 
     def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
         """The row of /etc/cst/swap.conf in plan and status."""
@@ -376,7 +385,7 @@ class SwapReports:
             older = f"not written yet; an older CST set up {res.note} (fstab)"
             note = (
                 f"{older}, and crypttab {_ROOT_CANNOT_READ}"
-                if env.as_root
+                if env.host_root
                 else f"{older}: apply writes it from crypttab, which needs root to read: on the host, {env.prog} {verb} --root"
             )
             return PlanItem("?", target, note)
@@ -410,7 +419,7 @@ class SwapReports:
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
         for state, row in ((c_state, f"crypttab: {spec.name} line"), (f_state, f"fstab: {spec.mapper_path} line")):
-            note = _marked_line_note(state, spec.name, env.prog, verb, as_root=env.as_root)
+            note = _marked_line_note(state, spec.name, env.prog, verb, host_root=env.host_root)
             file_items.append(PlanItem(describe_state(state), row, note))
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
