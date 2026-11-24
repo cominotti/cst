@@ -176,6 +176,12 @@ condition that sets a variable (`[[ -e f ]] && was_off=1`), the body of a
 one-line function (`unchanged() { cmp ... && cmp ...; }`: the caller's line
 checks its status), or a line ending in `|| { ...; exit 1; }`.
 
+`tests/e2e/test_suite_scripts.py`, run with the unit tests, reads both suite
+files and names, file:line, each line that starts with `!` and each check
+(`[[`, `[`, `test`, `grep`, `cmp`, `!`) followed by `&&` and a second check,
+unless the line has `||` or is a one-line function. It does not see a check
+chained to a function (`[[ ... ]] && unchanged`): write those on two lines too.
+
 ## Mixed-version tests
 
 The history of this repository was rewritten on 2026-11-18. The commit SHAs in fixture names (`tests/fixtures/legacy/<file>@<sha>`) and the `(#NN)` pull request numbers in older commit subjects refer to the history before that date; the fixtures' contents are what the names describe.
