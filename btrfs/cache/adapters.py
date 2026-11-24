@@ -354,17 +354,8 @@ def _undo(rt: _CacheMountRuntime, done: Sequence[CacheMountBinding], *, mounted:
     return [err for b in reversed(done) if (err := step(rt, b)) is not None]
 
 
-def _apply_attach(
-    snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, rt: _CacheMountRuntime
-) -> tuple[int, list[str]]:
-    """Folders, then mount --bind, then /etc/fstab and daemon-reload: a failure takes back the
-    binds this run mounted (and /etc/fstab), so no line is left that would mount at the next boot."""
-    blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
-    if blockers or snap.user is None:
-        return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
-
-    user = snap.user
-    lines = cache_seam_lines(rt.seam_root)
+def _prepare_attach_dirs(snap: CacheMountSnapshot, user: CacheMountUser, rt: _CacheMountRuntime) -> str | None:
+    """Make each binding's folders (and the scratchpad's tag); the ERROR line of the first failure."""
     for probe in snap.bindings:
         b = probe.binding
         h_src = _map_path(b.source, rt, read_only=False)
@@ -376,24 +367,85 @@ def _apply_attach(
             if not probe.target_exists:
                 _ensure_private_dir(h_tgt, user)
         except OSError as exc:
-            return 1, [*lines, f"ERROR: cannot prepare {b.source} and {b.target}: {exc.strerror or exc}"]
+            return f"ERROR: cannot prepare {b.source} and {b.target}: {exc.strerror or exc}"
+    return None
 
+
+def _bind_missing(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> tuple[list[CacheMountBinding], str | None]:
+    """mount --bind each binding not mounted yet; on a failure, the binds this run mounted are taken
+    back and the ERROR line comes with them."""
     mounted: list[CacheMountBinding] = []
     for probe in snap.bindings:
         if probe.mounted_from_source:
             continue
         err = _bind(rt, probe.binding)
         if err is not None:
-            return 1, [*lines, _error_after_undo(err, _undo(rt, mounted, mounted=True))]
+            return mounted, _error_after_undo(err, _undo(rt, mounted, mounted=True))
         mounted.append(probe.binding)
+    return mounted, None
+
+
+def _unbind_cst_mounts(
+    snap: CacheMountSnapshot, rt: _CacheMountRuntime
+) -> tuple[list[str], list[CacheMountBinding], str | None]:
+    """Unmount the binds CST made: the "kept:" lines of the mounts CST did not make, the binds
+    unmounted and, on a failure (the unmounted ones mounted again), the ERROR line."""
+    kept: list[str] = []
+    unmounted: list[CacheMountBinding] = []
+    for probe in snap.bindings:
+        if probe.mounted_other:
+            kept.append(f"kept: {probe.binding.target} has a mount CST did not make")
+        if not probe.mounted_from_source:
+            continue
+        err = _unbind(rt, probe.binding)
+        if err is not None:
+            return kept, unmounted, _error_after_undo(err, _undo(rt, unmounted, mounted=False))
+        unmounted.append(probe.binding)
+    return kept, unmounted, None
+
+
+def _commit_fstab_or_undo(
+    snap: CacheMountSnapshot,
+    new_fstab: str,
+    rt: _CacheMountRuntime,
+    done: Sequence[CacheMountBinding],
+    *,
+    mounted: bool,
+) -> str | None:
+    """Write /etc/fstab and reload systemd; on a failure, take back this run's binds (done) and give
+    the ERROR line."""
+    failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
+    if failed is None:
+        return None
+    undo_errors = [*_undo(rt, done, mounted=mounted), *failed.undo_errors]
+    return _error_after_undo(failed.cause, undo_errors)
+
+
+def _apply_attach(
+    snap: CacheMountSnapshot, parsed: CacheMountParsedArgs, rt: _CacheMountRuntime
+) -> tuple[int, list[str]]:
+    """Folders, then mount --bind, then /etc/fstab and daemon-reload: a failure takes back the
+    binds this run mounted (and /etc/fstab), so no line is left that would mount at the next boot."""
+    blockers = validate_attach_snapshot(snap, allow_nonempty=parsed.allow_nonempty)
+    if blockers or snap.user is None:
+        return 1, [f"ERROR: {msg}" for msg in (blockers or [snap.user_error or "invalid state"])]
+
+    user = snap.user
+    lines = cache_seam_lines(rt.seam_root)
+    error = _prepare_attach_dirs(snap, user, rt)
+    if error is not None:
+        return 1, [*lines, error]
+
+    mounted, error = _bind_missing(snap, rt)
+    if error is not None:
+        return 1, [*lines, error]
 
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_attach_fstab(cur_fstab, [p.binding for p in snap.bindings])
     if new_fstab != cur_fstab:
-        failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
-        if failed is not None:
-            undo_errors = [*_undo(rt, mounted, mounted=True), *failed.undo_errors]
-            return 1, [*lines, _error_after_undo(failed.cause, undo_errors)]
+        error = _commit_fstab_or_undo(snap, new_fstab, rt, mounted, mounted=True)
+        if error is not None:
+            return 1, [*lines, error]
     lines.extend(f"Mounted {b.source} -> {b.target}." for b in mounted)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
@@ -419,24 +471,17 @@ def _apply_detach(
     if blockers:
         return 1, [*lines, *(f"ERROR: {msg}" for msg in blockers)]
 
-    unmounted: list[CacheMountBinding] = []
-    for probe in snap.bindings:
-        if probe.mounted_other:
-            lines.append(f"kept: {probe.binding.target} has a mount CST did not make")
-        if not probe.mounted_from_source:
-            continue
-        err = _unbind(rt, probe.binding)
-        if err is not None:
-            return 1, [*lines, _error_after_undo(err, _undo(rt, unmounted, mounted=False))]
-        unmounted.append(probe.binding)
+    kept, unmounted, error = _unbind_cst_mounts(snap, rt)
+    lines.extend(kept)
+    if error is not None:
+        return 1, [*lines, error]
 
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_detach_fstab(cur_fstab, user.name, set(kinds))
     if new_fstab != cur_fstab:
-        failed = _commit_fstab(_map_path(FSTAB_PATH, rt, read_only=False), snap.fstab_text, new_fstab, rt)
-        if failed is not None:
-            undo_errors = [*_undo(rt, unmounted, mounted=False), *failed.undo_errors]
-            return 1, [*lines, _error_after_undo(failed.cause, undo_errors)]
+        error = _commit_fstab_or_undo(snap, new_fstab, rt, unmounted, mounted=False)
+        if error is not None:
+            return 1, [*lines, error]
     lines.extend(f"Unmounted {b.target}." for b in unmounted)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")

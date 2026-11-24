@@ -74,6 +74,24 @@ def mapper_names(sources: Collection[str], dm_names: Mapping[str, str]) -> froze
     return frozenset(names)
 
 
+def _crypttab_issue(raw: str, mappers: frozenset[str]) -> str | None:
+    """The missing-`nofail` warning of one /etc/crypttab line of the cache drive, else None."""
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    fields = stripped.split()
+    if len(fields) < _CRYPTTAB_MIN_FIELDS:
+        return None
+    name = fields[0]
+    is_cache_drive = name == _DEFAULT_MAPPER or name.startswith(_DEFAULT_MAPPER_PREFIXES) or name in mappers
+    if not is_cache_drive:
+        return None
+    opts = fields[_CRYPTTAB_OPT_IDX] if len(fields) > _CRYPTTAB_OPT_IDX else ""
+    if has_mount_option(opts, _NOFAIL):
+        return None
+    return f"/etc/crypttab entry {name!r} is missing '{_NOFAIL}' (boot could stall if NVMe is absent)"
+
+
 def parse_crypttab_cache_issues(
     crypttab_text: str | None, backing_sources: Collection[str], dm_names: Mapping[str, str] | None = None
 ) -> list[str]:
@@ -84,22 +102,7 @@ def parse_crypttab_cache_issues(
     if crypttab_text is None or not crypttab_text:
         return []
     mappers = mapper_names(backing_sources, dm_names or {})
-    issues: list[str] = []
-    for raw in crypttab_text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        fields = stripped.split()
-        if len(fields) < _CRYPTTAB_MIN_FIELDS:
-            continue
-        name = fields[0]
-        is_cache_drive = name == _DEFAULT_MAPPER or name.startswith(_DEFAULT_MAPPER_PREFIXES) or name in mappers
-        if not is_cache_drive:
-            continue
-        opts = fields[_CRYPTTAB_OPT_IDX] if len(fields) > _CRYPTTAB_OPT_IDX else ""
-        if not has_mount_option(opts, _NOFAIL):
-            issues.append(f"/etc/crypttab entry {name!r} is missing '{_NOFAIL}' (boot could stall if NVMe is absent)")
-    return issues
+    return [issue for raw in crypttab_text.splitlines() if (issue := _crypttab_issue(raw, mappers)) is not None]
 
 
 def _collect_active_bases(

@@ -458,7 +458,7 @@ def _parse_one_managed_line(raw: str) -> ManagedFstabEntry | None:
     fields = body.split()
     if len(fields) < _FSTAB_MIN_FIELDS:
         return None
-    tags = dict(tok.split("=", 1) for tok in meta.split() if "=" in tok)
+    tags = {key: value for key, sep, value in (tok.partition("=") for tok in meta.split()) if sep}
     kind = enum_member(CacheMountKind, tags.get("kind", ""))
     user = tags.get("user", "")
     if kind is None or not user:
@@ -660,6 +660,25 @@ def cache_seam_lines(seam_root: str) -> list[str]:
     return [f"test seam ({CACHE_SEAM_ROOT_ENV}): {seam_root}"] if seam_root else []
 
 
+def _base_status_line(base: BaseMountInfo) -> str:
+    if base.mounted:
+        flush_note = " [WARN: flushoncommit]" if has_mount_option(base.options, OPT_FLUSHONCOMMIT) else ""
+        return f"  {base.path:<18} mounted ({base.fstype}, uuid={base.uuid or 'unknown'}){flush_note}"
+    if base.in_fstab:
+        return f"  {base.path:<18} in fstab (not mounted)"
+    return f"  {base.path:<18} not provisioned"
+
+
+def _user_status_lines(snap: CacheMountSnapshot) -> list[str]:
+    if snap.user is None:
+        return [f"  target user        unavailable ({snap.user_error or 'unknown'})"]
+    lines = [f"  target user        {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})"]
+    for probe in snap.bindings:
+        b = probe.binding
+        lines.append(f"  {b.kind.value:<18} {b.source} -> {b.target} [{_binding_state_label(probe)}]")
+    return lines
+
+
 def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") -> list[str]:
     """Render lines for `cst btrfs cache status`."""
     lines = [*cache_seam_lines(seam_root), "Dedicated cache drive mounts:"]
@@ -667,22 +686,8 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
         return [*lines, f"  cannot list mounts: {snap.mounts_error}"]
     if snap.fstab_error is not None:
         return [*lines, f"  {snap.fstab_error}"]
-    for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD):
-        base = snap.bases[kind]
-        if base.mounted:
-            flush_note = " [WARN: flushoncommit]" if has_mount_option(base.options, OPT_FLUSHONCOMMIT) else ""
-            lines.append(f"  {base.path:<18} mounted ({base.fstype}, uuid={base.uuid or 'unknown'}){flush_note}")
-        elif base.in_fstab:
-            lines.append(f"  {base.path:<18} in fstab (not mounted)")
-        else:
-            lines.append(f"  {base.path:<18} not provisioned")
-    if snap.user is None:
-        lines.append(f"  target user        unavailable ({snap.user_error or 'unknown'})")
-    else:
-        lines.append(f"  target user        {snap.user.name} (uid={snap.user.uid}, home={snap.user.home})")
-        for probe in snap.bindings:
-            b = probe.binding
-            lines.append(f"  {b.kind.value:<18} {b.source} -> {b.target} [{_binding_state_label(probe)}]")
+    lines.extend(_base_status_line(snap.bases[kind]) for kind in (CacheMountKind.CACHE, CacheMountKind.SCRATCHPAD))
+    lines.extend(_user_status_lines(snap))
     other_users = sorted({e.user for e in snap.all_managed if snap.user is None or e.user != snap.user.name})
     if other_users:
         lines.append(f"  other fstab users  {', '.join(other_users)}")
