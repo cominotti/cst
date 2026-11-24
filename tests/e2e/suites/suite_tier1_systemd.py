@@ -5069,6 +5069,90 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_167_docker_volumes_nocow_recovers_the_other_volumes_past_one_it_cannot(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) at the boot after a
+        migration killed between its two renames in two volumes (each holds its old copy and its twin,
+        no _data), with a migration requested. The old copy of the volume listed first (a) is a mount
+        point (a tmpfs on it), so its rename back fails with EBUSY: migrate still restores and cleans
+        the other (b), keeps a's old copy, exits 0 and migrates nothing (the request stays, no boot is
+        counted). Once the tmpfs is gone, the next run puts a's original back. Before, a's failure
+        ended the loop and b kept no _data on that boot. The volumes are in a data root of the test's
+        own, which /etc/docker/daemon.json names."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-167-docker"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f'for m in {root}/volumes/*/_data.cow-old-*; do ! mountpoint -q "$m" || umount "$m" || umount -l "$m"; done; '
+            f"rm -rf {root} /var/lib/docker-volumes-nocow /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-167-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-167-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-167-made-docker /var/tmp/e2e-167-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_167 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-167-made-docker; }}
+            [ -d /etc/btrfs-setup ] || {{ mkdir -p /etc/btrfs-setup && touch /var/tmp/e2e-167-made-setup; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e /var/lib/docker-volumes-nocow ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$vols/v1" "$vols/v2"
+            # a: the volume the program lists first (os.listdir's order), so before the fix its
+            # failure stopped the loop before b.
+            a="$(/usr/bin/python3 -I -c 'import os, sys; print(os.listdir(sys.argv[1])[0])' "$vols")"
+            if [[ "$a" == v1 ]]; then b=v2; else b=v1; fi
+            for v in "$a" "$b"; do
+                mkdir -p "$vols/$v/_data.cow-old-1000000000" "$vols/$v/_data.nocow-new"
+                printf 'original %s\n' "$v" >"$vols/$v/_data.cow-old-1000000000/file"
+                printf 'twin %s\n' "$v" >"$vols/$v/_data.nocow-new/file"
+            done
+            mount -t tmpfs tmpfs "$vols/$a/_data.cow-old-1000000000"
+            : >"$flag"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_167 first migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            # b: restored and cleaned, whatever a does.
+            grep -qF "$b: restored the original after an interrupted migration" <<<"$out"
+            [[ "$(cat "$vols/$b/_data/file")" == "original $b" ]]
+            [[ "$(ls -A "$vols/$b")" == _data ]]
+            # a: its rename failed (EBUSY), its old copy and its twin stay, for the next boot.
+            grep -qF "$a: [Errno 16] Device or resource busy" <<<"$out"
+            grep -qF "recovery left for the next boot" <<<"$out"
+            grep -qF "1 volume(s) not recovered: migration left for the next boot" <<<"$out"
+            if grep -qF "$a: restored the original" <<<"$out"; then echo "$a restored through a mount point" >&2; exit 1; fi
+            [[ ! -e "$vols/$a/_data" ]]
+            mountpoint -q "$vols/$a/_data.cow-old-1000000000"
+            [[ -d "$vols/$a/_data.nocow-new" ]]
+            # Nothing migrated: the request stays and no boot is counted.
+            if grep -qF "rewriting" <<<"$out"; then echo "a boot that did not recover migrated" >&2; exit 1; fi
+            [[ -e "$flag" ]]
+            [[ ! -e /var/lib/docker-volumes-nocow/attempts ]]
+            # The next boot, the mount gone (the request dropped: only the recovery is under test).
+            umount "$vols/$a/_data.cow-old-1000000000"
+            rm -f "$flag"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_167 second migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "$a: restored the original after an interrupted migration" <<<"$out"
+            if grep -qF "not recovered" <<<"$out"; then echo "the second run did not recover" >&2; exit 1; fi
+            [[ "$(cat "$vols/$a/_data/file")" == "original $a" ]]
+            [[ "$(ls -A "$vols/$a")" == _data ]]
+            [[ "$(cat "$vols/$b/_data/file")" == "original $b" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
