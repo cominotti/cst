@@ -125,7 +125,7 @@ class CopyTreeNocowTest(unittest.TestCase):
         )
 
     def test_a_copy_has_c(self) -> None:
-        self.fx.machine.copy_tree(self.src, self.dst, True)
+        self.fx.machine.copy_tree(self.src, self.dst, nocow=True)
         self.assertEqual(self.copied(), ["disk.img", "sub", "sub/d2"])
         self.assertEqual([p for p in self.copied() if not self.fx.is_nocow(os.path.join(self.dst, p))], [])
 
@@ -134,13 +134,13 @@ class CopyTreeNocowTest(unittest.TestCase):
         arm_points(self.fx, plan, torn_rmtree=False)
         plan.arm((FaultMode.KILL, 1))
         with self.assertRaises(Killed):
-            self.fx.machine.copy_tree(self.src, self.dst, True)
+            self.fx.machine.copy_tree(self.src, self.dst, nocow=True)
         self.assertEqual(plan.calls, ["cp Bulk/emulators/android/avd.bulk-new"])
         self.assertEqual(self.copied(), ["disk.img", "sub", "sub/d2"])
         self.assertEqual([p for p in self.copied() if not self.fx.is_nocow(os.path.join(self.dst, p))], [])
 
     def test_a_copy_on_write_copy_has_no_c(self) -> None:
-        self.fx.machine.copy_tree(self.src, self.dst, False)
+        self.fx.machine.copy_tree(self.src, self.dst, nocow=False)
         self.assertEqual([p for p in self.copied() if self.fx.is_nocow(os.path.join(self.dst, p))], [])
 
 
@@ -198,7 +198,7 @@ class MachinePointsTest(unittest.TestCase):
         os.makedirs(self.fx.bulk_path("emulators/android"))
         self.plan.arm((FaultMode.KILL, 3))
         with self.assertRaises(Killed):
-            self.fx.user.u_mkdirs(self.fx.ctx.bulk, "emulators/android/avd", True)
+            self.fx.user.u_mkdirs(self.fx.ctx.bulk, "emulators/android/avd", nocow=True)
         self.assertEqual(self.plan.calls, ["chattr +C Bulk/emulators", "chattr +C Bulk/emulators/android", "os.mkdir"])
         self.assertTrue(os.path.isdir(self.fx.bulk_path("emulators/android/avd")))
         self.assertFalse(self.fx.is_nocow(self.fx.bulk_path("emulators/android/avd")))
