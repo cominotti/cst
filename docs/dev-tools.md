@@ -122,8 +122,9 @@ and `off` with their rollback, `cst btrfs iocost apply`'s "done last",
 `cst btrfs cache attach` and `detach` (no line in /etc/fstab for a bind
 that is not mounted), `cst toolchains prune apply rust:build` (a folder
 renamed to the trash before it is deleted, the leftovers of a run that
-died), and `cst bluetooth apply` and `revert` with their restarts and the
-record of the restarts still owed.
+died), `cst bluetooth apply` and `revert` with their restarts and the
+record of the restarts still owed, and btrfs-bulk's moves of an item into
+`~/Bulk` with the journal that finishes or undoes an interrupted one.
 `tests/fault_injection.py` tests them at every step, with the standard
 library only.
 
@@ -137,6 +138,12 @@ armed there, in one of three modes:
   `BaseException`, so the code's `except Exception` does not catch it);
 - `FAIL`: the call fails with ENOSPC and no effect; the run goes on;
 - `FAIL_FROM`: that call and every later one fail (a full disk stays full).
+
+`FaultPlan(dead_after_kill=True)` makes a `KILL` final: every later call
+raises `Killed` again, with no effect and no record, as a dead process runs
+no handler. Code that cleans up in an `except BaseException` handler
+(btrfs-bulk's copy) needs it: without it the cleanup runs after the kill,
+and the state a real kill leaves is never tried.
 
 A plan can hold several faults: a `FAIL` and then a `KILL` at each later
 call is a run that dies while it rolls back, and a `FAIL` then a second
@@ -167,6 +174,12 @@ run (recovery), and at the end (the same command again converges).
 - Give each run its own clock time when the code names files by it (a
   backup, a trash name): two runs in the same second would share a name a
   real machine never shares.
+- Replace a sleep that waits out a clock tick by a wait for the next tick,
+  not by a shorter sleep: btrfs-bulk sleeps 0.05 s so that a ctime taken as
+  a stamp never shares its tick with an earlier change, and
+  `btrfs/tests/bulk_fakes.py` `tick_wait` creates files until one's ctime
+  moves on (exact on a coarse clock and on a fine one, with no constant to
+  measure).
 - Call `stub_fsync(self)` in `setUp`: these tests check what a kill leaves,
   not durability, and an fsync per write makes them many times slower on a
   btrfs home. The fsync probes of `tests/probes.py` stay for the tests that
@@ -180,18 +193,38 @@ run (recovery), and at the end (the same command again converges).
 **What it cannot model.** A power loss and writes not yet flushed (`KILL`
 keeps every call that finished; the fsync probes cover durability); a call
 torn half-way (each call is atomic here; the nocow fakes' `copy_into` has
-its own `stop_after`); threads and timing (a thread that outlives a
+its own `stop_after`, and btrfs-bulk's deletion of a tree is two points,
+its first file and the rest: `arm_points(..., torn_rmtree=True)`); threads and timing (a thread that outlives a
 cancel is no failure at a call); the real systemd, btrfs and udev (the E2E
 tests, such as tier 1's `test_161` for scrub-limit's reload).
 
-**Cost.** The seven modules (`tests.test_fault_injection`,
+**btrfs-bulk.** `btrfs/tests/test_btrfs_bulk_faults.py` runs the
+program over the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`
+`BulkHome`: the real moves, cp included, with fakes only for subvolumes,
++C, the busy check, flatpak and btrfs-snapshot's convert), from eight start
+states (a plain move, the in-place +C rewrite, a +C copy out of /home, an
+old subvolume, a stale cache, an empty folder, a late write into the old
+tree, and writes on both sides). `arm_points` makes the user adapter's
+`os` calls (`FaultyOs`), the state files' writes and removals, cp
+(`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
+tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
+inside the repair; after a failure or a full disk, only a kill. One known
+gap is let through by name and counted per class: a fault that cuts the
+deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
+leaves a journal that every later repair keeps ("the copy ... was written
+to as well"), with the data back in /home.
+
+**Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
 `btrfs.tests.test_scrub_limit_faults`, `btrfs.tests.test_iocost_faults`,
 `btrfs.tests.test_cache_faults`, `toolchains.tests.test_prune_faults`,
-`bluetooth.tests.test_setup_faults`) together: 2.3 to 2.4 s wall at
-`--jobs 4` (`nice -n 10 /usr/bin/python3 -I -B tests/run_unit.py --jobs 4`
-on the seven, 3 runs), with fsync stubbed, so about the same on tmpfs and
-on a btrfs home.
+`bluetooth.tests.test_setup_faults`, `btrfs.tests.test_btrfs_bulk_faults`)
+together: 4.3 to 4.8 s wall at `--jobs 4` (`nice -n 10 /usr/bin/python3
+-I -B tests/run_unit.py --jobs 4` on the eight, 3 runs, on a workstation
+whose load average was 20 on 16 CPUs; the seven before bulk's took 2.7 s
+there, and 2.3 to 2.4 s unloaded). btrfs-bulk's alone is about 10 s of CPU
+in 24 classes, the longest (LateWriteKillTest) 1.5 s. fsync is stubbed, so
+the times are about the same on tmpfs and on a btrfs home.
 
 ## Where the virtual environment lives
 
@@ -689,6 +722,20 @@ not derive from it.
   revert again converges. One known gap is let through by name: a full
   revert whose removal fails after its disable leaves btrfs:iocost done
   with the service disabled, until the next full apply or revert.
+- `mbt_bulk_items.py`: btrfs-bulk's classify, apply and recover over four
+  items (a plain move, one nested in it, a NOCOW item, an old subvolume),
+  through the unit tests' scratch home (`btrfs/tests/bulk_fakes.py`: real
+  renames and `cp`, fakes only for subvolumes, +C, the busy check, flatpak
+  and the subvolume convert). The start puts each item absent, with data,
+  empty, in place, as a subvolume, with copy-on-write files or with data on
+  both sides; the rules are apply and recover with a kill, a failure or a
+  full disk at one of their first 20 points, an app's write into an item's
+  folder, busy, keep and settle. After every step no file the model holds
+  is lost (it is at the item's path, or at a path its journal names), no
+  `.bulk-old-` tree is without a journal, classify agrees with an oracle
+  over the disk, and a run leaves a kept item alone; settle converges, and
+  a further apply or recover changes nothing. It has no torn calls and no
+  writes during a call: the fault module above has those.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
@@ -696,7 +743,7 @@ depend on `TMPDIR`. A machine over adapters that write through
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
 The cache and scrub-limit machines write real files under a temporary
-folder. The iocost machine writes only io.cost.qos, its sysfs tree and
+folder; the bulk machine too, and it runs `cp` there. The iocost machine writes only io.cost.qos, its sysfs tree and
 the managed-devices file there: btrfs:iocost's installed files and the
 install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
 does not cover how `LocalInstallTarget` writes them (modes, fsync,

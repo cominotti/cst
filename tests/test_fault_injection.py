@@ -85,6 +85,47 @@ class FaultPlanTest(unittest.TestCase):
             fx.call(1)
         self.assertEqual(fx.done, [1])
 
+    def test_without_dead_after_kill_a_handler_still_runs_after_the_kill(self) -> None:
+        plan = FaultPlan().arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        # The code under test cleans up in an `except BaseException` handler: here it runs.
+        with self.assertRaises(Killed):
+            try:
+                fx.call(1)
+            except BaseException:
+                fx.call(2)
+                raise
+        self.assertEqual(fx.done, [1, 2])
+        self.assertEqual(plan.calls, ["call 1", "call 2"])
+
+    def test_dead_after_kill_runs_no_call_after_the_kill(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        with self.assertRaises(Killed):
+            try:
+                fx.call(1)
+            except BaseException:
+                fx.call(2)  # a dead process runs no handler: Killed again, no effect
+                raise
+        with self.assertRaises(Killed):
+            fx.call(3)
+        self.assertEqual(fx.done, [1])
+        self.assertEqual(plan.calls, ["call 1"])
+
+    def test_dead_after_kill_is_alive_again_after_arm(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.KILL, 1))
+        fx = Effects(plan)
+        with self.assertRaises(Killed):
+            fx.run(2)
+        plan.arm()
+        self.assertEqual(fx.run(2), [1, 2])
+        self.assertEqual(fx.done, [1, 1, 2])
+
+    def test_dead_after_kill_changes_nothing_before_a_kill(self) -> None:
+        plan = FaultPlan(dead_after_kill=True).arm((FaultMode.FAIL, 2))
+        fx = Effects(plan)
+        self.assertEqual(fx.run(3), [1, "failed 2", 3])
+
     def test_fail_at_k_has_no_effect_and_the_next_call_runs(self) -> None:
         plan = FaultPlan().arm((FaultMode.FAIL, 2))
         fx = Effects(plan)
