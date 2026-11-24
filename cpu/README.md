@@ -664,7 +664,12 @@ already idle (its settings holding) stays idle until `off`, and so does a
 game that does not use GameMode (with `game on` by hand). Start such a game
 from the desktop or Steam, or with `--slice=app-NAME.slice`. Apps that GNOME
 or Flatpak start (`app-*.scope`) and `flatpak-session-helper.service` are
-not touched.
+not touched. Nor is a folder whose name is no unit name (a blank, a byte that
+is not UTF-8, a character systemd never puts in a unit name): systemd never
+makes one, but a process of yours can `mkdir` one in your user manager's
+cgroup tree, and `set-property` could never act on it. (Versions before
+2026-11 wrote a record for it and ran a `set-property` that fails; for a
+name that is not UTF-8, one more of each at every watchdog run.)
 
 To keep a job out of this, give it a slice under one of the boxes CST
 already handles. `systemd-run --user --slice=user-NAME.slice` nests under the

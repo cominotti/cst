@@ -7213,6 +7213,89 @@ PY
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.CPU)
+    def test_183_cpu_game_profile_leaves_a_folder_whose_name_is_no_unit_name_alone(self) -> None:
+        """The real game profile, on for tester; in the real user manager's cgroup tree, as root, folders
+        whose name is no unit name ('a b.slice', and one with byte 0xff): 'on' and three ticks never name
+        them, game.state stays byte for byte as 'on' left it. And where lushtext runs its jobs: the scope
+        lushtext-cap-1234-5678.scope in user-lushtext.slice (under the toolboxes' user.slice), a valid
+        unit name, is covered by user.slice's rule only: no record, set-property or output line names it
+        or its slice, and it gets no override of its own. The old profile recorded both folders, ran a
+        set-property on them that the real systemd refuses, and wrote one more record of the 0xff name
+        at every tick."""
+        self.addCleanup(
+            exec_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\\xff.slice' 2>/dev/null || true
+            systemctl --user -M tester@ stop lushtext-cap-1234-5678.scope e2e183-launch.service 2>/dev/null || true
+            printf '%s\\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf || true
+            python3 -I -B /opt/cst-rw/cpu/game-profile off || true
+            rm -f /etc/cpu-setup/cpu-setup.conf
+            if [[ -e /tmp/e2e-183-conf.bak ]]; then mv /tmp/e2e-183-conf.bak /etc/cpu-setup/cpu-setup.conf; fi
+            rmdir /etc/cpu-setup 2>/dev/null || true
+            rm -rf /run/cpu-setup
+            systemctl daemon-reload || true
+            """,
+            check=False,
+        )
+        out = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            [[ ! -e /etc/cpu-setup/cpu-setup.conf ]] || cp -a /etc/cpu-setup/cpu-setup.conf /tmp/e2e-183-conf.bak
+            install -d /etc/cpu-setup /run/cpu-setup
+            printf '%s\n' "TARGET_USER='tester'" "BUILD_CPUS='0'" "P_CORES='0'" >/etc/cpu-setup/cpu-setup.conf
+            gp() { python3 -I -B /opt/cst-rw/cpu/game-profile "$@"; }
+            st=/run/cpu-setup/game.state
+            uid=$(id -u tester)
+            ucg=/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service
+            job=lushtext-cap-1234-5678.scope
+            ushow() { systemctl --user -M tester@ show -P "$1" "$2"; }
+            # Where lushtext runs its jobs (a --user --scope needs a caller the user manager may move).
+            systemd-run --user -M tester@ --quiet --unit=e2e183-launch \
+                -E DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+                systemd-run --user --scope --quiet --slice=user-lushtext.slice --unit="$job" sleep 300
+            for _ in $(seq 50); do [[ "$(ushow ActiveState "$job")" == active ]] && break; sleep 0.1; done
+            [[ "$(ushow ActiveState "$job")" == active ]]
+            [[ "$(ushow Slice "$job")" == user-lushtext.slice ]]
+            test -d "$ucg/user.slice/user-lushtext.slice/$job"
+            job_own=$(ushow CPUWeight "$job")
+            mkdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            touch /run/cpu-setup/manual
+            # The names as the journal, systemctl's refusal and printf %q write them.
+            names=(-e 'a b.slice' -e 'a\ b.slice' -e $'x\xff.slice' -e 'x\xff.slice' -e 'x\377.slice'
+                -e lushtext-cap -e user-lushtext)
+            named() {
+                if LC_ALL=C grep -qaF "${names[@]}" <<<"$got"; then
+                    echo "$1 named a folder:" >&2; cat -v <<<"$got" >&2; cat -v "$st" >&2; exit 1
+                fi
+            }
+            got=$(gp on 2>&1)  # systemctl's own refusals too
+            named on
+            [[ "$(ushow CPUWeight user.slice)" != "" ]]
+            sum=$(sha256sum "$st")
+            for n in 1 2 3; do
+                got=$(gp tick 2>&1)
+                named "tick $n"
+                [[ "$(sha256sum "$st")" == "$sum" ]] || { echo "tick $n changed game.state:" >&2; cat -v "$st" >&2; exit 1; }
+            done
+            if LC_ALL=C grep -qaF "${names[@]}" "$st"; then
+                echo "a record names a folder:" >&2; cat -v "$st" >&2; exit 1
+            fi
+            test ! -e "/run/user/$uid/systemd/transient/$job.d/50-CPUWeight.conf"
+            test ! -e "/run/user/$uid/systemd/user.control/user-lushtext.slice.d/50-CPUWeight.conf"
+            [[ "$(ushow CPUWeight "$job")" == "$job_own" ]]
+            gp off
+            rmdir "$ucg/a b.slice" "$ucg/"$'x\xff.slice'
+            systemctl --user -M tester@ stop "$job" e2e183-launch.service 2>/dev/null || true
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.SMOKE, E2ETag.VM, E2ETag.TOOLCHAINS)
     def test_73_setup_scripts_route_as_real_root(self) -> None:
         """vm-setup.sh and toolchains-setup.sh started as root (as sudo starts them), from a

@@ -15,7 +15,8 @@ override of machine.slice's CPUWeight from before the game ('existed').
 Between the profile's calls the machine changes the world: the game starts or ends (a GameMode
 client in /proc), the by-hand mark comes and goes, Docker containers and Steam scopes start, boxes
 of the user manager appear next to the game (a slice, or a systemd-run scope in app.slice; with the
-game inside or not), a setting the profile made drifts (uresourced, someone else's daemon-reload),
+game inside or not), a folder whose name is no unit name appears there (a blank, a byte that is not
+UTF-8: made by hand), a setting the profile made drifts (uresourced, someone else's daemon-reload),
 and an outside daemon-reload runs. A tick that asks systemd to stop cpu-game.service is followed by
 its ExecStop ('off'), one that asks to start it by 'on'.
 
@@ -53,12 +54,14 @@ value it sets, every value systemd shows, every sysfs file; the drop-ins and the
    a box whose record a faulted step wrote without its setting (its set-property failed, or the
    process died between the two: O2), and a box whose setting an 'off' that was killed undid while
    game.state stayed (O6), are set again by the next whole tick, with no new record.
+5. A folder whose name is no unit name (O5) is left alone, after every step: no record of
+   game.state or game.leftovers names it and no systemctl call of the last step does.
 
 Not modelled: the lock between processes (one call at a time here), cpu-power, the GPU, a settings
 file with problem lines and a TARGET_USER without an account (the unit tests cover the refusals),
 a record cut short in the middle of its write (tests/mbt/mbt_game_state.py Q5), a full /run from
-some point on (FullRunFolderTest), a failing daemon-reload, real systemd's merge of drop-ins
-(test_07, test_08), and box names that are not UTF-8 (O5: mbt_game_state.py Q1 pins that gap).
+some point on (FullRunFolderTest), a failing daemon-reload, and real systemd's merge of drop-ins
+(test_07, test_08).
 """
 
 from collections.abc import Callable, Sequence
@@ -108,6 +111,8 @@ MEMORY_LOW_BYTES: Final = "17179869184"  # 16G as systemctl show gives it
 ON_POINTS: Final = 40
 FEW_POINTS: Final = 8
 MAX_SCOPES: Final = 3
+# Folders whose name is no unit name (O5): a blank, and a byte that is not UTF-8 (as glob gives it).
+ODD_NAMES: Final = ("a b.slice", os.fsdecode(b"x\xff.slice"), os.fsdecode(b"app.slice/run-\xff.scope"))
 STEPS: Final = 30
 # The profile module's os functions that are points of a kill (never a failure: none of them fails with
 # ENOSPC, and the profile suppresses only the errors those calls give).
@@ -298,6 +303,7 @@ class GameProfileMachine(RuleBasedStateMachine):
         self.cpuset = False
         self.scopes = 0
         self.boxes: dict[str, str] = {}  # unit -> its cgroup folder
+        self.odd: list[str] = []  # the names of the folders odd_box made
         self.log = io.StringIO()
 
     @override
@@ -539,6 +545,13 @@ class GameProfileMachine(RuleBasedStateMachine):
                 fh.write("1\n")
         self.boxes[unit] = folder
 
+    @precondition(lambda self: not self.odd)
+    @rule(name=st.sampled_from(ODD_NAMES))
+    def odd_box(self, name: str) -> None:
+        """A folder whose name is no unit name, made by hand in the user manager's tree."""
+        os.makedirs(os.path.join(self.scratch.ucg, *name.split("/")))
+        self.odd.append(os.path.basename(name))
+
     @precondition(lambda self: os.path.exists(self.paths.state))
     @rule(data=st.data())
     def drift(self, data: st.DataObject) -> None:
@@ -617,6 +630,16 @@ class GameProfileMachine(RuleBasedStateMachine):
                 intended = fh.read()
         drifts = self.profile(self.systemd).drift(intended)
         assert unheld(drifts, records(text)) == drifts, f"tick left a drift game.state holds: {drifts}"
+
+    @invariant()
+    def no_odd_box_is_named(self) -> None:
+        """Point 5 of the docstring."""
+        text = self.state_text() + self.read(self.paths.leftovers)
+        for name in self.odd:
+            shown = name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")  # as game.state reads back
+            assert shown not in text, f"a record names {shown!r}: {text}"
+            named = [a for a in self.systemd.actions if name in a or shown in a]
+            assert named == [], f"a systemctl call names {shown!r}: {named}"
 
     @invariant()
     def every_change_has_its_record(self) -> None:

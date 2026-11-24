@@ -43,6 +43,7 @@ from cpu.game.domain import (
     Drift,
     cut_tail,
     drifted,
+    escaped_unit,
     escapes_in_state,
     expand_cpus,
     has_prop_record,
@@ -52,6 +53,7 @@ from cpu.game.domain import (
     records,
     game_settings,
     unheld,
+    unit_name_valid,
 )
 from cpu.game.domain.boxes import Unset, intended_covers, set_again_text, setting_holds, unset_settings
 from cpu.game.domain.leftovers import (
@@ -279,6 +281,42 @@ class GameProfileCase(unittest.TestCase):
 
 
 class PureRulesTest(unittest.TestCase):
+    def test_unit_name_valid(self) -> None:
+        for name in (
+            "lushtext.slice",
+            "background.slice",
+            "run-u7.service",
+            "run-r1a2.scope",
+            "lush\\x2dbatch.slice",  # systemd's escape of a dash, with its backslash
+            "user-lushtext.slice",
+            "lushtext-cap-1234-5678.scope",  # where lushtext runs its jobs
+            "a@b.service",
+            "a@b@c.service",  # systemd checks only the first '@'
+            "a:b_c.target",
+            "a" * 249 + ".slice",  # 255 characters
+        ):
+            self.assertTrue(unit_name_valid(name), name)
+        for name in (
+            "a b.slice",
+            os.fsdecode(b"x\xff.slice"),  # a byte that is not UTF-8, as glob gives it
+            "caf\N{LATIN SMALL LETTER E WITH ACUTE}.slice",
+            "",
+            ".slice",
+            "slice",
+            "a.notatype",
+            "a.slice.",
+            "@a.service",
+            "a" * 250 + ".slice",  # 256 characters
+        ):
+            self.assertFalse(unit_name_valid(name), repr(name))
+
+    def test_escaped_unit_leaves_out_known_slices_and_names_that_are_no_unit(self) -> None:
+        self.assertEqual(escaped_unit("_cpu.slice"), "cpu.slice")
+        self.assertEqual(escaped_unit("lushtext.slice"), "lushtext.slice")
+        self.assertIsNone(escaped_unit("app.slice"))
+        self.assertIsNone(escaped_unit("a b.slice"))
+        self.assertIsNone(escaped_unit(os.fsdecode(b"x\xff.slice")))
+
     def test_expand_cpus(self) -> None:
         self.assertEqual(expand_cpus("0-3,6,12-14"), ["0", "1", "2", "3", "6", "12", "13", "14"])
         self.assertEqual(expand_cpus("0-1,,5,"), ["0", "1", "5"])
@@ -1989,6 +2027,46 @@ class GameProfileEscapesTest(GameProfileCase):
         _, actions = self.run_profile("tick")
         self.assertEqual(self.sets(actions), [])
         self.assertEqual(self.read(self.state), grown)
+
+    def test_a_folder_whose_name_is_no_unit_name_is_left_alone(self) -> None:
+        # O5: a folder made by hand in the user manager's tree, with a blank or a byte that is not UTF-8
+        # in its name: no unit systemd could have. The old profile recorded and set it on every run
+        # (game.state is read back with "replace", so the record never matched).
+        self.tree()
+        bad, replaced = os.fsdecode(b"\xff"), "\N{REPLACEMENT CHARACTER}"
+        for name in ("a b.slice", f"x{bad}.slice", f"app.slice/run-{bad}.scope"):
+            self.cg(*name.split("/"))
+        out, actions = self.run_profile("on")
+        self.write(self.manual, "")
+        state = self.read(self.state)
+        self.assertIn(f"{USR} set-property --runtime lushtext.slice CPUWeight=idle", self.sets(actions))
+        for _ in range(3):
+            self.assertFalse([a for a in self.sets(actions) if "a b" in a or replaced in a or bad in a])
+            self.assertNotIn("a b.slice", out)
+            self.assertNotIn(replaced, out)
+            out, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+            self.assertEqual(self.read(self.state), state)
+        self.assertNotIn("a b", state)
+        self.assertNotIn(replaced, state)
+
+    def test_lushtext_jobs_under_user_slice_are_covered_by_its_rule_only(self) -> None:
+        # Where lushtext runs its jobs: a valid unit name under the toolboxes' user.slice, whose own
+        # rule covers it; 'on' and the ticks never name the job or its slice, and a tick with every
+        # value holding runs no set-property (lushtext measures timing there).
+        self.tree()
+        self.cg("user.slice", "user-lushtext.slice", "lushtext-cap-1234-5678.scope", procs=(5151,))
+        _, actions = self.run_profile("on")
+        self.write(self.manual, "")
+        self.assertTrue([a for a in self.sets(actions) if f"{USR} set-property --runtime user.slice " in a])
+        for _ in range(2):
+            names = [a for a in self.sets(actions) if "lushtext-cap" in a or "user-lushtext" in a]
+            self.assertEqual(names, [])
+            _, actions = self.run_profile("tick")
+            self.assertEqual(self.sets(actions), [])
+        state = self.read(self.state)
+        self.assertNotIn("lushtext-cap", state)
+        self.assertNotIn("user-lushtext", state)
 
     def test_off_reverts_them_and_tolerates_units_that_are_gone(self) -> None:
         self.tree()
