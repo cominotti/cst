@@ -34,11 +34,15 @@ from cst_core.adapters.runtime import (
 from cst_core.domain.install import Component, InstallReportWord
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.domain.text import YES_WORDS
+from cst_core.domain.values import MINUTE
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, UnitName
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
 _BTRFS_SYSFS: Final = "/sys/fs/btrfs"
+# The longest a daemon-reload this run's own write did not ask for may take (systemd was behind, or
+# could not say): a PID 1 that does not answer must not hang a run with nothing to change.
+_CATCH_UP_RELOAD_TIMEOUT: Final = MINUTE
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,17 +289,18 @@ def _apply_conf(
 def _reload_or_roll_back(
     cmd_runner: CommandRunnerPort,
     paths: ScrubPaths,
-    restore_conf: Callable[[], str | None],
-    dropin_before: str | None,
+    restore_files: Callable[[], list[str | None]],
     *,
     core_done: bool,
+    timeout: float | None,
 ) -> str | None:
-    """systemctl daemon-reload; when it fails, snapshots.conf and the drop-in go back (and btrfs:core is
-    marked done again) and the ERROR line comes back."""
-    dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+    """systemctl daemon-reload (at most timeout seconds; None: no limit); when it fails, snapshots.conf and
+    the drop-in go back (restore_files: what failed of each, the drop-in last; and btrfs:core is marked
+    done again) and the ERROR line comes back."""
+    dr = SystemctlAdapter(cmd_runner, timeout=timeout, on_host=SystemctlHost.LOCAL).daemon_reload_result()
     if dr.returncode == 0:
         return None
-    failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
+    failures = restore_files()
     if core_done and failures[-1] is None:
         # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
         rc_m, err_m = _mark_core_done(cmd_runner, paths)
@@ -303,40 +308,48 @@ def _reload_or_roll_back(
     return _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)
 
 
-def _systemd_behind(cmd_runner: CommandRunnerPort) -> bool:
-    """Whether systemd has not loaded the scrub unit's files as they are on disk; also when systemctl
-    cannot say (exit 0 must mean systemd loaded the limit)."""
-    return _need_daemon_reload(cmd_runner, on_host=SystemctlHost.LOCAL) is not False
-
-
-def _reload_what_is_on_disk(cmd_runner: CommandRunnerPort) -> str | None:
-    """daemon-reload when only systemd's view was behind (this run changed no file: nothing to roll back);
-    the ERROR line when it fails."""
-    dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+def _reload_what_is_on_disk(cmd_runner: CommandRunnerPort, *, behind: bool | None) -> str | None:
+    """daemon-reload when only systemd's view was behind, or systemctl could not say (behind None; this
+    run changed no file: nothing to roll back), at most _CATCH_UP_RELOAD_TIMEOUT; the ERROR line when it
+    fails."""
+    dr = SystemctlAdapter(
+        cmd_runner, timeout=_CATCH_UP_RELOAD_TIMEOUT, on_host=SystemctlHost.LOCAL
+    ).daemon_reload_result()
     if dr.returncode == 0:
         return None
+    loaded = "systemd has not loaded them" if behind is True else "systemctl cannot say whether systemd has loaded them"
     return (
         f"ERROR: {dr.failure('systemctl daemon-reload')}; snapshots.conf and the drop-in are as asked, "
-        "systemd has not loaded them (run systemctl daemon-reload once it works)"
+        f"{loaded} (run systemctl daemon-reload once it works)"
     )
 
 
 def _load_in_systemd(
     cmd_runner: CommandRunnerPort,
     inst_lines: Sequence[str],
-    reload_or_roll_back: Callable[[], str | None],
+    reload_or_roll_back: Callable[[float | None], str | None],
     *,
     conf_changed: bool,
 ) -> tuple[str | None, list[str]]:
     """daemon-reload when this run changed the drop-in, or when systemd has not loaded it as it is on
-    disk (an earlier run stopped before its daemon-reload): (the ERROR line or None, the lines to add)."""
+    disk (an earlier run stopped before its daemon-reload), or systemctl cannot say (exit 0 must mean
+    systemd loaded the limit): (the ERROR line or None, the lines to add)."""
     if any(line.startswith((InstallReportWord.WRITTEN, InstallReportWord.REMOVED)) for line in inst_lines):
-        return reload_or_roll_back(), []
-    if not _systemd_behind(cmd_runner):
+        return reload_or_roll_back(None), []
+    behind = _need_daemon_reload(cmd_runner, on_host=SystemctlHost.LOCAL)
+    if behind is False:
         return None, []
     # This run changed no file but snapshots.conf, or none at all: then there is nothing to roll back.
-    error = reload_or_roll_back() if conf_changed else _reload_what_is_on_disk(cmd_runner)
-    return error, [f"reloaded:  systemd had not loaded {SCRUB_SERVICE} as it is on disk (an earlier run stopped)"]
+    if conf_changed:
+        error = reload_or_roll_back(_CATCH_UP_RELOAD_TIMEOUT)
+    else:
+        error = _reload_what_is_on_disk(cmd_runner, behind=behind)
+    why = (
+        f"systemd had not loaded {SCRUB_SERVICE} as it is on disk (an earlier run stopped)"
+        if behind is True
+        else f"systemctl could not say whether systemd had loaded {SCRUB_SERVICE} as it is on disk"
+    )
+    return error, [f"reloaded:  {why}"]
 
 
 def _mark_core_after_write(
@@ -385,8 +398,11 @@ def scrub_limit_apply(
     if target_limit is None:
         _remove_if_empty(os.path.dirname(paths.dropin_path))
 
-    def reload_or_roll_back() -> str | None:
-        return _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
+    def restore_files() -> list[str | None]:
+        return [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
+
+    def reload_or_roll_back(timeout: float | None) -> str | None:
+        return _reload_or_roll_back(cmd_runner, paths, restore_files, core_done=core_done, timeout=timeout)
 
     error, note = _load_in_systemd(cmd_runner, inst_lines, reload_or_roll_back, conf_changed=conf_changed)
     if error is not None:

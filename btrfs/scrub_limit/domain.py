@@ -232,12 +232,19 @@ def scrub_limit_plan_reload_lines(
 ) -> list[str]:
     """The plan's line for the daemon-reload set or off runs although the drop-in stays as it is (the
     drop-in's own line names the reload when it changes): need_reload is NeedDaemonReload of SCRUB_SERVICE,
-    True when systemd has not loaded its files as they are on disk, None when systemctl cannot say."""
+    True when systemd has not loaded its files as they are on disk, None when systemctl cannot say (set|off
+    then asks again and reloads only if it cannot say either, or systemd answers yes: plan from a toolbox
+    asks the host through flatpak-spawn, which can fail where set|off on the host does not)."""
     dropin_stays = dropin_text == (None if target_limit is None else render_scrub_dropin(target_limit))
     if need_reload is False or not dropin_stays:
         return []
-    why = "systemd has not loaded it as it is on disk" if need_reload else "systemctl cannot say whether it is loaded"
-    return [f"  reload:    {SCRUB_SERVICE} ({why}) + systemctl daemon-reload"]
+    if need_reload:
+        return [f"  reload:    {SCRUB_SERVICE} (systemd has not loaded it as it is on disk) + systemctl daemon-reload"]
+    unknown = (
+        f"  reload:    {SCRUB_SERVICE} (systemctl cannot say whether it is loaded) + systemctl daemon-reload,"
+        " unless set|off then gets an answer that it is"
+    )
+    return [unknown]
 
 
 def scrub_limit_plan_lines(

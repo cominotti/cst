@@ -43,7 +43,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.runtime import lc_ctype_handover
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import GeneratedKind, Owner
-from cst_core.ports import CommandResult
+from cst_core.ports import CommandFault, CommandResult
 from tests.fault_injection import no_space
 from tests.repo_files import REPO
 
@@ -543,6 +543,93 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 0, lines)
         self.assertEqual(runner.calls[-1], ["systemctl", "daemon-reload"])
+        # Not "systemd had not loaded": nobody could say so.
+        self.assertEqual(
+            lines[-1],
+            "reloaded:  systemctl could not say whether systemd had loaded btrfs-scrub-weekly.service as it is on disk",
+        )
+
+    def _pid1_not_answering(self) -> tuple[ScrubFakeRunner, list[object]]:
+        """A runner whose systemctl show and daemon-reload time out (PID 1 does not answer): each call
+        with a time limit comes back as timed out; a daemon-reload with none would wait for ever, so the
+        test fails there. The list gets the timeout each daemon-reload was given."""
+        reloads: list[object] = []
+
+        class Stuck(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) in (["systemctl", "show"], ["systemctl", "daemon-reload"]):
+                    self.calls.append(list(argv))
+                    if argv[1] == "daemon-reload":
+                        reloads.append(kw.get("timeout"))
+                    if kw.get("timeout") is None:
+                        raise AssertionError(f"{' '.join(argv)} with no time limit: the run would hang")
+                    return CommandResult(
+                        124, "", f"timed out after {kw['timeout']}s", argv=tuple(argv), fault=CommandFault.TIMEOUT
+                    )
+                return super().run(argv, input_text=input_text, **kw)
+
+        return Stuck(), reloads
+
+    def test_a_pid_1_that_does_not_answer_does_not_hang_a_run_with_nothing_to_change(self) -> None:
+        self._as_asked("500M")
+        conf_before, dropin_before = self._read(self.conf), self._read(self.dropin)
+        runner, reloads = self._pid1_not_answering()
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1, lines)
+        self.assertEqual(reloads, [60])
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: timed out after 60s; snapshots.conf and the drop-in are as"
+            " asked, systemctl cannot say whether systemd has loaded them (run systemctl daemon-reload once it"
+            " works)",
+        )
+        self.assertEqual((self._read(self.conf), self._read(self.dropin)), (conf_before, dropin_before))
+
+    def test_a_pid_1_that_does_not_answer_does_not_hang_a_run_that_changes_only_snapshots_conf(self) -> None:
+        # The drop-in as asked, snapshots.conf without SCRUB_LIMIT: the reload is still this run's catch-up,
+        # with its time limit; when it fails, snapshots.conf goes back.
+        self._as_asked("500M")
+        self._write(self.conf, "NAS_ENABLED=1\n")
+        runner, reloads = self._pid1_not_answering()
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1, lines)
+        self.assertEqual(reloads, [60])
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: timed out after 60s; previous configuration restored."
+            " (run systemctl daemon-reload once it works)",
+        )
+        self.assertEqual(self._read(self.conf), "NAS_ENABLED=1\n")
+
+    def test_a_reload_this_run_s_own_write_asks_for_keeps_no_time_limit(self) -> None:
+        # The drop-in written by this run: its daemon-reload is the one of every change, as before.
+        seen: list[object] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv) == ["systemctl", "daemon-reload"]:
+                    seen.append(kw.get("timeout"))
+                return super().run(argv, input_text=input_text, **kw)
+
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=Recording())
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(seen, [None])
+
+    def test_plan_cannot_say_and_set_gets_an_answer_runs_no_reload(self) -> None:
+        # plan from a toolbox may not reach the host's systemctl while set on the host does: plan's line
+        # says the reload depends on that answer, and set with "no" runs none.
+        self._as_asked("500M")
+        asking = ScrubFakeRunner()
+        asking.fail_on = {"systemctl show"}
+        _, plan = scrub_limit_plan(self.paths, "500M", runner=asking)
+        self.assertIn("unless set|off then gets an answer that it is", plan[-1])
+        applied = ScrubFakeRunner()
+        applied.need_daemon_reload = "no\n"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=applied)
+        self.assertEqual(rc, 0, lines)
+        self.assertNotIn(["systemctl", "daemon-reload"], applied.calls)
 
     def test_plan_shows_the_daemon_reload_apply_runs(self) -> None:
         # The drop-in as asked: apply reloads systemd only when NeedDaemonReload is yes or systemctl
@@ -552,7 +639,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
             " + systemctl daemon-reload",
             "no\n": None,
             "fails": "  reload:    btrfs-scrub-weekly.service (systemctl cannot say whether it is loaded)"
-            " + systemctl daemon-reload",
+            " + systemctl daemon-reload, unless set|off then gets an answer that it is",
         }
         for limit in ("500M", None):
             for answer, want in reload_line.items():

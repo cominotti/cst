@@ -378,19 +378,31 @@ cst btrfs scrub-limit off
   place (the folder's fsync), the old `snapshots.conf` is put back and the
   line ends with `previous configuration restored.` (or
   `ROLLBACK INCOMPLETE (...)`).
-  When both files are already as asked, `set` and `off` ask systemd
-  whether it has loaded them (`NeedDaemonReload` of
-  `btrfs-scrub-weekly.service`, waiting at most 20 s for the answer; no
-  answer counts as not loaded) and run `daemon-reload` if not: an earlier
-  run that stopped after writing the drop-in and before its `daemon-reload`
-  left systemd with the old limit. The command then says
+  When the drop-in is already as asked (`snapshots.conf` may still change),
+  `set` and `off` ask systemd whether it has loaded it (`NeedDaemonReload`
+  of `btrfs-scrub-weekly.service`, waiting at most 20 s for the answer) and
+  run `daemon-reload` if not: an earlier run that stopped after writing the
+  drop-in and before its `daemon-reload` left systemd with the old limit.
+  The command then says
   `reloaded:  systemd had not loaded btrfs-scrub-weekly.service as it is on disk`.
-  A run with nothing pending runs no `daemon-reload`. When that reload
-  fails, no file is changed and the command ends with
-  `ERROR: ...; snapshots.conf and the drop-in are as asked, systemd has not loaded them`.
+  When systemctl cannot say (it fails, or gives no answer in time), the
+  command reloads too, since exit 0 must mean systemd has the limit, and says
+  `reloaded:  systemctl could not say whether systemd had loaded ...`.
+  Such a catch-up `daemon-reload` waits at most a minute, so a PID 1 that
+  does not answer cannot hang a run that has nothing to change. A run with
+  nothing pending runs no `daemon-reload`. When the catch-up reload fails
+  and this run changed no file, the command ends with
+  `ERROR: ...; snapshots.conf and the drop-in are as asked, systemd has not loaded them`
+  (or `..., systemctl cannot say whether systemd has loaded them`), exit 1.
+  When this run did change `snapshots.conf`, it puts the old one back and
+  ends with `previous configuration restored.`, as for any failed reload.
   `plan` asks systemd the same question and shows that reload
-  (`reload:    btrfs-scrub-weekly.service (...) + systemctl daemon-reload`),
-  and `status` says `systemd: has not loaded btrfs-scrub-weekly.service as it is on disk`
+  (`reload:    btrfs-scrub-weekly.service (...) + systemctl daemon-reload`;
+  when systemctl cannot say, the line adds
+  `unless set|off then gets an answer that it is`: `plan` in a toolbox asks
+  the host through `flatpak-spawn`, which can fail where `set` on the host
+  gets an answer), and `status` says
+  `systemd: has not loaded btrfs-scrub-weekly.service as it is on disk`
   when systemd answers yes.
   Writing the drop-in sets `btrfs:core` pending in the install record; when
   `btrfs:core` was done before, `set` marks it done again once the drop-in is
