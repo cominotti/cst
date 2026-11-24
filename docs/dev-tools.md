@@ -1305,7 +1305,7 @@ test quint` when a pull request (or a push to main) changes a path under
 `btrfs/docker_volumes_nocow/`, `btrfs/tests/quint/`, `vm/tests/quint/` or
 `tests/quint/`, `btrfs/tests/test_docker_volumes_nocow_replay.py`, the code
 the NAS spec models (`vm/application/nas.py`, `vm/adapters/restic.py`,
-`vm/adapters/backup.py`, `vm/domain/backup.py`), its replay
+`vm/adapters/backup.py`, `vm/domain/backup.py`, `vm/domain/__init__.py`), its replay
 (`vm/tests/test_vm_nas_replay.py`), or what runs the job
 (`.github/workflows/ci.yml`, `cst.invowkmod/invowkfile.cue`,
 `.github/actions/setup-invowk/`); `tests/test_quint_task.py` checks that
