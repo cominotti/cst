@@ -5229,6 +5229,84 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL)
+    def test_174_btrfs_setup_writes_no_flag_beside_a_count_mark_cannot_reset(self) -> None:
+        """btrfs-setup.sh's mark_docker_volumes (install's step for the Docker volumes, as the script
+        defines it, its helper the checkout's docker-volumes-nocow) as root in the container, on a data
+        root of the test's own on a tmpfs holding one volume with data, no flag, and a count of 2 an
+        older helper left, its file a read-only bind mount (a rename over a mount point fails: checked
+        first). mark cannot reset the count, so it makes no request and says so; the step goes on
+        (exit 0) and writes nothing: no flag beside that count, which the next boot would take for
+        two boots of this request and give up at once. Before, install touched the flag after any
+        failing mark. With the mount gone, the same step writes the request: the count 0, the flag."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-174-docker"
+        state = "/var/lib/docker-volumes-nocow"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"! mountpoint -q {state}/attempts || umount {state}/attempts || umount -l {state}/attempts; "
+            f"! mountpoint -q {root} || umount {root} || umount -l {root}; "
+            f"rm -rf {root} /var/tmp/e2e-174-bin {state} /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-174-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-174-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-174-made-docker /var/tmp/e2e-174-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_174 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            state={state}
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-174-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-174-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e "$state" ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            # The step as btrfs-setup.sh defines it, its helper the checkout's program.
+            eval "$(sed -n '/^mark_docker_volumes() {{/,/^}}/p' /opt/cst-rw/btrfs-setup.sh)"
+            declare -F mark_docker_volumes >/dev/null
+            DOCKER_NOCOW_BIN=/var/tmp/e2e-174-bin/docker-volumes-nocow
+            mkdir -p /var/tmp/e2e-174-bin
+            printf '#!/bin/bash\nexec /usr/bin/python3 -I -B /opt/cst-rw/btrfs/docker-volumes-nocow "$@"\n' >"$DOCKER_NOCOW_BIN"
+            chmod 0755 "$DOCKER_NOCOW_BIN"
+            mkdir -p {root}
+            mount -t tmpfs tmpfs {root}
+            mkdir -p "$vols/v/_data"
+            printf 'data\n' >"$vols/v/_data/file"
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$state"
+            printf '2\n' >"$state/attempts"
+            mount --bind "$state/attempts" "$state/attempts"
+            mount -o remount,bind,ro "$state/attempts"
+            # The precondition: the count's file cannot be replaced (save_attempts writes a new file
+            # and renames it over the old one).
+            printf '0\n' >"$state/.e2e-174-try"
+            if /usr/bin/python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$state/.e2e-174-try" "$state/attempts" 2>/dev/null; then
+                echo "the count's file was replaced: the test cannot show the step" >&2; exit 1
+            fi
+            rm -f "$state/.e2e-174-try"
+            rc=0; out="$(mark_docker_volumes 2>&1)" || rc=$?
+            echo "test_174 step: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "cannot schedule the migration (" <<<"$out" || {{ echo "mark did not fail at the reset" >&2; exit 1; }}
+            [[ ! -e "$flag" ]] || {{ echo "a flag beside the old count: the next boot gives up at once" >&2; exit 1; }}
+            [[ "$(cat "$state/attempts")" == 2 ]]
+            umount "$state/attempts"
+            rc=0; out="$(mark_docker_volumes 2>&1)" || rc=$?
+            echo "test_174 step, the mount gone: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            [[ -e "$flag" ]] || {{ echo "mark wrote no request" >&2; exit 1; }}
+            [[ "$(cat "$state/attempts")" == 0 ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root
