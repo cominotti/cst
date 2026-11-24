@@ -229,6 +229,10 @@ class SettingsTest(Base):
         for bad in ("48", "h", "-1h", "1y", "", "1 hours", "9" * 400 + "h"):
             with self.assertRaises(tcd_common.ConfigError, msg=bad):
                 p(bad)
+        # ASCII only: an Arabic-Indic "3h" was 3 hours, and "3" with a long s (U+017F) a KeyError.
+        for bad in ("\N{ARABIC-INDIC DIGIT THREE}h", "3\N{LATIN SMALL LETTER LONG S}", "48h\N{NO-BREAK SPACE}"):
+            with self.assertRaisesRegex(tcd_common.ConfigError, "is not a duration", msg=bad):
+                p(bad)
 
     def test_sizes(self) -> None:
         p = tcd_common.parse_size
@@ -244,6 +248,13 @@ class SettingsTest(Base):
         # bytes it would delete everything older than MIN_KEEP.
         for bad in ("lots", "G", "-1G", "10X", "150", "4096", "150b", "1.5"):
             with self.assertRaises(tcd_common.ConfigError, msg=bad):
+                p(bad)
+        # ASCII only: an Arabic-Indic "150G" was 150 GiB, and "1" with the Kelvin sign 1 KiB (lower() folds it).
+        for bad in (
+            "\N{ARABIC-INDIC DIGIT ONE}\N{ARABIC-INDIC DIGIT FIVE}\N{ARABIC-INDIC DIGIT ZERO}G",
+            "1\N{KELVIN SIGN}",
+        ):
+            with self.assertRaisesRegex(tcd_common.ConfigError, "is not a size", msg=bad):
                 p(bad)
 
     def test_conf_parsing(self) -> None:

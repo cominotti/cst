@@ -8433,3 +8433,75 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.TOOLCHAINS)
+    def test_169_toolchains_sizes_are_ascii_digits(self) -> None:
+        """~/.config/cst/toolchains.conf with sizes of Arabic-Indic digits (RUST_SCCACHE_CACHE_SIZE "40G",
+        RUST_BUILD_MAX_TOTAL "150G"), written as the real file: each is a bad setting (status says BAD
+        SETTINGS), plan changes nothing, and config apply --sccache writes the default 25G into the
+        real rustc wrapper, never 40G (before, the digits were read as 40G). With ASCII "40G" the same
+        apply writes 40G and a second apply keeps the wrapper; removing the file and
+        --no-sccache undo it."""
+        self.addCleanup(
+            as_tester_bash,
+            self.SYSTEMD_CONTAINER,
+            """
+            rm -f /home/tester/.config/cst/toolchains.conf
+            /opt/cst-rw/cst toolchains config apply --no-sccache >/dev/null 2>&1 || true
+            rm -rf /home/tester/work/e2e-169
+            """,
+            check=False,
+        )
+        out = as_tester_bash(
+            self.SYSTEMD_CONTAINER,
+            r"""
+            set -E
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            cst=/opt/cst-rw/cst
+            w=/home/tester/work/e2e-169
+            wrapper=/home/tester/.local/libexec/cst/rustc-wrapper
+            conf=/home/tester/.config/cst/toolchains.conf
+            rm -rf "$w"
+            mkdir -p "$w" /home/tester/.config/cst
+            # The settings file, its non-ASCII digits written from escapes (the test source stays ASCII).
+            put_conf() {
+                python3 -I -c 'import sys; open(sys.argv[1], "w", encoding="utf-8").write(sys.argv[2].encode().decode("unicode_escape"))' \
+                    "$conf" "$1"
+            }
+            files() { for f in "$wrapper" /home/tester/.cargo/config.toml; do if [[ -e "$f" ]]; then sha256sum "$f"; else echo "none $f"; fi; done; }
+
+            put_conf 'RUST_BUILD_MAX_TOTAL=\u0661\u0665\u0660G\n'
+            st=$("$cst" toolchains status)
+            grep -q 'BAD SETTINGS' <<<"$st"
+
+            put_conf 'RUST_SCCACHE=yes\nRUST_SCCACHE_CACHE_SIZE=\u0664\u0660G\n'
+            files >"$w/before"
+            plan=$("$cst" toolchains config plan --sccache 2>&1)  # the settings note goes to stderr
+            grep -q 'BAD SETTINGS' <<<"$plan"
+            files | cmp -s - "$w/before"
+            applied=$("$cst" toolchains config apply --sccache 2>&1)
+            printf '%s\n' "$applied" >&2
+            grep -q 'BAD SETTINGS' <<<"$applied"
+            grep -q 'RUST_SCCACHE_CACHE_SIZE' <<<"$applied"
+            grep -q '^cache_size=25G # cst: RUST_SCCACHE_CACHE_SIZE' "$wrapper"
+            if grep -q '40G' "$wrapper"; then echo "e2e: the wrapper took the Arabic-Indic 40G" >&2; exit 1; fi
+            grep -q 'BAD SETTINGS' <<<"$("$cst" toolchains status)"
+
+            # ASCII digits: the same apply writes 40G, and a second apply changes nothing.
+            printf 'RUST_SCCACHE=yes\nRUST_SCCACHE_CACHE_SIZE=40G\n' >"$conf"
+            "$cst" toolchains config apply --sccache >/dev/null
+            grep -q '^cache_size=40G # cst: RUST_SCCACHE_CACHE_SIZE' "$wrapper"
+            cp "$wrapper" "$w/wrapper.applied"
+            again=$("$cst" toolchains config apply --sccache)
+            grep -q "kept:      $wrapper (sccache wrapper)" <<<"$again"
+            cmp -s "$wrapper" "$w/wrapper.applied"
+            if grep -q 'BAD SETTINGS' <<<"$("$cst" toolchains status)"; then exit 1; fi
+
+            # Undo: the settings file removed, --no-sccache takes CST's rustc-wrapper line out.
+            rm -f "$conf"
+            "$cst" toolchains config apply --no-sccache >/dev/null
+            if grep -q '^rustc-wrapper' /home/tester/.cargo/config.toml; then exit 1; fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)

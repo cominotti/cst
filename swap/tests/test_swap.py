@@ -2991,6 +2991,16 @@ class Phase1MemoryTuningTest(_SwapScratch):
             # A comment, or the key in another section, sets nothing.
             ("[Global]\n#MaxMemoryMin=1%\n[ActiveUser]\nMaxMemoryMin=1%\nMemoryMin=1G\n", 64 * one_g, (one_g, False)),
             ("[Global]\nMaxMemoryMin=1%\n", 64 * one_g, (None, False)),
+            # ASCII digits only, as uresourced reads them: Arabic-Indic "2G" was 2 GiB, and "512M" a cap of 512 MiB.
+            ("[ActiveUser]\nMemoryMin=\N{ARABIC-INDIC DIGIT TWO}G\n", 64 * one_g, (None, False)),
+            (
+                (
+                    "[Global]\nMaxMemoryMin=\N{ARABIC-INDIC DIGIT FIVE}\N{ARABIC-INDIC DIGIT ONE}"
+                    "\N{ARABIC-INDIC DIGIT TWO}M\n[ActiveUser]\nMemoryMin=1G\n"
+                ),
+                64 * one_g,
+                (one_g, False),
+            ),
         ):
             with self.subTest(text=text, total=total):
                 self.assertEqual(effective_uresourced_memory_min(text, total), want)
