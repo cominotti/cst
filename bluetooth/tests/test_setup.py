@@ -743,7 +743,9 @@ class RestartTest(SetupCase):
         m = self.machine(DONE)
         r = m.run("apply", "--no-restart")
         self.assertIn("Not restarted (--no-restart). To finish: systemctl --user restart wireplumber\n", r.stdout)
-        self.assertNotIn("restart", " ".join(c for c in r.calls if not c.startswith("systemctl --user is-")))
+        # A word of a command, not a substring of the joined lines: the checkout's path may contain "restart".
+        restarts = [c for c in r.calls if not c.startswith("systemctl --user is-") and "restart" in c.split()]
+        self.assertEqual(restarts, [], r.calls)
         m = self.machine()
         r = m.run("apply", "--no-restart")
         self.assertIn(
