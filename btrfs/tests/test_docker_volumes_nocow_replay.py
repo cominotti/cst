@@ -551,20 +551,18 @@ def mock_ioctls(fs: FakeSystem) -> contextlib.ExitStack:
     return stack
 
 
+def traces_in(folder: str) -> list[str]:
+    return [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".itf.json")]
+
+
 def trace_files() -> list[str]:
     more = os.environ.get(MORE_TRACES)
-    folders = [TRACES] + ([more] if more is not None and more != "" else [])
-    return sorted(os.path.join(d, f) for d in folders for f in os.listdir(d) if f.endswith(".itf.json"))
+    return sorted([*traces_in(TRACES), *(traces_in(more) if more is not None and more != "" else [])])
 
 
 class ReplayTest(ReplayBase):
     def test_the_checked_in_traces_cover_every_call_of_the_spec(self) -> None:
-        seen = {
-            (st.name, st.outcome)
-            for f in os.listdir(TRACES)
-            if f.endswith(".itf.json")
-            for st in load_trace(os.path.join(TRACES, f))
-        }
+        seen = {(st.name, st.outcome) for path in traces_in(TRACES) for st in load_trace(path)}
         self.assertEqual(SPEC_CALLS - seen, set())
 
     def test_every_trace_matches_the_code(self) -> None:
