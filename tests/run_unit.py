@@ -1112,6 +1112,23 @@ def order_units(units: Sequence[tuple[str, ...]], durations: Mapping[str, float]
     return sorted(units, key=lambda unit: (-estimate(unit), -len(unit), unit[0]))
 
 
+def _test_seconds(
+    units: Sequence[tuple[str, ...]],
+    measured: Mapping[tuple[str, ...], float],
+    old: Mapping[str, float],
+) -> dict[str, float]:
+    """Each test's seconds: its unit's time over its tests, or its old time when its unit got no reply."""
+    seconds: dict[str, float] = {}
+    for unit in units:
+        took = measured.get(unit)
+        for test_id in unit:
+            if took is not None:
+                seconds[test_id] = took / len(unit)
+            elif test_id in old:
+                seconds[test_id] = old[test_id]
+    return seconds
+
+
 def save_durations(
     path: str,
     units: Sequence[tuple[str, ...]],
@@ -1123,15 +1140,7 @@ def save_durations(
     A test of this run whose unit got no reply keeps its old time; a test not in this run is dropped.
     The file is replaced whole (a temporary file renamed over it), never fsynced: it is a cache.
     """
-    seconds: dict[str, float] = {}
-    for unit in units:
-        took = measured.get(unit)
-        for test_id in unit:
-            if took is not None:
-                seconds[test_id] = took / len(unit)
-            elif test_id in old:
-                seconds[test_id] = old[test_id]
-    data: UnitDurations = {"version": DURATIONS_VERSION, "seconds": seconds}
+    data: UnitDurations = {"version": DURATIONS_VERSION, "seconds": _test_seconds(units, measured, old)}
     folder = os.path.dirname(path)
     try:
         os.makedirs(folder, mode=0o700, exist_ok=True)
