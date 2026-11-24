@@ -76,7 +76,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService, Placement
 from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner
-from cst_core.domain.record import InstallRecord
+from cst_core.domain.record import ComponentState, InstallRecord
 from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
@@ -3833,11 +3833,13 @@ class InstallAreaTest(Scratch):
         self.assertEqual(len(warns), 1, warns)
         # The cause it names holds for every way a component stays pending: an interrupted setup command, a
         # file of it written by another command before the setup command ever ran (cst btrfs scrub-limit), or
-        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause).
+        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause), or
+        # a removal that marked it pending first and did not finish (iocost's revert:
+        # test_a_component_a_removal_left_pending_names_the_same_cause).
         self.assertEqual(
             warns[0].message,
-            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
-            "`cst btrfs docker-gc enable` has not finished since)",
+            "btrfs:docker-gc: installed only in part (a file of it was recorded, or a removal of it began, "
+            "and `cst btrfs docker-gc enable` has not finished since)",
         )
         self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
         self.mark("btrfs:docker-gc")
@@ -3861,9 +3863,25 @@ class InstallAreaTest(Scratch):
         self.assertEqual(len(warns), 1, warns)
         self.assertEqual(
             warns[0].message,
-            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
-            "`cst btrfs docker-gc enable` has not finished since)",
+            "btrfs:docker-gc: installed only in part (a file of it was recorded, or a removal of it began, "
+            "and `cst btrfs docker-gc enable` has not finished since)",
         )
+
+    def test_a_component_a_removal_left_pending_names_the_same_cause(self) -> None:
+        # A revert marks the component pending before it changes anything (cst btrfs iocost revert) and
+        # stops at a removal that fails: its files were recorded by a setup command that did finish.
+        self.install("btrfs:docker-gc")
+        self.mark("btrfs:docker-gc")
+        self.assertEqual(self.warns(), [])
+        self.svc.mark(self.record, "btrfs:docker-gc", ComponentState.PENDING)
+        warns = self.warns()
+        self.assertEqual(len(warns), 1, warns)
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was recorded, or a removal of it began, "
+            "and `cst btrfs docker-gc enable` has not finished since)",
+        )
+        self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
         # What an older CST installed: other bytes, recorded as such.

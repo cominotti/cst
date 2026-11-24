@@ -1589,8 +1589,15 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   service then fails visibly in `systemctl --failed`); a kernel without
   `io.cost.qos` is only `skipped:` (exit 0). Without a running udevd (a
   container) the rules' reload is skipped with a `note:`;
-- **`revert`** first stops and disables `cst-btrfs-iocost.service` (when that
-  fails, nothing is removed), removes `btrfs:iocost`, reloads systemd and the
+- **`revert`** first marks `btrfs:iocost` pending in the install record, then
+  stops and disables `cst-btrfs-iocost.service`. Any failure after the mark
+  leaves the component pending (or with no state, once its last file and line
+  are gone), never done, and `cst doctor` shows it until a `revert` or an
+  `apply` finishes. A disable that fails removes nothing, and it puts `done`
+  back when the service is still as it was (enabled and running); when the
+  disable changed it, or `systemctl` cannot say, the component stays pending.
+  A record it cannot write, or one of a newer CST, stops `revert` with an
+  `ERROR:` line before anything changes. After the disable, `revert` removes `btrfs:iocost`, reloads systemd and the
   udev rules (a failure is an error), and only then resets the `MAJ:MIN`
   devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
   so no udev event enables a disk again after its reset. The tracking file is

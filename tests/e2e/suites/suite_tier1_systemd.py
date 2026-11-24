@@ -4548,6 +4548,95 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-IRQ-IOCOST-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_175_btrfs_iocost_revert_that_fails_after_its_disable_leaves_the_component_pending(self) -> None:
+        """A full `cst btrfs iocost revert` whose disable --now works and whose first removal then fails
+        (/etc/udev/rules.d bound read-only over itself: unlink fails with EROFS): exit 1 with the ERROR line,
+        the service disabled, btrfs:iocost pending in root's real install record, and `cst doctor` warns
+        that it is installed only in part. With the folder writable again, the next revert converges (no
+        file, no state, no warning), and so does the next apply (enabled, done). An older CST's revert left
+        such a record done: apply and revert from that state converge too. Before, the failed revert left
+        btrfs:iocost done with the service disabled. The record is copied aside first and put back after."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        rules = "/etc/udev/rules.d"
+        unit = "cst-btrfs-iocost.service"
+        record = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:iocost"
+        if exec_bash(c, f"[[ ! -e /etc/systemd/system/{unit} ]] || echo busy").stdout.strip():
+            self.skipTest("btrfs:iocost files already present on container")
+        exec_bash(c, f"rm -f /var/tmp/e2e-175-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-175-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; if [[ -e /var/tmp/e2e-175-bound ]]; then umount {rules}; rm -f /var/tmp/e2e-175-bound; fi; "
+            "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1; "
+            "rm -f /var/tmp/e2e-175-out /var/tmp/e2e-175-doc; "
+            f"if [[ -e /var/tmp/e2e-175-rec ]]; then mv /var/tmp/e2e-175-rec {rec}; else rm -f {rec}; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-175-doc 2>&1 || true; grep -qE "WARN +btrfs:iocost: installed only in part" /var/tmp/e2e-175-doc; }}
+            ro() {{ mount --bind {rules} {rules} && touch /var/tmp/e2e-175-bound && mount -o remount,bind,ro {rules}; }}
+            rw() {{ umount {rules} && rm -f /var/tmp/e2e-175-bound; }}
+            applied() {{
+                [[ "$(systemctl is-enabled {unit})" == enabled ]] || {{ echo "not enabled" >&2; return 1; }}
+                [[ "$({record})" == *" done" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+            }}
+            reverted() {{
+                [[ "$({record})" == "- -" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+                [[ ! -e /etc/systemd/system/{unit} && ! -e {rules}/91-cst-iocost.rules && ! -e /usr/local/sbin/btrfs-iocost ]]
+                if warned; then echo "doctor still warns about btrfs:iocost" >&2; cat /var/tmp/e2e-175-doc >&2; return 1; fi
+            }}
+            failed_revert() {{
+                ro
+                rc=0; /usr/local/sbin/btrfs-iocost revert >/var/tmp/e2e-175-out 2>&1 || rc=$?
+                # The test cannot bite unless the revert got past its disable.
+                [[ "$(systemctl is-enabled {unit} 2>/dev/null)" == disabled ]] \
+                    || {{ echo "the test cannot bite: the revert did not disable the service" >&2; cat /var/tmp/e2e-175-out >&2; return 1; }}
+                [[ $rc == 1 ]] || {{ echo "exit $rc" >&2; cat /var/tmp/e2e-175-out >&2; return 1; }}
+                grep -qxF "ERROR: cannot write {rules}/91-cst-iocost.rules: Read-only file system" /var/tmp/e2e-175-out \
+                    || {{ cat /var/tmp/e2e-175-out >&2; return 1; }}
+                if grep -q Traceback /var/tmp/e2e-175-out; then cat /var/tmp/e2e-175-out >&2; return 1; fi
+                [[ "$({record})" == *" pending" ]] || {{ echo "record: $({record})" >&2; return 1; }}
+                warned || {{ echo "doctor does not warn about btrfs:iocost" >&2; cat /var/tmp/e2e-175-doc >&2; return 1; }}
+                grep -qF "btrfs:iocost: installed only in part (a file of it was recorded, or a removal of it began" \
+                    /var/tmp/e2e-175-doc || {{ cat /var/tmp/e2e-175-doc >&2; return 1; }}
+                rw
+            }}
+            # A failed revert, then revert again.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            failed_revert
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
+            # A failed revert, then apply again.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            failed_revert
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            [[ "$(systemctl show -P ActiveState {unit})" == active ]]
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
+            # What an older CST's failed revert left: done, the service disabled, the rule gone.
+            for next in apply revert; do
+                /opt/cst-rw/cst btrfs iocost apply >/dev/null
+                systemctl disable --now {unit} 2>/dev/null
+                rm -f {rules}/91-cst-iocost.rules
+                [[ "$({record})" == *" done" ]]
+                /opt/cst-rw/cst btrfs iocost "$next" >/dev/null
+                if [[ $next == apply ]]; then applied; [[ -e {rules}/91-cst-iocost.rules ]]; else reverted; fi
+            done
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BLUETOOTH)
     def test_80_bluetooth_second_apply_and_le_audio_cycle(self) -> None:
         """bluetooth as tester with the real user manager, WirePlumber and

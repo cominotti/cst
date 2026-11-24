@@ -23,7 +23,9 @@ from cst_core.adapters.runtime import (
 )
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
 from cst_core.domain.install import INSTALL_MANIFEST, Component, Owner, select_entries
-from cst_core.domain.text import first_line, group
+from cst_core.domain.record import ComponentState
+from cst_core.domain.text import enum_member, first_line, group
+from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
@@ -364,18 +366,53 @@ def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, 
         return 1, [f"ERROR: {exc}"]
 
 
+def _unchanged_since(runner: CommandRunnerPort, before: tuple[bool, str, str]) -> bool:
+    """The service as the probe before found it: both probes answered with systemd's words (not "unknown":
+    a probe that cannot say proves nothing) and they agree on ActiveState and UnitFileState."""
+    now = probe_systemd_unit(runner, IOCOST_SERVICE)
+    known = enum_member(ActiveState, before[1]) is not None and enum_member(EnablementState, before[2]) is not None
+    return known and now == before
+
+
+def _put_state_back(
+    runner: CommandRunnerPort,
+    svc: InstallService,
+    paths: IocostPaths,
+    before: tuple[bool, str, str],
+    prior: ComponentState | None,
+) -> list[str]:
+    """After a failed disable: btrfs:iocost back to done when it was done and the disable changed nothing
+    (_unchanged_since). Otherwise it stays pending, the truth: disable --now can disable the unit and then
+    fail to stop it. The ERROR line when the record cannot be written again (pending stays: it only
+    overstates what is left to do)."""
+    if prior != ComponentState.DONE or not _unchanged_since(runner, before):
+        return []
+    try:
+        svc.mark(paths.record_path, Component.BTRFS_IOCOST.value, ComponentState.DONE)
+    except _UNINSTALL_ERRORS as exc:
+        return [f"ERROR: cannot put {Component.BTRFS_IOCOST.value} back to done: {exc}"]
+    return []
+
+
 def _remove_iocost_component(
     runner: CommandRunnerPort, svc: InstallService, paths: IocostPaths
 ) -> tuple[int, list[str]]:
-    """Stop the service, remove btrfs:iocost and reload systemd and udev; the first failure stops there."""
+    """Mark btrfs:iocost pending, stop the service, remove the component and reload systemd and udev; the
+    first failure stops there. A failure after the disable leaves pending (or no state, once its last file
+    and line are gone), never done; a record that cannot be marked stops revert before anything changes."""
     systemd = SystemctlAdapter(runner, on_host=SystemctlHost.LOCAL)
     out: list[str] = []
-    present, _, _ = probe_systemd_unit(runner, IOCOST_SERVICE)
-    if present:
+    try:
+        prior = svc.mark(paths.record_path, Component.BTRFS_IOCOST.value, ComponentState.PENDING)
+    except _UNINSTALL_ERRORS as exc:
+        return 1, [f"ERROR: {exc}", "nothing was removed"]
+    before = probe_systemd_unit(runner, IOCOST_SERVICE)
+    if before[0]:
         dis = systemd.disable(IOCOST_SERVICE, now=True)
         if dis.returncode != 0:
             rc_d, lines_d = _failed(f"systemctl disable --now {IOCOST_SERVICE}", dis)
-            return rc_d, [*lines_d, "nothing was removed"]
+            back = _put_state_back(runner, svc, paths, before, prior)
+            return rc_d, [*lines_d, "nothing was removed", *back]
         out.append(f"disabled:  {IOCOST_SERVICE}")
     rc_r, lines_r = _remove_iocost_files(svc, paths)
     out.extend(lines_r)

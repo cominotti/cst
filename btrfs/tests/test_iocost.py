@@ -27,6 +27,7 @@ from btrfs.iocost.adapters import (
 from btrfs.iocost.cli import IocostCliDeps, run_iocost_cli
 from btrfs.iocost.domain import (
     IOCOST_QOS_PATH,
+    IOCOST_RULE_DEST,
     BlockDisk,
     IocostAction,
     IocostParsedArgs,
@@ -40,11 +41,14 @@ from btrfs.iocost.domain import (
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget, program_installer
 from cst_core.adapters.runtime import RootElevation, enforce_host_root, lc_ctype_handover
-from cst_core.application.install import InstallService, Placement, staged
+from cst_core.application.install import InstallRequest, InstallService, Placement, staged
 from cst_core.domain.install import INSTALL_MANIFEST, Component, select_entries
 from cst_core.domain.record import ComponentState
 from cst_core.ports import CommandResult, WriteFailed
+from tests.fault_injection import Killed
 from tests.repo_files import REPO
+
+COMPONENT = Component.BTRFS_IOCOST
 
 
 class _FakeCtx:
@@ -128,6 +132,33 @@ class _RefusingRemove(InstallService):
     @override
     def remove(self, places: Sequence[Placement]) -> Iterator[str]:
         raise WriteFailed(places[0].path, "Read-only file system")
+
+
+class _FailingRemoveTarget(LocalInstallTarget):
+    """This machine's files, except that the removal of one path fails (a read-only folder)."""
+
+    def __init__(self, fail: str) -> None:
+        super().__init__()
+        self.fail = fail
+
+    @override
+    def remove(self, path: str) -> bool:
+        if path == self.fail:
+            raise WriteFailed(path, "Read-only file system")
+        return super().remove(path)
+
+
+class _NoDoneMark(InstallService):
+    """program_installer's service, except that a mark done cannot write the record (a full disk)."""
+
+    def __init__(self) -> None:
+        super().__init__(LocalInstallTarget(), lambda _e: b"", record=JsonInstallRecord())
+
+    @override
+    def mark(self, record: str, component: str, state: ComponentState = ComponentState.DONE) -> ComponentState | None:
+        if state == ComponentState.DONE:
+            raise WriteFailed(record, "No space left on device")
+        return super().mark(record, component, state)
 
 
 def _steps(calls: list[list[str]]) -> list[str]:
@@ -470,6 +501,209 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         self.assertEqual(self._installer_words(), [])
         with open(self.paths.qos_path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "259:1 enable=1 ctrl=auto\n")
+
+    # ---- F-I1: revert marks btrfs:iocost pending before it disables the service ----------------
+    def _state(self) -> str | None:
+        """btrfs:iocost's state in root's install record (None: no record, or no state for it)."""
+        rec = JsonInstallRecord().read(self.paths.record_path)
+        return None if rec is None else rec.components.get(Component.BTRFS_IOCOST.value)
+
+    def _service_on(self) -> None:
+        self.runner.load_state, self.runner.active_state, self.runner.enabled_state = "loaded", "active", "enabled"
+
+    def _left(self) -> list[str]:
+        return [p for p in self._component_files() if os.path.lexists(p)]
+
+    def _assert_reverted(self) -> None:
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self._state(), self._left(), self._recorded_components()), (None, [], {}))
+        self.assertEqual(self.runner.enabled_state, "disabled")
+
+    def test_the_mark_names_the_record_the_removal_rewrites(self) -> None:
+        svc = program_installer(os.path.join(REPO, "btrfs", "btrfs-iocost"))
+        req = InstallRequest(root=self.paths.install_root, as_root=True)
+        records = {svc.placement(e, req).record for e in select_entries(INSTALL_MANIFEST, component=COMPONENT)}
+        self.assertEqual(records, {self.paths.record_path})
+
+    def test_a_removal_that_fails_after_the_disable_leaves_the_component_pending(self) -> None:
+        # The first file revert removes (the rule) and the last one (the program): F-I1's two cases.
+        entries = select_entries(INSTALL_MANIFEST, component=COMPONENT)
+        rule, program = entries[-1].dest, entries[0].dest
+        for dest, recorded in ((rule, [e.dest for e in entries]), (program, [program])):
+            with self.subTest(fails=dest):
+                self.runner = _FakeRunner()
+                self._seed_component()
+                self._service_on()
+                failing = staged(self.paths.install_root, dest)
+                svc = InstallService(_FailingRemoveTarget(failing), lambda _e: b"", record=JsonInstallRecord())
+                rc, out = revert_iocost(self.paths, runner=self.runner, installer=svc)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("disabled:  cst-btrfs-iocost.service", out)
+                self.assertIn(f"ERROR: cannot write {failing}: Read-only file system", out)
+                self.assertEqual(self.runner.enabled_state, "disabled")
+                self.assertEqual(self._state(), "pending")
+                self.assertEqual(sorted(self._recorded_components()), sorted(recorded))
+                self.assertFalse(self._ran("systemctl", "daemon-reload"))
+                # The next revert finishes it.
+                self._assert_reverted()
+
+    def test_a_revert_that_failed_after_the_disable_is_converged_by_apply(self) -> None:
+        self._seed_component()
+        self._service_on()
+        failing = staged(self.paths.install_root, IOCOST_RULE_DEST)
+        svc = InstallService(_FailingRemoveTarget(failing), lambda _e: b"", record=JsonInstallRecord())
+        self.assertEqual(revert_iocost(self.paths, runner=self.runner, installer=svc)[0], 1)
+        self.assertEqual(self._state(), "pending")
+        self.runner.calls.clear()
+        rc, out = apply_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._installer_words(), ["install", "mark"])
+        self.assertEqual(self.runner.enabled_state, "enabled")
+
+    def test_a_failed_disable_that_changed_nothing_puts_done_back(self) -> None:
+        self._seed_component()
+        self._service_on()
+        self.runner.fail_on = {"systemctl disable"}
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(out), 2, out)
+        self.assertTrue(out[0].startswith("ERROR: systemctl disable --now cst-btrfs-iocost.service failed"), out)
+        self.assertEqual(out[1], "nothing was removed")
+        self.assertEqual(self._state(), "done")
+        self.assertEqual(len(self._left()), 3)
+
+    def test_a_failed_disable_that_changed_the_service_or_cannot_be_checked_leaves_pending(self) -> None:
+        def disabled() -> None:
+            self.runner.enabled_state = "disabled"
+
+        def stopped() -> None:
+            self.runner.active_state = "inactive"
+
+        def cannot_say() -> None:
+            self.runner.fail_on.add("systemctl show")
+
+        for what, effect in (("disabled", disabled), ("stopped", stopped), ("cannot say", cannot_say)):
+            with self.subTest(what):
+                self.runner = _FakeRunner()
+                self._seed_component()
+                self._service_on()
+                self.runner.fail_on = {"systemctl disable"}
+                self.runner.on_call = lambda cmd, effect=effect: (
+                    effect() if cmd[:2] == ["systemctl", "disable"] else None
+                )
+                rc, out = revert_iocost(self.paths, runner=self.runner)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("nothing was removed", out)
+                self.assertEqual(self._state(), "pending")
+                self.assertEqual(len(self._left()), 3)
+
+    def test_a_failed_disable_leaves_a_pending_component_pending(self) -> None:
+        self._seed_component()
+        program_installer("").mark(self.paths.record_path, COMPONENT, ComponentState.PENDING)
+        self._service_on()
+        self.runner.fail_on = {"systemctl disable"}
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self._state(), "pending")
+
+    def test_a_failed_disable_whose_done_cannot_be_put_back_says_so_and_stays_pending(self) -> None:
+        self._seed_component()
+        self._service_on()
+        self.runner.fail_on = {"systemctl disable"}
+        rc, out = revert_iocost(self.paths, runner=self.runner, installer=_NoDoneMark())
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(
+            out[1:],
+            [
+                "nothing was removed",
+                (
+                    f"ERROR: cannot put btrfs:iocost back to done: cannot write {self.paths.record_path}: "
+                    "No space left on device"
+                ),
+            ],
+        )
+        self.assertEqual(self._state(), "pending")
+
+    def test_a_record_it_cannot_mark_stops_revert_before_the_disable(self) -> None:
+        for case in ("newer", "unwritable"):
+            with self.subTest(case):
+                self.runner = _FakeRunner()
+                shutil.rmtree(os.path.dirname(self.paths.record_path), ignore_errors=True)
+                self._seed_component()
+                self._service_on()
+                record = self.paths.record_path
+                if case == "newer":
+                    self._write(record, '{"format": 9, "files": {}}')
+                else:
+                    os.remove(record + ".lock")
+                    os.makedirs(record + ".lock")  # the record's lock cannot be opened: no write either
+                with open(record, encoding="utf-8") as fh:
+                    text = fh.read()
+                rc, out = revert_iocost(self.paths, runner=self.runner)
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(out[1:], ["nothing was removed"])
+                want = (
+                    f"ERROR: {record}: format 9" if case == "newer" else f"ERROR: cannot write {record}: Is a directory"
+                )
+                self.assertTrue(out[0].startswith(want), out)
+                self.assertFalse(self._ran("systemctl", "disable"))
+                self.assertEqual(self.runner.enabled_state, "enabled")
+                self.assertEqual(len(self._left()), 3)
+                with open(record, encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), text)
+
+    def test_a_revert_with_nothing_installed_makes_no_record(self) -> None:
+        rc, out = revert_iocost(self.paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(os.path.exists(self.paths.record_path))
+
+    def test_a_done_record_an_older_failed_revert_left_is_repaired(self) -> None:
+        # What an older CST's revert left when its removal of the program failed (F-I1, case 2): btrfs:iocost
+        # done, the service disabled, the rule and the unit gone with their lines.
+        svc = program_installer("")
+        for then in ("revert", "apply"):
+            with self.subTest(then):
+                self.runner = _FakeRunner()
+                self._seed_component()
+                for e in select_entries(INSTALL_MANIFEST, component=COMPONENT)[1:]:
+                    os.unlink(staged(self.paths.install_root, e.dest))
+                    svc.forget(self.paths.record_path, [e.dest])
+                self.runner.load_state = "loaded"  # systemd was not reloaded
+                self.assertEqual((self._state(), len(self._left())), ("done", 1))
+                if then == "revert":
+                    self._assert_reverted()
+                    continue
+                rc, out = apply_iocost(self.paths, runner=self.runner)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(self._installer_words(), ["install", "mark"])
+                self.assertEqual(self.runner.enabled_state, "enabled")
+
+    def test_a_revert_killed_after_its_mark_leaves_pending_and_converges(self) -> None:
+        for then in ("revert", "apply"):
+            with self.subTest(then):
+                self.runner = _FakeRunner()
+                self._seed_component()
+                self._service_on()
+
+                def kill(cmd: list[str]) -> None:
+                    if cmd[:2] == ["systemctl", "disable"]:
+                        raise Killed
+
+                self.runner.on_call = kill
+                with self.assertRaises(Killed):
+                    revert_iocost(self.paths, runner=self.runner)
+                self.assertEqual(self._state(), "pending")
+                self.assertEqual(self.runner.enabled_state, "enabled")
+                self.assertEqual(len(self._left()), 3)
+                self.runner.on_call = None
+                if then == "revert":
+                    self._assert_reverted()
+                    continue
+                self.runner.calls.clear()
+                rc, out = apply_iocost(self.paths, runner=self.runner)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(self._installer_words(), ["install", "mark"])
 
     def test_revert_resets_the_disks_after_the_rule_is_gone(self) -> None:
         self.runner.load_state = "loaded"

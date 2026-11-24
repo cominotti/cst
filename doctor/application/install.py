@@ -116,8 +116,8 @@ def _record_results(
             out.results.append(
                 Result(
                     WARN,
-                    f"{component}: installed only in part (a file of it was recorded and `{fix or component}` "
-                    "has not finished since)",
+                    f"{component}: installed only in part (a file of it was recorded, or a removal of it began, "
+                    f"and `{fix or component}` has not finished since)",
                     fix,
                 )
             )
