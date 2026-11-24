@@ -81,6 +81,9 @@ class FaultyTree(LocalVolumeTree):
     def __init__(self, paths: NocowPaths, runner: CommandRunnerPort, plan: FaultPlan) -> None:
         super().__init__(paths, runner)
         self.plan = plan
+        # True while recover()'s faulty_os block runs: its steps are os.rename and shutil.rmtree there,
+        # so rename and remove_tree go straight to the adapter (each step is counted once, at one level).
+        self.os_level = False
 
     def rel(self, path: str) -> str:
         return os.path.relpath(path, self.paths.volumes)
@@ -113,10 +116,16 @@ class FaultyTree(LocalVolumeTree):
     @override
     def remove_tree(self, path: str, *, ignore_errors: bool = False) -> None:
         effect = functools.partial(super().remove_tree, path, ignore_errors=ignore_errors)
+        if self.os_level:
+            effect()
+            return
         self.plan.step(f"remove_tree {self.rel(path)}", effect, ignore_error if ignore_errors else None)
 
     @override
     def rename(self, src: str, dst: str) -> None:
+        if self.os_level:
+            super().rename(src, dst)
+            return
         self.plan.step(f"rename {self.rel(src)} {self.rel(dst)}", functools.partial(super().rename, src, dst))
 
 
@@ -180,9 +189,10 @@ class NocowFaultBase(Base):
         super().setUp()
         stub_fsync(self)
         self.plan = FaultPlan()
+        self.faulty_tree = FaultyTree(self.paths, self.fs, self.plan)
         self.service = DockerVolumesNocow(
             paths=self.paths,
-            tree=FaultyTree(self.paths, self.fs, self.plan),
+            tree=self.faulty_tree,
             state=FaultyState(self.paths, self.plan),
             daemon=DockerDaemons(self.paths, self.fs),
             out=NocowOutput(self.paths, self.fs),
@@ -209,8 +219,12 @@ class NocowFaultBase(Base):
         """The next boot's recover(), the steps inside the adapter through the plan: those steps.
         An OSError there ends the boot, as the program logs it; Killed goes through."""
         self.plan.arm(*faults)
-        with faulty_os(self.plan, self.vols), contextlib.suppress(OSError):
-            self.quiet(self.service.recover)
+        self.faulty_tree.os_level = True
+        try:
+            with faulty_os(self.plan, self.vols), contextlib.suppress(OSError):
+                self.quiet(self.service.recover)
+        finally:
+            self.faulty_tree.os_level = False
         return list(self.plan.calls)
 
     # ---- the invariants -------------------------------------------------
