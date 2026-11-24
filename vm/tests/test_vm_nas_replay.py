@@ -48,8 +48,8 @@ from vm.tests.test_vm_nas import (
     NOW,
     fake_blklist,
     fake_nas_xml,
-    FakeNasClock,
     FakeNasCommands,
+    FakeNasMovingClock,
     FakeNasOut,
     FakeNasRestic,
     FakeNasSettings,
@@ -547,24 +547,16 @@ class Settings(FakeNasSettings):
         return {"VM_NAS_KEEP_WEEKLY": 2}.get(key, 0)
 
 
-class Clock(FakeNasClock):
+class Clock(FakeNasMovingClock):
     """now: the run's week; monotonic moves on with sleep (a poll until a deadline ends)."""
 
     def __init__(self, r: int) -> None:
+        super().__init__()
         self.r = r
-        self.t = 100.0
 
     @override
     def now(self) -> float:
         return run_time(self.r)
-
-    @override
-    def monotonic(self) -> float:
-        return self.t
-
-    @override
-    def sleep(self, seconds: float) -> None:
-        self.t += seconds
 
 
 class Virsh:

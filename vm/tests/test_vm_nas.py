@@ -2753,7 +2753,7 @@ class _StopAtHeldEnd(FakeNasSignals):
         return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
 
 
-class _MovingClock(FakeNasClock):
+class FakeNasMovingClock(FakeNasClock):
     """A clock whose sleep moves monotonic on, so a poll until a deadline ends."""
 
     def __init__(self) -> None:
@@ -2802,7 +2802,7 @@ class NasUnclearSnapshotTest(unittest.TestCase):
             [("vda", disk_a)],
             on_virsh=self._timeout_hook({}, [overlay_a]),
             signals=_StopAtHeldEnd(),
-            clock=_MovingClock(),
+            clock=FakeNasMovingClock(),
         )
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
         with self.assertRaises(Refused) as ctx:
@@ -2832,7 +2832,7 @@ class NasUnclearSnapshotTest(unittest.TestCase):
             return timeout(args, cmds, sigs, live, store)
 
         port, _commands, store, _signals, alerts = self._make_backup(
-            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, clock=_MovingClock()
+            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, clock=FakeNasMovingClock()
         )
         nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
         with self.assertRaises(Refused) as ctx:
