@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
-"""systemd units: their files as CST writes them (header comment lines, then sections), and
-systemd's ActiveState words (ActiveState).
+"""systemd units: their files as CST writes them (header comment lines, then sections), the answer
+of `systemctl show` (parse_show_props, parse_show_units), and systemd's ActiveState words (ActiveState).
 
     render_unit_file(["# Managed by ...", "# why"], [("Unit", ["Description=x"]), ("Service", [...])])
 
@@ -14,6 +14,18 @@ import posixpath
 
 # `systemctl mask NAME` leaves a link to this file where the unit file goes.
 MASK_TARGET = "/dev/null"
+
+
+def parse_show_props(text: str) -> dict[str, str]:
+    """One unit's PROP=VALUE lines of `systemctl show` as {prop: value} (a line without = is skipped)."""
+    return {key: value for key, sep, value in (line.partition("=") for line in text.splitlines()) if sep}
+
+
+def parse_show_units(text: str) -> list[dict[str, str]]:
+    """The answer of `systemctl show -p PROP... PATTERN` over several units: one {prop: value} per unit
+    (parse_show_props of each block, blocks parted by an empty line), in systemctl's order; a block with
+    no PROP=VALUE line is skipped."""
+    return [unit for block in text.split("\n\n") if (unit := parse_show_props(block))]
 
 
 def render_unit_file(header: Sequence[str], sections: Sequence[tuple[str, Sequence[str]]]) -> str:

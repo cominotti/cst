@@ -35,6 +35,7 @@ from btrfs.cache.domain import parse_all_mounts, parse_managed_fstab_entries
 from btrfs.cache.domain.health import CacheMountFindingSeverity, assess_cache_mount_health, dm_device_names
 from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread
 from cst_core.domain.shapes import parse_json
+from cst_core.domain.units import parse_show_units
 from cst_core.domain.text import YES_WORDS, ShellAssignments, parse_shell_assignments
 from cst_core.domain.values import GIB, format_bytes_gib_mib, parse_whole_number
 from doctor.application.cpu import unit_props
@@ -735,12 +736,7 @@ def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Resu
     rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
     if rc != 0:
         return
-    units = [
-        unit
-        for block in out.split("\n\n")
-        if (unit := {k: v for k, sep, v in (line.partition("=") for line in block.splitlines()) if sep})
-    ]
-    if fstab_lines_unread(units, {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:
+    if fstab_lines_unread(parse_show_units(out), {e.target for e in parse_managed_fstab_entries(fstab_raw)}) is True:
         yield Result(
             WARN,
             "btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "

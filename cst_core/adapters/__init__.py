@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 import time
 from typing import TypedDict, Unpack
 
+from cst_core.domain.units import parse_show_props, parse_show_units
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode, StdinMode, SystemctlHost, UnitName
 
 
@@ -43,11 +44,6 @@ class _SystemctlScope(TypedDict, total=False):
     on_host: SystemctlHost
     base_env: Mapping[str, str] | None
     stdin: StdinMode
-
-
-def _show_props(text: str) -> dict[str, str]:
-    """One unit's PROP=VALUE lines of `systemctl show` as {prop: value} (a line without = is skipped)."""
-    return {key: value for key, sep, value in (line.partition("=") for line in text.splitlines()) if sep}
 
 
 class SystemctlAdapter:
@@ -165,7 +161,7 @@ class SystemctlAdapter:
         res = self._show(self._head, props, pattern)
         if res.returncode != 0:
             return None
-        return [unit for block in res.stdout.split("\n\n") if (unit := _show_props(block))]
+        return parse_show_units(res.stdout)
 
     def escape_path(self, path: str, *, suffix: str) -> UnitName:
         """Escape a filesystem path into a systemd unit name via systemd-escape."""
@@ -179,4 +175,4 @@ class SystemctlAdapter:
         systemctl fails or cannot start. 20 s at most, or the adapter's timeout when it has one."""
         head = [*self._head, "--user"] if user and "--user" not in self._head else self._head
         res = self._show(head, props, unit)
-        return _show_props(res.stdout) if res.returncode == 0 else {}
+        return parse_show_props(res.stdout) if res.returncode == 0 else {}
