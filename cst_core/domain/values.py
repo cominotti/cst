@@ -120,6 +120,18 @@ def parse_whole_number(text: str) -> int | None:
     return _whole_number(text)
 
 
+def parse_integer(text: str) -> int | None:
+    """TEXT as an integer: one optional leading "-", then what parse_whole_number takes ("-0" is 0).
+
+    None for anything else: "+5", "--5", "-" alone, blanks, a digit that is not ASCII, or more digits
+    than int() reads. Never a ValueError.
+    """
+    if text.startswith("-"):
+        number = parse_whole_number(text[1:])
+        return None if number is None else -number
+    return parse_whole_number(text)
+
+
 @dataclass(frozen=True, slots=True)
 class ByteSize:
     """Non-negative byte quantity with binary unit parsing and formatting."""

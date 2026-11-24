@@ -241,6 +241,23 @@ class ReadBytesTest(unittest.TestCase):
         self.assertEqual(self.m.read_int(missing), 0)
         self.assertEqual(self.opened, [])
 
+    def test_read_int_takes_one_leading_minus_and_ascii_digits(self) -> None:
+        # A sysfs or /proc/sys value: "-7" is -7; "--5", "²" (int() refuses it), "٣" (int() reads 3) and more
+        # digits than int() reads are no number, so 0, as a file that holds none.
+        for text, want in (
+            ("123\n", 123),
+            ("-7", -7),
+            ("-", 0),
+            ("+5", 0),
+            ("--5", 0),
+            ("\N{SUPERSCRIPT TWO}", 0),
+            ("\N{ARABIC-INDIC DIGIT THREE}", 0),
+            ("9" * 5000, 0),
+            ("-" + "9" * 5000, 0),
+        ):
+            with self.subTest(text=text[:8]):
+                self.assertEqual(self.m.read_int(self.write("v", text.encode())), want)
+
     def test_error_during_first_read(self) -> None:
         path = self.write("big", b"a" * (2 * PAGE))
 

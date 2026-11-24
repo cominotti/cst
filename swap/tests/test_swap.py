@@ -32,7 +32,7 @@ from cst_core.domain.install import ArtifactKind, Owner
 from cst_core.ports import CommandFailed, CommandResult, OutputMode, UnitName
 from tests.probes import NoUnitQueries
 from swap.application.apply import SwapApplicationService
-from swap.application.memory_tuning import effective_uresourced_memory_min
+from swap.application.memory_tuning import MM_TMPFILES_ENTRY, URESOURCED_ENTRY, effective_uresourced_memory_min
 from swap.application.reports import MissingDesiredFileError, SwapEnvironment
 from swap.adapters import LinuxSwapSystemAdapter
 from swap.cli import execute_cli, format_usage, main as swap_main
@@ -146,6 +146,34 @@ class StatusMathTest(unittest.TestCase):
 
     def test_kv_skips_non_numbers(self) -> None:
         self.assertEqual(parse_kv("zswpout 5\nbad x\nshort\n"), {"zswpout": 5})
+
+    def test_sysfs_size_is_ascii_digits_within_the_digit_limit(self) -> None:
+        # The partition's size from sysfs: "2048" sectors is 1 MiB; a digit int() refuses ("²"), one of
+        # another script ("٣", which int() reads as 3) or more digits than int() reads is no number.
+        def part(size: str | None) -> tuple[str, int] | None:
+            return D.sysfs_partition(
+                "/dev/disk/by-partuuid/p",
+                resolve=lambda _p: "/dev/sda3",
+                is_block=lambda _p: True,
+                first_line=lambda p: size if p == "/sys/class/block/sda3/size" else None,
+                sys_dir="/sys",
+            )
+
+        self.assertEqual(part("2048"), ("/dev/sda3", 1048576))
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000, "-1", "", None):
+            with self.subTest(size=(bad or "")[:8]):
+                self.assertIsNone(part(bad))
+
+    def test_proc_swaps_skips_a_row_whose_sizes_are_no_ascii_number(self) -> None:
+        head = "Filename\tType\tSize\tUsed\tPriority\n"
+        good = "/dev/dm-0 partition 8388604 1024 -2\n"
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000):
+            for row in (f"/dev/zram0 partition {bad} 0 100\n", f"/dev/zram0 partition 10 {bad} 100\n"):
+                with self.subTest(row=row[:30]):
+                    entries = D.parse_proc_swaps(head + row + good)
+                    self.assertEqual(
+                        [(e.device, e.size_kib, e.used_kib) for e in entries], [("/dev/dm-0", 8388604, 1024)]
+                    )
 
     def test_share(self) -> None:
         self.assertEqual(share(1, 2), 0.5)
@@ -1839,6 +1867,119 @@ class SwapSettingsTest(_SwapScratch):
         os.remove(self.env.fstab)
         self.assertIn("REFUSE    cst/swap.conf", self._plan_text(self.env, unreadable={self.env.crypttab}))
 
+    def test_as_root_a_crypttab_or_fstab_it_cannot_read_says_apply_refuses_not_root(self) -> None:
+        # Root, and access refuses (a security policy, a root-squashed mount): --root cannot help, and
+        # apply refuses that file before it writes anything.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        rows = {self.env.crypttab: "crypttab: swap0 line", self.env.fstab: "fstab: /dev/mapper/swap0 line"}
+        for as_root in (True, False):
+            env = dataclasses.replace(self.env, as_root=as_root)
+            for path, row in rows.items():
+                for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                    with self.subTest(as_root=as_root, path=path, cmd=cmd):
+                        self.env = env
+                        rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={path}))
+                        self.assertEqual(rc, 0, err)
+                        line = next(x for x in out.splitlines() if row in x)
+                        if as_root:
+                            self.assertEqual(
+                                line.split(row, 1)[1].strip(),
+                                "cannot be read, even as root: apply refuses before it writes anything",
+                            )
+                            self.assertNotIn("--root", out)
+                        else:
+                            self.assertEqual(
+                                line.split(row, 1)[1].strip(), f"needs root to read: on the host, cst swap {cmd} --root"
+                            )
+                        self.assertTrue(line.startswith("  ?  "), line)
+
+    def test_as_root_a_file_apply_writes_whole_that_it_cannot_read_does_not_ask_for_root(self) -> None:
+        # Root on the host, and access refuses (a security policy, a root-squashed mount): the row asked for
+        # --root, which cannot help. As a user (root in a toolbox too) it still does.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        env = self.env
+        dests = (env.tmpfiles_conf, env.etc_path(MM_TMPFILES_ENTRY), env.sysctl_conf, env.etc_path(URESOURCED_ENTRY))
+        dests += (env.slice_dropin,)
+        for dest in dests:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            self._write(dest, "# edited by hand\n")
+        for as_root, in_container in ((True, False), (False, False), (True, True)):
+            reader = dataclasses.replace(env, as_root=as_root, in_container=in_container)
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                self.env = reader
+                rc, out, err, _ = self._run_on(cmd, self._fs(mapper_present=True, unreadable=set(dests)))
+                self.assertEqual(rc, 0, err)
+                for dest in dests:
+                    with self.subTest(as_root=as_root, in_container=in_container, cmd=cmd, dest=dest):
+                        short = dest.removeprefix(env.etc_dir.rstrip("/") + "/").removeprefix("systemd/system/")
+                        line = next(x for x in out.splitlines() if f" {short} " in x)
+                        self.assertTrue(line.startswith("  ?  "), line)
+                        want = (
+                            "cannot be read, even as root"
+                            if as_root and not in_container
+                            else f"needs root to read: on the host, cst swap {cmd} --root"
+                        )
+                        self.assertEqual(line.split(short, 1)[1].strip(), want)
+
+    def test_root_in_a_toolbox_is_still_sent_to_the_host_s_root(self) -> None:
+        # sudo cst swap plan in a toolbox: its root is root of the user namespace only, and the host's
+        # root-only files are closed to it. On the host, --root reads them: the notes say so, as for a user,
+        # and none says "even as root" or that apply stops.
+        self._older_install()
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        box = dataclasses.replace(self.env, as_root=True, in_container=True)
+        rows = {self.env.crypttab: "crypttab: swap0 line", self.env.fstab: "fstab: /dev/mapper/swap0 line"}
+        for path, row in rows.items():
+            for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+                with self.subTest(path=path, cmd=cmd):
+                    self.env = box
+                    rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={path}))
+                    self.assertEqual(rc, 0, err)
+                    line = next(x for x in out.splitlines() if row in x)
+                    self.assertEqual(
+                        line.split(row, 1)[1].strip(), f"needs root to read: on the host, cst swap {cmd} --root"
+                    )
+                    self.assertNotIn("even as root", out)
+        # No swap.conf, the fstab line of an older CST, a crypttab closed to it.
+        os.remove(self.env.settings_path)
+        self.assertIn(
+            "  ?         cst/swap.conf                          not written yet; an older CST set up swap0 (fstab):"
+            " apply writes it from crypttab, which needs root to read: on the host, cst swap plan --root",
+            self._plan_text(box, unreadable={self.env.crypttab}),
+        )
+        # A swap.conf closed to it: asked for --root, not refused.
+        self._write(self.env.settings_path, TEST_SETTINGS)
+        path = self.env.settings_path
+        fs = _TextUnreadable(self._fs().block_links, unreadable_paths={path}, unread={path})
+        rc, out, err, _ = self._run_on(D.SwapCommand.PLAN, fs)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("  ?         cst/swap.conf                          cannot be read as this user:", out)
+        self.assertNotIn("REFUSE    cst/swap.conf", out)
+
+    def test_as_root_an_older_install_whose_crypttab_it_cannot_read_says_apply_refuses(self) -> None:
+        # No /etc/cst/swap.conf, the fstab line an older CST wrote, and a crypttab root may not read:
+        # the swap.conf row does not ask for --root, and apply stops with it before any write.
+        self._older_install()
+        self.env = dataclasses.replace(self.env, as_root=True)
+        note = (
+            "not written yet; an older CST set up swap0 (fstab), and crypttab cannot be read, even as root:"
+            " apply refuses before it writes anything"
+        )
+        before = file_tree(self.tmp)
+        for cmd in (D.SwapCommand.PLAN, D.SwapCommand.STATUS):
+            with self.subTest(cmd=cmd):
+                rc, out, err, _ = self._run_on(cmd, self._fs(unreadable={self.env.crypttab}))
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"  ?         cst/swap.conf                          {note}\n", out)
+                self.assertNotIn("--root", out)
+        rc, out, err, systemd = self._run_on(D.SwapCommand.APPLY, self._fs(unreadable={self.env.crypttab}))
+        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.settings_path}: {note}.\n")
+        self.assertEqual((systemd.daemon_reloads, systemd.calls), (0, []))
+        self.assertEqual(file_tree(self.tmp), before)
+
 
 class MemoryLowOverrideTest(_SwapScratch):
     """machine.slice's MemoryLow from a drop-in systemd applies after CST's: an "over" row naming it, no
@@ -2876,8 +3017,18 @@ class SwapWiringTest(unittest.TestCase):
                 seats_dir="/x/run/systemd/seats",
                 prog="cst swap",
                 install_record="/x/var/lib/cst/installed.json",
+                in_container=True,
             ),
         )
+
+    def test_root_in_a_toolbox_is_not_the_host_s_root(self) -> None:
+        # Root of a toolbox's user namespace: the host's root-only files may be closed to it, so its notes
+        # still send the user to --root on the host (cst doctor's rule: uid 0 and no container).
+        for container, root, host_root in ((True, True, False), (False, True, True), (True, False, False)):
+            with self.subTest(container=container, root=root):
+                ctx = _FakeContext(container=container, root=root, etc_dir="/x/etc", run_dir="/x/run")
+                env = swap_wiring.desired_paths("cst swap", ctx, fallback_root="/nowhere")
+                self.assertEqual((env.as_root, env.in_container, env.host_root), (root, container, host_root))
 
 
 class SwapStatusDiagnosisTest(_SwapScratch):

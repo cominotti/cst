@@ -305,7 +305,8 @@ repository:
   by other rules. `tests/test_python_files.py` fails when the two differ.
 - **`[tool.ruff] per-file-target-version`**: the files CI runs on its
   ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
-  and what they import) are formatted and linted as Python 3.12 (`py312`),
+  `tests/quint/cst-quint`, and what they import, such as
+  `cst_core/domain/errors.py` and `values.py`) are formatted and linted as Python 3.12 (`py312`),
   not as `requires-python`'s 3.15: `ruff format` would otherwise write
   `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
   error in them. `tests/test_e2e_host_python.py` finds that set from the

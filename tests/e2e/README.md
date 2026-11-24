@@ -183,8 +183,10 @@ both tiers.
 ## The Python that runs these files
 
 CI runs `tests/e2e/run.py` (`invowk cmd test e2e tier1|tier2`), the files it
-imports and loads (`selection.py`, the two suites) and `image_digest.py` on
-the python3 of its ubuntu-24.04 runner, Python 3.12, not in a container. So
+imports and loads (`selection.py`, the two suites), `image_digest.py` and,
+in its quint jobs, `tests/quint/cst-quint` (`invowk cmd test quint`, with
+what it imports from `cst_core`) on the python3 of its ubuntu-24.04 runner,
+Python 3.12, not in a container. So
 these files are 3.12 code, while every other gate runs on Fedora's Python and
 ruff's target follows `requires-python` (3.15): `except A, B:` (3.14) or
 `os.process_cpu_count` (3.13) here passes every local gate and breaks every
@@ -193,8 +195,13 @@ E2E shard in CI.
 `tests/test_e2e_host_python.py` (rules in `tests/e2e_host_python.py`), run
 with the unit tests, finds these files from the code (the entries, what they
 import, the suite files `run.py` loads by path; a new load by path it cannot
-follow fails), checks that every `python3 FILE.py` CI runs on a runner's host
-is one of its entries and that each such runner's python3 is recorded, then
+follow fails), checks that every program a `python3` command line runs on a
+runner's host (the line split into shell words, redirections left out, and
+read as python3 reads its options: a repository file, with or without
+`.py`, also under `${{ github.workspace }}/`, or `-m` of a repository
+module; one named by a variable fails, unless that `python3` is text: in
+quotes, a word of `echo` or `printf`, or a YAML key's value other than
+`run:`) is one of its entries and that each such runner's python3 is recorded, then
 parses each file with 3.12's grammar and looks for a table of newer
 standard-library names. The table holds the known, cheap cases only: a new
 method or keyword argument passes it, and CI stays the real check. A use behind

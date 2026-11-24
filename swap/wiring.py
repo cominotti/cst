@@ -130,4 +130,5 @@ def desired_paths(
         # Next to the /etc it writes (the host's /var/lib/cst; under a test's folder, that folder's).
         install_record=os.path.join(os.path.dirname(etc.rstrip("/")), ROOT_RECORD.lstrip("/")),
         as_root=ctx.is_root(),
+        in_container=ctx.is_container(),
     )

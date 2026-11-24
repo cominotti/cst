@@ -4552,6 +4552,12 @@ class DoctorDomainTest(unittest.TestCase):
     def test_parse_cpu_stat_and_offered_features(self) -> None:
         self.assertEqual(doc_domain.parse_cpu_stat_seconds("nr_periods 5\nusage_usec 2500000\n"), 2.5)
         self.assertIsNone(doc_domain.parse_cpu_stat_seconds("nr_periods 5\n"))
+        # usage_usec is ASCII digits within int()'s limit: "²" (int() refuses it), "٣" (int() reads 3) and
+        # 5000 digits are no number, and a later line that is one still counts.
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000):
+            with self.subTest(value=bad[:8]):
+                self.assertIsNone(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\n"))
+                self.assertEqual(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\nusage_usec 1000000\n"), 1.0)
         feats, err = doc_domain.parse_offered_features_xml(CAPS_QEMU11)
         self.assertEqual(err, "")
         self.assertIsNotNone(feats)
@@ -4600,6 +4606,9 @@ class PackageRulesEdgeTest(unittest.TestCase):
         self.assertIsNone(p("-1-1.fc45.x86_64"))  # no name
         self.assertIsNone(p("a-1:-4.x86_64"))  # an epoch and no version
         self.assertEqual(p("a-1:2:3-4.x86_64"), ("a", "1", "2:3", "4", "x86_64"))  # only the first colon is the epoch
+        # An epoch is ASCII digits: "²" and "٣" pass isdigit() but are no epoch rpm writes.
+        self.assertIsNone(p("a-\N{SUPERSCRIPT TWO}:2-4.x86_64"))
+        self.assertIsNone(p("a-\N{ARABIC-INDIC DIGIT THREE}:2-4.x86_64"))
 
     def test_classify_multilib_and_unreadable_entries(self) -> None:
         c = doc_domain.classify_requests

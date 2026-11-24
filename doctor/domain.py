@@ -292,7 +292,7 @@ def parse_nevra(s: str) -> Nevra | None:
     epoch = ""
     if ":" in ev:
         epoch, ev = ev.split(":", 1)
-        if not epoch.isdigit():
+        if parse_whole_number(epoch) is None:  # ASCII digits only: "²" or "٣" is no epoch
             return None
     if not ev or not rel:
         return None
@@ -547,8 +547,9 @@ def parse_cpu_stat_seconds(text: str) -> float | None:
     """Parse cgroup cpu.stat text and return usage_usec in seconds, or None."""
     for line in text.splitlines():
         k, _, v = line.partition(" ")
-        if k == "usage_usec" and v.strip().isdigit():
-            return int(v) / 1e6
+        usec = parse_whole_number(v.strip()) if k == "usage_usec" else None  # ASCII digits within int()'s limit
+        if usec is not None:
+            return usec / 1e6
     return None
 
 

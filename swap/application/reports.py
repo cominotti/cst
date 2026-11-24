@@ -116,8 +116,16 @@ class SwapEnvironment:
     # root (a root file owned by another account is then rewritten, as by the installer).
     install_record: str = ""
     as_root: bool = False
+    # Whether this runs in a toolbox or a container: its root is root of that user namespace only, so a
+    # file it cannot read may be one the host's root reads (on the host, --root).
+    in_container: bool = False
     # A test's seam that moved /proc or /sys: (variable, the kernel's folder, where it is read now).
     test_seam: tuple[tuple[str, str, str], ...] = ()
+
+    @property
+    def host_root(self) -> bool:
+        """Root of the host, whom --root cannot help with a file it cannot read (cst doctor's rule too)."""
+        return self.as_root and not self.in_container
 
     @property
     def uresourced_view(self) -> UresourcedView:
@@ -185,6 +193,23 @@ class SwapEnvironment:
     @property
     def src_dropin(self) -> str:
         return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
+
+
+# A crypttab or fstab that root cannot read (a security policy, a root-squashed mount): --root cannot help, and
+# apply refuses it before the first write.
+_ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
+# A file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice drop-in) that root cannot read:
+# --root cannot help either.
+_ROOT_CANNOT_READ_FILE: Final = "cannot be read, even as root"
+
+
+def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
+    """The note of a row of plan and status: state_note's, except a file that cannot be read when the
+    reader already runs as the host's root (env.host_root; root in a toolbox is not): cannot_read, with
+    no --root advice."""
+    if env.host_root and state == OwnedState.UNREADABLE:
+        return cannot_read
+    return state_note(state, swap_name, env.prog, verb)
 
 
 def _short_etc_path(etc_dir: str, path: str) -> str:
@@ -343,7 +368,7 @@ class SwapReports:
         """The partition from /etc/cst/swap.conf, or the one an older CST set up (swap.domain's
         resolve_settings, over this file system)."""
         facts = _FileSettingsFacts(self._fs, self._env, self._partition_size_sysfs)
-        return resolve_settings(facts, as_root=self._env.as_root)
+        return resolve_settings(facts, as_root=self._env.host_root)
 
     def _settings_item(self, res: SpecResolution, verb: str) -> PlanItem:
         """The row of /etc/cst/swap.conf in plan and status."""
@@ -360,12 +385,13 @@ class SwapReports:
                 f" {spec.expected_size_bytes} bytes (its size now)",
             )
         if res.state == SwapSpecState.UNKNOWN:
-            return PlanItem(
-                "?",
-                target,
-                f"not written yet; an older CST set up {res.note} (fstab): apply writes it from crypttab,"
-                f" which needs root to read: on the host, {env.prog} {verb} --root",
+            older = f"not written yet; an older CST set up {res.note} (fstab)"
+            note = (
+                f"{older}, and crypttab {_ROOT_CANNOT_READ}"
+                if env.host_root
+                else f"{older}: apply writes it from crypttab, which needs root to read: on the host, {env.prog} {verb} --root"
             )
+            return PlanItem("?", target, note)
         if res.state == SwapSpecState.UNREADABLE:
             return PlanItem("?", target, f"cannot be read as this user: on the host, {env.prog} {verb} --root")
         if res.state == SwapSpecState.BAD:
@@ -395,18 +421,9 @@ class SwapReports:
         file_items: list[PlanItem] = []
         c_state = self._inspect_marked(env.crypttab, spec.crypttab_spec())
         f_state = self._inspect_marked(env.fstab, spec.fstab_spec())
-        file_items.append(
-            PlanItem(
-                describe_state(c_state), f"crypttab: {spec.name} line", state_note(c_state, spec.name, env.prog, verb)
-            )
-        )
-        file_items.append(
-            PlanItem(
-                describe_state(f_state),
-                f"fstab: {spec.mapper_path} line",
-                state_note(f_state, spec.name, env.prog, verb),
-            )
-        )
+        for state, row in ((c_state, f"crypttab: {spec.name} line"), (f_state, f"fstab: {spec.mapper_path} line")):
+            note = _root_note(env, state, spec.name, verb, cannot_read=_ROOT_CANNOT_READ)
+            file_items.append(PlanItem(describe_state(state), row, note))
         tier_change = any(st in (OwnedState.MISSING, OwnedState.CHANGE) for st in (c_state, f_state))
         return file_items, tier_change
 
@@ -484,9 +501,8 @@ class SwapReports:
             (env.src_dropin, env.slice_dropin),
         ):
             st = self._inspect_file(src, dest)
-            file_items.append(
-                PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), state_note(st, name, env.prog, verb))
-            )
+            note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ_FILE)
+            file_items.append(PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), note))
 
         if self._fs.exists(env.old_sysctl_conf):
             file_items.append(

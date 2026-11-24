@@ -8,6 +8,9 @@
   programs, and the `cli.py` modules a setup script runs.
 - `module_closure(entries)`: every repository module those programs import,
   directly or through another module, by AST (function-level imports too).
+- `import_bindings(node)`: the names one import statement binds, each with
+  the dotted name it stands for (the architecture gate's primitive calls,
+  the host-Python gate's run-time imports and newer names).
 """
 
 import ast
@@ -110,3 +113,18 @@ def module_closure(entries: Iterable[str]) -> set[str]:
 def top_level_nodes(source: str, rel: str) -> list[ast.stmt]:
     """The statements at the top of a module."""
     return list(ast.parse(source, filename=rel).body)
+
+
+def import_bindings(node: ast.AST) -> list[tuple[str, str]]:
+    """The names an import statement binds and the dotted name each stands for (import os.path: os is
+    os; import os as o: o is os; from os import sep as s: s is os.sep); none for another node or a
+    relative import."""
+    if isinstance(node, ast.Import):
+        bindings: list[tuple[str, str]] = []
+        for alias in node.names:
+            top = alias.name.split(".", 1)[0]
+            bindings.append((top, top) if alias.asname is None else (alias.asname, alias.name))
+        return bindings
+    if isinstance(node, ast.ImportFrom) and not node.level and node.module is not None:
+        return [(alias.asname or alias.name, f"{node.module}.{alias.name}") for alias in node.names]
+    return []
