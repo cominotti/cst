@@ -860,17 +860,11 @@ class ParseArgsAndJobsTest(unittest.TestCase):
             mock.patch("sys.gettrace", return_value=None),
             mock.patch.object(sys.monitoring, "get_tool", return_value=None),
             mock.patch.dict(sys.modules, {"coverage": None}),
-            mock.patch("os.cpu_count", return_value=24),
-            mock.patch("os.process_cpu_count", return_value=16),
         ):
-            self.assertEqual(default_jobs(), 16)
-        with (
-            mock.patch("sys.gettrace", return_value=None),
-            mock.patch.object(sys.monitoring, "get_tool", return_value=None),
-            mock.patch.dict(sys.modules, {"coverage": None}),
-            mock.patch("os.process_cpu_count", return_value=None),
-        ):
-            self.assertEqual(default_jobs(), 1)
+            with mock.patch("os.cpu_count", return_value=24), mock.patch("os.process_cpu_count", return_value=16):
+                self.assertEqual(default_jobs(), 16)
+            with mock.patch("os.process_cpu_count", return_value=None):
+                self.assertEqual(default_jobs(), 1)
 
 
 class TestJobsEnvTest(unittest.TestCase):
