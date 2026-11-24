@@ -1039,7 +1039,11 @@ class UnitDurations(TypedDict):
 def _seconds_value(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
-    return math.isfinite(value) and value >= 0
+    try:
+        seconds = float(value)
+    except OverflowError:  # an int past the largest float (JSON has no limit on an int's size)
+        return False
+    return math.isfinite(seconds) and seconds >= 0
 
 
 def _is_unit_durations(value: object) -> TypeIs[UnitDurations]:

@@ -1366,6 +1366,7 @@ class LongestFirstTest(unittest.TestCase):
             "NaN": b'{"version": 1, "seconds": {"m.C.a": NaN}}',
             "Infinity": b'{"version": 1, "seconds": {"m.C.a": Infinity}}',
             "too large": b'{"version": 1, "seconds": {"m.C.a": 1e999}}',
+            "an int past the largest float": b'{"version": 1, "seconds": {"m.C.a": 1' + b"0" * 400 + b"}}",
             "too deep": b"[" * 100_000 + b"]" * 100_000,
         }
         for label, body in cases.items():
