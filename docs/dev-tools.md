@@ -230,11 +230,11 @@ tree, a write into the source during its copy, and writes on both sides). `arm_p
 `os` calls (`FaultyOs`), the state files' writes and removals, cp
 (`FaultyRunner`), +C on a folder, the creation of `~/Bulk` and each
 tree's deletion (torn in two) points of the plan, which is dead after a kill. After a kill every mode is tried again
-inside the repair; after a failure or a full disk, only a kill. One known
-gap is let through by name and counted per class: a fault that cuts the
-deletion of the copy (`<target>.bulk-new`) while a rollback deletes it
-leaves a journal that every later repair keeps ("the copy ... was written
-to as well"), with the data back in /home.
+inside the repair; after a failure or a full disk, only a kill. No gap is
+let through: a fault that cuts the deletion of a checked copy (a rollback's,
+or the switch's when the source changed) must converge too, because the
+copy is renamed to `<target>.bulk-new.bulk-drop` before it is deleted and a
+repair deletes a marked copy without the "written to" check.
 
 **Cost.** The eight modules (`tests.test_fault_injection`,
 `btrfs.tests.test_docker_volumes_nocow_faults`,
