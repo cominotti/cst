@@ -276,6 +276,155 @@ class T(unittest.TestCase):
 """
 
 
+_SIGNALS = """
+import signal
+import unittest
+
+
+class Leaks(unittest.TestCase):
+    def test_a_sets_sigpipe_to_its_default(self):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    def test_b_sees_the_disposition_the_run_started_with(self):
+        self.assertEqual(signal.getsignal(signal.SIGPIPE), signal.SIG_IGN)
+
+
+class Restores(unittest.TestCase):
+    def test_puts_it_back_in_a_cleanup(self):
+        self.addCleanup(signal.signal, signal.SIGPIPE, signal.getsignal(signal.SIGPIPE))
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        self.addCleanup(signal.pthread_sigmask, signal.SIG_UNBLOCK, {signal.SIGUSR1})
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+
+
+class Masks(unittest.TestCase):
+    def test_blocks_sigusr1(self):
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+
+
+class FixtureRestores(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.old = signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+
+    @classmethod
+    def tearDownClass(cls):
+        signal.signal(signal.SIGUSR2, cls.old)
+
+    def test_a_sees_the_class_s_disposition(self):
+        self.assertEqual(signal.getsignal(signal.SIGUSR2), signal.SIG_IGN)
+
+    def test_b_sees_it_too(self):
+        self.assertEqual(signal.getsignal(signal.SIGUSR2), signal.SIG_IGN)
+
+
+class FixtureLeaks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+
+    def test_runs(self):
+        pass
+"""
+
+
+class SignalGateTest(unittest.TestCase):
+    """A test that leaves a signal disposition or the signal mask changed changes it for every later test
+    of its worker: it fails the run, even though unittest says OK, and the runner puts it back."""
+
+    def run_probe(self, *names: str, options: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+        """The runner (or with options ("-m", "unittest"), unittest alone) in a child on classes of
+        _SIGNALS."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory(prefix="cst-signal-run-"))
+        with open(os.path.join(tmp, "probe_signals.py"), "w", encoding="utf-8") as f:
+            f.write(_SIGNALS)
+        argv = (
+            list(options)
+            if options[:2] == ("-m", "unittest")
+            else [os.path.join(REPO, "tests", "run_unit.py"), *options]
+        )
+        return subprocess.run(
+            [sys.executable, "-B", *argv, *(f"probe_signals.{name}" for name in names)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=120,
+            env={**os.environ, "PYTHONPATH": tmp},
+        )
+
+    def errors(self, done: subprocess.CompletedProcess[str]) -> list[str]:
+        return [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+
+    def test_a_changed_disposition_fails_the_run_and_is_put_back(self) -> None:
+        # unittest alone: OK for the test itself, and the next test then sees SIG_DFL (fails).
+        self.assertEqual(
+            self.run_probe("Leaks.test_a_sets_sigpipe_to_its_default", options=("-m", "unittest")).returncode, 0
+        )
+        self.assertIn("FAIL: test_b", self.run_probe("Leaks", options=("-m", "unittest")).stderr)
+        done = self.run_probe("Leaks")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(
+            self.errors(done),
+            [
+                (
+                    "error: signal SIGPIPE changed and not restored by "
+                    "probe_signals.Leaks.test_a_sets_sigpipe_to_its_default (SIG_IGN -> SIG_DFL)"
+                )
+            ],
+        )
+        self.assertNotIn("FAIL:", done.stderr)  # the next test saw SIG_IGN again
+
+    def test_a_test_that_puts_them_back_in_a_cleanup_passes(self) -> None:
+        done = self.run_probe("Restores")
+        self.assertEqual((done.returncode, self.errors(done)), (0, []), done.stderr)
+
+    def test_a_blocked_signal_fails_the_run(self) -> None:
+        done = self.run_probe("Masks")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(
+            self.errors(done),
+            ["error: the signal mask changed and not restored by probe_signals.Masks.test_blocks_sigusr1 (+SIGUSR1)"],
+        )
+
+    def test_a_class_set_up_may_change_one_until_its_tear_down(self) -> None:
+        done = self.run_probe("FixtureRestores")
+        self.assertEqual((done.returncode, self.errors(done)), (0, []), done.stderr)
+
+    def test_a_class_set_up_that_never_puts_it_back_fails_the_run(self) -> None:
+        done = self.run_probe("FixtureLeaks")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(
+            self.errors(done),
+            [
+                (
+                    "error: signal SIGUSR2 changed and not restored by a class or module set-up or tear-down "
+                    "before probe_signals.FixtureLeaks.test_runs (SIG_DFL -> SIG_IGN)"
+                )
+            ],
+        )
+
+    def test_workers_report_them_as_a_serial_run_does(self) -> None:
+        for jobs in ("1", "2"):
+            with self.subTest(jobs=jobs):
+                done = self.run_probe("Leaks", "Masks", "Restores", options=("--jobs", jobs))
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertEqual(
+                    sorted(self.errors(done)),
+                    [
+                        (
+                            "error: signal SIGPIPE changed and not restored by "
+                            "probe_signals.Leaks.test_a_sets_sigpipe_to_its_default (SIG_IGN -> SIG_DFL)"
+                        ),
+                        (
+                            "error: the signal mask changed and not restored by "
+                            "probe_signals.Masks.test_blocks_sigusr1 (+SIGUSR1)"
+                        ),
+                    ],
+                    done.stderr,
+                )
+
+
 class ResourceWarningGateTest(unittest.TestCase):
     """A test that leaves a file or socket open fails the run, even though unittest says OK."""
 

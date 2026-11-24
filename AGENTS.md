@@ -265,6 +265,23 @@ stubs. A command run by its absolute path (`/usr/bin/systemctl`) passes the
 stubs: production code names these commands bare, and a test never adds a
 path to them.
 
+### A test that changes a signal disposition changes it for its whole worker
+
+A test runs in the same process as many tests after it. A test that calls
+`signal.signal` (code that puts SIGPIPE back to its default, as
+`restore_default_signals` does, or installs a handler) or blocks a signal
+with `signal.pthread_sigmask`, and leaves it so, changes every later test
+of that worker: one of them then fails only in some orders.
+
+**Rule:** a test that changes a disposition or the mask puts it back in a
+cleanup (`self.addCleanup(signal.signal, sig, signal.getsignal(sig))`).
+`tests/run_unit.py` enforces it at run time: it notes every disposition and
+the main thread's mask when a test starts and compares them when it ends
+(after its cleanups); each difference fails the run, naming the test, the
+signal and the change, and the runner puts it back. A class or module
+set-up may change one until its tear-down; one still changed at the end
+fails the run too. `SignalGateTest` in `tests/test_run_unit.py` checks it.
+
 ### A child Python without -B writes __pycache__ into the checkout
 
 `python3 -I` ignores `PYTHONDONTWRITEBYTECODE`. A test that starts Python
