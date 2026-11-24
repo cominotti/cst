@@ -585,11 +585,17 @@ class SetupModelParityTest(unittest.TestCase):
         return norm(stdout), norm(stderr), [norm(" ".join(c)) for c in calls]
 
     def files(self, m: Machine) -> dict[str, str]:
+        """The files of the home, the root and the state folder: the units' .inv, .active and the
+        counter the fault tests judge by are FAKE's state too. Only FAKE's logs of what it was asked
+        (log, env-log) are left out: the model keeps its calls in a list."""
         out: dict[str, str] = {}
-        for top in (m.home, m.root):
+        logs = {os.path.join(m.state, "log"), os.path.join(m.state, "env-log")}
+        for top in (m.home, m.root, m.state):
             for d, _dirs, names in os.walk(top):
                 for n in names:
                     p = os.path.join(d, n)
+                    if p in logs:
+                        continue
                     with open(p, encoding="utf-8", errors="replace") as f:
                         out[os.path.relpath(p, m.tmp)] = f.read()
         return out
