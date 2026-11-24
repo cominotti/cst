@@ -60,7 +60,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, TextIO, override
 
-# The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path.
+# The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path. Run by its
+# shebang (no -B), the cst_core imported from there would write __pycache__ into the checkout: nothing does.
+sys.dont_write_bytecode = True
 _CHECKOUT = Path(__file__).resolve().parents[2]
 if str(_CHECKOUT) not in sys.path:
     sys.path.insert(0, str(_CHECKOUT))
