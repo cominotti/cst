@@ -308,7 +308,8 @@ class CacheMountDomainTests(unittest.TestCase):
         warn = "/var/home/u/.cache (user=u) has a mount that is not CST's bind of /var/mnt/cache/u"
         for at_target, warned in (
             ("/dev/mapper/cache[/cache/u] /var/home/u/.cache btrfs rw 0 0\n", False),
-            ("/dev/mapper/cache /var/home/u/.cache btrfs rw 0 0\n", False),
+            # No [FSROOT] under a base shown with one: findmnt's text, so the drive's top level, not /cache/u.
+            ("/dev/mapper/cache /var/home/u/.cache btrfs rw 0 0\n", True),
             ("tmpfs /var/home/u/.cache tmpfs rw 0 0\n", True),
             ("/dev/sdb1 /var/home/u/.cache ext4 rw 0 0\n", True),
             ("/dev/mapper/cache[/cache/alice] /var/home/u/.cache btrfs rw 0 0\n", True),

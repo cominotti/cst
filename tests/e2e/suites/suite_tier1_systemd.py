@@ -8075,6 +8075,13 @@ STUB
             grep -qF "btrfs cache status --user u1" <<<"$doc_out"
             detach_refused "ERROR: /var/home/u1/.cache has a mount CST did not make on top of CST's bind of /var/mnt/cache/u1; unmount that one first, then run detach again" --user u1
             cp {w}/mounts.ok {w}/mounts
+            # A bind of the drive's top level at u1's target: findmnt shows its SOURCE without [FSROOT] while the
+            # base shows "[/cache]", so it is not CST's bind of /var/mnt/cache/u1, and doctor warns.
+            row /dev/mapper/cache /var/home/u1/.cache btrfs rw uuid-cache-2222 / >>{w}/mounts
+            doc_out="$($cst doctor || true)"
+            warn="WARN   btrfs cache: /var/home/u1/.cache (user=u1) has a mount that is not CST's bind of /var/mnt/cache/u1"
+            grep -qF "$warn" <<<"$doc_out" || {{ echo "$doc_out" >&2; exit 1; }}
+            cp {w}/mounts.ok {w}/mounts
             # /var/mnt/cache not mounted: CST cannot tell its bind from another mount, so detach changes nothing.
             awk -F'\t' '$2 != "/var/mnt/cache"' {w}/mounts.ok >{w}/mounts
             detach_refused "ERROR: /var/home/u1/.cache has a mount and /var/mnt/cache is not mounted, so CST cannot tell whether it is its bind; mount /var/mnt/cache and run detach again" --user u1
