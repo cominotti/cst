@@ -56,6 +56,7 @@ from typing import Final
 
 from cst_core.domain.imports import imported_modules, loads_code_by_path
 from cst_core.domain.text import group, group_or_none
+from tests.code_graph import import_bindings
 from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines, workflow_jobs
 
 # The files CI starts with its runner's python3 (the rest of the closure is found from them).
@@ -368,27 +369,12 @@ def _run_time_imports(tree: ast.Module) -> list[tuple[int, str]]:
     runpy.run_module; a bare exec or __import__ is the builtin), so obj.exec(...), self.run_module()
     or a repository function named run_module is none. Not reported: a call through a name bound
     other than by an import (m = importlib; m.import_module(x)) or through getattr."""
-    bound = dict(binding for node in ast.walk(tree) for binding in _import_bindings(node))
+    bound = dict(binding for node in ast.walk(tree) for binding in import_bindings(node))
     return sorted(
         (node.lineno, name)
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and (name := _dotted(node.func, bound)) in _RUN_TIME_IMPORTS
     )
-
-
-def _import_bindings(node: ast.AST) -> list[tuple[str, str]]:
-    """The names an import statement binds and the dotted name each stands for (import os.path: os is
-    os; import os as o: o is os; from os import sep as s: s is os.sep); none for another node or a
-    relative import."""
-    if isinstance(node, ast.Import):
-        bindings: list[tuple[str, str]] = []
-        for alias in node.names:
-            top = alias.name.split(".", 1)[0]
-            bindings.append((top, top) if alias.asname is None else (alias.asname, alias.name))
-        return bindings
-    if isinstance(node, ast.ImportFrom) and not node.level and node.module is not None:
-        return [(alias.asname or alias.name, f"{node.module}.{alias.name}") for alias in node.names]
-    return []
 
 
 def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list[str], list[str]]:
@@ -722,14 +708,14 @@ def newer_names(tree: ast.AST, target: tuple[int, int]) -> list[tuple[int, str, 
         if isinstance(node, ast.Import):
             for alias in node.names:
                 hit(node.lineno, alias.name)
-            bound.update(_import_bindings(node))  # import os.path binds os
+            bound.update(import_bindings(node))  # import os.path binds os
         elif isinstance(node, ast.ImportFrom):
             if node.level or node.module is None:
                 continue
             hit(node.lineno, node.module)
             for alias in node.names:
                 hit(node.lineno, f"{node.module}.{alias.name}")
-            bound.update(_import_bindings(node))
+            bound.update(import_bindings(node))
         elif id(node) not in attribute_parts:
             dotted = _dotted(node, bound)
             if dotted is not None:

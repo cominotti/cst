@@ -75,7 +75,7 @@ import unittest
 
 from cst_core.domain.imports import loads_code_by_path
 from tests.budgets import budget_problems, format_table, package_of
-from tests.code_graph import entry_points, is_python, module_closure, module_of, production_python
+from tests.code_graph import entry_points, import_bindings, is_python, module_closure, module_of, production_python
 from tests.repo_files import REPO, repo_files
 from tests.test_entrypoints import BOOTSTRAP
 
@@ -809,17 +809,7 @@ def private_imports(source: str, rel: str) -> list[str]:
 
 def _bindings(tree: ast.Module) -> dict[str, str]:
     """Local name -> fully qualified name, for every import of a module."""
-    bound: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                bound[alias.asname or alias.name.split(".", 1)[0]] = (
-                    alias.name if alias.asname is not None else alias.name.split(".", 1)[0]
-                )
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
-            for alias in node.names:
-                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return bound
+    return dict(binding for node in ast.walk(tree) for binding in import_bindings(node))
 
 
 def primitive_calls(source: str, rel: str) -> list[tuple[int, str]]:
