@@ -481,7 +481,7 @@ def _recorded_file(p: Placement, sha: str, commit: str, tree: str) -> RecordedFi
 
 
 def _adding(
-    files: Mapping[str, tuple[RecordedFile, bool]], keep: frozenset[str] = frozenset()
+    files: Mapping[str, tuple[RecordedFile, bool]], keep: frozenset[str]
 ) -> Callable[[InstallRecord], InstallRecord]:
     """The record change that lists these files (with_files; keep: the components that keep their state)."""
     return lambda rec: with_files(rec, files, keep=keep)
