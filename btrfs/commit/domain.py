@@ -26,6 +26,11 @@ DEFAULT_TARGET_COMMIT_S: Final = 60
 MIN_COMMIT_S: Final = 15
 MAX_COMMIT_S: Final = 300
 _COMMIT_PREFIX: Final = "commit="
+# How the kernel reads a commit= value (btrfs's fsparam_u32: kstrtouint with base 0, as C reads a number).
+_U32_MAX: Final = 2**32 - 1
+_HEX_PREFIX: Final = "0x"
+_HEX_DIGITS: Final = frozenset("0123456789abcdefABCDEF")
+_OCTAL_DIGITS: Final = frozenset("01234567")
 # The command's name in its own messages, when CST_PROG does not give it.
 COMMIT_PROG: Final = "cst btrfs commit-interval"
 
@@ -114,12 +119,30 @@ class CommitCoherenceReport:
     drift_details: tuple[str, ...]
 
 
+def _kernel_u32(text: str) -> int | None:
+    """TEXT as the kernel's kstrtouint(TEXT, 0) reads it, or None where the kernel refuses it.
+
+    An optional "+", then "0x" (or "0X") and hex digits, or "0" and octal digits ("060" is 48), or
+    decimal digits; ASCII only, at most 2**32 - 1. (A last newline, which the kernel also takes, never
+    reaches here: the tokens are stripped.)
+    """
+    body = text.removeprefix("+")
+    hex_digits = body[len(_HEX_PREFIX) :]
+    if body[: len(_HEX_PREFIX)].lower() == _HEX_PREFIX and hex_digits and set(hex_digits) <= _HEX_DIGITS:
+        value = int(hex_digits, 16)
+    elif body.startswith("0"):
+        value = int(body, 8) if set(body) <= _OCTAL_DIGITS else None
+    else:
+        value = parse_whole_number(body)
+    return value if value is not None and value <= _U32_MAX else None
+
+
 def parse_commit_token(token: str) -> int | None:
-    """Parse one `commit=N` mount option token (positive integer seconds in ASCII digits, as the kernel
-    reads it), or None."""
+    """Parse one `commit=N` mount option token: N seconds as the kernel reads it (`_kernel_u32`), or None
+    for a token that is no `commit=`, one the kernel refuses, and `commit=0` (the kernel's 30 s default)."""
     if not token.startswith(_COMMIT_PREFIX):
         return None
-    return parse_whole_number(token[len(_COMMIT_PREFIX) :]) or None
+    return _kernel_u32(token[len(_COMMIT_PREFIX) :]) or None
 
 
 def extract_commit_seconds(options_str: str) -> tuple[int, ...]:
@@ -138,8 +161,9 @@ def has_explicit_commit(options_str: str) -> bool:
 
 
 def has_malformed_commit(options_str: str) -> bool:
-    """True when `options_str` holds a `commit=` token that is not a positive number of seconds
-    (`commit=abc`, `commit=0`, `commit=`, digits other than ASCII 0-9): a mount refuses it, and
+    """True when `options_str` holds a `commit=` token that is not a positive number of seconds as the
+    kernel reads it: one a mount refuses (`commit=abc`, `commit=`, `commit=08`, digits other than ASCII
+    0-9, more than 2**32 - 1) or `commit=0`, which the kernel takes as its 30 s default.
     rewrite_commit_options replaces it."""
     return any(
         tok.startswith(_COMMIT_PREFIX) and parse_commit_token(tok) is None

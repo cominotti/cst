@@ -259,6 +259,41 @@ class CommitDomainTests(unittest.TestCase):
         self.assertTrue(has_malformed_commit(both))
         self.assertEqual(rewrite_commit_options(both, 60), "commit=60")
 
+    def test_a_commit_is_read_as_the_kernel_reads_it(self) -> None:
+        # btrfs reads commit= with kstrtouint(value, 0): C's number forms, ASCII only, at most 2**32 - 1.
+        for opts, want in (
+            ("commit=060", 48),  # a leading 0 is octal
+            ("commit=0x3c", 60),
+            ("commit=0X3C", 60),
+            ("commit=+60", 60),
+            ("commit=+0x3c", 60),
+            ("commit=4294967295", 4294967295),
+            ("commit=0x" + "0" * 5000 + "1e", 30),  # no digit limit in base 16
+        ):
+            with self.subTest(opts=opts[:20]):
+                self.assertEqual(extract_commit_seconds(opts), (want,))
+                self.assertFalse(has_malformed_commit(opts))
+        for opts in (
+            "commit=08",
+            "commit=09",
+            "commit=0x",
+            "commit=0xg",
+            "commit=00",
+            "commit=0x0",
+            "commit=4294967296",
+            "commit=0x100000000",
+            "commit=++60",
+            "commit=-60",
+            "commit=1_0",
+            "commit=0x1_0",
+            "commit= 60",
+        ):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), ())
+                self.assertTrue(has_malformed_commit(opts))
+                self.assertEqual(effective_commit_seconds(opts), 30)
+        self.assertEqual(rewrite_commit_options("commit=060,noatime", 60), "commit=60,noatime")
+
     def test_the_booted_diff_reads_the_last_rootflags(self) -> None:
         head = f"ostree=/ostree/boot.1/fedora/abc/0 root=UUID={SAMPLE_UUID} rw "
         first, last = "rootflags=subvol=root,commit=90", "rootflags=subvol=root,noatime"
@@ -485,6 +520,22 @@ class CommitAdapterAndCliTests(unittest.TestCase):
                 )
                 self.assertEqual(rc_r, 0, out_r)
                 self.assertEqual(host.s.fstab, SAMPLE_FSTAB)
+
+    def test_an_fstab_commit_with_a_leading_zero_is_octal(self) -> None:
+        # commit=060 is 48 s for the kernel: status and plan read 48, and apply writes commit=60 in its place.
+        fstab = SAMPLE_FSTAB.replace("noatime,flushoncommit 0 0", "noatime,flushoncommit,commit=060 0 0")
+        host = _FakeHost(_FakeState(fstab=fstab))
+        snap = read_commit_snapshot(host)[0]
+        status = "\n".join(format_commit_status(snap, kargs_ok=True, kargs_error="", proc_cmdline=None))
+        self.assertIn("commit=48", status)
+        plan = build_commit_plan(snap, target_seconds=60)
+        self.assertIn(
+            "fstab      [CHANGE] commit=48 -> commit=60", "\n".join(format_commit_plan_lines(plan, "c", dry_run=True))
+        )
+        rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("commit=060", host.s.fstab or "")
+        self.assertEqual((host.s.fstab or "").count("flushoncommit,commit=60 0 0"), 2, host.s.fstab)
 
     def test_cli_seam_and_container_refusal(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-commit-test-")

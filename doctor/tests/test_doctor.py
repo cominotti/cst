@@ -1504,6 +1504,21 @@ class BtrfsCompressionDoctorTest(Scratch):
                 self.assertIn("WARN   root btrfs commit interval: drift across layers:", bad_text)
                 self.assertIn("fstab /var=commit=30 (default)", bad_text)
 
+        # The kernel reads a commit= with a leading 0 as octal: commit=060 is 48 s, a drift from the others' 60.
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        with open(etc_fstab, "w", encoding="utf-8") as f:
+            f.write(f"UUID={UUID} /var btrfs subvol=var,degraded,compress-force=zstd:1,commit=060,noatime 0 0\n")
+        octal_r = self.run_tool()
+        self.assertEqual(octal_r.returncode, 1, octal_r.stdout + octal_r.stderr)
+        octal_text = "\n".join(area_lines(octal_r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs commit interval: drift across layers:", octal_text)
+        self.assertIn("fstab /var=commit=48", octal_text)
+
         self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
         r2 = self.run_tool()
         self.assertEqual(r2.returncode, 0, r2.stdout)

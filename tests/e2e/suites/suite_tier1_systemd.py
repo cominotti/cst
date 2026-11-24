@@ -7700,7 +7700,8 @@ EOF
         left there.
         The top-mount's Options= is rewritten in place: its own compress-force=zstd:3 stays (the live /var
         has zstd:1). A commit= there in digits the kernel does not read is malformed: apply and revert
-        replace it, and status reads it without a traceback."""
+        replace it, and status reads it without a traceback. One there in C's number forms is read as the
+        kernel reads it (060 is 48 s, 0x3c is 60 s)."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-btrfs-commit"
         top_unit = r"var-mnt-btrfs\x2dtop.mount"
@@ -7886,6 +7887,25 @@ EOF
             /opt/cst-rw/cst btrfs commit-interval status >/dev/null
             /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
             grep -qxF "$unit_line" "/etc/systemd/system/{top_unit}"
+            # A commit= read as the kernel reads it (kstrtouint, base 0), only in the unit: commit=060 is octal,
+            # 48 s, which status shows and revert replaces; commit=0x3c is 60 s, so apply leaves it in place.
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=060" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            /opt/cst-rw/cst btrfs commit-interval status | grep -qF "commit=48"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$unit_line" "/etc/systemd/system/{top_unit}"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes | grep -qF "nothing to do"
+            cst_install --set "UUID={uuid}" --set "OPTIONS=subvolid=5,noatime,degraded,compress-force=zstd:3,ssd,flushoncommit,commit=0x3c" --component btrfs:top-mount >/dev/null
+            cst_mark btrfs:top-mount
+            systemctl daemon-reload
+            /opt/cst-rw/cst btrfs commit-interval apply --yes >/dev/null
+            grep -qxF "$unit_line,commit=0x3c" "/etc/systemd/system/{top_unit}"
+            grep -qF "commit=60" /etc/fstab
+            /opt/cst-rw/cst btrfs commit-interval apply --yes | grep -qF "nothing to do"
+            /opt/cst-rw/cst btrfs commit-interval revert --yes >/dev/null
+            grep -qxF "$unit_line" "/etc/systemd/system/{top_unit}"
+            absent "commit=" /etc/fstab
             # A separate btrfs /var (its own UUID and device): the root is the btrfs of /sysroot, so plan changes
             # nothing, apply changes the / line and leaves the /var line byte for byte, a second apply has nothing
             # to do, and revert puts the / line back and leaves the /var line again.
