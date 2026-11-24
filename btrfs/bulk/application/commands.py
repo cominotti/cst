@@ -55,10 +55,10 @@ from btrfs.bulk.domain.steam import (
     VdfPair,
     lf_libraries,
     lf_with_library,
-    snapshots_resume_above,
     steam_move_lines,
     steam_nocow_files,
 )
+from btrfs.snapshot_runtime.domain import snapshots_resume_above
 from btrfs.bulk.ports import BulkStatePort, HomeTreePort, HostPort, OutputPort
 
 LIBRARY_ROW = "library ~/Bulk/steam"  # the plan's line about ~/Bulk/steam as a Steam library

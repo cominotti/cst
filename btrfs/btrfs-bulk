@@ -50,7 +50,9 @@ new copy were written to during the switch, or the old path was created
 again meanwhile, nothing is deleted: the journal stays and it is reported.
 The same checks run when an interrupted switch is repaired (the journal keeps
 both time stamps); once they passed, the journal says "finishing" before the
-old tree is deleted, and a repair only goes on deleting it. A pure cache
+old tree is deleted, and a repair only goes on deleting it. A copy that an
+undo deletes after its check is first renamed to TARGET.bulk-new.bulk-drop,
+and a repair goes on deleting a folder of that name. A pure cache
 whose tool deletes the link itself (`npm cache clean --force`, `go clean
 -modcache`) and then fills a new real folder: the stale copy in ~/Bulk is
 deleted and the new folder moved in, instead of "data in both". A journal whose paths are all inside ~/Bulk (the in-place
