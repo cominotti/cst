@@ -157,6 +157,14 @@ class RulesTest(unittest.TestCase):
                 self.assertEqual(header_line(rel, first), want)
         self.assertIsNone(header_line("x/data.bin", "\x00"))
 
+    def test_a_quint_spec_carries_the_header_as_a_slashes_comment(self) -> None:
+        rel = "btrfs/tests/quint/spec.qnt"
+        self.assertIsNone(header_problem(rel, "// " + IDENTIFIER + "\nmodule spec {}\n"))
+        self.assertIn(
+            "no license header (want line 1: '// " + IDENTIFIER + "')", header_problem(rel, "module spec {}\n") or ""
+        )
+        self.assertEqual(with_header(rel, "module spec {}\n"), "// " + IDENTIFIER + "\nmodule spec {}\n")
+
     def test_an_unknown_kind_is_a_problem_not_a_skip(self) -> None:
         self.assertIn("unknown file kind", header_problem("x/data.bin", "abc\n") or "")
         with self.assertRaises(ValueError):

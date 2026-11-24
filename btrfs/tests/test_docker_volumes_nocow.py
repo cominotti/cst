@@ -65,6 +65,7 @@ from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
 from btrfs.docker_volumes_nocow.domain import (
     NocowCommand,
     NocowPaths,
+    TreeScan,
     VolumeLeftovers,
     old_copy_name,
     old_copy_stamp,
@@ -166,7 +167,7 @@ class Commands:
         return 0
 
     def mark(self) -> int:
-        return 1 if self.service.mark() else 0
+        return self.service.mark()
 
     def migrate(self) -> int:
         self.service.migrate()
@@ -504,8 +505,8 @@ class MarkUnmarkTest(Base):
             self.assertTrue(self.fs.nocow(os.path.join(top, rel)), rel)
         for rel in ("db/base/1", "db/wal/000001", "README"):
             self.assertFalse(self.fs.nocow(os.path.join(top, rel)), rel)
-        self.assertIsNone(read_attempts(self))  # a new request gets its two boots again
-        self.assertFalse(os.path.exists(self.flag))  # the flag is install's job
+        self.assertEqual(read_attempts(self), "0")  # a new request gets its two boots again, durably
+        self.assertTrue(os.path.exists(self.flag))  # written by mark itself, before +C
         self.assertEqual(self.fs.calls, [])
 
     def test_mark_with_nothing_to_copy(self) -> None:
@@ -517,6 +518,112 @@ class MarkUnmarkTest(Base):
         self.assertTrue(self.fs.nocow(self.vols))
         self.assert_all_nocow(os.path.join(self.vols, "empty/_data"))
         self.assertIsNone(read_attempts(self))
+        self.assertFalse(os.path.exists(self.flag))
+
+    def test_mark_writes_the_flag_durably_before_nocow_is_set(self) -> None:
+        # The install's request, as the boot's: the flag, its entry in its folder and the folder's
+        # entry in /etc are flushed before +C is set on the volumes folder. A kill or a power loss
+        # between the two must not leave +C, copy-on-write data and no flag: no boot would ask again.
+        shutil.rmtree(os.path.dirname(self.flag))
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        synced: list[tuple[str, list[str]]] = []
+        real_fsync = os.fsync
+
+        def fsync(fd: int) -> None:
+            synced.append((os.readlink(f"/proc/self/fd/{fd}"), list(self.fs.sets)))
+            real_fsync(fd)
+
+        with mock.patch.object(os, "fsync", fsync):
+            rc, _out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        folder = os.path.dirname(self.flag)
+        self.assertEqual(synced, [(self.flag, []), (folder, []), (os.path.dirname(folder), [])])
+        self.assertEqual(self.fs.sets[0], self.vols)  # then +C, first on the volumes folder
+        self.assertTrue(self.fs.nocow(self.vols))
+
+    def test_mark_that_cannot_write_the_flag_leaves_the_folder_copy_on_write(self) -> None:
+        # The flag's folder is a file: no request, so no +C either; the next boot sees the
+        # folder without +C and asks again.
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=False)
+        top = self.volume("cow")
+        before = tree(top)
+        rc, out = self.call(self.cli.mark)
+        self.assertEqual(rc, 2)
+        self.assertRegex(
+            out,
+            rf"^<3>{TAG}: cannot schedule the migration \(\[Errno 17\] File exists: '[^']*'\); "
+            rf"{self.vols} keeps copy-on-write, the next boot tries again\n$",
+        )
+        self.assertEqual(self.fs.sets, [])
+        self.assertFalse(self.fs.nocow(self.vols))
+        self.assertEqual(tree(top), before)
+        self.assertIsNone(read_attempts(self))
+
+    def test_mark_that_cannot_reset_the_count_makes_no_request(self) -> None:
+        # The reset of an old count is part of the request: when it fails, no flag and no +C.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        self.set_attempts("1")
+        with mock.patch.object(
+            self.cli.service.state, "save_attempts", side_effect=OSError(errno.EIO, os.strerror(errno.EIO))
+        ):
+            rc, out = self.call(self.cli.mark)
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot schedule the migration ([Errno 5] Input/output error)", out)
+        self.assertFalse(os.path.exists(self.flag))
+        self.assertEqual(self.fs.sets, [])
+        self.assertEqual(read_attempts(self), "1")
+
+    def test_mark_with_a_flag_already_there_gives_two_boots_again(self) -> None:
+        self.volume("cow")
+        schedule(self)
+        self.set_attempts("1")
+        rc, _out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertEqual(read_attempts(self), "0")
+        self.assertTrue(os.path.exists(self.flag))
+
+    def test_mark_requests_when_the_second_scan_finds_data_the_first_did_not(self) -> None:
+        # A container wrote between mark's two scans (install does not stop Docker): the second
+        # one finds the data, and mark asks for the migration then, after +C.
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        service = self.cli.service
+        real_scan = service.tree.scan
+        first: list[bool] = []
+
+        def scan(top: str, *, fix: bool = False) -> TreeScan:
+            if not fix and not first:
+                first.append(True)
+                return TreeScan()  # nothing yet
+            return real_scan(top, fix=fix)
+
+        with mock.patch.object(service.tree, "scan", scan):
+            rc, out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertIn("1 existing volume(s) hold copy-on-write data", out)
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertTrue(self.fs.nocow(self.vols))
+
+    def test_mark_after_an_old_install_left_nocow_without_its_flag(self) -> None:
+        # An older install set +C first and the flag after mark: killed in between, it left +C,
+        # copy-on-write data and no flag. No boot asks again; the next install does.
+        self.fs.set(self.vols, nocow=True)
+        top = self.volume("cow")
+        _rc, out = self.call(self.cli.status)
+        self.assertIn("1 with copy-on-write data (2 MiB), migration not scheduled", out)
+        self.assertEqual(self.call(self.cli.migrate), (0, ""))  # a boot: nothing asks
+        rc, _out = self.call(self.cli.mark)
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.exists(self.flag))
+        _rc, out = self.call(self.cli.migrate)
+        self.assertIn(f"<5>{TAG}: all Docker volumes are NOCOW now\n", out)
+        self.assert_all_nocow(top)
+        self.assertFalse(os.path.exists(self.flag))
 
     def test_unmark_clears_only_the_volumes_folder(self) -> None:
         self.fs.set(self.vols, True, other=OTHER)
@@ -541,6 +648,24 @@ class MainTest(Base):
         rc, out, err = self.main()
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith(f"{self.vols}: new volumes copy-on-write;"), out)
+
+    def test_mark_exit_statuses(self) -> None:
+        # 1: a migration is requested, the flag already written by mark; 2: it could not be.
+        self.volume("cow")
+        rc, out, _ = self.main("mark")
+        self.assertEqual(rc, 1)
+        self.assertIn("1 existing volume(s) hold copy-on-write data", out)
+        self.assertTrue(os.path.exists(self.flag))
+        fresh(self)
+        shutil.rmtree(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.set(self.vols, nocow=False)
+        self.volume("cow")
+        rc, out, _ = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"<3>{TAG}: cannot schedule the migration", out)
+        self.assertFalse(self.fs.nocow(self.vols))
 
     def test_oserror_exit_codes(self) -> None:
         # A data-root that is not on btrfs: the flag ioctls fail.
@@ -1246,7 +1371,7 @@ class PostponeBase(Base):
 
 class DaemonJsonProblemTest(PostponeBase):
     """/etc/docker/daemon.json that dockerd cannot read (NocowPaths.config_problem): which volumes
-    folder Docker uses is unknown, so nothing is migrated, and mark changes nothing."""
+    folder Docker uses is unknown, so nothing is migrated, and mark writes only the request."""
 
     PROBLEM = "/etc/docker/daemon.json: not JSON"
 
@@ -1283,13 +1408,34 @@ class DaemonJsonProblemTest(PostponeBase):
                     f"{self.PROBLEM}: the boot's migration waits until it is fixed\n", self.call(self.cli.status)[1]
                 )
 
-    def test_mark_changes_nothing(self) -> None:
+    def test_mark_writes_only_the_request(self) -> None:
+        # No +C (the folder Docker uses is unknown), but the request, as mark's own: an old count
+        # without its flag is reset first, so the first boot after the fix gets its two boots. A flag
+        # written beside that count (btrfs-setup's touch, before) made that boot give up at once.
+        os.remove(self.flag)
+        self.set_attempts("2")
         self.fs.sets.clear()
         before = tree(self.vols)
         rc, out, err = self.main("mark")
         self.assertEqual(rc, 2)
         self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
         self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertTrue(os.path.exists(self.flag))
+        self.assertEqual(read_attempts(self), "0")
+
+    def test_mark_that_cannot_write_the_request_says_so(self) -> None:
+        os.remove(self.flag)
+        os.rmdir(os.path.dirname(self.flag))
+        with open(os.path.dirname(self.flag), "w") as f:
+            f.write("in the way\n")
+        self.fs.sets.clear()
+        before = tree(self.vols)
+        rc, out, err = self.main("mark")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.PROBLEM}: nothing marked (fix the file, then run it again)", out + err)
+        self.assertIn(f"<3>{TAG}: cannot schedule the migration ([Errno 17] File exists", out + err)
+        self.assertEqual((self.fs.sets, tree(self.vols)), ([], before))
+        self.assertFalse(os.path.exists(self.flag))
 
 
 class DockerRunningTest(PostponeBase):

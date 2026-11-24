@@ -47,11 +47,15 @@ class DockerVolumesNocow:
         try:
             match command:
                 case NocowCommand.MARK if self.paths.config_problem:
-                    # btrfs-setup then leaves the request to the boot, which waits until it is fixed.
+                    # Which folder Docker uses is unknown: no +C, but the request is written as mark's
+                    # own (the count reset, then the flag, each flushed), so the first boot after the
+                    # fix runs the migration. Nothing else writes it: a flag written by btrfs-setup
+                    # could sit beside an old count, which the next boot would take for this request's.
                     self.out.log(3, f"{self.paths.config_problem}: nothing marked (fix the file, then run it again)")
+                    self.request_migration(renew=True)
                     return 2
                 case NocowCommand.MARK:
-                    return 1 if self.mark() else 0
+                    return self.mark()
                 case NocowCommand.MIGRATE:
                     self.migrate()
                 case NocowCommand.UNMARK:
@@ -141,12 +145,13 @@ class DockerVolumesNocow:
         self.tree.remove_tree(old)
 
     # ---- the commands ----------------------------------------------------
-    def request_migration(self) -> bool:
+    def request_migration(self, *, renew: bool = False) -> bool:
         """Write the flag (and its folder), durable before +C is set: the data root may be on
         another filesystem than /etc, and after a power loss +C must not stay while the flag
-        is lost. False, with a log line, when that fails."""
+        is lost. renew (install's request): the request gets its two boots again even when a
+        flag is there already. False, with a log line, when that fails."""
         try:
-            if not self.state.flag_exists() and self.state.attempts():
+            if (renew or not self.state.flag_exists()) and self.state.attempts():
                 # A count of boots without its flag is not this request's (an older helper removed the
                 # flag, then the count, and could stop between the two): the request gets its two boots.
                 # Reset durably before the durable flag (a power loss must not bring the old count back
@@ -259,22 +264,36 @@ class DockerVolumesNocow:
             self.state.remove_flag()
             self.out.log(5, "all Docker volumes are NOCOW now")
 
-    def mark(self) -> bool:
-        """+C on the volumes folder (new volumes inherit it); True when existing volumes still need migrating."""
+    def mark(self) -> int:
+        """+C on the volumes folder (new volumes inherit it). Its exit status: 0 nothing left to
+        migrate; 1 existing volumes still need migrating, and the flag that asks the next boot is
+        written; 2 the request could not be written (a journal line says why; no +C then, so the
+        next boot asks again)."""
         vols = self.paths.volumes
         if not self.tree.is_dir(vols):
             self.out.say(f"{vols}: absent (Docker not set up yet): nothing to mark")
-            return False
+            return 0
+        # The request before +C, as the boot does it: a kill or a power loss in between must not
+        # leave +C with copy-on-write data and no flag (no boot would ever ask again). When it
+        # cannot be written, the folder keeps no +C and the next boot sees the request again.
+        requested = bool(self.pending())
+        if not requested:
+            self.state.forget_attempts()
+        elif not self.request_migration(renew=True):  # a new request gets its two boots again
+            return 2
         self.tree.set_nocow(vols, on=True)
         todo = self.pending(fix=True)  # folders and empty files: in place, now
-        self.state.forget_attempts()  # a new request gets its two boots again
         if not todo:
-            return False
+            return 0
+        # A container wrote between the two scans (install does not stop Docker): asked now,
+        # after +C but flushed, which a kill right before can still lose.
+        if not requested and not self.request_migration(renew=True):
+            return 2
         self.out.say(
             f"{len(todo)} existing volume(s) hold copy-on-write data "
             f"({sum(t.size for t in todo) >> 20} MiB): rewritten at the next boot, before Docker starts"
         )
-        return True
+        return 1
 
     def unmark(self) -> None:
         """Clear +C on the volumes folder (uninstall); the volumes keep theirs."""

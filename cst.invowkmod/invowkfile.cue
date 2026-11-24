@@ -416,6 +416,41 @@ cmds: [
 		}]
 	},
 	{
+		// Optional: `check` does not run it; CI runs it when the module or the spec changes, and in the nightly.
+		// See docs/dev-tools.md, "Model checking with Quint (optional)".
+		name:        "test quint"
+		category:    "test"
+		description: "Model-check the Quint specs with TLC (every instance, every property), or write their traces again (--traces); pinned quint, Apalache and evaluator, checked by SHA-256, in ~/.cache/cst-quint (tests/quint/cst-quint)"
+		flags: [
+			{name: "instance", description: "Only this instance (a module of the spec, such as nocow_ab)"},
+			{name: "spec", description: "Check this file instead of the checked-in spec (a planted copy, say)"},
+			{name: "traces", type: "bool", default_value: "false", description: "Write the checked-in traces again (simulator and Apalache), then run the replay"},
+			{name: "keep", type: "bool", default_value: "false", description: "Keep the work folder under ~/.cache/cst-quint/work"},
+		]
+		depends_on: {
+			tools: [
+				{alternatives: ["node"]},
+				{alternatives: ["npm"]},
+				{alternatives: ["java"]},
+				{alternatives: ["curl"]},
+			]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "20m"
+			script: {content: """
+				set -euo pipefail
+				args=()
+				[[ -n "${INVOWK_FLAG_INSTANCE:-}" ]] && args+=(--instance "${INVOWK_FLAG_INSTANCE}")
+				[[ -n "${INVOWK_FLAG_SPEC:-}" ]] && args+=(--spec "${INVOWK_FLAG_SPEC}")
+				[[ "${INVOWK_FLAG_TRACES:-false}" == "true" ]] && args+=(--traces)
+				[[ "${INVOWK_FLAG_KEEP:-false}" == "true" ]] && args+=(--keep)
+				exec nice -n 10 /usr/bin/python3 -I -B tests/quint/cst-quint "${args[@]}"
+				"""}
+		}]
+	},
+	{
 		name:        "test e2e tier1"
 		category:    "test"
 		description: "Run Docker Layer 1 E2E suite (systemd PID 1, toolchains, bluetooth/wp, restic+SFTP, alerts, doctor)"

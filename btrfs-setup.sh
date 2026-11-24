@@ -1024,6 +1024,19 @@ docker_gc() {
     esac
 }
 
+# ---- Docker volumes NOCOW (the docker-volumes-nocow helper) ----------------------
+DOCKER_NOCOW_BIN=/usr/local/sbin/docker-volumes-nocow
+# mark_docker_volumes: install's step for the Docker volumes (+C on their folder: new volumes get it).
+# mark writes the request itself before it sets +C: the attempt counter reset, then the flag,
+# each flushed (exit 1: volumes left to copy). Also when daemon.json cannot be read (exit 2,
+# nothing marked: the first boot after the fix migrates). Every exit 2 leaves a journal line;
+# when the request could not be written, the folder keeps no +C and the next boot asks again.
+# Nothing is written here: a flag touched beside an old count would make the next boot give up
+# at once.
+mark_docker_volumes() {
+    "${DOCKER_NOCOW_BIN}" mark || true
+}
+
 # stop_monitoring: the first step of uninstall (disable_timers: one unit at
 # a time, then the timers' last runs forgotten while their files are still
 # there).
@@ -1064,7 +1077,7 @@ uninstall() {
     stop_monitoring
     # New Docker volumes copy-on-write again; existing NOCOW files stay as they are.
     systemctl disable docker-volumes-nocow.service 2>/dev/null || true
-    [[ -x /usr/local/sbin/docker-volumes-nocow ]] && /usr/local/sbin/docker-volumes-nocow unmark
+    [[ -x "${DOCKER_NOCOW_BIN}" ]] && "${DOCKER_NOCOW_BIN}" unmark
     rm -f /etc/btrfs-setup/docker-nocow-pending
     systemctl reset-failed "${units[@]}" 2>/dev/null || true
     # This script enabled below's recorder; the package itself stays layered.
@@ -1182,10 +1195,7 @@ print("yes" if d and "below" in d[0].get("requested-packages", []) else "no")' 2
     # Docker volumes NOCOW: new ones at once; existing ones rewritten at the
     # next boot, before Docker starts (no container can be writing then).
     systemctl enable docker-volumes-nocow.service
-    if ! /usr/local/sbin/docker-volumes-nocow mark; then
-        install -d -m 0755 /etc/btrfs-setup
-        touch /etc/btrfs-setup/docker-nocow-pending   # (mark resets the attempt counter)
-    fi
+    mark_docker_volumes
     systemctl enable btrfs-stall-monitor.service
     systemctl restart btrfs-stall-monitor.service
     if (( with_below )) && rpm -q below >/dev/null 2>&1; then

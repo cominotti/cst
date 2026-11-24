@@ -73,8 +73,9 @@ consistent.
   in `LICENSE_EXEMPT` of `tests/license_headers.py`, each with its reason.
 - **CI is the gate.** Work on a branch and open a pull request; nothing is
   pushed to `main` directly. A pull request lands only with a green
-  `CI Status` (fast gates, both E2E tiers) and a green SonarCloud check on
-  its head, merged through GitHub in one of two ways:
+  `CI Status` (fast gates, both E2E tiers, the Quint check when it runs)
+  and a green SonarCloud check on its head, merged through GitHub in one
+  of two ways:
   - a pull request of one kind (one change, a Dependabot bump): a squash
     merge;
   - a batch, or any pull request whose commits are of more than one kind: a
@@ -106,7 +107,7 @@ before changing that module.
 | `cst doctor` checks | [doctor/README.md](doctor/README.md) |
 | Read-only responsiveness diagnosis (`cst perf`) | [perf/README.md](perf/README.md) |
 | Docker E2E tests and the tier 2 opt-in | [tests/e2e/README.md](tests/e2e/README.md) |
-| Python dev tools: uv, ruff, ty, pinned versions, mutation testing | [docs/dev-tools.md](docs/dev-tools.md) |
+| Python dev tools: uv, ruff, ty, pinned versions, mutation testing, model checking with Quint | [docs/dev-tools.md](docs/dev-tools.md) |
 | How the code fits together: `cst` dispatch, modules, the install manifest, entry points, package layout and profile (light or full), static gates | [docs/architecture.md](docs/architecture.md) |
 | What `cst_core` already provides: reuse it before you write | [.agents/rules/reuse-primitives.md](.agents/rules/reuse-primitives.md) |
 
@@ -151,6 +152,7 @@ invowk cmd test coverage                      # unit suite under coverage.py + C
 invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] [--affected [--base REF]] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)
 invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
+invowk cmd test quint [--instance NAME] [--traces] # optional: TLC on the Quint specs (pinned tools in ~/.cache/cst-quint; CI runs it when the nocow module or the spec changes)
 ```
 
 - Before a pull request, run `invowk cmd check` and `invowk cmd test mbt`
@@ -171,6 +173,9 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
   green run.
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
   ([docs/dev-tools.md, "Mutation testing"](docs/dev-tools.md#mutation-testing-optional)).
+  `test quint` is optional too and not part of `check`; CI's `quint` job runs
+  it when a change touches docker-volumes-nocow or its spec, and the nightly on main
+  ([docs/dev-tools.md, "Model checking with Quint"](docs/dev-tools.md#model-checking-with-quint-optional)).
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
   standard library. `test pylint`, `test types`, `test mbt` and `test mutation` use uv,
   whose virtual environment never lives in the checkout; run a tool by hand

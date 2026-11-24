@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+"""cst-quint: model checking of CST's Quint specs with TLC, and the traces their replays read.
+
+A Quint spec (btrfs/tests/quint/*.qnt) models a protocol of a module step by step, with a crash or
+a fault after any step. TLC, through quint, explores every state the spec's instances can reach and
+checks that each property holds in all of them. A replay test in the unit suite then runs traces of
+the spec (checked in, written by --traces) against the real code. See docs/dev-tools.md, "Model
+checking with Quint (optional)".
+
+Run it through the invowk task:
+
+    invowk cmd test quint [--traces] [--instance NAME] [--spec FILE] [--keep]
+
+or by hand, from the checkout:
+
+    nice -n 10 /usr/bin/python3 -I -B tests/quint/cst-quint [options]
+
+Options:
+    --instance NAME   only this instance (a module of the spec, such as nocow_ab)
+    --spec FILE       check FILE instead of the checked-in spec (a planted copy, say)
+    --traces          write the checked-in traces again (simulator and Apalache), then run the replay
+    --keep            keep the work folder (it names it at the end)
+
+The tools are pinned and fetched into ${XDG_CACHE_HOME:-~/.cache}/cst-quint, never into the
+checkout: quint (npm ci --ignore-scripts from tests/quint/package-lock.json, which pins every package
+with its hash), and the two programs quint would otherwise download unchecked on first use,
+Apalache (whose jar also runs TLC) and the Rust evaluator, each checked against its SHA-256 before it
+is unpacked into QUINT_HOME. A tool is used as it is only when the stamp beside it records the
+hash that was checked. quint, Apalache and TLC run from a work folder under the same cache (they
+write _apalache-out/ in the current folder), under nice, each with a time limit, TLC with 4 GB of
+heap and 4 workers (quint's defaults are 8 GB and every CPU).
+
+It needs node and npm, java (17 or later) and curl. Exit status: 0 every property holds (and with
+--traces, the replay passes); 1 a property is violated, a run timed out or failed, or a download did
+not match; 2 a usage error or a missing tool.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from typing import Final, TypeGuard
+
+# The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path (and -B,
+# or the bytecode flag below, keeps the cst_core imported from there from writing __pycache__ into it).
+sys.dont_write_bytecode = True
+# Through the script's real path: run by a link (from ~/bin, say), the folders above the link are not the checkout.
+_CHECKOUT: Final = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+if _CHECKOUT not in sys.path:
+    sys.path.insert(0, _CHECKOUT)
+
+from cst_core.domain.errors import ExitStatus
+from cst_core.domain.values import format_bytes_human
+
+QUINT_VERSION: Final = "0.33.1"
+JVM_ARGS: Final = "-Xmx4g"
+TLC_CONFIG: Final = {"maxHeap": JVM_ARGS, "workers": 4}
+STAMP: Final = ".cst-quint-sha256"
+# Seconds each kind of run may take before it is stopped.
+TLC_TIMEOUT: Final = 300
+APALACHE_TIMEOUT: Final = 600
+SIMULATOR_TIMEOUT: Final = 300
+FETCH_TIMEOUT: Final = 600
+REPLAY_TIMEOUT: Final = 300
+EX_FAILED: Final = 1
+EX_USAGE: Final = 2
+REQUIRED: Final = ("node", "npm", "java", "curl", "nice", "timeout")
+NICE: Final = ("nice", "-n", "10")
+
+
+@dataclass(frozen=True, slots=True)
+class Tool:
+    """A download quint needs, pinned by its SHA-256, and the folder of QUINT_HOME it is unpacked into."""
+
+    url: str
+    sha256: str
+    folder: str
+    marker: str  # a file the unpacked folder must hold
+
+
+APALACHE: Final = Tool(
+    url="https://github.com/apalache-mc/apalache/releases/download/v0.62.4/apalache.tgz",
+    sha256="8ac8488422c30d552735bae11b92a2d014d8e02e8608702acc08f9a2d8a9abb2",
+    folder="apalache-dist-0.62.4",
+    marker="apalache/lib/apalache.jar",
+)
+EVALUATOR: Final = Tool(
+    url="https://github.com/quint-co/quint/releases/download/evaluator/v0.7.1/quint_evaluator-x86_64-unknown-linux-gnu.tar.gz",
+    sha256="ce0502bdef65dc26c242a9e56379a9bb26de6f3db38f0e3989339d46a542f5eb",
+    folder="rust-evaluator-v0.7.1",
+    marker="quint_evaluator",
+)
+TOOLS: Final = (APALACHE, EVALUATOR)
+
+
+@dataclass(frozen=True, slots=True)
+class Check:
+    """One TLC run: an instance (a module) of a spec and the properties that must hold in every state."""
+
+    spec: str  # relative to the checkout
+    main: str
+    invariants: tuple[str, ...]
+    step: str = "step_"
+
+
+@dataclass(frozen=True, slots=True)
+class TraceJob:
+    """One checked-in trace: the simulator's random walk (from a seed), or the first trace that reaches
+    a witness (invariant: its negation, so the simulator or Apalache answers with a trace to it)."""
+
+    name: str  # the file is NAME.itf.json in the spec's traces folder
+    spec: str
+    main: str
+    backend: str  # "simulator" or "apalache"
+    max_steps: int
+    seed: int = 0
+    invariant: str = ""
+    samples: int = 1
+    step: str = "step_"
+
+
+# The checks and the traces of each spec (relative to the checkout).
+NOCOW_SPEC: Final = "btrfs/tests/quint/docker_volumes_nocow.qnt"
+NOCOW_PROPERTIES: Final = ("noDataLoss", "requestKept", "attemptsMatch", "boundedTries", "cleanRunConverges")
+NOCOW_INSTANCES: Final = ("nocow_ab", "nocow_a", "nocow_ab_boots", "nocow_ab_wide", "nocow_abc")
+CHECKS: Final[tuple[Check, ...]] = tuple(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES)
+# The checked-in traces of the nocow spec: two random walks, and the first trace the simulator finds
+# to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
+# value of the spec, or the negation of a step's label for a call with no witness of its own.
+NOCOW_WITNESSES: Final = (
+    ("recovered", "nocow_a", "neverRecovered", 45),
+    ("recover_failed", "nocow_a", "neverRecoverFailed", 40),
+    ("old_removed", "nocow_a", "neverOldRemoved", 40),
+    ("twin_removed", "nocow_a", "neverTwinRemoved", 20),
+    ("rolled_back", "nocow_a", "neverRolledBack", 30),
+    ("gave_up", "nocow_a", "neverGaveUp", 30),
+    ("gave_up_flag_kept", "nocow_a", "neverGaveUpFlagKept", 30),
+    ("converged", "nocow_a", "neverConverged", 30),
+    ("install_forgot", "nocow_a", 'not(step.name == "forget_attempts")', 20),
+    ("reset_failed", "nocow_a", 'not(step.name == "save_attempts" and step.outcome == "fail")', 20),
+    ("label_failed", "nocow_a", 'not(step.name == "reference_label" and step.outcome == "fail")', 20),
+    ("copy_mismatch", "nocow_a", 'not(step.name == "copy" and step.outcome == "mismatch")', 20),
+    ("copy_killed", "nocow_a", 'not(step.name == "copy" and step.outcome == "killed")', 25),
+    ("power_loss_partial", "nocow_a", "neverPowerLossPartial", 20),
+)
+NOCOW_APALACHE_WITNESSES: Final = (
+    ("install_requested", "nocow_a", "neverInstallRequested", 4),
+    ("install_request_failed", "nocow_a", "neverInstallRequestFailed", 4),
+)
+TRACE_JOBS: Final[tuple[TraceJob, ...]] = (
+    TraceJob("walk_ab", NOCOW_SPEC, "nocow_ab", "simulator", 40, seed=1),
+    TraceJob("walk_abc", NOCOW_SPEC, "nocow_abc", "simulator", 40, seed=2),
+    *(
+        TraceJob(name, NOCOW_SPEC, main, "simulator", steps, seed=7, invariant=invariant, samples=100000)
+        for name, main, invariant, steps in NOCOW_WITNESSES
+    ),
+    # The shortest trace to each of two install witnesses: Apalache's bounded check of the negation (an SMT
+    # search: seconds for a few steps, minutes for a few dozen).
+    *(
+        TraceJob(name, NOCOW_SPEC, main, "apalache", steps, invariant=invariant)
+        for name, main, invariant, steps in NOCOW_APALACHE_WITNESSES
+    ),
+    # A stop where a request ends, then a new round: the spec's step_round_end crashes only there (a walk
+    # of step_ spends its crashes long before), each of its steps one of step_'s.
+    TraceJob(
+        "new_round",
+        NOCOW_SPEC,
+        "nocow_a",
+        "simulator",
+        40,
+        seed=7,
+        invariant="neverNewRound",
+        samples=100000,
+        step="step_round_end",
+    ),
+)
+TRACES_DIR: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs/tests/quint/traces"}
+# spec -> the unit test module that replays its traces
+REPLAYS: Final[Mapping[str, str]] = {NOCOW_SPEC: "btrfs.tests.test_docker_volumes_nocow_replay"}
+
+
+class StepError(Exception):
+    """A step that cannot go on: the message is printed and the exit status is 1."""
+
+
+@dataclass(frozen=True, slots=True)
+class Ran:
+    """What one command did: its exit status, its output, the largest resident set of its process tree, its time."""
+
+    returncode: int
+    output: str
+    max_rss_kb: int
+    seconds: float
+
+
+type Exec = Callable[[Sequence[str], str, Mapping[str, str]], Ran]
+
+
+def execute(argv: Sequence[str], cwd: str, env: Mapping[str, str]) -> Ran:
+    """Run argv to its end, its output (stdout and stderr) into a file of cwd; its exit status, output and
+    largest RSS (wait4's: the largest of the process and of its waited-for descendants, the JVM included).
+    Bytes of the output that are not UTF-8 become U+FFFD, as cst_core's runner reads them."""
+    with tempfile.TemporaryFile(
+        mode="w+", encoding="utf-8", errors="replace", prefix=".cst-quint-", suffix=".log", dir=cwd
+    ) as log:
+        t0 = time.monotonic()
+        proc = subprocess.Popen(
+            list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT
+        )
+        _pid, status, usage = os.wait4(proc.pid, 0)
+        proc.returncode = os.waitstatus_to_exitcode(status)
+        seconds = time.monotonic() - t0
+        log.seek(0)
+        output = log.read()
+    return Ran(proc.returncode, output, usage.ru_maxrss, seconds)
+
+
+def sha256_of(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_stamp(folder: str) -> str:
+    try:
+        with open(os.path.join(folder, STAMP), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_stamp(folder: str, digest: str) -> None:
+    with open(os.path.join(folder, STAMP), "w", encoding="utf-8") as f:
+        f.write(digest + "\n")
+
+
+def ready(folder: str, digest: str, marker: str) -> bool:
+    """The folder holds what was checked against digest: its stamp says so, and the marker is there."""
+    return read_stamp(folder) == digest and os.path.exists(os.path.join(folder, marker))
+
+
+def fetch(tool: Tool, home: str, run: Exec, env: Mapping[str, str]) -> str:
+    """tool unpacked into home/tool.folder: downloaded and checked first, unless its stamp is there."""
+    dest = os.path.join(home, tool.folder)
+    if ready(dest, tool.sha256, tool.marker):
+        return dest
+    os.makedirs(home, exist_ok=True)
+    fd, download = tempfile.mkstemp(prefix=".download-", dir=home)
+    os.close(fd)
+    try:
+        got = run(["timeout", str(FETCH_TIMEOUT), "curl", "-sSLf", "--retry", "3", "-o", download, tool.url], home, env)
+        if got.returncode != 0:
+            raise StepError(f"{tool.url}: download failed (exit {got.returncode}): {got.output.strip()[-300:]}")
+        digest = sha256_of(download)
+        if digest != tool.sha256:
+            raise StepError(f"{tool.url}: SHA-256 {digest}, want {tool.sha256}: the download was removed")
+        unpacked = tempfile.mkdtemp(prefix=".unpack-", dir=home)
+        try:
+            with tarfile.open(download) as tar:
+                tar.extractall(unpacked, filter="data")
+            if not os.path.exists(os.path.join(unpacked, tool.marker)):
+                raise StepError(f"{tool.url}: no {tool.marker} in the archive")
+            write_stamp(unpacked, digest)
+            shutil.rmtree(dest, ignore_errors=True)
+            os.rename(unpacked, dest)
+        finally:
+            shutil.rmtree(unpacked, ignore_errors=True)
+    finally:
+        os.remove(download)
+    return dest
+
+
+def install_quint(cache: str, pin: str, run: Exec, env: Mapping[str, str]) -> str:
+    """quint from the lock in pin (npm ci --ignore-scripts, which checks every package's hash), in a folder
+    of cache named after the lock's hash; the path of its program."""
+    digest = sha256_of(os.path.join(pin, "package-lock.json"))
+    prefix = os.path.join(cache, f"npm-{digest[:16]}")
+    marker = os.path.join("node_modules", ".bin", "quint")
+    if ready(prefix, digest, marker):
+        return os.path.join(prefix, marker)
+    os.makedirs(cache, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix=".npm-", dir=cache)
+    try:
+        for name in ("package.json", "package-lock.json"):
+            shutil.copyfile(os.path.join(pin, name), os.path.join(staging, name))
+        npm_env = {**env, "npm_config_cache": os.path.join(cache, "npm-cache")}
+        argv = ["timeout", str(FETCH_TIMEOUT), "npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+        got = run(argv, staging, npm_env)
+        if got.returncode != 0:
+            raise StepError(f"npm ci failed (exit {got.returncode}): {got.output.strip()[-500:]}")
+        write_stamp(staging, digest)
+        shutil.rmtree(prefix, ignore_errors=True)
+        os.rename(staging, prefix)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return os.path.join(prefix, marker)
+
+
+def quint_env(env: Mapping[str, str], home: str, work: str) -> dict[str, str]:
+    """The environment quint, Apalache and TLC run in: the checked tools, a bounded heap, temporary files in work."""
+    return {**env, "QUINT_HOME": home, "JVM_ARGS": JVM_ARGS, "TMPDIR": work}
+
+
+def tlc_argv(quint: str, spec: str, check: Check, config: str) -> list[str]:
+    return [
+        "timeout",
+        str(TLC_TIMEOUT),
+        *NICE,
+        quint,
+        "verify",
+        spec,
+        "--backend",
+        "tlc",
+        "--tlc-config",
+        config,
+        "--main",
+        check.main,
+        "--step",
+        check.step,
+        "--invariant",
+        ",".join(check.invariants),
+    ]
+
+
+def trace_argv(quint: str, spec: str, job: TraceJob, out: str) -> list[str]:
+    """The run that writes job's trace to out: the simulator with one thread (a seed then gives the same walk),
+    or Apalache's bounded check of the negated witness."""
+    common = ["--main", job.main, "--step", job.step, "--max-steps", str(job.max_steps), "--out-itf", out]
+    if job.backend == "simulator":
+        argv = ["timeout", str(SIMULATOR_TIMEOUT), *NICE, quint, "run", spec, *common]
+        argv += ["--max-samples", str(job.samples), "--n-traces", "1", "--n-threads", "1", "--seed", str(job.seed)]
+    else:
+        argv = ["timeout", str(APALACHE_TIMEOUT), *NICE, quint, "verify", spec, *common]
+    if job.invariant:
+        argv += ["--invariant", job.invariant]
+    return argv
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """quint verify's answer for one instance."""
+
+    result: str  # "ok", "violated", "timed out" or "failed"
+    states: int | None
+    depth: int | None
+
+
+def last_number(pattern: str, text: str) -> int | None:
+    """The number in pattern's one group at its last match in text, or None."""
+    found = re.findall(pattern, text)
+    return int(found[-1]) if found else None
+
+
+def verdict(ran: Ran) -> Verdict:
+    # TLC prints its progress as it goes ("Progress(N) at ...: X states generated, Y distinct states found"):
+    # the last such line is the total.
+    states = last_number(r"(\d+) distinct states found", ran.output)
+    depth = last_number(r"depth of the complete state graph search is (\d+)", ran.output)
+    if ran.returncode == ExitStatus.TIMED_OUT:
+        result = "timed out"
+    elif ran.returncode == 0 and "[ok] No violation found" in ran.output:
+        result = "ok"
+    elif ran.returncode != 0 and "[violation]" in ran.output:
+        result = "violated"
+    else:
+        result = "failed"
+    return Verdict(result, states, depth)
+
+
+def trace_problem(job: TraceJob, ran: Ran) -> str | None:
+    """Why the run of job gave no trace to keep, or None. A witness's run must end with a violation of
+    its negated invariant (else the trace written is a walk that never reaches the witness); a walk's
+    run must end with exit 0."""
+    if job.invariant:
+        if verdict(ran).result == "violated":
+            return None
+        return f"no trace reaches the witness ({job.invariant}): quint exit {ran.returncode}, no violation found"
+    if ran.returncode == 0:
+        return None
+    return f"the walk failed (exit {ran.returncode})"
+
+
+def _json_object(value: object) -> TypeGuard[dict[str, object]]:
+    """A JSON object: a dict whose keys are all strings. cst_core.domain.shapes.json_object is the same check, but
+    that module imports typing.TypeIs (Python 3.13), and this program runs on the CI runner's own Python 3.12 (the
+    quint job of .github/workflows/ci.yml), so it reads JSON with the standard library."""
+    return isinstance(value, dict) and all(isinstance(k, str) for k in value)
+
+
+def normalize(text: str, description: str) -> str:
+    """An ITF trace as it is checked in: "#meta" without the spec's absolute path or a timestamp (the
+    description in their place), one state per line, sorted keys: the same bytes for the same trace."""
+    doc = json.loads(text)
+    if not _json_object(doc) or not isinstance(states_in := doc.get("states"), list):
+        raise StepError("not an ITF trace")
+    meta = doc.get("#meta")
+    kept = {k: meta[k] for k in ("format", "format-description") if _json_object(meta) and k in meta}
+    kept["description"] = description
+    lines = ["{", f'"#meta": {json.dumps(kept, sort_keys=True)},']
+    lines += [
+        f"{json.dumps(k)}: {json.dumps(doc[k], sort_keys=True)}," for k in sorted(doc) if k not in {"#meta", "states"}
+    ]
+    states = [json.dumps(state, sort_keys=True) for state in states_in]
+    lines.append('"states": [')
+    lines += [state + ("," if i < len(states) - 1 else "") for i, state in enumerate(states)]
+    lines += ["]", "}"]
+    return "\n".join(lines) + "\n"
+
+
+def rss(kb: int) -> str:
+    """wait4's largest resident set (KiB) in binary IEC units, as CST's other output gives sizes."""
+    return format_bytes_human(kb * 1024)
+
+
+def known(value: int | None) -> str:
+    return "?" if value is None else str(value)
+
+
+@dataclass
+class Session:
+    """One run of cst-quint: where things are and how commands run."""
+
+    checkout: str
+    cache: str
+    run: Exec
+    env: Mapping[str, str]
+    out: Callable[[str], None]
+
+    def tools(self, work: str) -> tuple[str, dict[str, str]]:
+        """quint's program and its environment, every tool in place and checked."""
+        home = os.path.join(self.cache, "quint-home")
+        for tool in TOOLS:
+            fetch(tool, home, self.run, self.env)
+        quint = install_quint(self.cache, os.path.join(self.checkout, "tests", "quint"), self.run, self.env)
+        env = quint_env(self.env, home, work)
+        got = self.run([quint, "--version"], work, env)
+        if got.returncode != 0 or got.output.strip() != QUINT_VERSION:
+            raise StepError(f"{quint} --version: {got.output.strip()!r}, want {QUINT_VERSION}")
+        return quint, env
+
+    def check_all(
+        self, work: str, quint: str, env: Mapping[str, str], checks: Sequence[Check], spec: str | None
+    ) -> int:
+        """TLC on each check, one line each; the exit status."""
+        config = os.path.join(work, "tlc.json")
+        with open(config, "w", encoding="utf-8") as f:
+            json.dump(TLC_CONFIG, f)
+        status, largest, total = 0, 0, 0.0
+        for check in checks:
+            path = spec if spec is not None else os.path.join(self.checkout, check.spec)
+            ran = self.run(tlc_argv(quint, path, check, config), work, env)
+            found = verdict(ran)
+            largest, total = max(largest, ran.max_rss_kb), total + ran.seconds
+            self.out(
+                f"{check.main}: {found.result}, {known(found.states)} states, depth {known(found.depth)}, "
+                f"{ran.seconds:.1f} s, largest RSS {rss(ran.max_rss_kb)} ({', '.join(check.invariants)})"
+            )
+            if found.result != "ok":
+                status = EX_FAILED
+                self.out(ran.output.strip()[-6000:])
+        self.out(f"{len(checks)} instance(s) in {total:.1f} s, largest RSS of any run {rss(largest)}")
+        return status
+
+    def write_traces(self, work: str, quint: str, env: Mapping[str, str], jobs: Sequence[TraceJob]) -> int:
+        """Each job's trace, normalized, into its spec's traces folder of the checkout; then the replays."""
+        for job in jobs:
+            raw = os.path.join(work, f"{job.name}.raw.itf.json")
+            ran = self.run(trace_argv(quint, os.path.join(self.checkout, job.spec), job, raw), work, env)
+            problem = trace_problem(job, ran)
+            if problem is None and not os.path.exists(raw):
+                problem = f"quint wrote no trace (exit {ran.returncode})"
+            if problem is not None:
+                self.out(ran.output.strip()[-3000:])
+                raise StepError(f"{job.name}: {problem}")
+            with open(raw, encoding="utf-8") as f:
+                text = normalize(f.read(), f"{job.backend} trace {job.name} of {job.spec} ({job.main})")
+            dest = os.path.join(self.checkout, TRACES_DIR[job.spec], f"{job.name}.itf.json")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.out(f"{job.name}: {ran.seconds:.1f} s -> {os.path.relpath(dest, self.checkout)}")
+        status = 0
+        for module in sorted({REPLAYS[job.spec] for job in jobs}):
+            argv = ["timeout", str(REPLAY_TIMEOUT), sys.executable, "-I", "-B", "tests/run_unit.py", module]
+            ran = self.run(argv, self.checkout, self.env)
+            self.out(f"replay {module}: exit {ran.returncode}")
+            if ran.returncode != 0:
+                self.out(ran.output.strip()[-6000:])
+                status = EX_FAILED
+        return status
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="cst-quint", description="TLC on CST's Quint specs, and their traces.")
+    p.add_argument("--instance", help="only this instance (a module of the spec)")
+    p.add_argument("--spec", help="check this file instead of the checked-in spec")
+    p.add_argument("--traces", action="store_true", help="write the checked-in traces again, then run the replay")
+    p.add_argument("--keep", action="store_true", help="keep the work folder")
+    return p.parse_args(argv)
+
+
+def cache_root(env: Mapping[str, str]) -> str:
+    base = env.get("XDG_CACHE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "cst-quint")
+
+
+def checkout_root() -> str:
+    return _CHECKOUT
+
+
+@dataclass(frozen=True, slots=True)
+class Seams:
+    """What main takes from outside: the checkout, the environment, how commands run and what is on PATH,
+    where lines go, and the checks and trace jobs (the tests give fakes)."""
+
+    checkout: str | None = None
+    env: Mapping[str, str] | None = None
+    run: Exec = execute
+    which: Callable[[str], str | None] = shutil.which
+    out: Callable[[str], None] = print
+    checks: Sequence[Check] = CHECKS
+    jobs: Sequence[TraceJob] = TRACE_JOBS
+
+
+def main(argv: Sequence[str], seams: Seams | None = None) -> int:
+    s = Seams() if seams is None else seams
+    checkout, run, which, out, checks, jobs = s.checkout, s.run, s.which, s.out, s.checks, s.jobs
+    args = parse_args(argv)
+    env = dict(os.environ) if s.env is None else dict(s.env)
+    missing = [tool for tool in REQUIRED if which(tool) is None]
+    if missing:
+        out(f"cst-quint: needs {', '.join(missing)} on PATH")
+        return EX_USAGE
+    if args.traces and (args.spec or args.instance):
+        out("cst-quint: --traces writes every trace of the checked-in specs: no --spec or --instance with it")
+        return EX_USAGE
+    chosen = [c for c in checks if args.instance is None or c.main == args.instance]
+    if not chosen and not args.traces:
+        out(f"cst-quint: no instance {args.instance!r}" if args.instance else "cst-quint: no check is defined")
+        return EX_USAGE
+    session = Session(checkout or checkout_root(), cache_root(env), run, env, out)
+    os.makedirs(os.path.join(session.cache, "work"), exist_ok=True)
+    work = tempfile.mkdtemp(prefix="run-", dir=os.path.join(session.cache, "work"))
+    try:
+        quint, qenv = session.tools(work)
+        if args.traces:
+            return session.write_traces(work, quint, qenv, jobs)
+        return session.check_all(work, quint, qenv, chosen, os.path.abspath(args.spec) if args.spec else None)
+    except StepError as e:
+        out(f"cst-quint: {e}")
+        return EX_FAILED
+    finally:
+        if args.keep:
+            out(f"work folder kept: {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
