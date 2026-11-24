@@ -745,7 +745,9 @@ class RestartTest(SetupCase):
         self.assertIn("Not restarted (--no-restart). To finish: systemctl --user restart wireplumber\n", r.stdout)
         # Absolute paths left out: the checkout's own path may contain "restart"; any other word still counts
         # (try-restart, reload-or-restart).
-        words = " ".join(w for c in r.calls if not c.startswith("systemctl --user is-") for w in c.split() if not w.startswith("/"))
+        words = " ".join(
+            w for c in r.calls if not c.startswith("systemctl --user is-") for w in c.split() if not w.startswith("/")
+        )
         self.assertNotIn("restart", words, r.calls)
         m = self.machine()
         r = m.run("apply", "--no-restart")
