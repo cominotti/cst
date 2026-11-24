@@ -144,5 +144,44 @@ class CopyTreeNocowTest(unittest.TestCase):
         self.assertEqual([p for p in self.copied() if self.fx.is_nocow(os.path.join(self.dst, p))], [])
 
 
+class RmtreePointTest(unittest.TestCase):
+    """One deletion by u_rmtree is one point, whatever it deletes."""
+
+    @override
+    def setUp(self) -> None:
+        stub_fsync(self)
+        self.fx = BulkHome()
+        self.addCleanup(self.fx.close)
+        self.plan = FaultPlan(dead_after_kill=True)
+        arm_points(self.fx, self.plan, torn_rmtree=False)
+
+    def test_a_file_a_link_and_a_folder_are_one_point_each(self) -> None:
+        folder = os.path.dirname(self.fx.write("tree/a"))
+        self.fx.write("left")
+        os.symlink(folder, self.fx.home_path("link"))
+        for rel in ("left", "link", "tree"):
+            path = self.fx.home_path(rel)
+            with self.subTest(rel=rel):
+                self.plan.arm()
+                self.fx.user.u_rmtree(path)
+                self.assertEqual(self.plan.calls, [f"rmtree {rel}"])
+                self.assertFalse(os.path.lexists(path))
+
+    def test_a_failure_at_a_files_deletion_leaves_the_file(self) -> None:
+        path = self.fx.write("left")
+        self.plan.arm((FaultMode.FAIL, 1))
+        with self.assertRaises(OSError):
+            self.fx.user.u_rmtree(path)
+        self.assertEqual(self.plan.calls, ["rmtree left"])
+        self.assertTrue(os.path.lexists(path))
+
+    def test_no_point_inside_a_files_deletion(self) -> None:
+        path = self.fx.write("left")
+        self.plan.arm((FaultMode.FAIL, 2))  # the call after the deletion, never reached here
+        self.fx.user.u_rmtree(path)
+        self.assertEqual(self.plan.calls, ["rmtree left"])
+        self.assertFalse(os.path.lexists(path))
+
+
 if __name__ == "__main__":
     unittest.main()

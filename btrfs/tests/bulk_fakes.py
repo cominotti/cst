@@ -374,9 +374,10 @@ def arm_points(home: BulkHome, plan: FaultPlan, *, torn_rmtree: bool) -> None:
     - "write NAME": a state file's write_atomic (a journal, the boot flag, the keep file, the
       convert plan), by its file name;
     - "cp DEST": the copy (a fault answers exit 1: copy_tree's "copy failed");
-    - "rmtree PATH": the user adapter's u_rmtree, one call; with torn_rmtree, a folder holding two
-      or more files is two points, "rmtree-part PATH" (its first file in sorted walk order) and
-      "rmtree PATH" (the rest): a deletion cut half-way (FaultPlan keeps every other call atomic).
+    - "rmtree PATH": the user adapter's u_rmtree, one call, also of a file or a link (its os.unlink
+      is no point of its own); with torn_rmtree, a folder holding two or more files is two points,
+      "rmtree-part PATH" (its first file in sorted walk order) and "rmtree PATH" (the rest): a
+      deletion cut half-way (FaultPlan keeps every other call atomic).
 
     The commands that only read (stat, du, flatpak) are no points. restorecon is not run (u_relabel
     answers True): it is best effort, its errors suppressed, and changes no data."""
@@ -400,12 +401,17 @@ def arm_points(home: BulkHome, plan: FaultPlan, *, torn_rmtree: bool) -> None:
     home.fake(home.user, "u_relabel", lambda path: True)
     real_rmtree = home.user.u_rmtree
 
+    def whole_rmtree(path: str) -> None:
+        """The real u_rmtree as one call: its os.unlink of a file or a link is no point of its own."""
+        with mock.patch.object(bulk_user, "os", os):
+            real_rmtree(path)
+
     def rmtree(path: str) -> None:
         name = home.rel(path)
         if torn_rmtree and os.path.isdir(path) and not os.path.islink(path):
             files = sorted(os.path.join(root, n) for root, _dirs, names in os.walk(path) for n in names)
             if len(files) > 1:
                 plan.step(f"rmtree-part {name}", functools.partial(os.unlink, files[0]))
-        plan.step(f"rmtree {name}", functools.partial(real_rmtree, path))
+        plan.step(f"rmtree {name}", functools.partial(whole_rmtree, path))
 
     home.fake(home.user, "u_rmtree", rmtree)
