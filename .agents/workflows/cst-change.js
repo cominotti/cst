@@ -88,6 +88,9 @@ export const meta = {
 //   (startAction): it creates the worktree, continues from it, or refuses; it never stops because its own earlier
 //   work is there. Simplify, fix and the fast lane are told the same. Decisions live on disk (the design note,
 //   commits), so a restart costs a re-read, not the work.
+// - The harness relays the owner's latest message to every agent and says it wins over the stage prompt, so a
+//   message that asks for the advisor can override a stage's "forbidden" sentence; the orchestrator words such
+//   messages with that in mind.
 // - The guard's equality check stays on GUARD_CMD's four lines. Each agent also pastes GUARD_DETAIL_CMD (status
 //   lines and a hash per modified or untracked file), report only: when the guard stops a run, the log and the
 //   trail name what changed. Someone else's edit in the main checkout is never reverted, stashed or committed by
@@ -258,12 +261,13 @@ function advisorProblem(stage, prompt) {
   return ''
 }
 // What implement does with the state it finds, from the facts it reports before acting: "created" (nothing
-// exists; mode "new" only), "continued" (the worktree on the branch, or the branch alone, descending from the
-// base), or "refused" (anything else). Pure: tested below.
+// exists; mode "new" only), "continued" (the worktree on the branch, or the branch alone, sharing history with the
+// base and ahead of it or equal to it: a base that moved on since is fine), or "refused" (anything else, such as a
+// leftover branch already merged into the base). Pure: tested below.
 function startAction(f, mode) {
   if (!f.branch_exists && !f.worktree_exists) return mode === 'new' ? 'created' : 'refused'
   if (f.worktree_exists && !f.worktree_on_branch) return 'refused'
-  if (!f.branch_exists || !f.descends_from_base) return 'refused'
+  if (!f.branch_exists || !f.shares_history || !(f.ahead_of_base || f.equal_to_base)) return 'refused'
   return 'continued'
 }
 // The lines one guard detail reading has and the other has not: what changed in the main checkout. Pure: tested
@@ -322,8 +326,19 @@ function selftest() {
   throws(() => advisorLine('review-unknown'), 'an unknown stage')
   eq([stageOf('review: command'), stageOf('review: code-review'), stageOf('fix'), stageOf('review+fix')], ['review-command', 'review-code-review', 'fix', 'review+fix'], 'stage of a label')
   eq([advisorProblem('fix', 'x ' + ADVISOR_FORBIDDEN), advisorProblem('re-review', 'x ' + ADVISOR_ALLOWED), advisorProblem('fix', 'x'), advisorProblem('fix', ADVISOR_FORBIDDEN + ADVISOR_FORBIDDEN), advisorProblem('design', ADVISOR_ALLOWED + ADVISOR_FORBIDDEN)], ['', '', 'fix: the prompt must carry its advisor sentence exactly once', 'fix: the prompt must carry its advisor sentence exactly once', 'design: the prompt carries the other advisor sentence'], 'advisor problem')
-  const S = (branch_exists, worktree_exists, worktree_on_branch, descends_from_base) => ({ branch_exists, worktree_exists, worktree_on_branch, descends_from_base })
-  eq([startAction(S(false, false, false, false), 'new'), startAction(S(false, false, false, false), 'continue'), startAction(S(true, true, true, true), 'new'), startAction(S(true, false, false, true), 'new'), startAction(S(true, false, false, false), 'new'), startAction(S(true, true, false, true), 'new'), startAction(S(true, true, true, false), 'continue'), startAction(S(false, true, false, false), 'new')], ['created', 'refused', 'continued', 'continued', 'refused', 'refused', 'refused', 'refused'], 'start action')
+  const S = (branch_exists, worktree_exists, worktree_on_branch, shares_history, ahead_of_base, equal_to_base) => ({ branch_exists, worktree_exists, worktree_on_branch, shares_history, ahead_of_base, equal_to_base })
+  eq([
+    startAction(S(false, false, false, false, false, false), 'new'), // nothing yet
+    startAction(S(false, false, false, false, false, false), 'continue'), // continue expects work
+    startAction(S(true, true, true, true, true, false), 'new'), // a restart: work on the branch
+    startAction(S(true, true, true, true, true, false), 'continue'), // the same in mode continue
+    startAction(S(true, true, true, true, false, true), 'new'), // restarted before the first commit
+    startAction(S(true, false, false, true, true, false), 'new'), // the branch alone: add the worktree
+    startAction(S(true, true, true, true, false, false), 'new'), // a leftover branch merged into the base
+    startAction(S(true, true, false, true, true, false), 'new'), // the worktree on another branch
+    startAction(S(true, true, true, false, true, false), 'new'), // no history in common with the base
+    startAction(S(false, true, false, false, false, false), 'new'), // a worktree without the branch
+  ], ['created', 'refused', 'continued', 'continued', 'continued', 'continued', 'refused', 'refused', 'refused', 'refused'], 'start action')
   eq([guardChanges('a\nb', 'a\nb'), guardChanges(' M AGENTS.md\nh1  AGENTS.md', ' M AGENTS.md\nh2  AGENTS.md\n?? x'), guardChanges('', '')], [[], ['- h1  AGENTS.md', '+ h2  AGENTS.md', '+ ?? x'], []], 'guard changes')
   return 'ok'
 }
@@ -417,10 +432,10 @@ if (MODE === 'new' && A.kind !== 'docs') {
 let impl = null, simp = null, changed = [], numstat = '', HEAD = ''
 if (MODE === 'new' || MODE === 'continue') {
   phase('Implement')
-  const START_FACTS = { type: 'object', properties: { branch_exists: { type: 'boolean' }, worktree_exists: { type: 'boolean' }, worktree_on_branch: { type: 'boolean' }, descends_from_base: { type: 'boolean' } }, required: ['branch_exists', 'worktree_exists', 'worktree_on_branch', 'descends_from_base'] }
-  const start = 'Before anything else, look at what exists and report start_facts, read before you act: branch_exists ("git -C ' + QM + ' rev-parse --verify --quiet refs/heads/' + BRANCH + '" exits 0), worktree_exists (the folder ' + WT + ' exists and "git -C ' + QWT + ' rev-parse --git-dir" exits 0), worktree_on_branch ("git -C ' + QWT + ' rev-parse --abbrev-ref HEAD" prints ' + BRANCH + '), descends_from_base ("git -C ' + QM + ' merge-base --is-ancestor ' + QBASE + ' ' + QBRANCH + '" exits 0; false when the branch does not exist), and found_head ("git -C ' + QWT + ' rev-parse HEAD", or "" without a worktree). Then act by this table and report start: ' +
+  const START_FACTS = { type: 'object', properties: { branch_exists: { type: 'boolean' }, worktree_exists: { type: 'boolean' }, worktree_on_branch: { type: 'boolean' }, shares_history: { type: 'boolean' }, ahead_of_base: { type: 'boolean' }, equal_to_base: { type: 'boolean' } }, required: ['branch_exists', 'worktree_exists', 'worktree_on_branch', 'shares_history', 'ahead_of_base', 'equal_to_base'] }
+  const start = 'Before anything else, look at what exists and report start_facts, read before you act: branch_exists ("git -C ' + QM + ' rev-parse --verify --quiet refs/heads/' + BRANCH + '" exits 0), worktree_exists (the folder ' + WT + ' exists and "git -C ' + QWT + ' rev-parse --git-dir" exits 0), worktree_on_branch ("git -C ' + QWT + ' rev-parse --abbrev-ref HEAD" prints ' + BRANCH + '), shares_history ("git -C ' + QM + ' merge-base ' + QBASE + ' ' + QBRANCH + '" exits 0), ahead_of_base ("git -C ' + QM + ' rev-list --count ' + QBASE + '..' + QBRANCH + '" prints more than 0), equal_to_base ("git -C ' + QM + ' rev-parse ' + QBASE + '" and "git -C ' + QM + ' rev-parse ' + QBRANCH + '" print the same; each of the three false when the branch does not exist), and found_head ("git -C ' + QWT + ' rev-parse HEAD", or "" without a worktree). Then act by this table and report start: ' +
     (MODE === 'new' ? 'no branch and no worktree: "created" (git -C ' + QM + ' worktree add -b ' + QBRANCH + ' ' + QWT + ' ' + QBASE + '); ' : 'no branch and no worktree: "refused" (mode "continue" expects them); ') +
-    'the worktree on ' + BRANCH + ', or the branch alone, and the branch descends from ' + BASE + ': "continued" (with the branch alone, first git -C ' + QM + ' worktree add ' + QWT + ' ' + QBRANCH + '). You may be a restart of this stage after a pause: continue from what is there (read ' + A.notes + '/DESIGN-' + A.slug + '.md if it exists, "git -C ' + QWT + ' log --oneline ' + QBASE + '..HEAD" and "git -C ' + QWT + ' status"), finish or redo a half-done edit and commit it; never start over, and never stop because your own earlier work exists. Anything else (a worktree on another branch, a branch that does not descend from ' + BASE + '): "refused": change nothing, say what you found, check_ok false.'
+    'the worktree on ' + BRANCH + ', or the branch alone, and the branch shares history with ' + BASE + ' and is ahead of it or equal to it (a base that moved on since is fine): "continued" (with the branch alone, first git -C ' + QM + ' worktree add ' + QWT + ' ' + QBRANCH + '). You may be a restart of this stage after a pause: continue from what is there (read ' + A.notes + '/DESIGN-' + A.slug + '.md if it exists, "git -C ' + QWT + ' log --oneline ' + QBASE + '..HEAD" and "git -C ' + QWT + ' status"), finish or redo a half-done edit and commit it; never start over, and never stop because your own earlier work exists. Anything else (a worktree on another branch, a branch with no history in common with ' + BASE + ', a branch already merged into it): "refused": change nothing, say what you found, check_ok false.'
   impl = await guarded('implement', 'Implement', shared('implement', true) + '\n\nStage: implement "' + A.title + '". ' + start + ' Follow the brief ' + A.brief + (design ? ' and the design note ' + A.notes + '/DESIGN-' + A.slug + '.md' : '') + '. Commits of one kind each, with their proof; tests with the change (a behaviour change has a test that fails on the old code, checked). While working run "cd ' + QWT + ' && invowk cmd test module <module>"; at the end run "cd ' + QWT + ' && invowk cmd check" once: check_ok is true only when it passed, and check holds its summary. ' + GATE_TAIL + ' Return changed_paths exactly as "' + DIFF_CMD + '" prints them.',
     { start: { type: 'string', enum: ['created', 'continued', 'refused'] }, start_facts: START_FACTS, found_head: { type: 'string' }, commits: { type: 'array', items: { type: 'string' } }, changed_paths: CHANGED, check_ok: { type: 'boolean' }, check: { type: 'string' }, notes: { type: 'string' }, ...GATED }, ['start', 'start_facts', 'found_head', 'commits', 'changed_paths', 'check_ok', 'check', 'gated_head', 'worktree_clean'])
   if (!impl) return stopped('implement')
