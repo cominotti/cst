@@ -953,8 +953,42 @@ power loss then leaves a partial `_data` beside the old copy, the next
 boot's recovery sees a `_data` and removes the old copy, and
 `noDataLoss` fails.
 
-**A change of order in the module** changes the spec in the same commit
-(one action per call, in the code's order).
+**The replay.** `btrfs/tests/test_docker_volumes_nocow_replay.py`, in the
+unit suite, replays the checked-in traces of the spec
+(`btrfs/tests/quint/traces/*.itf.json`) against the real code: the use
+case over its real adapters, with the fakes of the module's unit tests
+(NOCOW ioctls, the commands, `os.sync`). Each trace's start becomes the
+volumes on disk, the folder's +C and the flag; each run of the trace (a
+boot, an install with `btrfs-setup.sh`'s touch after a non-zero exit,
+Docker recreating a volume) gets the faults the trace picked, each at its
+call's position in the run, and dies where the trace crashes (a power loss
+also spoils the copies the spec says it loses). Every call the code makes
+to the volume tree and to the flag and counter files is recorded with the
+spec's label; the calls of each run must be the spec's, in its order, and
+after each run each volume's `_data`, twin and old copies, the folder's +C,
+the flag and the counter must be the spec's state. A second test checks
+that the traces, together, replay every recorded call and outcome of the
+spec. `CST_NOCOW_TRACES` names a folder of more traces to replay.
+
+The traces are two random walks of the simulator and the first trace it
+finds to each witness a random walk rarely reaches (a restore, a failed
+recovery, a kept flag after a give-up, a power loss with a partial copy, a
+failed install request, a new round, ...); `TRACE_JOBS` in
+`tests/quint/cst-quint` lists them with their seeds and bounds, and
+`invowk cmd test quint --traces` writes the same bytes again (one thread,
+the seed fixed, the absolute path and the time taken out). About 300 KB in
+all; the replay takes a fraction of a second.
+
+What the replay does not compare: `scan(fix)` setting +C in place on
+folders and empty files, the postponed record, journal lines and the alert,
+`daemon.json`, a dockerd outside docker.service, `status` and `unmark`,
+a failing `remove_tree`, containers writing during an install, and the
+durability of metadata (the unit tests and the fault tests cover those).
+
+**A change of order in the module** changes the spec and its traces in the
+same commit (one action per call, in the code's order): the replay fails
+on a code change the spec does not follow, and the CI job on a spec change
+that breaks a property.
 
 **In CI.** The `quint` job of `.github/workflows/ci.yml` runs `invowk cmd
 test quint` when a pull request (or a push to main) changes a path under
