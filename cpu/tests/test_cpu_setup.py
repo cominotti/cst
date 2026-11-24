@@ -723,14 +723,24 @@ class InstallTest(CpuSetupCase):
             )
 
     def test_a_failing_step_ends_install_with_its_exit_status(self) -> None:
-        self.runner.answers = [
-            ("systemctl restart cst-cpu-power.service", CommandResult(4, "", "")),
-            ("id -nG", CommandResult(0, "gamemode", "")),
-        ]
-        rc, out, _ = self.command("install")
-        self.assertEqual(rc, 4)
-        self.assertFalse([c for c in self.runner.joined() if " mark " in c])
-        self.assertNotIn("Done.", out)
+        # Each of the three systemctl calls at the end stops install: nothing after it runs, nothing is marked done.
+        steps = (
+            "systemctl enable --now cpu-game-watchdog.timer",
+            "systemctl enable cst-cpu-power.service",
+            "systemctl restart cst-cpu-power.service",
+        )
+        for i, step in enumerate(steps):
+            with self.subTest(step=step):
+                self.runner.calls.clear()
+                self.runner.answers = [(step, CommandResult(4, "", "")), ("id -nG", CommandResult(0, "gamemode", ""))]
+                rc, out, _ = self.command("install")
+                self.assertEqual(rc, 4)
+                calls = self.runner.joined()
+                self.assertIn(step, calls)
+                for later in steps[i + 1 :]:
+                    self.assertNotIn(later, calls)
+                self.assertFalse([c for c in calls if " mark " in c])
+                self.assertNotIn("Done.", out)
         self.runner.answers = [("usermod", CommandResult(-15, "", ""))]
         self.assertEqual(self.command("install")[0], 143)  # killed by SIGTERM: 128+15, as bash
         self.runner.answers = [("text " + self.paths.hwp_tmpfiles, CommandResult(1, "", ""))]
