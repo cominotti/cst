@@ -652,8 +652,8 @@ not derive from it.
   `snapshots.conf` and the drop-in agree, a failed step leaves both files
   and their folders as they were, exit 0 means systemd loaded the limit,
   and btrfs:core's state never changes.
-- `mbt_iocost_apply.py`: `cst btrfs iocost` apply and revert, live or
-  not, with any one step failing (a file's write or removal, the
+- `mbt_iocost_apply.py`: `cst btrfs iocost` apply (after an upgrade of
+  CST or not) and revert, live or not, with any one step failing (a file's write or removal, the
   io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
   the installer's mark), through a model of the installer (the real
   `InstallService` in memory), systemd, udev and io.cost.qos: the component

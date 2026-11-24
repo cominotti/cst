@@ -17,7 +17,10 @@ MAJ:MIN. os.fsync is stubbed (the TestCase's setUp).
 Each step arms at most one fault: a write or a removal of one of the
 component's three files, the io.cost.qos write, daemon-reload, enable --now,
 disable --now, the udev rules' reload, or the installer's mark. Each fault
-records whether it fired (the step made that call).
+records whether it fired (the step made that call). An apply may come with
+an upgrade (a new CST: every file's payload changes), so its install
+rewrites the files that are there and a file's fault hits a rewrite too, not
+only a first install.
 
 Checked:
 1. a7c5e92's contract: at every mark of btrfs:iocost done, this apply has
@@ -307,7 +310,8 @@ class IocostMachine(RuleBasedStateMachine):
         )
         self.target = FiringTarget()
         self.records = MemoryRecord()
-        self.svc = InstallService(self.target, lambda _e: b"payload\n", record=self.records)
+        self.release = 0  # the CST whose payload install writes: an apply's upgrade moves it on
+        self.svc = InstallService(self.target, lambda e: f"{e.dest} {self.release}\n".encode(), record=self.records)
         self.host = IocostHost(self.svc, self.target, InstallRequest(root=root, as_root=True), self.record)
         self.host.disk_enabled = lambda: self._disk_line() == ENABLED_LINE
         self.vendor = False
@@ -413,9 +417,12 @@ class IocostMachine(RuleBasedStateMachine):
         self.host.udevd = udevd
         self.vendor = vendor
 
-    @rule(fault=st.sampled_from(APPLY_FAULTS), dest=st.sampled_from(DESTS))
-    def apply(self, fault: IocostStepFault, dest: str) -> None:
-        rc, lines = self._step(functools.partial(apply_iocost, self.paths, runner=self.host), "apply", fault, dest)
+    @rule(fault=st.sampled_from(APPLY_FAULTS), dest=st.sampled_from(DESTS), upgrade=st.booleans())
+    def apply(self, fault: IocostStepFault, dest: str, *, upgrade: bool) -> None:
+        if upgrade:
+            self.release += 1
+        what = "apply (upgrade)" if upgrade else "apply"
+        rc, lines = self._step(functools.partial(apply_iocost, self.paths, runner=self.host), what, fault, dest)
         if rc == 0:
             self.revert_left_done = False
             self._assert_applied(lines)
