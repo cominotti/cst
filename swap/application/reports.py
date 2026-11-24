@@ -128,6 +128,17 @@ class SwapEnvironment:
         return self.as_root and not self.in_container
 
     @property
+    def managed_files(self) -> tuple[tuple[str, str], ...]:
+        """The files apply writes whole, as (source in swap/, where it goes), in the order plan lists them."""
+        return (
+            (self.src_tmpfiles, self.tmpfiles_conf),
+            (self.src_path(MM_TMPFILES_ENTRY), self.etc_path(MM_TMPFILES_ENTRY)),
+            (self.src_sysctl, self.sysctl_conf),
+            (self.src_path(URESOURCED_ENTRY), self.etc_path(URESOURCED_ENTRY)),
+            (self.src_dropin, self.slice_dropin),
+        )
+
+    @property
     def uresourced_view(self) -> UresourcedView:
         """Where uresourced's floor is read (the cgroup tree, /proc, the seat files)."""
         return UresourcedView(self.cgroup_dir, self.proc_dir, self.seats_dir)
@@ -336,6 +347,11 @@ class SwapReports:
         actual = self._fs.read_text(dest)
         return inspect_managed_file(desired, actual, exists=True, is_symlink=False, readable=actual is not None)
 
+    def _uresourced_copy_due(self, src: str, dest: str) -> bool:
+        """apply copies /etc/uresourced.conf (dest) aside before it writes it: when it is there (through a
+        link) and not CST's (neither ok nor adopt)."""
+        return self._fs.exists(dest) and self._inspect_file(src, dest) not in (OwnedState.OK, OwnedState.ADOPT)
+
     def old_dropin_is_ours(self) -> bool:
         """The drop-in under its old name is there and CST (or the script before it) wrote it."""
         text = self._fs.read_text(self._env.old_slice_dropin)
@@ -493,13 +509,7 @@ class SwapReports:
         file_items.insert(0, self._settings_item(res, verb))
         name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
-        for src, dest in (
-            (env.src_tmpfiles, env.tmpfiles_conf),
-            (env.src_path(MM_TMPFILES_ENTRY), env.etc_path(MM_TMPFILES_ENTRY)),
-            (env.src_sysctl, env.sysctl_conf),
-            (env.src_path(URESOURCED_ENTRY), env.etc_path(URESOURCED_ENTRY)),
-            (env.src_dropin, env.slice_dropin),
-        ):
+        for src, dest in env.managed_files:
             st = self._inspect_file(src, dest)
             note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ_FILE)
             file_items.append(PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), note))
