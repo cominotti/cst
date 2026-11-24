@@ -689,6 +689,16 @@ not derive from it.
   revert again converges. One known gap is let through by name: a full
   revert whose removal fails after its disable leaves btrfs:iocost done
   with the service disabled, until the next full apply or revert.
+- `mbt_game_state.py`: the game profile's `game.state` and
+  `game.intended`, whose fields are written as bash's `printf %q` writes
+  them, over fields generated as bytes (any but NUL, as a bash variable
+  holds them): our reader reads what our writer wrote, an older bash copy's
+  `eval` reads back the exact bytes, `record_line` is bash's own
+  `printf %q` line, a line bash wrote reads back, a record cut short is
+  left out and removed before the next one, and `game.intended`'s drift
+  records keep their six fields. One known gap is let through by name: a
+  field that is not UTF-8 (a cgroup folder's name the user made) reads back
+  decoded with U+FFFD, so it never matches its record.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
