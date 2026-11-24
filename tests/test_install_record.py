@@ -114,7 +114,7 @@ MAIN_RECORD = """\
 """
 
 
-class _MemoryRecord:
+class MemoryRecord:
     """InstallRecordPort in memory: {path: text}; writes counts the files written."""
 
     def __init__(self) -> None:
@@ -203,7 +203,7 @@ class InstallServiceRecordTest(unittest.TestCase):
         self.s = entry("m/s.service", "/etc/systemd/system/s.service", kind=ArtifactKind.UNIT)
         self.u = entry("m/u", "~/.config/u", owner=Owner.USER)
         self.target = MemoryTarget()
-        self.record = _MemoryRecord()
+        self.record = MemoryRecord()
         self.svc = InstallService(self.target, lambda e: self.payloads[e.src], record=self.record, commit="c0ffee")
 
     def test_install_records_every_file_and_a_second_run_changes_nothing(self) -> None:
@@ -329,7 +329,7 @@ class InstallServiceRecordTest(unittest.TestCase):
                 self.assertEqual(self.svc.plan([self.a], InstallRequest()), (["would record: /usr/local/sbin/a"], 0))
                 self.assertEqual(self.record.texts[self.ROOT], text)
 
-        class _Unreadable(_MemoryRecord):
+        class _Unreadable(MemoryRecord):
             @override
             def read(self, path: str) -> InstallRecord | None:
                 raise PermissionError(13, "Permission denied", path)
