@@ -327,7 +327,7 @@ cmds: [
 		flags: [
 			{name: "profile", description: "dev (random, example database under ~/.cache/cst-mbt/), ci (derandomized, no database) or nightly (random, 500 examples, a seed printed); default: ci under CI, else dev"},
 			{name: "examples", type: "int", default_value: "0", description: "Examples per test (0 = the profile's: 100, or 500 for nightly)"},
-			{name: "seed", description: "Seed every test (replays a nightly run: its log prints the seed); default: none, or a new one printed for nightly"},
+			{name: "seed", description: "Seed every test (replays a nightly run: its log prints the seed); default: CST_MBT_SEED, else none (nightly: a new one, printed)"},
 			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto: CST_TEST_JOBS, else one per CPU of the affinity; 1 = single-process)"},
 			{name: "affected", type: "bool", default_value: "false", description: "Only the modules the change affects (tests/run_unit.py --list-affected-mbt)"},
 			{name: "base", description: "With --affected: the git ref to diff against (default: merge-base with main, or HEAD)"},
@@ -365,7 +365,7 @@ cmds: [
 				profile="${INVOWK_FLAG_PROFILE:-${CST_MBT_PROFILE:-}}"
 				[[ -n "${profile}" ]] && export CST_MBT_PROFILE="${profile}"
 				[[ "${INVOWK_FLAG_EXAMPLES:-0}" != "0" ]] && export CST_MBT_EXAMPLES="${INVOWK_FLAG_EXAMPLES}"
-				seed="${INVOWK_FLAG_SEED:-}"
+				seed="${INVOWK_FLAG_SEED:-${CST_MBT_SEED:-}}"
 				if [[ -z "${seed}" && "${profile}" == "nightly" ]]; then
 					# One seed for every worker, chosen and printed here, so a failure can be replayed.
 					seed="${SRANDOM}"
