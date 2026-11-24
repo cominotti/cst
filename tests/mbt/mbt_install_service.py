@@ -19,8 +19,9 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, Placement
+from cst_core.domain.contracts import StateFormatKey, state_format
 from cst_core.domain.install import ArtifactKind, InstallEntry, Owner
-from cst_core.domain.record import ComponentState, parse_record
+from cst_core.domain.record import ROOT_RECORD, USER_RECORD_REL, ComponentState, parse_record
 from cst_core.ports import WriteFailed
 from tests.mbt import profiles
 from tests.test_install import MemoryTarget, entry
@@ -29,9 +30,11 @@ from tests.test_install_record import MemoryRecord
 profiles.load()
 
 HOME = "/var/home/u"
-ROOT_RECORD = "/var/lib/cst/installed.json"
-USER_RECORD = f"{HOME}/.local/state/cst/installed.json"
-NEWER_RECORD = '{"format": 2, "files": {}, "components": {}}\n'
+USER_RECORD = f"{HOME}/{USER_RECORD_REL}"
+# One format above the one this CST reads: a newer CST wrote it, whatever the current format is.
+NEWER_RECORD = (
+    f'{{"format": {state_format(StateFormatKey.INSTALL_RECORD).version + 1}, "files": {{}}, "components": {{}}}}\n'
+)
 
 ENTRIES: tuple[InstallEntry, ...] = (
     entry("m/a", "/usr/local/sbin/a", mode=0o755, kind=ArtifactKind.SHELL),
