@@ -8669,7 +8669,10 @@ EOF
         mounts this run made were taken back.": it wrote no /etc/fstab); the run again exits 0, says
         "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
         (NeedDaemonReload=no, the mount unit of ~/.cache made); a third run has nothing to do and reloads
-        nothing. After the killed detach, the run again reloads once, unmounts the binds and leaves no mount
+        nothing. A second user's lines that systemd never read, with no unit of /etc/fstab behind and no unit
+        of the binds at all: plan shows the reload attach runs after its mounts, and attach runs it (the
+        units of the binds then come from /etc/fstab). After the killed detach, the run again reloads once,
+        unmounts the binds and leaves no mount
         unit of them; a third has nothing to do. With no systemd that answers (systemctl show and
         daemon-reload both fail), a detach after a killed one warns, exits 0 and still unmounts; the next one
         reloads. Before, the run again said "nothing to do" (attach) or
@@ -8700,7 +8703,8 @@ EOF
             [[ ! -f /etc/fstab ]] || cp -a /etc/fstab {w}/fstab.bak
             [[ -d /var/mnt/cache ]] || {{ mkdir -p /var/mnt/cache && touch {w}/made-cache; }}
             [[ -d /var/mnt/scratchpad ]] || {{ mkdir -p /var/mnt/scratchpad && touch {w}/made-scratchpad; }}
-            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\n' >{w}/etc/passwd
+            printf 'root:x:0:0:root:/root:/bin/bash\nu1:x:1000:1000::/var/home/u1:/bin/bash\nu2:x:1001:1001::/var/home/u2:/bin/bash\n' >{w}/etc/passwd
+            mkdir -p {w}/var/home/u2
             cat >{w}/etc/fstab <<'EOF'
 tmpfs /var/mnt/cache tmpfs defaults,nofail 0 0
 tmpfs /var/mnt/scratchpad tmpfs defaults,nofail 0 0
@@ -8804,6 +8808,32 @@ EOF
             again attach
             [[ -f "$cache_unit" ]] || {{ echo "no mount unit of ~/.cache after the reload" >&2; exit 1; }}
             [[ "$(systemctl show -P SourcePath var-home-u1-.cache.mount)" == /etc/fstab ]]
+
+            # u2's lines in the test root's /etc/fstab that systemd never read (an attach killed at its
+            # reload before its shim copied them), its binds unmounted since: no unit of /etc/fstab says
+            # NeedDaemonReload=yes, and systemd has no unit of u2's binds at all. Had it read the lines it
+            # would have their units, so plan shows the reload and attach runs it after its mounts.
+            mkdir -p {w}/killnc
+            printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then kill -KILL "$(cat {w}/pid)"; sleep 5; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/killnc/systemctl
+            chmod +x {w}/killnc/systemctl
+            rm -f {w}/pid
+            PATH="{w}/killnc:$PATH" $cst btrfs cache attach --user u2 >{w}/out 2>&1 &
+            echo $! >{w}/pid
+            rc=0; wait $! || rc=$?
+            [[ $rc == 137 ]] || {{ echo "the u2 attach killed at its reload exited $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "user=u2 kind=cache" {w}/etc/fstab
+            grep -vF /var/home/u2/ {w}/mounts >{w}/mounts.new && mv {w}/mounts.new {w}/mounts
+            [[ "$(behind)" == no ]] || {{ echo "the test cannot bite: a unit of /etc/fstab says NeedDaemonReload=yes" >&2; exit 1; }}
+            [[ "$(systemctl show -P LoadState var-home-u2-.cache.mount)" != loaded ]]
+            plan_out="$($cst btrfs cache plan --user u2)"
+            grep -qF "u2's lines are in /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: attach runs systemctl daemon-reload after the mounts." \
+                <<<"$plan_out" || {{ echo "$plan_out" >&2; exit 1; }}
+            n=$(reloads)
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u2 >{w}/out 2>&1
+            grep -qF "Mounted /var/mnt/cache/u2 -> /var/home/u2/.cache." {w}/out && grep -qF "reloaded: " {w}/out \
+                || {{ cat {w}/out >&2; exit 1; }}
+            [[ $(reloads) == $((n + 1)) ]]
+            [[ "$(systemctl show -P SourcePath var-home-u2-.cache.mount)" == /etc/fstab ]]
 
             killed detach
             if grep -qF "user=u1" {w}/etc/fstab; then echo "a u1 line after the killed detach" >&2; exit 1; fi

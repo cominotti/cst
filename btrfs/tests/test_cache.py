@@ -1070,6 +1070,64 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("reloaded: systemd had not loaded /etc/fstab", out)
         self.assertTrue(self.runner.view_current())
 
+    def test_a_bind_attach_mounts_with_no_unit_at_all_reloads(self) -> None:
+        # The lines are in /etc/fstab but systemd never loaded them, and it lists no unit of the binds
+        # attach just mounted (it has not handled the new mounts yet, or, as here, it does not see them):
+        # had it read those lines it would have their units from /etc/fstab. No other unit says
+        # NeedDaemonReload=yes (none of /etc/fstab is listed).
+        self._killed_at_reload(["attach"])
+        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+            self.runner.run(["umount", self.tmp + b.target])
+        self.runner.units_visible = False
+        _, out, _ = self._run(["plan"])
+        self.assertIn(
+            "danilo's lines are in /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: "
+            "attach runs systemctl daemon-reload after the mounts.",
+            out,
+        )
+        self.runner.calls.clear()
+        rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Mounted /var/mnt/cache/danilo -> /var/home/danilo/.cache.", out)
+        self.assertIn("reloaded: systemd had not loaded /etc/fstab as it is on disk (an earlier run stopped)", out)
+        self.assertEqual(self._reloads(), 1)
+        self.assertTrue(self.runner.view_current())
+        # Binds mounted before this run with no unit at all prove nothing (test_160's test root): no reload.
+        self.runner.calls.clear()
+        rc, out, _ = self._run(["attach"])
+        self.assertIn("Already attached for danilo; nothing to do.", out)
+        self.assertEqual(self._reloads(), 0)
+
+    def test_plan_with_mounts_to_make_and_systemd_current_shows_no_reload(self) -> None:
+        self.assertEqual(self._run(["attach"])[0], 0)
+        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+            self.runner.run(["umount", self.tmp + b.target])
+        _, out, _ = self._run(["plan"])
+        self.assertIn("mount --bind", out)
+        self.assertNotIn("daemon-reload", out)
+        self.runner.calls.clear()
+        rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("reloaded:", out)
+        self.assertEqual(self._reloads(), 0)
+
+    def test_plan_with_mounts_to_make_and_systemd_behind_shows_the_reload(self) -> None:
+        # NeedDaemonReload=yes of the units systemd loaded from /etc/fstab (the base's), or no answer.
+        self._killed_at_reload(["attach"])
+        for b in build_user_bindings(CacheMountUser("danilo", 1000, 1000, "/var/home/danilo")):
+            self.runner.run(["umount", self.tmp + b.target])
+        self.runner.calls.clear()
+        _, out, _ = self._run(["plan"])
+        self.assertIn("attach runs systemctl daemon-reload after the mounts.", out)
+        self.runner.show_fails = True
+        _, out, _ = self._run(["plan"])
+        self.assertIn(
+            "danilo's lines are in /etc/fstab; systemctl cannot say whether systemd has loaded /etc/fstab: "
+            "attach runs systemctl daemon-reload after the mounts.",
+            out,
+        )
+        self.assertEqual(self._reloads(), 0)
+
     def test_a_catch_up_reload_that_fails_changes_nothing(self) -> None:
         self._killed_at_reload(["attach"])
         fstab, mounted = self._fstab(), sorted(self._mounted())

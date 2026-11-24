@@ -1744,7 +1744,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   mount units already loaded and loads none), whether it is behind: a unit
   loaded from `/etc/fstab` that says `NeedDaemonReload=yes`, or a bind of
   the run mounted, with its line in `/etc/fstab`, whose unit systemd still
-  took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`).
+  took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`), or
+  of which systemd has no unit at all when this run mounts it (had systemd
+  read that line it would have the unit from `/etc/fstab` already: CST's
+  lines are `nofail`, so `local-fs.target` wants them; this also holds
+  before systemd has handled the new mount).
   Then it runs the daemon-reload and says `reloaded: systemd had not
   loaded /etc/fstab as it is on disk (an earlier run stopped)`; when
   systemctl gives no answer it reloads too, and says so. When it gives no
@@ -1758,12 +1762,18 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   daemon-reload` once it works) and `the mounts this run made were taken
   back.` (it wrote no `/etc/fstab`, so there is none to restore). `plan` shows the same reload as
   `Already attached for USER; systemd has not loaded /etc/fstab as it is
-  on disk: attach runs systemctl daemon-reload.` Two limits, on purpose:
+  on disk: attach runs systemctl daemon-reload.`, and, when `attach` would
+  also mount binds whose lines are there, as `USER's lines are in
+  /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: attach
+  runs systemctl daemon-reload after the mounts.` Two limits, on purpose:
   systemd marks a reload as needed by the file's time, not its bytes, so
   any other program's rewrite of `/etc/fstab` makes the next run reload
-  once more (harmless); and with no unit of `/etc/fstab` loaded at all
-  (an `/etc/fstab` systemd-fstab-generator makes no unit of) the answer is
-  "not behind".
+  once more (harmless); and a `detach` killed before its reload on a
+  machine where no unit of `/etc/fstab` is loaded at all (an `/etc/fstab`
+  systemd-fstab-generator makes no unit of) reads as "not behind": it took
+  the lines out, so only `NeedDaemonReload` could tell (an `attach` still
+  sees its own binds' units). A bind mounted before the run with no unit
+  at all proves nothing (a test root whose mounts systemd does not see).
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in
