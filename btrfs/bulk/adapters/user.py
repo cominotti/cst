@@ -360,7 +360,7 @@ class UserFiles:
         (nothing changed) if src was written to since the copy started."""
         src, target, new, old, link = j["src"], j["target"], j["new"], j["old"], j["link"]
         if self.tree.changed_since(src, j["stamp"]):
-            self.u_rmtree(new)
+            self.u_drop(new)  # after the journal with stamp2: a cut deletion must not read as a write
             return False
         os.rename(src, old)
         try:

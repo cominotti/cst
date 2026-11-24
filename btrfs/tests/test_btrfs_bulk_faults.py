@@ -23,7 +23,8 @@ apply() with no fault, and apply() once more.
 To bound the module's time: after a kill the second fault is of every mode, after a failure or a
 full disk a kill only (a kill during the repair is the hazard; a second failure after a full disk
 is what FAIL_FROM's first fault covers already); and LateWrite and Conflict put their first fault
-from the switch on (before it their apply is MoveBase's, which its own classes cover).
+from the switch on (before it their apply is MoveBase's, which its own classes cover), Changed
+from the journal's write before the switch.
 
 Checked after the fault, after the recovery and at the end:
 - no data lost: every file of the item, with its content, is at its path in /home (through the
@@ -36,12 +37,13 @@ Checked after the fault, after the recovery and at the end:
 The Conflict start state ends as documented instead: both sides kept, the journal names the old
 tree, status says "written to on both sides", and a further apply changes nothing.
 
-A rollback's deletion of the copy is cut like any other point: the copy is renamed to
+A rollback's deletion of the copy, and the switch's when the source changed during the copy
+(Changed), is cut like any other point: the copy is renamed to
 `<target>.bulk-new.bulk-drop` first (UserFiles.u_drop), so what a cut deletion leaves is known by
 its name, and the next repair goes on deleting it: those cases converge too.
 
 Not modelled: Steam's journals, the child process of as_user (no user to drop to), real btrfs and
-+C, and writes during a call other than the late writes of LateWrite and Conflict.
++C, and writes during a call other than the late writes of LateWrite, Changed and Conflict.
 """
 
 from __future__ import annotations
@@ -100,6 +102,9 @@ CASES_EMPTY_FAIL_FROM = 6
 CASES_LATE_WRITE_KILL = 188
 CASES_LATE_WRITE_FAIL = 76
 CASES_LATE_WRITE_FAIL_FROM = 79
+CASES_CHANGED_KILL = 52
+CASES_CHANGED_FAIL = 24
+CASES_CHANGED_FAIL_FROM = 24
 CASES_CONFLICT_KILL = 50
 CASES_CONFLICT_FAIL = 24
 CASES_CONFLICT_FAIL_FROM = 27
@@ -376,6 +381,28 @@ class LateWriteBase(MoveBase):
         self.extra["late"] = "late"
 
 
+class ChangedBase(MoveBase):
+    """MoveBase, and a write into ~/Programs just before the switch (once): the switch finds it
+    changed since the copy started and deletes the copy instead (UserFiles.u_commit), with the
+    journal (and its stamp2) on disk; the next apply moves it."""
+
+    SETTLE_APPLIES = 2
+    FIRST_FAULT_AT = "write journal-apps.json"
+
+    @override
+    def hook(self, fx: BulkHome) -> None:
+        real = fx.user.u_commit
+
+        def commit(j: ItemJournal) -> bool:
+            if "late" not in self.extra:
+                with open(os.path.join(j["src"], "late"), "w") as f:
+                    f.write("late")
+                self.extra["late"] = "late"
+            return real(j)
+
+        fx.fake(fx.user, "u_commit", commit)
+
+
 class ConflictBase(LateWriteBase):
     """LateWriteBase, and a write through the link as well: the conflict journal, both sides kept."""
 
@@ -578,6 +605,21 @@ class LateWriteFailTest(LateWriteBase):
 class LateWriteFailFromTest(LateWriteBase):
     def test_every_fault_then_recover(self) -> None:
         self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_LATE_WRITE_FAIL_FROM)
+
+
+class ChangedKillTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.KILL), CASES_CHANGED_KILL)
+
+
+class ChangedFailTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL), CASES_CHANGED_FAIL)
+
+
+class ChangedFailFromTest(ChangedBase):
+    def test_every_fault_then_recover(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_CHANGED_FAIL_FROM)
 
 
 class ConflictKillTest(ConflictBase):

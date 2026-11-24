@@ -1665,7 +1665,9 @@ back at the usual path and deletes neither side. Copy what you need from the
 
 A deletion of the copy that was cut short no longer leads here. Once the copy
 passed this check, the repair (or an undo right after the switch) first
-renames it to `<path>.bulk-new.bulk-drop` and then deletes it. After a power
+renames it to `<path>.bulk-new.bulk-drop` and then deletes it; so does a move
+that drops its copy, never used, because the usual folder changed while it was
+being copied. After a power
 loss or a failed deletion, the next repair goes on deleting the marked folder
 without checking it again. A half-deleted `.bulk-new` left by an older CST
 (before this change) still leads here: it cannot be told from a copy that was

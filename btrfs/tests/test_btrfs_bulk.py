@@ -768,6 +768,29 @@ class BulkTest(BulkBase):
         self.assertIn("undid an interrupted move", self.out)
         self.assertNotIn("was written to as well", self.out)
 
+    def test_a_kill_while_the_switch_drops_the_copy_of_a_changed_source_converges(self) -> None:
+        # ~/Programs written to after the copy started: the switch deletes the copy instead
+        # (u_commit), after the journal with stamp2 is on disk. A kill there leaves a marked copy,
+        # not a partly deleted .bulk-new the next repair would take for a write through the link.
+        self.setup_programs()
+        real = self.user.u_commit
+
+        def commit(j: ItemJournal) -> bool:
+            if not os.path.exists(self.H("Programs/late")):
+                self.write("Programs/late", "late")  # once: after the copy started
+            return real(j)
+
+        self.fake(self.user, "u_commit", commit)
+        self.run_crash("u_commit", "unlink", 1)  # the copy's deletion; killed after one file
+        self.fake(self.user, "u_commit", real)
+        self.assertFalse(os.path.lexists(self.B("apps.bulk-new")))
+        self.assertTrue(os.path.isdir(self.B("apps.bulk-new" + bulk_domain.DROP_MARK)))
+        self.assertEqual(len(self.journals()), 1)
+        self.check_recovered()
+        self.assertEqual(self.read("Programs/late"), "late")
+        self.assertIn("undid an interrupted move", self.out)
+        self.assertNotIn("was written to as well", self.out)
+
     def test_a_copy_written_to_after_stamp2_keeps_its_name_and_the_journal(self) -> None:
         self.setup_programs()
         self.run_crash("u_commit", "rename", 0)
