@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 import os
 import pwd
@@ -47,6 +47,7 @@ from btrfs.cache.domain import (
     unmanaged_fstab_targets,
     validate_attach_snapshot,
 )
+from btrfs.cache.domain.systemd_view import MOUNT_UNIT_PROPS, fstab_lines_unread, systemd_behind_fstab
 from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from btrfs.snapshot.domain import CACHE_SIGNATURE, CACHE_TAG
 from cst_core.adapters import SystemctlAdapter, SystemctlHost
@@ -144,12 +145,17 @@ def _real_home(home: str, rt: _CacheMountRuntime) -> str:
     return real.removeprefix(prefix) if real.startswith(f"{prefix}/") else home
 
 
+def _from_toolbox(rt: _CacheMountRuntime) -> bool:
+    """Whether the probes go to the host: a run inside a toolbox with no seam root."""
+    return not rt.seam_root and rt.ctx.is_container()
+
+
 def _read_live_mounts(rt: _CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:
     """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox); (), and why,
     when findmnt cannot answer: nothing is guessed from another table."""
     res = rt.runner.run(
         ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS],
-        on_host=(not rt.seam_root and rt.ctx.is_container()),
+        on_host=_from_toolbox(rt),
         timeout=_FINDMNT_TIMEOUT_S,
         locale_c=True,
         output=OutputMode.CAPTURE,
@@ -340,6 +346,65 @@ def _reload_systemd(rt: _CacheMountRuntime) -> str | None:
     return None if res.returncode == 0 else res.failure("systemctl daemon-reload")
 
 
+def _fstab_behind(snap: CacheMountSnapshot, rt: _CacheMountRuntime, mounting: Collection[str] = ()) -> bool | None:
+    """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab over the mount
+    units it has loaded, one `systemctl show '*.mount'`, on the host from a toolbox as findmnt is; mounting:
+    the targets attach mounts); None when systemctl gives no answer."""
+    return systemd_behind_fstab(_mount_units(rt), snap.bindings, mounting)
+
+
+def _mount_units(rt: _CacheMountRuntime) -> list[dict[str, str]] | None:
+    """The mount units systemd has loaded (MOUNT_UNIT_PROPS), one `systemctl show '*.mount'`, on the host
+    from a toolbox as findmnt is; None when systemctl gives no answer."""
+    on_host = SystemctlHost.SHOW_ONLY if _from_toolbox(rt) else SystemctlHost.LOCAL
+    return SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
+
+
+def _cache_set_up(snap: CacheMountSnapshot) -> bool:
+    """Whether status asks systemd about /etc/fstab: a managed line, or a base in /etc/fstab or mounted (an
+    attach or detach may have stopped before its reload); not for a machine without the cache, where a hand
+    edit of /etc/fstab is no business of the cache's."""
+    return bool(snap.all_managed) or any(b.in_fstab or b.mounted for b in snap.bases.values())
+
+
+def _catch_up_reload(
+    snap: CacheMountSnapshot, rt: _CacheMountRuntime, mounting: Collection[str] = ()
+) -> tuple[str | None, list[str]]:
+    """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is
+    on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say:
+    (why the reload failed, or None; the lines to add). A run with nothing pending reloads nothing. When
+    systemctl cannot say and the reload fails too, no systemd answers (a rescue shell, a PID 1 that does
+    not answer on D-Bus): nothing points to it being behind, so a warning line, and the run goes on (a
+    detach still unmounts)."""
+    behind = _fstab_behind(snap, rt, mounting)
+    if behind is False:
+        return None, []
+    why = _reload_systemd(rt)
+    if why is not None and behind is None:
+        warning = (
+            f"warning: {why}; systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk "
+            "either (run systemctl daemon-reload once it works)"
+        )
+        return None, [warning]
+    if why is not None:
+        return (
+            f"{why}; {FSTAB_PATH} is as asked, systemd has not loaded it (run systemctl daemon-reload once it works)",
+            [],
+        )
+    said = (
+        f"systemd had not loaded {FSTAB_PATH} as it is on disk (an earlier run stopped)"
+        if behind
+        else f"systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk"
+    )
+    return None, [f"reloaded: {said}"]
+
+
+def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
+    """/etc/fstab as it is (empty when there is none) and as attach would write it."""
+    cur = snap.fstab_text or ""
+    return cur, plan_attach_fstab(cur, [p.binding for p in snap.bindings])
+
+
 def _put_fstab_back(fstab_path: str, previous: str | None) -> str | None:
     """/etc/fstab as it was (the previous text, or no file when there was none); None, or why not."""
     try:
@@ -362,6 +427,14 @@ def _error_after_undo(cause: str, undo_errors: Sequence[str]) -> str:
     if undo_errors:
         return f"ERROR: {cause}; ROLLBACK INCOMPLETE ({'; '.join(undo_errors)})"
     return f"ERROR: {cause}; mounts and {FSTAB_PATH} restored."
+
+
+def _error_after_catch_up(cause: str, undo_errors: Sequence[str], mounted: Sequence[CacheMountBinding]) -> str:
+    """The ERROR line of attach's failed catch-up reload, a step that wrote no /etc/fstab: only the mounts
+    this run made are taken back."""
+    if undo_errors:
+        return _error_after_undo(cause, undo_errors)
+    return f"ERROR: {cause}; the mounts this run made were taken back." if mounted else f"ERROR: {cause}"
 
 
 def _undo_each(
@@ -449,20 +522,28 @@ def _apply_attach(
     if error is not None:
         return 1, [*lines, error]
 
+    cur_fstab, new_fstab = _attach_fstab(snap)
     mounted, error = _bind_missing(snap, rt)
     if error is not None:
         return 1, [*lines, error]
 
-    cur_fstab = snap.fstab_text or ""
-    new_fstab = plan_attach_fstab(cur_fstab, [p.binding for p in snap.bindings])
-    if new_fstab != cur_fstab:
+    reloaded: list[str] = []
+    if new_fstab == cur_fstab:
+        # After the mounts: a bind this run mounted whose line is in /etc/fstab shows whether systemd
+        # read that line (systemd_behind_fstab). A catch-up reload that fails takes them back.
+        now = tuple(replace(p, mounted_from_source=True) if p.binding in mounted else p for p in snap.bindings)
+        cause, reloaded = _catch_up_reload(replace(snap, bindings=now), rt, {b.target for b in mounted})
+        if cause is not None:
+            return 1, [*lines, _error_after_catch_up(cause, _undo(rt, mounted, mounted=True), mounted)]
+    else:
         error = _commit_fstab_or_undo(snap, new_fstab, rt, mounted)
         if error is not None:
             return 1, [*lines, error]
     lines.extend(f"Mounted {b.source} -> {b.target}." for b in mounted)
+    lines.extend(reloaded)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
-    if new_fstab == cur_fstab and not mounted:
+    if new_fstab == cur_fstab and not mounted and not reloaded:
         lines.append(f"Already attached for {user.name}; nothing to do.")
     return 0, lines
 
@@ -492,10 +573,17 @@ def _apply_detach(
     cur_fstab = snap.fstab_text or ""
     new_fstab = plan_detach_fstab(cur_fstab, user.name, set(kinds))
     fstab_path = _map_path(FSTAB_PATH, rt, read_only=False)
+    reloaded: list[str] = []
     if new_fstab != cur_fstab:
         failed = _commit_fstab(fstab_path, snap.fstab_text, new_fstab, rt)
         if failed is not None:
             return 1, [*lines, _error_after_undo(failed.cause, failed.undo_errors)]
+    else:
+        # Before any umount: a catch-up reload that fails leaves nothing to take back.
+        cause, reloaded = _catch_up_reload(snap, rt)
+        if cause is not None:
+            return 1, [*lines, f"ERROR: {cause}"]
+    lines.extend(reloaded)
 
     unmounted, cause = _unbind_cst_mounts(snap, rt)
     if cause is not None:
@@ -511,10 +599,10 @@ def _apply_detach(
     lines.extend(f"Unmounted {b.target}." for b in unmounted)
     if new_fstab != cur_fstab:
         lines.append(f"Updated {FSTAB_PATH} and reloaded systemd.")
-    if not unmounted and new_fstab == cur_fstab:
-        lines.append(f"Nothing attached for {user.name}; nothing to do.")
-    else:
+    if unmounted or new_fstab != cur_fstab:
         lines.append("Data in /var/mnt/{cache,scratchpad} kept untouched.")
+    elif not reloaded:
+        lines.append(f"Nothing attached for {user.name}; nothing to do.")
     return 0, lines
 
 
@@ -535,8 +623,16 @@ def dispatch_cache_mount_cli_action(
     snap = _probe_snapshot(parsed, rt)
     match parsed.action:
         case CacheMountAction.STATUS:
+            if snap.mounts_error is None and snap.fstab_error is None and _cache_set_up(snap):
+                targets = {e.target for e in snap.all_managed}
+                snap = replace(snap, fstab_behind=fstab_lines_unread(_mount_units(rt), targets))
             return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)
         case CacheMountAction.PLAN:
+            if snap.user is not None:
+                cur_fstab, new_fstab = _attach_fstab(snap)
+                if new_fstab == cur_fstab:  # attach would only mount and reload
+                    mounting = {p.binding.target for p in snap.bindings if not p.mounted_from_source}
+                    snap = replace(snap, fstab_behind=_fstab_behind(snap, rt, mounting))
             return 0, format_cache_mount_plan(snap, prog, allow_nonempty=parsed.allow_nonempty, seam_root=rt.seam_root)
         case CacheMountAction.ATTACH:
             return _apply_attach(snap, parsed, rt)

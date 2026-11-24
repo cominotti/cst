@@ -11,7 +11,7 @@ import posixpath
 import re
 from typing import Final, TypedDict, TypeIs
 
-from btrfs.compress.domain import MountEntry
+from btrfs.compress.domain import FSTAB_PATH, MountEntry
 from cst_core.domain.shapes import KeyTypes, has_shape, json_object, list_of, parse_json
 from cst_core.domain.text import (
     HELP_WORDS,
@@ -209,6 +209,11 @@ class CacheMountSnapshot:
     home_missing: bool = False
     fstab_error: str | None = None
     """Why /etc/fstab, which is there, could not be read (attach, detach and plan refuse)."""
+    fstab_behind: bool | None = False
+    """Whether systemd has not loaded /etc/fstab as it is on disk (None: systemctl cannot say). Asked by
+    plan, only when attach would write no /etc/fstab (systemd_behind_fstab, with the binds attach would
+    mount), and by status where the cache is set up (fstab_lines_unread, every managed line); False
+    otherwise."""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
@@ -691,6 +696,13 @@ def format_cache_mount_status(snap: CacheMountSnapshot, *, seam_root: str = "") 
     other_users = sorted({e.user for e in snap.all_managed if snap.user is None or e.user != snap.user.name})
     if other_users:
         lines.append(f"  other fstab users  {', '.join(other_users)}")
+    if snap.fstab_behind is True:
+        lines.append(
+            f"  systemd            has not loaded {FSTAB_PATH} as it is on disk (an edit, or an attach or detach "
+            "that stopped before its daemon-reload): run that attach or detach again, or systemctl daemon-reload"
+        )
+    elif snap.fstab_behind is None:
+        lines.append(f"  systemd            cannot say whether it has loaded {FSTAB_PATH} (systemctl gave no answer)")
     return lines
 
 
@@ -722,9 +734,22 @@ def format_cache_mount_plan(
     if blockers:
         lines.extend(f"BLOCKED: {msg}" for msg in blockers)
         return lines
+    why = (
+        f"systemd has not loaded {FSTAB_PATH} as it is on disk"
+        if snap.fstab_behind is True
+        else f"systemctl cannot say whether systemd has loaded {FSTAB_PATH}"
+    )
     if all(p.in_fstab and p.mounted_from_source for p in snap.bindings):
-        lines.append(f"Already attached for {snap.user.name}; nothing to do.")
+        if snap.fstab_behind is False:
+            lines.append(f"Already attached for {snap.user.name}; nothing to do.")
+        else:
+            lines.append(f"Already attached for {snap.user.name}; {why}: attach runs systemctl daemon-reload.")
         return lines
+    if snap.fstab_behind is not False:
+        # Only mounts to make (the lines are there): attach asks again after them and reloads.
+        lines.append(
+            f"{snap.user.name}'s lines are in {FSTAB_PATH}; {why}: attach runs systemctl daemon-reload after the mounts."
+        )
     user_flag = f" --user {snap.user.name}"
     extra = " --allow-nonempty" if allow_nonempty else ""
     lines.append(f"Dry run, nothing changed. Run `{prog} attach{user_flag}{extra}` to apply.")

@@ -1606,12 +1606,36 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   service then fails visibly in `systemctl --failed`); a kernel without
   `io.cost.qos` is only `skipped:` (exit 0). Without a running udevd (a
   container) the rules' reload is skipped with a `note:`;
-- **`revert`** first stops and disables `cst-btrfs-iocost.service` (when that
-  fails, nothing is removed), removes `btrfs:iocost`, reloads systemd and the
+- **`revert`** first marks `btrfs:iocost` pending in the install record, then
+  stops and disables `cst-btrfs-iocost.service`. Any failure after the mark
+  leaves the component pending (or with no state, once its last file and line
+  are gone), never done, and `cst doctor` shows it until a `revert` or an
+  `apply` finishes. A disable that fails removes nothing, and it puts `done`
+  back when a second probe of the service finds the same `ActiveState` and
+  `UnitFileState` as the one before the disable (whatever they were:
+  enabled and running, or enabled and failed, ...); when the disable changed
+  either, or `systemctl` cannot say, the component stays pending.
+  A record it cannot write, or one of a newer CST, stops `revert` with an
+  `ERROR:` line before anything changes. A full `apply` and a full
+  `revert` hold `/run/btrfs-setup/iocost-component.lock` from their first
+  step to their last, so one cannot mark `btrfs:iocost` done between the
+  other's steps; a run that finds it held waits up to 30 s, then stops with
+  `ERROR: another btrfs-iocost run holds
+  /run/btrfs-setup/iocost-component.lock` and changes nothing (the boot
+  service's and the udev rule's `--live-only` runs do not take it). After the disable, `revert` removes `btrfs:iocost`, reloads systemd and the
   udev rules (a failure is an error), and only then resets the `MAJ:MIN`
   devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
   so no udev event enables a disk again after its reset. The tracking file is
   removed, also on a kernel without `io.cost.qos` (nothing to reset there).
+  A save of `/run/btrfs-setup/iocost-managed` that fails (a full or
+  read-only `/run`), in `apply` or `revert`, is an `ERROR: cannot write
+  /run/btrfs-setup/iocost-managed: REASON` line with exit 1; `apply` then
+  leaves `btrfs:iocost` pending. `apply` saves the devices it is about to
+  enable there **before** it writes their `io.cost.qos` lines (and saves the
+  list again without the ones whose write failed): when that first save
+  fails it writes no line (`nothing was written to io.cost.qos`), so a line
+  CST wrote is always listed as CST's, and the next `apply` and `revert`
+  treat it as such, also after a later save failed or a kill.
   `revert` removes the files and their record lines itself, so the installed
   program (`/usr/local/sbin/btrfs-iocost revert`) works without a checkout;
   `apply` (not `--live-only`) installs from a checkout and, run from the
@@ -1729,6 +1753,52 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   mount the base, or unmount the other mount, and run `detach` again.
   `status` shows these two as `mounted (source not checked: base not
   mounted)` and `mounted (other source on top of CST's bind!)`.
+- **A run stopped before its reload:** a run killed (or the machine reset)
+  after it wrote `/etc/fstab` and before its `systemctl daemon-reload`
+  leaves systemd with the old `/etc/fstab` loaded. The same `attach` or
+  `detach` again finds nothing to write, so before it says "nothing to do"
+  it asks systemd, with one `systemctl show '*.mount'` (which lists the
+  mount units already loaded and loads none), whether it is behind: a unit
+  loaded from `/etc/fstab` that says `NeedDaemonReload=yes`, or a bind of
+  the run mounted, with its line in `/etc/fstab`, whose unit systemd still
+  took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`), or
+  of which systemd has no unit at all when this run mounts it (had systemd
+  read that line it would have the unit from `/etc/fstab` already: CST's
+  lines are `nofail`, so `local-fs.target` wants them; this also holds
+  before systemd has handled the new mount).
+  Then it runs the daemon-reload and says `reloaded: systemd had not
+  loaded /etc/fstab as it is on disk (an earlier run stopped)`; when
+  systemctl gives no answer it reloads too, and says so. When it gives no
+  answer and that reload fails too, no systemd answers (a rescue shell, a
+  PID 1 that does not answer on D-Bus) and nothing points to it being
+  behind: a `warning:` line, exit 0, and `detach` still unmounts. A reload
+  that fails when systemd did say it is behind is an `ERROR:` (below). `detach` reloads
+  before it unmounts; `attach` asks after the mounts it makes, and when
+  that reload fails it unmounts them again and says `ERROR:` with
+  `/etc/fstab is as asked` (its text is right; run `systemctl
+  daemon-reload` once it works) and `the mounts this run made were taken
+  back.` (it wrote no `/etc/fstab`, so there is none to restore). `plan` shows the same reload as
+  `Already attached for USER; systemd has not loaded /etc/fstab as it is
+  on disk: attach runs systemctl daemon-reload.`, and, when `attach` would
+  also mount binds whose lines are there, as `USER's lines are in
+  /etc/fstab; systemd has not loaded /etc/fstab as it is on disk: attach
+  runs systemctl daemon-reload after the mounts.` Two limits, on purpose:
+  systemd marks a reload as needed by the file's time, not its bytes, so
+  any other program's rewrite of `/etc/fstab` makes the next run reload
+  once more (harmless); and a `detach` killed before its reload on a
+  machine where no unit of `/etc/fstab` is loaded at all (an `/etc/fstab`
+  systemd-fstab-generator makes no unit of) reads as "not behind": it took
+  the lines out, so only `NeedDaemonReload` could tell (an `attach` still
+  sees its own binds' units). A bind mounted before the run with no unit
+  at all proves nothing (a test root whose mounts systemd does not see).
+  `status` asks the same question over every managed line and says
+  `systemd has not loaded /etc/fstab as it is on disk ...: run that attach
+  or detach again, or systemctl daemon-reload` (or that systemctl gives no
+  answer), and `cst doctor` warns with the fix `sudo systemctl
+  daemon-reload`. Both ask only where the cache is set up (`status`: a
+  managed line, or a base in `/etc/fstab` or mounted; `cst doctor`: its
+  cache check's hints), so a hand edit of `/etc/fstab` on a machine
+  without the cache drive says nothing.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

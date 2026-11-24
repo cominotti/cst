@@ -100,6 +100,28 @@ other work at the same time (another test run, a build, an agent).
   competed (at 8 to 24 workers the times with and without it were within each
   other's spread). How much it helps the machine's other users was not
   measured.
+- **The longest work first.** A parallel run of the whole suite (no NAME,
+  no `--gates`) that passes writes how long each test took to
+  `${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json`, one file per
+  checkout or worktree (the key as `tests/uv-dev` makes it; a relative
+  `XDG_CACHE_HOME` is ignored, so the file never lands in the checkout). The
+  next parallel run, whole or named, queues its work units longest first by
+  those times, so a long unit (a class of real sleeps or timeouts) does not
+  start last and hold the run open; a test with no time yet counts as the
+  average one. With no file, or one it cannot read, the order is the old one:
+  most tests first. A run in one process (`--jobs 1`, `CST_TEST_JOBS=1`, a
+  load error, a single unit) neither reads nor writes the file, so it cannot
+  seed the times. A run that fails (a test, a gate, a lost worker) leaves
+  the file as it was: tests that error at once would otherwise record a
+  slow unit as a quick one. CI neither reads nor writes the file. Only the order
+  changes: the same tests and gates run, and a failure is the same failure.
+  Deleting the file costs one run in the old order. Measured on 2026-11-24 on
+  `main` (3,692 tests), under `nice -n 10` with TMPDIR on tmpfs, 5 runs each,
+  the old and the new order interleaved on a shared machine: at 16 workers
+  the median went from 56.1 s to 50.8 s (9.5% less; each order's runs spread
+  over 18%), at 8 workers it did not change (88.2 s and 89.1 s, within the
+  spread of 5% to 11%). With fewer workers the long units are a smaller part
+  of each worker's share, so their place in the queue matters less.
 
 Conditions of these numbers: Python 3.15; 3 runs per cell, the median shown;
 a shared machine, with another project's load at times (the spread was 1% to
@@ -111,9 +133,6 @@ every fsync real. `main` has had those tests since, with fsync stubbed
 on where TMPDIR is. The "about 12 times" is those tests as they were then;
 the suite-level 8% to 13% was measured on that tree and may be smaller on
 `main`.
-
-Not adopted yet: queueing the longest work units first (6% to 12% less wall
-time in the same measurements), to be measured again later.
 
 ## Fault injection tests
 
@@ -286,7 +305,8 @@ repository:
   by other rules. `tests/test_python_files.py` fails when the two differ.
 - **`[tool.ruff] per-file-target-version`**: the files CI runs on its
   ubuntu-24.04 runner's python3 (`tests/e2e/**/*.py`, `tests/__init__.py`,
-  and what they import) are formatted and linted as Python 3.12 (`py312`),
+  `tests/quint/cst-quint`, and what they import, such as
+  `cst_core/domain/errors.py` and `values.py`) are formatted and linted as Python 3.12 (`py312`),
   not as `requires-python`'s 3.15: `ruff format` would otherwise write
   `except A, B:` (3.14) there, and `ruff check` reports it as a syntax
   error in them. `tests/test_e2e_host_python.py` finds that set from the

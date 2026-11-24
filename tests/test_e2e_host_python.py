@@ -28,6 +28,7 @@ _READ_FILES = (
     "cst.invowkmod/invowkfile.cue",
     "cst_core/__init__.py",
     "cst_core/domain/__init__.py",
+    "cst_core/domain/errors.py",
     "cst_core/domain/values.py",
     "pyproject.toml",
     "tests/__init__.py",
@@ -37,6 +38,7 @@ _READ_FILES = (
     "tests/e2e/selection.py",
     "tests/e2e/suites/suite_tier1_systemd.py",
     "tests/e2e/suites/suite_tier2_storage_cpu.py",
+    "tests/quint/cst-quint",
 )
 
 
@@ -52,6 +54,7 @@ class CheckoutTest(unittest.TestCase):
             [
                 "cst_core/__init__.py",
                 "cst_core/domain/__init__.py",
+                "cst_core/domain/errors.py",
                 "cst_core/domain/values.py",
                 "tests/__init__.py",
                 "tests/e2e/__init__.py",
@@ -60,6 +63,7 @@ class CheckoutTest(unittest.TestCase):
                 "tests/e2e/selection.py",
                 "tests/e2e/suites/suite_tier1_systemd.py",
                 "tests/e2e/suites/suite_tier2_storage_cpu.py",
+                "tests/quint/cst-quint",
             ],
         )
 
@@ -196,6 +200,18 @@ class PlantedTest(unittest.TestCase):
         )
         self.assert_checked_at("tests/helper.py:3:", not_at="tests/e2e/helper.py")
 
+    def test_a_load_from_the_top_of_the_repository_is_checked_there(self) -> None:
+        # Three folders up from tests/e2e/run.py is the top of the repository (""): the old gate took it
+        # for a folder above it and reported a load it cannot follow instead of checking m.py.
+        self.append("m.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append(
+            "tests/e2e/run.py",
+            "\nROOT = Path(__file__).resolve().parent.parent.parent\n"
+            "\n\ndef top() -> None:\n"
+            '    importlib.util.spec_from_file_location("m", ROOT / "m.py")\n',
+        )
+        self.assert_checked_at("m.py:3:", not_at="cannot follow")
+
     def test_a_folder_above_the_repository_is_a_load_the_gate_cannot_follow(self) -> None:
         self.append(
             "tests/e2e/run.py",
@@ -221,17 +237,36 @@ class PlantedTest(unittest.TestCase):
         self.assert_one_problem("tests/e2e/selection.py:", "above the top of the repository")
 
     def test_an_import_by_a_name_given_at_run_time_is_reported(self) -> None:
-        for code in (
-            'importlib.import_module("tests.e2e.helper")',
-            '__import__("tests.e2e.helper")',
-            'exec(open("tests/e2e/helper.py").read())',
-            'runpy.run_module("tests.e2e.helper")',
+        for imports, code in (
+            ("import importlib\n", 'importlib.import_module("tests.e2e.helper")'),
+            ("", '__import__("tests.e2e.helper")'),
+            ("", 'exec(open("tests/e2e/helper.py").read())'),
+            ("", 'eval(open("tests/e2e/helper.txt").read())'),
+            ("import builtins\n", 'builtins.eval("__import__(name)")'),
+            ("import runpy\n", 'runpy.run_module("tests.e2e.helper")'),
+            ("import importlib as il\n", 'il.import_module("tests.e2e.helper")'),
+            ("from importlib import import_module\n", 'import_module("tests.e2e.helper")'),
+            ("from runpy import run_module as rm\n", 'rm("tests.e2e.helper")'),
         ):
             with self.subTest(code=code):
                 self.setUp()
-                self.append("tests/e2e/selection.py", f"\n\ndef load() -> None:\n    {code}\n")
+                self.append("tests/e2e/selection.py", f"\n{imports}\n\ndef load() -> None:\n    {code}\n")
                 line = self.line_of("tests/e2e/selection.py", code)
                 self.assert_one_problem(f"tests/e2e/selection.py:{line}:", "given at run time")
+
+    def test_a_call_that_only_shares_a_run_time_import_s_name_is_no_problem(self) -> None:
+        # The old gate matched the method's last name: obj.exec(), self.run_module() and a repository
+        # function named run_module were false problems.
+        for imports, code in (
+            ("", "obj.exec(x)"),
+            ("", "self.run_module()"),
+            ("from tests.e2e.helper import run_module\n", "run_module()"),
+        ):
+            with self.subTest(code=code):
+                self.setUp()
+                self.append("tests/e2e/helper.py", "def run_module() -> None:\n    pass\n")
+                self.append("tests/e2e/selection.py", f"\n{imports}\n\ndef load() -> None:\n    {code}\n")
+                self.assertEqual(gate.problems(self.repo), [])
 
     def test_a_new_suite_file_is_checked_too(self) -> None:
         self.replace(
@@ -261,6 +296,147 @@ class PlantedTest(unittest.TestCase):
         self.assertEqual(gate.problems(self.repo), [])
         self.assertEqual(set(gate.host_runs(self.repo)[0]["ubuntu-24.04"]), set(gate.HOST_ENTRIES))
 
+    def test_an_extensionless_program_a_host_job_runs_is_checked(self) -> None:
+        # The quint jobs run tests/quint/cst-quint through `invowk cmd test quint` on the runner's
+        # python3 (3.12): only python3 ... FILE.py was read, so a 3.14 line there passed the gate.
+        self.append("tests/quint/cst-quint", "\ntry:\n    pass\nexcept OSError, ValueError: pass\n")
+        line = self.line_of("tests/quint/cst-quint", "except OSError, ValueError:")
+        self.assert_one_problem(f"tests/quint/cst-quint:{line}:", "ubuntu-24.04, 3.12")
+
+    def test_a_new_extensionless_program_a_host_job_s_task_runs_is_reported(self) -> None:
+        self.append("tests/quint/cst-new", "import os\n")
+        self.replace(
+            "cst.invowkmod/invowkfile.cue",
+            "/usr/bin/python3 -I -B tests/quint/cst-quint ",
+            "/usr/bin/python3 -I -B tests/quint/cst-new ",
+        )
+        problems = gate.problems(self.repo)
+        self.assertEqual(len(problems), 2, problems)  # the quint job of ci.yml and of nightly.yml
+        for problem in problems:
+            self.assertIn("runs tests/quint/cst-new", problem)
+            self.assertIn("HOST_ENTRIES", problem)
+
+    def test_a_dash_m_after_the_script_is_the_script_s_argument(self) -> None:
+        # python3 stops reading its options at the script: the old gate took this -m as python3's.
+        self.append("tests/e2e/new.py", "")
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B tests/e2e/image_digest.py -m tests.e2e.new "${name}")"',
+        )
+        self.assertEqual(gate.problems(self.repo), [])
+
+    def test_options_with_an_argument_are_read_as_python3_reads_them(self) -> None:
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        cases = {
+            'want="$(python3 -X dev -W error tests/e2e/new.py "${name}")"': "tests/e2e/new.py",
+            "want=\"$(python3 -I -c 'print(1)'; python3 -m venv /tmp/v)\"": None,
+            'want="$(python3 -IBm tests.e2e.image_digest "${name}")"': None,
+            'want="$(python3 --check-hash-based-pycs always tests/e2e/new.py)"': "tests/e2e/new.py",
+        }
+        for new, reported in cases.items():
+            with self.subTest(line=new):
+                self.setUp()
+                self.replace(action, old, new)
+                if reported is None:
+                    self.assertEqual(gate.problems(self.repo), [])
+                else:
+                    self.assert_one_problem("prep-e2e-runner/action.yml", reported, "HOST_ENTRIES")
+
+    def test_a_program_next_to_shell_punctuation_or_a_redirection_is_read(self) -> None:
+        # The words after python3 were split at blanks only: a program word with ; | > glued to it, one
+        # after a redirection or a quoted "python3" was no program, and the file went unchecked.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for form in (
+            "python3 tests/e2e/new.py|tee log",
+            "python3 tests/e2e/new.py>log",
+            "python3 tests/e2e/new.py;python3 -I tests/e2e/image_digest.py",
+            "python3 2>/dev/null tests/e2e/new.py",
+            "'python3' tests/e2e/new.py",
+        ):
+            with self.subTest(form=form):
+                self.setUp()
+                self.replace(action, old, f'want="$(python3 -I -B tests/e2e/image_digest.py "${{name}}"; {form})"')
+                self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_a_program_inside_quotes_ends_at_their_closing_quote(self) -> None:
+        # The closing quote stuck to the program word was read as an opening quote: it paired with the next
+        # quote of the line, the word swallowed '"; echo "' and was no path, and the file went unchecked.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for form in (
+            'bash -c "python3 tests/e2e/new.py"; echo "ok"',
+            'bash -c "python3 tests/e2e/new.py" || echo "failed"',
+            'bash -c "python3 tests/e2e/new.py" "$arg"',
+            "sh -c 'python3 tests/e2e/new.py' && echo 'x'",
+        ):
+            with self.subTest(form=form):
+                self.setUp()
+                self.replace(action, old, f"{old}; {form}")
+                self.assert_one_problem("prep-e2e-runner/action.yml", "tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_a_quote_after_python3_closes_only_a_quote_opened_right_before_it(self) -> None:
+        # Any quote right after python3 was dropped as the end of a quoted "python3": in a message's text the
+        # word after it was read as the program, a false problem.
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        self.replace(action, old, f'{old}; echo "use python3" tests/e2e/new.py')
+        self.assertEqual(gate.problems(self.repo), [])
+
+    def test_a_program_named_at_run_time_is_reported(self) -> None:
+        self.replace(
+            ".github/actions/prep-e2e-runner/action.yml",
+            'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"',
+            'want="$(python3 -I -B "$tool" "${name}")"',
+        )
+        self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name", "$tool")
+
+    def test_python3_in_a_message_is_no_program_named_at_run_time(self) -> None:
+        # Any python3 word followed by a word with a "$" was a program the gate cannot name: in a message, a
+        # step's name: and a ${{ github.workspace }} path, which names the checkout, failed the unit suite.
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for extra in (
+            '; echo "install python3 $VERSION"',
+            "; echo install python3 $VERSION",
+            "; printf '%s\\n' python3 \"$v\"",
+            "\n- name: Set up python3 ${{ matrix.python }}",
+        ):
+            with self.subTest(extra=extra):
+                self.setUp()
+                self.replace(action, old, old + extra)
+                self.assertEqual(gate.problems(self.repo), [])
+
+    def test_a_program_under_the_checkout_s_folder_is_named(self) -> None:
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for path in ("${{ github.workspace }}/tests/e2e/new.py", '"$GITHUB_WORKSPACE/tests/e2e/new.py"'):
+            with self.subTest(path=path):
+                self.setUp()
+                self.replace(action, old, f"{old}; python3 -I {path}")
+                self.assert_one_problem("prep-e2e-runner/action.yml", "runs tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_a_program_named_at_run_time_by_a_command_is_still_reported(self) -> None:
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for extra in (
+            '; if true; then X=1 python3 "$tool"; fi',
+            "; echo x | python3 $tool",
+            '; echo "$(python3 $tool)"',
+            "; python3 ${{ inputs.tool }}",
+        ):
+            with self.subTest(extra=extra):
+                self.setUp()
+                self.replace(action, old, old + extra)
+                self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name")
+
     def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",
@@ -288,6 +464,38 @@ class PlantedTest(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(head + job + tail)
         self.assert_one_problem("(job e2e-tier1)", "ubuntu-26.04", "HOST_PYTHON_BY_RUNNER")
+
+
+class CommandLineTest(unittest.TestCase):
+    def test_python3_s_options_are_read_as_python_reads_them(self) -> None:
+        for line, want in (
+            ("-I -B tests/e2e/run.py --tier 1", ("script", "tests/e2e/run.py")),
+            ("-IB tests/e2e/run.py -m x", ("script", "tests/e2e/run.py")),
+            ("-Xdev -W error -- -odd.py", ("script", "-odd.py")),
+            ("--version", None),
+            ("-I -m tests.e2e.run -c x", ("module", "tests.e2e.run")),
+            ("-Im tests.e2e.run", ("module", "tests.e2e.run")),
+            ("-c 'import x' tests/e2e/run.py", None),
+            ("- < tests/e2e/run.py", None),
+            ("-I; tests/e2e/run.py", None),
+            ('-I -B "tests/e2e/run.py")', ("script", "tests/e2e/run.py")),
+            ("", None),
+            # Shell punctuation inside a word, and redirections before or after the program.
+            ("tests/e2e/run.py|tee log", ("script", "tests/e2e/run.py")),
+            ("tests/e2e/run.py>log", ("script", "tests/e2e/run.py")),
+            ("tests/e2e/run.py;python3 x.py", ("script", "tests/e2e/run.py")),
+            ("2>/dev/null tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            (">log 2>&1 -I tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("&>log tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("<in -m tests.e2e.run", ("module", "tests.e2e.run")),
+            ('-I "tests/e2e/run.py"&&true', ("script", "tests/e2e/run.py")),
+            ("-I|tee log", None),
+            ("--check-hash-based-pycs always tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("--check-hash-based-pycs=never tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+            ("--version tests/e2e/run.py", ("script", "tests/e2e/run.py")),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(gate.python_program(line), want)
 
 
 class RuffTargetTest(unittest.TestCase):

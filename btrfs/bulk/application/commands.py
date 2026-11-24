@@ -55,6 +55,7 @@ from btrfs.bulk.domain.steam import (
     VdfPair,
     lf_libraries,
     lf_with_library,
+    snapshots_resume_above,
     steam_move_lines,
     steam_nocow_files,
 )
@@ -255,7 +256,7 @@ def print_copies(b: Bulk, sv: SteamSurvey) -> None:
         row(
             b,
             "",
-            f"and resume above {gib(g['resume'])} (once old snapshots expire); fewer games per run may avoid it",
+            f"and resume above {gib(snapshots_resume_above(g))} (once old snapshots expire); fewer games per run may avoid it",
         )
     row(b, "", "each copy is read back and compared byte for byte before the old one is deleted;")
     row(b, "", "at idle priority: expect minutes per 10 GiB, more while the PC is busy")

@@ -29,7 +29,9 @@ import tempfile
 import time
 from typing import Final, override
 import unittest
+from unittest import mock
 
+from btrfs.pending_alerts import adapters as pa_adapters
 from btrfs.pending_alerts.domain import PendingPaths, alert_paths
 
 sys.dont_write_bytecode = True
@@ -675,6 +677,22 @@ class AlertPathsWaitTest(unittest.TestCase):
     def test_a_wait_past_int_s_digit_limit_is_zero(self) -> None:
         # isascii() and isdigit() took 5000 digits, and int() raised ValueError: a traceback at login.
         self.assertEqual(self.wait("1" * 5000), 0)
+
+
+class BootTimeTest(unittest.TestCase):
+    def boot_time(self, stat: bytes | None) -> int | None:
+        with mock.patch.object(pa_adapters, "read_bytes", lambda _path: stat):
+            return pa_adapters.boot_time()
+
+    def test_btime_is_ascii_digits_within_int_s_digit_limit(self) -> None:
+        self.assertEqual(self.boot_time(b"cpu 1 2\nbtime 1700000000\nprocesses 5\n"), 1700000000)
+        self.assertIsNone(self.boot_time(None))
+        self.assertIsNone(self.boot_time(b"cpu 1 2\n"))
+        # isascii() and isdigit() took 5000 digits, and int() raised ValueError; a byte that is not ASCII
+        # ("²" in UTF-8) is no digit either.
+        for bad in (b"9" * 5000, "\N{SUPERSCRIPT TWO}".encode(), b"x"):
+            with self.subTest(btime=bad[:8]):
+                self.assertIsNone(self.boot_time(b"btime " + bad + b"\n"))
 
 
 if __name__ == "__main__":

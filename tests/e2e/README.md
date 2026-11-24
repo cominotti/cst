@@ -100,6 +100,9 @@ Tier 1 (`suites/suite_tier1_systemd.py`):
 - `test_171`: `cst swap apply` as root (the `test_88` harness) with `/etc/cst/swap.conf` in place and a folder where `/etc/fstab` was: `apply` exits 1 with `/etc/fstab: unreadable` and changes nothing (every file, link, mode and owner under `/etc` and the scratch tree, and the install record; no `crypttab.pre-swap-config.bak`). Before, it rewrote `/etc/crypttab` and wrote its `.bak` first. With `/etc/fstab` back, the same `apply` works.
 - `test_172`: `cst swap apply` as root (the `test_88` harness) with `/etc/cst/swap.conf` in place and root's install record of a newer CST (format 99, a downgrade): `apply` exits 1 with `written by a newer CST` and `nothing was changed` and changes nothing (every file, link, mode and owner under `/etc` and the scratch tree, the record; no `.pre-swap-config.bak`, no `sysctl`). Before, it rewrote `/etc/crypttab` and `/etc/fstab` first and only its first put refused. With the record removed, the same `apply` works and records `swap:core` done.
 - `test_174`: btrfs-setup.sh's `mark_docker_volumes` (install's step for the Docker volumes, as the script defines it, its helper the checkout's `docker-volumes-nocow`) as root, on a data root of the test's own on a tmpfs holding a volume with data, no flag, and a count of 2 an older helper left, its file a read-only bind mount (checked first: the count's file cannot be replaced). `mark` cannot reset the count and says `cannot schedule the migration`; the step exits 0 and writes no flag beside that count (the next boot would give up at once), and the count stays 2. The old step touched the flag after any failing `mark`. With the mount gone, the same step writes the request: the count 0 and the flag.
+- `test_175`: a full `cst btrfs iocost revert` (the installed program) whose `disable --now` works and whose first removal then fails (`/etc/udev/rules.d` bound read-only over itself: EROFS): exit 1 with `ERROR: cannot write /etc/udev/rules.d/91-cst-iocost.rules: Read-only file system`, the service disabled (the test fails as "cannot bite" otherwise), `btrfs:iocost` pending in root's real install record, and `cst doctor` warns that it is installed only in part and names the revert that finishes the removal ("or `cst btrfs iocost revert` began removing it ... run ... again to finish the removal"). With the folder writable again, the next revert converges (no file, no state, no warning), and so does the next apply (enabled, active, done). The upgrade path: a record an older CST's failed revert left done, with the service disabled and the rule gone, is converged by the next apply and by the next revert. While another process holds `/run/btrfs-setup/iocost-component.lock`, a full revert waits 30 s, then exits 1 with `ERROR: another btrfs-iocost run holds /run/btrfs-setup/iocost-component.lock` and changes nothing (still enabled and done). The record is copied aside first and put back after.
+- `test_176`: `cst btrfs iocost revert --live-only` as root with a folder where `/run/btrfs-setup/iocost-managed` belongs (its unlink fails with EISDIR; there is no `io.cost.qos` here, so revert only removes the file): exit 1, `ERROR: cannot write /run/btrfs-setup/iocost-managed: Is a directory` and no traceback; with the folder gone, the same command exits 0. A full tmpfs cannot make an unlink fail, and apply never writes the file in this container, so revert's removal is the save tier 1 can stage.
+- `test_177`: `cst btrfs cache attach` and `detach` under a test root (`CST_BTRFS_CACHE_ROOT`, test_160's stand-ins for findmnt, mount and umount), each killed by SIGKILL at its `daemon-reload` after it wrote `/etc/fstab` (a `systemctl` shim on PATH copies the test root's fstab to the real `/etc/fstab`, then kills the pid the test recorded), then run again, with the real systemd. The bases are tmpfs lines, which systemd-fstab-generator accepts, so `var-mnt-cache.mount` is loaded from `/etc/fstab` and the real `systemctl show` says `NeedDaemonReload=yes` after the kill (the test fails as "cannot bite" otherwise). After the killed attach, `status` and `cst doctor` say systemd has not loaded `/etc/fstab` (neither does once the run again reloaded), `plan` says attach runs daemon-reload; with the binds unmounted by hand, an attach whose catch-up reload fails mounts them and takes back only the mounts (exit 1, `the mounts this run made were taken back.`: it wrote no `/etc/fstab`); the run again exits 0, says `reloaded:`, runs one real `daemon-reload`, and systemd has `/etc/fstab` loaded as it is on disk (the mount unit of `~/.cache` made); a third run has nothing to do and reloads nothing. A second user's lines that systemd never read (no unit of `/etc/fstab` says `NeedDaemonReload=yes`, and systemd has no unit of the binds at all), with the binds unmounted: `plan` says attach runs daemon-reload after the mounts, and attach mounts and reloads (the binds' units then come from `/etc/fstab`). The same for detach, whose run again reloads, then unmounts, and leaves no mount unit of the binds. With no systemd that answers (a `systemctl` shim where every call fails), a detach after a killed one warns, exits 0 and still unmounts; the next detach reloads.
 
 Tier 2 (`suites/suite_tier2_storage_cpu.py`):
 
@@ -180,8 +183,10 @@ both tiers.
 ## The Python that runs these files
 
 CI runs `tests/e2e/run.py` (`invowk cmd test e2e tier1|tier2`), the files it
-imports and loads (`selection.py`, the two suites) and `image_digest.py` on
-the python3 of its ubuntu-24.04 runner, Python 3.12, not in a container. So
+imports and loads (`selection.py`, the two suites), `image_digest.py` and,
+in its quint jobs, `tests/quint/cst-quint` (`invowk cmd test quint`, with
+what it imports from `cst_core`) on the python3 of its ubuntu-24.04 runner,
+Python 3.12, not in a container. So
 these files are 3.12 code, while every other gate runs on Fedora's Python and
 ruff's target follows `requires-python` (3.15): `except A, B:` (3.14) or
 `os.process_cpu_count` (3.13) here passes every local gate and breaks every
@@ -190,8 +195,13 @@ E2E shard in CI.
 `tests/test_e2e_host_python.py` (rules in `tests/e2e_host_python.py`), run
 with the unit tests, finds these files from the code (the entries, what they
 import, the suite files `run.py` loads by path; a new load by path it cannot
-follow fails), checks that every `python3 FILE.py` CI runs on a runner's host
-is one of its entries and that each such runner's python3 is recorded, then
+follow fails), checks that every program a `python3` command line runs on a
+runner's host (the line split into shell words, redirections left out, and
+read as python3 reads its options: a repository file, with or without
+`.py`, also under `${{ github.workspace }}/`, or `-m` of a repository
+module; one named by a variable fails, unless that `python3` is text: in
+quotes, a word of `echo` or `printf`, or a YAML key's value other than
+`run:`) is one of its entries and that each such runner's python3 is recorded, then
 parses each file with 3.12's grammar and looks for a table of newer
 standard-library names. The table holds the known, cheap cases only: a new
 method or keyword argument passes it, and CI stays the real check. A use behind

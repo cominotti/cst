@@ -28,7 +28,7 @@ from btrfs.pending_alerts.domain import (
 )
 from cst_core.adapters.files import read_bytes, write_atomic
 from cst_core.domain.contracts import Urgency
-from cst_core.domain.values import DAY
+from cst_core.domain.values import DAY, parse_whole_number
 from cst_core.ports import CommandRunnerPort, OutputMode
 
 
@@ -117,7 +117,7 @@ def boot_time() -> int | None:
     for line in (data or b"").decode("ascii", "replace").split("\n"):
         f = line.split()
         if len(f) >= 2 and f[0] == "btime":
-            return int(f[1]) if f[1].isascii() and f[1].isdigit() else None
+            return parse_whole_number(f[1])  # ASCII digits within int()'s limit, else None
     return None
 
 

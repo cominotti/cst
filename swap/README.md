@@ -122,7 +122,9 @@ compressor later creates a second pool that lives until the old one drains).
   as missing: as a user who may not read it (its mode or owner, or a folder
   above it the user may not enter) `plan` and `status` show `?` and ask for
   `--root`; one that is not a regular file, or that root cannot read, is
-  `REFUSE`, and `apply` stops before it changes anything.
+  `REFUSE`, and `apply` stops before it changes anything. Root inside a
+  toolbox counts as a user here: the host's root-only files may be closed
+  to it, and `--root` on the host reads them.
   On sophia it reads:
 
   ```
@@ -306,7 +308,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read without root (as root: `apply` stops before it writes anything). |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host, for `/etc/crypttab` or `/etc/fstab`: `apply` refuses before it writes anything, and the row says so; for another file, the row says it cannot be read even as root, with no `--root` advice. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:

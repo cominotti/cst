@@ -6,7 +6,7 @@ import re
 from typing import Final
 
 from cst_core.domain.text import enum_member, group
-from cst_core.domain.values import CpuSet
+from cst_core.domain.values import CpuSet, parse_integer, parse_whole_number
 from perf.domain.models import (
     ALL_PERF_AXES,
     BlockDeviceSample,
@@ -31,8 +31,6 @@ from perf.domain.models import (
 _BRACKET_RE: Final = re.compile(r"\[([^\]]+)\]")
 _AMD_PROFILE_ACTIVE_RE: Final = re.compile(r"^\s*\d+\s+([A-Za-z0-9_-]+)\*\s*:?")
 _PREEMPT_TOKEN_RE: Final = re.compile(r"\bpreempt=([a-z]+)\b")
-_ASCII_INT_RE: Final = re.compile(r"-?[0-9]+")
-_ASCII_UINT_RE: Final = re.compile(r"[0-9]+")
 _ALLOCSTALL_PREFIX: Final = "allocstall_"
 _FLUSHONCOMMIT_OPT: Final = "flushoncommit"
 _DEFAULT_BTRFS_COMMIT_S: Final = 30
@@ -118,8 +116,9 @@ def parse_proc_kib_table(text: str | None) -> dict[str, int]:
             continue
         key, rest = line.split(_COLON, 1)
         fields = rest.split()
-        if fields and _ASCII_UINT_RE.fullmatch(fields[0]) is not None:
-            result[key.strip()] = int(fields[0])
+        kib = parse_whole_number(fields[0]) if fields else None  # ASCII digits within int()'s limit
+        if kib is not None:
+            result[key.strip()] = kib
     return result
 
 
@@ -130,8 +129,9 @@ def parse_proc_space_kv(text: str | None) -> dict[str, int]:
         return result
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == PAIR_LEN and _ASCII_INT_RE.fullmatch(parts[1]) is not None:
-            result[parts[0]] = int(parts[1])
+        value = parse_integer(parts[1]) if len(parts) == PAIR_LEN else None  # ASCII, within int()'s limit
+        if value is not None:
+            result[parts[0]] = value
     return result
 
 
@@ -234,9 +234,9 @@ def parse_proc_interrupts(text: str | None) -> tuple[IrqLineSample, ...]:
     if not lines:
         return ()
     cpu_indices = [
-        int(tok[CPU_COL_PREFIX_LEN:])
+        index
         for tok in lines[0].split()
-        if tok.startswith(CPU_COL_PREFIX) and tok[CPU_COL_PREFIX_LEN:].isdigit()
+        if tok.startswith(CPU_COL_PREFIX) and (index := parse_whole_number(tok[CPU_COL_PREFIX_LEN:])) is not None
     ]
     if not cpu_indices:
         return ()
@@ -253,7 +253,7 @@ def _parse_interrupt_line(line: str, cpu_indices: Sequence[int]) -> IrqLineSampl
         return None
     prefix, rest = line.split(_COLON, 1)
     irq_id = prefix.strip()
-    if not irq_id.isdigit():
+    if parse_whole_number(irq_id) is None:  # a numbered IRQ: ASCII digits (NMI, LOC and "²" are none)
         return None
     fields = rest.split()
     n_cpus = len(cpu_indices)
@@ -261,9 +261,9 @@ def _parse_interrupt_line(line: str, cpu_indices: Sequence[int]) -> IrqLineSampl
         return None
     counts: dict[int, int] = {}
     for idx, cpu in enumerate(cpu_indices):
-        if _ASCII_UINT_RE.fullmatch(fields[idx]) is None:
+        val = parse_whole_number(fields[idx])  # ASCII digits within int()'s limit, else no line
+        if val is None:
             return None
-        val = int(fields[idx])
         if val:
             counts[cpu] = val
     return IrqLineSample(irq_id=irq_id, label=" ".join(fields[n_cpus:]), counts_by_cpu=counts)
@@ -286,9 +286,7 @@ def parse_uevent_fields(text: str | None) -> tuple[str | None, str | None]:
 def parse_optional_int(text: str | None) -> int | None:
     """Parse trimmed integer sysfs/procfs text, returning `None` if absent/invalid."""
     stripped = clean_opt_str(text)
-    if stripped is None or _ASCII_INT_RE.fullmatch(stripped) is None:
-        return None
-    return int(stripped)
+    return None if stripped is None else parse_integer(stripped)  # ASCII, within int()'s limit
 
 
 def parse_optional_cpuset(spec: str | None) -> CpuSet | None:
@@ -435,8 +433,8 @@ def _parse_root_btrfs_opts(proc_mounts_text: str) -> tuple[int, bool, bool] | No
         parsed
         for tok in raw_opts.split(",")
         if tok.startswith(_COMMIT_OPT_PREFIX)
-        and _ASCII_UINT_RE.fullmatch(val := tok.removeprefix(_COMMIT_OPT_PREFIX)) is not None
-        and (parsed := int(val)) > 0
+        and (parsed := parse_whole_number(tok.removeprefix(_COMMIT_OPT_PREFIX))) is not None
+        and parsed > 0
     ]
     explicit = bool(commit_vals)
     commit_s = commit_vals[-1] if explicit else _DEFAULT_BTRFS_COMMIT_S

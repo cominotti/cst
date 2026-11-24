@@ -146,6 +146,45 @@ class PerfParserTest(unittest.TestCase):
         self.assertEqual(lines[0].total_count, 1200100)
         self.assertEqual(lines[0].counts_by_cpu, {0: 100, 2: 1200000})
 
+    def test_interrupts_take_ascii_cpu_columns_and_counts_within_int_s_limit(self) -> None:
+        # A CPU column is "CPU" and ASCII digits: "CPU²" (int() refuses it) and "CPU٣" (int() reads 3) are none.
+        line = "  246:      100          7   IR-PCI-MSIX  amdgpu\n"
+        for second in ("CPU\N{SUPERSCRIPT TWO}", "CPU\N{ARABIC-INDIC DIGIT THREE}", "CPU" + "9" * 5000):
+            with self.subTest(column=second[:5]):
+                samples = parse_proc_interrupts(f"   CPU0  {second}\n" + line)
+                self.assertEqual([s.counts_by_cpu for s in samples], [{0: 100}])
+        # A count of more digits than int() reads drops that line, as a count that is no number does.
+        samples = parse_proc_interrupts("   CPU0  CPU1\n" + f"  7:  {'9' * 5000}  1  x\n" + line)
+        self.assertEqual([(s.irq_id, s.counts_by_cpu) for s in samples], [("246", {0: 100, 1: 7})])
+
+    def test_an_interrupt_line_is_numbered_by_ascii_digits_only(self) -> None:
+        # isdigit() took any Unicode digit: a superscript two or an Arabic-Indic three was a numbered IRQ, and
+        # cst perf built /proc/irq paths from it.
+        line = "  246:      100          7   IR-PCI-MSIX  amdgpu\n"
+        for irq in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "+5", " "):
+            with self.subTest(irq=irq):
+                samples = parse_proc_interrupts(f"   CPU0  CPU1\n {irq}:   1   2   IO-APIC x\n" + line)
+                self.assertEqual([s.irq_id for s in samples], ["246"])
+
+    def test_proc_numbers_past_int_s_digit_limit_are_no_number(self) -> None:
+        many = "9" * 5000
+        self.assertEqual(parse_proc_kib_table(f"MemTotal: 12 kB\nBig: {many} kB\n"), {"MemTotal": 12})
+        self.assertEqual(parse_proc_space_kv(f"a 12\nb -3\nbig {many}\nneg -{many}\n"), {"a": 12, "b": -3})
+        for bad in (many, "-" + many, "\N{ARABIC-INDIC DIGIT THREE}"):
+            with self.subTest(value=bad[:6]):
+                self.assertIsNone(parse_optional_int(bad))
+        self.assertEqual([parse_optional_int("12"), parse_optional_int(" -3\n")], [12, -3])
+        from perf.domain.models import PerfPathKey
+
+        def commit_of(opts: str) -> tuple[int | None, bool]:
+            probe = assemble_io_probe({PerfPathKey.PROC_MOUNTS: f"/dev/dm-0 / btrfs rw,{opts} 0 0\n"})
+            return probe.root_btrfs_commit_s, probe.root_btrfs_commit_explicit
+
+        self.assertEqual(commit_of("commit=120"), (120, True))
+        for bad in (many, "\N{ARABIC-INDIC DIGIT THREE}"):
+            with self.subTest(commit=bad[:6]):
+                self.assertEqual(commit_of("commit=" + bad), (30, False))
+
 
 class PerfEvaluatorTest(unittest.TestCase):
     def test_empty_snapshot_returns_skip_and_exit_zero(self) -> None:

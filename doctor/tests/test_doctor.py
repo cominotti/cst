@@ -76,7 +76,7 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.adapters.zipapp import entry_payload
 from cst_core.application.install import InstallRequest, InstallService, Placement
 from cst_core.domain.install import INSTALL_MANIFEST, GeneratedKind, Owner
-from cst_core.domain.record import InstallRecord
+from cst_core.domain.record import ComponentState, InstallRecord
 from cst_core.domain.errors import Usage
 from cst_core.ports import CommandResult
 from doctor.domain import Result
@@ -259,6 +259,7 @@ class Scratch(unittest.TestCase):
             "virsh -r -c qemu:///system domblklist ",
             "virsh -r -c qemu:///system domstate ",
             "systemctl show -p LoadState ",
+            "systemctl show -p Id -p LoadState ",
             "systemctl --user show -p LoadState ",
             "systemctl --user -M tester@ show -p LoadState ",
         )
@@ -1650,6 +1651,74 @@ class BtrfsCacheDoctorTest(Scratch):
         self.assertIn("WARN   btrfs cache: /var/mnt/cache has 'flushoncommit'", btrfs_text)
         self.assertIn("WARN   btrfs cache: /etc/crypttab entry 'cache' is missing 'nofail'", btrfs_text)
         self.assertIn("fix: cst btrfs cache attach --user danilo", btrfs_text)
+
+    def test_systemd_behind_on_fstab_warns_with_the_reload(self) -> None:
+        # An attach or detach killed between its /etc/fstab write and its daemon-reload (or an edit): a unit
+        # systemd loaded from /etc/fstab says NeedDaemonReload=yes, or a bind with its line in /etc/fstab
+        # has a unit systemd took from /proc/self/mountinfo.
+        line = "/var/mnt/cache/danilo /var/home/danilo/.cache none bind,nofail 0 0 # managed-by: btrfs-cache (CST) user=danilo kind=cache\n"
+        self._put(
+            "etc", "fstab", text="/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n" + line
+        )
+        self._put("etc", "crypttab", text="cache UUID=abc /etc/cryptsetup-keys.d/cache.key nofail,discard\n")
+        warn = (
+            "WARN   btrfs cache: systemd has not loaded /etc/fstab as it is on disk (an edit, or a "
+            "`cst btrfs cache attach` or `detach` that stopped before its daemon-reload), so it keeps the mounts "
+            "of the /etc/fstab it loaded before"
+        )
+        base = "Id=var-mnt-cache.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload={}\nWhere=/var/mnt/cache\n"
+        bind = "Id=var-home-danilo-.cache.mount\nLoadState=loaded\nSourcePath={}\nNeedDaemonReload=no\nWhere=/var/home/danilo/.cache\n"
+        for name, answer, warned in (
+            ("flagged", base.format("yes"), True),
+            ("mountinfo", base.format("no") + "\n" + bind.format("/proc/self/mountinfo"), True),
+            ("current", base.format("no") + "\n" + bind.format("/etc/fstab"), False),
+            ("none", "", False),
+            ("no answer", None, False),
+        ):
+            with self.subTest(name):
+                show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
+                os.makedirs(os.path.dirname(show), exist_ok=True)
+                if answer is None:
+                    if os.path.exists(show):
+                        os.unlink(show)
+                else:
+                    with open(show, "w", encoding="utf-8") as fh:
+                        fh.write(answer)
+                out = self.run_tool().stdout
+                btrfs_text = "\n".join(area_lines(out, "btrfs"))
+                self.assertEqual(warn in btrfs_text, warned, btrfs_text)
+                self.assertEqual("fix: sudo systemctl daemon-reload" in btrfs_text, warned, btrfs_text)
+                self.assertIn(
+                    "systemctl show -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount", self.calls()
+                )
+
+    def test_systemd_behind_on_fstab_is_no_warning_without_the_cache(self) -> None:
+        # A btrfs machine without the cache drive (no line, mount or name of the cache's) whose /etc/fstab
+        # was edited by hand (a NAS line) and not reloaded: no warning of the cache's, and systemd is not
+        # asked. With the cache drive's base line, the same answer warns.
+        os.makedirs(os.path.join(self.root, "sys", "fs", "btrfs", UUID, "allocation"), exist_ok=True)
+        root_line = f"UUID={UUID} / btrfs subvol=root 0 0\n"
+        self._put("etc", "fstab", text=root_line + "nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n")
+        show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
+        os.makedirs(os.path.dirname(show), exist_ok=True)
+        with open(show, "w", encoding="utf-8") as fh:
+            fh.write(
+                "Id=var-mnt-nas.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload=yes\nWhere=/var/mnt/nas\n"
+            )
+        btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertNotIn("systemd has not loaded /etc/fstab", btrfs_text)
+        self.assertNotIn("fix: sudo systemctl daemon-reload", btrfs_text)
+        self.assertNotIn("*.mount", self.calls())
+        self._put(
+            "etc",
+            "fstab",
+            text=root_line
+            + "nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n"
+            + "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n",
+        )
+        btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: systemd has not loaded /etc/fstab as it is on disk", btrfs_text)
+        self.assertIn("fix: sudo systemctl daemon-reload", btrfs_text)
 
     def test_the_cache_drives_crypttab_line_is_found_through_its_dm_device(self) -> None:
         self._put("etc", "fstab", text="UUID=feed /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n")
@@ -3833,7 +3902,9 @@ class InstallAreaTest(Scratch):
         self.assertEqual(len(warns), 1, warns)
         # The cause it names holds for every way a component stays pending: an interrupted setup command, a
         # file of it written by another command before the setup command ever ran (cst btrfs scrub-limit), or
-        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause).
+        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause). A
+        # component whose removal marks it pending first names that removal too
+        # (test_a_component_a_removal_left_pending_names_the_removal_too); docker-gc's does not.
         self.assertEqual(
             warns[0].message,
             "btrfs:docker-gc: installed only in part (a file of it was recorded and "
@@ -3864,6 +3935,25 @@ class InstallAreaTest(Scratch):
             "btrfs:docker-gc: installed only in part (a file of it was recorded and "
             "`cst btrfs docker-gc enable` has not finished since)",
         )
+
+    def test_a_component_a_removal_left_pending_names_the_removal_too(self) -> None:
+        # cst btrfs iocost revert marks btrfs:iocost pending before it changes anything and may stop at a
+        # removal that fails: its files were recorded by an apply that did finish. The warning names both
+        # ways out (the fix line stays the one install command), so a user who was removing it is not sent
+        # to turn it back on without a word.
+        self.install("btrfs:iocost")
+        self.mark("btrfs:iocost")
+        self.assertEqual(self.warns(), [])
+        self.svc.mark(self.record, "btrfs:iocost", ComponentState.PENDING)
+        warns = self.warns()
+        self.assertEqual(len(warns), 1, warns)
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:iocost: installed only in part (a file of it was recorded and `cst btrfs iocost apply` has not "
+            "finished since, or `cst btrfs iocost revert` began removing it and has not finished since: run "
+            "`cst btrfs iocost revert` again to finish the removal)",
+        )
+        self.assertEqual(warns[0].fix, "cst btrfs iocost apply")
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
         # What an older CST installed: other bytes, recorded as such.
@@ -4462,6 +4552,12 @@ class DoctorDomainTest(unittest.TestCase):
     def test_parse_cpu_stat_and_offered_features(self) -> None:
         self.assertEqual(doc_domain.parse_cpu_stat_seconds("nr_periods 5\nusage_usec 2500000\n"), 2.5)
         self.assertIsNone(doc_domain.parse_cpu_stat_seconds("nr_periods 5\n"))
+        # usage_usec is ASCII digits within int()'s limit: "²" (int() refuses it), "٣" (int() reads 3) and
+        # 5000 digits are no number, and a later line that is one still counts.
+        for bad in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "9" * 5000):
+            with self.subTest(value=bad[:8]):
+                self.assertIsNone(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\n"))
+                self.assertEqual(doc_domain.parse_cpu_stat_seconds(f"usage_usec {bad}\nusage_usec 1000000\n"), 1.0)
         feats, err = doc_domain.parse_offered_features_xml(CAPS_QEMU11)
         self.assertEqual(err, "")
         self.assertIsNotNone(feats)
@@ -4510,6 +4606,9 @@ class PackageRulesEdgeTest(unittest.TestCase):
         self.assertIsNone(p("-1-1.fc45.x86_64"))  # no name
         self.assertIsNone(p("a-1:-4.x86_64"))  # an epoch and no version
         self.assertEqual(p("a-1:2:3-4.x86_64"), ("a", "1", "2:3", "4", "x86_64"))  # only the first colon is the epoch
+        # An epoch is ASCII digits: "²" and "٣" pass isdigit() but are no epoch rpm writes.
+        self.assertIsNone(p("a-\N{SUPERSCRIPT TWO}:2-4.x86_64"))
+        self.assertIsNone(p("a-\N{ARABIC-INDIC DIGIT THREE}:2-4.x86_64"))
 
     def test_classify_multilib_and_unreadable_entries(self) -> None:
         c = doc_domain.classify_requests
