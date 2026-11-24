@@ -346,8 +346,8 @@ class CpuProbeExtra:
     online_cpus: CpuSet | None = None
     irqbalance_active: bool | None = None
     irqbalance_banned_cpus: CpuSet | None = None
-    # The IRQ lines as the probe read them (effective affinity included); None: parsed from /proc/interrupts.
-    irq_lines: tuple[IrqLineSample, ...] | None = None
+    # The lines of /proc/interrupts as the probe read them (effective affinity included).
+    irq_lines: tuple[IrqLineSample, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
