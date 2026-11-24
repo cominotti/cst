@@ -1160,6 +1160,31 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self._run(["status"])
         self.assertEqual(self._reloads(), 0)
 
+    def test_status_asks_systemd_only_where_the_cache_is_set_up(self) -> None:
+        # A machine without the cache drive (no base mounted, no line of the cache's in /etc/fstab) whose
+        # /etc/fstab was edited by hand and not reloaded: systemd's unit of the NAS line says
+        # NeedDaemonReload=yes, and status says nothing of systemd, nor asks it.
+        self.runner = FakeMountRunner(self.tmp)
+        with open(os.path.join(self.tmp, "etc", "fstab"), "w", encoding="utf-8") as fh:
+            fh.write("nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n")
+        self.runner.loaded_fstab = ((0, 0), "nas:/old /var/mnt/nas nfs defaults 0 0\n")
+        show = ["systemctl", "show", *MOUNT_UNIT_ARGS, "*.mount"]
+        for show_fails in (False, True):
+            with self.subTest(show_fails=show_fails):
+                self.runner.show_fails = show_fails
+                self.runner.calls.clear()
+                rc, out, err = self._run(["status"])
+                self.assertEqual(rc, 0, err)
+                self.assertIn("  /var/mnt/cache     not provisioned", out)
+                self.assertNotIn("  systemd  ", out)
+                self.assertNotIn(show, self.runner.calls)
+        # The cache drive's base line alone (no user attached yet) is a cache set up: status says it.
+        self.runner.show_fails = False
+        with open(os.path.join(self.tmp, "etc", "fstab"), "a", encoding="utf-8") as fh:
+            fh.write("/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,nofail 0 0\n")
+        _, out, _ = self._run(["status"])
+        self.assertIn("  systemd            has not loaded /etc/fstab as it is on disk", out)
+
     def test_a_catch_up_reload_that_fails_changes_nothing(self) -> None:
         self._killed_at_reload(["attach"])
         fstab, mounted = self._fstab(), sorted(self._mounted())

@@ -1692,6 +1692,34 @@ class BtrfsCacheDoctorTest(Scratch):
                     "systemctl show -p Id -p LoadState -p SourcePath -p NeedDaemonReload -p Where *.mount", self.calls()
                 )
 
+    def test_systemd_behind_on_fstab_is_no_warning_without_the_cache(self) -> None:
+        # A btrfs machine without the cache drive (no line, mount or name of the cache's) whose /etc/fstab
+        # was edited by hand (a NAS line) and not reloaded: no warning of the cache's, and systemd is not
+        # asked. With the cache drive's base line, the same answer warns.
+        os.makedirs(os.path.join(self.root, "sys", "fs", "btrfs", UUID, "allocation"), exist_ok=True)
+        root_line = f"UUID={UUID} / btrfs subvol=root 0 0\n"
+        self._put("etc", "fstab", text=root_line + "nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n")
+        show = os.path.join(self.env["FIX_SHOW"], "sys", "*.mount")
+        os.makedirs(os.path.dirname(show), exist_ok=True)
+        with open(show, "w", encoding="utf-8") as fh:
+            fh.write(
+                "Id=var-mnt-nas.mount\nLoadState=loaded\nSourcePath=/etc/fstab\nNeedDaemonReload=yes\nWhere=/var/mnt/nas\n"
+            )
+        btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertNotIn("systemd has not loaded /etc/fstab", btrfs_text)
+        self.assertNotIn("fix: sudo systemctl daemon-reload", btrfs_text)
+        self.assertNotIn("*.mount", self.calls())
+        self._put(
+            "etc",
+            "fstab",
+            text=root_line
+            + "nas:/export /var/mnt/nas nfs defaults,nofail 0 0\n"
+            + "/dev/mapper/cache /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n",
+        )
+        btrfs_text = "\n".join(area_lines(self.run_tool().stdout, "btrfs"))
+        self.assertIn("WARN   btrfs cache: systemd has not loaded /etc/fstab as it is on disk", btrfs_text)
+        self.assertIn("fix: sudo systemctl daemon-reload", btrfs_text)
+
     def test_the_cache_drives_crypttab_line_is_found_through_its_dm_device(self) -> None:
         self._put("etc", "fstab", text="UUID=feed /var/mnt/cache btrfs subvol=cache,noatime,nofail 0 0\n")
         self._put("etc", "crypttab", text="luks-1234 UUID=abc none discard\nluks-abcd UUID=def none discard\n")

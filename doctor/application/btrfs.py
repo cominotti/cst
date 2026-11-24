@@ -728,7 +728,9 @@ def check_btrfs_commit_interval(host: DoctorHostPort) -> Iterator[Result]:
 def _fstab_loaded_results(host: DoctorHostPort, fstab_raw: str) -> Iterator[Result]:
     """WARN when systemd has not loaded /etc/fstab as it is on disk (fstab_lines_unread over the mount units
     it has loaded, one `systemctl show '*.mount'`): an edit, or a cache attach or detach that stopped
-    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked."""
+    between its /etc/fstab write and its daemon-reload. Nothing when systemctl cannot be asked. Asked only
+    where the cache is set up (check_btrfs_cache's hints), so a hand edit of /etc/fstab on a machine without
+    one is no warning of the cache's."""
     cmd = ["systemctl", "show", *(a for p in MOUNT_UNIT_PROPS for a in ("-p", p)), "*.mount"]
     rc, out, _ = host.run(cmd, timeout=20, locale_c=True)
     if rc != 0:
@@ -782,6 +784,7 @@ def check_btrfs_cache(host: DoctorHostPort) -> Iterator[Result]:
     for finding in assess_cache_mount_health(fstab_raw or None, mounts_text or None, crypttab_raw or None, dm_names):
         fix_cmd = f"{host.cst} {finding.fix}" if finding.fix else ""
         yield Result(sev_map[finding.severity], f"btrfs cache: {finding.message}", fix_cmd)
-    yield from _fstab_loaded_results(host, fstab_raw)
+    if has_hints:
+        yield from _fstab_loaded_results(host, fstab_raw)
     if crypttab_unreadable and has_hints:
         yield Result(INFO, "btrfs cache: /etc/crypttab is not readable as this user (nofail not checked)")

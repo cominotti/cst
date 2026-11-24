@@ -360,6 +360,13 @@ def _mount_units(rt: _CacheMountRuntime) -> list[dict[str, str]] | None:
     return SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
 
 
+def _cache_set_up(snap: CacheMountSnapshot) -> bool:
+    """Whether status asks systemd about /etc/fstab: a managed line, or a base in /etc/fstab or mounted (an
+    attach or detach may have stopped before its reload); not for a machine without the cache, where a hand
+    edit of /etc/fstab is no business of the cache's."""
+    return bool(snap.all_managed) or any(b.in_fstab or b.mounted for b in snap.bases.values())
+
+
 def _catch_up_reload(
     snap: CacheMountSnapshot, rt: _CacheMountRuntime, mounting: Collection[str] = ()
 ) -> tuple[str | None, list[str]]:
@@ -616,7 +623,7 @@ def dispatch_cache_mount_cli_action(
     snap = _probe_snapshot(parsed, rt)
     match parsed.action:
         case CacheMountAction.STATUS:
-            if snap.mounts_error is None and snap.fstab_error is None:
+            if snap.mounts_error is None and snap.fstab_error is None and _cache_set_up(snap):
                 targets = {e.target for e in snap.all_managed}
                 snap = replace(snap, fstab_behind=fstab_lines_unread(_mount_units(rt), targets))
             return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)

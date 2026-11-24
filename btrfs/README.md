@@ -1778,7 +1778,10 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   `systemd has not loaded /etc/fstab as it is on disk ...: run that attach
   or detach again, or systemctl daemon-reload` (or that systemctl gives no
   answer), and `cst doctor` warns with the fix `sudo systemctl
-  daemon-reload`.
+  daemon-reload`. Both ask only where the cache is set up (`status`: a
+  managed line, or a base in `/etc/fstab` or mounted; `cst doctor`: its
+  cache check's hints), so a hand edit of `/etc/fstab` on a machine
+  without the cache drive says nothing.
 - **Provisioning, once, on the host** (CST does not do this part):
   - LUKS2 on the NVMe, opened as `/dev/mapper/cache` with a keyfile
     `/etc/cryptsetup-keys.d/cache.key` (`0400`), and this line in

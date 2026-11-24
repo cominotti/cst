@@ -212,7 +212,8 @@ class CacheMountSnapshot:
     fstab_behind: bool | None = False
     """Whether systemd has not loaded /etc/fstab as it is on disk (None: systemctl cannot say). Asked by
     plan, only when attach would write no /etc/fstab (systemd_behind_fstab, with the binds attach would
-    mount), and by status (fstab_lines_unread, every managed line); False otherwise."""
+    mount), and by status where the cache is set up (fstab_lines_unread, every managed line); False
+    otherwise."""
 
 
 def is_cache_mount_help(parsed: CacheMountParsedArgs) -> bool:
