@@ -100,7 +100,7 @@ class QuintCiPathsTest(unittest.TestCase):
             "vm/adapters/backup.py",
             "vm/domain/backup.py",
             "vm/tests/quint/nas.qnt",
-            "vm/tests/quint/traces/nas_walk_live1.itf.json",
+            "vm/tests/quint/traces/walk_live1.itf.json",
             "vm/tests/test_vm_nas_replay.py",
             "tests/quint/cst-quint",
             ".github/workflows/ci.yml",
