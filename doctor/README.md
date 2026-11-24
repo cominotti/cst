@@ -67,7 +67,7 @@ cst doctor help
 | `vm` | The weekly NAS backup timer of each VM (`cst-vm-backup@VM.timer`) | `info`: on or off. Never `WARN` |
 | `vm` | A VM's weekly NAS backup timer is on, but `/usr/local/sbin/btrfs-notify` (which a failed backup alerts through) is missing, as `cst btrfs uninstall` leaves it when snapshots are not set up: a failed backup then reaches no desktop, only the journal and the pending alerts (the `alerts` rows) | `WARN`, fix: `cst btrfs install` (it installs `btrfs-notify` with the alerts kept for the next login); nothing when no timer is on |
 | `responsiveness` | Live responsiveness probes shared with [perf/README.md](../perf/README.md) for each axis (`memory` / `cpu` / `io` / `gpu`) whose CST module (`swap`, `cpu`, or `btrfs`) is installed or configured on the host: memory headroom/reclaim stalls/THP/MGLRU/zswap/`session.slice` floors, cpuidle latency/`ntsync`/`irqbalance`/IRQ overlap on `BUILD_CPUS`, `blk-iocost`/NVMe APST/dirty writeback/btrfs commit latency/`SCRUB_LIMIT`, and connected GPU runtime PM / AMD game power profile | `WARN` on `BOTTLENECK` or findings with a `fix:` command (`cst swap apply`, `cst btrfs install`, `cst btrfs scrub-limit set 500M`, `cst btrfs iocost apply`, `cst cpu install`, `cst cpu irq apply`, `cst cpu game off && cst cpu game on`, `sudo systemctl restart cpu-game.service`); `INFO` for advisory items; nothing for axes without CST files installed (`cst perf` always checks all four axes unconditionally) |
-| `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; differs on disk from its record (its sha256 differs from the record's: changed by hand, or written by an install that could not update the record); a component installed only in part (a file of it was written and its setup command has not finished since: the record says `pending`); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST or that is no record | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
+| `install` | What CST installed, from its install records (`/var/lib/cst/installed.json` for root's files, `~/.local/state/cst/installed.json` for yours; see [section 9](#9-the-install-check)): per recorded file, missing; differs on disk from its record (its sha256 differs from the record's: changed by hand, or written by an install that could not update the record); a component installed only in part (a file of it was recorded and its setup command has not finished since: the record says `pending`); a unit whose CST program (a word under `/usr/local/` or `%h/` in its command lines: `ExecStart=`, `ExecStartPre=`, `ExecStop=` and the like, not `ExecSearchPath=` or `ExecPaths=`) is missing or not executable; a record written by a newer CST or that is no record | `WARN`, fix: the command that installs the component again (`cst btrfs install`, `cst btrfs docker-gc enable`, ...) |
 | `install` | A recorded file older than this checkout (what CST installed differs from what this checkout installs now, a template rendered with the values it was installed with); a mode other than the one CST installed; a file not readable as your user (the record is then compared with this checkout only); a record you may not read | `info`, one line per component for the older files, naming the command that refreshes them. A file a module renders itself (the sccache wrapper) and generated files (units of `cst vm` and `cst toolchains`, the LDAC watcher's unit, the files of `cst btrfs degraded-boot`, the scrub drop-in, the stall-report launcher, cpu's hwp tmpfiles file and toolbox drop-ins) are only checked against the record |
 | `install` | Without a record (an install from before it): each component's installed files compared with this checkout | `info` per component with files that differ, naming the command that installs and records them; nothing for a component that is not installed, or when this checkout cannot build a file to compare with |
 | `install` | Every recorded file as CST installed it | `ok`, with the number of files per record |
@@ -561,12 +561,14 @@ and what this CST folder would install now.
   record's: something other than CST changed it, or an install wrote it and
   could not update the record (its folder not writable, a full disk).
   `WARN`, with the command that installs the component again.
-- A component still "pending": a file of it was written and its command
-  has not finished since. Its command was interrupted (an error, a Ctrl-C)
-  between its first write and its end; or another command wrote one file
-  of it before its command ever ran (`cst btrfs scrub-limit set` on a
-  machine where `cst btrfs install` never ran, or an older CST's
-  scrub-limit stopped after its installer). `WARN`, same fix.
+- A component still "pending": a file of it was recorded (written, or
+  adopted: found on disk from an install before the record, or recorded
+  otherwise, and recorded as it is) and its command has not finished
+  since. Its command was interrupted (an error, a Ctrl-C) between its
+  first record write and its end; or another command wrote one file of it
+  before its command ever ran (`cst btrfs scrub-limit set` on a machine
+  where `cst btrfs install` never ran, or an older CST's scrub-limit
+  stopped after its installer). `WARN`, same fix.
 - A unit whose program is missing (a unit of one component running a program
   of another that was removed, for example). `WARN`.
 - The record's bytes differ from what this folder installs now: the
