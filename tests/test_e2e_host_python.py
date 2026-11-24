@@ -26,6 +26,9 @@ from tests.repo_files import REPO
 _READ_TREES = (".github",)
 _READ_FILES = (
     "cst.invowkmod/invowkfile.cue",
+    "cst_core/__init__.py",
+    "cst_core/domain/__init__.py",
+    "cst_core/domain/values.py",
     "pyproject.toml",
     "tests/__init__.py",
     "tests/e2e/__init__.py",
@@ -47,6 +50,9 @@ class CheckoutTest(unittest.TestCase):
         self.assertEqual(
             closure,
             [
+                "cst_core/__init__.py",
+                "cst_core/domain/__init__.py",
+                "cst_core/domain/values.py",
                 "tests/__init__.py",
                 "tests/e2e/__init__.py",
                 "tests/e2e/image_digest.py",

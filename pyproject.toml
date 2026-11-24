@@ -45,7 +45,9 @@ line-length = 120
 # container. Ruff formats and lints those files as 3.12 code, so
 # `invowk cmd fmt` never writes newer syntax there (`except A, B:` is 3.14).
 # tests/test_e2e_host_python.py checks that every file of that set is covered.
-per-file-target-version = { "tests/__init__.py" = "py312", "tests/e2e/**/*.py" = "py312" }
+# tests/e2e/selection.py imports cst_core.domain.values (parse_whole_number),
+# so it and its two package files are in that set too.
+per-file-target-version = { "tests/__init__.py" = "py312", "tests/e2e/**/*.py" = "py312", "cst_core/__init__.py" = "py312", "cst_core/domain/__init__.py" = "py312", "cst_core/domain/values.py" = "py312" }
 # ruff finds *.py files by itself but not the extensionless helpers: each one
 # is named here. tests/test_python_files.py fails when a Python file of the
 # repository is missing from this list.

@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Pure domain value objects with invariant enforcement on construction."""
+"""Pure domain value objects with invariant enforcement on construction.
+
+CI runs this file on its E2E runner's python3, 3.12 (tests/e2e/selection.py
+imports parse_whole_number; tests/e2e/README.md, "The Python that runs these
+files"): it stays 3.12 code that imports the standard library only.
+tests/test_e2e_host_python.py checks it.
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
