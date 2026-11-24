@@ -31,7 +31,7 @@ from btrfs.compress.domain import (
     pick_root_mounts,
 )
 from btrfs.compress.ports import CompressHostPort
-from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines
+from btrfs.compress.presenter import format_layer_plan_lines, format_layer_status_lines, format_status_note_lines
 from cst_core.adapters.runtime import ManagedCliEnv
 from cst_core.domain.errors import Refused
 from cst_core.ports import CommandFailed, WriteFailed
@@ -239,6 +239,7 @@ def format_commit_status(
             booted_diff=booted_commit_diff(snap, proc_cmdline, kargs_ok=kargs_ok),
         )
     )
+    out.extend(format_status_note_lines(plan_view.left_alone_notes))
     if snap.is_ostree and not kargs_ok:
         out.append(f"  overall         incomplete (rpm-ostree kargs error: {kargs_error})")
     elif snap.is_ostree and snap.kargs_text is not None and not extract_rootflags_tokens(snap.kargs_text):
@@ -253,7 +254,11 @@ def format_commit_plan_lines(plan: CommitPlan, prog: str, *, dry_run: bool, seam
     out: list[str] = []
     if seam_proc:
         out.append(f"test seam (CST_BTRFS_COMMIT_PROC): /proc in {seam_proc}, not the kernel's")
-    out.extend(format_layer_plan_lines(f"Target root btrfs commit interval: {plan.target_seconds}s", plan.layers))
+    out.extend(
+        format_layer_plan_lines(
+            f"Target root btrfs commit interval: {plan.target_seconds}s", plan.layers, plan.left_alone_notes
+        )
+    )
     if not plan.has_changes:
         out.append(f"Already at {plan.target_seconds}s across all active layers; nothing to do.")
         return out

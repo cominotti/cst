@@ -133,6 +133,7 @@ class CompressPlan:
     kargs_edits: tuple[tuple[str, str], ...]
     remount_target: str | None
     new_top_mount_options: str | None
+    left_alone_notes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +158,7 @@ class CompressStatusView:
     kargs_error: str
     booted_diff: tuple[str, str] | None
     coherence: CoherenceReport
+    left_alone_notes: tuple[str, ...]
 
 
 def format_compress_option(mode: CompressMode, level: int) -> str:
@@ -282,6 +284,30 @@ def parse_proc_mounts(text: str) -> tuple[MountEntry, ...]:
                     )
                 )
     return tuple(entries)
+
+
+def separate_var_entries(fstab_text: str, root_uuid: str) -> tuple[MountEntry, ...]:
+    """The btrfs `/etc/fstab` lines of a separate filesystem at /var: those whose `UUID=` is that of the /var
+    line, when it is not the root's (empty without a root UUID, or a /var line of another kind). A CST
+    before `ROOT_ANCHOR_TARGETS` asked findmnt for /var first and took that filesystem for the root, so its
+    `apply` changed these lines; none is the root's, so nothing changes them back."""
+    if not root_uuid:
+        return ()
+    entries = parse_proc_mounts(fstab_text)
+    var_uuid = next((u for e in entries if e.target == "/var" and (u := _fstab_uuid(e.source)) is not None), None)
+    if var_uuid is None or var_uuid == root_uuid.lower():
+        return ()
+    return tuple(e for e in entries if _fstab_uuid(e.source) == var_uuid)
+
+
+def left_alone_note(entry: MountEntry, current: str) -> str:
+    """What `status` and `plan` say of a separate /var filesystem's fstab line that carries the option an
+    older CST's `apply` may have set there (`current`, as the feature describes it)."""
+    return (
+        f"/etc/fstab {entry.target} ({entry.source}) is a separate btrfs filesystem, not the root's, and has "
+        f"{current}: CST leaves it alone. An older CST took a separate btrfs /var for the root and may have "
+        "set that; if you did not, put that line's options back by hand."
+    )
 
 
 def parse_fstab_root_entries(fstab_text: str, root_uuid: str = "") -> tuple[MountEntry, ...]:
@@ -433,6 +459,8 @@ class OptionLayerOps:
     describe_top: Callable[[str], str]
     needs_live_change: Callable[[Sequence[MountEntry]], bool]
     needs_top_change: Callable[[TopMountInfo], bool]
+    # True for options that carry what this feature's `apply` writes (a note for a separate /var's lines).
+    set_by_apply: Callable[[str], bool]
     fstab_absent_current: str = "(no root btrfs entries)"
     fstab_absent_detail: str = "no root btrfs entries in /etc/fstab"
     kargs_absent_current: str = "(no rootflags= in kargs)"
@@ -450,6 +478,8 @@ class RootOptionLayerPlan:
     kargs_edits: tuple[tuple[str, str], ...]
     remount_target: str | None
     new_top_mount_options: str | None
+    # A note per line of a separate /var filesystem that carries this feature's option (separate_var_entries).
+    left_alone_notes: tuple[str, ...]
 
 
 def _plan_fstab(
@@ -568,6 +598,11 @@ def plan_root_option_layers(snapshot: CompressSnapshot, ops: OptionLayerOps) -> 
         kargs_edits=kargs_edits,
         remount_target=remount_target,
         new_top_mount_options=new_top_opts,
+        left_alone_notes=tuple(
+            left_alone_note(e, ops.describe_options([e.options]))
+            for e in separate_var_entries(snapshot.fstab_text or "", snapshot.root_uuid)
+            if ops.set_by_apply(e.options)
+        ),
     )
 
 
@@ -609,6 +644,7 @@ def build_plan(
             needs_top_change=lambda top: (
                 not matches_target_spec(effective_compress_spec(top.options), target_mode, target_level)
             ),
+            set_by_apply=_has_compress_force,
         ),
     )
     return CompressPlan(
@@ -623,7 +659,13 @@ def build_plan(
         kargs_edits=core.kargs_edits,
         remount_target=core.remount_target,
         new_top_mount_options=core.new_top_mount_options,
+        left_alone_notes=core.left_alone_notes,
     )
+
+
+def _has_compress_force(options: str) -> bool:
+    spec = effective_compress_spec(options)
+    return spec is not None and spec.mode == CompressMode.COMPRESS_FORCE
 
 
 def _canonical_spec(spec: CompressSpec | None) -> str:

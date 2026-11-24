@@ -143,6 +143,7 @@ class CompressService:
             kargs_error=kargs_err_msg,
             booted_diff=booted_diff,
             coherence=coherence,
+            left_alone_notes=plan_view.left_alone_notes,
         )
 
     def build_change_plan(self, args: CompressArgs) -> CompressPlanResult:

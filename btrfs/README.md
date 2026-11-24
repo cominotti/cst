@@ -1437,6 +1437,17 @@ Fedora's default `/home` (a subvolume of the root filesystem) follows the
 setting, and a separate btrfs `/home` or `/var/home` is never changed or
 remounted.
 
+**After an upgrade, on a host with a separate btrfs `/var`:** an older CST
+asked for `/var` first and took that filesystem for the root, so its
+`compress-force apply` and `commit-interval apply` wrote their option
+(`compress-force=zstd:N`, `commit=N`) on the fstab lines of the separate `/var`
+filesystem, not on the root's `/` line. Those lines are not the root's, so
+nothing changes them back (`revert` included). `status`, `plan`, `apply` and
+`revert` of each command print a `note` naming each line of that filesystem
+(the lines with the `UUID=` of the `/var` line) that has its option. If you did
+not set it yourself, put that line's options back by hand (`sudoedit
+/etc/fstab`); `cst doctor` does not check a separate filesystem.
+
 **What it does not touch:** the live remount takes effect immediately for new
 writes without rebooting. Existing files keep their current extents until rewritten
 or updated: CST never runs `btrfs filesystem defragment -r` automatically, because

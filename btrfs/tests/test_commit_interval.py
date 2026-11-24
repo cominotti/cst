@@ -12,7 +12,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from btrfs.commit.adapters import execute_commit_change
+from btrfs.commit.adapters import (
+    execute_commit_change,
+    format_commit_plan_lines,
+    format_commit_status,
+    read_commit_snapshot,
+)
 from btrfs.commit.cli import CommitCliDeps, run_commit_cli
 from btrfs.commit.domain import (
     CommitAction,
@@ -327,6 +332,48 @@ class CommitAdapterAndCliTests(unittest.TestCase):
         )
         self.assertEqual(rc_r, 0, out_r)
         self.assertEqual(host.s.fstab, fstab)
+
+    def test_a_separate_btrfs_var_s_commit_from_an_older_cst_is_named_and_left(self) -> None:
+        # An older CST took a separate btrfs /var (dm-2, its own UUID) for the root and wrote its commit=60 there.
+        var_line = "UUID=0b5e6a1d-0000-4000-8000-00000000beef /var btrfs subvol=var,commit=60,noatime 0 0\n"
+        fstab = (
+            f"UUID={SAMPLE_UUID} / btrfs subvol=root,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\n"
+            + var_line
+        )
+        mounts = SAMPLE_PROC_MOUNTS.replace(
+            "/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress-force=zstd:1,ssd,flushoncommit,subvol=/var",
+            "/dev/dm-2 /var btrfs rw,seclabel,noatime,commit=60,subvol=/var",
+        )
+        note = (
+            "/etc/fstab /var (UUID=0b5e6a1d-0000-4000-8000-00000000beef) is a separate btrfs filesystem, not the "
+            "root's, and has commit=60: CST leaves it alone."
+        )
+        host = _FakeHost(_FakeState(fstab=fstab, proc_mounts=mounts))
+        status = format_commit_status(read_commit_snapshot(host)[0], kargs_ok=True, kargs_error="", proc_cmdline=None)
+        self.assertIn(f"  note            {note} An older CST", "\n".join(status))
+        for revert in (False, True):
+            with self.subTest(revert=revert):
+                plan = build_commit_plan(read_commit_snapshot(host)[0], revert=revert)
+                self.assertIn(
+                    f"Note: {note} An older CST", "\n".join(format_commit_plan_lines(plan, "c", dry_run=True))
+                )
+        for parsed in (
+            CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True),
+            CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True),
+            CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True),
+        ):
+            with self.subTest(action=parsed.action):
+                rc, out = execute_commit_change(host, parsed)
+                self.assertEqual(rc, 0, out)
+                self.assertTrue((host.s.fstab or "").endswith(var_line), host.s.fstab)
+                self.assertIn(f"Note: {note}", "\n".join(out))
+                self.assertIn(
+                    "/dev/dm-2 /var btrfs rw,seclabel,noatime,commit=60,subvol=/var", host.s.proc_mounts or ""
+                )
+        self.assertNotIn("commit=", (host.s.fstab or "").removesuffix(var_line))  # revert put the root's / back
+        clean = fstab.replace(var_line, var_line.replace("commit=60,", ""))
+        plan = build_commit_plan(read_commit_snapshot(_FakeHost(_FakeState(fstab=clean, proc_mounts=mounts)))[0])
+        self.assertNotIn("separate btrfs filesystem", "\n".join(format_commit_plan_lines(plan, "c", dry_run=True)))
 
     def test_the_top_mount_keeps_its_own_options(self) -> None:
         # The unit's compress-force=zstd:3 is its own: commit apply changes only its commit=, and does not

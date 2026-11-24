@@ -94,6 +94,11 @@ class CommitPlan:
         """Updated `Options=` string for the top-mount systemd unit."""
         return self.core.new_top_mount_options
 
+    @property
+    def left_alone_notes(self) -> tuple[str, ...]:
+        """A note per line of a separate /var filesystem that has a `commit=`, from `core`."""
+        return self.core.left_alone_notes
+
 
 @dataclass(frozen=True, slots=True)
 class CommitCoherenceReport:
@@ -273,6 +278,7 @@ def build_commit_plan(
                 or has_explicit_commit(top.options) != (opt_target is not None)
                 or has_malformed_commit(top.options)
             ),
+            set_by_apply=has_explicit_commit,
             fstab_absent_current="(no root btrfs)",
             kargs_absent_current="(no rootflags=)",
             kargs_absent_detail="no rootflags= in rpm-ostree kargs",

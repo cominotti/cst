@@ -37,6 +37,7 @@ from btrfs.compress.domain import (
     rewrite_fstab,
     rewrite_kargs_rootflags,
     rewrite_mount_options,
+    separate_var_entries,
     top_mount_options_from_var,
 )
 from btrfs.compress.domain.args import ArgsError, CompressArgs, CompressCommand, parse_compress_args
@@ -504,6 +505,82 @@ class SeparateHomeTests(unittest.TestCase):
             err.getvalue(),
         )
         self.assertEqual(host.s.fstab, SEPARATE_HOME_FSTAB)
+
+
+# A separate btrfs /var (dm-2, VAR_UUID) whose fstab line an older CST's apply changed: it took findmnt's /var
+# for the root, so it wrote compress-force=zstd:1 there and left the root's / line as it was.
+OLD_APPLY_VAR_LINE = f"UUID={VAR_UUID} /var btrfs subvol=var,compress-force=zstd:1,noatime 0 0\n"
+SEPARATE_VAR_FSTAB = "".join(
+    OLD_APPLY_VAR_LINE if " /var " in line else line for line in SAMPLE_FSTAB.splitlines(keepends=True)
+)
+SEPARATE_VAR_MOUNTS = SAMPLE_PROC_MOUNTS.replace(
+    "/dev/dm-0 /var btrfs rw,seclabel,noatime,degraded,compress=zstd:1,ssd,flushoncommit,subvol=/var",
+    "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress-force=zstd:1,ssd,subvol=/var",
+)
+LEFT_ALONE = f"/etc/fstab /var (UUID={VAR_UUID}) is a separate btrfs filesystem, not the root's, and has"
+
+
+class SeparateVarUpgradeTests(unittest.TestCase):
+    """A separate btrfs /var's fstab line that an older CST's apply changed is never changed back (it is
+    not the root's), so status, plan, apply and revert say so."""
+
+    def test_the_separate_var_s_lines_are_those_of_its_uuid(self) -> None:
+        var_home = f"UUID={VAR_UUID} /var/home btrfs subvol=home,compress=zstd:3 0 0\n"
+        self.assertEqual(
+            [e.target for e in separate_var_entries(SEPARATE_VAR_FSTAB + var_home, SAMPLE_UUID)], ["/var", "/var/home"]
+        )
+        upper = SEPARATE_VAR_FSTAB.replace(VAR_UUID, VAR_UUID.upper())
+        self.assertEqual([e.target for e in separate_var_entries(upper, SAMPLE_UUID)], ["/var"])
+        for fstab, root_uuid in (
+            (SAMPLE_FSTAB, SAMPLE_UUID),  # /var is the root filesystem's
+            (SAMPLE_FSTAB, SAMPLE_UUID.upper()),
+            (SEPARATE_VAR_FSTAB, ""),  # no root UUID to compare
+            (SEPARATE_VAR_FSTAB.replace(f"UUID={VAR_UUID}", "LABEL=var"), SAMPLE_UUID),
+            ("".join(ln for ln in SAMPLE_FSTAB.splitlines(keepends=True) if " /var " not in ln), SAMPLE_UUID),
+        ):
+            with self.subTest(fstab=fstab, root_uuid=root_uuid):
+                self.assertEqual(separate_var_entries(fstab, root_uuid), ())
+
+    def test_status_and_plan_name_the_line_and_its_option(self) -> None:
+        svc = CompressService(_FakeHost(_FakeState(fstab=SEPARATE_VAR_FSTAB, proc_mounts=SEPARATE_VAR_MOUNTS)))
+        out = io.StringIO()
+        self.assertEqual(render_compress_status(svc.gather_status(), out), 0)
+        self.assertIn(f"  note            {LEFT_ALONE} compress-force=zstd:1: CST leaves it alone.", out.getvalue())
+        self.assertIn("if you did not, put that line's options back by hand.", out.getvalue())
+        for revert in (False, True):
+            with self.subTest(revert=revert):
+                out, err = io.StringIO(), io.StringIO()
+                res = svc.build_change_plan(CompressArgs(CompressCommand.PLAN, revert=revert))
+                self.assertEqual(render_compress_plan(res, "cst", out, err), 0, err.getvalue())
+                self.assertIn(f"Note: {LEFT_ALONE} compress-force=zstd:1", out.getvalue())
+
+    def test_apply_and_revert_leave_the_line_and_say_so(self) -> None:
+        host = _FakeHost(_FakeState(fstab=SEPARATE_VAR_FSTAB, proc_mounts=SEPARATE_VAR_MOUNTS))
+        svc = CompressService(host)
+        for command in (CompressCommand.REVERT, CompressCommand.APPLY, CompressCommand.APPLY):
+            with self.subTest(command=command):
+                out, err = io.StringIO(), io.StringIO()
+                rc = render_compress_change(svc.execute_change(CompressArgs(command, yes=True)), out, err)
+                self.assertEqual(rc, 0, err.getvalue())
+                self.assertIn(OLD_APPLY_VAR_LINE, host.s.fstab or "")
+                self.assertIn(f"Note: {LEFT_ALONE} compress-force=zstd:1", out.getvalue())
+        self.assertIn("nothing to do", out.getvalue())  # the second apply changes nothing, and says it again
+        self.assertIn(
+            "/dev/dm-2 /var btrfs rw,seclabel,noatime,compress-force=zstd:1,ssd,subvol=/var", host.s.proc_mounts or ""
+        )
+        self.assertFalse(any(c.startswith("remount:/var:") for c in host.calls), host.calls)
+
+    def test_no_note_without_the_option_or_a_separate_var(self) -> None:
+        clean = SEPARATE_VAR_FSTAB.replace(
+            OLD_APPLY_VAR_LINE, f"UUID={VAR_UUID} /var btrfs subvol=var,compress=zstd:3 0 0\n"
+        )
+        for fstab in (clean, SAMPLE_FSTAB):
+            with self.subTest(fstab=fstab):
+                svc = CompressService(_FakeHost(_FakeState(fstab=fstab, proc_mounts=SEPARATE_VAR_MOUNTS)))
+                out, err = io.StringIO(), io.StringIO()
+                render_compress_status(svc.gather_status(), out)
+                render_compress_plan(svc.build_change_plan(CompressArgs(CompressCommand.PLAN)), "cst", out, err)
+                self.assertNotIn("separate btrfs filesystem", out.getvalue())
 
 
 class BootedKargsTests(unittest.TestCase):

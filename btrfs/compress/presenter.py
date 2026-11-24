@@ -16,8 +16,8 @@ from btrfs.compress.domain import (
 )
 
 
-def format_layer_plan_lines(header: str, layers: Sequence[LayerPlan]) -> list[str]:
-    """Render shared multi-layer plan header and per-layer status rows."""
+def format_layer_plan_lines(header: str, layers: Sequence[LayerPlan], notes: Sequence[str] = ()) -> list[str]:
+    """Render shared multi-layer plan header, per-layer status rows and a `Note:` line per note."""
     lines = [header]
     for lp in layers:
         match lp.status:
@@ -30,6 +30,7 @@ def format_layer_plan_lines(header: str, layers: Sequence[LayerPlan]) -> list[st
             case _:
                 marker = lp.status.value
         lines.append(f"  {lp.layer.value:<10} [{marker:<6}] {lp.current} -> {lp.target} ({lp.detail})")
+    lines.extend(f"Note: {note}" for note in notes)
     return lines
 
 
@@ -59,13 +60,20 @@ def format_layer_status_lines(
     return lines
 
 
+def format_status_note_lines(notes: Sequence[str]) -> list[str]:
+    """Render a `status` note line per note (after `format_layer_status_lines`)."""
+    return [f"  note            {note}" for note in notes]
+
+
 def _emit_seam(seam_proc: str, out: TextIO) -> None:
     if seam_proc:
         print(f"test seam (CST_BTRFS_COMPRESS_PROC): /proc in {seam_proc}, not the kernel's", file=out)
 
 
 def _render_plan(plan: CompressPlan, out: TextIO) -> None:
-    for line in format_layer_plan_lines(f"Target compression: {plan.target_option}", plan.layers):
+    for line in format_layer_plan_lines(
+        f"Target compression: {plan.target_option}", plan.layers, plan.left_alone_notes
+    ):
         print(line, file=out)
 
 
@@ -79,6 +87,8 @@ def render_compress_status(view: CompressStatusView, out: TextIO) -> int:
         kargs_error=view.kargs_error,
         booted_diff=view.booted_diff,
     ):
+        print(line, file=out)
+    for line in format_status_note_lines(view.left_alone_notes):
         print(line, file=out)
     print(f"  overall         {view.coherence.summary}", file=out)
     return 0
@@ -110,6 +120,9 @@ def render_compress_change(res: CompressChangeResult, out: TextIO, err: TextIO) 
     if res.plan is not None and res.plan.has_changes:
         _render_plan(res.plan, out)
         print("Note: remount applies immediately to new writes; existing files keep their current extents.", file=out)
+    elif res.plan is not None:
+        for note in res.plan.left_alone_notes:
+            print(f"Note: {note}", file=out)
     for msg in res.messages:
         print(msg, file=out)
     if res.error:
