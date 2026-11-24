@@ -39,7 +39,7 @@ from bluetooth.setup.domain import (
 )
 from cst_core.domain.errors import Refused, shell_exit_status
 from cst_core.domain.files import OwnedState
-from cst_core.domain.install import Component
+from cst_core.domain.install import Component, InstallReportWord
 from cst_core.domain.units import ActiveState
 from cst_core.ports import CommandResult, OutputMode, UnitName
 
@@ -450,10 +450,10 @@ class Change(Checks):
             input_text=render_unit(self.c.device, self.c.ldac_rate),
         )
         self.out(f"{said.rstrip(chr(10))} (LDAC to {self.c.ldac_rate} Hz)\n")
-        unit_changed = said.startswith("written:")
+        unit_changed = said.startswith(InstallReportWord.WRITTEN)
         if unit_changed:
             self._must_result(self.m.user_systemd.daemon_reload_result(output=OutputMode.INHERIT))
-        changed = unit_changed or any(line.startswith("written:") for line in r.stdout.splitlines())
+        changed = unit_changed or any(line.startswith(InstallReportWord.WRITTEN) for line in r.stdout.splitlines())
         if self.lw_enabled != "enabled":
             self._must_result(self.m.user_systemd.enable(UnitName(unit), output=OutputMode.INHERIT))
             self.out(f"enabled:   {unit} (starts with your session)\n")

@@ -106,6 +106,7 @@ from cst_core.domain.install import (
     ArtifactKind,
     GeneratedKind,
     InstallEntry,
+    InstallReportWord,
     Owner,
     expand_dest,
     select_entries,
@@ -250,7 +251,7 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     data = sys.stdin.buffer.read()
     if a.command == InstallerCommand.TEXT:
         written = service.put(place, data, as_root=as_root)
-        return f"{'written:  ' if written else 'unchanged:'} {place.path}"
+        return (InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED).line(place.path)
     return service.plan_put(place, data, as_root=as_root)
 
 
@@ -319,7 +320,7 @@ def _files(service: InstallService, a: argparse.Namespace, entries: Sequence[Ins
         print("\n".join(lines))
         return 0
     # check: current means current and recorded; a "would record:" file is one install adopts.
-    return 0 if todo == 0 and not any(line.startswith("would record:") for line in lines) else 1
+    return 0 if todo == 0 and not any(line.startswith(InstallReportWord.WOULD_RECORD) for line in lines) else 1
 
 
 # The commands that act on the files they select (dests, srcs and payload only list them).

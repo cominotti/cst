@@ -30,6 +30,7 @@ from cst_core.domain.install import (
     ArtifactKind,
     GeneratedKind,
     InstallEntry,
+    InstallReportWord,
     Owner,
     expand_dest,
     is_current,
@@ -251,9 +252,9 @@ class InstallService:
     ) -> str:
         """Write path unless it is current; the report line either way (WriteFailed when it cannot)."""
         if self.is_current(path, data, mode, owner, as_root=as_root):
-            return f"unchanged: {path}"
+            return InstallReportWord.UNCHANGED.line(path)
         self._target.write(path, data, mode)
-        return f"written:   {path}"
+        return InstallReportWord.WRITTEN.line(path)
 
     def install(self, entries: Sequence[InstallEntry], req: InstallRequest) -> Iterator[str]:
         """Bring every entry's dest up to date; one report line each, yielded as it is written.
@@ -306,7 +307,7 @@ class InstallService:
                     f"{p.path}: its settings {settings} could not be written from it (exit {r.returncode}); "
                     "nothing was changed" + "".join(f"\n  {line}" for line in out)
                 )
-            lines += [line for line in out if line.startswith("written:")]
+            lines += [line for line in out if line.startswith(InstallReportWord.WRITTEN)]
         return lines
 
     def _write_all(self, todo: Sequence[tuple[Placement, bytes]], req: InstallRequest) -> Iterator[str]:
@@ -386,8 +387,9 @@ class InstallService:
         """What a write of p would print, changing nothing: `would write:`, `would record:` (current, but its
         record line is missing or not what the write records: _record_changes) or `unchanged:`."""
         if not self.is_current(p.path, data, p.mode, p.owner, as_root=as_root):
-            return f"would write: {p.path}"
-        return f"{'would record:' if self._record_changes(records, p, data) else 'unchanged:'} {p.path}"
+            return InstallReportWord.WOULD_WRITE.line(p.path)
+        word = InstallReportWord.WOULD_RECORD if self._record_changes(records, p, data) else InstallReportWord.UNCHANGED
+        return word.line(p.path)
 
     def plan_put(self, place: Placement, data: bytes, *, as_root: bool) -> str:
         """What put would do, changing nothing: its _plan_line. A place with a record reads it (a record of a
@@ -429,7 +431,7 @@ class InstallService:
                 existed = self._target.remove(p.path)
                 gone.append(p)
                 if existed:
-                    yield f"removed:   {p.path}"
+                    yield InstallReportWord.REMOVED.line(p.path)
         finally:
             for record in sorted({p.record for p in gone if p.record}):
                 self.forget(record, [p.dest for p in gone if p.record == record])
@@ -445,11 +447,12 @@ class InstallService:
         todo, records = self._prepare(entries, req)
         for p, data in todo:
             lines.append(self._plan_line(records, p, data, as_root=req.as_root))
-            if lines[-1].startswith("would write:"):
+            if lines[-1].startswith(InstallReportWord.WOULD_WRITE):
                 replaced.append(p)
         # A settings file install would write first, from the program it replaces (SettingsStep).
         settings = [
-            f"would write: {path} (from {p.path}, before it is replaced)" for p, _, path in self._due_steps(replaced)
+            InstallReportWord.WOULD_WRITE.line(f"{path} (from {p.path}, before it is replaced)")
+            for p, _, path in self._due_steps(replaced)
         ]
         return settings + lines, len(replaced) + len(settings)
 

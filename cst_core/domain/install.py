@@ -17,6 +17,27 @@ class Owner(StrEnum):
     USER = "user"
 
 
+# The width the installer pads its report word to: that of `unchanged:`, so the paths line up.
+_REPORT_WORD_WIDTH: Final = 10
+
+
+class InstallReportWord(StrEnum):
+    """The first word of the line the installer prints for each file: an install's `written:` or
+    `unchanged:`, a removal's `removed:`, a plan's `would write:`, `would record:` or `unchanged:`.
+    The programs that read the installer's output (bluetooth, cpu irq, scrub-limit, the settings steps)
+    match these words."""
+
+    UNCHANGED = "unchanged:"
+    WRITTEN = "written:"
+    REMOVED = "removed:"
+    WOULD_WRITE = "would write:"
+    WOULD_RECORD = "would record:"
+
+    def line(self, path: str) -> str:
+        """The installer's line for path: this word padded to the width of `unchanged:`, a space, path."""
+        return f"{self.value:<{_REPORT_WORD_WIDTH}} {path}"
+
+
 class ArtifactKind(StrEnum):
     """What an installed file is (the manifest's kind column)."""
 

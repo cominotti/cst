@@ -15,7 +15,7 @@ from cst_core.adapters.runner import HostExecutionContext, SubprocessCommandRunn
 from cst_core.adapters.runtime import ManagedCliEnv, host_view_path, probe_systemd_unit
 from cst_core.application.install import InstallRefused, InstallService, Placement
 from cst_core.domain.contracts import CPU_SETTINGS
-from cst_core.domain.install import Component, GeneratedKind, Owner
+from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.text import parse_shell_assignments
 from cst_core.domain.units import ActiveState
@@ -176,8 +176,8 @@ def _remove_managed_files(svc: InstallService, paths: IrqPaths) -> tuple[int, li
         return 1, [f"ERROR: {exc}"], False, False
     with contextlib.suppress(OSError):
         os.rmdir(os.path.dirname(paths.dropin_path))
-    dropin_removed = any(line.startswith("removed:") and paths.dropin_path in line for line in lines)
-    env_removed = any(line.startswith("removed:") and paths.env_path in line for line in lines)
+    dropin_removed = any(line.startswith(InstallReportWord.REMOVED) and paths.dropin_path in line for line in lines)
+    env_removed = any(line.startswith(InstallReportWord.REMOVED) and paths.env_path in line for line in lines)
     return 0, lines, dropin_removed, env_removed
 
 
@@ -196,7 +196,7 @@ def _sync_irq_files(svc: InstallService, paths: IrqPaths, snap: IrqSnapshot) -> 
         ):
             place = _irq_placement(path, dest, paths.record_path)
             written = svc.put(place, text.encode("utf-8"), as_root=as_root)
-            out.append(f"{'written:  ' if written else 'unchanged:'} {path}")
+            out.append((InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED).line(path))
             env_changed = env_changed or (is_env and written)
             dropin_changed = dropin_changed or (not is_env and written)
     except _INSTALL_ERRORS as exc:

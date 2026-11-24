@@ -17,6 +17,7 @@ from typing import Final, Literal
 from bluetooth.domain import LDAC_PROG, LDAC_UNIT, LE_CONF_NAME, OLD_MARKERS, QUALITIES
 from cst_core.domain.dispatch import MODULE_BY_NAME
 from cst_core.domain.files import OwnedState
+from cst_core.domain.install import InstallReportWord
 from cst_core.domain.text import HELP_WORDS, enum_member, group
 from cst_core.domain.units import ActiveState
 
@@ -481,9 +482,9 @@ def watcher_prog_state(plan_out: str, prog: str, marked: Callable[[], bool]) -> 
     plan_line = next(
         (line for line in lines if os.path.normpath(line.partition(": ")[2]) == path), lines[-1] if lines else ""
     )
-    if plan_line.startswith("unchanged:"):
+    if plan_line.startswith(InstallReportWord.UNCHANGED):
         return OwnedState.OK
-    if plan_line.startswith("would record:"):
+    if plan_line.startswith(InstallReportWord.WOULD_RECORD):
         return OwnedState.ADOPT
     return OwnedState.CHANGE if marked() else OwnedState.CONFLICT
 

@@ -29,16 +29,13 @@ from cst_core.adapters.runtime import (
     run_installer,
     undo_python_start,
 )
-from cst_core.domain.install import Component
+from cst_core.domain.install import Component, InstallReportWord
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
 _BTRFS_SYSFS: Final = "/sys/fs/btrfs"
-# The installer's words for a file it wrote or removed (and this module's for a new snapshots.conf).
-_WRITTEN: Final = "written:"
-_REMOVED: Final = "removed:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +226,7 @@ def _apply_conf(paths: ScrubPaths, conf_text: str | None, target_limit: str | No
     made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
     if new_conf is not None and conf_changed:
         _write_conf(paths.conf_path, new_conf)
-        verb = _WRITTEN if conf_text is None else "updated:"
+        verb = "written:" if conf_text is None else "updated:"
         note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
         return conf_changed, made_dir, f"{verb:<10} {paths.conf_path} ({note})"
     suffix = " (absent)" if conf_text is None else ""
@@ -261,7 +258,7 @@ def _mark_core_after_write(
     cmd_runner: CommandRunnerPort, paths: ScrubPaths, inst_lines: Sequence[str], *, core_done: bool
 ) -> tuple[int, str | None]:
     """btrfs:core done again after the installer wrote the drop-in: (exit status, the ERROR line or None)."""
-    if not (core_done and any(line.startswith(_WRITTEN) for line in inst_lines)):
+    if not (core_done and any(line.startswith(InstallReportWord.WRITTEN) for line in inst_lines)):
         return 0, None
     rc_m, err_m = _mark_core_done(cmd_runner, paths)
     if rc_m != 0:
@@ -301,7 +298,7 @@ def scrub_limit_apply(
     if target_limit is None:
         with contextlib.suppress(OSError):
             os.rmdir(os.path.dirname(paths.dropin_path))
-    if any(line.startswith((_WRITTEN, _REMOVED)) for line in inst_lines):
+    if any(line.startswith((InstallReportWord.WRITTEN, InstallReportWord.REMOVED)) for line in inst_lines):
         error = _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
         if error is not None:
             return 1, [*out, error]
