@@ -4,7 +4,7 @@ export const meta = {
   description: 'One CST change: design, implement, simplify, findings-only review (a fast lane for a small change of docs, tests and tooling), one independent fixer, a re-review of its code (branch ready)',
   whenToUse: 'A CST change worth a reviewed branch: a command, a fix, a refactor, a port. Integration and merge stay with the orchestrator.',
   phases: [
-    { title: 'Design', detail: 'brief + advisor review' },
+    { title: 'Design', detail: 'brief + advisor review (the spec review)' },
     { title: 'Implement', detail: 'worktree, commits of one kind, check green' },
     { title: 'Simplify', detail: 'quality pass by hand, in the worktree' },
     { title: 'Review', detail: 'findings only: code-review high <branch> + checklist lenses by path, at most 3 agents at once' },
@@ -28,7 +28,9 @@ export const meta = {
 //   notes     absolute path of a folder for the design note and reports (outside the repository)
 //   base      git ref to start from (default "main")
 //   branch, worktree   optional overrides (to review or continue an existing branch)
-//   tier1     "run" (default) | "defer": a batch runs tier 1 once on its integration branch; the result says so
+//   tier1     "run" (default) | "defer": a batch runs tier 1 once on its integration branch; the result says so.
+//             Prefer "run": the fixer then runs the whole tier (about 3 minutes), which also catches tests that
+//             depend on order; with "defer", tier 1 failures surfaced only at integration (2026-11-23).
 //   mode      "new" (default) | "continue" (the worktree exists) | "review" (review + fix of an existing branch)
 //             | "selftest" (only the self-tests below)
 //
@@ -80,6 +82,23 @@ export const meta = {
 // - The branch head is checked the same way: simplify reports the head it leaves (and a clean worktree), every
 //   reviewer the head it reviewed (it must be that one), and the fixer the head it gated and the head after
 //   everything (they must be equal for ready).
+
+// Restarts, the guard, the advisor and when to stop (2026-11-24, from the runs of 2026-11-22/24):
+// - A stage may run again after a usage-limit pause, with the same prompt. Implement decides from what exists
+//   (startAction): it creates the worktree, continues from it, or refuses; it never stops because its own earlier
+//   work is there. Simplify, fix and the fast lane are told the same. Decisions live on disk (the design note,
+//   commits), so a restart costs a re-read, not the work.
+// - The guard's equality check stays on GUARD_CMD's four lines. Each agent also pastes GUARD_DETAIL_CMD (status
+//   lines and a hash per modified or untracked file), report only: when the guard stops a run, the log and the
+//   trail name what changed. Someone else's edit in the main checkout is never reverted, stashed or committed by
+//   the orchestrator: it resumes in mode "review" and integrates in a clean worktree.
+// - Advisor (the owner's rule for workflow agents): allowed once, at the final checkpoint, in design (the spec
+//   review: no later stage reviews the approach) and in re-review (the last independent review); forbidden in every
+//   other stage, including the code-review reviewer, its fork and the fast lane (an author fixes there). Every
+//   prompt carries one of the two sentences (advisorLine); guarded() refuses a prompt without the right one.
+// - Stopping rule for the orchestrator: the result's followups (the re-review's low findings, the run's
+//   out-of-scope notes) go to the pull request body unless one is a correctness bug in code the pull request
+//   ships; only those get another run.
 
 const LENSES = {
   parity: { skill: 'cst-refactor-parity', why: 'a refactor: the proof that nothing changed' },
@@ -214,6 +233,47 @@ function worktreeProblem(main, wt) {
   return ''
 }
 
+// The advisor sentences; every prompt carries exactly one (shared() adds it, guarded() checks it).
+const ADVISOR_ALLOWED = 'Advisor: you may call the advisor tool ONCE in this stage, at its final checkpoint: write your output down first (the note, or your findings), then call it, apply what holds, and return. If it errors, times out, answers empty or is not in your tool list, say so in your result and carry on: no retry. Its advice is not authority: it never replaces your own checks, authorizes a write outside the worktree, or settles what the owner decides.'
+const ADVISOR_FORBIDDEN = 'Advisor: do not call the advisor tool in this stage (the owner allows it only in design and re-review).'
+const ADVISOR_STAGES = ['design', 're-review']
+// Every stage name the script passes to shared().
+const STAGES = ['design', 'implement', 'simplify', 'survey', 'review-code-review', ...Object.keys(LENSES).map((l) => 'review-' + l), 'fix', 'review+fix', 're-review']
+// The writing stages a restart can find half done (implement has its own rule, startAction).
+const RESTART_STAGES = ['simplify', 'fix', 'review+fix']
+// The advisor sentence of a stage; an unknown stage is a bug of this script. Pure: tested below.
+function advisorLine(stage) {
+  if (!STAGES.includes(stage)) throw new Error('unknown stage ' + stage)
+  return ADVISOR_STAGES.includes(stage) ? ADVISOR_ALLOWED : ADVISOR_FORBIDDEN
+}
+// The stage of an agent label ("review: command" is the stage "review-command"). Pure: tested below.
+const stageOf = (label) => (label.startsWith('review: ') ? 'review-' + label.slice('review: '.length) : label)
+// Why a prompt breaks the advisor rule ('' when it does not): it must carry its stage's sentence and not the other.
+// Pure: tested below.
+function advisorProblem(stage, prompt) {
+  const want = advisorLine(stage)
+  const other = want === ADVISOR_ALLOWED ? ADVISOR_FORBIDDEN : ADVISOR_ALLOWED
+  if (prompt.split(want).length !== 2) return stage + ': the prompt must carry its advisor sentence exactly once'
+  if (prompt.includes(other)) return stage + ': the prompt carries the other advisor sentence'
+  return ''
+}
+// What implement does with the state it finds, from the facts it reports before acting: "created" (nothing
+// exists; mode "new" only), "continued" (the worktree on the branch, or the branch alone, descending from the
+// base), or "refused" (anything else). Pure: tested below.
+function startAction(f, mode) {
+  if (!f.branch_exists && !f.worktree_exists) return mode === 'new' ? 'created' : 'refused'
+  if (f.worktree_exists && !f.worktree_on_branch) return 'refused'
+  if (!f.branch_exists || !f.descends_from_base) return 'refused'
+  return 'continued'
+}
+// The lines one guard detail reading has and the other has not: what changed in the main checkout. Pure: tested
+// below.
+function guardChanges(before, after) {
+  const a = String(before || '').split('\n').map((s) => s.trimEnd()).filter(Boolean)
+  const b = String(after || '').split('\n').map((s) => s.trimEnd()).filter(Boolean)
+  return [...a.filter((l) => !b.includes(l)).map((l) => '- ' + l), ...b.filter((l) => !a.includes(l)).map((l) => '+ ' + l)]
+}
+
 function selftest() {
   const eq = (a, b, what) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error('selftest ' + what + ': ' + JSON.stringify(a) + ' != ' + JSON.stringify(b)) }
   const throws = (f, what) => { try { f() } catch (e) { return } throw new Error('selftest ' + what + ': did not throw') }
@@ -257,6 +317,14 @@ function selftest() {
   eq([reReviewOutcome([]), reReviewOutcome([fh, fl]), reReviewOutcome([fn, { ...fl, severity: 'LOW ' }, { ...fl, severity: 'medium' }])], [{ high: [], low: [] }, { high: [fh], low: [fl] }, { high: [fn, { ...fl, severity: 'medium' }], low: [{ ...fl, severity: 'LOW ' }] }], 're-review outcome')
   eq([reviewWaves([]), reviewWaves(['parity']), reviewWaves(['code-review', 'command', 'primitives']), reviewWaves(['code-review', 'command', 'helper', 'primitives']), reviewWaves(['code-review', 'parity', 'port', 'primitives', 'command'])], [[], [['parity']], [['code-review', 'command'], ['primitives']], [['code-review', 'command'], ['helper', 'primitives']], [['code-review', 'parity'], ['port', 'primitives', 'command']]], 'review waves')
   throws(() => reviewWaves(['code-review'], 1), 'a cap below one reviewer')
+  eq(STAGES.filter((s) => advisorLine(s) === ADVISOR_ALLOWED), ['design', 're-review'], 'advisor allowed only in design and re-review')
+  eq(STAGES.filter((s) => advisorLine(s) === ADVISOR_FORBIDDEN).length, STAGES.length - 2, 'advisor forbidden everywhere else')
+  throws(() => advisorLine('review-unknown'), 'an unknown stage')
+  eq([stageOf('review: command'), stageOf('review: code-review'), stageOf('fix'), stageOf('review+fix')], ['review-command', 'review-code-review', 'fix', 'review+fix'], 'stage of a label')
+  eq([advisorProblem('fix', 'x ' + ADVISOR_FORBIDDEN), advisorProblem('re-review', 'x ' + ADVISOR_ALLOWED), advisorProblem('fix', 'x'), advisorProblem('fix', ADVISOR_FORBIDDEN + ADVISOR_FORBIDDEN), advisorProblem('design', ADVISOR_ALLOWED + ADVISOR_FORBIDDEN)], ['', '', 'fix: the prompt must carry its advisor sentence exactly once', 'fix: the prompt must carry its advisor sentence exactly once', 'design: the prompt carries the other advisor sentence'], 'advisor problem')
+  const S = (branch_exists, worktree_exists, worktree_on_branch, descends_from_base) => ({ branch_exists, worktree_exists, worktree_on_branch, descends_from_base })
+  eq([startAction(S(false, false, false, false), 'new'), startAction(S(false, false, false, false), 'continue'), startAction(S(true, true, true, true), 'new'), startAction(S(true, false, false, true), 'new'), startAction(S(true, false, false, false), 'new'), startAction(S(true, true, false, true), 'new'), startAction(S(true, true, true, false), 'continue'), startAction(S(false, true, false, false), 'new')], ['created', 'refused', 'continued', 'continued', 'refused', 'refused', 'refused', 'refused'], 'start action')
+  eq([guardChanges('a\nb', 'a\nb'), guardChanges(' M AGENTS.md\nh1  AGENTS.md', ' M AGENTS.md\nh2  AGENTS.md\n?? x'), guardChanges('', '')], [[], ['- h1  AGENTS.md', '+ h2  AGENTS.md', '+ ?? x'], []], 'guard changes')
   return 'ok'
 }
 
@@ -281,6 +349,9 @@ if (wtProblem) throw new Error('args.worktree: ' + wtProblem)
 const QM = shq(MAIN), QWT = shq(WT), QBASE = shq(BASE), QBRANCH = shq(BRANCH)
 // The main checkout's state: HEAD, the status lines, the staged and unstaged contents, the untracked files' contents.
 const GUARD_CMD = 'git -C ' + QM + ' rev-parse HEAD; git -C ' + QM + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + QM + ' diff HEAD | sha256sum; (cd ' + QM + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
+// Report only (never compared for equality): the status lines and a hash per modified or untracked file, so a stop
+// can name what changed even on a path that was already dirty.
+const GUARD_DETAIL_CMD = 'git -C ' + QM + ' status --porcelain --untracked-files=all; (cd ' + QM + ' && { git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u | xargs -r -d "\\n" sha256sum)'
 const DIFF_CMD = 'git -C ' + QWT + ' diff --name-status --no-renames ' + QBASE + '...HEAD'
 const NUMSTAT_CMD = 'git -C ' + QWT + ' diff --numstat --no-renames ' + QBASE + '...HEAD'
 const GATE_TAIL = 'Then report gated_head (git -C ' + QWT + ' rev-parse HEAD) and worktree_clean (true when git -C ' + QWT + ' status --porcelain prints nothing).'
@@ -289,9 +360,14 @@ const shared = (stage, rereadBrief) => [
   'Work only in the worktree ' + WT + ' (branch ' + BRANCH + '). Your shell starts in the main checkout on EVERY call: use git -C ' + QWT + ', absolute paths, or "cd ' + QWT + ' && ..." inside the same command. Never edit, commit or check out anything in ' + MAIN + '.',
   'Shared machine: a short TMPDIR for anything you run, TMPDIR=$(mktemp -d $HOME/.cache/cc.XXXXXX) (tests bind unix sockets below it, which allow 108 bytes; remove it when done), a timeout on every harness you write, no large files in /tmp; never sudo, never tier 2 E2E, never git stash, never push; repository text in English, with no personal or private names.',
   'Never end your turn or return while a command you started is still running: run gates in the foreground (a Bash timeout up to 600000 ms), or keep checking a backgrounded one in the foreground until it exits. Do not invoke the code-review or simplify skills unless this prompt says so.' + (rereadBrief ? ' Re-read the brief ' + A.brief + ' before your final check: it may have grown.' : ''),
-  'Guard: run exactly "' + GUARD_CMD + '" as your first and as your last command, and paste each output verbatim into main_before and main_after.',
+  'Guard: run exactly "' + GUARD_CMD + '" as your first and as your last command, and paste each output verbatim into main_before and main_after. Right after each of the two, run "' + GUARD_DETAIL_CMD + '" and paste its output into main_detail_before and main_detail_after (report only).',
+  'Bugs you find outside this change go to ' + A.notes + '/out-of-scope-' + A.slug + '.md (file, line, scenario); leave that code alone.',
+  ...(RESTART_STAGES.includes(stage) ? ['You may be a restart of this stage after a pause: first read "git -C ' + QWT + ' log --oneline ' + QBASE + '..HEAD" and "git -C ' + QWT + ' status"; continue from what is there (commit or redo a half-done edit); never start over, and never stop because earlier work of this stage exists.'] : []),
+  advisorLine(stage),
 ].join('\n')
-const GUARDED = { main_before: { type: 'string' }, main_after: { type: 'string' } }
+// Every stage's shared prompt carries its advisor sentence: checked at start, not an hour later when the stage runs.
+for (const s of STAGES) { const p = advisorProblem(s, shared(s, false)); if (p) throw new Error('advisor rule: ' + p) }
+const GUARDED = { main_before: { type: 'string' }, main_after: { type: 'string' }, main_detail_before: { type: 'string' }, main_detail_after: { type: 'string' } }
 const GREQ = ['main_before', 'main_after']
 const CHANGED = { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, status: { type: 'string' } }, required: ['path', 'status'] } }
 const GATED = { gated_head: { type: 'string' }, worktree_clean: { type: 'boolean' } }
@@ -299,13 +375,25 @@ const GATED = { gated_head: { type: 'string' }, worktree_clean: { type: 'boolean
 let lastAfter = null
 const trail = []
 // Runs one agent and checks the guard; returns null (and logs why) when the run must stop.
+let lastDetail = null
 async function guarded(label, phase_, prompt, props, required) {
+  const why = advisorProblem(stageOf(label), prompt)
+  if (why) throw new Error('advisor rule: ' + why)
   const r = await agent(prompt, { label, phase: phase_, schema: { type: 'object', properties: { ...props, ...GUARDED }, required: [...required, ...GREQ] } })
   if (!r) { log(label + ': the agent failed or was skipped: stopping'); trail.push({ label, failed: true }); return null }
   const norm = (s) => String(s).trim()
-  if (norm(r.main_before) !== norm(r.main_after)) { log(label + ': the main checkout changed during this agent: stopping'); trail.push({ label, main_changed: true }); return null }
-  if (lastAfter !== null && norm(r.main_before) !== lastAfter) { log(label + ': the main checkout changed between agents: stopping'); trail.push({ label, main_changed_between: true }); return null }
+  if (norm(r.main_before) !== norm(r.main_after)) {
+    const main_changes = guardChanges(r.main_detail_before, r.main_detail_after)
+    log(label + ': the main checkout changed during this agent: stopping; changed: ' + (main_changes.join(' | ') || 'not reported'))
+    trail.push({ label, main_changed: true, main_changes }); return null
+  }
+  if (lastAfter !== null && norm(r.main_before) !== lastAfter) {
+    const main_changes = guardChanges(lastDetail, r.main_detail_before)
+    log(label + ': the main checkout changed between agents: stopping; changed: ' + (main_changes.join(' | ') || 'not reported'))
+    trail.push({ label, main_changed_between: true, main_changes }); return null
+  }
   lastAfter = norm(r.main_after)
+  lastDetail = r.main_detail_after
   return r
 }
 const stopped = (stage, extra) => ({ ready: false, stopped: stage, branch: BRANCH, worktree: WT, trail, ...extra })
@@ -329,12 +417,17 @@ if (MODE === 'new' && A.kind !== 'docs') {
 let impl = null, simp = null, changed = [], numstat = '', HEAD = ''
 if (MODE === 'new' || MODE === 'continue') {
   phase('Implement')
-  const start = MODE === 'new'
-    ? 'Create the worktree: git -C ' + QM + ' worktree add -b ' + QBRANCH + ' ' + QWT + ' ' + QBASE + '. If the branch or the worktree already exists, stop and report it (check_ok false).'
-    : 'The worktree ' + WT + ' exists: continue from its state' + ' (read ' + A.notes + '/DESIGN-' + A.slug + '.md if it exists).'
+  const START_FACTS = { type: 'object', properties: { branch_exists: { type: 'boolean' }, worktree_exists: { type: 'boolean' }, worktree_on_branch: { type: 'boolean' }, descends_from_base: { type: 'boolean' } }, required: ['branch_exists', 'worktree_exists', 'worktree_on_branch', 'descends_from_base'] }
+  const start = 'Before anything else, look at what exists and report start_facts, read before you act: branch_exists ("git -C ' + QM + ' rev-parse --verify --quiet refs/heads/' + BRANCH + '" exits 0), worktree_exists (the folder ' + WT + ' exists and "git -C ' + QWT + ' rev-parse --git-dir" exits 0), worktree_on_branch ("git -C ' + QWT + ' rev-parse --abbrev-ref HEAD" prints ' + BRANCH + '), descends_from_base ("git -C ' + QM + ' merge-base --is-ancestor ' + QBASE + ' ' + QBRANCH + '" exits 0; false when the branch does not exist), and found_head ("git -C ' + QWT + ' rev-parse HEAD", or "" without a worktree). Then act by this table and report start: ' +
+    (MODE === 'new' ? 'no branch and no worktree: "created" (git -C ' + QM + ' worktree add -b ' + QBRANCH + ' ' + QWT + ' ' + QBASE + '); ' : 'no branch and no worktree: "refused" (mode "continue" expects them); ') +
+    'the worktree on ' + BRANCH + ', or the branch alone, and the branch descends from ' + BASE + ': "continued" (with the branch alone, first git -C ' + QM + ' worktree add ' + QWT + ' ' + QBRANCH + '). You may be a restart of this stage after a pause: continue from what is there (read ' + A.notes + '/DESIGN-' + A.slug + '.md if it exists, "git -C ' + QWT + ' log --oneline ' + QBASE + '..HEAD" and "git -C ' + QWT + ' status"), finish or redo a half-done edit and commit it; never start over, and never stop because your own earlier work exists. Anything else (a worktree on another branch, a branch that does not descend from ' + BASE + '): "refused": change nothing, say what you found, check_ok false.'
   impl = await guarded('implement', 'Implement', shared('implement', true) + '\n\nStage: implement "' + A.title + '". ' + start + ' Follow the brief ' + A.brief + (design ? ' and the design note ' + A.notes + '/DESIGN-' + A.slug + '.md' : '') + '. Commits of one kind each, with their proof; tests with the change (a behaviour change has a test that fails on the old code, checked). While working run "cd ' + QWT + ' && invowk cmd test module <module>"; at the end run "cd ' + QWT + ' && invowk cmd check" once: check_ok is true only when it passed, and check holds its summary. ' + GATE_TAIL + ' Return changed_paths exactly as "' + DIFF_CMD + '" prints them.',
-    { commits: { type: 'array', items: { type: 'string' } }, changed_paths: CHANGED, check_ok: { type: 'boolean' }, check: { type: 'string' }, notes: { type: 'string' }, ...GATED }, ['commits', 'changed_paths', 'check_ok', 'check', 'gated_head', 'worktree_clean'])
+    { start: { type: 'string', enum: ['created', 'continued', 'refused'] }, start_facts: START_FACTS, found_head: { type: 'string' }, commits: { type: 'array', items: { type: 'string' } }, changed_paths: CHANGED, check_ok: { type: 'boolean' }, check: { type: 'string' }, notes: { type: 'string' }, ...GATED }, ['start', 'start_facts', 'found_head', 'commits', 'changed_paths', 'check_ok', 'check', 'gated_head', 'worktree_clean'])
   if (!impl) return stopped('implement')
+  const wantStart = startAction(impl.start_facts, MODE)
+  if (impl.start !== wantStart) { log('implement: it reported start "' + impl.start + '" where its facts give "' + wantStart + '": stopping'); return stopped('implement', { impl }) }
+  if (wantStart === 'refused') { log('implement: refused to start (see impl.notes): stopping'); return stopped('implement', { impl }) }
+  if (wantStart === 'continued') log('implement: continued from the existing worktree at ' + (impl.found_head || 'its branch'))
   if (!impl.check_ok || !impl.worktree_clean) return stopped('implement', { impl })
 
   phase('Simplify')
@@ -413,7 +506,8 @@ else if (fix.deferred.length) log('fix: ' + fix.deferred.length + ' finding(s) d
 if (fix.gates_ok && String(fix.final_head).trim() !== String(fix.gated_head).trim()) log('fix: HEAD moved after the gates (' + fix.gated_head + ' -> ' + fix.final_head + '): not ready')
 const ready = isReady(fix, TIER1) && fix.descends_from_reviewed === true && !deferWhy
 const changedCode = fixerChangedCode(fix)
-const done = (extra) => ({ ready, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: changedCode, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail, ...extra })
+// followups: what the stopping rule (header) sends to the pull request body unless it is a correctness bug.
+const done = (extra) => ({ ready, lane: LANE, deferred: fix.deferred, tier1_deferred: pick.tier1 && !TIER1, needs_review: changedCode, reviewed_head: HEAD, branch: BRANCH, worktree: WT, head: fix.gated_head, lenses: pick, design, impl, simp, findings: all, fix, trail, followups: { rereview_low: (extra.rereview && extra.rereview.low) || [], out_of_scope: A.notes + '/out-of-scope-' + A.slug + '.md (when the run wrote it)' }, ...extra })
 if (!changedCode) return done({ rereview: null })
 if (!ready) { log('re-review: skipped, the branch is not ready anyway'); return done({ rereview: null }) }
 
@@ -424,7 +518,7 @@ const FIXED = String(fix.gated_head).trim()
 const RANGE = 'git -C ' + QWT + ' diff ' + shq(HEAD) + ' ' + shq(FIXED)
 const runReReview = async () => {
   const r = await guarded('re-review', 'Re-review', shared('re-review', false) + '\n\nStage: re-review of the fixer\'s commits, by hand, FINDINGS ONLY (edit nothing; do not invoke the code-review skill: it reviews only against main). The range is "' + RANGE + '" ("git -C ' + QWT + ' log ' + shq(HEAD) + '..' + shq(FIXED) + '" lists its commits); the change before it was already reviewed. Check that each commit does what its message says and breaks nothing around it (read the code around it on the branch with "git -C ' + QWT + ' show ' + shq(FIXED) + ':<file>"), keeps the repository rules and the proof the kind "' + A.kind + '" asks for, and has a test where it needs one. Give each finding file, line, summary, a concrete failure scenario and severity: "high" when the branch must not be integrated as it is (a bug, a broken rule or gate, a missing proof), "low" for anything else.' + REVIEWED,
-    { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string', enum: ['high', 'low'] } }, required: ['file', 'summary', 'scenario', 'severity'] } }, reviewed_head: { type: 'string' } }, ['findings', 'reviewed_head'])
+    { findings: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, summary: { type: 'string' }, scenario: { type: 'string' }, severity: { type: 'string', enum: ['high', 'low'] } }, required: ['file', 'summary', 'scenario', 'severity'] } }, reviewed_head: { type: 'string' }, advisor_called: { type: 'boolean' } }, ['findings', 'reviewed_head'])
   return counted(r, 're-review', FIXED, 're-review')
 }
 let rr = await runReReview()
