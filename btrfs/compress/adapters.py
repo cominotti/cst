@@ -12,6 +12,7 @@ from typing import Final
 from btrfs.compress.domain import (
     PROC_CMDLINE_PATH,
     PROC_MOUNTS_PATH,
+    ROOT_ANCHOR_TARGETS,
     TOP_MOUNT_UNIT_NAME,
     TopMountInfo,
     parse_top_mount_unit,
@@ -104,8 +105,9 @@ class LinuxCompressHostAdapter:
 
     def root_uuid(self) -> str:
         """Return the root btrfs filesystem UUID, or "" when unknown: the btrfs of /sysroot, else of /, else of
-        /var (the order of `pick_root_mounts`, cst doctor and btrfs-setup); else the top mount unit's."""
-        for target in ("/sysroot", "/", "/var"):
+        /var (`ROOT_ANCHOR_TARGETS`, the order of `pick_root_mounts`, cst doctor and btrfs-setup); else the top
+        mount unit's."""
+        for target in ROOT_ANCHOR_TARGETS:
             res = self._runner.run(
                 ["findmnt", "-rn", "-t", "btrfs", "-o", "UUID", "--target", target],
                 on_host=not self._host_root,

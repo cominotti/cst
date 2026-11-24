@@ -29,6 +29,9 @@ ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var", "/var/
 # filesystem, never changed).
 _PRIMARY_ROOT_TARGETS: Final[frozenset[str]] = frozenset({"/", "/sysroot", "/var"})
 _HOME_TARGETS: Final[frozenset[str]] = ROOT_TARGETS - _PRIMARY_ROOT_TARGETS
+# The root filesystem is the btrfs of the first of these targets that is one (/sysroot, else /, else /var):
+# pick_root_mounts picks the live root mounts by it, and the host adapter's root_uuid the fstab lines.
+ROOT_ANCHOR_TARGETS: Final[tuple[str, ...]] = ("/sysroot", "/", "/var")
 _UUID_PREFIX: Final = "UUID="
 _SUBVOL_SUFFIX_RE: Final = re.compile(r"\[[^\]]*\]$")
 ROOTFLAGS_PREFIX: Final[str] = "rootflags="
@@ -393,7 +396,7 @@ def pick_root_mounts(mounts: Sequence[MountEntry]) -> tuple[MountEntry, ...]:
     of the root filesystem: the device of /sysroot, else /, else /var. A separate btrfs /home is left out;
     with none of those three on btrfs, nothing is a root mount."""
     by_target = {m.target: m for m in mounts}
-    anchor = next((by_target[t] for t in ("/sysroot", "/", "/var") if t in by_target), None)
+    anchor = next((by_target[t] for t in ROOT_ANCHOR_TARGETS if t in by_target), None)
     if anchor is None:
         return ()
     device = _mount_device(anchor.source)
