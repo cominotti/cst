@@ -9,6 +9,7 @@ import re
 from typing import TYPE_CHECKING, Final
 
 from cst_core.adapters.files import read_text
+from cst_core.domain.text import group
 from cpu.game.adapters.host import holds, read_stripped, write_sysfs_line
 from cpu.game.domain import (
     GameRecordKind,
@@ -42,7 +43,7 @@ _STEAM_CLIENT_COMMS: Final = frozenset(
 
 def _suffix_num(name: str, pattern: re.Pattern[str]) -> int:
     m = pattern.fullmatch(name)
-    return int(m.group(1)) if m is not None else -1
+    return int(group(m, 1)) if m is not None else -1
 
 
 def _card_number(name: str) -> int:
@@ -188,7 +189,7 @@ def _pid_cards(profile: GameProfile, pid: str, dev_to_card: dict[str, str]) -> s
         m = _DRI_FD_RE.match(target)
         if m is None:
             continue
-        dev_path = os.path.join(profile.paths.sys_drm, m.group(1), "device")
+        dev_path = os.path.join(profile.paths.sys_drm, group(m, 1), "device")
         card = dev_to_card.get(os.path.realpath(dev_path))
         if card is not None:
             cards.add(card)
