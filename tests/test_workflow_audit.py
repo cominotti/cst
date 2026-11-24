@@ -315,7 +315,9 @@ def _task_variables(block: str) -> list[str]:
 
 
 UV_AUDIT_STEP = re.compile(r"^\s*(?:-\s+)?run:\s*invowk cmd ci uv-audit\s*$")
-_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+# A job's line under the top-level jobs: key (a trailing comment allowed), and that key's own line.
+_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
+_JOBS_KEY = re.compile(r"^jobs:\s*(?:#.*)?$")
 _LENIENT = re.compile(r"^\s*(?:-\s+)?(if|continue-on-error|needs)\s*:")
 _STEP = re.compile(r"^(\s*)-\s")
 
@@ -325,16 +327,18 @@ def uncommented_lines(text: str) -> list[tuple[int, str]]:
     return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
 
 
-def _jobs(lines: Iterable[tuple[int, str]]) -> dict[str, list[tuple[int, str]]]:
-    """The numbered lines of each job of a workflow (the lines under `  NAME:`), by job name."""
+def workflow_jobs(lines: Iterable[tuple[int, str]]) -> dict[str, list[tuple[int, str]]]:
+    """The numbered lines of each job of a workflow (the lines under `  NAME:` of the top-level `jobs:`
+    key; a key of `on:` or `env:` is no job), by job name. tests/e2e_host_python.py reads jobs with it
+    too."""
     jobs: dict[str, list[tuple[int, str]]] = {}
     job: list[tuple[int, str]] | None = None
+    in_jobs = False
     for n, line in lines:
-        found = _JOB.match(line)
-        if found is not None:
-            job = jobs.setdefault(found.group(1), [])
-        elif line and not line.startswith(" "):
-            job = None
+        if line and not line.startswith(" "):
+            in_jobs, job = _JOBS_KEY.match(line) is not None, None
+        elif in_jobs and (found := _JOB.match(line)) is not None:
+            job = jobs.setdefault(group(found, 1), [])
         elif job is not None:
             job.append((n, line))
     return jobs
@@ -370,7 +374,7 @@ def uv_audit_problems(cue: str, nightly: str) -> list[str]:
         for n, line in lines
         if "UV_" in line
     ]
-    jobs = _jobs(lines)
+    jobs = workflow_jobs(lines)
     runs = [(name, n) for name, body in jobs.items() for n, line in body if UV_AUDIT_STEP.match(line)]
     if not runs:
         out.append(f"{NIGHTLY}: no step runs `run: invowk cmd ci uv-audit` (on one line, nothing added)")
@@ -440,7 +444,7 @@ def _mbt_variable_problems(path: str, lines: Iterable[tuple[int, str]]) -> list[
 def _mbt_ci_problems(ci: str) -> list[str]:
     lines = uncommented_lines(ci)
     out = _mbt_variable_problems(CI, lines)
-    body = _jobs(lines).get(MBT_CI_JOB, [])
+    body = workflow_jobs(lines).get(MBT_CI_JOB, [])
     runs = [n for n, line in body if MBT_CI_STEP.match(line)]
     if not runs:
         out.append(f"{CI}: the job {MBT_CI_JOB} has no step `{_MBT_SHOWN.format('ci')}` (on one line, nothing added)")
@@ -461,7 +465,7 @@ def _mbt_ci_problems(ci: str) -> list[str]:
 def _mbt_nightly_problems(nightly: str) -> list[str]:
     lines = uncommented_lines(nightly)
     out = _mbt_variable_problems(NIGHTLY, lines)
-    jobs = _jobs(lines)
+    jobs = workflow_jobs(lines)
     named = [name for name, lines in jobs.items() if any(MBT_NIGHTLY_STEP.match(line) for _, line in lines)]
     if not named:
         out.append(f"{NIGHTLY}: no step runs `{_MBT_SHOWN.format('nightly')}` (on one line, nothing added)")
@@ -988,6 +992,19 @@ class WorkflowAuditTest(unittest.TestCase):
 
     def test_ci_and_the_nightly_run_the_mbt_profiles(self) -> None:
         self.assertEqual(mbt_step_problems(GOOD_CI, GOOD_MBT_NIGHTLY), [])
+
+    def test_a_job_line_with_a_comment_is_still_that_job(self) -> None:
+        # _JOB took only `  NAME:` with nothing after it: a comment after fast-gates hid its mbt step, and
+        # after uv-audit its audit step, while tests/e2e_host_python.py (a reader of its own) still saw both.
+        ci = GOOD_CI.replace("  fast-gates:\n", "  fast-gates:  # the fast gates\n")
+        self.assertEqual(mbt_step_problems(ci, GOOD_MBT_NIGHTLY), [])
+        nightly = GOOD_NIGHTLY.replace("  uv-audit:\n", "  uv-audit:  # the audit\n")
+        self.assertEqual(uv_audit_problems(GOOD_CUE, nightly), [])
+
+    def test_only_keys_of_the_top_level_jobs_key_are_jobs(self) -> None:
+        # Every `  NAME:` was a job, `on:`'s `  push:` too.
+        text = "on:\n  push:\n    branches: [main]\njobs:  # all of them\n  a:  # one\n    runs-on: x\n"
+        self.assertEqual(workflow_jobs(uncommented_lines(text)), {"a": [(6, "    runs-on: x")]})
         ci_none = [
             (
                 f"{CI}: the job fast-gates has no step "

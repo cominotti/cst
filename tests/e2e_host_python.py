@@ -49,7 +49,7 @@ from typing import Final
 
 from cst_core.domain.imports import imported_modules, loads_code_by_path
 from cst_core.domain.text import group
-from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines
+from tests.test_workflow_audit import INVOWKFILE, task_script, uncommented_lines, workflow_jobs
 
 # The files CI starts with its runner's python3 (the rest of the closure is found from them).
 HOST_ENTRIES: Final = ("tests/e2e/image_digest.py", "tests/e2e/run.py")
@@ -94,7 +94,6 @@ _PYTHON_MODULE_RUN: Final = re.compile(r"\bpython3\b[^\n]*?\s-m\s*([\w.]+)")
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
 # command starts (a line, a run: key, after ; & | or an opening parenthesis), not in a message's text.
 _INVOWK_RUN: Final = re.compile(r"(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|(]\s*)(?:exec\s+)?invowk cmd((?: [a-z0-9][\w-]*)+)")
-_JOB: Final = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
 _JOB_KEY: Final = re.compile(r"^    ([a-z-]+):\s*(.*?)\s*(?:#.*)?$")
 _LOCAL_ACTION: Final = re.compile(r"\buses:\s*\./(\.github/actions/[\w.-]+)\s*$")
 # Path's attributes that name a folder above a path, and its methods that give the same file's path.
@@ -344,21 +343,6 @@ def host_closure(repo: str, entries: Iterable[str] = HOST_ENTRIES) -> tuple[list
     return sorted(seen), problems
 
 
-def _jobs(text: str) -> dict[str, list[tuple[int, str]]]:
-    """The numbered lines of each job under a workflow's top-level jobs: key, by job name."""
-    jobs: dict[str, list[tuple[int, str]]] = {}
-    job: list[tuple[int, str]] | None = None
-    in_jobs = False
-    for n, line in uncommented_lines(text):
-        if line and not line.startswith(" "):
-            in_jobs, job = line.rstrip() == "jobs:", None
-        elif in_jobs and (found := _JOB.match(line)) is not None:
-            job = jobs.setdefault(group(found, 1), [])
-        elif job is not None:
-            job.append((n, line))
-    return jobs
-
-
 def _job_key(body: Sequence[tuple[int, str]], key: str) -> str | None:
     """The value of a job's own key (indented four spaces), None when the job has none."""
     for _, line in body:
@@ -439,7 +423,7 @@ def host_runs(repo: str) -> tuple[dict[str, list[str]], list[str]]:
         problems += _not_entries(rel, files)
     by_runner: dict[str, list[str]] = {}
     for rel in _workflow_files(repo):
-        for job, body in _jobs(_read(repo, rel)).items():
+        for job, body in workflow_jobs(uncommented_lines(_read(repo, rel))).items():
             if _job_key(body, "container") is not None:
                 continue
             files, found = _runs(repo, body, cue, f"{rel} (job {job})")
