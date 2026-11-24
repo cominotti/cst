@@ -174,7 +174,7 @@ def _with_udev_fields(disk: BlockDisk, *, hwdb_solution: str, udev_ready: bool, 
     )
 
 
-def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDisk:
+def with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDisk:
     """disk with what udev knows of it: its hwdb solution, whether udev has processed it, or why
     `udevadm info` could not tell (missing, failed: the disk is judged as before)."""
     res = runner.run(
@@ -210,7 +210,7 @@ def collect_iocost_snapshot(
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
     disks = _scan_sys_block(paths.sys_block)
     if udev:
-        disks = tuple(_with_udev_properties(cmd_runner, d) if is_auto_eligible_disk(d) else d for d in disks)
+        disks = tuple(with_udev_properties(cmd_runner, d) if is_auto_eligible_disk(d) else d for d in disks)
     ctrl_raw = read_text(paths.controllers_path)
     io_present = ("io" in ctrl_raw.split()) if ctrl_raw is not None else None
     qos_raw = read_text(paths.qos_path)
