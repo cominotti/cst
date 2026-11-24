@@ -456,8 +456,7 @@ class UserFiles:
         folder known by its name, which the next repair deletes (drop_marked), not a partly
         deleted copy whose times say it was written to."""
         marked = path + DROP_MARK
-        if kind(marked) != LstatKind.ABSENT:
-            self.u_rmtree(marked)  # a rename onto a folder that is not empty fails
+        self.drop_marked(path)  # a rename onto a folder that is not empty fails
         os.rename(path, marked)
         fsync_dir(os.path.dirname(marked))
         self.u_rmtree(marked)
