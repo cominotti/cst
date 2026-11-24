@@ -78,7 +78,8 @@ export const meta = {
 //   by hand, never code-review. Named lookup through .claude/workflows did not find it
 //   in a session that started before it landed on main (scriptPath works); retry by name in a new session.
 // - Every agent pastes the output of GUARD_CMD for the main checkout (its HEAD, status lines, staged and unstaged
-//   contents and untracked files' contents) before and after; the script stops when an
+//   contents with full object names (--full-index: abbreviated ones grow with the object store) and untracked files'
+//   contents) before and after; the script stops when an
 //   agent's two readings differ or when one agent's "before" differs from the previous agent's "after".
 // - The branch head is checked the same way: simplify reports the head it leaves (and a clean worktree), every
 //   reviewer the head it reviewed (it must be that one), and the fixer the head it gated and the head after
@@ -229,6 +230,12 @@ function fixerChangedCode(fix) {
   return fix.needs_review === true || (fix.fix_paths || []).some((p) => !MD.test(p) && !UNIT_TEST.test(p))
 }
 
+// The main checkout's state: HEAD, the status lines, the staged and unstaged contents, the untracked files' contents.
+// git diff names objects in full (--full-index): its abbreviated names grow (7 to 8 characters) as the shared object
+// store grows, so the same main checkout hashed differently between two agents and stopped runs (2026-11-24). Pure: tested below.
+function guardCmd(qm) {
+  return 'git -C ' + qm + ' rev-parse HEAD; git -C ' + qm + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + qm + ' diff HEAD --full-index | sha256sum; (cd ' + qm + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
+}
 // A path as one shell word: as it is when it needs no quoting. Pure: tested below.
 function shq(s) { return /^[A-Za-z0-9_\/.,+:@%=-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'" }
 // Why the worktree path cannot work ('' when it can): inside the main checkout, its folder shows up in the guard's
@@ -342,6 +349,9 @@ function selftest() {
     startAction(S(true, true, true, false, true, false), 'new'), // no history in common with the base
     startAction(S(false, true, false, false, false, false), 'new'), // a worktree without the branch
   ], ['created', 'refused', 'continued', 'continued', 'continued', 'continued', 'refused', 'refused', 'refused', 'refused'], 'start action')
+  const gc = guardCmd('/r/cst')
+  eq([gc.includes('git -C /r/cst diff HEAD --full-index | sha256sum'), /\bdiff\b(?![^;|]*--full-index)/.test(gc)], [true, false], 'the guard names objects in full')
+  eq(['git -C /r/cst rev-parse HEAD;', 'git -C /r/cst status --porcelain --untracked-files=all | sha256sum;', 'git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'].map((s) => gc.includes(s)), [true, true, true], 'the guard keeps its four readings')
   eq([guardChanges('a\nb', 'a\nb'), guardChanges(' M AGENTS.md\nh1  AGENTS.md', ' M AGENTS.md\nh2  AGENTS.md\n?? x'), guardChanges('', '')], [[], ['- h1  AGENTS.md', '+ h2  AGENTS.md', '+ ?? x'], []], 'guard changes')
   return 'ok'
 }
@@ -365,8 +375,7 @@ const wtProblem = worktreeProblem(MAIN, WT)
 if (wtProblem) throw new Error('args.worktree: ' + wtProblem)
 
 const QM = shq(MAIN), QWT = shq(WT), QBASE = shq(BASE), QBRANCH = shq(BRANCH)
-// The main checkout's state: HEAD, the status lines, the staged and unstaged contents, the untracked files' contents.
-const GUARD_CMD = 'git -C ' + QM + ' rev-parse HEAD; git -C ' + QM + ' status --porcelain --untracked-files=all | sha256sum; git -C ' + QM + ' diff HEAD | sha256sum; (cd ' + QM + ' && git ls-files -z --others --exclude-standard | xargs -0r sha256sum) | sha256sum'
+const GUARD_CMD = guardCmd(QM)
 // Report only (never compared for equality): the status lines and a hash per modified or untracked file, so a stop
 // can name what changed even on a path that was already dirty.
 const GUARD_DETAIL_CMD = 'git -C ' + QM + ' status --porcelain --untracked-files=all; (cd ' + QM + ' && { git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u | xargs -r -d "\\n" sha256sum)'
