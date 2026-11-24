@@ -4351,6 +4351,16 @@ class DoctorDomainTest(unittest.TestCase):
             ("critical", "Disk error", 123),
         )
         self.assertIsNone(doc_domain.parse_alert_text("unknown 1\nurgency=critical\ntitle=x\n"))
+        # A last= in digits CST does not write (a hand-edited or damaged file) reads as 0: int() refuses the
+        # first and past its digit limit, and reads the Arabic-Indic three as 3.
+        for last in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "1" * 5000):
+            with self.subTest(last=last[:12]):
+                self.assertEqual(
+                    doc_domain.parse_alert_text(
+                        f"cst-alert 1\nurgency=critical\ntitle=Disk error\nlast={last}\n\nbody"
+                    ),
+                    ("critical", "Disk error", 0),
+                )
         self.assertTrue(doc_domain.mtime_matches_ns("1000.000000042", 1000 * 1_000_000_000 + 42))
         self.assertFalse(doc_domain.mtime_matches_ns("1001.0", 1000 * 1_000_000_000))
 
