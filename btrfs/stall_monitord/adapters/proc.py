@@ -20,7 +20,7 @@ from btrfs.stall_monitord.domain import (
 from cst_core.adapters.files import ensure_dir
 from cst_core.adapters.journal import log as journal_log
 from cst_core.domain.text import cgroup_v2_path
-from cst_core.domain.values import DAY
+from cst_core.domain.values import DAY, parse_integer
 
 CGROUP_ROOT = "/sys/fs/cgroup"
 
@@ -74,8 +74,9 @@ def read_kv(path: str) -> dict[str, int]:
 
 
 def read_int(path: str) -> int:
-    v = (read_text(path) or "").strip()
-    return int(v) if v.lstrip("-").isdigit() else 0
+    """The file's integer (one leading "-", then ASCII digits within int()'s limit), else 0."""
+    number = parse_integer((read_text(path) or "").strip())
+    return 0 if number is None else number
 
 
 def parse_psi(path: str) -> list[float | int] | None:

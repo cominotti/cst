@@ -53,6 +53,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
     format_cpulist,
+    parse_integer,
     parse_whole_number,
 )
 from cst_core.domain.units import ActiveState
@@ -159,6 +160,26 @@ class ValueObjectsTest(unittest.TestCase):
         ):
             with self.subTest(bad=bad[:12]):
                 self.assertIsNone(parse_whole_number(bad))
+
+    def test_an_integer_is_one_leading_minus_and_ascii_digits(self) -> None:
+        for text, want in (("0", 0), ("-0", 0), ("060", 60), ("-7", -7), ("-060", -60), ("9" * 4300, int("9" * 4300))):
+            with self.subTest(text=text[:12]):
+                self.assertEqual(parse_integer(text), want)
+        for digits in (
+            "",
+            "\N{SUPERSCRIPT TWO}",
+            "\N{ARABIC-INDIC DIGIT THREE}",
+            " 5",
+            "5 ",
+            "+5",
+            "--5",
+            "1_0",
+            "5\n",
+            "9" * 5000,
+        ):
+            for bad in (digits, "-" + digits):
+                with self.subTest(bad=bad[:12]):
+                    self.assertIsNone(parse_integer(bad))
 
     def test_duration_parse(self) -> None:
         self.assertEqual(Duration.parse("30s"), Duration(30))
