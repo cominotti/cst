@@ -6,7 +6,6 @@ import posixpath
 from typing import Final
 
 from cst_core.domain.text import parse_shell_assignments, parse_snapshots_conf
-from dataclasses import replace
 
 from perf.domain.evaluate import evaluate_perf_snapshot
 from perf.domain.models import (
@@ -22,6 +21,7 @@ from perf.domain.models import (
     GpuDeviceSample,
     GpuProbeSnapshot,
     IO_FILE_KEYS,
+    IrqLineSample,
     IoProbeSnapshot,
     MEMORY_FILE_KEYS,
     MemoryProbeSnapshot,
@@ -44,6 +44,7 @@ from perf.domain.parsers import (
     parse_optional_bool_flag,
     parse_optional_cpuset,
     parse_optional_int,
+    parse_proc_interrupts,
     parse_uevent_fields,
     parse_uptime_seconds,
 )
@@ -153,6 +154,23 @@ def _collect_idle_states(reader: PerfFsReader) -> tuple[CpuIdleStateSample, ...]
     return tuple(samples)
 
 
+def _irq_lines_with_affinity(reader: PerfFsReader, interrupts: str | None) -> tuple[IrqLineSample, ...]:
+    """The lines of /proc/interrupts, each active numbered IRQ with its effective_affinity_list read."""
+    return tuple(
+        IrqLineSample(
+            line.irq_id,
+            line.label,
+            line.counts_by_cpu,
+            effective_cpus=parse_optional_cpuset(
+                reader.read_rel(PerfRootKind.PROC, posixpath.join("irq", line.irq_id, "effective_affinity_list"))
+            ),
+        )
+        if line.irq_id.isdigit() and line.total_count >= IRQ_ACTIVE_MIN_COUNT
+        else line
+        for line in parse_proc_interrupts(interrupts)
+    )
+
+
 def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
     """Collect cpuidle, preempt, sched_ext, ntsync, irqbalance, and IRQ counts cleanly."""
     files = _read_key_map(reader, CPU_FILE_KEYS)
@@ -190,7 +208,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             or reader.is_dir_rel(PerfRootKind.SYS, _NTSYNC_CLASS)
             or reader.is_dir_rel(PerfRootKind.SYS, _NTSYNC_MODULE)
         )
-    snap = assemble_cpu_probe(
+    return assemble_cpu_probe(
         files,
         CpuProbeExtra(
             idle_states=_collect_idle_states(reader),
@@ -202,22 +220,9 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
             online_cpus=online_cpus,
             irqbalance_active=irqbalance_active,
             irqbalance_banned_cpus=banned_cpus,
+            irq_lines=_irq_lines_with_affinity(reader, files.get(PerfPathKey.INTERRUPTS)),
         ),
     )
-    if not snap.irq_lines:
-        return snap
-    enriched = tuple(
-        replace(
-            line,
-            effective_cpus=parse_optional_cpuset(
-                reader.read_rel(PerfRootKind.PROC, posixpath.join("irq", line.irq_id, "effective_affinity_list"))
-            ),
-        )
-        if line.irq_id.isdigit() and line.total_count >= IRQ_ACTIVE_MIN_COUNT
-        else line
-        for line in snap.irq_lines
-    )
-    return replace(snap, irq_lines=enriched)
 
 
 def _collect_block_devices(reader: PerfFsReader) -> list[BlockDeviceSample]:

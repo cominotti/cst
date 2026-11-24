@@ -400,7 +400,9 @@ def assemble_cpu_probe(
         online_cpus=meta.online_cpus,
         irqbalance_active=meta.irqbalance_active,
         irqbalance_banned_cpus=meta.irqbalance_banned_cpus,
-        irq_lines=parse_proc_interrupts(files.get(PerfPathKey.INTERRUPTS)),
+        irq_lines=parse_proc_interrupts(files.get(PerfPathKey.INTERRUPTS))
+        if meta.irq_lines is None
+        else meta.irq_lines,
         default_smp_affinity_hex=clean_opt_str(files.get(PerfPathKey.DEFAULT_SMP_AFFINITY)),
     )
 
