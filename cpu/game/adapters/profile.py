@@ -615,7 +615,7 @@ class GameProfile:
         of a newer CST is not read (its records may mean something else), and a setting game.state holds
         no record of is not set again ('off' could not undo it): each said in the journal once per boot
         (again when the text changes, and when it comes back after a tick that had nothing to say: _say_unheld)."""
-        text, newer = self._intended()
+        text, newer = self.intended()
         if newer is not None:
             said = f"drift not repaired: {newer}"
             self._say_once(self.paths.drift_warned, said, lambda: self.log(4, said))
@@ -764,7 +764,7 @@ class GameProfile:
         not_held = [] if drifts is None else unheld(drifts, state_recs)
         return drift_lines(drifts, manual=manual, newer=newer, not_held=not_held)
 
-    def _intended(self) -> tuple[str, str | None]:
+    def intended(self) -> tuple[str, str | None]:
         """game.intended's text, and why it cannot be compared (None: it can)."""
         text = read_text(self.paths.intended) or ""
         return text, newer_intended(self.paths.intended, text)

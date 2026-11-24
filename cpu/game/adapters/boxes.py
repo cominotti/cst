@@ -11,9 +11,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from cst_core.adapters.files import read_text
 from cst_core.domain.units import LoadState
-from cpu.game.domain import Manager, intended_records, newer_intended, show_values, transient_unit
+from cpu.game.domain import Manager, intended_records, show_values, transient_unit
 from cpu.game.domain.boxes import intended_covers, set_again_text, unset_settings
 
 if TYPE_CHECKING:
@@ -31,9 +30,7 @@ def set_again(
     repair leaves it too), a unit systemd has not loaded, a box that holds the game by now (folder, looked
     at only when there is something to set) and a value it cannot judge (setting_holds). With every setting
     holding it writes nothing."""
-    path = profile.paths.intended
-    text = read_text(path) or ""
-    newer = newer_intended(path, text)
+    text, newer = profile.intended()
     if newer is not None and not transient_unit(unit):
         return
     covered = intended_covers(intended_records(text), mgr, unit) if newer is None else frozenset()
