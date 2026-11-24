@@ -676,7 +676,9 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                     runner.fail_on = {"systemctl show"}
                 else:
                     runner.need_daemon_reload = answer
-                rc, lines = scrub_limit_status(self.paths, runner=runner)
+                # The runner the command makes itself (no runner keyword: code without it fails by assertion).
+                with mock.patch.object(scrub_adapters, "SubprocessCommandRunner", return_value=runner):
+                    rc, lines = scrub_limit_status(self.paths)
                 self.assertEqual(rc, 0, lines)
                 self.assertEqual(line in lines, shown, lines)
                 self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)  # status changes nothing

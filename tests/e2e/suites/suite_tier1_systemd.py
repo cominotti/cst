@@ -8291,10 +8291,13 @@ EOF
             says_behind 1G
             again set 1G
             limit_loaded 1G || {{ echo "set 1G again: systemd did not load the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
+            says_loaded 1G
 
             # 3. Nothing pending: no daemon-reload (the holder's Description, changed on disk, stays as loaded).
             sed -i 's/^Description=before$/Description=after/' {holder}
             [[ "$(show NeedDaemonReload cst-e2e-161-holder.service)" == yes ]] || cannot_bite "the holder's change is not seen"
+            plan_out="$(/opt/cst-rw/cst btrfs scrub-limit plan 1G)"
+            if grep -q '^  reload:' <<<"$plan_out"; then echo "plan 1G shows a reload with nothing pending" >&2; echo "$plan_out" >&2; exit 1; fi
             again set 1G
             [[ "$(show Description cst-e2e-161-holder.service)" == before ]] \
                 || {{ echo "set 1G with nothing pending ran a daemon-reload" >&2; exit 1; }}
