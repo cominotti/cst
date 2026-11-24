@@ -247,7 +247,7 @@ Rules:
 | `~/.local/bin/cst` | Link to the `cst` of the CST folder, so the hints of these tools (`cst cpu ...`) work as typed. Created for the user who ran `sudo`, only if nothing else is there ([README.md, The `cst` command](../README.md#the-cst-command)). |
 | `/etc/systemd/system/cpu-game.service` | Runs `cpu-game-profile on` when started, `off` when stopped. |
 | `/etc/systemd/system/cpu-game-watchdog.service` + `.timer` | Watchdog, every 30 s (first run 2 min after boot). Enabled and started. |
-| `/etc/systemd/system/cst-cpu-power.service` | Applies baseline GPU runtime PM and CPU C-state limits at boot (`cpu-power apply`). |
+| `/etc/systemd/system/cst-cpu-power.service` | Applies baseline GPU runtime PM and CPU C-state limits at boot (`cpu-power apply`). Enabled, and restarted by each `install`: it applies them now too, also when the unit already ran (states turned back on since, or a changed `CPU_CSTATE_MAX_LATENCY_US`). |
 | `/etc/cpu-setup/irqbalance.env`, `/etc/systemd/system/irqbalance.service.d/10-cst-ban.conf` | Managed by `cst cpu irq apply` (component `cpu:irq`): sets `IRQBALANCE_BANNED_CPULIST` from `BUILD_CPUS` & online CPUs. |
 | `/etc/udev/rules.d/65-cst-gpu-pm.rules` | Re-runs `cpu-power apply --gpu-only` on DRM card `add`/`change` (monitor hotplug). |
 | `/etc/systemd/system/machine.slice.d/10-cpu-setup.conf` | VM baseline weights `CPUWeight=50`, `IOWeight=50`. |
@@ -344,8 +344,10 @@ from `BUILD_CPUS`:
   an older CST wrote always has `CPU_CSTATE_MAX_LATENCY_US='200'`, and
   `install` keeps an existing file, so an AMD host installed before keeps the
   200 µs cap after an upgrade: set the line to `'off'` (or remove it), then
-  run `cst cpu power apply` (or reboot), which turns the states it disabled
-  back on.
+  run `cst cpu power apply` (or `cst cpu install`, or reboot), which turns
+  the states it disabled back on. After any change of the line, `cst cpu
+  install` applies the new value at once (it restarts
+  `cst-cpu-power.service`).
 
 (Files written before `VM_CPU_DISABLE` existed lack that line: `vm-pin` then
 uses the same five names as its default.) A byte that is not UTF-8 in this

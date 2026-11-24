@@ -5655,6 +5655,7 @@ PY
             [[ "$(head -n1 /usr/local/sbin/cpu-game-profile)" == *bash* ]]
             # This version over it: the programs again (zipapps), nothing else.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-new.txt
+            power_run1="$(systemctl show -P InvocationID cst-cpu-power.service)"
             written=$(sed -n 's/^written:   //p' /tmp/e2e-84-new.txt | sort | tr '
 ' ' ')
             # The game profile becomes a zipapp; cpu-watch, cpu-irq, cpu-power, and cpu-vm-pin + new unit/udev rule.
@@ -5691,6 +5692,11 @@ PY
             # A second install writes nothing.
             as_root /opt/cst-rw/cst cpu install >/tmp/e2e-84-again.txt
             if grep -q '^written:' /tmp/e2e-84-again.txt; then cat /tmp/e2e-84-again.txt >&2; exit 1; fi
+            # ...and still runs cpu-power apply again: cst-cpu-power.service, a oneshot that already ran, restarted.
+            systemctl -q is-active cst-cpu-power.service
+            power_run2="$(systemctl show -P InvocationID cst-cpu-power.service)"
+            [[ -n "$power_run1" && "$power_run2" != "$power_run1" ]] \
+                || {{ echo "cst-cpu-power.service not run again: $power_run1 / $power_run2" >&2; exit 1; }}
             # The installed cpu-irq is a zipapp with no checkout beside it: apply and revert write and remove
             # through the installer's use case in the program itself, and record cpu:irq: pending while no
             # irqbalance.service runs the ban-list, done once one does.

@@ -531,7 +531,8 @@ class InstallTest(CpuSetupCase):
             "systemctl --user -M tester@ daemon-reload",
             "udevadm control --reload-rules",
             "systemctl enable --now cpu-game-watchdog.timer",
-            "systemctl enable --now cst-cpu-power.service",
+            "systemctl enable cst-cpu-power.service",
+            "systemctl restart cst-cpu-power.service",
             f"{inst} mark --component cpu:core done",
             f"{runuser} mark --home {self.home} --component cpu:toolbox done",
             f"{runuser} mark --home {self.home} --component cpu:gamemode done",
@@ -707,9 +708,23 @@ class InstallTest(CpuSetupCase):
                 )
                 self.assertEqual(self.runner.calls, [])
 
+    def test_a_second_install_applies_cpu_power_again(self) -> None:
+        # The unit already ran (a oneshot that stays active): `enable --now` would not run cpu-power apply again,
+        # so a C-state cap or GPU policy set but not in effect (states turned back on, a new
+        # CPU_CSTATE_MAX_LATENCY_US) would stay so. Each install restarts it.
+        for run in (1, 2):
+            self.runner.calls.clear()
+            self.assertEqual(self.command("install")[0], 0, run)
+            calls = self.runner.joined()
+            self.assertIn("systemctl restart cst-cpu-power.service", calls, run)
+            self.assertLess(
+                calls.index("systemctl enable cst-cpu-power.service"),
+                calls.index("systemctl restart cst-cpu-power.service"),
+            )
+
     def test_a_failing_step_ends_install_with_its_exit_status(self) -> None:
         self.runner.answers = [
-            ("systemctl enable --now", CommandResult(4, "", "")),
+            ("systemctl restart cst-cpu-power.service", CommandResult(4, "", "")),
             ("id -nG", CommandResult(0, "gamemode", "")),
         ]
         rc, out, _ = self.command("install")

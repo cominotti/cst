@@ -354,8 +354,8 @@ class CpuSetup:
         self.run(["systemctl", "daemon-reload"])
         self.usys("daemon-reload")
         self.run(["udevadm", "control", "--reload-rules"], check=False, quiet=True)
-        self.run(["systemctl", "enable", "--now", WATCHDOG_TIMER])
-        self.run(["systemctl", "enable", "--now", CPU_POWER_SERVICE])
+        for cmd in (["enable", "--now", WATCHDOG_TIMER], ["enable", CPU_POWER_SERVICE], ["restart", CPU_POWER_SERVICE]):
+            self.run(["systemctl", *cmd])
         self.installer("mark", "--component", CORE_COMPONENT, ComponentState.DONE)
         home = self.required_home(user, "cst-install.bash")
         self.installer("mark", "--home", home, "--component", TOOLBOX_COMPONENT, ComponentState.DONE, as_user=user)
