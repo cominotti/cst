@@ -42,10 +42,9 @@ from btrfs.tests.fakes import Crash, FakeSystem, entries, tree
 from btrfs.tests.test_docker_volumes_nocow import Base, fresh
 from cst_core.adapters import SystemClockAdapter
 from cst_core.adapters import nocow as core_nocow
-from cst_core.domain.shapes import json_object, parse_json
 from cst_core.ports import CommandResult, CommandRunnerPort
 from tests.fault_injection import stub_fsync
-from tests.quint.itf import Value, items, itf, number, record, text, truth
+from tests.quint.itf import Value, items, number, record, text, trace_states, traces_in, truth
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACES: Final = os.path.join(HERE, "quint", "traces")
@@ -124,26 +123,17 @@ def disk_of(s: dict[str, Value]) -> Disk:
 
 
 def load_trace(path: str) -> list[Step]:
-    with open(path, encoding="utf-8") as f:
-        doc = parse_json(f.read())
-    if not json_object(doc) or not isinstance(doc.get("states"), list):
-        raise AssertionError(f"{path}: not an ITF trace")
-    out = []
-    for raw in items(itf(doc["states"])):
-        state = record(raw)
-        s = next(record(v) for k, v in state.items() if k.endswith("::s"))
-        label = next(record(v) for k, v in state.items() if k.endswith("::step"))
-        out.append(
-            Step(
-                text(label["name"]),
-                text(label["vol"]),
-                text(label["outcome"]),
-                text(s["pc"]),
-                disk_of(s),
-                tuple(text(t) for t in items(s["todo"])),
-            )
+    return [
+        Step(
+            text(label["name"]),
+            text(label["vol"]),
+            text(label["outcome"]),
+            text(s["pc"]),
+            disk_of(s),
+            tuple(text(t) for t in items(s["todo"])),
         )
-    return out
+        for s, label in trace_states(path)
+    ]
 
 
 def runs(trace: list[Step]) -> Iterator[list[Step]]:
@@ -498,10 +488,6 @@ def mock_ioctls(fs: FakeSystem) -> contextlib.ExitStack:
     stack.enter_context(mock.patch.object(os, "getxattr", fs.getxattr))
     stack.enter_context(mock.patch.object(os, "sync", fs.sync))
     return stack
-
-
-def traces_in(folder: str) -> list[str]:
-    return [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".itf.json")]
 
 
 def trace_files() -> list[str]:

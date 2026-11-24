@@ -39,9 +39,8 @@ import unittest
 
 from btrfs.tests.fakes import Crash
 from cst_core.domain.errors import ExitStatus, Refused
-from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import WEEK
-from tests.quint.itf import Value, items, itf, number, record, text, truth
+from tests.quint.itf import Value, items, number, record, text, trace_states, traces_in, truth
 from vm import domain as vm_domain, wiring as vm_wiring
 from vm.application import nas as vm_app_nas
 from vm.domain import backup as vm_domain_backup
@@ -168,33 +167,24 @@ def machine_of(s: Mapping[str, Value]) -> Machine:
 
 
 def load_trace(path: str) -> list[Step]:
-    with open(path, encoding="utf-8") as f:
-        doc = parse_json(f.read())
-    if not json_object(doc) or not isinstance(doc.get("states"), list):
-        raise AssertionError(f"{path}: not an ITF trace")
-    out: list[Step] = []
-    for raw in items(itf(doc["states"])):
-        state = record(raw)
-        s = next(record(v) for k, v in state.items() if k.endswith("::s"))
-        label = next(record(v) for k, v in state.items() if k.endswith("::step"))
-        out.append(
-            Step(
-                name=text(label["name"]),
-                target=text(label["target"]),
-                ident=number(label["id"]),
-                outcome=text(label["outcome"]),
-                stop=truth(label["stop"]),
-                pc=text(s["pc"]),
-                r=number(s["r"]),
-                end=text(s["end"]),
-                keep=truth(s["keep"]),
-                quiesce=truth(s["quiesce"]),
-                machine=machine_of(s),
-                alerted=frozenset((text(a[0]), number(a[1]), text(a[2])) for a in pairs(s["alerted"])),
-                told=frozenset(number(i) for i in items(s["told"])),
-            )
+    return [
+        Step(
+            name=text(label["name"]),
+            target=text(label["target"]),
+            ident=number(label["id"]),
+            outcome=text(label["outcome"]),
+            stop=truth(label["stop"]),
+            pc=text(s["pc"]),
+            r=number(s["r"]),
+            end=text(s["end"]),
+            keep=truth(s["keep"]),
+            quiesce=truth(s["quiesce"]),
+            machine=machine_of(s),
+            alerted=frozenset((text(a[0]), number(a[1]), text(a[2])) for a in pairs(s["alerted"])),
+            told=frozenset(number(i) for i in items(s["told"])),
         )
-    return out
+        for s, label in trace_states(path)
+    ]
 
 
 def runs(trace: list[Step]) -> Iterator[list[Step]]:
@@ -757,10 +747,10 @@ def replay(case: unittest.TestCase, path: str) -> set[tuple[str, str]]:
 
 
 def trace_files() -> list[str]:
-    paths = sorted(os.path.join(TRACES, n) for n in os.listdir(TRACES) if n.endswith(".itf.json"))
+    paths = sorted(traces_in(TRACES))
     more = os.environ.get(MORE_TRACES, "")
     if more:
-        paths += sorted(os.path.join(more, n) for n in os.listdir(more) if n.endswith(".itf.json"))
+        paths += sorted(traces_in(more))
     return paths
 
 
@@ -774,7 +764,7 @@ class NasReplayTest(unittest.TestCase):
 
     def test_the_traces_replay_every_recorded_call_of_the_spec(self) -> None:
         seen: set[tuple[str, str]] = set()
-        for path in sorted(os.path.join(TRACES, n) for n in os.listdir(TRACES) if n.endswith(".itf.json")):
+        for path in sorted(traces_in(TRACES)):
             seen |= replay(self, path)
         self.assertEqual(sorted(SPEC_CALLS - seen), [], "no checked-in trace replays these")
         self.assertEqual(sorted(seen - SPEC_CALLS), [], "SPEC_CALLS lacks these")

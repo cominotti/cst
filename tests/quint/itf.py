@@ -7,7 +7,9 @@ runs on the CI runner's Python 3.12, never imports it."""
 
 from __future__ import annotations
 
-from cst_core.domain.shapes import json_object
+import os
+
+from cst_core.domain.shapes import json_object, parse_json
 
 type Value = bool | int | str | list[Value] | dict[str, Value]
 
@@ -69,3 +71,23 @@ def items(value: Value) -> list[Value]:
     if not isinstance(value, list):
         raise AssertionError(f"not a list: {value!r}")
     return value
+
+
+def trace_states(path: str) -> list[tuple[dict[str, Value], dict[str, Value]]]:
+    """Each state of the ITF trace at path: (the spec's state s, the label of the step that led to it)."""
+    with open(path, encoding="utf-8") as f:
+        doc = parse_json(f.read())
+    if not json_object(doc) or not isinstance(doc.get("states"), list):
+        raise AssertionError(f"{path}: not an ITF trace")
+    out: list[tuple[dict[str, Value], dict[str, Value]]] = []
+    for raw in items(itf(doc["states"])):
+        state = record(raw)
+        s = next(record(v) for k, v in state.items() if k.endswith("::s"))
+        label = next(record(v) for k, v in state.items() if k.endswith("::step"))
+        out.append((s, label))
+    return out
+
+
+def traces_in(folder: str) -> list[str]:
+    """The ITF traces (*.itf.json) in folder, in the order os.listdir gives."""
+    return [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".itf.json")]
