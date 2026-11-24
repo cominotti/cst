@@ -34,13 +34,11 @@ from cst_core.adapters.runtime import (
 from cst_core.domain.install import Component, InstallReportWord
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
 from cst_core.domain.text import YES_WORDS
-from cst_core.ports import CommandRunnerPort, ExecutionContextPort
+from cst_core.ports import CommandRunnerPort, ExecutionContextPort, UnitName
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
 _BTRFS_SYSFS: Final = "/sys/fs/btrfs"
-# seconds systemctl may take to say whether systemd loaded the scrub unit (as SystemctlAdapter.show's own)
-_SHOW_TIMEOUT: Final = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,14 +109,15 @@ def _live_scrub_sysfs(btrfs_sysfs: str) -> list[str]:
 
 
 def _need_daemon_reload(cmd_runner: CommandRunnerPort, *, on_host: SystemctlHost) -> bool | None:
-    """NeedDaemonReload of the scrub unit: True when systemd has not loaded its files as they are on disk
-    (an earlier run wrote them and stopped before its daemon-reload); None when systemctl cannot say, or
-    does not within _SHOW_TIMEOUT (a PID 1 that does not answer must not hang a run with nothing to change)."""
-    systemctl = SystemctlAdapter(cmd_runner, timeout=_SHOW_TIMEOUT, on_host=on_host)
-    r = systemctl.show_value(SCRUB_SERVICE, "NeedDaemonReload")
-    if r.returncode != 0:
+    """NeedDaemonReload of the scrub unit, through SystemctlAdapter.show (the C locale, and its time limit:
+    a PID 1 that does not answer must not hang a run with nothing to change): True when systemd has not
+    loaded its files as they are on disk (an earlier run wrote them and stopped before its daemon-reload);
+    None when systemctl cannot say (it fails, or does not answer in time)."""
+    props = SystemctlAdapter(cmd_runner, on_host=on_host).show(UnitName(SCRUB_SERVICE), ["NeedDaemonReload"])
+    value = props.get("NeedDaemonReload")
+    if value is None:
         return None
-    return r.stdout.strip().lower() in YES_WORDS
+    return value.strip().lower() in YES_WORDS
 
 
 def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> tuple[int, list[str]]:
@@ -134,7 +133,7 @@ def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = 
             dropin_path=paths.dropin_path,
             dropin_text=dropin_text,
             live_sysfs=tuple(_live_scrub_sysfs(paths.btrfs_sysfs)),
-            need_reload=_need_daemon_reload(cmd_runner, on_host=SystemctlHost.EVERY),  # from a toolbox too
+            need_reload=_need_daemon_reload(cmd_runner, on_host=SystemctlHost.SHOW_ONLY),  # from a toolbox too
         )
     )
     return (1 if conf_unreadable else 0), lines
@@ -159,7 +158,7 @@ def scrub_limit_plan(
         dropin_text=dropin_text,
         target_limit=target_limit,
     )
-    need_reload = _need_daemon_reload(cmd_runner, on_host=SystemctlHost.EVERY)  # from a toolbox too
+    need_reload = _need_daemon_reload(cmd_runner, on_host=SystemctlHost.SHOW_ONLY)  # from a toolbox too
     return 0, [
         *lines,
         *scrub_limit_plan_reload_lines(dropin_text=dropin_text, target_limit=target_limit, need_reload=need_reload),

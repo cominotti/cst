@@ -518,7 +518,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
                 rc, lines = scrub_limit_apply(self.paths, limit, runner=runner)
                 self.assertEqual(rc, 0, lines)
                 self.assertIn(f"unchanged: {self.conf}", lines)
-                show = ["systemctl", "show", "-p", "NeedDaemonReload", "--value", "btrfs-scrub-weekly.service"]
+                show = ["systemctl", "show", "-p", "NeedDaemonReload", "btrfs-scrub-weekly.service"]
                 self.assertIn(show, runner.calls)
                 self.assertEqual(runner.calls[runner.calls.index(show) + 1 :], [["systemctl", "daemon-reload"]])
                 self.assertEqual(
@@ -608,6 +608,30 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=Recording())
         self.assertEqual(rc, 0, lines)
         self.assertEqual(seen, [20])
+
+    def test_the_question_to_systemd_is_read_in_the_c_locale_on_the_host_for_plan_and_status(self) -> None:
+        # SystemctlAdapter.show's read: the C locale (the answer is parsed), on the host from a toolbox for
+        # the read-only commands, never for set|off (which run on the host).
+        self._as_asked("500M")
+        seen: list[tuple[object, object]] = []
+
+        class Recording(ScrubFakeRunner):
+            @override
+            def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+                if list(argv[:2]) == ["systemctl", "show"]:
+                    seen.append((kw.get("locale_c"), kw.get("on_host")))
+                return super().run(argv, input_text=input_text, **kw)
+
+        for name, call in (
+            ("status", lambda r: scrub_limit_status(self.paths, runner=r)),
+            ("plan", lambda r: scrub_limit_plan(self.paths, "500M", runner=r)),
+            ("set", lambda r: scrub_limit_apply(self.paths, "500M", runner=r)),
+        ):
+            with self.subTest(command=name):
+                seen.clear()
+                rc, lines = call(Recording())
+                self.assertEqual(rc, 0, lines)
+                self.assertEqual(seen, [(True, name != "set")])
 
     def test_files_as_asked_and_a_failed_reload_says_systemd_has_not_loaded_them(self) -> None:
         self._as_asked("500M")
