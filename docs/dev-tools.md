@@ -668,8 +668,12 @@ depend on `TMPDIR`. A machine over adapters that write through
 `write_atomic` fsyncs every file, many times slower on the btrfs home
 than on tmpfs (the pilot measured about 20 times; see
 [Test performance on a workstation](#test-performance-on-a-workstation)).
-The adapter machines write real files under a temporary folder; their
-TestCase stubs fsync
+The cache and scrub-limit machines write real files under a temporary
+folder. The iocost machine writes only io.cost.qos, its sysfs tree and
+the managed-devices file there: btrfs:iocost's installed files and the
+install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
+does not cover how `LocalInstallTarget` writes them (modes, fsync,
+relabel). Each machine's TestCase stubs fsync
 (`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
 depend on `TMPDIR` either.
 
