@@ -658,12 +658,43 @@ not derive from it.
 - `mbt_snapshot_domain.py`: the snapshot retention plan, its safeguards and
   the circuit breaker, over generated policies, zones, timelines and clocks.
 - `mbt_profiles.py`: the profiles and the seeding themselves.
+- `mbt_cache_rollback.py`: `cst btrfs cache` attach and detach for two
+  users and the three kind selections, through the unit tests' fake
+  findmnt, mount and systemctl (`btrfs/tests/fakes.py`), with a bind mount
+  or the daemon-reload failing: `/etc/fstab` names exactly the mounted
+  binds, a failed command leaves `/etc/fstab` and the mounts as they were,
+  and the same command with no fault exits 0.
+- `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four
+  starting `snapshots.conf` files, through the unit tests' `SystemdModel`
+  (the installer through the real `InstallService`, and what systemd has
+  loaded), with the installer or the daemon-reload failing:
+  `snapshots.conf` and the drop-in agree, a failed step leaves both files
+  and their folders as they were, exit 0 means systemd loaded the limit,
+  and btrfs:core's state never changes.
+- `mbt_iocost_apply.py`: `cst btrfs iocost` apply (after an upgrade of
+  CST or not) and revert, live or not, with any one step failing (a file's write or removal, the
+  io.cost.qos write, daemon-reload, enable, disable, the udev rules' reload,
+  the installer's mark), through a model of the installer (the real
+  `InstallService` in memory), systemd, udev and io.cost.qos: the component
+  is marked done only after every step it stands for (a7c5e92), exit 0
+  leaves the whole target, a vendor's io.cost.qos line stays, and apply or
+  revert again converges. One known gap is let through by name: a full
+  revert whose removal fails after its disable leaves btrfs:iocost done
+  with the service disabled, until the next full apply or revert.
 
-These targets are in memory, so they do not depend on `TMPDIR`. A machine
-over adapters that write through `write_atomic` fsyncs every file, many
-times slower on the btrfs home than on tmpfs (the pilot measured about 20
-times; see [Test performance on a workstation](#test-performance-on-a-workstation)):
-stub the fsync in its fake, or run it with `TMPDIR` on tmpfs.
+The targets above the adapter machines are in memory, so they do not
+depend on `TMPDIR`. A machine over adapters that write through
+`write_atomic` fsyncs every file, many times slower on the btrfs home
+than on tmpfs (the pilot measured about 20 times; see
+[Test performance on a workstation](#test-performance-on-a-workstation)).
+The cache and scrub-limit machines write real files under a temporary
+folder. The iocost machine writes only io.cost.qos, its sysfs tree and
+the managed-devices file there: btrfs:iocost's installed files and the
+install record are in memory (`MemoryTarget`, `MemoryRecord`), so it
+does not cover how `LocalInstallTarget` writes them (modes, fsync,
+relabel). Each machine's TestCase stubs fsync
+(`tests.fault_injection.stub_fsync` in its `setUp`), so they do not
+depend on `TMPDIR` either.
 
 ### Writing one: typing without ignore comments
 

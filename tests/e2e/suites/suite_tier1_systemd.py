@@ -4292,11 +4292,16 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-126-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-126-rec; fi")
         self.addCleanup(
             exec_bash,
             c,
-            f"rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
-            f"{installer} forget-text {dropin} {seed}; rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
+            # exec_bash runs bash -e: every step must run, also after one that fails (the rmdir fails when
+            # `off` removed the folder already). Root's record goes back as it was, without the seed's line.
+            "set +e; rm -rf /var/tmp/e2e-126-tmpfiles /var/tmp/e2e-126-bin; "
+            f"rm -f {conf} {dropin} {seed}; rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"if [[ -e /var/tmp/e2e-126-rec ]]; then mv /var/tmp/e2e-126-rec {rec}; else rm -f {rec}; fi; "
+            "rm -f /etc/systemd/system/btrfs-scrub-weekly.service; "
             # /etc/btrfs-setup when the test made it; then systemd forgets the unit and its drop-in.
             "if [[ -e /var/tmp/e2e-126-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-126-made-etc; fi; "
             "systemctl daemon-reload",
@@ -5077,6 +5082,136 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             if grep -qF "daemon.json" /var/lib/docker-volumes-nocow/postponed 2>/dev/null; then
                 echo "the record still names the fixed file" >&2; exit 1
             fi
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_168_docker_volumes_nocow_puts_back_the_newest_old_copy_by_its_number(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) at the boot after a
+        migration killed between its two renames, in a volume holding two old copies and no _data:
+        migrate puts back the newest by the number in its name (_data.cow-old-1000000000), not the one
+        whose text sorts last (_data.cow-old-999999999), and removes the other. The volumes are in a
+        data root of the test's own, which /etc/docker/daemon.json names; the recovery comes before any
+        NOCOW flag is read, so the container's file system is enough."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-163-docker"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {root} /var/lib/docker-volumes-nocow /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-163-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-163-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-163-made-docker /var/tmp/e2e-163-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_168 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vol={root}/volumes/v
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-163-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-163-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$vol/_data.cow-old-999999999" "$vol/_data.cow-old-1000000000"
+            printf 'stale\n' >"$vol/_data.cow-old-999999999/file"
+            printf 'original\n' >"$vol/_data.cow-old-1000000000/file"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_168 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "v: restored the original after an interrupted migration" <<<"$out"
+            [[ "$(cat "$vol/_data/file")" == original ]]
+            [[ ! -e "$vol/_data.cow-old-999999999" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS)
+    def test_167_docker_volumes_nocow_recovers_the_other_volumes_past_one_it_cannot(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) at the boot after a
+        migration killed between its two renames in two volumes (each holds its old copy and its twin,
+        no _data), with a migration requested. The old copy of the volume listed first (a) is a mount
+        point (a tmpfs on it), so its rename back fails with EBUSY: migrate still restores and cleans
+        the other (b), keeps a's old copy, exits 0 and migrates nothing (the request stays, no boot is
+        counted). Once the tmpfs is gone, the next run puts a's original back. Before, a's failure
+        ended the loop and b kept no _data on that boot. The volumes are in a data root of the test's
+        own, which /etc/docker/daemon.json names."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-167-docker"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f'for m in {root}/volumes/*/_data.cow-old-*; do ! mountpoint -q "$m" || umount "$m" || umount -l "$m"; done; '
+            f"rm -rf {root} /var/lib/docker-volumes-nocow /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-167-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-167-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-167-made-docker /var/tmp/e2e-167-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_167 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vols={root}/volumes
+            flag=/etc/btrfs-setup/docker-nocow-pending
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-167-made-docker; }}
+            [ -d /etc/btrfs-setup ] || {{ mkdir -p /etc/btrfs-setup && touch /var/tmp/e2e-167-made-setup; }}
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e "$flag" ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            [ ! -e /var/lib/docker-volumes-nocow ] || {{ echo "a migration state is there already" >&2; exit 1; }}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$vols/v1" "$vols/v2"
+            # a: the volume the program lists first (os.listdir's order), so before the fix its
+            # failure stopped the loop before b.
+            a="$(/usr/bin/python3 -I -c 'import os, sys; print(os.listdir(sys.argv[1])[0])' "$vols")"
+            if [[ "$a" == v1 ]]; then b=v2; else b=v1; fi
+            for v in "$a" "$b"; do
+                mkdir -p "$vols/$v/_data.cow-old-1000000000" "$vols/$v/_data.nocow-new"
+                printf 'original %s\n' "$v" >"$vols/$v/_data.cow-old-1000000000/file"
+                printf 'twin %s\n' "$v" >"$vols/$v/_data.nocow-new/file"
+            done
+            mount -t tmpfs tmpfs "$vols/$a/_data.cow-old-1000000000"
+            : >"$flag"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_167 first migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            # b: restored and cleaned, whatever a does.
+            grep -qF "$b: restored the original after an interrupted migration" <<<"$out"
+            [[ "$(cat "$vols/$b/_data/file")" == "original $b" ]]
+            [[ "$(ls -A "$vols/$b")" == _data ]]
+            # a: its rename failed (EBUSY), its old copy and its twin stay, for the next boot.
+            grep -qF "$a: [Errno 16] Device or resource busy" <<<"$out"
+            grep -qF "recovery left for the next boot" <<<"$out"
+            grep -qF "1 volume(s) not recovered: migration left for the next boot" <<<"$out"
+            if grep -qF "$a: restored the original" <<<"$out"; then echo "$a restored through a mount point" >&2; exit 1; fi
+            [[ ! -e "$vols/$a/_data" ]]
+            mountpoint -q "$vols/$a/_data.cow-old-1000000000"
+            [[ -d "$vols/$a/_data.nocow-new" ]]
+            # Nothing migrated: the request stays and no boot is counted.
+            if grep -qF "rewriting" <<<"$out"; then echo "a boot that did not recover migrated" >&2; exit 1; fi
+            [[ -e "$flag" ]]
+            [[ ! -e /var/lib/docker-volumes-nocow/attempts ]]
+            # The next boot, the mount gone (the request dropped: only the recovery is under test).
+            umount "$vols/$a/_data.cow-old-1000000000"
+            rm -f "$flag"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_167 second migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "$a: restored the original after an interrupted migration" <<<"$out"
+            if grep -qF "not recovered" <<<"$out"; then echo "the second run did not recover" >&2; exit 1; fi
+            [[ "$(cat "$vols/$a/_data/file")" == "original $a" ]]
+            [[ "$(ls -A "$vols/$a")" == _data ]]
+            [[ "$(cat "$vols/$b/_data/file")" == "original $b" ]]
             echo E2E-OK
             """,
         ).stdout
@@ -8385,8 +8520,8 @@ EOF
         rec = "/var/lib/cst/installed.json"
         if exec_bash(c, f"for f in {conf} {dropin} {unit_file}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf, 10-cst-limit.conf or the scrub unit already exists (another test's)")
-        # The installer writes the drop-in with --component btrfs:core (pending in root's record): the
-        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        # The installer writes the drop-in's line into root's record (--component btrfs:core --keep-state):
+        # the record goes back as it was, so a later test in this container finds it as before.
         exec_bash(c, f"rm -f /var/tmp/e2e-161-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-161-rec; fi")
         self.addCleanup(
             exec_bash,
@@ -8429,7 +8564,7 @@ EOF
                 if [[ $1 == off ]]; then
                     {installer} remove-text {dropin} >/dev/null
                 else
-                    /usr/bin/python3 -I -B {render} dropin "$1" {conf} | {installer} text {dropin} 0644 --component btrfs:core >/dev/null
+                    /usr/bin/python3 -I -B {render} dropin "$1" {conf} | {installer} text {dropin} 0644 --component btrfs:core --keep-state >/dev/null
                 fi
             }}
             cannot_bite() {{ echo "the test cannot bite: $*" >&2; exit 1; }}
@@ -8527,8 +8662,8 @@ EOF
         installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
         if exec_bash(c, f"for f in {conf} {dropin}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
             self.skipTest("snapshots.conf or 10-cst-limit.conf already exists (another test's)")
-        # The second set writes the drop-in with --component btrfs:core (pending in root's record): the
-        # record goes back as it was, so a later test in this container finds btrfs:core as before.
+        # The second set writes the drop-in's line into root's record (--component btrfs:core --keep-state):
+        # the record goes back as it was, so a later test in this container finds it as before.
         exec_bash(c, f"rm -f /var/tmp/e2e-162-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-162-rec; fi")
         self.addCleanup(
             exec_bash,
@@ -8568,6 +8703,272 @@ EOF
             /opt/cst-rw/cst btrfs scrub-limit set 500M
             grep -qxF "SCRUB_LIMIT='500M'" {conf}
             [[ -f {dropin} ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_163_installer_drops_a_component_state_no_recorded_file_names(self) -> None:
+        """Root's real install record as an older CST could leave it: a state for btrfs:degraded-boot, with no
+        file of it recorded (its last file had been recorded again under another component, and
+        with_files() kept the state). `cst doctor` warns that btrfs:degraded-boot is installed only in part;
+        one `installer.py text --component btrfs:core` writes the record without that state, after which
+        doctor no longer warns about it, and the same call again changes no byte of the record. Before,
+        the state stayed, and so did doctor's warning."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-163-core-seed"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        state = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:degraded-boot"
+        if exec_bash(c, f"[[ ! -e {seed} ]] || echo {seed}; {state}").stdout.split() != ["-", "-"]:
+            self.skipTest("the seed exists, or root's record already lists btrfs:degraded-boot (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-163-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-163-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} /var/tmp/e2e-163-doc; "
+            f"if [[ -e /var/tmp/e2e-163-rec ]]; then mv /var/tmp/e2e-163-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        orphan = (
+            "import json, os, sys\n"
+            "p = sys.argv[1]\n"
+            'd = json.load(open(p)) if os.path.exists(p) else {"format": 1, "files": {}, "components": {}}\n'
+            'd.setdefault("components", {})["btrfs:degraded-boot"] = "pending"\n'
+            "os.makedirs(os.path.dirname(p), exist_ok=True)\n"
+            'open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\\n")\n'
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-163-doc 2>&1 || true; grep -qE "WARN +btrfs:degraded-boot: installed only in part" /var/tmp/e2e-163-doc; }}
+            /usr/bin/python3 -I -c {shlex.quote(orphan)} {rec}
+            [[ "$({state})" == "- pending" ]]
+            warned || {{ echo "the test cannot bite: doctor does not warn about the orphan state" >&2; cat /var/tmp/e2e-163-doc >&2; exit 1; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            [[ "$({state})" == "- -" ]] || {{ echo "the orphan state stayed: $({state})" >&2; exit 1; }}
+            if warned; then echo "doctor still warns about btrfs:degraded-boot" >&2; cat /var/tmp/e2e-163-doc >&2; exit 1; fi
+            before="$(sha256sum <{rec})"
+            again="$(printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core)"
+            [[ "$again" == "unchanged: {seed}" ]]
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_166_installer_mark_drops_a_component_state_no_recorded_file_names(self) -> None:
+        """Root's real install record as an older CST could leave it: btrfs:core with a file of it recorded
+        (a seed text), and a state `pending` for e2e:gone, with no file of e2e:gone recorded. `cst doctor`
+        warns that e2e:gone is installed only in part; one `installer.py mark --component btrfs:core done`
+        writes the record with btrfs:core done and without the state of e2e:gone, after which doctor no
+        longer warns about it, and the same mark again changes no byte of the record. Before, a mark kept
+        the orphan state, and so did doctor's warning."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-166-core-seed"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        gone = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} e2e:gone"
+        core = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:core"
+        if exec_bash(c, f"[[ ! -e {seed} ]] || echo {seed}; {gone}").stdout.split() != ["-", "-"]:
+            self.skipTest("the seed exists, or root's record already lists e2e:gone (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-166-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-166-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} /var/tmp/e2e-166-doc; "
+            f"if [[ -e /var/tmp/e2e-166-rec ]]; then mv /var/tmp/e2e-166-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        orphan = (
+            "import json, sys\n"
+            "p = sys.argv[1]\n"
+            "d = json.load(open(p))\n"
+            'd["components"]["e2e:gone"] = "pending"\n'
+            'open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\\n")\n'
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-166-doc 2>&1 || true; grep -qE "WARN +e2e:gone: installed only in part" /var/tmp/e2e-166-doc; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            /usr/bin/python3 -I -c {shlex.quote(orphan)} {rec}
+            [[ "$({gone})" == "- pending" ]]
+            warned || {{ echo "the test cannot bite: doctor does not warn about the orphan state" >&2; cat /var/tmp/e2e-166-doc >&2; exit 1; }}
+            {installer} mark --component btrfs:core done
+            [[ "$({core})" == *"{seed}"*" done" ]] || {{ echo "btrfs:core: $({core})" >&2; exit 1; }}
+            [[ "$({gone})" == "- -" ]] || {{ echo "the orphan state stayed: $({gone})" >&2; exit 1; }}
+            if warned; then echo "doctor still warns about e2e:gone" >&2; cat /var/tmp/e2e-166-doc >&2; exit 1; fi
+            before="$(sha256sum <{rec})"
+            {installer} mark --component btrfs:core done
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_164_installer_text_keep_state_keeps_a_done_component_done(self) -> None:
+        """`installer.py text DEST 0644 --component btrfs:core --keep-state` as root on root's real install
+        record, with btrfs:core done (a seed text of it, marked done): a new text is `written:`, its record
+        line has the file's sha256 and btrfs:core stays done; the same call again is `unchanged:` and changes
+        no byte of the record; `text-plan` of it says `unchanged:`; `remove-text` removes the file and its
+        line and btrfs:core is still done (the seed remains). `cst doctor` never says btrfs:core is
+        installed only in part. Before, the installer refused the option (exit 2)."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-164-core-seed"
+        dest = "/etc/e2e-164-kept.conf"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        core = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:core"
+        line_sha = (
+            'import json, sys\nprint(json.load(open(sys.argv[1]))["files"].get(sys.argv[2], {}).get("sha256", "-"))\n'
+        )
+        if exec_bash(c, f"for f in {seed} {dest}; do [[ ! -e $f ]] || echo $f; done").stdout.strip():
+            self.skipTest("a file of this test already exists (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-164-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-164-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} {dest} /var/tmp/e2e-164-doc; "
+            f"if [[ -e /var/tmp/e2e-164-rec ]]; then mv /var/tmp/e2e-164-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            done_and_no_warning() {{
+                [[ "$({core})" == *" done" ]] || {{ echo "btrfs:core: $({core})" >&2; return 1; }}
+                /opt/cst-rw/cst doctor >/var/tmp/e2e-164-doc 2>&1 || true
+                if grep -qF "btrfs:core: installed only in part" /var/tmp/e2e-164-doc; then cat /var/tmp/e2e-164-doc >&2; return 1; fi
+            }}
+            keep() {{ {installer} "$1" {dest} 0644 --component btrfs:core --keep-state; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            done_and_no_warning
+            # btrfs:core's files and state now: the seed, and any file of it an earlier test in this
+            # container left in root's record.
+            start="$({core})"
+            [[ "$(printf 'kept\\n' | keep text)" == "written:   {dest}" ]]
+            [[ "$(/usr/bin/python3 -I -c {shlex.quote(line_sha)} {rec} {dest})" == "$(sha256sum <{dest} | cut -d' ' -f1)" ]]
+            done_and_no_warning
+            before="$(sha256sum <{rec})"
+            [[ "$(printf 'kept\\n' | keep text)" == "unchanged: {dest}" ]]
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            [[ "$(printf 'kept\\n' | {installer} text-plan {dest} 0644 --component btrfs:core)" == "unchanged: {dest}" ]]
+            [[ "$({installer} remove-text {dest})" == "removed:   {dest}" ]]
+            [[ ! -e {dest} ]]
+            [[ "$({core})" == "$start" ]]
+            done_and_no_warning
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.BTRFS, E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_165_btrfs_scrub_limit_killed_at_its_daemon_reload_keeps_btrfs_core_done(self) -> None:
+        """`cst btrfs scrub-limit set 500M`, `set 1G` and `off`, each first killed (SIGKILL) at its
+        daemon-reload, after the installer wrote or removed the drop-in, then run again, with btrfs:core done
+        in root's real install record (a seed text of it, marked done): the killed run exits 137 and leaves
+        btrfs:core done; the run again exits 0 with the limit loaded in systemd, btrfs:core still done, and
+        `cst doctor` never says btrfs:core is installed only in part. Before, the killed run left btrfs:core
+        pending and the run again did not mark it done."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/btrfs-setup/e2e-165-core-seed"
+        conf = "/etc/btrfs-setup/snapshots.conf"
+        dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+        unit_file = "/etc/systemd/system/btrfs-scrub-weekly.service"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        core = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:core"
+        b = "/var/tmp/e2e-165-bin"
+        if exec_bash(
+            c, f"for f in {conf} {dropin} {unit_file} {seed}; do [[ ! -e $f ]] || echo $f; done"
+        ).stdout.strip():
+            self.skipTest(
+                "snapshots.conf, 10-cst-limit.conf, the scrub unit or the seed already exists (another test's)"
+            )
+        exec_bash(c, f"rm -f /var/tmp/e2e-165-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-165-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -rf {b}; rm -f {conf} {dropin} {seed} {unit_file} /var/tmp/e2e-165-doc; "
+            f"rmdir {dropin.rsplit('/', 1)[0]} 2>/dev/null; "
+            f"if [[ -e /var/tmp/e2e-165-rec ]]; then mv /var/tmp/e2e-165-rec {rec}; else rm -f {rec}; fi; "
+            "if [[ -e /var/tmp/e2e-165-made-etc ]]; then rmdir /etc/btrfs-setup 2>/dev/null; rm -f /var/tmp/e2e-165-made-etc; fi; "
+            "systemctl daemon-reload",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            core_done() {{
+                [[ "$({core})" == *" done" ]] || {{ echo "$1: btrfs:core: $({core})" >&2; return 1; }}
+                /opt/cst-rw/cst doctor >/var/tmp/e2e-165-doc 2>&1 || true
+                if grep -qF "btrfs:core: installed only in part" /var/tmp/e2e-165-doc; then
+                    echo "$1: doctor:" >&2; cat /var/tmp/e2e-165-doc >&2; return 1
+                fi
+            }}
+            # The command, killed by SIGKILL when it runs daemon-reload (the shim kills the pid this
+            # script recorded when it started it, then waits to be killed itself), then run again.
+            killed_then_again() {{
+                rm -f {b}/pid
+                PATH="{b}:$PATH" /opt/cst-rw/btrfs/btrfs-scrub-limit "$@" >{b}/out 2>&1 &
+                echo $! >{b}/pid
+                rc=0; wait $! || rc=$?
+                [[ $rc == 137 ]] || {{ echo "$*: the killed run exited $rc" >&2; cat {b}/out >&2; return 1; }}
+                [[ -e {b}/killed ]] || {{ echo "the test cannot bite: $* was not killed at its daemon-reload" >&2; return 1; }}
+                rm -f {b}/killed
+                core_done "$* (killed)"
+                rc=0; /opt/cst-rw/cst btrfs scrub-limit "$@" >{b}/out 2>&1 || rc=$?
+                [[ $rc == 0 ]] || {{ echo "$* again: exit $rc" >&2; cat {b}/out >&2; return 1; }}
+                core_done "$* again"
+            }}
+            mkdir -p {b}
+            cat >{b}/systemctl <<'EOF'
+#!/bin/bash
+if [[ "$1" == daemon-reload ]]; then
+    for _ in $(seq 100); do [[ -s {b}/pid ]] && break; sleep 0.1; done
+    touch {b}/killed
+    kill -KILL "$(cat {b}/pid)"
+    sleep 5
+    exit 1
+fi
+exec /usr/bin/systemctl "$@"
+EOF
+            chmod +x {b}/systemctl
+            cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service {unit_file}
+            [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-165-made-etc
+            install -d -m 0755 /etc/btrfs-setup
+            systemctl daemon-reload
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            {installer} mark --component btrfs:core done
+            core_done start
+            # btrfs:core's files and state now: the seed, and any file of it an earlier test in this
+            # container left in root's record.
+            start="$({core})"
+            killed_then_again set 500M
+            systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 500M /var"
+            killed_then_again set 1G
+            systemctl show -p ExecStartPre btrfs-scrub-weekly.service | grep -qF "btrfs scrub limit -a -l 1G /var"
+            killed_then_again off
+            [[ ! -e {dropin} ]]
+            [[ -z "$(systemctl show -P ExecStartPre btrfs-scrub-weekly.service)" ]]
+            [[ "$({core})" == "$start" ]]
             echo E2E-OK
             """,
         ).stdout

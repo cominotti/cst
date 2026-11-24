@@ -15,7 +15,7 @@ owner (cst_core.domain.record): what it came from, its sha256, mode and
 component, and which checkout installed it. A file found current that the
 record did not list yet (installed before the record existed) is adopted.
 A component is "pending" from a write until its setup command marks it
-done (mark).
+done (mark); a put with keep_state leaves a state the record has as it is.
 """
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -361,8 +361,14 @@ class InstallService:
             by_component.setdefault(p.component, {})[p.src or p.dest] = self._record.sha256(data)
         return {c: self._record.sha256(tree_lines(f).encode()) for c, f in by_component.items()}
 
-    def _save(self, done: Sequence[tuple[Placement, bytes, bool]], trees: Mapping[str, str]) -> None:
-        """Record what was written or found current, one update per record file."""
+    def _save(
+        self,
+        done: Sequence[tuple[Placement, bytes, bool]],
+        trees: Mapping[str, str],
+        keep: frozenset[str] = frozenset(),
+    ) -> None:
+        """Record what was written or found current, one update per record file (keep: the components whose
+        state stays as the record has it, with_files)."""
         if self._record is None:
             return
         per_record: dict[str, dict[str, tuple[RecordedFile, bool]]] = {}
@@ -373,7 +379,7 @@ class InstallService:
             f = _recorded_file(p, sha, self._commit, trees.get(p.component, sha))
             per_record.setdefault(p.record, {})[p.dest] = (f, written)
         for path, files in sorted(per_record.items()):
-            self._update(path, _adding(files))
+            self._update(path, _adding(files, keep))
 
     def _update(self, path: str, change: Callable[[InstallRecord], InstallRecord]) -> None:
         if self._record is None:
@@ -396,15 +402,16 @@ class InstallService:
         newer CST refuses, as put does); one without (no component) is never `would record:`."""
         return self._plan_line(self._read_records({place.record}), place, data, as_root=as_root)
 
-    def put(self, place: Placement, data: bytes, *, as_root: bool) -> bool:
+    def put(self, place: Placement, data: bytes, *, as_root: bool, keep_state: bool = False) -> bool:
         """Write one file a module checked itself (its own refusals first), unless current; record it.
-        True when it was written."""
+        True when it was written. keep_state: the component keeps the state the record has for it (a command
+        that rewrites one file of a component outside its setup command; with_files)."""
         # Only this file: the module may have changed other things before it (swap's crypttab).
         self._read_records({place.record}, f"{place.path} was not written")
         written = self.write_if_changed(place.path, data, place.mode, place.owner, as_root=as_root).startswith(
             "written"
         )
-        self._save([(place, data, written)], {})
+        self._save([(place, data, written)], {}, frozenset({place.component}) if keep_state else frozenset())
         return written
 
     def mark(self, record: str, component: str, state: ComponentState = ComponentState.DONE) -> None:
@@ -473,6 +480,8 @@ def _recorded_file(p: Placement, sha: str, commit: str, tree: str) -> RecordedFi
     return RecordedFile(p.src, p.component, p.kind, sha, p.mode, p.owner, p.values, commit, tree)
 
 
-def _adding(files: Mapping[str, tuple[RecordedFile, bool]]) -> Callable[[InstallRecord], InstallRecord]:
-    """The record change that lists these files (with_files)."""
-    return lambda rec: with_files(rec, files)
+def _adding(
+    files: Mapping[str, tuple[RecordedFile, bool]], keep: frozenset[str]
+) -> Callable[[InstallRecord], InstallRecord]:
+    """The record change that lists these files (with_files; keep: the components that keep their state)."""
+    return lambda rec: with_files(rec, files, keep=keep)

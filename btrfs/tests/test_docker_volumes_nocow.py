@@ -62,7 +62,16 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, postponed_line
+from btrfs.docker_volumes_nocow.domain import (
+    NocowCommand,
+    NocowPaths,
+    VolumeLeftovers,
+    old_copy_name,
+    old_copy_stamp,
+    oldest_first,
+    postponed_line,
+    recovery,
+)
 from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, entries, tree
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -1896,6 +1905,36 @@ class RecoverTest(Base):
         self.assertEqual(self.call(self.cli.recover), (None, ""))
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data.nocow-new"])
 
+    def test_recover_puts_back_the_newest_old_copy_by_its_number(self) -> None:
+        # The clock went past 10 digits' worth of seconds between two migrations (or had fewer
+        # digits once): 1000000000 is newer than 999999999, although its text sorts first.
+        os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1000000000"))
+        os.makedirs(os.path.join(self.vol, "_data.cow-old-999999999", "stale"))
+        _rc, out = self.call(self.cli.recover)
+        self.assertEqual(out, f"<4>{TAG}: cow: restored the original after an interrupted migration\n")
+        self.assertEqual(ino(self.top), self.ino)
+        self.assertEqual(tree(self.top), self.before)
+        self.assert_no_leftovers("cow")
+
+    def test_a_clock_behind_an_old_copy_left_over_still_restores_the_original(self) -> None:
+        # An earlier migration's old copy could not be deleted (a file in it is immutable, say) and
+        # is named after a time ahead of the clock now (the clock went back): this migration names
+        # its own old copy above it, so after a kill between the renames the original comes back.
+        stale = os.path.join(self.vol, "_data.cow-old-9999999999")
+        os.makedirs(os.path.join(stale, "stale"))
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path: str, *, ignore_errors: bool = False) -> None:
+            if path != stale:
+                real_rmtree(path, ignore_errors=ignore_errors)
+
+        with mock.patch.object(shutil, "rmtree", rmtree), self.second_rename_raises(Crash("power loss")):
+            self.crash()
+        names = sorted(os.listdir(self.vol))
+        self.assertEqual(names, ["_data.cow-old-10000000000", "_data.cow-old-9999999999", "_data.nocow-new"])
+        self.assertEqual(ino(os.path.join(self.vol, "_data.cow-old-10000000000")), self.ino)
+        self.next_boot_finishes(restored=True)  # the original's content, migrated; the stale copy gone
+
     def test_recover_leaves_a_data_that_is_not_a_folder(self) -> None:
         # Something named _data that is not a folder (here a dangling link):
         # recover() neither puts the old copy over it nor deletes the copies.
@@ -1921,6 +1960,134 @@ class RecoverTest(Base):
         self.assertTrue(os.path.islink(os.path.join(self.vols, "link")))
         self.assertEqual(sorted(os.listdir(elsewhere)), names)
         self.assert_no_leftovers("cow")  # the real volume is still cleaned
+
+
+class RecoverEachVolumeTest(Base):
+    """A volume that cannot be recovered (an OSError) does not stop the recovery of the others."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.fs.set(self.vols, nocow=True)
+        schedule(self)
+        self.before: dict[str, dict[str, tuple[object, ...]]] = {}
+        self.ino: dict[str, int] = {}
+        for name in ("a", "b"):
+            top = self.volume(name)
+            self.before[name], self.ino[name] = tree(top), ino(top)
+            # Died between the two renames: no _data, the original is its old copy.
+            os.rename(top, os.path.join(self.vols, name, "_data.cow-old-1700000000"))
+
+    def boot_with(self, patch: Callable[[str], contextlib.AbstractContextManager[object]]) -> None:
+        """For each volume as the one that fails (whichever the volumes folder lists first), the next boot."""
+        for bad, good in (("a", "b"), ("b", "a")):
+            with self.subTest(failing=bad):
+                fresh(self)
+                with patch(os.path.join(self.vols, bad)):
+                    rc, out, _err = self.main("migrate")
+                self.assertEqual(rc, 0)
+                data = os.path.join(self.vols, good, "_data")
+                self.assertEqual(ino(data), self.ino[good])
+                self.assertEqual(tree(data), self.before[good])
+                self.assert_no_leftovers(good)
+                self.assertIn(f"<4>{TAG}: {good}: restored the original after an interrupted migration\n", out)
+                self.assertIn(f"<3>{TAG}: {bad}: [Errno 5] Input/output error; recovery left for the next boot\n", out)
+                self.assertNotIn(f"{bad}: restored", out)
+                self.assertEqual(sorted(os.listdir(os.path.join(self.vols, bad))), ["_data.cow-old-1700000000"])
+                self.assertIn(
+                    f"<3>{TAG}: {self.vols}: 1 volume(s) not recovered: migration left for the next boot\n", out
+                )
+                # This boot migrates nothing: the request and the copy-on-write data wait for the next one.
+                self.assertTrue(os.path.exists(self.flag))
+                self.assertIsNone(read_attempts(self))
+                self.assertFalse(self.fs.nocow(os.path.join(data, "README")))
+                # The next boot, with no error, recovers the other one too and migrates both.
+                rc, out, _err = self.main("migrate")
+                self.assertEqual(rc, 0)
+                self.assertIn(f"<4>{TAG}: {bad}: restored the original after an interrupted migration\n", out)
+                for name in ("a", "b"):
+                    self.assertEqual(tree(os.path.join(self.vols, name, "_data")), self.before[name])
+                    self.assert_all_nocow(os.path.join(self.vols, name, "_data"))
+                    self.assert_no_leftovers(name)
+                self.assertFalse(os.path.exists(self.flag))
+
+    def test_a_rename_that_fails(self) -> None:
+        real_rename = os.rename
+
+        def failing(folder: str) -> contextlib.AbstractContextManager[object]:
+            def rename(src: str, dst: str) -> None:
+                if src.startswith(folder + os.sep):
+                    raise OSError(errno.EIO, "Input/output error")
+                real_rename(src, dst)
+
+            return mock.patch.object(os, "rename", rename)
+
+        self.boot_with(failing)
+
+    def test_a_volume_folder_that_cannot_be_listed(self) -> None:
+        real_listdir = os.listdir
+
+        def failing(folder: str) -> contextlib.AbstractContextManager[object]:
+            def listdir(path: str) -> list[str]:
+                if path == folder:
+                    raise OSError(errno.EIO, "Input/output error")
+                return real_listdir(path)
+
+            return mock.patch.object(os, "listdir", listdir)
+
+        self.boot_with(failing)
+
+
+class OldCopyNameTest(unittest.TestCase):
+    """The old copies' order and the name of a new one (no I/O)."""
+
+    def test_old_copies_are_ordered_by_their_number(self) -> None:
+        names = ["_data.cow-old-1000000000", "_data.cow-old-999999999", "_data.cow-old-x", "_data.cow-old-1700000000"]
+        self.assertEqual(
+            oldest_first(names),
+            ("_data.cow-old-x", "_data.cow-old-999999999", "_data.cow-old-1000000000", "_data.cow-old-1700000000"),
+        )
+        self.assertEqual(old_copy_stamp("_data.cow-old-1700000000"), 1700000000)
+        for name in (
+            "_data.cow-old-",
+            "_data.cow-old-17x",
+            "_data.cow-old-\N{ARABIC-INDIC DIGIT THREE}",
+            "_data.cow-old--1",
+            "_data",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(old_copy_stamp(name))
+
+    def test_a_new_old_copy_is_named_above_every_one_still_there(self) -> None:
+        self.assertEqual(old_copy_name((), 1700000000), "_data.cow-old-1700000000")
+        self.assertEqual(old_copy_name(("_data.cow-old-1600000000",), 1700000000), "_data.cow-old-1700000000")
+        self.assertEqual(old_copy_name(("_data.cow-old-1700000000",), 1700000000), "_data.cow-old-1700000001")
+        self.assertEqual(
+            old_copy_name(("_data.cow-old-1800000000", "_data.cow-old-junk"), 1700000000), "_data.cow-old-1800000001"
+        )
+
+
+class RecoveryTest(unittest.TestCase):
+    """recovery(): what recover does in one volume, from what its folder holds (no I/O)."""
+
+    def test_the_choice_for_each_volume_folder(self) -> None:
+        o1, o2, o3 = "_data.cow-old-1700000001", "_data.cow-old-1700000002", "_data.cow-old-1700000003"
+        cases = [
+            # (_data there, old copies oldest first, twin there) -> (put back, then removed)
+            ((False, (), False), (None, ())),
+            ((False, (), True), (None, ("_data.nocow-new",))),
+            ((False, (o1,), False), (o1, ())),
+            ((False, (o1, o2), True), (o2, (o1, "_data.nocow-new"))),
+            ((False, (o1, o2, o3), False), (o3, (o1, o2))),
+            ((True, (), False), (None, ())),
+            ((True, (), True), (None, ("_data.nocow-new",))),
+            ((True, (o1, o2), False), (None, (o1, o2))),
+            ((True, (o1, o2, o3), True), (None, (o1, o2, o3, "_data.nocow-new"))),
+        ]
+        for (has_data, olds, twin), (restore, remove) in cases:
+            with self.subTest(has_data=has_data, olds=olds, twin=twin):
+                todo = recovery(VolumeLeftovers(has_data=has_data, olds=olds, twin=twin))
+                self.assertEqual((todo.restore, todo.remove), (restore, remove))
 
 
 class PostponedDurableTest(PostponeBase):

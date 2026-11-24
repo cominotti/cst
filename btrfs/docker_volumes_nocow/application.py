@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import os
+
 from btrfs.docker_volumes_nocow.domain import (
+    DATA_DIR,
     GAVE_UP,
     GIVE_UP_AFTER,
     MARGIN,
     NEW_SUFFIX,
-    OLD_MARK,
     NocowCommand,
     NocowPaths,
     PendingVolume,
@@ -17,7 +19,9 @@ from btrfs.docker_volumes_nocow.domain import (
     copy_matches,
     label_mismatch,
     next_postponed,
+    old_copy_name,
     postponed_line,
+    recovery,
 )
 from btrfs.docker_volumes_nocow.ports import DockerDaemonPort, NocowOutputPort, NocowStatePort, VolumeTreePort
 from cst_core.ports import ClockPort
@@ -76,14 +80,37 @@ class DockerVolumesNocow:
         ]
 
     def recover(self) -> None:
-        """Leftovers of an interrupted migration (kill, timeout, power loss)."""
-        for name in self.tree.restore_interrupted():
+        """Undo what an interrupted migration (kill, timeout, power loss) left, one volume at a time.
+        A volume that cannot be recovered (an OSError) is a journal line and does not stop the others;
+        then recover raises, so this boot migrates nothing and the next one tries again."""
+        failed = 0
+        for name, folder in self.tree.volume_folders():
+            try:
+                self.recover_one(name, folder)
+            except OSError as e:  # one volume must not stop the others
+                self.out.log(3, f"{name}: {e}; recovery left for the next boot")
+                failed += 1
+        if failed:
+            raise OSError(f"{failed} volume(s) not recovered: migration left for the next boot")
+
+    def recover_one(self, name: str, folder: str) -> None:
+        """In a volume that died between the two renames the original goes back; then, when _data is
+        a folder, the other old copies and the twin go."""
+        todo = recovery(self.tree.leftovers(folder))
+        data = os.path.join(folder, DATA_DIR)
+        if todo.restore is not None:
+            self.tree.rename(os.path.join(folder, todo.restore), data)
             self.out.log(4, f"{name}: restored the original after an interrupted migration")
+        if self.tree.is_dir(data):
+            for x in todo.remove:
+                self.tree.remove_tree(os.path.join(folder, x), ignore_errors=True)
 
     # ---- one volume ------------------------------------------------------
     def migrate_one(self, data: str) -> None:
         """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
-        new, old = data + NEW_SUFFIX, data + f"{OLD_MARK}{int(self.clock.now())}"
+        folder = os.path.dirname(data)
+        new = data + NEW_SUFFIX
+        old = os.path.join(folder, old_copy_name(self.tree.leftovers(folder).olds, int(self.clock.now())))
         self.tree.make_twin(data, new)
         self.tree.reference_label(data, new)
         self.tree.set_nocow(new, on=True)
