@@ -34,7 +34,8 @@ Checked:
   exactly, the format line no record, every line readable, newer_intended None.
 """
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+import contextlib
 import io
 import shutil
 import subprocess
@@ -97,6 +98,11 @@ def as_read(data: bytes) -> str:
     return data.decode("utf-8", "replace")
 
 
+def line_bytes(fields: Sequence[bytes]) -> bytes:
+    """The bytes of the record_line the profile writes for these fields."""
+    return record_line(*(as_field(f) for f in fields)).encode("utf-8", "surrogateescape")
+
+
 @st.composite
 def state_record(draw: st.DrawFn) -> tuple[bytes, ...]:
     """One record of game.state that 'off' can read (state_undo): a prop record of six fields, or a
@@ -112,13 +118,8 @@ STATE_RECORDS: Final = st.lists(state_record(), min_size=1, max_size=5)
 def run_bash(script: str, args: Sequence[bytes], *, stdin_path: str | None = None) -> bytes:
     """bash -c script with args, its stdout (stdin: the file, or nothing); fails on a non-zero exit."""
     argv = ["bash", "-c", script, "bash", *args]
-    if stdin_path is None:
-        res = subprocess.run(
-            argv, capture_output=True, stdin=subprocess.DEVNULL, env=BASH_ENV, timeout=BASH_TIMEOUT_S, check=False
-        )
-    else:
-        with open(stdin_path, "rb") as fh:
-            res = subprocess.run(argv, capture_output=True, stdin=fh, env=BASH_ENV, timeout=BASH_TIMEOUT_S, check=False)
+    with open(stdin_path, "rb") if stdin_path is not None else contextlib.nullcontext(subprocess.DEVNULL) as stdin:
+        res = subprocess.run(argv, capture_output=True, stdin=stdin, env=BASH_ENV, timeout=BASH_TIMEOUT_S, check=False)
     assert res.returncode == 0, f"bash exit {res.returncode}: {res.stderr!r}"
     return res.stdout
 
@@ -153,14 +154,18 @@ class GameStateFilesTest(profiles.MbtTestCase):
     def setUp(self) -> None:
         stub_fsync(self)
 
-    def _profile(self, shown_value: str | None = None) -> tuple[GameProfile, str]:
-        """A profile over a scratch folder of this example (the caller removes it), and that folder;
-        with shown_value, systemd shows it for every property."""
+    @contextlib.contextmanager
+    def _profile(self, shown_value: str | None = None) -> Generator[GameProfile]:
+        """A profile over a scratch folder of this example, removed after it; with shown_value, systemd
+        shows it for every property."""
         tmp = tempfile.mkdtemp(prefix="cst-mbt-game-")
-        scratch = game_scratch(tmp)
-        runner = scratch.systemd if shown_value is None else ShownSystemd(tmp, shown_value)
-        out = io.StringIO()
-        return GameProfile(scratch.paths, scratch.settings, runner, uid_of=lambda _u: UID, out=out), tmp
+        try:
+            scratch = game_scratch(tmp)
+            runner = scratch.systemd if shown_value is None else ShownSystemd(tmp, shown_value)
+            out = io.StringIO()
+            yield GameProfile(scratch.paths, scratch.settings, runner, uid_of=lambda _u: UID, out=out)
+        finally:
+            shutil.rmtree(tmp)
 
     def _append_all(self, profile: GameProfile, recs: Sequence[tuple[bytes, ...]]) -> None:
         for rec in recs:
@@ -168,28 +173,22 @@ class GameStateFilesTest(profiles.MbtTestCase):
 
     @given(recs=STATE_RECORDS)
     def test_q1_our_reader_reads_what_our_writer_wrote(self, recs: list[tuple[bytes, ...]]) -> None:
-        profile, tmp = self._profile()
-        try:
+        with self._profile() as profile:
             self._append_all(profile, recs)
             text = profile.state_text()
             # Valid UTF-8 exactly; other bytes as "replace" decodes them (the O5 gap, the docstring).
             self.assertEqual(records(text), [tuple(as_read(f) for f in rec) for rec in recs])
             self.assertEqual(unreadable_lines(text, intended=False), [])
-        finally:
-            shutil.rmtree(tmp)
 
     @given(recs=STATE_RECORDS)
     def test_q2_an_older_bash_copy_reads_our_bytes(self, recs: list[tuple[bytes, ...]]) -> None:
-        profile, tmp = self._profile()
-        try:
+        with self._profile() as profile:
             self._append_all(profile, recs)
             self.assertEqual(bash_records(run_bash(BASH_EVAL, [], stdin_path=profile.paths.state)), recs)
-        finally:
-            shutil.rmtree(tmp)
 
     @given(fields=st.lists(FIELD_BYTES, min_size=1, max_size=6))
     def test_q3_our_line_is_bashs_printf_q(self, fields: list[bytes]) -> None:
-        ours = record_line(*(as_field(f) for f in fields)).encode("utf-8", "surrogateescape")
+        ours = line_bytes(fields)
         theirs = run_bash(BASH_PRINTF_Q, fields)
         if ours != theirs:
             # printf_q's known limit: a code point Python's or glibc's Unicode has not assigned.
@@ -209,10 +208,9 @@ class GameStateFilesTest(profiles.MbtTestCase):
         new: tuple[bytes, ...],
         data: st.DataObject,
     ) -> None:
-        profile, tmp = self._profile()
-        try:
-            encode = [record_line(*(as_field(f) for f in rec)).encode("utf-8", "surrogateescape") for rec in whole]
-            cut_line = record_line(*(as_field(f) for f in cut)).encode("utf-8", "surrogateescape")
+        with self._profile() as profile:
+            encode = [line_bytes(rec) for rec in whole]
+            cut_line = line_bytes(cut)
             prefix = cut_line[: data.draw(st.integers(1, len(cut_line) - 1), label="cut at")]
             with open(profile.paths.state, "wb") as fh:
                 fh.write(b"".join(encode) + prefix)
@@ -222,10 +220,7 @@ class GameStateFilesTest(profiles.MbtTestCase):
             self.assertTrue(profile.append_state(*(as_field(f) for f in new)))
             with open(profile.paths.state, "rb") as fh:
                 after = fh.read()
-            new_line = record_line(*(as_field(f) for f in new)).encode("utf-8", "surrogateescape")
-            self.assertEqual(after, b"".join(encode) + new_line)
-        finally:
-            shutil.rmtree(tmp)
+            self.assertEqual(after, b"".join(encode) + line_bytes(new))
 
     @given(
         settings=st.lists(
@@ -245,8 +240,7 @@ class GameStateFilesTest(profiles.MbtTestCase):
     ) -> None:
         # What `systemctl show -P` prints, as the profile reads it (shown(): one line, [not set] none).
         assume(shown_value == shown_value.strip() and shown_value != "[not set]")
-        profile, tmp = self._profile(shown_value)
-        try:
+        with self._profile(shown_value) as profile:
             with open(profile.paths.intended, "w", encoding="utf-8") as fh:
                 fh.write(intended_header())
             for mgr, unit, prop, value in settings:
@@ -257,8 +251,6 @@ class GameStateFilesTest(profiles.MbtTestCase):
             self.assertEqual(intended_records(text), want)
             self.assertEqual(unreadable_lines(text, intended=True), [])
             self.assertIsNone(newer_intended(profile.paths.intended, text))
-        finally:
-            shutil.rmtree(tmp)
 
 
 if __name__ == "__main__":
