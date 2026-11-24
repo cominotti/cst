@@ -62,7 +62,8 @@ class CpuPowerDomainTest(unittest.TestCase):
     def test_parse_args(self) -> None:
         self.assertEqual(parse_power_args([]), parse_power_args(["status"]))
         self.assertEqual(parse_power_args(["--help"]).action, PowerAction.HELP)
-        self.assertEqual(parse_power_args(["apply", "--gpu-only"]), parse_power_args(["apply", "--gpu-only"]))
+        applied = parse_power_args(["apply", "--gpu-only"])
+        self.assertEqual((applied.action, applied.gpu_only, applied.error), (PowerAction.APPLY, True, None))
         self.assertTrue(parse_power_args(["plan", "--gpu-only"]).gpu_only)
         self.assertIsNotNone(parse_power_args(["status", "extra"]).error)
         self.assertIsNotNone(parse_power_args(["revert", "--gpu-only"]).error)
