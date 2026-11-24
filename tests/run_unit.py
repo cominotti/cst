@@ -5,7 +5,7 @@
 Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affected | --list-affected] [--base REF] [NAME...]   (from anywhere)
 
 With no NAME it runs every unit test of the checkout across parallel worker
-processes (`default_jobs()`, 1 per CPU; automatically 1 under `coverage.py`).
+processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `coverage.py`).
 A NAME is a test module, class or method as unittest names it (vm.tests.test_vm,
 vm.tests.test_vm.PartsTest.test_disks_nvram_tpm): `invowk cmd test module`
 runs one that way, so the socket gate below still applies. `--gates` runs
@@ -735,10 +735,14 @@ def _coverage_active() -> bool:
 
 
 def default_jobs() -> int:
-    """Default worker count when `-j`/`--jobs` is unset or 0 (1 under coverage.py)."""
+    """Default worker count when `-j`/`--jobs` is unset or 0 (1 under coverage.py).
+
+    One per CPU this process may run on (`os.process_cpu_count()`: the CPU affinity, as a
+    toolbox or a cgroup's cpuset narrows it), not per CPU of the machine (`os.cpu_count()`).
+    """
     if _coverage_active():
         return 1
-    return max(1, os.cpu_count() or 1)
+    return max(1, os.process_cpu_count() or 1)
 
 
 def _consume_value(args: Sequence[str], index: int, flag: str) -> tuple[str, int]:

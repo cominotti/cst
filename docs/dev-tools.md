@@ -39,9 +39,10 @@ with an error when `uv.lock` does not match `pyproject.toml`, and uv checks
 the hash of every package against the lock.
 
 The unit tests do not need any of this: `python3 -I -B tests/run_unit.py`
-still runs on the system Python with the standard library (in parallel across
-CPUs by default; pass `--jobs 1` to force a single process, or let it fall back
-to 1 automatically when run under `coverage.py`). For faster local iterations,
+still runs on the system Python with the standard library (in parallel by
+default, one worker per CPU the run may use: its CPU affinity, so a toolbox or
+cgroup pinned to 16 of 24 CPUs gets 16; pass `--jobs 1` to force a single
+process, or let it fall back to 1 automatically when run under `coverage.py`). For faster local iterations,
 `invowk cmd test affected [--list] [--base REF]` (`tests/run_unit.py --affected`)
 selects only the static gates and unit modules statically reachable from your
 changed files, falling back conservatively to the full suite for `cst_core` or
