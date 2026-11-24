@@ -559,6 +559,52 @@ tests, and runs a state machine with `profiles.run_machine(Machine)`.
 `tests/mbt/mbt_profiles.py` fails on a TestCase of `tests/mbt` that does
 not derive from it.
 
+### What it covers
+
+- `mbt_install_service.py`: a state machine over `InstallService` with the
+  unit tests' in-memory target and record (`tests.test_install.MemoryTarget`,
+  `tests.test_install_record.MemoryRecord`): any sequence of install, put,
+  mark, remove and forget, failed writes, files changed behind CST's back, a
+  checkout whose payloads change and a record of a newer CST. Its first run
+  found that `remove()` deleted the files before it refused a newer record.
+- `mbt_record.py`: the install record's text round trip and its updates
+  (no component state without a file).
+- `mbt_snapshot_domain.py`: the snapshot retention plan, its safeguards and
+  the circuit breaker, over generated policies, zones, timelines and clocks.
+- `mbt_profiles.py`: the profiles and the seeding themselves.
+
+These targets are in memory, so they do not depend on `TMPDIR`. A machine
+over adapters that write through `write_atomic` fsyncs every file, many
+times slower on the btrfs home than on tmpfs (the pilot measured about 20
+times; see [Test performance on a workstation](#test-performance-on-a-workstation)):
+stub the fsync in its fake, or run it with `TMPDIR` on tmpfs.
+
+### Writing one: typing without ignore comments
+
+Every file of `tests/mbt` is ty-clean and passes ruff's annotation rules,
+like the rest of the repository:
+
+- ty needs the `mbt` group in its environment (`invowk cmd test types` has
+  it; by hand, `tests/uv-dev --group mbt ty check`).
+- `assume(x is not None)` does not narrow the type: follow it with
+  `assert x is not None`.
+- A state machine runs through `profiles.run_machine(Machine)` in a test
+  method of an `MbtTestCase`, not through `Machine.TestCase`: Hypothesis
+  creates that class in `hypothesis.stateful`, where `tests/run_unit.py`'s
+  workers cannot load it by name, and ty refuses a subclass of it
+  (`unsupported-base`).
+- A `teardown` of a machine takes `@typing.override`.
+- A `bool` parameter of a rule or a `@given` test is keyword-only (`*,`):
+  ruff's FBT001 counts positional ones against `RUFF_BUDGETS`, tests
+  included.
+- Reuse the unit tests' fakes by public names only: the architecture gate
+  refuses a private name imported from another module. Never import a
+  TestCase class into an mbt module: the loader would run its tests there
+  too.
+- Naive `datetime` bounds of `st.datetimes()` need a `DTZ001` entry in
+  `per-file-ignores`, with its reason (the snapshot names are naive local
+  wall clock).
+
 ## Mutation testing (optional)
 
 A green test suite says the tests pass; it does not say what they check.
