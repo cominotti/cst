@@ -645,6 +645,13 @@ not derive from it.
   or the daemon-reload failing: `/etc/fstab` names exactly the mounted
   binds, a failed command leaves `/etc/fstab` and the mounts as they were,
   and the same command with no fault exits 0.
+- `mbt_scrub_rollback.py`: `cst btrfs scrub-limit` set and off from four
+  starting `snapshots.conf` files, through the unit tests' `SystemdModel`
+  (the installer through the real `InstallService`, and what systemd has
+  loaded), with the installer or the daemon-reload failing:
+  `snapshots.conf` and the drop-in agree, a failed step leaves both files
+  and their folders as they were, exit 0 means systemd loaded the limit,
+  and btrfs:core's state never changes.
 
 The targets above the adapter machines are in memory, so they do not
 depend on `TMPDIR`. A machine over adapters that write through
