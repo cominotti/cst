@@ -253,8 +253,11 @@ class BulkItemsMachine(RuleBasedStateMachine):
 
     def shape_of(self, ident: str) -> tuple[TreeEntry, ...]:
         """The item's path and target as they are, without what another item keeps inside them
-        (jetbrains' folder, its copy and its stamp probe in ~/Bulk/apps)."""
+        (jetbrains' folder, its copy and its stamp probe in ~/Bulk/apps). An item whose target
+        holds this one's (apps' ~/Bulk/apps for jetbrains) is not left out of it."""
+        mine = self.target(ident)
         others = [self.target(i) for i in ITEM_IDS if i != ident]
+        others = [t for t in others if not mine.startswith(t + "/")]
 
         def own(path: str) -> bool:
             return not any(path == t or path.startswith((t + "/", t + ".")) for t in others)
@@ -461,6 +464,20 @@ class BulkItemsMachineTest(profiles.MbtTestCase):
 
     def test_any_sequence_of_steps_keeps_the_invariants(self) -> None:
         profiles.run_machine(BulkItemsMachine)
+
+    def test_the_kept_check_sees_jetbrains_data_inside_apps_target(self) -> None:
+        """jetbrains' target lies inside apps': a change there to a kept jetbrains is seen."""
+        machine = BulkItemsMachine()
+        self.addCleanup(machine.teardown)
+        in_place, absent = BulkStartShape.IN_PLACE, BulkStartShape.ABSENT
+        machine.start(bulk=True, shapes=(in_place, in_place, absent, absent), keep={"jetbrains"})
+        before = machine.kept_paths()
+        ide = os.path.join(machine.target("jetbrains"), "ide")
+        self.assertIn((ide, "file", "jetbrains:ide"), before["jetbrains"])
+        with open(ide, "w") as f:
+            f.write("rewritten")
+        with self.assertRaises(AssertionError):
+            machine.assert_kept_unchanged(before, "a planted rewrite")
 
 
 if __name__ == "__main__":
