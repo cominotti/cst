@@ -18,7 +18,7 @@ import subprocess
 import time
 import unittest
 
-from btrfs.bulk.domain.steam import snapshots_resume_above
+from btrfs.snapshot_runtime.domain import snapshots_resume_above
 from btrfs.tests.snapshot_fakes import GIB, SCRIPT, UMASK, USAGE, RuntimeTest, log, read
 from tests.test_module_routing import userns_root
 
