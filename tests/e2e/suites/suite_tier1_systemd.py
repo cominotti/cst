@@ -9732,3 +9732,82 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_188_swap_apply_refuses_an_uresourced_conf_it_cannot_copy_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place, nothing applied yet, and, where
+        /etc/uresourced.conf goes (the image's own moved aside first; the test's trap removes what it put
+        there and puts it back before swap_cleanup runs), first a folder, then a link to a folder (apply
+        copies the file aside through the link before it writes it): plan's row of the file is "?" and
+        says apply refuses it; apply exits 1 with "<file>: cannot be read: nothing was changed" on
+        stderr, and every file, link, mode and owner under /etc and the scratch tree, and the install
+        record, are as before (no crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply
+        wrote crypttab and fstab, started swap0's step, set zswap, masked zram and ran sysctl first, and
+        failed at the copy with "Is a directory". With the image's file back, the same apply works and
+        a second one changes nothing."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+CONF=/etc/uresourced.conf
+NOTE="cannot be read, even as root: apply refuses before it writes anything"
+conf_made=""
+conf_back() {
+    if [[ -n "$conf_made" ]]; then rm -rf "$CONF"; fi
+    if [[ -e "$W/uresourced.real" ]]; then mv "$W/uresourced.real" "$CONF"; fi
+}
+trap 'conf_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+refused() {
+    swap_run plan
+    [[ $rc == 0 ]] || fail "plan with $1 exited $rc"
+    grep -qE "^  \?  +uresourced\.conf +$NOTE\$" <<<"$out" || fail "plan's row of $CONF with $1"
+    s0="$(snap)"
+    r0="$(record)"
+    : >"$W/calls"
+    swap_run apply
+    [[ $rc == 1 ]] || fail "apply with $1 exited $rc"
+    grep -qF "ERROR: $CONF: cannot be read: nothing was changed" <<<"$err" || fail "apply's message with $1"
+    [[ "$out" != *"written:"* ]] || fail "apply with $1 wrote before it refused"
+    [[ "$out" != *"== swap0: crypttab and fstab"* ]] || fail "apply with $1 reached swap0's step"
+    [[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+    [[ ! -e "$CONF.pre-swap-config.bak" && ! -L "$CONF.pre-swap-config.bak" ]] || fail "$CONF's .bak was written"
+    [[ "$(snap)" == "$s0" ]] || fail "a refused apply with $1 changed /etc or the scratch tree"
+    [[ "$(record)" == "$r0" ]] || fail "a refused apply with $1 changed the install record"
+    if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply with $1 ran sysctl"; fi
+}
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d "$CONF" && ! -L "$CONF" ]] || fail "$CONF is a folder or a link before the test"
+if [[ -e "$CONF" ]]; then mv "$CONF" "$W/uresourced.real"; fi
+mkdir "$CONF"
+conf_made=1
+refused "a folder in its place"
+rmdir "$CONF"
+mkdir "$W/ures-dir"
+ln -s "$W/ures-dir" "$CONF"
+refused "a link to a folder in its place"
+
+# The image's file back (or none): the same apply works, and a second one changes nothing.
+conf_back
+conf_made=""
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with $CONF back exited $rc"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail "$CONF is not a file"
+s1="$(snap)"
+swap_run apply
+[[ $rc == 0 ]] || fail "a second apply exited $rc"
+[[ "$out" != *"written:"* ]] || fail "a second apply wrote"
+[[ "$(snap)" == "$s1" ]] || fail "a second apply changed /etc or the scratch tree"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
