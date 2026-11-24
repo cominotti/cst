@@ -149,7 +149,7 @@ class Change(Checks):
         stops the run, also one that left a part of the copy behind (a full disk)."""
         mc = self.p.main_conf
         base = f"{mc}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.m.clock.now()))}"
-        taken = {name for _, name in self.m.files.backups(mc)}
+        taken = self.backup_names()
         for n in range(BACKUP_NAME_TRIES):
             bak = backup_name(base, n)
             if bak in taken:
@@ -159,12 +159,16 @@ class Change(Checks):
             r = self.m.runner.run(["sudo", "cp", "-p", *ctx, "--update=none-fail", mc, bak], locale_c=True)
             if r.returncode == 0:
                 return bak
-            taken = {name for _, name in self.m.files.backups(mc)}
+            taken = self.backup_names()
             if bak not in taken or not backup_name_taken(r.stderr):
                 self.out(r.stdout)
                 self.err(r.stderr)
                 raise StepFailed(shell_exit_status(r.returncode))
         raise self.die(f"no free name for a backup of {mc} ({base} and {BACKUP_NAME_TRIES - 1} more are taken)")
+
+    def backup_names(self) -> set[str]:
+        """The names main.conf's backups have now."""
+        return {name for _, name in self.m.files.backups(self.p.main_conf)}
 
     def write_wp(self) -> None:
         """The rule, as the user, atomically; one with other settings is kept as .bak first."""

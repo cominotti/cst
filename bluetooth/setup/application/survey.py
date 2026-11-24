@@ -464,11 +464,11 @@ class Survey:
     def read_owed(self) -> None:
         """The restarts the record owes while the services run with the IDs it names: owed (the units,
         one per line), bt_owed and wp_owed."""
-        self.owed = self.restart_state("show") or ""
-        owed = self.owed.split("\n")
+        text = self.restart_state("show") or ""
+        owed = text.split("\n")
         self.bt_owed = BLUETOOTH_UNIT in owed
         self.wp_owed = WIREPLUMBER_UNIT in owed
-        self.owed = self.owed.rstrip("\n")
+        self.owed = text.rstrip("\n")
 
     def _bearer_state(self) -> BearerState:
         """What apply does with the headset's preferred bearer (BEARER)."""
