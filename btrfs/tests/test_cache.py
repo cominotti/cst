@@ -734,6 +734,23 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         # Only the mounts and /etc/fstab are taken back: the folders and the tag it made stay.
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "var", "mnt", "scratchpad", "danilo", CACHE_TAG)))
 
+    def test_an_fstab_already_gone_counts_as_put_back(self) -> None:
+        # With no /etc/fstab before, putting it back is removing CST's. When it is already gone, the
+        # unlink's ENOENT was an undo error: "ROLLBACK INCOMPLETE (cannot put /etc/fstab back: No such
+        # file or directory)", although /etc/fstab was as it was.
+        fstab = os.path.join(self.tmp, "etc", "fstab")
+        os.unlink(fstab)
+        self.runner.reload_fails = True
+        self.runner.on_failed_reload = lambda: os.unlink(fstab)
+        rc, _, err = self._run(["attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "ERROR: systemctl daemon-reload failed: Failed to reload daemon; mounts and /etc/fstab restored.", err
+        )
+        self.assertNotIn("ROLLBACK INCOMPLETE", err)
+        self.assertFalse(os.path.lexists(fstab))
+        self.assertEqual(self._mounted(), [])
+
     def test_a_failed_reload_puts_the_old_fstab_back(self) -> None:
         self.runner.reload_fails = True
         before = self._fstab()

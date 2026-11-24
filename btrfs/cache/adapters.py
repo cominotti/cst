@@ -333,7 +333,7 @@ def _commit_fstab(fstab_path: str, previous: str | None, new_text: str, rt: _Cac
     why = res.failure("systemctl daemon-reload")
     try:
         if previous is None:
-            os.unlink(fstab_path)
+            LocalFileSystemAdapter().remove_file(fstab_path)  # already gone: as it was
         else:
             write_atomic(fstab_path, previous, mode=_FSTAB_MODE)
     except OSError as exc:
