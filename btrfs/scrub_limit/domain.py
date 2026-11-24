@@ -15,6 +15,7 @@ from cst_core.domain.text import DRY_RUN_LINE, HELP_WORDS, ShellAssignments, gro
 DEFAULT_SCRUB_LIMIT: Final = "500M"
 SCRUB_CONF_PATH: Final = SNAPSHOTS_CONF
 SCRUB_DROPIN_PATH: Final = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
+SCRUB_SERVICE: Final = "btrfs-scrub-weekly.service"  # the unit the drop-in extends
 
 _SCRUB_SIZE_RE: Final = re.compile(r"^[0-9]+[KkMmGgTt]?$")
 _SCRUB_ASSIGN_RE: Final = re.compile(r"^\s*(?:export\s+)?SCRUB_LIMIT\s*(?:=|$)")

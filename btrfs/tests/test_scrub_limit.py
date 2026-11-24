@@ -445,6 +445,66 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         self.assertNotIn("Traceback", said)
         self.assertIsNone(self._read(self.conf))
 
+    def _as_asked(self, limit: str | None) -> None:
+        """snapshots.conf and the drop-in as set LIMIT (off: None) writes them, as a run killed before its
+        daemon-reload left them."""
+        self._write(self.conf, update_snapshots_conf_scrub_limit("NAS_ENABLED=1\n", limit) or "")
+        if limit is not None:
+            self._write(self.dropin, render_scrub_dropin(limit))
+        elif os.path.exists(self.dropin):
+            os.remove(self.dropin)
+
+    def test_files_as_asked_and_systemd_behind_reloads_systemd(self) -> None:
+        for limit in ("500M", None):
+            with self.subTest(limit=limit):
+                self._as_asked(limit)
+                runner = ScrubFakeRunner()
+                runner.need_daemon_reload = "yes\n"
+                rc, lines = scrub_limit_apply(self.paths, limit, runner=runner)
+                self.assertEqual(rc, 0, lines)
+                self.assertIn(f"unchanged: {self.conf}", lines)
+                show = ["systemctl", "show", "-p", "NeedDaemonReload", "--value", "btrfs-scrub-weekly.service"]
+                self.assertIn(show, runner.calls)
+                self.assertEqual(runner.calls[runner.calls.index(show) + 1 :], [["systemctl", "daemon-reload"]])
+                self.assertEqual(
+                    lines[-1],
+                    "reloaded:  systemd had not loaded btrfs-scrub-weekly.service as it is on disk"
+                    " (an earlier run stopped)",
+                )
+
+    def test_files_as_asked_and_systemd_in_step_runs_no_daemon_reload(self) -> None:
+        self._as_asked("500M")
+        runner = ScrubFakeRunner()
+        runner.need_daemon_reload = "no\n"
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 0, lines)
+        self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)
+        self.assertFalse(any(line.startswith("reloaded:") for line in lines), lines)
+
+    def test_files_as_asked_and_systemctl_cannot_say_reloads_systemd(self) -> None:
+        self._as_asked("500M")
+        runner = ScrubFakeRunner()
+        runner.fail_on = {"systemctl show"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(runner.calls[-1], ["systemctl", "daemon-reload"])
+
+    def test_files_as_asked_and_a_failed_reload_says_systemd_has_not_loaded_them(self) -> None:
+        self._as_asked("500M")
+        conf_before, dropin_before = self._read(self.conf), self._read(self.dropin)
+        runner = ScrubFakeRunner()
+        runner.need_daemon_reload = "yes\n"
+        runner.fail_on = {"systemctl daemon-reload"}
+        rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            lines[-1],
+            "ERROR: systemctl daemon-reload failed: Access denied; snapshots.conf and the drop-in are as asked,"
+            " systemd has not loaded them (run systemctl daemon-reload once it works)",
+        )
+        self.assertEqual((self._read(self.conf), self._read(self.dropin)), (conf_before, dropin_before))
+        self.assertEqual(sum("installer.py" in " ".join(c) for c in runner.calls), 1)  # its first call only
+
     def test_an_unreadable_drop_in_stops_set_before_any_write(self) -> None:
         os.makedirs(self.dropin)  # a folder where the drop-in goes: it cannot be read back
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=ScrubFakeRunner())

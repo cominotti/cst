@@ -291,6 +291,8 @@ class ScrubFakeRunner:
         self._installer_root = installer_root
         # a part of the command line ("systemctl daemon-reload", "installer.py text") whose calls exit 1
         self.fail_on: set[str] = set()
+        # what `systemctl show -p NeedDaemonReload --value UNIT` prints ("": systemd answers nothing)
+        self.need_daemon_reload = ""
 
     def run(
         self,
@@ -306,6 +308,8 @@ class ScrubFakeRunner:
             return CommandResult(1, "", "Access denied", argv=tuple(cmd))
         if "installer.py" in " ".join(cmd):
             return self._installer(cmd, input_text)
+        if cmd[:4] == ["systemctl", "show", "-p", "NeedDaemonReload"]:
+            return CommandResult(0, self.need_daemon_reload, "", argv=tuple(cmd))
         return CommandResult(0, "", "", argv=tuple(cmd))
 
     def _installer(self, cmd: list[str], input_text: str | None) -> CommandResult:

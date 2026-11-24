@@ -13,6 +13,7 @@ from typing import Final
 from btrfs.scrub_limit.domain import (
     SCRUB_CONF_PATH,
     SCRUB_DROPIN_PATH,
+    SCRUB_SERVICE,
     ScrubStatusSnapshot,
     render_scrub_dropin,
     scrub_limit_plan_lines,
@@ -31,6 +32,7 @@ from cst_core.adapters.runtime import (
 )
 from cst_core.domain.install import Component, InstallReportWord
 from cst_core.domain.record import ROOT_RECORD, ComponentState, RecordFormatError
+from cst_core.domain.text import YES_WORDS
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
@@ -263,6 +265,43 @@ def _reload_or_roll_back(
     return _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)
 
 
+def _systemd_behind(cmd_runner: CommandRunnerPort) -> bool:
+    """Whether systemd has not loaded the scrub unit's files as they are on disk (NeedDaemonReload: an
+    earlier run wrote them and stopped before its daemon-reload); also when systemctl cannot say."""
+    r = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).show_value(SCRUB_SERVICE, "NeedDaemonReload")
+    return r.returncode != 0 or r.stdout.strip().lower() in YES_WORDS
+
+
+def _reload_what_is_on_disk(cmd_runner: CommandRunnerPort) -> str | None:
+    """daemon-reload when only systemd's view was behind (this run changed no file: nothing to roll back);
+    the ERROR line when it fails."""
+    dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+    if dr.returncode == 0:
+        return None
+    return (
+        f"ERROR: {dr.failure('systemctl daemon-reload')}; snapshots.conf and the drop-in are as asked, "
+        "systemd has not loaded them (run systemctl daemon-reload once it works)"
+    )
+
+
+def _load_in_systemd(
+    cmd_runner: CommandRunnerPort,
+    inst_lines: Sequence[str],
+    reload_or_roll_back: Callable[[], str | None],
+    *,
+    conf_changed: bool,
+) -> tuple[str | None, list[str]]:
+    """daemon-reload when this run changed the drop-in, or when systemd has not loaded it as it is on
+    disk (an earlier run stopped before its daemon-reload): (the ERROR line or None, the lines to add)."""
+    if any(line.startswith((InstallReportWord.WRITTEN, InstallReportWord.REMOVED)) for line in inst_lines):
+        return reload_or_roll_back(), []
+    if not _systemd_behind(cmd_runner):
+        return None, []
+    # This run changed no file but snapshots.conf, or none at all: then there is nothing to roll back.
+    error = reload_or_roll_back() if conf_changed else _reload_what_is_on_disk(cmd_runner)
+    return error, [f"reloaded:  systemd had not loaded {SCRUB_SERVICE} as it is on disk (an earlier run stopped)"]
+
+
 def _mark_core_after_write(
     cmd_runner: CommandRunnerPort, paths: ScrubPaths, inst_lines: Sequence[str], *, core_done: bool
 ) -> tuple[int, str | None]:
@@ -310,10 +349,14 @@ def scrub_limit_apply(
     if target_limit is None:
         with contextlib.suppress(OSError):
             os.rmdir(os.path.dirname(paths.dropin_path))
-    if any(line.startswith((InstallReportWord.WRITTEN, InstallReportWord.REMOVED)) for line in inst_lines):
-        error = _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
-        if error is not None:
-            return 1, [*out, error]
+
+    def reload_or_roll_back() -> str | None:
+        return _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
+
+    error, note = _load_in_systemd(cmd_runner, inst_lines, reload_or_roll_back, conf_changed=conf_changed)
+    if error is not None:
+        return 1, [*out, error]
+    out.extend(note)
     rc_m, mark_error = _mark_core_after_write(cmd_runner, paths, inst_lines, core_done=core_done)
     if mark_error is not None:
         return rc_m, [*out, mark_error]
