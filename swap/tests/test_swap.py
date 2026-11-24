@@ -1885,6 +1885,20 @@ class MemoryLowOverrideTest(_SwapScratch):
             self._run(D.SwapCommand.PLAN, shown)[1],
         )
 
+    def test_a_live_memory_low_of_other_than_ascii_digits_is_shown_as_it_is(self) -> None:
+        # isdigit() takes these: int() refused "²" (a traceback out of status), and read "٣" as 3 bytes.
+        for low in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}"):
+            with self.subTest(low=low):
+                with open(os.path.join(self.env.cgroup_dir, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
+                    f.write(low + "\n")
+                rc, out, err = self._run(D.SwapCommand.STATUS, {"ActiveState": "active"})
+                self.assertEqual(rc, 0, out + err)
+                rows = [ln for ln in out.splitlines() if "machine.slice memory.low" in ln]
+                self.assertEqual(len(rows), 1, out)
+                self.assertIn("DIFF", rows[0])
+                self.assertIn(low, rows[0])
+                self.assertNotIn("3 B", out)
+
     def test_a_foreign_50_memory_low_conf_is_an_over_row(self) -> None:
         self._host_file(self.FOREIGN, "[Slice]\nMemoryLow=8G\n")
         self._cgroup_low(8 * 2**30)
@@ -2443,6 +2457,31 @@ class SwapApplyBranchesTest(_SwapScratch):
         plan = self._plan_text(self.env)
         self.assertRegex(plan, r"later +zram0 +active; not enough free RAM to swap it off now: gone after a reboot")
         self.assertNotRegex(plan, r"swapoff +zram0")
+
+    def test_cgroup_numbers_of_other_than_ascii_digits_are_no_numbers(self) -> None:
+        # memory.swap.current, memory.low and zswap's pool_total_size: isdigit() takes "²", int() refused it.
+        cg = os.path.join(self.env.cgroup_dir, "machine.slice")
+        for name in ("memory.swap.current", "memory.low"):
+            with open(os.path.join(cg, name), "w", encoding="utf-8") as f:
+                f.write("\N{SUPERSCRIPT TWO}\n")
+        os.makedirs(self.env.zswap_debug_dir, exist_ok=True)
+        with open(os.path.join(self.env.zswap_debug_dir, "pool_total_size"), "w", encoding="utf-8") as f:
+            f.write("\N{ARABIC-INDIC DIGIT THREE}\n")
+        fs = self._fs()
+        service = SwapApplicationService(
+            self.env,
+            fs,
+            _FakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs),
+            _FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes),
+            installer=_installer(),
+        )
+        report = service.status_report(include_config=False)
+        rows = {r.label: r for r in report.cgroups}
+        self.assertIsNone(rows["machine.slice"].row["swap"])
+        self.assertEqual(rows["machine.slice"].low_display, "\N{SUPERSCRIPT TWO}")
+        assert report.debug is not None
+        pool = [r for r in report.debug.rows if r.name == "pool_total_size"]
+        self.assertEqual([r.value for r in pool], ["\N{ARABIC-INDIC DIGIT THREE}"])
 
     def test_the_whole_system_row_takes_its_swap_from_meminfo_without_memory_swap_current(self) -> None:
         with open(os.path.join(self.env.proc_dir, "meminfo"), "a", encoding="utf-8") as f:
@@ -3030,6 +3069,28 @@ class Phase1MemoryTuningTest(_SwapScratch):
         self.assertIn("no active seat session", out)
         self.assertNotRegex(out, r"DIFF +user\.slice memory\.min")
         self.assertNotIn(("restart", "uresourced.service"), sd.calls)
+
+    def test_a_live_floor_of_other_than_ascii_digits_is_a_difference(self) -> None:
+        # isdigit() takes these: int() refused "²" and 5000 digits (a traceback out of apply).
+        for live in ("\N{SUPERSCRIPT TWO}", "1" * 5000):
+            with self.subTest(live=live[:10]):
+                self._uresourced_case(live)
+                rc, out, _ = self._apply_with_uresourced()
+                self.assertNotEqual(rc, 0, out)
+                self.assertRegex(out, r"DIFF +user\.slice memory\.min")
+
+    def test_a_seat_uid_of_other_than_ascii_digits_is_a_user(self) -> None:
+        # ACTIVE_UID "٣" was read as uid 3, a greeter's: the seat counted nobody, and a live 0 was no
+        # difference. Not a number, it counts as the seat's user, as a seat without ACTIVE_UID does.
+        self._uresourced_case(str(2**30))
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertEqual(rc, 0, out)  # writes /etc/uresourced.conf
+        self._seats(seat0="IS_SEAT0=1\nACTIVE=c1\nACTIVE_UID=\N{ARABIC-INDIC DIGIT THREE}\nSESSIONS=c1\n")
+        self._uresourced_case("0")
+        rc, out, _ = self._apply_with_uresourced()
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("no active seat session", out)
+        self.assertRegex(out, r"DIFF +user\.slice memory\.min")
 
     def test_the_floor_counts_each_active_user_once(self) -> None:
         # Two users in front of two seats: uresourced gives user.slice MemoryMin for each (2G), and that is
