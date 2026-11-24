@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -298,6 +299,31 @@ class ArgvTest(unittest.TestCase):
         self.assertEqual(argv[-2:], ["--invariant", "neverX"])
         self.assertNotIn("--backend", argv)
         self.assertNotIn("--seed", argv)
+
+
+# Names the standard library of Python 3.12 lacks, which cst-quint and what it imports must not need: the quint
+# job of .github/workflows/ci.yml runs it on the ubuntu-24.04 runner's own python3 (3.12).
+_SIMULATE_312 = """
+import os, runpy, sys, typing
+del typing.TypeIs
+del os.process_cpu_count
+sys.argv = [sys.argv[1], "--help"]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+class HostPythonTest(unittest.TestCase):
+    def test_help_runs_without_the_names_python_3_12_lacks(self) -> None:
+        ran = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _SIMULATE_312, TOOL],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertIn("usage", ran.stdout.lower())
 
 
 class CheckoutTest(unittest.TestCase):

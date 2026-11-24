@@ -51,7 +51,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from typing import Final
+from typing import Final, TypeGuard
 
 # The checkout's top, two folders above this script: run with -I, Python leaves it off sys.path (and -B,
 # or the bytecode flag below, keeps the cst_core imported from there from writing __pycache__ into it).
@@ -62,7 +62,6 @@ if _CHECKOUT not in sys.path:
     sys.path.insert(0, _CHECKOUT)
 
 from cst_core.domain.errors import ExitStatus
-from cst_core.domain.shapes import json_object, parse_json
 from cst_core.domain.values import format_bytes_human
 
 QUINT_VERSION: Final = "0.33.1"
@@ -395,14 +394,21 @@ def trace_problem(job: TraceJob, ran: Ran) -> str | None:
     return f"the walk failed (exit {ran.returncode})"
 
 
+def _json_object(value: object) -> TypeGuard[dict[str, object]]:
+    """A JSON object: a dict whose keys are all strings. cst_core.domain.shapes.json_object is the same check, but
+    that module imports typing.TypeIs (Python 3.13), and this program runs on the CI runner's own Python 3.12 (the
+    quint job of .github/workflows/ci.yml), so it reads JSON with the standard library."""
+    return isinstance(value, dict) and all(isinstance(k, str) for k in value)
+
+
 def normalize(text: str, description: str) -> str:
     """An ITF trace as it is checked in: "#meta" without the spec's absolute path or a timestamp (the
     description in their place), one state per line, sorted keys: the same bytes for the same trace."""
-    doc = parse_json(text)
-    if not json_object(doc) or not isinstance(states_in := doc.get("states"), list):
+    doc = json.loads(text)
+    if not _json_object(doc) or not isinstance(states_in := doc.get("states"), list):
         raise StepError("not an ITF trace")
     meta = doc.get("#meta")
-    kept = {k: meta[k] for k in ("format", "format-description") if json_object(meta) and k in meta}
+    kept = {k: meta[k] for k in ("format", "format-description") if _json_object(meta) and k in meta}
     kept["description"] = description
     lines = ["{", f'"#meta": {json.dumps(kept, sort_keys=True)},']
     lines += [
