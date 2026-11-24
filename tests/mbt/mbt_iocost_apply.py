@@ -63,6 +63,7 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, ru
 from btrfs.iocost import adapters as iocost_adapters
 from btrfs.iocost.adapters import IocostPaths, apply_iocost, revert_iocost
 from btrfs.iocost.domain import IOCOST_DISABLE_CTRL_AUTO, IOCOST_ENABLE_CTRL_AUTO, IOCOST_SERVICE
+from btrfs.tests.fakes import write
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Component, Owner, select_entries
 from cst_core.domain.record import ComponentState
@@ -313,11 +314,6 @@ class IocostMachine(RuleBasedStateMachine):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ---- helpers -----------------------------------------------------------------------------
-    def _write(self, path: str, text: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
-
     def _qos(self) -> dict[str, str]:
         """io.cost.qos as {MAJ:MIN: its line}."""
         with open(self.paths.qos_path, encoding="utf-8") as fh:
@@ -331,7 +327,7 @@ class IocostMachine(RuleBasedStateMachine):
             return OSError(errno.EINVAL, os.strerror(errno.EINVAL))
         lines = self._qos()
         lines[payload.split(maxsplit=1)[0]] = payload
-        self._write(qos_path, "".join(f"{line}\n" for line in lines.values()))
+        write(qos_path, "".join(f"{line}\n" for line in lines.values()))
         return None
 
     def _component(self) -> tuple[ComponentState | None, set[str]]:
@@ -396,16 +392,16 @@ class IocostMachine(RuleBasedStateMachine):
     @initialize(udevd=st.booleans(), vendor=st.booleans())
     def start(self, *, udevd: bool, vendor: bool) -> None:
         """One NVMe disk (and maybe a vendor's), io.cost.qos without CST's line, nothing installed."""
-        self._write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
-        self._write(self.paths.qos_path, f"{VENDOR_LINE}\n" if vendor else "")
-        self._write(self.paths.model_path, "")
+        write(self.paths.controllers_path, "cpuset cpu io memory pids\n")
+        write(self.paths.qos_path, f"{VENDOR_LINE}\n" if vendor else "")
+        write(self.paths.model_path, "")
         disks = [("nvme0n1", DISK), *([("nvme1n1", VENDOR_DISK)] if vendor else [])]
         for name, devno in disks:
             base = os.path.join(self.paths.sys_block, name)
             for rel, text in (("dev", devno), ("queue/rotational", "0"), ("queue/scheduler", "[none]")):
-                self._write(os.path.join(base, rel), text + "\n")
+                write(os.path.join(base, rel), text + "\n")
         if udevd:
-            self._write(self.udev_control, "")
+            write(self.udev_control, "")
         self.host.udevd = udevd
         self.vendor = vendor
 

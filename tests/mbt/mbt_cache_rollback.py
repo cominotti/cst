@@ -44,7 +44,7 @@ from btrfs.cache.domain import (
     CacheMountKind,
     parse_managed_fstab_entries,
 )
-from btrfs.tests.fakes import CacheTestCtx, FakeMountRunner
+from btrfs.tests.fakes import CacheTestCtx, FakeMountRunner, write
 from cst_core.adapters.runtime import ManagedCliEnv
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
@@ -113,10 +113,7 @@ class CacheMachine(RuleBasedStateMachine):
 
     # ---- helpers -----------------------------------------------------------------------------
     def _write(self, rel: str, text: str) -> None:
-        path = os.path.join(self.tmp, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        write(os.path.join(self.tmp, rel), text)
 
     def _fstab(self) -> str | None:
         path = os.path.join(self.tmp, "etc", "fstab")
