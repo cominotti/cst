@@ -7,7 +7,7 @@ Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affecte
 With no NAME it runs every unit test of the checkout across parallel worker
 processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `coverage.py`).
 The worker count, first rule that applies (`requested_jobs()`): `-j N`/`--jobs N`
-with N >= 1; 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
+with N >= 1 (ASCII digits; anything else is a usage error); 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
 (unset, empty or 0: the next rule; any other value that is not a whole number
 is a usage error, when this rule is reached); one per CPU of the affinity. `invowk cmd check` passes no
 --jobs, so CST_TEST_JOBS is how a run on a shared machine caps the suite.
@@ -816,9 +816,14 @@ class _ParseAcc:
 
 
 def _parse_jobs_value(raw: str) -> int:
-    if not raw.isdigit():
-        raise SystemExit(f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
-    return int(raw)
+    """N of -j N/--jobs N: ASCII digits only (str.isdigit also takes "²", which int() refuses)."""
+    invalid = SystemExit(f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
+    if not (raw.isascii() and raw.isdigit()):
+        raise invalid
+    try:
+        return int(raw)
+    except ValueError:  # past Python's limit on the digits int() converts
+        raise invalid from None
 
 
 def _parse_worker_fds(raw: str) -> tuple[int, int]:
