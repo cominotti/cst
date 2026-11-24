@@ -26,7 +26,14 @@ whose fault did not fire (no daemon-reload was needed), exits 0.
 
 Not modelled: a failed write of snapshots.conf, kills
 (btrfs/tests/test_scrub_limit_faults.py covers both), a systemctl that
-cannot say whether it is behind.
+cannot say whether it is behind, and a fault that fails only some of the
+calls it matches. A fault fails every installer call, or every
+daemon-reload, of its step, so the rollback's installer call never fails
+after a forward one that worked, and a first reload never fails before a
+later one works: the never-ROLLBACK-INCOMPLETE and left-as-they-were checks
+see only that all-or-nothing pattern. A failed undo is covered by
+btrfs/tests/test_scrub_limit.py (test_a_rollback_that_fails_says_so) and
+the combinations of btrfs/tests/test_scrub_limit_faults.py.
 """
 
 from enum import StrEnum

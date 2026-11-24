@@ -21,7 +21,12 @@ fire (the bind was already mounted, /etc/fstab did not change so no reload
 ran), exits 0: the same command converges from every state.
 
 Not modelled: a failed umount, a failed write of /etc/fstab, a findmnt that
-fails, a mount CST did not make, kills.
+fails, a mount CST did not make, kills, and a fault that fails only some of
+the calls it matches: a reload fault fails the step's one daemon-reload
+(its undo runs none), and a mount fault fails an attach's bind, never the
+undo's mount again of a detach. So the undo never fails here; the
+ROLLBACK INCOMPLETE paths are covered by btrfs/tests/test_cache.py (an
+/etc/fstab that cannot be put back, a bind not mounted again).
 """
 
 from enum import StrEnum
