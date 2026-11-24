@@ -253,7 +253,7 @@ def _parse_interrupt_line(line: str, cpu_indices: Sequence[int]) -> IrqLineSampl
         return None
     prefix, rest = line.split(_COLON, 1)
     irq_id = prefix.strip()
-    if not irq_id.isdigit():
+    if parse_whole_number(irq_id) is None:  # a numbered IRQ: ASCII digits (NMI, LOC and "²" are none)
         return None
     fields = rest.split()
     n_cpus = len(cpu_indices)

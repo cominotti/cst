@@ -157,6 +157,15 @@ class PerfParserTest(unittest.TestCase):
         samples = parse_proc_interrupts("   CPU0  CPU1\n" + f"  7:  {'9' * 5000}  1  x\n" + line)
         self.assertEqual([(s.irq_id, s.counts_by_cpu) for s in samples], [("246", {0: 100, 1: 7})])
 
+    def test_an_interrupt_line_is_numbered_by_ascii_digits_only(self) -> None:
+        # isdigit() took any Unicode digit: a superscript two or an Arabic-Indic three was a numbered IRQ, and
+        # cst perf built /proc/irq paths from it.
+        line = "  246:      100          7   IR-PCI-MSIX  amdgpu\n"
+        for irq in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "+5", " "):
+            with self.subTest(irq=irq):
+                samples = parse_proc_interrupts(f"   CPU0  CPU1\n {irq}:   1   2   IO-APIC x\n" + line)
+                self.assertEqual([s.irq_id for s in samples], ["246"])
+
     def test_proc_numbers_past_int_s_digit_limit_are_no_number(self) -> None:
         many = "9" * 5000
         self.assertEqual(parse_proc_kib_table(f"MemTotal: 12 kB\nBig: {many} kB\n"), {"MemTotal": 12})
