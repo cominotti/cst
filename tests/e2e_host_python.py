@@ -183,7 +183,7 @@ def _file_folder(node: ast.expr, rel: str) -> str | None:
         and node.args[0].id == "__file__"
     )
     parts = rel.split("/")
-    if not is_file_path or ups == 0 or ups > len(parts) - 1:
+    if not is_file_path or ups == 0 or ups > len(parts):  # len(parts) folders up: the top ("")
         return None
     return "/".join(parts[: len(parts) - ups])
 

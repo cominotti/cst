@@ -200,6 +200,18 @@ class PlantedTest(unittest.TestCase):
         )
         self.assert_checked_at("tests/helper.py:3:", not_at="tests/e2e/helper.py")
 
+    def test_a_load_from_the_top_of_the_repository_is_checked_there(self) -> None:
+        # Three folders up from tests/e2e/run.py is the top of the repository (""): the old gate took it
+        # for a folder above it and reported a load it cannot follow instead of checking m.py.
+        self.append("m.py", "try:\n    pass\nexcept OSError, ValueError: pass\n")
+        self.append(
+            "tests/e2e/run.py",
+            "\nROOT = Path(__file__).resolve().parent.parent.parent\n"
+            "\n\ndef top() -> None:\n"
+            '    importlib.util.spec_from_file_location("m", ROOT / "m.py")\n',
+        )
+        self.assert_checked_at("m.py:3:", not_at="cannot follow")
+
     def test_a_folder_above_the_repository_is_a_load_the_gate_cannot_follow(self) -> None:
         self.append(
             "tests/e2e/run.py",
