@@ -22,6 +22,10 @@ Checked after each fault, after the recovery and at the end:
 A boot that gives up (the third of a scheduled migration) is checked the same way: each fault
 there, then two more boots, leave the volumes as they were and no flag and no counter.
 
+A migration from a count of boots an older helper left without its flag (the volumes folder
+without +C again, as after Docker is reinstalled) is checked as the first one: its new request
+resets that count before it writes the flag, and every fault there still converges in one boot.
+
 One class per start state and fault mode (each a work unit of tests/run_unit.py of its own), each
 pinning its number of cases.
 """
@@ -65,6 +69,10 @@ CASES_MIGRATION_KILL = 67  # 25 first faults, 42 with a second fault in recover(
 CASES_MIGRATION_FAIL = 55  # 25 and 30
 CASES_MIGRATION_FAIL_FROM = 67  # 25 and 42
 CASES_GIVE_UP = 4  # per mode: each of the boot's points, and the boot with no fault
+# The migration's cases, and one more first fault: the reset of the old count (recover has no step then).
+CASES_STALE_KILL = 68
+CASES_STALE_FAIL = 56
+CASES_STALE_FAIL_FROM = 68
 
 
 class FaultyTree(LocalVolumeTree):
@@ -388,3 +396,37 @@ class GiveUpFailTest(GiveUpFaultBase):
 class GiveUpFailFromTest(GiveUpFaultBase):
     def test_every_full_disk_while_giving_up(self) -> None:
         self.assertEqual(self.every_fault_while_giving_up(FaultMode.FAIL_FROM), CASES_GIVE_UP)
+
+
+class StaleCountFaultBase(MigrationFaultBase):
+    """A count of boots an older helper left without its flag (it removed the flag, then the count, and
+    could stop between the two), and the volumes folder without +C (Docker reinstalled): the new request
+    resets the count, durably, before it writes its flag. Every fault of that boot, then recovery and one
+    whole boot, must converge: a request that went on with the old count would give up instead."""
+
+    @override
+    def arrange(self) -> None:
+        self.set_attempts("2\n")
+
+
+class StaleCountCutPointsTest(StaleCountFaultBase):
+    def test_the_count_is_reset_before_the_flag_is_written(self) -> None:
+        calls = cut_points(self.plan, self.boot)
+        self.assert_converged("no fault")
+        self.assertEqual(calls[:3], ["clear_postponed", "save_attempts 0", "request_migration"])
+        self.assertEqual(calls.count("save_attempts 1"), 1)  # this request's first boot
+
+
+class StaleCountKillTest(StaleCountFaultBase):
+    def test_every_kill_then_recover_then_migrate(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.KILL), CASES_STALE_KILL)
+
+
+class StaleCountFailTest(StaleCountFaultBase):
+    def test_every_failure_then_recover_then_migrate(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL), CASES_STALE_FAIL)
+
+
+class StaleCountFailFromTest(StaleCountFaultBase):
+    def test_every_full_disk_then_recover_then_migrate(self) -> None:
+        self.assertEqual(self.every_fault_then_recover(FaultMode.FAIL_FROM), CASES_STALE_FAIL_FROM)
