@@ -25,7 +25,7 @@ profiles.load()
 ZONES = ("UTC", "Europe/Berlin", "America/New_York", "Australia/Sydney", "Asia/Kolkata", "Australia/Lord_Howe")
 LOW = dt.datetime(2024, 1, 1)
 HIGH = dt.datetime(2028, 12, 31)
-LAST_EPOCH = 253_402_128_000  # 9999-12-29 00:00 UTC
+LAST_EPOCH = 253_402_128_000  # 9999-12-30 00:00 UTC
 
 counts = st.integers(min_value=0, max_value=120)
 policies = st.dictionaries(st.sampled_from(core.POLICY_UNITS), st.one_of(counts, st.just("all")), min_size=1)
