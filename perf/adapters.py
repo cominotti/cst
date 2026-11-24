@@ -4,6 +4,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 import os
+from typing import Final
 
 from cst_core.adapters.files import read_text
 from cst_core.ports import ExecutionContextPort
@@ -17,12 +18,15 @@ from perf.domain.models import (
     perf_path_spec,
 )
 
+# The procfs root a probe reads, unless a container maps the host's.
+_PROC_DIR: Final = "/proc"
+
 
 @dataclass(frozen=True, slots=True)
 class PerfPaths:
     """Resolved root and override paths readable from the current host/container view."""
 
-    proc_dir: str = "/proc"
+    proc_dir: str = _PROC_DIR
     sys_dir: str = "/sys"
     cgroup_dir: str = "/sys/fs/cgroup"
     etc_dir: str = "/etc"
@@ -37,9 +41,9 @@ class PerfPaths:
 
 def resolve_host_perf_paths(exec_ctx: ExecutionContextPort) -> PerfPaths:
     """Map host procfs/sysfs roots through `exec_ctx` only when the container exposes them."""
-    if exec_ctx.is_container() and os.path.isdir(exec_ctx.path("/proc")) and os.path.isdir(exec_ctx.etc_dir()):
+    if exec_ctx.is_container() and os.path.isdir(exec_ctx.path(_PROC_DIR)) and os.path.isdir(exec_ctx.etc_dir()):
         return PerfPaths(
-            proc_dir=exec_ctx.path("/proc"),
+            proc_dir=exec_ctx.path(_PROC_DIR),
             sys_dir=exec_ctx.path("/sys"),
             cgroup_dir=exec_ctx.path("/sys/fs/cgroup"),
             etc_dir=exec_ctx.etc_dir(),

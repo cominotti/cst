@@ -52,6 +52,7 @@ from perf.ports import PerfFsReader, PerfProbePort
 _CG_USER_SLICE: Final = "user.slice"
 _CG_MACHINE_SLICE: Final = "machine.slice"
 _CG_SESSION_SLICE: Final = "session.slice"
+_CG_MEMORY_MIN: Final = "memory.min"
 _CG_SLICE_WEIGHT_CANDIDATES: Final[tuple[str, ...]] = (
     "machine.slice",
     "builds.slice",
@@ -90,7 +91,7 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
     """Collect memory, reclaim, THP, MGLRU, zswap, PSI, and cgroup metrics cleanly."""
     files = _read_key_map(reader, MEMORY_FILE_KEYS)
     user_base_min = parse_optional_int(
-        reader.read_rel(PerfRootKind.CGROUP, posixpath.join(_CG_USER_SLICE, "memory.min"))
+        reader.read_rel(PerfRootKind.CGROUP, posixpath.join(_CG_USER_SLICE, _CG_MEMORY_MIN))
     )
     session_slices: list[CgroupMemorySlice] = []
     for entry in reader.list_rel(PerfRootKind.CGROUP, _CG_USER_SLICE):
@@ -105,11 +106,13 @@ def collect_memory_from_reader(reader: PerfFsReader) -> MemoryProbeSnapshot:
         if not reader.is_dir_rel(PerfRootKind.CGROUP, sess_rel):
             continue
         sess_cur = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.current")))
-        sess_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.min")))
+        sess_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, _CG_MEMORY_MIN)))
         sess_low = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sess_rel, "memory.low")))
-        user_uid_min = parse_optional_int(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(user_rel, "memory.min")))
+        user_uid_min = parse_optional_int(
+            reader.read_rel(PerfRootKind.CGROUP, posixpath.join(user_rel, _CG_MEMORY_MIN))
+        )
         service_min = parse_optional_int(
-            reader.read_rel(PerfRootKind.CGROUP, posixpath.join(service_rel, "memory.min"))
+            reader.read_rel(PerfRootKind.CGROUP, posixpath.join(service_rel, _CG_MEMORY_MIN))
         )
         ancestors = [val for val in (user_base_min, user_uid_min, service_min) if val is not None]
         parent_min = min(ancestors) if ancestors else None
@@ -217,9 +220,7 @@ def collect_cpu_from_reader(reader: PerfFsReader) -> CpuProbeSnapshot:
     return replace(snap, irq_lines=enriched)
 
 
-def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
-    """Collect block schedulers, io.weight vs blk-iocost, NVMe APST, dirty sysctls, and btrfs commits."""
-    files = _read_key_map(reader, IO_FILE_KEYS)
+def _collect_block_devices(reader: PerfFsReader) -> list[BlockDeviceSample]:
     blocks: list[BlockDeviceSample] = []
     for dev in reader.list_rel(PerfRootKind.SYS, "block"):
         if dev.startswith(_BLOCK_SKIP_PREFIXES):
@@ -229,6 +230,10 @@ def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
             reader.read_rel(PerfRootKind.SYS, posixpath.join("block", dev, "queue/rotational"))
         )
         blocks.append(BlockDeviceSample(name=dev, scheduler=sched, rotational=rot))
+    return blocks
+
+
+def _collect_slice_weights(reader: PerfFsReader) -> list[tuple[str, int]]:
     weights: list[tuple[str, int]] = []
     for sl in _CG_SLICE_WEIGHT_CANDIDATES:
         raw_w = clean_opt_str(reader.read_rel(PerfRootKind.CGROUP, posixpath.join(sl, "io.weight")))
@@ -237,6 +242,10 @@ def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
             w = parse_optional_int(tokens[1] if len(tokens) > 1 else tokens[0])
             if w is not None:
                 weights.append((sl, w))
+    return weights
+
+
+def _collect_btrfs_commits(reader: PerfFsReader) -> list[BtrfsCommitSample]:
     btrfs_commits: list[BtrfsCommitSample] = []
     for fs_entry in reader.list_rel(PerfRootKind.SYS, "fs/btrfs"):
         if fs_entry == "features":
@@ -246,17 +255,28 @@ def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
         )
         if parsed is not None:
             btrfs_commits.append(parsed)
-    scrub_limit: str | None = None
-    btrfs_conf = files.get(PerfPathKey.BTRFS_CONF)
-    if btrfs_conf is not None:
-        raw_val = parse_snapshots_conf(btrfs_conf).values.get("SCRUB_LIMIT")
-        scrub_limit = clean_opt_str(raw_val)
+    return btrfs_commits
+
+
+def _scrub_limit_setting(btrfs_conf: str | None) -> str | None:
+    if btrfs_conf is None:
+        return None
+    raw_val = parse_snapshots_conf(btrfs_conf).values.get("SCRUB_LIMIT")
+    return clean_opt_str(raw_val)
+
+
+def collect_io_from_reader(reader: PerfFsReader) -> IoProbeSnapshot:
+    """Collect block schedulers, io.weight vs blk-iocost, NVMe APST, dirty sysctls, and btrfs commits."""
+    files = _read_key_map(reader, IO_FILE_KEYS)
+    blocks = _collect_block_devices(reader)
+    weights = _collect_slice_weights(reader)
+    btrfs_commits = _collect_btrfs_commits(reader)
     return assemble_io_probe(
         files,
         block_devices=blocks,
         nonzero_slice_io_weights=weights,
         btrfs_commits=btrfs_commits,
-        btrfs_scrub_limit=scrub_limit,
+        btrfs_scrub_limit=_scrub_limit_setting(files.get(PerfPathKey.BTRFS_CONF)),
     )
 
 
