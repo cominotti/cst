@@ -120,7 +120,7 @@ class InstallMachine(RuleBasedStateMachine):
     @rule(e=st.sampled_from(ENTRIES))
     def put(self, e: InstallEntry) -> None:
         req = self._req([e])
-        place = self.svc.placement(e, req, {"UUID": self.uuid} if e.is_template else None)
+        place = self.svc.placement(e, req, req.values)
         before = self._state()
         try:
             self.svc.put(place, self.svc.desired(e, req.values), as_root=False)
