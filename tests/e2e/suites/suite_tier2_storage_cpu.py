@@ -2680,7 +2680,12 @@ assert d["samples"] >= 1, d["samples"]
 
     def test_23_btrfs_iocost_plan_apply_and_revert_live(self) -> None:
         """`cst btrfs iocost` writes real kernel `/sys/fs/cgroup/io.cost.qos` on a loopback block
-        device and cleanly reverts only CST-managed rows without disturbing other entries."""
+        device and cleanly reverts only CST-managed rows without disturbing other entries.
+
+        io.cost.qos exists only in the root cgroup. This container runs systemd in a cgroup namespace of
+        its own (other tests read its machine.slice), so where the root is hidden the file is absent and
+        the test checks what cst does then: plan warns, apply --live-only skips with exit 0, status says
+        absent, revert succeeds. Where the file is there, it checks the real write and revert."""
         self.addCleanup(
             exec_bash,
             self.PRIV_CONTAINER,
@@ -2698,6 +2703,17 @@ assert d["samples"] >= 1, d["samples"]
             plan_out="$(/opt/cst-rw/cst btrfs iocost plan --live-only --device "$loop_name")"
             grep -qF "$devno enable=1 ctrl=auto" <<<"$plan_out"
 
+            if [[ ! -e /sys/fs/cgroup/io.cost.qos ]]; then
+                grep -qF "/sys/fs/cgroup/io.cost.qos is absent" <<<"$plan_out"
+                apply_out="$(/opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name")"
+                grep -qF "skipped:   /sys/fs/cgroup/io.cost.qos unavailable" <<<"$apply_out"
+                st="$(/opt/cst-rw/cst btrfs iocost status)"
+                grep -qF "/sys/fs/cgroup/io.cost.qos absent" <<<"$st"
+                /opt/cst-rw/cst btrfs iocost revert --live-only >/dev/null
+                echo E2E-IOCOST-T2-OK absent
+                exit 0
+            fi
+
             /opt/cst-rw/cst btrfs iocost apply --live-only --device "$loop_name" >/dev/null
             grep -qE "^${devno} enable=1" /sys/fs/cgroup/io.cost.qos
 
@@ -2709,7 +2725,7 @@ assert d["samples"] >= 1, d["samples"]
                 echo "io.cost.qos still has enable=1 for $devno after revert" >&2
                 exit 1
             fi
-            echo E2E-IOCOST-T2-OK
+            echo E2E-IOCOST-T2-OK live
             """,
         ).stdout
         self.assertIn("E2E-IOCOST-T2-OK", out)
