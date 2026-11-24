@@ -148,6 +148,7 @@ invowk cmd test types                         # ty on the ty gate list + ruff's 
 invowk cmd test workflows                     # zizmor (offline) on .github, exceptions in .github/zizmor.yml (through uv)
 invowk cmd fmt                                # ruff's safe fixes, then ruff format
 invowk cmd test coverage                      # unit suite under coverage.py + COVERAGE_FLOORS (slow; the nightly runs it)
+invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)
 invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
 ```
@@ -170,7 +171,7 @@ invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
   ([docs/dev-tools.md, "Mutation testing"](docs/dev-tools.md#mutation-testing-optional)).
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
-  standard library. `test pylint`, `test types` and `test mutation` use uv,
+  standard library. `test pylint`, `test types`, `test mbt` and `test mutation` use uv,
   whose virtual environment never lives in the checkout; run a tool by hand
   with `tests/uv-dev` ([docs/dev-tools.md](docs/dev-tools.md)).
 - Every Python file, tests included, is ty-clean, with every ty rule an error

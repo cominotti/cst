@@ -167,6 +167,12 @@ jobs:
       - name: Run the fast gates (invowk cmd check)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
+      # The Hypothesis tests of tests/mbt (the mbt group of uv.lock), derandomized,
+      # 100 examples per test: never fewer on a pull request (docs/dev-tools.md,
+      # "Property and model-based tests"). tests/test_workflow_audit.py keeps this step.
+      - name: Run the property and state-machine tests (invowk cmd test mbt, ci profile)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile ci
+
   e2e-tier1:
     name: E2E Tier 1 (Fedora 45 systemd + NAS, shard ${{ matrix.shard }}/3)
     needs: [fast-gates, changes]

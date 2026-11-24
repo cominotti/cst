@@ -67,6 +67,48 @@ jobs:
       - name: Run the fast gates (invowk cmd check)
         run: runuser -u ci -- env "PATH=${PATH}" invowk cmd check
 
+  # The Hypothesis tests of tests/mbt with the nightly profile: random, 500
+  # examples per test. The task prints the seed it chose, so a failure is
+  # replayed with `invowk cmd test mbt --profile nightly --seed N`. A job of its
+  # own: a red static-gates job does not hide it. tests/test_workflow_audit.py
+  # keeps this step, in a job with no `if:`, `continue-on-error:` or `needs:`.
+  mbt-nightly:
+    name: Property and State-Machine Tests, Nightly Profile (Fedora 45)
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:45
+    timeout-minutes: 15
+    steps:
+      - name: Install Fedora 45 tools and create non-root CI user
+        run: |
+          set -euo pipefail
+          # gettext-envsubst provides envsubst, needed by sigstore/cosign-installer inside setup-invowk.
+          dnf -y install --setopt=install_weak_deps=False git-core python3 curl tar gzip findutils util-linux diffutils gettext-envsubst
+          id -u ci >/dev/null 2>&1 || useradd -m -s /bin/bash ci
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same reason as in ci.yml: the checkout belongs to root, the tests run as ci.
+      - name: Let the ci user's git read the checkout
+        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      # The same uv pin as ci.yml (version and archive SHA256); move both together.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.12.0'
+          checksum: 'eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9'
+          enable-cache: 'false'
+
+      - name: Run the property and state-machine tests (invowk cmd test mbt, nightly profile)
+        run: runuser -u ci -- env "PATH=${PATH}" invowk cmd test mbt --profile nightly
+
   # Known vulnerabilities in the locked dev tools (uv.lock, every group). It
   # needs the network, so it runs here and not in the fast gates. A job of
   # its own: a new advisory or a vulnerability database that does not answer

@@ -249,7 +249,10 @@ cmds: [
 			runtimes: [{name: "native"}]
 			script: {content: """
 				set -euo pipefail
-				tests/uv-dev ty check
+				# --group mbt: ty resolves the imports of tests/mbt (hypothesis) only when the
+				# group is in the tools' environment. Without it a fresh environment (CI) fails
+				# with import-not-found, while one that once had the group passes.
+				tests/uv-dev --group mbt ty check
 				tests/uv-dev ruff check --select ANN
 				"""}
 		}]
@@ -307,6 +310,49 @@ cmds: [
 				"${cov[@]}" html "${data}" -q -d "${out}/html"
 				echo "test coverage: reports in ${out} (report.txt, coverage.json, html/index.html)"
 				python3 -I -B tests/coverage_floors.py "${out}/coverage.json" | tee "${out}/floors.txt"
+				"""}
+		}]
+	},
+	{
+		// Not part of `check`: CI runs it as a step of its own (ci profile) and in the nightly (nightly profile).
+		// See docs/dev-tools.md, "Property and model-based tests".
+		name:        "test mbt"
+		category:    "test"
+		description: "Run the Hypothesis property and state-machine tests of tests/mbt (mbt_*.py) through tests/run_unit.py, on uv's Python with the mbt group (tests/uv-dev)"
+		flags: [
+			{name: "profile", description: "dev (random, example database under ~/.cache/cst-mbt/), ci (derandomized, no database) or nightly (random, 500 examples, a seed printed); default: ci under CI, else dev"},
+			{name: "examples", type: "int", default_value: "0", description: "Examples per test (0 = the profile's: 100, or 500 for nightly)"},
+			{name: "seed", description: "Seed every test (replays a nightly run: its log prints the seed); default: none, or a new one printed for nightly"},
+			{name: "jobs", type: "int", default_value: "0", description: "Worker processes (0 = auto: CST_TEST_JOBS, else one per CPU of the affinity; 1 = single-process)"},
+		]
+		depends_on: {
+			tools: [{alternatives: ["uv"]}]
+		}
+		implementations: [{
+			platforms: [{name: "linux"}]
+			runtimes: [{name: "native"}]
+			timeout: "10m"
+			script: {content: """
+				set -euo pipefail
+				# Named mbt_*.py, not test_*.py: the unit suite's discovery (standard library only) never imports them.
+				mods=()
+				for f in tests/mbt/mbt_*.py; do
+					m="${f%.py}"
+					mods+=("${m//\//.}")
+				done
+				profile="${INVOWK_FLAG_PROFILE:-${CST_MBT_PROFILE:-}}"
+				[[ -n "${profile}" ]] && export CST_MBT_PROFILE="${profile}"
+				[[ "${INVOWK_FLAG_EXAMPLES:-0}" != "0" ]] && export CST_MBT_EXAMPLES="${INVOWK_FLAG_EXAMPLES}"
+				seed="${INVOWK_FLAG_SEED:-}"
+				if [[ -z "${seed}" && "${profile}" == "nightly" ]]; then
+					# One seed for every worker, chosen and printed here, so a failure can be replayed.
+					seed="${SRANDOM}"
+					echo "mbt: profile nightly, seed ${seed} (replay: invowk cmd test mbt --profile nightly --seed ${seed})"
+				fi
+				[[ -n "${seed}" ]] && export CST_MBT_SEED="${seed}"
+				args=(-v)
+				[[ "${INVOWK_FLAG_JOBS:-0}" -gt 0 ]] && args+=(--jobs "${INVOWK_FLAG_JOBS}")
+				exec tests/uv-dev --group mbt python3 -I -B tests/run_unit.py "${args[@]}" "${mods[@]}"
 				"""}
 		}]
 	},

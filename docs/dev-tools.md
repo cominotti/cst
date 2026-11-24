@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-# Developer tools: uv, ruff, ty, zizmor, coverage.py, cosmic-ray
+# Developer tools: uv, ruff, ty, zizmor, coverage.py, Hypothesis, cosmic-ray
 
 CST's helpers are Python scripts that run as root on the system's
 `/usr/bin/python3 -I`, with the standard library only. That does not change.
@@ -13,6 +13,7 @@ are not part of CST: nothing installed on the machine uses them.
 | [ty](https://docs.astral.sh/ty/) 0.0.104 | type checker | `pyproject.toml`, `uv.lock` |
 | [zizmor](https://docs.zizmor.sh/) 1.32.0 | audit of the workflows, the composite actions and `dependabot.yml` in `.github` (see "The workflow audit") | `pyproject.toml`, `uv.lock` |
 | [coverage.py](https://coverage.readthedocs.io/) 7.17.3 | statement and branch coverage of the unit suite, for `invowk cmd test coverage` (its own `coverage` group; the nightly runs it; see "Coverage") | `pyproject.toml`, `uv.lock` |
+| [Hypothesis](https://hypothesis.readthedocs.io/) 6.170.17 | property and state-machine tests of `tests/mbt`, for `invowk cmd test mbt` (its own `mbt` group; CI runs it on every pull request and in the nightly; see "Property and model-based tests") | `pyproject.toml`, `uv.lock` |
 | [cosmic-ray](https://cosmic-ray.readthedocs.io/) 8.9.0 | mutation testing, for the optional `invowk cmd test mutation` (its own `mutation` group; CI does not install it; see "Mutation testing") | `pyproject.toml`, `uv.lock` |
 
 **ty is beta.** Its versions are 0.0.x and a new one can report new errors on
@@ -23,9 +24,10 @@ unchanged code. That is why it is pinned exactly and upgraded on purpose (see
 
 ```
 invowk cmd test pylint        # ruff check (the select list of pyproject.toml), ruff format --check, then the ruff budgets: every Python file
-invowk cmd test types         # ty check on the ty gate list, then ruff check --select ANN on every Python file
+invowk cmd test types         # ty check on the ty gate list (with the mbt group), then ruff check --select ANN on every Python file
 invowk cmd test workflows     # zizmor --offline on .github, with the exceptions in .github/zizmor.yml
 invowk cmd test coverage      # the unit suite under coverage.py, its reports, then COVERAGE_FLOORS (slow; the nightly runs it)
+invowk cmd test mbt           # the Hypothesis tests of tests/mbt (see "Property and model-based tests")
 tests/uv-dev ruff format      # rewrite the files the format check complains about
 tests/uv-dev ruff check --fix # any tool command, by hand
 tests/uv-dev ty check swap/domain.py
@@ -489,6 +491,67 @@ CI skips a few tests a workstation runs. Raise a floor by hand when a
 report shows room; `invowk cmd fix budgets` never touches this table, and
 nothing lowers it to get a green run.
 
+## Property and model-based tests
+
+`tests/mbt/` holds Hypothesis tests: properties of pure functions
+(`@given`) and state machines over a use case and its port fakes
+(`RuleBasedStateMachine`, invariants checked after every step). Hypothesis
+is not in the standard library, so they live apart from the unit suite:
+
+- Their modules are named `mbt_*.py`, not `test_*.py`: the unit suite's
+  discovery never imports them, and `invowk cmd test unit` stays
+  standard-library only. `tests/mbt/__init__.py` imports nothing.
+- `invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N]
+  [--jobs N]` runs them through `tests/run_unit.py`, so its gates apply,
+  on uv's Python with the `mbt` group:
+  `tests/uv-dev --group mbt python3 -I -B tests/run_unit.py`. `check`
+  does not run it; CI runs it as a step of its own, after the fast gates.
+- ty resolves `import hypothesis` only when the group is in the tools'
+  environment, so `invowk cmd test types` runs `tests/uv-dev --group mbt ty
+  check`. Without it a fresh environment (CI) fails with
+  `import-not-found`, while one that once had the group installed passes
+  (`uv run` adds packages to an environment, it does not remove them).
+
+### Profiles
+
+`tests/mbt/profiles.py` holds the settings; every module calls its
+`load()` at import, before its tests (a `@given` test takes the profile
+that is loaded when it is decorated).
+
+| Profile | Examples per test | Draws | Example database | Where it runs |
+|---|---|---|---|---|
+| `dev` | 100 | random | `${XDG_CACHE_HOME:-~/.cache}/cst-mbt/<key>/examples` | a workstation (the default outside CI) |
+| `ci` | 100 | derandomized: the same on every run of the same code | none | every pull request, in fast-gates (the default under CI) |
+| `nightly` | 500 | random, with a seed the task prints | none | the nightly workflow, in a job of its own |
+
+None has a deadline: on a shared machine one slow example is load, not a
+bug. `--examples N` (`CST_MBT_EXAMPLES`) changes the count of any profile;
+a pull request never runs fewer than 100: in the verification pilot, 5
+examples missed a known bug in one copy of the code.
+
+The `dev` database keeps the examples that failed, so the next run tries
+them first. Hypothesis's own folder (its `constants/` and `unicode_data/`
+caches) is the same `cst-mbt/<key>` folder, with the key `tests/uv-dev`
+gives the checkout's virtual environment: Hypothesis's default is
+`./.hypothesis`, in the checkout. Deleting the folder is safe.
+
+### Seeds and replaying a failure
+
+Hypothesis prints a failing example, shrunk, and with `print_blob` a
+`@reproduce_failure(...)` line that replays it exactly on the same code.
+A nightly run picks a seed and prints it first:
+
+```
+mbt: profile nightly, seed 2584909277 (replay: invowk cmd test mbt --profile nightly --seed 2584909277)
+```
+
+`--seed N` (`CST_MBT_SEED`) seeds every test of the run, so the run draws
+the same examples again. Hypothesis has no setting for a seed: a TestCase of
+`tests/mbt` derives from `profiles.MbtTestCase`, which seeds its `@given`
+tests, and runs a state machine with `profiles.run_machine(Machine)`.
+`tests/mbt/mbt_profiles.py` fails on a TestCase of `tests/mbt` that does
+not derive from it.
+
 ## Mutation testing (optional)
 
 A green test suite says the tests pass; it does not say what they check.
@@ -697,7 +760,11 @@ One tool per pull request, so that new findings are clearly the new version's:
    findings, and the release notes for the ones gone) and lay out code
    differently: when the format check fails, run
    `tests/uv-dev ruff format` and commit the result in the same pull request.
-4. For cosmic-ray, the gates above do not run it: run it for real, with
+4. For Hypothesis, run `invowk cmd test mbt --profile ci` and
+   `--profile nightly`. A new version can draw other examples, also
+   derandomized ones, so a new failure on unchanged code can be a real bug
+   the old draws missed: read it before calling it noise.
+5. For cosmic-ray, the gates above do not run it: run it for real, with
    `invowk cmd test mutation swap/domain.py swap.tests.test_swap --all`,
    and put its numbers (mutants, killed, timed out, survived, minutes) in the
    pull request next to the previous version's. A new version can add or
