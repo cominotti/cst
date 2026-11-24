@@ -2480,6 +2480,60 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
 
+    def _newer_record(self) -> str:
+        """An install record of a newer CST in the scratch tree (a downgrade); its path."""
+        record = os.path.join(self.tmp, "var/lib/cst/installed.json")
+        os.makedirs(os.path.dirname(record))
+        with open(record, "w", encoding="utf-8") as f:
+            f.write('{"format": 99, "files": {}}')
+        self.env = dataclasses.replace(self.env, install_record=record)
+        return record
+
+    def test_a_record_of_a_newer_cst_stops_apply_before_any_write(self) -> None:
+        # Before, apply rewrote crypttab and fstab (and their .bak) and started swap0, and only its
+        # first put (the zswap section's) refused the record.
+        record = self._newer_record()
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        before = file_tree(self.tmp)
+        rc, out, err, systemd = self._run(mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            err,
+            f"cst swap: ERROR: {record}: format 99, written by a newer CST (this one reads format 1):"
+            " nothing was changed\n",
+        )
+        self.assertNotIn("== swap0: crypttab and fstab", out)
+        self.assertNotIn("written:", out)
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertFalse(os.path.exists(f"{self.env.crypttab}.pre-swap-config.bak"))
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_record_of_a_newer_cst_stops_apply_before_it_writes_the_settings_file(self) -> None:
+        # No /etc/cst/swap.conf, the crypttab line an older CST wrote: apply would write the settings
+        # file from it first (resolve_spec's "write").
+        record = self._newer_record()
+        os.remove(self.env.settings_path)
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write(OLD_CRYPTTAB + "\n")
+        before = file_tree(self.tmp)
+        rc, out, err, systemd = self._run(mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"cst swap: ERROR: {record}: format 99, written by a newer CST", err)
+        self.assertNotIn("== settings", out)
+        self.assertFalse(os.path.exists(self.env.settings_path))
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_an_unmarked_line_is_named_before_a_record_of_a_newer_cst(self) -> None:
+        self._newer_record()
+        with open(self.env.fstab, "w", encoding="utf-8") as f:
+            f.write("/dev/mapper/swap0 none swap defaults 0 0\n")
+        rc, _out, err, _systemd = self._run(mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"{self.env.fstab} has an unmarked entry for /dev/mapper/swap0", err)
+        self.assertNotIn("newer CST", err)
+
     def test_an_empty_active_swap0_whose_line_changed_is_activated_again(self) -> None:
         self._swaps("/dev/dm-0 partition 134217724 0 -2", "/dev/zram0 partition 8388604 102400 100")
         rc, out, err, systemd = self._run(mapper_present=True)

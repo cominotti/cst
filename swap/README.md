@@ -314,9 +314,10 @@ What `apply` does, in order:
 1. **Checks** that a partition is configured (`/etc/cst/swap.conf`,
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
    partition (exists, exact size, no filesystem signature), that no `swap0`
-   line was written by hand, and that `/etc/crypttab` and `/etc/fstab` can
-   be read (a folder in place of one is refused): a refusal stops it before
-   it writes anything. On a machine an older CST set up, it then writes
+   line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
+   be read (a folder in place of one is refused), and that root's install
+   record (`/var/lib/cst/installed.json`) was not written by a newer CST (a
+   downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
    `/etc/cst/swap.conf` (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line

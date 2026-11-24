@@ -5,7 +5,7 @@ from collections.abc import Callable
 import posixpath
 from typing import Final, override
 
-from cst_core.application.install import Placement
+from cst_core.application.install import InstallRefused, Placement
 from cst_core.domain.files import ManagedState, MarkedLineSpec, OwnedState
 from cst_core.domain.install import InstallEntry
 from cst_core.ports import CommandResult, UnitName
@@ -276,8 +276,9 @@ class SwapApplicationService(SwapReports):
 
     def _check_before_writing(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> str | None:
         """Every refusal, before the first write (the settings file too): the preconditions, an
-        unmarked swap line among lines, and a file of lines apply cannot read. The desired tmpfiles
-        text, or None when apply stops."""
+        unmarked swap line among lines, a file of lines apply cannot read, and an install record of a
+        newer CST (the installer's puts would refuse it only after swap0's lines were written). The
+        desired tmpfiles text, or None when apply stops."""
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return None
@@ -288,6 +289,11 @@ class SwapApplicationService(SwapReports):
             if refusal is not None:
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
                 return None
+        try:
+            self._installer.check_record(self._env.install_record)
+        except InstallRefused as e:
+            events.append(ApplyEvent("err", ApplyEventKind.ERROR, f"{self._env.prog}: ERROR: {e}"))
+            return None
         return tmpfiles_text
 
     def _line_refusal(self, path: str, line_spec: MarkedLineSpec, st: ManagedState) -> str | None:

@@ -23,8 +23,9 @@ CST's file, a reboot):
 The expected outcome of an apply comes from those parts (an oracle over the files, not the code):
 1. A refusal (no partition, a bad or unreadable settings file, no zswap, no zstd, the wrong size,
    a filesystem signature on a partition with no mapper, an unmarked swap0 line, a crypttab or
-   fstab apply cannot read): exit 1, an ERROR line, and the machine as it was: every file of the
-   scratch tree byte for byte, no systemctl call, no daemon-reload, no sysctl or zram call.
+   fstab apply cannot read, an install record of a newer CST): exit 1, an ERROR line, and the
+   machine as it was: every file of the scratch tree byte for byte, no systemctl call, no
+   daemon-reload, no sysctl or zram call.
    modprobe is left out on purpose: the checks load the compressor module before they can tell
    whether zstd exists (bash parity).
 2. Otherwise exit 0 with no ERROR line and no zswap parameter skipped (a kernel with zswap has all
@@ -32,10 +33,9 @@ The expected outcome of an apply comes from those parts (an oracle over the file
    after changes no file, starts, stops or restarts no unit, reloads nothing and exits 0.
 3. After an apply that exits 0, the install record lists swap's five files with the sha256 of what is
    in place, and swap:core is done.
-Named gap (O1): with an install record of a newer CST, apply writes crypttab and fstab (and their
-.pre-swap-config.bak, and swap.conf in the "write" state) and starts swap0 before the first put
-refuses: exit 1 with "written by a newer CST", the record byte for byte, and nothing else changed.
-A fix (a check before the first write) flips this to a refusal of point 1.
+An install record of a newer CST was gap O1 (apply wrote crypttab and fstab and started swap0
+before its first put refused); apply now checks the record before its first write, so it is a
+refusal of point 1.
 
 Not modelled: a non-root run (plan's "?" rows), a systemctl call that fails, a sysctl that fails,
 uresourced's restart, the old drop-in name (the unit tests cover them).
@@ -261,7 +261,8 @@ class SwapApplyMachine(RuleBasedStateMachine):
 
     def refusal(self) -> str | None:
         """Why apply must refuse this machine (the oracle), None when it must not."""
-        return self._settings_refusal() or self._probe_refusal() or self._lines_refusal()
+        newer = "an install record of a newer CST" if self.newer_record() else None
+        return self._settings_refusal() or self._probe_refusal() or self._lines_refusal() or newer
 
     def _settings_refusal(self) -> str | None:
         env = self.env
@@ -398,7 +399,6 @@ class SwapApplyMachine(RuleBasedStateMachine):
     @rule()
     def apply_once(self) -> None:
         why = self.refusal()
-        newer = self.newer_record()
         before = file_tree(self.tmp)
         rc, out, err, system = self.apply()
         if why is not None:
@@ -407,9 +407,6 @@ class SwapApplyMachine(RuleBasedStateMachine):
             assert file_tree(self.tmp) == before, f"refusal ({why}) changed files: {out}{err}"
             calls = (self.systemd.calls, self.systemd.daemon_reloads, system.sysctl_calls, system.zram_resets)
             assert calls == ([], 0, [], 0), f"refusal ({why}) ran {calls}"
-            return
-        if newer:
-            self._assert_newer_record_gap(before, rc, err)
             return
         assert (rc, "ERROR:" in err) == (0, False), f"apply exited {rc}: {out}{err}"
         assert "skipped:   zswap" not in out, f"a kernel with zswap lacks a parameter: {out}"
@@ -421,25 +418,6 @@ class SwapApplyMachine(RuleBasedStateMachine):
         verbs = [verb for verb, _unit in self.systemd.calls]
         reloads = self.systemd.daemon_reloads
         assert (verbs, reloads) == ([], 0), f"apply again ran {self.systemd.calls} and {reloads} daemon-reloads"
-
-    def _assert_newer_record_gap(self, before: dict[str, bytes], rc: int, err: str) -> None:
-        """O1, as today: the files apply writes before its first put changed, the record not."""
-        env = self.env
-        assert rc == 1 and "written by a newer CST" in err, f"O1 fixed? exit {rc}: {err}"
-        after = file_tree(self.tmp)
-        changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
-        allowed = {
-            env.settings_path,
-            env.crypttab,
-            env.fstab,
-            f"{env.crypttab}.pre-swap-config.bak",
-            f"{env.fstab}.pre-swap-config.bak",
-            self.swaps,
-        }
-        assert changed <= allowed, f"O1: apply changed {sorted(changed - allowed)} before it refused"
-        assert after.get(env.install_record) == NEWER_RECORD.encode(), "O1: the newer record was changed"
-        for path, cst in ((env.crypttab, CST_CRYPTTAB), (env.fstab, CST_FSTAB)):
-            assert cst in after.get(path, b"").decode(), f"O1 fixed? {path} not written before the refusal"
 
 
 class SwapApplyMachineTest(profiles.MbtTestCase):

@@ -9100,3 +9100,50 @@ echo E2E-OK
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("E2E-OK", r.stdout)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_172_swap_apply_refuses_a_record_of_a_newer_cst_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup, which saves root's install record and puts it back) with
+        /etc/cst/swap.conf in place and root's install record of a newer CST (format 99, a
+        downgrade): apply exits 1 with "written by a newer CST ...: nothing was changed" on stderr,
+        and every file, link, mode and owner under /etc and the scratch tree, and the record, are
+        as before (no crypttab line, no .pre-swap-config.bak, no sysctl run). Before, apply
+        rewrote /etc/crypttab and /etc/fstab first, and only its first put refused. With the record
+        removed, the same apply works and records swap:core done."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+trap swap_cleanup EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+
+mkdir -p /etc/cst "$(dirname "$REC")"
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+printf '{"format": 99, "files": {}}' >"$REC"
+s0="$(snap)"
+r0="$(sha256sum "$REC")"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a record of a newer CST exited $rc"
+grep -qF "ERROR: $REC: format 99, written by a newer CST" <<<"$err" || fail "apply's message"
+grep -qF "nothing was changed" <<<"$err" || fail "apply's message says what it left"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak && ! -e /etc/fstab.pre-swap-config.bak ]] || fail "a .bak was written"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+[[ "$(sha256sum "$REC")" == "$r0" ]] || fail "a refused apply changed the install record"
+if grep -qs '^sysctl ' "$W/calls"; then fail "a refused apply ran sysctl"; fi
+
+# The record removed (as an uninstall of the newer CST leaves it): the same apply works.
+rm -f "$REC"
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with no record"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+grep -qF '"swap:core": "done"' "$REC" || fail "the record names swap:core done"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)
