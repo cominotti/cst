@@ -871,7 +871,8 @@ time and the largest resident memory of its process tree (the JVM included).
 
 The unit tests in `tests/quint/tests/` check the checksums (a match, a
 mismatch, a folder without the stamp), the `npm ci` call, the command
-lines, the verdicts and the trace normalizer with a fake runner; no tool or
+lines, the verdicts, the trace normalizer and the refusal of a trace run that
+did not reach its witness, with a fake runner; no tool or
 network is used. `tests/test_quint_task.py` checks the task's flags.
 
 **What the spec models.** One action per call of
@@ -976,7 +977,10 @@ recovery, a kept flag after a give-up, a power loss with a partial copy, a
 failed install request, a new round, ...); `TRACE_JOBS` in
 `tests/quint/cst-quint` lists them with their seeds and bounds, and
 `invowk cmd test quint --traces` writes the same bytes again (one thread,
-the seed fixed, the absolute path and the time taken out). About 300 KB in
+the seed fixed, the absolute path and the time taken out). A witness's run
+must end with a violation of its negated invariant, and a walk's with exit 0:
+otherwise (the witness not reached within its bounds, a time limit, an
+error) the checked-in trace is left as it is and the run stops with exit 1. About 300 KB in
 all; the replay takes a fraction of a second.
 
 What the replay does not compare: `scan(fix)` setting +C in place on

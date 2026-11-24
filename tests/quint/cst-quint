@@ -348,6 +348,19 @@ def verdict(ran: Ran) -> Verdict:
     return Verdict(result, states, depth)
 
 
+def trace_problem(job: TraceJob, ran: Ran) -> str | None:
+    """Why the run of job gave no trace to keep, or None. A witness's run must end with a violation of
+    its negated invariant (else the trace written is a walk that never reaches the witness); a walk's
+    run must end with exit 0."""
+    if job.invariant:
+        if verdict(ran).result == "violated":
+            return None
+        return f"no trace reaches the witness ({job.invariant}): quint exit {ran.returncode}, no violation found"
+    if ran.returncode == 0:
+        return None
+    return f"the walk failed (exit {ran.returncode})"
+
+
 def normalize(text: str, description: str) -> str:
     """An ITF trace as it is checked in: "#meta" without the spec's absolute path or a timestamp (the
     description in their place), one state per line, sorted keys: the same bytes for the same trace."""
@@ -426,9 +439,12 @@ class Session:
         for job in jobs:
             raw = os.path.join(work, f"{job.name}.raw.itf.json")
             ran = self.run(trace_argv(quint, os.path.join(self.checkout, job.spec), job, raw), work, env)
-            if not os.path.exists(raw):
+            problem = trace_problem(job, ran)
+            if problem is None and not os.path.exists(raw):
+                problem = f"quint wrote no trace (exit {ran.returncode})"
+            if problem is not None:
                 self.out(ran.output.strip()[-3000:])
-                raise StepError(f"{job.name}: quint wrote no trace (exit {ran.returncode})")
+                raise StepError(f"{job.name}: {problem}")
             with open(raw, encoding="utf-8") as f:
                 text = normalize(f.read(), f"{job.backend} trace {job.name} of {job.spec} ({job.main})")
             dest = os.path.join(self.checkout, TRACES_DIR[job.spec], f"{job.name}.itf.json")

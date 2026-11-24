@@ -86,6 +86,8 @@ class FakeRun:
         self.version = "0.33.1"
         self.replay_status = 0
         self.trace = json.dumps(TRACE)
+        self.witness = (1, "[violation] Found an issue (412ms).\nerror: found a counterexample\n")
+        self.walk_status = 0
 
     def __call__(self, argv: Sequence[str], cwd: str, env: Mapping[str, str]) -> object:
         args = list(argv)
@@ -107,7 +109,9 @@ class FakeRun:
         if "--out-itf" in args:
             with open(args[args.index("--out-itf") + 1], "w", encoding="utf-8") as f:
                 f.write(self.trace)
-            return M.Ran(0, "", 200_000, 1.5)
+            if "--invariant" in args:  # a witness: the run ends with a violation of its negation
+                return M.Ran(*self.witness, 200_000, 1.5)
+            return M.Ran(self.walk_status, "", 200_000, 1.5)
         main = args[args.index("--main") + 1]
         code, out = self.verdicts.get(main, (0, OK))
         return M.Ran(code, out, 900_000, 9.4)
@@ -417,6 +421,38 @@ class MainTest(Base):
             self.run_.replay_status = 1
             self.assertEqual(self.main("--traces", jobs=jobs), 1)
         self.assertEqual(self.main("--traces", "--instance", "x"), 2)
+
+    def test_a_trace_run_that_did_not_reach_its_end_is_not_kept(self) -> None:
+        # A witness whose run found no violation wrote a random walk, not a trace to the witness; a walk
+        # whose run failed wrote what it had. Neither replaces the checked-in trace.
+        witness = M.TraceJob(
+            name="w", spec="specs/s.qnt", main="m", backend="simulator", max_steps=10, invariant="neverX", samples=9
+        )
+        walk = M.TraceJob(name="walk", spec="specs/s.qnt", main="m", backend="simulator", max_steps=10, seed=3)
+        dest = os.path.join(self.checkout, "specs", "traces")
+        with (
+            mock.patch.object(M, "TRACES_DIR", {"specs/s.qnt": "specs/traces"}),
+            mock.patch.object(M, "REPLAYS", {"specs/s.qnt": "specs.tests.test_replay"}),
+        ):
+            self.assertEqual(self.main("--traces", jobs=(witness,)), 0)
+            self.assertEqual(os.listdir(dest), ["w.itf.json"])
+            os.remove(os.path.join(dest, "w.itf.json"))
+            for code, out in ((0, "[ok] No violation found (2051ms).\n"), (124, ""), (1, "error: parse error\n")):
+                with self.subTest(code=code, out=out):
+                    self.lines.clear()
+                    self.run_.calls.clear()
+                    self.run_.witness = (code, out)
+                    self.assertEqual(self.main("--traces", jobs=(witness,)), 1)
+                    self.assertIn(
+                        f"cst-quint: w: no trace reaches the witness (neverX): quint exit {code}, no violation found",
+                        self.lines,
+                    )
+                    self.assertEqual(os.listdir(dest), [])
+                    self.assertEqual(self.run_.commands("tests/run_unit.py"), [])
+            self.run_.walk_status = 1
+            self.assertEqual(self.main("--traces", jobs=(walk,)), 1)
+            self.assertIn("cst-quint: walk: the walk failed (exit 1)", self.lines)
+            self.assertEqual(os.listdir(dest), [])
 
 
 if __name__ == "__main__":
