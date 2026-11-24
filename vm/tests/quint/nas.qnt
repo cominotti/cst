@@ -687,6 +687,11 @@ module nas {
   val wOffline = step.name == "alert" and s.alerted.exists(a => a._2 == s.r and a._3 == "offline")
   val wDefinition = step.name == "alert" and s.alerted.exists(a => a._2 == s.r and a._3 == "definition")
   val wCommitFailed = step.name == "blockcommit" and step.outcome == "fail"
+  // An alert that names one disk and not another of the same run: with an atomic snapshot whose outcome
+  // was clear, every disk was on its overlay, so the one not named is a disk the merge back put back.
+  val wBackBesideAlerted = step.name == "alert" and step.ctx != "uncertain" and
+    TSET.exists(t => s.alerted.exists(a => a._1 == t and a._2 == s.r)) and
+    TSET.exists(t => not(s.alerted.exists(a => a._1 == t and a._2 == s.r)))
   val wTornForgotten = step.name == "drop_torn" and step.outcome == "ok" and step.target == ""
   val wTornRetried = step.name == "forget" and step.outcome == "ok" and step.target == "retry"
   val wRetentionSkipped = s.skipped and step.name == "restic_snapshots" and step.target == "index"
@@ -712,6 +717,7 @@ module nas {
   val neverOffline = not(wOffline)
   val neverDefinition = not(wDefinition)
   val neverCommitFailed = not(wCommitFailed)
+  val neverBackBesideAlerted = not(wBackBesideAlerted)
   val neverTornForgotten = not(wTornForgotten)
   val neverTornRetried = not(wTornRetried)
   val neverRetentionSkipped = not(wRetentionSkipped)

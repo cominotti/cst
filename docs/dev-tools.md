@@ -1300,7 +1300,8 @@ traces, together, replay every recorded call and outcome of the spec.
 The traces are two random walks (`nas_live1`, `nas_shutoff`), the first
 trace the simulator finds (seed 7, 40 steps) to each witness of the spec
 (`never...`: a stray file dropped, a snapshot that timed out, an unclear
-one alerted, each recovery kind, a failed commit, a listing that failed, a
+one alerted, each recovery kind, a failed commit, a disk put back beside
+an alerted one (`nas_live2`, two disks), a listing that failed, a
 torn snapshot forgotten or not, a good run indexed, ...), and two from
 `step_calm`, the steps of `step_` without the environment's: a torn
 snapshot recorded by one run and retried by the next, and the retention

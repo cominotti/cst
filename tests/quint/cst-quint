@@ -188,6 +188,7 @@ NAS_WITNESSES: Final = (
     ("offline", "nas_mixed", "neverOffline"),
     ("definition", "nas_mixed", "neverDefinition"),
     ("commit_failed", "nas_mixed", "neverCommitFailed"),
+    ("back_beside_alerted", "nas_live2", "neverBackBesideAlerted"),
     ("torn_forgotten", "nas_mixed", "neverTornForgotten"),
     ("killed_refused", "nas_mixed", "neverKilledRefused"),
     ("late_switch", "nas_mixed", "neverLateSwitch"),
