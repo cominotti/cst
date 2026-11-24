@@ -9045,3 +9045,58 @@ EOF
             """,
         ).stdout
         self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.SWAP)
+    def test_171_swap_apply_refuses_an_unreadable_fstab_before_any_write(self) -> None:
+        """cst swap apply as root on the container's /etc and systemd (SWAP_E2E_LIB, its cleanup trap
+        set before swap_setup) with /etc/cst/swap.conf in place and a folder where /etc/fstab was
+        (the test moves the real one aside; its own trap removes the folder and puts it back before
+        swap_cleanup runs): apply exits 1 with "/etc/fstab: unreadable" on stderr, and every file,
+        link, mode and owner under /etc and the scratch tree, and the install record, are as before
+        (no crypttab.pre-swap-config.bak, crypttab not rewritten). Before, apply rewrote
+        /etc/crypttab and wrote its .bak first. With /etc/fstab back, the same apply works."""
+        r = exec_bash(
+            self.SYSTEMD_CONTAINER,
+            SWAP_E2E_LIB
+            + r"""
+fstab_dir_made=""
+fstab_back() {
+    if [[ -n "$fstab_dir_made" ]]; then rm -rf /etc/fstab; fi
+    if [[ -e "$W/fstab.real" ]]; then mv "$W/fstab.real" /etc/fstab; fi
+}
+trap 'fstab_back; swap_cleanup' EXIT
+swap_setup
+trap 'echo "FAILED line $LINENO: $BASH_COMMAND"' ERR
+fail() { echo "FAILED: $1"; echo "--- stdout"; echo "$out"; echo "--- stderr"; echo "$err"; exit 1; }
+record() { if [[ -e "$REC" ]]; then sha256sum "$REC"; else echo "absent $REC"; fi; }
+
+mkdir -p /etc/cst
+printf 'SWAP_PARTUUID=%s\nSWAP_SIZE_BYTES=%s\n' "$PU" "$SIZE" >/etc/cst/swap.conf
+[[ ! -d /etc/fstab ]] || fail "/etc/fstab is a folder before the test"
+if [[ -e /etc/fstab ]]; then mv /etc/fstab "$W/fstab.real"; fi
+mkdir /etc/fstab
+fstab_dir_made=1
+s0="$(snap)"
+r0="$(record)"
+swap_run apply
+[[ $rc == 1 ]] || fail "apply with a folder in place of /etc/fstab exited $rc"
+grep -qF "ERROR: /etc/fstab: unreadable" <<<"$err" || fail "apply's message"
+[[ "$out" != *"written:"* ]] || fail "apply wrote before it refused"
+[[ ! -e /etc/crypttab.pre-swap-config.bak ]] || fail "crypttab's .bak was written"
+[[ "$(snap)" == "$s0" ]] || fail "a refused apply changed /etc or the scratch tree"
+[[ "$(record)" == "$r0" ]] || fail "a refused apply changed the install record"
+
+# /etc/fstab back: the same apply works.
+fstab_back
+fstab_dir_made=""
+swap_run apply
+[[ $rc == 0 ]] || fail "apply with /etc/fstab back"
+grep -qF "written:   /etc/crypttab (swap0 entry)" <<<"$out" || fail "crypttab written"
+grep -qxF "/dev/mapper/swap0 none swap defaults,nofail,discard 0 0 # managed-by: swap-setup.sh (CST)" /etc/fstab \
+    || fail "fstab line"
+echo E2E-OK
+""",
+            check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("E2E-OK", r.stdout)

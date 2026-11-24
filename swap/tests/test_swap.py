@@ -2377,7 +2377,8 @@ class SwapApplyOutputTest(_SwapScratch):
 
 
 class SwapApplyBranchesTest(_SwapScratch):
-    """apply's and the reports' branches no other test reached: a marked line apply cannot read, swap0
+    """apply's and the reports' branches no other test reached: a marked line apply cannot read (refused
+    before the first write), swap0
     active when its line changed, zram0 that cannot be swapped off now, the root cgroup without
     memory.swap.current, and --root as root."""
 
@@ -2405,23 +2406,71 @@ class SwapApplyBranchesTest(_SwapScratch):
     def test_an_unreadable_crypttab_stops_apply_before_any_change(self) -> None:
         with open(self.env.crypttab, "w", encoding="utf-8") as f:
             f.write("other /dev/sdz none\n")
+        before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.crypttab})
         self.assertEqual(rc, 1)
-        self.assertIn("== swap0: crypttab and fstab", out)
-        self.assertIn(f"cst swap: ERROR: {self.env.crypttab}: unreadable", err)
-        self.assertNotIn("== zswap", out)
-        self.assertFalse(os.path.exists(self.env.fstab))
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.crypttab}: unreadable\n")
+        self.assertNotIn("== swap0: crypttab and fstab", out)
+        self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
 
-    def test_an_unreadable_fstab_stops_apply_after_crypttab_without_a_reload(self) -> None:
+    def test_an_unreadable_fstab_stops_apply_before_it_writes_crypttab(self) -> None:
         with open(self.env.fstab, "w", encoding="utf-8") as f:
             f.write("UUID=1 / btrfs defaults 0 0\n")
+        before = file_tree(self.tmp)
         rc, out, err, systemd = self._run(mapper_present=False, unreadable={self.env.fstab})
         self.assertEqual(rc, 1)
-        self.assertIn(f"written:   {self.env.crypttab} (swap0 entry)", out)
-        self.assertIn(f"cst swap: ERROR: {self.env.fstab}: unreadable", err)
-        self.assertNotIn("== zswap", out)
-        self.assertTrue(os.path.exists(self.env.crypttab))
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertNotIn("written:", out)
+        self.assertFalse(os.path.exists(self.env.crypttab))
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_folder_in_place_of_fstab_stops_apply_before_any_write(self) -> None:
+        # As root a folder is "unreadable" (read_text gives None): before, apply wrote crypttab and its
+        # .pre-swap-config.bak first, then stopped at fstab.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        os.makedirs(self.env.fstab)
+        before = file_tree(self.tmp)
+        rc, out, err, systemd = self._run(mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertNotIn("written:", out)
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertFalse(os.path.exists(f"{self.env.crypttab}.pre-swap-config.bak"))
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_a_folder_in_place_of_fstab_stops_apply_before_it_writes_the_settings_file(self) -> None:
+        # No /etc/cst/swap.conf, the crypttab line an older CST wrote: apply would write the settings
+        # file from it first (resolve_spec's "write").
+        os.remove(self.env.settings_path)
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write(OLD_CRYPTTAB + "\n")
+        os.makedirs(self.env.fstab)
+        before = file_tree(self.tmp)
+        rc, out, err, systemd = self._run(mapper_present=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(err, f"cst swap: ERROR: {self.env.fstab}: unreadable\n")
+        self.assertNotIn("== settings", out)
+        self.assertFalse(os.path.exists(self.env.settings_path))
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    def test_an_unmarked_fstab_line_is_named_before_an_unreadable_crypttab(self) -> None:
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        with open(self.env.fstab, "w", encoding="utf-8") as f:
+            f.write("/dev/mapper/swap0 none swap defaults 0 0\n")
+        before = file_tree(self.tmp)
+        rc, _out, err, systemd = self._run(mapper_present=False, unreadable={self.env.crypttab})
+        self.assertEqual(rc, 1)
+        self.assertEqual(
+            err,
+            f"cst swap: ERROR: {self.env.fstab} has an unmarked entry for /dev/mapper/swap0: "
+            "remove it by hand, then run apply again.\n",
+        )
+        self.assertEqual(file_tree(self.tmp), before)
         self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
 
     def test_an_empty_active_swap0_whose_line_changed_is_activated_again(self) -> None:
