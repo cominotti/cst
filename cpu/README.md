@@ -1681,7 +1681,7 @@ this is harmless.
 | `setup/wiring.py` | What the shim hands over (`CST_SELF`, `CST_ARG0`), the environment, the command lines it execs (cpu-watch, flatpak-spawn from a toolbox, sudo) and `CpuSetup` over the real adapters |
 | `setup/cli.py` | Help, cpu-watch's commands, the toolbox refusal, the sudo re-run and the root commands |
 | `game-profile` | `/usr/local/sbin/cpu-game-profile` (`on`, `off`, `tick`, `state`): a zipapp of this entry point with the `cpu.game` and `cst_core` packages; `cst cpu game state` runs the checkout's copy |
-| `game/domain.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
+| `game/domain/__init__.py` | The game profile's rules, no I/O: its settings and paths, the records of `game.state` and `game.intended` (fields as bash's `printf %q` writes them: an installed bash copy of an older CST reads them with `eval`), the drift and its report |
 | `game/adapters/profile.py` | `GameProfile`: `on`, `off`, `tick` and `state` on the machine (`systemctl` for both managers, the cgroup tree, `/proc`, sysfs, the state files, the run lock) |
 | `game/adapters/power.py` | Dynamic active-GPU DRM discovery (including render-offload `/dev/dri/renderD*`), AMD `3D_FULL_SCREEN` activation, P-core EPP, and per-game C-state caps |
 | `game/adapters/host.py` | What the game profile reads besides systemd and its state files, and `cst cpu` reads too: `cpu-setup.conf`, the accounts (uid and name), a file's text, sysfs writes, the locale's collation |
