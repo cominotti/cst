@@ -32,12 +32,19 @@ Checked:
    reset to enable=0 when CST managed it. Live-only: the io.cost.qos lines
    only. The vendor line never changes.
 3. btrfs:iocost done means its files are in place, systemd loaded the unit
-   and the service is enabled; except after a full revert that failed after
-   its disable and left the component done (the out-of-scope finding F-I1 of
-   this change's review notes: a removal that fails after the disable),
-   until the next full apply or revert that exits 0. The io.cost.qos line is
-   not part of it: revert --live-only leaves the component done with
-   enable=0 (the boot service writes it again).
+   and the service is enabled. The io.cost.qos line is not part of it:
+   revert --live-only leaves the component done with enable=0 (the boot
+   service writes it again). One known gap of revert is let through, the
+   revert gap: a full revert whose disable --now works and whose removal of
+   one of the component's files then fails returns with btrfs:iocost still
+   done in the install record, although the service is disabled, the files
+   removed before the failing one are gone with their record lines, and
+   systemd and udev were not reloaded. From such a revert until the next
+   full apply or revert that exits 0, this check is off as a whole (points 2
+   and 4 still check that both converge). A fix of revert (mark the component
+   pending before the disable, or enable the service again after a failed
+   removal) removes the exemption, and the machine then fails on the old
+   code.
 4. A step whose fault fired exits non-zero, with an ERROR line or the
    installer's own error line; a step with no fault, or whose fault did not
    fire, exits 0 from every state (apply again, and revert again, converge).
@@ -306,7 +313,8 @@ class IocostMachine(RuleBasedStateMachine):
         self.vendor = False
         self.qos_fault = False
         self.qos_fired = False
-        # F-I1 (see the module's docstring): a full revert stopped after its disable, the component still done.
+        # The revert gap (the module's docstring, point 3): a full revert stopped after its disable, the
+        # component still done.
         self.revert_left_done = False
 
     @override
@@ -431,7 +439,7 @@ class IocostMachine(RuleBasedStateMachine):
             assert not self.host.enabled, f"revert exit 0, the service is enabled: {lines}"
             self._assert_reset(managed=managed, what="revert")
         elif "disable" in self.host.events and state == ComponentState.DONE:
-            self.revert_left_done = True  # F-I1
+            self.revert_left_done = True  # the revert gap (the module's docstring, point 3)
 
     @rule(fault=st.sampled_from(LIVE_FAULTS))
     def revert_live_only(self, fault: IocostStepFault) -> None:
