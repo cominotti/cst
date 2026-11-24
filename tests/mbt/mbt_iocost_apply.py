@@ -74,6 +74,7 @@ from btrfs.tests.fakes import write
 from cst_core.application.install import InstallRefused, InstallRequest, InstallService, record_file
 from cst_core.domain.install import INSTALL_MANIFEST, ArtifactKind, Component, Owner, select_entries
 from cst_core.domain.record import ComponentState
+from cst_core.installer import NAME as INSTALLER_NAME
 from cst_core.ports import CommandResult, WriteFailed
 from tests.fault_injection import stub_fsync
 from tests.mbt import profiles
@@ -90,7 +91,6 @@ ENABLED_LINE: Final = f"{DISK} {IOCOST_ENABLE_CTRL_AUTO}"
 DISABLED_LINE: Final = f"{DISK} {IOCOST_DISABLE_CTRL_AUTO}"
 VENDOR_DISK: Final = "259:2"
 VENDOR_LINE: Final = f"{VENDOR_DISK} enable=1 ctrl=user"
-INSTALLER_NAME: Final = "cst installer"  # how installer.py's errors begin (cst_core/installer.py NAME)
 
 
 class IocostStepFault(StrEnum):
