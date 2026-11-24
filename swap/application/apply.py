@@ -51,6 +51,9 @@ type _SwapLines = tuple[tuple[str, MarkedLineSpec, int], ...]
 _WRITABLE_LINE_STATES: Final[frozenset[ManagedState]] = frozenset(
     {OwnedState.OK, OwnedState.ADOPT, OwnedState.DUPLICATE, OwnedState.MISSING, OwnedState.CHANGE}
 )
+# What apply says of a file it writes whole that it cannot read (a folder in its place, a policy), refused before
+# the first write.
+_FILE_CANNOT_BE_READ: Final = "cannot be read: nothing was changed"
 
 
 class _EventLog(list[ApplyEvent]):
@@ -276,9 +279,10 @@ class SwapApplicationService(SwapReports):
 
     def _check_before_writing(self, spec: SwapHardwareSpec, lines: _SwapLines, events: list[ApplyEvent]) -> str | None:
         """Every refusal, before the first write (the settings file too): the preconditions, an
-        unmarked swap line among lines, a file of lines apply cannot read, and an install record of a
-        newer CST (the installer's puts would refuse it only after swap0's lines were written). The
-        desired tmpfiles text, or None when apply stops."""
+        unmarked swap line among lines, a file of lines apply cannot read, a file apply writes whole that
+        it cannot read (or a source of one missing from swap/: MissingDesiredFileError), and an install
+        record of a newer CST (the installer's puts would refuse it only after swap0's lines were
+        written). The desired tmpfiles text, or None when apply stops."""
         tmpfiles_text = self._check_preconditions(spec, events)
         if tmpfiles_text is None:
             return None
@@ -288,6 +292,12 @@ class SwapApplicationService(SwapReports):
             refusal = self._line_refusal(path, line_spec, st)
             if refusal is not None:
                 events.append(ApplyEvent("err", ApplyEventKind.ERROR, refusal))
+                return None
+        for src, dest in self._env.managed_files:
+            if self._managed_state(src, dest) == OwnedState.UNREADABLE:
+                events.append(
+                    ApplyEvent("err", ApplyEventKind.ERROR, f"{self._env.prog}: ERROR: {dest}: {_FILE_CANNOT_BE_READ}")
+                )
                 return None
         try:
             self._installer.check_record(self._env.install_record)

@@ -19,6 +19,7 @@ from perf.domain.models import PerfRootKind, PerfVerdict
 from swap.application.memory_tuning import (
     MM_TMPFILES_ENTRY,
     THP_EXPERIMENT,
+    URESOURCED_BAK_SUFFIX,
     URESOURCED_ENTRY,
     SwapPerfReader,
     UresourcedView,
@@ -206,12 +207,10 @@ class SwapEnvironment:
         return _under(self.src_dir, DROPIN_ENTRY.src, _SWAP_SRC_PREFIX)
 
 
-# A crypttab or fstab that root cannot read (a security policy, a root-squashed mount): --root cannot help, and
-# apply refuses it before the first write.
+# A crypttab or fstab, or a file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice
+# drop-in), that root cannot read (a folder in its place, a security policy, a root-squashed mount): --root cannot
+# help, and apply refuses it before the first write.
 _ROOT_CANNOT_READ: Final = "cannot be read, even as root: apply refuses before it writes anything"
-# A file apply writes whole (the tmpfiles, sysctl and uresourced files, the slice drop-in) that root cannot read:
-# --root cannot help either.
-_ROOT_CANNOT_READ_FILE: Final = "cannot be read, even as root"
 
 
 def _root_note(env: SwapEnvironment, state: ManagedState, swap_name: str, verb: str, *, cannot_read: str) -> str:
@@ -351,6 +350,21 @@ class SwapReports:
         """apply copies /etc/uresourced.conf (dest) aside before it writes it: when it is there (through a
         link) and not CST's (neither ok nor adopt)."""
         return self._fs.exists(dest) and self._inspect_file(src, dest) not in (OwnedState.OK, OwnedState.ADOPT)
+
+    def _managed_state(self, src: str, dest: str) -> ManagedState:
+        """The state of a file apply writes whole (src: its source in swap/), as plan shows it and apply checks it
+        before its first write: _inspect_file's, except unreadable for /etc/uresourced.conf when apply would copy it
+        aside and cannot read it (a link to a folder, or to a file it may not read: the copy follows the link).
+        The installer replaces a link at any of the others itself, and reads nothing through it."""
+        st = self._inspect_file(src, dest)
+        if st == OwnedState.UNREADABLE or dest != self._env.etc_path(URESOURCED_ENTRY):
+            return st
+        copy_fails = (
+            self._uresourced_copy_due(src, dest)
+            and not self._fs.lexists(dest + URESOURCED_BAK_SUFFIX)
+            and self._fs.read_text(dest) is None
+        )
+        return OwnedState.UNREADABLE if copy_fails else st
 
     def old_dropin_is_ours(self) -> bool:
         """The drop-in under its old name is there and CST (or the script before it) wrote it."""
@@ -510,8 +524,8 @@ class SwapReports:
         name = DEFAULT_SWAP_NAME if spec is None else spec.name
 
         for src, dest in env.managed_files:
-            st = self._inspect_file(src, dest)
-            note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ_FILE)
+            st = self._managed_state(src, dest)
+            note = _root_note(env, st, name, verb, cannot_read=_ROOT_CANNOT_READ)
             file_items.append(PlanItem(describe_state(st), _short_etc_path(env.etc_dir, dest), note))
 
         if self._fs.exists(env.old_sysctl_conf):

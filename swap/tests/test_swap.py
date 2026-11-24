@@ -1894,9 +1894,10 @@ class SwapSettingsTest(_SwapScratch):
                             )
                         self.assertTrue(line.startswith("  ?  "), line)
 
-    def test_as_root_a_file_apply_writes_whole_that_it_cannot_read_does_not_ask_for_root(self) -> None:
-        # Root on the host, and access refuses (a security policy, a root-squashed mount): the row asked for
-        # --root, which cannot help. As a user (root in a toolbox too) it still does.
+    def test_as_root_a_file_apply_writes_whole_that_it_cannot_read_says_apply_refuses_not_root(self) -> None:
+        # Root on the host, and access refuses (a security policy, a root-squashed mount): --root cannot help,
+        # and apply refuses that file before it writes anything. As a user (root in a toolbox too) the row
+        # asks for --root.
         self._older_install()
         self._write(self.env.settings_path, TEST_SETTINGS)
         env = self.env
@@ -1917,7 +1918,7 @@ class SwapSettingsTest(_SwapScratch):
                         line = next(x for x in out.splitlines() if f" {short} " in x)
                         self.assertTrue(line.startswith("  ?  "), line)
                         want = (
-                            "cannot be read, even as root"
+                            "cannot be read, even as root: apply refuses before it writes anything"
                             if as_root and not in_container
                             else f"needs root to read: on the host, cst swap {cmd} --root"
                         )
@@ -2674,6 +2675,160 @@ class SwapApplyBranchesTest(_SwapScratch):
         self.assertEqual(rc, 1)
         self.assertIn(f"{self.env.fstab} has an unmarked entry for /dev/mapper/swap0", err)
         self.assertNotIn("newer CST", err)
+
+    def _fresh_scratch(self) -> str:
+        """A new scratch tree (removed at the end of the test) for self.env: one per subTest, so each
+        refusal starts from a machine apply has not touched yet. Its folder."""
+        tmp = tempfile.mkdtemp(prefix="swap-app-test-")
+        self.addCleanup(shutil.rmtree, tmp)
+        self.env = swap_scratch(tmp, self.spec)
+        # An unrelated crypttab line: apply would write swap0's line first.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        return tmp
+
+    def _apply_on(self, fs: SwapTempFileSystem) -> tuple[int, str, str, SwapFakeSystemd, FakeSwapSystem]:
+        """apply through the command line's run_command on fs, with its systemd and system fakes."""
+        systemd = SwapFakeSystemd(os.path.join(self.env.proc_dir, "swaps"), "/dev/dm-0", fs=fs)
+        system = FakeSwapSystem(self.env.proc_dir, size_bytes=self.spec.expected_size_bytes)
+        service = SwapApplicationService(self.env, fs, systemd, system, installer=swap_installer())
+        out, err = io.StringIO(), io.StringIO()
+        rc = run_command(D.SwapCommand.APPLY, service, hint="", out=out, err=err)
+        return rc, out.getvalue(), err.getvalue(), systemd, system
+
+    def _assert_refused_before_any_write(
+        self, ran: tuple[int, str, str, SwapFakeSystemd, FakeSwapSystem], err_line: str
+    ) -> None:
+        """apply exited 1 with err_line alone on stderr, printed no step, wrote no .bak and ran nothing."""
+        rc, out, err, systemd, system = ran
+        self.assertEqual((rc, out, err), (1, "", err_line + "\n"))
+        self.assertFalse(os.path.exists(f"{self.env.crypttab}.pre-swap-config.bak"))
+        self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+        self.assertEqual((system.sysctl_calls, system.zram_resets), ([], 0))
+
+    def test_a_folder_in_place_of_a_file_apply_writes_whole_stops_apply_before_any_write(self) -> None:
+        # Before, apply wrote crypttab, fstab and their .bak, started swap0 (and, for the later files, set
+        # zswap, masked zram, swapped zram0 off and ran sysctl) and only then failed at that file.
+        for index in range(len(self.env.managed_files)):
+            tmp = self._fresh_scratch()
+            _src, dest = self.env.managed_files[index]
+            with self.subTest(dest=dest):
+                os.makedirs(dest)
+                before = file_tree(tmp)
+                fs = self._fs()
+                self._assert_refused_before_any_write(
+                    self._apply_on(fs), f"cst swap: ERROR: {dest}: cannot be read: nothing was changed"
+                )
+                self.assertEqual(file_tree(tmp), before)
+                self.assertTrue(os.path.isdir(dest))
+                # The folder gone, the same apply works, and a second one changes nothing more.
+                os.rmdir(dest)
+                rc, out, err, _systemd, _system = self._apply_on(fs)
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn("written:   " + self.env.crypttab + " (swap0 entry)", out)
+                self.assertTrue(os.path.isfile(dest))
+                after = file_tree(tmp)
+                rc, out, err, systemd, _system = self._apply_on(fs)
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("written:", out)
+                self.assertEqual(file_tree(tmp), after)
+                self.assertEqual((systemd.calls, systemd.daemon_reloads), ([], 0))
+
+    @unittest.skipIf(os.geteuid() == 0, "not as root")
+    def test_an_uresourced_conf_root_cannot_read_stops_apply_before_any_write(self) -> None:
+        # A real permission denial (mode 0; this process is not root) as apply as root meets one under a
+        # policy. Before, apply wrote crypttab, fstab, swap0 and four managed files, then failed with
+        # "[Errno 13] Permission denied" at the copy of uresourced.conf aside.
+        self.env = dataclasses.replace(self.env, as_root=True)
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write("# mine\n")
+        before = file_tree(self.tmp)  # file_tree cannot read a mode 0 file
+        os.chmod(dest, 0)  # tearDown's rmtree removes it whatever its mode
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: {dest}: cannot be read: nothing was changed"
+        )
+        self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode), 0)
+        os.chmod(dest, 0o644)
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertFalse(os.path.exists(f"{dest}.pre-swap-config.bak"))
+
+    def test_a_file_apply_writes_whole_that_it_cannot_read_by_policy_stops_apply(self) -> None:
+        # Someone else's file that access refuses to read (a security policy: is_readable says no). Before,
+        # apply exited 0 and wrote over it, and its bytes were lost.
+        for index in range(len(self.env.managed_files)):
+            tmp = self._fresh_scratch()
+            _src, dest = self.env.managed_files[index]
+            with self.subTest(dest=dest):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "w", encoding="utf-8") as f:
+                    f.write("# mine\n")
+                before = file_tree(tmp)
+                self._assert_refused_before_any_write(
+                    self._apply_on(self._fs(unreadable={dest})),
+                    f"cst swap: ERROR: {dest}: cannot be read: nothing was changed",
+                )
+                self.assertEqual(file_tree(tmp), before)
+
+    def test_a_link_at_uresourced_conf_to_a_folder_stops_apply_before_any_write(self) -> None:
+        # apply copies uresourced.conf aside through the link before it writes it. Before, it failed there
+        # with "[Errno 21] Is a directory" after crypttab, fstab, swap0, zswap, zram, sysctl and the mm file.
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        dest = self.env.etc_path(URESOURCED_ENTRY)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        os.symlink(elsewhere, dest)
+        before = file_tree(self.tmp)
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: {dest}: cannot be read: nothing was changed"
+        )
+        self.assertEqual(file_tree(self.tmp), before)
+        self.assertEqual(os.readlink(dest), elsewhere)  # file_tree does not list a link to a folder
+        self.assertFalse(os.path.lexists(f"{dest}.pre-swap-config.bak"))
+        # As root on the host, plan's row of the file says apply refuses it.
+        plan = self._plan_text(dataclasses.replace(self.env, as_root=True))
+        line = next(x for x in plan.splitlines() if " uresourced.conf " in x)
+        self.assertTrue(line.startswith("  ?  "), line)
+        self.assertTrue(
+            line.endswith(
+                " uresourced.conf                        cannot be read, even as root: apply refuses before"
+                " it writes anything"
+            ),
+            line,
+        )
+        # A link to a file it reads is copied aside and replaced by CST's file, as before.
+        os.remove(dest)
+        mine = os.path.join(self.tmp, "mine.conf")
+        with open(mine, "w", encoding="utf-8") as f:
+            f.write("# mine\n")
+        os.symlink(mine, dest)
+        rc, out, err, _systemd, _system = self._apply_on(self._fs())
+        self.assertEqual(rc, 0, out + err)
+        with open(f"{dest}.pre-swap-config.bak", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# mine\n")
+        self.assertFalse(os.path.islink(dest))
+        with open(dest, encoding="utf-8") as f, open(self.env.src_path(URESOURCED_ENTRY), encoding="utf-8") as g:
+            self.assertEqual(f.read(), g.read())
+
+    def test_a_missing_source_stops_apply_before_any_write(self) -> None:
+        # A copy of CST without units/uresourced.conf. Before, apply wrote crypttab, fstab, swap0 and the
+        # earlier files first, and stopped only at that step.
+        src = os.path.join(self.tmp, "src", "swap")
+        for folder in ("tmpfiles", "sysctl", "units"):
+            shutil.copytree(os.path.join(SWAP, folder), os.path.join(src, folder))
+        self.env = dataclasses.replace(self.env, src_dir=src)
+        missing = self.env.src_path(URESOURCED_ENTRY)
+        os.remove(missing)
+        with open(self.env.crypttab, "w", encoding="utf-8") as f:
+            f.write("other /dev/sdz none\n")
+        before = file_tree(self.tmp)
+        self._assert_refused_before_any_write(
+            self._apply_on(self._fs()), f"cst swap: ERROR: swap: {missing} is missing (incomplete copy of CST?)"
+        )
+        self.assertEqual(file_tree(self.tmp), before)
 
     def test_an_empty_active_swap0_whose_line_changed_is_activated_again(self) -> None:
         self._swaps("/dev/dm-0 partition 134217724 0 -2", "/dev/zram0 partition 8388604 102400 100")

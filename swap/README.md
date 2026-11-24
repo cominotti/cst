@@ -308,7 +308,7 @@ The words in the first column of `plan` and `status`:
 | `DIFF` | The live value differs from the desired one; `apply` sets it. |
 | `MISSING` | This kernel has no such zswap parameter (a new kernel renamed or dropped it): `systemd-tmpfiles` skips it at boot without a word, and `apply` cannot set it. `apply` skips it (a `skipped:` line) and goes on; `cst doctor` warns about it too. |
 | `later` | Needs a reboot (for example, `swap0` is in use, so it keeps its old options). |
-| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host, for `/etc/crypttab` or `/etc/fstab`: `apply` refuses before it writes anything, and the row says so; for another file, the row says it cannot be read even as root, with no `--root` advice. |
+| `?` | Could not be read. As a user (root inside a toolbox too): run `plan` or `status` with `--root`, on the host. As root on the host (for `/etc/crypttab`, `/etc/fstab` and every file `apply` writes whole): `apply` refuses before it writes anything, and the row says so, with no `--root` advice. |
 | `REFUSE`, `CONFLICT` | `apply` would stop: no partition configured or a problem in `/etc/cst/swap.conf` (section 2.3), wrong partition, or an entry for `swap0` that was written by hand. |
 
 What `apply` does, in order:
@@ -317,9 +317,15 @@ What `apply` does, in order:
    section 2.3), that zswap exists, that the `zstd` compressor loads, and the
    partition (exists, exact size, no filesystem signature), that no `swap0`
    line was written by hand, that `/etc/crypttab` and `/etc/fstab` can
-   be read (a folder in place of one is refused), and that root's install
-   record (`/var/lib/cst/installed.json`) was not written by a newer CST (a
-   downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
+   be read (a folder in place of one is refused), that the files it writes
+   whole (`/etc/tmpfiles.d/zswap.conf`,
+   `/etc/tmpfiles.d/cst-mm-responsiveness.conf`,
+   `/etc/sysctl.d/99-swap-tuning.conf`, `/etc/uresourced.conf`, which
+   step 7 copies aside first, and the `machine.slice` drop-in) can be read
+   (a folder in place of one, or a link at `/etc/uresourced.conf` to one, is
+   refused with `<file>: cannot be read: nothing was changed`), and that
+   root's install record (`/var/lib/cst/installed.json`) was not written by
+   a newer CST (a downgrade): a refusal stops it before it writes anything. On a machine an older CST set up, it then writes
    `/etc/cst/swap.conf` (section 5).
 2. **swap0**: the marked lines in `/etc/crypttab` (mode 0600) and
    `/etc/fstab`. A marked line is replaced **in place**; a second marked line
