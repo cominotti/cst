@@ -2507,10 +2507,12 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             [Sequence[str], _NasCommands, _NasSignals, dict[str, str], _NasStore], tuple[int, str, str] | None
         ],
         backup_fn: Callable[[], tuple[int, vm_domain_backup.ResticSummary]] | None = None,
+        signals: _NasSignals | None = None,
+        clock: ClockPort | None = None,
     ) -> tuple[vm_app_nas.NasBackup, _NasCommands, _NasStore, _NasSignals, list[tuple[str, str]]]:
         live: dict[str, str] = dict(disks)
         store = _NasStore([p for _, p in disks])
-        signals = _NasSignals()
+        signals = _NasSignals() if signals is None else signals
         alerts: list[tuple[str, str]] = []
 
         def handle(args: Sequence[str]) -> tuple[int, str, str]:
@@ -2518,7 +2520,7 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
             return _default_virsh(args, disks, live, store) if custom is None else custom
 
         commands = _NasCommands(handle, signals)
-        clock: ClockPort = _NasClock()
+        clock = _NasClock() if clock is None else clock
         port = vm_app_nas.NasBackup(
             commands=commands,
             store=store,
@@ -2728,6 +2730,114 @@ class NasMergeBackAndStrayTest(unittest.TestCase):
         self.assertEqual(store2.removed, [overlay_a])
         commits = [c[0][2] for c in commands2.virsh_log if c[0][0] == "blockcommit"]
         self.assertEqual(commits, ["vda"])
+
+
+class _HeldStop(contextlib.AbstractContextManager[object]):
+    """A held block that a stop came during: raised at its end, as signals_held delivers it."""
+
+    @override
+    def __exit__(self, *_: object) -> None:
+        raise vm_domain_backup.Stop("stopped by signal SIGTERM")
+
+
+class _StopAtHeldEnd(_NasSignals):
+    """SignalsPort whose first held block ends with a stop that came during it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.helds = 0
+
+    @override
+    def held(self) -> contextlib.AbstractContextManager[object]:
+        self.helds += 1
+        return _HeldStop() if self.helds == 1 else contextlib.nullcontext()
+
+
+class _MovingClock(_NasClock):
+    """A clock whose sleep moves monotonic on, so a poll until a deadline ends."""
+
+    def __init__(self) -> None:
+        self.t = 100.0
+
+    @override
+    def monotonic(self) -> float:
+        return self.t
+
+    @override
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class NasUnclearSnapshotTest(unittest.TestCase):
+    """A snapshot whose outcome stays unclear (virsh timed out, a disk never showed its overlay) alerts and
+    names the overlay files however the read ends: libvirt may still switch a disk to one."""
+
+    _cfg = NasMergeBackAndStrayTest._cfg
+    _make_backup = NasMergeBackAndStrayTest._make_backup
+
+    def _timeout_hook(
+        self, switched: Mapping[str, str], made: Sequence[str]
+    ) -> Callable[[Sequence[str], _NasCommands, _NasSignals, dict[str, str], _NasStore], tuple[int, str, str] | None]:
+        def hook(
+            args: Sequence[str], _cmds: _NasCommands, _sigs: _NasSignals, live: dict[str, str], store: _NasStore
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "snapshot-create-as":
+                store.overlays.update(made)
+                live.update(switched)
+                return 124, "", ""  # virsh's timeout: no answer
+            return None
+
+        return hook
+
+    def test_a_stop_held_through_an_unclear_snapshot_still_alerts_and_names_the_overlay(self) -> None:
+        disk_a = "/img/a.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        port, commands, store, _signals, alerts = self._make_backup(
+            [("vda", disk_a)],
+            on_virsh=self._timeout_hook({}, [overlay_a]),
+            signals=_StopAtHeldEnd(),
+            clock=_MovingClock(),
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        msg = str(ctx.exception)
+        self.assertIn("DISK NOT MERGED BACK:\n  virsh snapshot-create-as win did not answer within", msg)
+        self.assertIn(f"(kept: {overlay_a})", msg)
+        self.assertIn(overlay_a, msg.split("by hand (read each line first):", 1)[1])
+        self.assertIn("(the backup itself: stopped by signal SIGTERM)", msg)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("may still switch to it", alerts[0][1])
+        self.assertEqual((store.dropped, store.removed), ([], []))
+        self.assertTrue(store.exists(overlay_a), "never removed while libvirt may still switch to it")
+        self.assertEqual([c for c in commands.virsh_log if c[0][0] == "blockcommit"], [])
+
+    def test_an_unclear_snapshot_is_named_when_the_merge_back_of_another_disk_fails(self) -> None:
+        disk_a, disk_b = "/img/a.qcow2", "/img/b.qcow2"
+        overlay_a = f"{disk_a}{vm_domain.OVERLAY_MARK}{STAMP}"
+        overlay_b = f"{disk_b}{vm_domain.OVERLAY_MARK}{STAMP}"
+        timeout = self._timeout_hook({"vda": overlay_a}, [overlay_a, overlay_b])
+
+        def hook(
+            args: Sequence[str], cmds: _NasCommands, sigs: _NasSignals, live: dict[str, str], store: _NasStore
+        ) -> tuple[int, str, str] | None:
+            if args[0] == "blockcommit":
+                return 1, "", "error: block commit timed out"
+            return timeout(args, cmds, sigs, live, store)
+
+        port, _commands, store, _signals, alerts = self._make_backup(
+            [("vda", disk_a), ("vdb", disk_b)], on_virsh=hook, clock=_MovingClock()
+        )
+        nas: vm_domain.NasRepo = {"host": "sophia", "repo": "/repo", "env": {}}
+        with self.assertRaises(Refused) as ctx:
+            vm_app_nas.nas_run(self._cfg(), port, "win", None, nas, quiesce=False, live=True)
+        msg = str(ctx.exception)
+        self.assertIn("vda: virsh blockcommit: error: block commit timed out", msg)
+        self.assertIn(f"may still switch to it. Nothing was removed (kept: {overlay_b})", msg)
+        self.assertIn(overlay_b, msg.split("by hand (read each line first):", 1)[1])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("may still switch to it", alerts[0][1])
+        self.assertTrue(store.exists(overlay_b))
 
 
 class _LingeringTimer(threading.Timer):

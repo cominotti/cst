@@ -258,8 +258,10 @@ def nas_run(
     # From here on no signal may cut the cleanup short, and no child may get one.
     with p.signals.ignored():
         merge = _nas_merge_back(cfg, p, run)
-    if isinstance(failure, Uncertain) and not merge.problems:
-        merge.problems.append(str(failure))
+    # The snapshot's unclear outcome, also when a stop held through its call came first or the merge
+    # back of another disk failed: libvirt may still switch a disk to an overlay file, so the alert names it.
+    if run.unclear:
+        merge.problems.extend(run.unclear)
         _add_overlay_files(p, run)
     if merge.problems:
         raise _nas_not_merged_back(cfg, p, run, merge, failure)
@@ -548,15 +550,19 @@ def _snapshot_attempt(cfg: VmSettings, p: NasBackup, run: NasRun, *, quiesce: bo
         settled = rc != ExitStatus.TIMED_OUT and rc >= 0  # not a timeout, and virsh not killed by a signal
         deadline = p.clock.monotonic() + (0 if settled else cfg.snapshot_settle)
         _poll_overlays(p, run, deadline, settled=settled)
-    if not settled and len(run.overlaid) != len(specs):
+        if not settled and len(run.overlaid) != len(specs):
+            # In run before the block ends: a stop held through the call is raised there, and nas_run
+            # still alerts on this.
+            kept = ", ".join(o for t, (_, o) in specs.items() if t not in run.overlaid and p.store.lexists(o))
+            run.unclear.append(
+                f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
+                f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
+                f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
+            )
+    if run.unclear:
         if quiesce:
             p.commands.virsh(("domfsthaw", vm), 60, detach=None)  # best effort: never leave the guest frozen
-        kept = ", ".join(o for t, (_, o) in specs.items() if t not in run.overlaid and p.store.lexists(o))
-        raise Uncertain(
-            f"virsh snapshot-create-as {vm} did not answer within {cfg.snapshot_timeout} s and, "
-            f"{cfg.snapshot_settle} s later, the VM's disks still do not all show the overlay: libvirt "
-            f"may still switch to it. Nothing was removed{f' (kept: {kept})' if kept else ''}"
-        )
+        raise Uncertain(run.unclear[0])
     if not settled and quiesce:
         p.commands.virsh(("domfsthaw", vm), 60, detach=None)
         run.notes.append(

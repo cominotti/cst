@@ -416,6 +416,9 @@ class NasRun:
     deployment: BootedDeployment | None
     before: dict[str, Fingerprint] = field(default_factory=dict)
     overlaid: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # The snapshot's unclear outcome (virsh did not answer, and some disk never showed its overlay): the
+    # words of the alert (one at most), which nas_run sends however the read ended.
+    unclear: list[str] = field(default_factory=list)
 
 
 class NasMergeBack(NamedTuple):

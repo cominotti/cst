@@ -568,7 +568,9 @@ details keep a stop from cutting the merge short:
   overlay, the backup goes on (marked crash-consistent). If they do not
   all show it, libvirt might still switch later: nothing is deleted, and
   you get `DISK NOT MERGED BACK` with the commands to look, plus a critical
-  alert.
+  alert. That alert names every overlay file there is also when a stop
+  came while virsh was waited for (the refusal then gives the stop as the
+  backup's own failure), and when the merge back of another disk failed.
 - The merge has its own time limit: 4 hours for all disks together
   (`virsh blockcommit --timeout`). If it hits that limit, virsh cancels the
   merge cleanly: the disk stays on the overlay, with no job half done, and
