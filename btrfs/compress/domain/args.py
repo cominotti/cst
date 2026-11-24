@@ -9,6 +9,7 @@ from enum import StrEnum
 
 from btrfs.compress.domain import MAX_ZSTD_LEVEL, MIN_ZSTD_LEVEL
 from cst_core.domain.text import HELP_WORDS, enum_member
+from cst_core.domain.values import parse_whole_number
 
 
 class CompressCommand(StrEnum):
@@ -48,9 +49,9 @@ class ArgsError:
 
 
 def _parse_level_value(raw: str) -> int | ArgsError:
-    if not raw.isdigit():
+    val = parse_whole_number(raw)
+    if val is None:
         return ArgsError(f"invalid --level value {raw!r}: expected an integer {MIN_ZSTD_LEVEL}..{MAX_ZSTD_LEVEL}")
-    val = int(raw)
     if val < MIN_ZSTD_LEVEL or val > MAX_ZSTD_LEVEL:
         return ArgsError(f"invalid --level {val}: must be between {MIN_ZSTD_LEVEL} and {MAX_ZSTD_LEVEL}")
     return val

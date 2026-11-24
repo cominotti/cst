@@ -1451,6 +1451,9 @@ cst btrfs compress-force apply         # root on host; asks confirmation unless 
 cst btrfs compress-force revert        # root on host; back to compress=zstd:N
 ```
 
+N is a zstd level 1..15 in ASCII digits; anything else is a usage error
+(exit 2).
+
 **Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
 before invoking zstd and skips compression altogether when the sample looks only
 borderline compressible. With `compress-force=zstd:1`, btrfs hands every extent
@@ -1614,10 +1617,19 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `commit=` is treated as `30 s` default everywhere (`revert` removes `commit=`
   from `fstab`/`kargs`/`top-mount` and remounts with `commit=30`). `cst doctor`
   flags any cross-layer drift.
-- A `commit=` that is not a positive number of seconds (`commit=abc`,
-  `commit=0`, an empty `commit=`), which a mount refuses, is replaced in
-  every layer, the top-mount unit included, by `apply` and `revert`, even
-  when the valid `commit=` next to it already has the target.
+- SECONDS is written in ASCII digits (`plan 90`); anything else (`plan ²`,
+  digits of another script) is a usage error (exit 2).
+- A `commit=` is read as the kernel reads it (`kstrtouint` with base 0,
+  C's number forms): decimal, `0` then octal (`commit=060` is 48 s),
+  `0x` then hex (`commit=0x3c` is 60 s), an optional `+`, ASCII only, at
+  most 4294967295.
+- A `commit=` that is not a positive number of seconds that way, one a
+  mount refuses (`commit=abc`, an empty `commit=`, `commit=08`, digits
+  other than ASCII 0-9, more than 4294967295) or `commit=0` (which the
+  kernel takes as its 30 s default), is replaced in every layer, the
+  top-mount unit included, by `apply` and `revert`, even when the valid
+  `commit=` next to it already has the target. `status` and `cst doctor` read such a layer as the 30 s
+  default, unless a valid `commit=` sits next to it.
 
 ### 9.4 Dedicated NVMe cache drive (`cache`)
 

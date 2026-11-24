@@ -7,7 +7,7 @@ Use: python3 -I -B tests/run_unit.py [-v] [-j N | --jobs N] [--gates | --affecte
 With no NAME it runs every unit test of the checkout across parallel worker
 processes (`default_jobs()`, 1 per CPU the run may use; automatically 1 under `coverage.py`).
 The worker count, first rule that applies (`requested_jobs()`): `-j N`/`--jobs N`
-with N >= 1; 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
+with N >= 1 (ASCII digits; anything else is a usage error); 1 under coverage.py; CST_TEST_JOBS=N in the environment, N >= 1
 (unset, empty or 0: the next rule; any other value that is not a whole number
 is a usage error, when this rule is reached); one per CPU of the affinity. `invowk cmd check` passes no
 --jobs, so CST_TEST_JOBS is how a run on a shared machine caps the suite.
@@ -747,6 +747,23 @@ def _coverage_active() -> bool:
     return sys.monitoring.get_tool(sys.monitoring.COVERAGE_ID) is not None
 
 
+def _ascii_whole_number(raw: str, invalid: str) -> int:
+    """RAW as a whole number when it is ASCII digits only; SystemExit(INVALID) for anything else.
+
+    str.isdigit also takes "²", which int() refuses, and a digit of another script, which
+    int() reads; int() also refuses more digits than Python's limit (sys.get_int_max_str_digits).
+
+    The same rule as cst_core.domain.values.parse_whole_number, on purpose not imported from it: the
+    runner imports nothing of the checkout before the tests start, and its own tests run it from a
+    folder that holds only tests/run_unit.py (the bytecode tests of tests/test_run_unit.py), where
+    cst_core is not there. A change to that rule changes both.
+    """
+    if raw.isascii() and raw.isdigit():
+        with contextlib.suppress(ValueError):
+            return int(raw)
+    raise SystemExit(invalid)
+
+
 def jobs_from_env(environ: Mapping[str, str]) -> int | None:
     """The worker count CST_TEST_JOBS asks for: None when it is unset, empty or 0 (the default applies).
 
@@ -755,13 +772,8 @@ def jobs_from_env(environ: Mapping[str, str]) -> int | None:
     raw = environ.get(TEST_JOBS_ENV, "")
     if not raw:
         return None
-    invalid = SystemExit(f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)")
-    if not (raw.isascii() and raw.isdigit()):
-        raise invalid
-    try:
-        return int(raw) or None
-    except ValueError:  # past Python's limit on the digits int() converts
-        raise invalid from None
+    invalid = f"run_unit: invalid {TEST_JOBS_ENV} value {raw!r} (expected a whole number >= 0, or unset)"
+    return _ascii_whole_number(raw, invalid) or None
 
 
 def default_jobs(env_jobs: int | None = None) -> int:
@@ -816,9 +828,8 @@ class _ParseAcc:
 
 
 def _parse_jobs_value(raw: str) -> int:
-    if not raw.isdigit():
-        raise SystemExit(f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
-    return int(raw)
+    """N of -j N/--jobs N: ASCII digits only."""
+    return _ascii_whole_number(raw, f"run_unit: invalid {_JOBS_FLAG} value {raw!r} (expected non-negative integer)")
 
 
 def _parse_worker_fds(raw: str) -> tuple[int, int]:
