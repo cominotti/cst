@@ -861,7 +861,14 @@ class ParseArgsAndJobsTest(unittest.TestCase):
         # developer to the command already running.
         from tests.affected import AffectedPlan
 
-        plan = AffectedPlan("abc", ("swap/domain.py",), False, ("swap.tests.test_swap",), "1 file", ("tests.mbt.m",))
+        plan = AffectedPlan(
+            base="abc",
+            changed=("swap/domain.py",),
+            full_suite=False,
+            modules=("swap.tests.test_swap",),
+            reason="1 file",
+            mbt_modules=("tests.mbt.m",),
+        )
         err = io.StringIO()
         with (
             mock.patch("tests.affected.git_changed_files", return_value=("abc", ["swap/domain.py"])),
