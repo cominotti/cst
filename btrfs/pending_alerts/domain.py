@@ -38,7 +38,7 @@ from cst_core.domain.contracts import (
     state_format,
 )
 from cst_core.domain.text import file_lines, read_fields
-from cst_core.domain.values import MINUTE
+from cst_core.domain.values import MINUTE, parse_whole_number
 
 _SPOOL: Final = state_format(StateFormatKey.ALERT_SPOOL)
 
@@ -109,7 +109,7 @@ def alert_paths(environ: Mapping[str, str]) -> PendingPaths | str:
     return PendingPaths(
         alerts_dir=environ.get("CST_ALERTS_DIR") or posixpath.dirname(_SPOOL.folder),
         owner=environ.get("CST_ALERTS_OWNER") or "0",
-        wait=int(wait) if wait.isascii() and wait.isdigit() else 0,
+        wait=parse_whole_number(wait) or 0,  # anything but ASCII digits (or past int()'s digit limit) is 0
         state_dir=f"{state}/cst-alerts",
         old_state_dir=f"{state}/f44-alerts",
     )
