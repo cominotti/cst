@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MPL-2.0
 """Fakes that several of btrfs's test modules share, one section per module they stand in for.
 
+- any module: read and write, a text file of a test's folder (read: None for one that is not there);
 - docker-volumes-nocow (test_docker_volumes_nocow and its fault tests): FakeSystem, the inode-flag
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
-- scrub-limit (test_scrub_limit and its fault tests): ScrubFakeRunner, the installer and systemctl;
-  RecordingInstallerRunner, the installer's text, remove-text and mark through the real
-  InstallService and one install record; core_text, a generated text of btrfs:core;
+- scrub-limit (test_scrub_limit, its fault tests and tests/mbt/mbt_scrub_rollback): ScrubFakeRunner,
+  the installer and systemctl; RecordingInstallerRunner, the installer's text, remove-text and mark
+  through the real InstallService and one install record; SystemdModel, the same and what systemd
+  has loaded of the drop-in; core_text, a generated text of btrfs:core;
 - cache (test_cache): FakeMountRunner, findmnt, mount and umount over a list of mounts;
   CacheTestCtx, the host or toolbox the command runs in; the UUIDs the mounts carry.
 
@@ -33,6 +35,23 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.ports import CommandFault, CommandResult
+
+# ---- files ---------------------------------------------------------------
+
+
+def read(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
 
 # ---- docker-volumes-nocow ------------------------------------------------
 
@@ -396,6 +415,28 @@ class RecordingInstallerRunner(ScrubFakeRunner):
         if word == "remove-text":
             return CommandResult(0, "".join(f"{line}\n" for line in self.svc.remove([place])), "", argv=tuple(cmd))
         raise AssertionError(f"scrub-limit ran an installer command this fake does not model: {cmd}")
+
+
+class SystemdModel(RecordingInstallerRunner):
+    """The installer (its writes and their record through the real InstallService) and systemctl, and
+    what systemd has loaded of the drop-in."""
+
+    def __init__(self, dropin: str, record: str, *, loaded: str | None = None, behind: bool = False) -> None:
+        super().__init__(record)
+        self.dropin = dropin
+        self.loaded = loaded
+        self.dirty = behind  # a write or a removal of the drop-in since the last reload that worked
+
+    @override
+    def run(self, argv: Sequence[str], *, input_text: str | None = None, **kw: object) -> CommandResult:
+        cmd = list(argv)
+        self.need_daemon_reload = "yes\n" if self.dirty else "no\n"
+        r = super().run(argv, input_text=input_text, **kw)
+        if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
+            self.dirty = True
+        if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
+            self.loaded, self.dirty = read(self.dropin), False
+        return r
 
 
 # ---- cache ---------------------------------------------------------------
