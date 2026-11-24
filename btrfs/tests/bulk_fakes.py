@@ -43,7 +43,7 @@ from btrfs.bulk.domain import BulkPaths, ItemJournal
 from btrfs.bulk.wiring import Wiring
 from cst_core.adapters.files import CounterFile
 from cst_core.domain.shapes import json_object
-from tests.fault_injection import Fault, FaultPlan, FaultyOs, FaultyRunner, Killed
+from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyOs, FaultyRunner, Killed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "btrfs-bulk")
@@ -299,12 +299,25 @@ def read_or_none(path: str) -> str | None:
         return None
 
 
+def failure_fired(plan: FaultPlan) -> bool:
+    """A FAIL or FAIL_FROM of the plan's run has fired: the run reached its point (step records a
+    call before it fails it)."""
+    return any(mode != FaultMode.KILL and at <= len(plan.calls) for mode, at in plan.faults)
+
+
 def run_armed(plan: FaultPlan, fn: Callable[[], object], *faults: Fault) -> list[str]:
-    """fn() with these faults armed (none: no fault) and its output dropped; a kill or an OSError
-    ends it, as the program's traceback does. The points it reached; the plan is disarmed after."""
+    """fn() with these faults armed (none: no fault) and its output dropped; a kill ends it, and so
+    does an OSError once one of the plan's failures has fired, as the program's traceback does. An
+    OSError with no failure fired is the code under test crashing on its own: it is raised. The
+    points it reached; the plan is disarmed after."""
     plan.arm(*faults)
-    with contextlib.suppress(Killed, OSError), contextlib.redirect_stdout(io.StringIO()):
-        fn()
+    try:
+        with contextlib.suppress(Killed), contextlib.redirect_stdout(io.StringIO()):
+            fn()
+    except OSError:
+        if not failure_fired(plan):
+            plan.arm()
+            raise
     calls = list(plan.calls)
     plan.arm()
     return calls

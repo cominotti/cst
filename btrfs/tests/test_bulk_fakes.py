@@ -7,6 +7,7 @@ no point, a +C the fake forgets) or leaves scratch folders behind, so each gets 
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -14,11 +15,16 @@ import unittest
 from unittest import mock
 
 from btrfs.tests import bulk_fakes
-from btrfs.tests.bulk_fakes import BulkHome
+from btrfs.tests.bulk_fakes import BulkHome, run_armed
+from tests.fault_injection import FaultMode, FaultPlan
 
 
 def fail() -> None:
     raise RuntimeError("planted failure")
+
+
+def nothing() -> None:
+    """A mutating call's effect, when only the trace matters."""
 
 
 class BulkHomeCleanupTest(unittest.TestCase):
@@ -47,6 +53,51 @@ class BulkHomeCleanupTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             fx.close()
         self.assertEqual(os.listdir(folder), [])
+
+
+class RunArmedTest(unittest.TestCase):
+    """run_armed ends a run at a kill or at the failure a fault gave, and lets any other error through."""
+
+    def crash_after(self, plan: FaultPlan, points: int) -> None:
+        """points mutating calls, then an OSError the plan did not give (the code crashing)."""
+        for n in range(points):
+            plan.step(f"call {n + 1}", nothing)
+        raise FileExistsError("planted crash")
+
+    def test_an_os_error_with_no_fault_armed_is_raised(self) -> None:
+        plan = FaultPlan()
+        with self.assertRaises(FileExistsError):
+            run_armed(plan, lambda: self.crash_after(plan, 1))
+        self.assertEqual(plan.calls, [], "the plan is disarmed after")
+
+    def test_an_os_error_before_the_armed_failure_fired_is_raised(self) -> None:
+        for mode in (FaultMode.FAIL, FaultMode.FAIL_FROM):
+            plan = FaultPlan()
+            with self.subTest(mode=mode.value), self.assertRaises(FileExistsError):
+                run_armed(plan, lambda plan=plan: self.crash_after(plan, 2), (mode, 3))
+
+    def test_an_os_error_after_a_kill_fired_is_raised(self) -> None:
+        plan = FaultPlan()  # alive after the kill: the code caught it (a BaseException) and went on
+
+        def catch_the_kill_then_crash() -> None:
+            with contextlib.suppress(BaseException):
+                plan.step("call 1", nothing)
+            raise FileExistsError("planted crash")
+
+        with self.assertRaises(FileExistsError):
+            run_armed(plan, catch_the_kill_then_crash, (FaultMode.KILL, 1))
+
+    def test_the_failure_a_fault_gave_ends_the_run(self) -> None:
+        for mode in (FaultMode.FAIL, FaultMode.FAIL_FROM):
+            plan = FaultPlan()
+            with self.subTest(mode=mode.value):
+                calls = run_armed(plan, lambda plan=plan: self.crash_after(plan, 3), (mode, 2))
+                self.assertEqual(calls, ["call 1", "call 2"])
+
+    def test_a_kill_ends_the_run(self) -> None:
+        plan = FaultPlan()
+        calls = run_armed(plan, lambda: self.crash_after(plan, 3), (FaultMode.KILL, 2))
+        self.assertEqual(calls, ["call 1", "call 2"])
 
 
 if __name__ == "__main__":
