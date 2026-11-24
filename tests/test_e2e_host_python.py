@@ -26,6 +26,7 @@ from tests.repo_files import REPO
 _READ_TREES = (".github",)
 _READ_FILES = (
     "cst.invowkmod/invowkfile.cue",
+    "pyproject.toml",
     "tests/__init__.py",
     "tests/e2e/__init__.py",
     "tests/e2e/image_digest.py",
@@ -198,6 +199,52 @@ class PlantedTest(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(head + job + tail)
         self.assert_one_problem("(job e2e-tier1)", "ubuntu-26.04", "HOST_PYTHON_BY_RUNNER")
+
+
+class RuffTargetTest(unittest.TestCase):
+    CLOSURE = ("tests/__init__.py", "tests/e2e/run.py", "tests/e2e/suites/suite_tier1_systemd.py")
+
+    def test_the_checkout_formats_the_closure_as_its_python(self) -> None:
+        with open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8") as fh:
+            pyproject = fh.read()
+        closure, _ = gate.host_closure(REPO)
+        self.assertEqual(gate.ruff_target_problems(pyproject, closure, (3, 12)), [])
+
+    def test_a_file_with_no_entry_is_reported(self) -> None:
+        pyproject = '[tool.ruff]\nper-file-target-version = { "tests/e2e/**/*.py" = "py312" }\n'
+        problems = gate.ruff_target_problems(pyproject, self.CLOSURE, (3, 12))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("tests/__init__.py", problems[0])
+        self.assertIn("no entry", problems[0])
+
+    def test_no_table_reports_every_file(self) -> None:
+        problems = gate.ruff_target_problems("[tool.ruff]\nline-length = 120\n", self.CLOSURE, (3, 12))
+        self.assertEqual(len(problems), len(self.CLOSURE), problems)
+
+    def test_an_entry_of_another_version_is_reported(self) -> None:
+        pyproject = (
+            '[tool.ruff]\nper-file-target-version = { "tests/__init__.py" = "py312", "tests/e2e/**/*.py" = "py313" }\n'
+        )
+        problems = gate.ruff_target_problems(pyproject, self.CLOSURE, (3, 12))
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(all("py313" in p for p in problems), problems)
+
+    def test_a_pyproject_without_the_entry_fails_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for tree in _READ_TREES:
+                shutil.copytree(os.path.join(REPO, tree), os.path.join(tmp, tree))
+            for rel in _READ_FILES:
+                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+                shutil.copyfile(os.path.join(REPO, rel), os.path.join(tmp, rel))
+            path = os.path.join(tmp, "pyproject.toml")
+            with open(path, encoding="utf-8") as fh:
+                lines = [line for line in fh if not line.startswith("per-file-target-version")]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+            problems = gate.problems(tmp)
+        closure, _ = gate.host_closure(REPO)
+        self.assertEqual(len(problems), len(closure), problems)
+        self.assertTrue(all("per-file-target-version" in p for p in problems), problems)
 
 
 class NamesTest(unittest.TestCase):

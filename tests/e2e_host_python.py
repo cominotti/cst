@@ -28,8 +28,8 @@ out of the set). problems() checks:
   reported (the gate does not read guards): write
   getattr(os, "process_cpu_count", None) instead;
 - every file of the set is formatted and linted by ruff as the target
-  (pyproject.toml, [tool.ruff] per-file-target-version), so
-  `invowk cmd fmt` cannot rewrite it into newer syntax.
+  (pyproject.toml, [tool.ruff] per-file-target-version, ruff_target_problems),
+  so `invowk cmd fmt` cannot rewrite it into newer syntax.
 
 tests/test_e2e_host_python.py runs these checks. Standard library only: the
 unit tests run on /usr/bin/python3 without uv.
@@ -38,7 +38,9 @@ unit tests run on /usr/bin/python3 without uv.
 import ast
 from collections.abc import Iterable, Mapping, Sequence
 import os
+from pathlib import PurePosixPath
 import re
+import tomllib
 from typing import Final
 
 from cst_core.domain.imports import imported_modules, loads_code_by_path
@@ -452,6 +454,25 @@ def file_problems(rel: str, text: str, target: tuple[int, int], runner: str) -> 
     ]
 
 
+def ruff_target_problems(pyproject: str, closure: Iterable[str], target: tuple[int, int]) -> list[str]:
+    """Each file of the closure ruff does not format and lint as the target: no [tool.ruff]
+    per-file-target-version pattern of pyproject.toml's text matches it, or the first that does names
+    another version. Patterns are matched as ruff's globs (** for any folders)."""
+    want = f"py{target[0]}{target[1]}"
+    raw = tomllib.loads(pyproject).get("tool", {}).get("ruff", {}).get("per-file-target-version", {})
+    table = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    out: list[str] = []
+    for rel in closure:
+        got = next((v for pattern, v in table.items() if PurePosixPath(rel).full_match(pattern)), None)
+        if got != want:
+            out.append(
+                f"{PYPROJECT}: {rel} is run by CI on Python {_version(target)}, but ruff's "
+                f"per-file-target-version gives it {got or 'no entry'}: add a {want!r} entry that covers it, "
+                "so ruff never formats it into newer syntax"
+            )
+    return out
+
+
 def problems(repo: str) -> list[str]:
     """Every problem of the host-run Python, as text lines (empty: all fine)."""
     by_runner, out = host_runs(repo)
@@ -462,4 +483,4 @@ def problems(repo: str) -> list[str]:
     for rel in closure:
         if os.path.isfile(os.path.join(repo, rel)):
             out += file_problems(rel, _read(repo, rel), target, runner)
-    return out
+    return out + ruff_target_problems(_read(repo, PYPROJECT), closure, target)
