@@ -231,7 +231,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         with open(self.conf, "w", encoding="utf-8") as fh:
             fh.write("NAS_ENABLED=1\n")
 
-        rc_plan, plan_lines = scrub_limit_plan(self.paths, "500M")
+        rc_plan, plan_lines = scrub_limit_plan(self.paths, "500M", runner=ScrubFakeRunner())
         self.assertEqual(rc_plan, 0)
         self.assertIn("Dry run: nothing is changed.", plan_lines)
         self.assertTrue(any("500M" in line for line in plan_lines))
@@ -260,7 +260,7 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         os.makedirs(dev_sysfs, exist_ok=True)
         with open(os.path.join(dev_sysfs, "scrub_speed_max"), "w", encoding="utf-8") as fh:
             fh.write("524288000\n")
-        rc_st, st_lines = scrub_limit_status(self.paths)
+        rc_st, st_lines = scrub_limit_status(self.paths, runner=ScrubFakeRunner())
         self.assertEqual(rc_st, 0)
         self.assertIn("setting: 500M", "\n".join(st_lines))
         self.assertIn("service: 500M, as set", "\n".join(st_lines))
@@ -543,6 +543,56 @@ class ScrubLimitAdapterAndCliTest(unittest.TestCase):
         rc, lines = scrub_limit_apply(self.paths, "500M", runner=runner)
         self.assertEqual(rc, 0, lines)
         self.assertEqual(runner.calls[-1], ["systemctl", "daemon-reload"])
+
+    def test_plan_shows_the_daemon_reload_apply_runs(self) -> None:
+        # The drop-in as asked: apply reloads systemd only when NeedDaemonReload is yes or systemctl
+        # cannot say; plan shows the same reload, and with the same answers.
+        reload_line = {
+            "yes\n": "  reload:    btrfs-scrub-weekly.service (systemd has not loaded it as it is on disk)"
+            " + systemctl daemon-reload",
+            "no\n": None,
+            "fails": "  reload:    btrfs-scrub-weekly.service (systemctl cannot say whether it is loaded)"
+            " + systemctl daemon-reload",
+        }
+        for limit in ("500M", None):
+            for answer, want in reload_line.items():
+                with self.subTest(limit=limit, answer=answer):
+                    self._as_asked(limit)
+
+                    def runner(answer: str = answer) -> ScrubFakeRunner:
+                        r = ScrubFakeRunner()
+                        if answer == "fails":
+                            r.fail_on = {"systemctl show"}
+                        else:
+                            r.need_daemon_reload = answer
+                        return r
+
+                    rc, plan = scrub_limit_plan(self.paths, limit, runner=runner())
+                    self.assertEqual(rc, 0, plan)
+                    self.assertEqual(
+                        [line for line in plan if line.startswith("  reload:")], [want] if want is not None else []
+                    )
+                    applied = runner()
+                    rc, lines = scrub_limit_apply(self.paths, limit, runner=applied)
+                    self.assertEqual(rc, 0, lines)
+                    self.assertEqual(["systemctl", "daemon-reload"] in applied.calls, want is not None)
+
+    def test_status_says_systemd_has_not_loaded_the_drop_in(self) -> None:
+        self._as_asked("500M")
+        line = (
+            "  systemd: has not loaded btrfs-scrub-weekly.service as it is on disk (run: sudo systemctl daemon-reload)"
+        )
+        for answer, shown in (("yes\n", True), ("no\n", False), ("fails", False)):
+            with self.subTest(answer=answer):
+                runner = ScrubFakeRunner()
+                if answer == "fails":
+                    runner.fail_on = {"systemctl show"}
+                else:
+                    runner.need_daemon_reload = answer
+                rc, lines = scrub_limit_status(self.paths, runner=runner)
+                self.assertEqual(rc, 0, lines)
+                self.assertEqual(line in lines, shown, lines)
+                self.assertNotIn(["systemctl", "daemon-reload"], runner.calls)  # status changes nothing
 
     def test_asking_systemd_whether_it_loaded_the_files_has_a_time_limit(self) -> None:
         self._as_asked("500M")

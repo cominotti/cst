@@ -8173,8 +8173,9 @@ STUB
         first-ever `set 500M`, a `set 1G` over it and an `off`. A run with nothing pending runs no
         daemon-reload (a holder unit, changed on disk, keeps its loaded Description). The holder also keeps
         the scrub unit loaded between the commands, so a `systemctl show` reads what systemd loaded
-        before, not the files afresh. Before, the command again saw both files unchanged, ran no
-        daemon-reload and left the old limit loaded."""
+        before, not the files afresh. In each flagged state `plan` shows the daemon-reload the command
+        then runs and `status` says systemd has not loaded the drop-in; once loaded, neither does. Before,
+        the command again saw both files unchanged, ran no daemon-reload and left the old limit loaded."""
         c = self.SYSTEMD_CONTAINER
         conf = "/etc/btrfs-setup/snapshots.conf"
         dropin = "/etc/systemd/system/btrfs-scrub-weekly.service.d/10-cst-limit.conf"
@@ -8232,6 +8233,22 @@ EOF
                 if [[ $1 == set ]]; then grep -qxF "unchanged: {dropin}" /var/tmp/e2e-161-out; fi
             }}
             limit_loaded() {{ show ExecStartPre | grep -qF "btrfs scrub limit -a -l $1 /var"; }}
+            plan_reloads() {{
+                /opt/cst-rw/cst btrfs scrub-limit plan "$1" \
+                    | grep -qxF "  reload:    $unit (systemd has not loaded it as it is on disk) + systemctl daemon-reload"
+            }}
+            status_behind() {{
+                /opt/cst-rw/cst btrfs scrub-limit status | grep -qF "  systemd: has not loaded $unit as it is on disk"
+            }}
+            # plan and status in a flagged state say what the command will do; once loaded, nothing.
+            says_behind() {{
+                plan_reloads "$1" || {{ echo "plan $1 does not show the daemon-reload set runs" >&2; exit 1; }}
+                status_behind || {{ echo "status does not say systemd is behind" >&2; exit 1; }}
+            }}
+            says_loaded() {{
+                if plan_reloads "$1"; then echo "plan $1 shows a daemon-reload with nothing pending" >&2; exit 1; fi
+                if status_behind; then echo "status says systemd is behind after a reload" >&2; exit 1; fi
+            }}
 
             cp /opt/cst-rw/btrfs/units/btrfs-scrub-weekly.service /etc/systemd/system/$unit
             [[ -d /etc/btrfs-setup ]] || touch /var/tmp/e2e-161-made-etc
@@ -8246,14 +8263,17 @@ EOF
             killed_after_installer 500M
             [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a new drop-in"
             [[ -z "$(show ExecStartPre)" ]] || cannot_bite "a drop-in loaded without a reload"
+            says_behind 500M
             again set 500M
             limit_loaded 500M || {{ echo "set 500M again: systemd did not load the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
             [[ "$(show NeedDaemonReload)" == no ]]
+            says_loaded 500M
 
             # 2. A set 1G over it, killed after its installer (the drop-in rewritten).
             killed_after_installer 1G
             [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a rewritten drop-in"
             limit_loaded 500M || cannot_bite "the 1G drop-in loaded without a reload"
+            says_behind 1G
             again set 1G
             limit_loaded 1G || {{ echo "set 1G again: systemd did not load the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
 
@@ -8269,8 +8289,10 @@ EOF
             [[ ! -e {dropin} ]]
             [[ "$(show NeedDaemonReload)" == yes ]] || cannot_bite "NeedDaemonReload $(show NeedDaemonReload) for a removed drop-in"
             limit_loaded 1G || cannot_bite "the drop-in's removal loaded without a reload"
+            says_behind off
             again off
             [[ -z "$(show ExecStartPre)" ]] || {{ echo "off again: systemd still has the drop-in" >&2; show ExecStartPre >&2; exit 1; }}
+            says_loaded off
             echo E2E-OK
             """,
         ).stdout

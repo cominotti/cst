@@ -18,9 +18,9 @@ def _run_scrub_action(parsed: ScrubParsedArgs, env: ManagedCliEnv, *, read_only:
         env.entry_file, ctx=env.ctx, read_only=read_only, fallback_root=env.fallback_root
     )
     if parsed.action == ScrubLimitAction.STATUS:
-        return scrub_adapters.scrub_limit_status(paths)
+        return scrub_adapters.scrub_limit_status(paths, runner=env.runner)
     if parsed.action == ScrubLimitAction.PLAN:
-        return scrub_adapters.scrub_limit_plan(paths, parsed.limit)
+        return scrub_adapters.scrub_limit_plan(paths, parsed.limit, runner=env.runner)
     return scrub_adapters.scrub_limit_apply(paths, parsed.limit, runner=env.runner)
 
 

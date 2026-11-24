@@ -56,6 +56,9 @@ class ScrubStatusSnapshot:
     dropin_path: str
     dropin_text: str | None
     live_sysfs: tuple[str, ...]
+    # NeedDaemonReload of SCRUB_SERVICE: True when systemd has not loaded its files as they are on disk;
+    # None when systemctl cannot say (nothing is shown then)
+    need_reload: bool | None = None
 
 
 def format_scrub_usage(prog: str) -> str:
@@ -217,9 +220,24 @@ def scrub_limit_status_lines(snapshot: ScrubStatusSnapshot) -> list[str]:
         fix = f"set {want}" if want else "off"
         svc_line = f"  service: {have or 'no limit'}, DIFFERS from setting (run: cst btrfs scrub-limit {fix})"
     lines = [want_line, svc_line]
+    if snapshot.need_reload is True:
+        lines.append(f"  systemd: has not loaded {SCRUB_SERVICE} as it is on disk (run: sudo systemctl daemon-reload)")
     if snapshot.live_sysfs:
         lines.append(f"  now in sysfs (bytes/s, 0 = no limit): {', '.join(snapshot.live_sysfs)}")
     return lines
+
+
+def scrub_limit_plan_reload_lines(
+    *, dropin_text: str | None, target_limit: str | None, need_reload: bool | None
+) -> list[str]:
+    """The plan's line for the daemon-reload set or off runs although the drop-in stays as it is (the
+    drop-in's own line names the reload when it changes): need_reload is NeedDaemonReload of SCRUB_SERVICE,
+    True when systemd has not loaded its files as they are on disk, None when systemctl cannot say."""
+    dropin_stays = dropin_text == (None if target_limit is None else render_scrub_dropin(target_limit))
+    if need_reload is False or not dropin_stays:
+        return []
+    why = "systemd has not loaded it as it is on disk" if need_reload else "systemctl cannot say whether it is loaded"
+    return [f"  reload:    {SCRUB_SERVICE} ({why}) + systemctl daemon-reload"]
 
 
 def scrub_limit_plan_lines(

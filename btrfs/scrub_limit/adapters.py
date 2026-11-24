@@ -17,6 +17,7 @@ from btrfs.scrub_limit.domain import (
     ScrubStatusSnapshot,
     render_scrub_dropin,
     scrub_limit_plan_lines,
+    scrub_limit_plan_reload_lines,
     scrub_limit_status_lines,
     update_snapshots_conf_scrub_limit,
 )
@@ -109,8 +110,20 @@ def _live_scrub_sysfs(btrfs_sysfs: str) -> list[str]:
     return out
 
 
-def scrub_limit_status(paths: ScrubPaths) -> tuple[int, list[str]]:
-    """Read-only status of `SCRUB_LIMIT`, drop-in, and sysfs."""
+def _need_daemon_reload(cmd_runner: CommandRunnerPort, *, on_host: SystemctlHost) -> bool | None:
+    """NeedDaemonReload of the scrub unit: True when systemd has not loaded its files as they are on disk
+    (an earlier run wrote them and stopped before its daemon-reload); None when systemctl cannot say, or
+    does not within _SHOW_TIMEOUT (a PID 1 that does not answer must not hang a run with nothing to change)."""
+    systemctl = SystemctlAdapter(cmd_runner, timeout=_SHOW_TIMEOUT, on_host=on_host)
+    r = systemctl.show_value(SCRUB_SERVICE, "NeedDaemonReload")
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip().lower() in YES_WORDS
+
+
+def scrub_limit_status(paths: ScrubPaths, *, runner: CommandRunnerPort | None = None) -> tuple[int, list[str]]:
+    """Read-only status of `SCRUB_LIMIT`, drop-in, sysfs, and whether systemd loaded the drop-in."""
+    cmd_runner = SubprocessCommandRunner() if runner is None else runner
     conf_text, conf_unreadable = _read_optional_strict(paths.conf_path)
     dropin_text, _ = _read_optional_strict(paths.dropin_path)
     lines = scrub_limit_status_lines(
@@ -121,26 +134,36 @@ def scrub_limit_status(paths: ScrubPaths) -> tuple[int, list[str]]:
             dropin_path=paths.dropin_path,
             dropin_text=dropin_text,
             live_sysfs=tuple(_live_scrub_sysfs(paths.btrfs_sysfs)),
+            need_reload=_need_daemon_reload(cmd_runner, on_host=SystemctlHost.EVERY),  # from a toolbox too
         )
     )
     return (1 if conf_unreadable else 0), lines
 
 
-def scrub_limit_plan(paths: ScrubPaths, target_limit: str | None) -> tuple[int, list[str]]:
-    """Read-only dry run of `cst btrfs scrub-limit set|off`."""
+def scrub_limit_plan(
+    paths: ScrubPaths, target_limit: str | None, *, runner: CommandRunnerPort | None = None
+) -> tuple[int, list[str]]:
+    """Read-only dry run of `cst btrfs scrub-limit set|off`, the daemon-reload included that apply runs
+    when systemd has not loaded the drop-in as it is on disk."""
+    cmd_runner = SubprocessCommandRunner() if runner is None else runner
     conf_text, conf_unreadable = _read_optional_strict(paths.conf_path)
     if conf_unreadable:
         return 1, [f"ERROR: cannot read {paths.conf_path}"]
     dropin_text, dropin_unreadable = _read_optional_strict(paths.dropin_path)
     if dropin_unreadable:
         return 1, [f"ERROR: cannot read {paths.dropin_path}"]
-    return 0, scrub_limit_plan_lines(
+    lines = scrub_limit_plan_lines(
         conf_path=paths.conf_path,
         conf_text=conf_text,
         dropin_path=paths.dropin_path,
         dropin_text=dropin_text,
         target_limit=target_limit,
     )
+    need_reload = _need_daemon_reload(cmd_runner, on_host=SystemctlHost.EVERY)  # from a toolbox too
+    return 0, [
+        *lines,
+        *scrub_limit_plan_reload_lines(dropin_text=dropin_text, target_limit=target_limit, need_reload=need_reload),
+    ]
 
 
 def _remove_if_empty(folder: str) -> None:
@@ -282,12 +305,9 @@ def _reload_or_roll_back(
 
 
 def _systemd_behind(cmd_runner: CommandRunnerPort) -> bool:
-    """Whether systemd has not loaded the scrub unit's files as they are on disk (NeedDaemonReload: an
-    earlier run wrote them and stopped before its daemon-reload); also when systemctl cannot say, or does
-    not within _SHOW_TIMEOUT (a PID 1 that does not answer must not hang a run with nothing to change)."""
-    systemctl = SystemctlAdapter(cmd_runner, timeout=_SHOW_TIMEOUT, on_host=SystemctlHost.LOCAL)
-    r = systemctl.show_value(SCRUB_SERVICE, "NeedDaemonReload")
-    return r.returncode != 0 or r.stdout.strip().lower() in YES_WORDS
+    """Whether systemd has not loaded the scrub unit's files as they are on disk; also when systemctl
+    cannot say (exit 0 must mean systemd loaded the limit)."""
+    return _need_daemon_reload(cmd_runner, on_host=SystemctlHost.LOCAL) is not False
 
 
 def _reload_what_is_on_disk(cmd_runner: CommandRunnerPort) -> str | None:
