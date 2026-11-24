@@ -540,14 +540,17 @@ def _window_seconds(val: str) -> int:
     return seconds
 
 
+# A limit's number: ASCII digits, a fraction and an exponent allowed, blanks around it (float() alone also
+# took every Unicode digit, Unicode blanks and 1_0).
+_LIMIT_NUMBER: Final = re.compile(r"[ \t]*(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?[ \t]*")
+
+
 def positive(text: str, what: str) -> float:
-    """TEXT as a finite number above 0, or ValueError naming WHAT."""
-    try:
+    """TEXT as a finite number above 0 (_LIMIT_NUMBER), or ValueError naming WHAT."""
+    if _LIMIT_NUMBER.fullmatch(text):
         v = float(text)
         if 0 < v < float("inf"):
             return v
-    except ValueError:
-        pass
     raise ValueError(f"{what}: a number above 0 (got {text!r})")
 
 

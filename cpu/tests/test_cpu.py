@@ -1198,6 +1198,21 @@ class QuietNumbersTest(unittest.TestCase):
             with self.subTest(argv=[a[:10] for a in argv]), self.assertRaisesRegex(ValueError, message):
                 q(argv, {})
 
+    def test_quiet_limits_take_ascii_numbers_only(self) -> None:
+        # float() took an Arabic-Indic "3" as 3.0, Unicode blanks and 1_0, where --for and --wait refuse them.
+        q = cpu_domain.quiet_args
+        three = "\N{ARABIC-INDIC DIGIT THREE}"
+        for text in (three, f"1.{three}", "1_0", "\N{NO-BREAK SPACE}3", "\N{SUPERSCRIPT TWO}", "nan", "inf", "9e999"):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "^--cpu: a number above 0"):
+                    q(["--cpu", text], {})
+                with self.assertRaisesRegex(ValueError, "^QUIET_CPU_PCT: a number above 0"):
+                    q([], {"QUIET_CPU_PCT": text})
+        for text, value in (("3", 3.0), ("2.5", 2.5), (".5", 0.5), ("5.", 5.0), ("1e1", 10.0), (" 3\t", 3.0)):
+            with self.subTest(text=text):
+                self.assertEqual(q(["--cpu", text], {})[3]["cpu"], value)
+                self.assertEqual(q([], {"QUIET_CPU_PCT": text})[3]["cpu"], value)
+
     def test_busy_pct(self) -> None:
         window: list[cpu_domain.Readings] = [{"v": {"cpu": (300, 100)}}, {"v": {"cpu": (1200, 250)}}]
         self.assertAlmostEqual(cpu_domain.busy_pct(window, "cpu"), 750 / 9)  # 900 ticks, 150 idle

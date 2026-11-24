@@ -1355,6 +1355,10 @@ The window is quiet when **all** of these hold:
   partition and the disk).
 - **Pressure** (PSI, see section 11): the share of the last 10 seconds in
   which at least one task waited for a CPU, for the disks, or for memory.
+- A limit is a number above 0 in ASCII digits, a fraction and an exponent
+  allowed (`3`, `2.5`, `.5`, `1e1`), blanks or tabs around it; anything else
+  (another script's digits, `1_0`, `inf`) is a usage error, from a flag or a
+  variable.
 - A limit given as a flag wins over its environment variable, and the
   variable wins over the default. Inside a toolbox, `quiet` runs on the host
   (`flatpak-spawn --host`), so it reads the host's files and sees the game
