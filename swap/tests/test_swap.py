@@ -967,6 +967,20 @@ class _FakeRunner:
         return CommandResult(0, "", "")
 
 
+def write_zswap_params(zparams: str) -> None:
+    """zswap's parameter files in the folder zparams (made when missing), as a kernel boots with them:
+    the values before an apply."""
+    os.makedirs(zparams, exist_ok=True)
+    for param, init in (
+        ("compressor", "lz4"),
+        ("max_pool_percent", "10"),
+        ("shrinker_enabled", "N"),
+        ("enabled", "N"),
+    ):
+        with open(os.path.join(zparams, param), "w", encoding="utf-8") as f:
+            f.write(init + "\n")
+
+
 def swap_scratch(tmp: str, spec: SwapHardwareSpec) -> SwapEnvironment:
     """A scratch /etc (with TEST_SETTINGS in /etc/cst/swap.conf), /proc, /sys and cgroup tree in the folder
     tmp (which the caller removes), for spec's partition; the application service's environment over it."""
@@ -1007,14 +1021,7 @@ def swap_scratch(tmp: str, spec: SwapHardwareSpec) -> SwapEnvironment:
         f.write("swap0\n")
     with open(os.path.join(cg, "machine.slice", "memory.low"), "w", encoding="utf-8") as f:
         f.write(f"{48 * 2**30}\n")
-    for param, init in (
-        ("compressor", "lz4"),
-        ("max_pool_percent", "10"),
-        ("shrinker_enabled", "N"),
-        ("enabled", "N"),
-    ):
-        with open(os.path.join(zparams, param), "w", encoding="utf-8") as f:
-            f.write(init + "\n")
+    write_zswap_params(zparams)
     with open(os.path.join(SWAP, "sysctl", "99-swap-tuning.conf"), encoding="utf-8") as fh:
         sysctl_text = fh.read()
     for key, _ in parse_sysctl(sysctl_text):
