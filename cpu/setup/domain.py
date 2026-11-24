@@ -54,6 +54,15 @@ class DockerSliceAction(StrEnum):
     UNINSTALL = "uninstall"
 
 
+class SchedExtState(StrEnum):
+    """What /sys/kernel/sched_ext/state holds: the kernel's scx_enable_state_str words."""
+
+    ENABLING = "enabling"
+    ENABLED = "enabled"
+    DISABLING = "disabling"
+    DISABLED = "disabled"
+
+
 # The commands cpu-watch answers (as the caller), and the ones that need root.
 WATCH_COMMANDS: Final = frozenset({"watch", "report", "quiet"})
 ROOT_COMMANDS: Final = frozenset(CpuRootCommand)

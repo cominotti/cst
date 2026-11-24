@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Final
 
 from cst_core.domain.text import DRY_RUN_LINE, parse_subcommand_head
-from cst_core.domain.units import ActiveState
+from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.domain.values import CpuSet, format_cpulist
 
 IRQ_ENV_PATH: Final = "/etc/cpu-setup/irqbalance.env"
@@ -222,7 +222,7 @@ def _irq_service_line(snap: IrqSnapshot, *, no_pkg: bool) -> str | None:
     cfg_changed = snap.env_text != render_irq_env(snap.banned_cpulist) or snap.dropin_text != render_irq_dropin()
     if (
         not snap.service_unit_present
-        or snap.service_enabled != "enabled"
+        or snap.service_enabled != EnablementState.ENABLED
         or snap.service_active != ActiveState.ACTIVE
         or cfg_changed
     ):

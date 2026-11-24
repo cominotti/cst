@@ -21,6 +21,7 @@ from cst_core.adapters.journal import log as journal_log
 from cst_core.adapters.locks import take_lock
 from cst_core.adapters.terminal import stdout
 from cst_core.domain.text import SettingsProblem, describe_problems
+from cst_core.domain.units import LoadState
 from cst_core.ports import CommandResult, CommandRunnerPort, OutputMode
 from cpu.game.adapters.host import (
     holds,
@@ -578,7 +579,7 @@ class GameProfile:
             if res.returncode != 0:
                 continue
             vals = show_values(res.stdout)
-            if vals.get("LoadState") == "loaded":
+            if vals.get("LoadState") == LoadState.LOADED:
                 now[mgr, unit] = vals
         return drifted(recs, now, lambda f: (read_stripped(f) or "") if os.path.exists(f) else None)
 

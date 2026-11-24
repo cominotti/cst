@@ -49,6 +49,7 @@ from cpu.setup.domain import (
     DaemonJson,
     DockerSliceAction,
     Halt,
+    SchedExtState,
     SetupPaths,
     cgroup_parent_shown,
     current_choice,
@@ -688,7 +689,7 @@ class CpuSetup:
     def status(self) -> int:
         """The whole picture; nothing in it stops the rest."""
         p, user = self.paths, self.user
-        ext = " + sched_ext!" if read_stripped(p.sched_ext) == "enabled" else ""
+        ext = " + sched_ext!" if read_stripped(p.sched_ext) == SchedExtState.ENABLED else ""
         self.say(
             f"kernel {os.uname().release}, scheduler EEVDF{ext}, preempt {preempt_modes(read_text(p.preempt) or '')}"
         )

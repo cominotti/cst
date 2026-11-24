@@ -70,3 +70,39 @@ class ActiveState(StrEnum):
     DEACTIVATING = "deactivating"
     MAINTENANCE = "maintenance"
     REFRESHING = "refreshing"
+
+
+class LoadState(StrEnum):
+    """A unit's LoadState as `systemctl show` prints it: the words of `systemctl --state=help`'s load
+    states. Compared as ActiveState is, never parsed with LoadState(text)."""
+
+    STUB = "stub"
+    LOADED = "loaded"
+    NOT_FOUND = "not-found"
+    BAD_SETTING = "bad-setting"
+    ERROR = "error"
+    MERGED = "merged"
+    MASKED = "masked"
+
+
+class EnablementState(StrEnum):
+    """A unit file's enablement as `systemctl is-enabled` prints it (and `systemctl show`'s
+    UnitFileState): the words of systemctl(1)'s is-enabled table.
+
+    As with ActiveState, the text from systemctl stays a plain str compared with members; it is never
+    parsed with EnablementState(text), which would raise on a word a newer systemd adds."""
+
+    ENABLED = "enabled"
+    ENABLED_RUNTIME = "enabled-runtime"
+    LINKED = "linked"
+    LINKED_RUNTIME = "linked-runtime"
+    ALIAS = "alias"
+    MASKED = "masked"
+    MASKED_RUNTIME = "masked-runtime"
+    STATIC = "static"
+    INDIRECT = "indirect"
+    DISABLED = "disabled"
+    GENERATED = "generated"
+    TRANSIENT = "transient"
+    BAD = "bad"
+    NOT_FOUND = "not-found"

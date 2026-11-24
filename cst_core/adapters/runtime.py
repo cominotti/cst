@@ -22,6 +22,7 @@ from cst_core.adapters import SystemctlAdapter, SystemctlHost, terminal
 from cst_core.adapters.runner import HostExecutionContext
 from cst_core.adapters.zipapp import build_python_zipapp
 from cst_core.domain.install import expand_dest, manifest_by_src
+from cst_core.domain.units import LoadState
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, UnitName
 
 SYSTEM_PYTHON = "/usr/bin/python3"
@@ -319,7 +320,7 @@ def probe_systemd_unit(runner: CommandRunnerPort, unit: str) -> tuple[bool, str,
     """Query `(unit_present, ActiveState, UnitFileState)` via `SystemctlAdapter(..., SHOW_ONLY)`."""
     systemd = SystemctlAdapter(runner, on_host=SystemctlHost.SHOW_ONLY)
     props = systemd.show(UnitName(unit), ("LoadState", "ActiveState", "UnitFileState"))
-    present = bool(props) and props.get("LoadState", "not-found") != "not-found"
+    present = bool(props) and props.get("LoadState", LoadState.NOT_FOUND) != LoadState.NOT_FOUND
     return present, props.get("ActiveState", "unknown"), props.get("UnitFileState", "unknown")
 
 

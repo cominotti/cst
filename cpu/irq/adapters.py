@@ -18,7 +18,7 @@ from cst_core.domain.contracts import CPU_SETTINGS
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.domain.record import ROOT_RECORD
 from cst_core.domain.text import parse_shell_assignments
-from cst_core.domain.units import ActiveState
+from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.domain.values import CpuSet, DomainValidationError
 from cst_core.ports import CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from cpu.game.adapters.host import read_settings
@@ -248,7 +248,7 @@ def _sync_active_irq_service(
     if not unit_present:
         return 0, []
     out: list[str] = []
-    if enabled_state != "enabled":
+    if enabled_state != EnablementState.ENABLED:
         en = systemd.enable(IRQBALANCE_SERVICE)
         if en.returncode != 0:
             return en.returncode, [en.stderr.strip() or f"systemctl enable {IRQBALANCE_SERVICE} failed"]
