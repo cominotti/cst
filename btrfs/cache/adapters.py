@@ -146,12 +146,17 @@ def _real_home(home: str, rt: _CacheMountRuntime) -> str:
     return real.removeprefix(prefix) if real.startswith(f"{prefix}/") else home
 
 
+def _from_toolbox(rt: _CacheMountRuntime) -> bool:
+    """Whether the probes go to the host: a run inside a toolbox with no seam root."""
+    return not rt.seam_root and rt.ctx.is_container()
+
+
 def _read_live_mounts(rt: _CacheMountRuntime) -> tuple[tuple[LiveMount, ...], str | None]:
     """Every live mount, from one `findmnt -J -l` call (on the host from a toolbox); (), and why,
     when findmnt cannot answer: nothing is guessed from another table."""
     res = rt.runner.run(
         ["findmnt", "-J", "-l", "-o", FINDMNT_COLUMNS],
-        on_host=(not rt.seam_root and rt.ctx.is_container()),
+        on_host=_from_toolbox(rt),
         timeout=_FINDMNT_TIMEOUT_S,
         locale_c=True,
         output=OutputMode.CAPTURE,
@@ -346,7 +351,7 @@ def _fstab_behind(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> bool | No
     """Whether systemd has not loaded /etc/fstab as it is on disk (systemd_behind_fstab over the mount
     units it has loaded, one `systemctl show '*.mount'`, on the host from a toolbox as findmnt is);
     None when systemctl gives no answer."""
-    on_host = SystemctlHost.SHOW_ONLY if (not rt.seam_root and rt.ctx.is_container()) else SystemctlHost.LOCAL
+    on_host = SystemctlHost.SHOW_ONLY if _from_toolbox(rt) else SystemctlHost.LOCAL
     units = SystemctlAdapter(rt.runner, on_host=on_host).show_units("*.mount", MOUNT_UNIT_PROPS)
     return systemd_behind_fstab(units, snap.bindings)
 
@@ -369,6 +374,12 @@ def _catch_up_reload(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> tuple[
         else f"systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk"
     )
     return None, [f"reloaded: {said}"]
+
+
+def _attach_fstab(snap: CacheMountSnapshot) -> tuple[str, str]:
+    """/etc/fstab as it is (empty when there is none) and as attach would write it."""
+    cur = snap.fstab_text or ""
+    return cur, plan_attach_fstab(cur, [p.binding for p in snap.bindings])
 
 
 def _put_fstab_back(fstab_path: str, previous: str | None) -> str | None:
@@ -480,8 +491,7 @@ def _apply_attach(
     if error is not None:
         return 1, [*lines, error]
 
-    cur_fstab = snap.fstab_text or ""
-    new_fstab = plan_attach_fstab(cur_fstab, [p.binding for p in snap.bindings])
+    cur_fstab, new_fstab = _attach_fstab(snap)
     mounted, error = _bind_missing(snap, rt)
     if error is not None:
         return 1, [*lines, error]
@@ -585,11 +595,10 @@ def dispatch_cache_mount_cli_action(
         case CacheMountAction.STATUS:
             return 0, format_cache_mount_status(snap, seam_root=rt.seam_root)
         case CacheMountAction.PLAN:
-            if (
-                snap.user is not None
-                and plan_attach_fstab(cur := snap.fstab_text or "", [p.binding for p in snap.bindings]) == cur
-            ):
-                snap = replace(snap, fstab_behind=_fstab_behind(snap, rt))  # attach would only reload
+            if snap.user is not None:
+                cur_fstab, new_fstab = _attach_fstab(snap)
+                if new_fstab == cur_fstab:  # attach would only reload
+                    snap = replace(snap, fstab_behind=_fstab_behind(snap, rt))
             return 0, format_cache_mount_plan(snap, prog, allow_nonempty=parsed.allow_nonempty, seam_root=rt.seam_root)
         case CacheMountAction.ATTACH:
             return _apply_attach(snap, parsed, rt)
