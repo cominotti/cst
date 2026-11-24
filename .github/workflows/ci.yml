@@ -32,6 +32,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       e2e_images: ${{ steps.filter.outputs.e2e_images }}
+      quint: ${{ steps.filter.outputs.quint }}
     steps:
       - name: Checkout repository
         if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -57,10 +58,24 @@ jobs:
           if [[ "${FORCE_E2E}" == "true" ]]; then
             echo "code=true" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
+            echo "quint=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
+          # The paths whose change the quint job checks with TLC: the module the
+          # Quint spec models, the spec and its traces, the replay, the tool, and
+          # what runs it (this workflow, the invowk task, the action that
+          # installs invowk).
+          quint_path() {
+            case "$1" in
+              btrfs/docker_volumes_nocow/*|btrfs/tests/quint/*|tests/quint/*|btrfs/tests/test_docker_volumes_nocow_replay.py) return 0 ;;
+              .github/workflows/ci.yml|cst.invowkmod/invowkfile.cue|.github/actions/setup-invowk/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
           e2e_images="false"
+          quint="false"
           if [[ "${EVENT_NAME}" == "push" ]]; then
             code="true"
             if [[ -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
@@ -70,18 +85,24 @@ jobs:
                   tests/e2e/images/*|tests/e2e/scripts/*) e2e_images="true" ;;
                   *) ;;  # other paths leave the images alone
                 esac
+                if quint_path "${path}"; then
+                  quint="true"
+                fi
               done
             else
               e2e_images="true"
+              quint="true"
             fi
             echo "code=${code}" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=${e2e_images}" >> "${GITHUB_OUTPUT}"
+            echo "quint=${quint}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
           if [[ "${EVENT_NAME}" != "pull_request" ]]; then
             echo "code=true" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
+            echo "quint=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -89,6 +110,7 @@ jobs:
           if [[ "${#changed[@]}" -eq 0 ]]; then
             echo "code=false" >> "${GITHUB_OUTPUT}"
             echo "e2e_images=false" >> "${GITHUB_OUTPUT}"
+            echo "quint=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -102,10 +124,14 @@ jobs:
               *.md|LICENSE|.gitignore) ;;
               *) code="true" ;;
             esac
+            if quint_path "${path}"; then
+              quint="true"
+            fi
           done
 
           echo "code=${code}" >> "${GITHUB_OUTPUT}"
           echo "e2e_images=${e2e_images}" >> "${GITHUB_OUTPUT}"
+          echo "quint=${quint}" >> "${GITHUB_OUTPUT}"
 
   fast-gates:
     name: Fast Gates (Fedora 45)
@@ -283,9 +309,41 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # TLC on the Quint spec of docker-volumes-nocow (invowk cmd test quint: every
+  # instance, every property), only when a change touches what it checks. The
+  # replay of its traces is in the unit suite and runs in fast-gates always; this
+  # job is what tells that a changed spec still holds its properties (a spec
+  # and its traces changed together pass the replay whatever the spec says).
+  # On the runner host, as its own non-root user, with the runner's JDK 21 and
+  # node; the task fetches its pinned tools, each checked by its SHA-256 (no
+  # GitHub cache). docs/dev-tools.md, "Model checking with Quint (optional)".
+  quint:
+    name: Quint Spec, TLC (docker-volumes-nocow)
+    needs: [changes]
+    if: needs.changes.outputs.quint == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup invowk
+        uses: ./.github/actions/setup-invowk
+
+      - name: Model-check the Quint specs (invowk cmd test quint)
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="${JAVA_HOME_21_X64}"
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          java -version
+          node --version
+          invowk cmd test quint
+
   ci-status:
     name: CI Status
-    needs: [changes, fast-gates, e2e-tier1, e2e-tier2]
+    needs: [changes, fast-gates, e2e-tier1, e2e-tier2, quint]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -294,12 +352,14 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          QUINT_CHANGED: ${{ needs.changes.outputs.quint }}
           FAST_RESULT: ${{ needs.fast-gates.result }}
           TIER1_RESULT: ${{ needs.e2e-tier1.result }}
           TIER2_RESULT: ${{ needs.e2e-tier2.result }}
+          QUINT_RESULT: ${{ needs.quint.result }}
         run: |
           set -euo pipefail
-          echo "changes=${CHANGES_RESULT} (code=${CODE_CHANGED:-<unset>}) fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT}"
+          echo "changes=${CHANGES_RESULT} (code=${CODE_CHANGED:-<unset>}) fast-gates=${FAST_RESULT} e2e-tier1=${TIER1_RESULT} e2e-tier2=${TIER2_RESULT} quint=${QUINT_RESULT} (quint=${QUINT_CHANGED:-<unset>})"
           # The E2E tiers are skipped when 'changes' did not run cleanly, so a
           # failed or cancelled classification must never pass as "nothing to test".
           if [[ "${CHANGES_RESULT}" != "success" ]]; then
@@ -325,3 +385,12 @@ jobs:
             echo "::error::${job} ended with non-passing result (${res}; code=${CODE_CHANGED:-<unset>})" >&2
             exit 1
           done
+          # The quint job is skipped only when no path it checks changed.
+          if [[ "${QUINT_RESULT}" != "success" ]]; then
+            if [[ "${QUINT_RESULT}" == "skipped" && "${QUINT_CHANGED}" == "false" ]]; then
+              echo "quint skipped: no change to what the Quint spec checks"
+            else
+              echo "::error::quint ended with non-passing result (${QUINT_RESULT}; quint=${QUINT_CHANGED:-<unset>})" >&2
+              exit 1
+            fi
+          fi

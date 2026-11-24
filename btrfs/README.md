@@ -822,7 +822,14 @@ docker volume rm <name>         # or one volume by name
 - `+C` only works on **empty** files. Files that already hold data must be
   copied to become NOCOW. That cannot happen while containers use them, so for
   those `install` only leaves a flag file `/etc/btrfs-setup/docker-nocow-pending`.
-  It also resets the counter of attempts (see below).
+  Its `mark` writes that file itself and flushes it to disk **before** it sets
+  `+C` on the volumes folder (the same order as the boot, below), and resets
+  the counter of attempts to 0 (see below), flushed too, so a power loss
+  cannot bring an old count back beside the new flag. When it cannot write
+  either, the folder keeps no `+C`, the journal says why, and the next boot
+  asks again. One gap is left: a container that writes into a volume during
+  the few milliseconds between mark's two looks at the volumes is asked for
+  after `+C` (still flushed), so a kill exactly there can lose that request.
 - At the **next boot**, `docker-volumes-nocow.service` runs **before Docker
   starts**. For each volume with copy-on-write data it makes a full NOCOW copy
   (the empty copy folder first gets the volume folder's SELinux label with
@@ -876,8 +883,9 @@ docker volume rm <name>         # or one volume by name
   it is recorded as postponed with that reason, even when nothing is scheduled
   and the default folder is absent or already `+C` (`status` shows it, `cst doctor`
   from two boots on), and the first boot after the file is fixed runs it. `mark`
-  (what `install` runs) changes nothing then and exits 2, so `install` leaves the
-  request to that boot. Another dockerd whose config file cannot be read that way
+  (what `install` runs) sets no `+C` then and exits 2, but writes the request
+  (an old count reset, then the flag, each flushed to disk), so that boot runs
+  the migration. Another dockerd whose config file cannot be read that way
   counts as one that may use the volumes.
 - If the migration does not finish after two boots, it gives up with the
   message `Docker volumes: NOCOW migration gave up`. The count of boots is
@@ -921,9 +929,18 @@ docker volume rm <name>         # or one volume by name
   data; the snapshots setup creates it too), writing the flag then failed,
   and the request was lost. Such a machine shows `migration not scheduled`
   and stays that way. Run `cst btrfs install` once: its `mark` finds the
-  copy-on-write data, install creates the folder and the flag, and the next
+  copy-on-write data and writes the folder and the flag itself, and the next
   boot migrates the volumes (the same `install` also puts the fixed helper in
   place).
+- Older copies of `install` also set `+C` first: `mark` set it, and the
+  flag was written after `mark` ended, without a flush. An install killed or
+  powered off between the two left `+C`, copy-on-write volumes and no flag.
+  Their touch of the flag after any failing `mark` could also put it beside
+  an old count that `mark` had failed to reset, so the next boot gave up at
+  once; `install` now writes nothing after `mark`.
+  `status` then shows `migration not scheduled`, `cst doctor` shows
+  nothing, and no boot asks again. Run `cst btrfs install` once: it schedules
+  the migration again.
 
 Note: `cst cpu docker-slice install` also edits
 `/etc/docker/daemon.json` (it adds `cgroup-parent`, see
@@ -2594,8 +2611,8 @@ journalctl -u docker-volumes-nocow
 Common causes are low free space or a copy error. The volumes are still usable
 (copy-on-write). Fix the cause and run `install` again; the migration is then
 tried again at the next boot (two more attempts). With no "gave up" line in the
-journal, an older helper may have lost the request (section 4.10): `install`
-schedules it again too.
+journal, an older helper or an older `install` that was stopped half-way may
+have lost the request (section 4.10): `install` schedules it again too.
 
 ### Docker volumes: `migration postponed at N boot(s) in a row`
 
@@ -2734,7 +2751,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |
 | `docker-gc` | `docker_gc/` | `domain.py`: Docker's generated names, its time stamps, which containers are ephemeral, the settings and paths (`GcSettings`, `GcPaths`), the protected registries (the strict reader of the settings file, the built-in list read from an installed docker-gc's source, `resolve_protection`), the typed records of what docker reports, the plan (`plan_gc`) and the lines that show it; no I/O. `ports.py`: docker (with the events stream), the state files and run lock, the settings file and the installed program, the host (uptime, the recorder's unit), the terminal and journal. `application.py`: the use cases (`DockerGc`: record, plan, apply with the last checks before an image is removed, run, cleanup-now, status, settings) and the recorder's state while it follows `docker events` (`Recording`). `adapters.py`: the `docker` commands and their JSON, the last-used state and the last run's summary (each replaced atomically through cst_core's `write_atomic`; a state file docker-gc did not write reads as no state), the run lock (cst_core's `take_lock`), the settings file and the sources of the installed zipapp or script (`GcSettingsFile`), systemctl and `/proc/uptime`, the terminal and the journal lines. `wiring.py`: the environment (`DOCKER_GC_STATE`, `DOCKER_GC_RUNTIME`, `DOCKER_GC_CONF`, `DOCKER_GC_INSTALLED`, `KEEP_*_DAYS`, `DOCKER_GC_PROTECT`, `DOCKER_GC_FLUSH`), whether it runs inside a toolbox or container (cst_core's `HostExecutionContext`; `CST_DOCKER_GC_CONTAINER` 1/0 for the tests) and the use cases over the real adapters. `domain.py` also holds `container_refusal`, the commands that refuse there. `cli.py`: the arguments and `main()`. |
-| `docker-volumes-nocow` | `docker_volumes_nocow/` | `domain.py`: the paths (`NocowPaths`), what a scan of a volume found, whether a copy matches its original (entries, bytes, SELinux labels), how a dockerd names its data root, docker.service's states, the record of postponed boots, what recovery does in one volume of an interrupted migration (`recovery`); no I/O. `ports.py`: the volume trees, the helper's state files, the Docker daemons, its output. `application.py`: one volume's NOCOW copy (`migrate_one`), the recovery of an interrupted migration (`recover`, one volume at a time: `recover_one`), `migrate`, `mark`, `unmark` and `status`. `adapters.py`: their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), the volumes' folders and what an interrupted migration left in each (`volume_folders`, `leftovers`), whether docker.service or another dockerd uses them, the flag, attempts and postponed files, SELinux labels, the journal lines and btrfs-notify. `wiring.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`, read when the program runs) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. |
+| `docker-volumes-nocow` | `docker_volumes_nocow/` | `domain.py`: the paths (`NocowPaths`), what a scan of a volume found, whether a copy matches its original (entries, bytes, SELinux labels), how a dockerd names its data root, docker.service's states, the record of postponed boots, what recovery does in one volume of an interrupted migration (`recovery`); no I/O. `ports.py`: the volume trees, the helper's state files, the Docker daemons, its output. `application.py`: one volume's NOCOW copy (`migrate_one`), the recovery of an interrupted migration (`recover`, one volume at a time: `recover_one`), `migrate`, `mark`, `unmark` and `status`. `adapters.py`: their files and NOCOW flags (cst_core's `inode_flags`/`set_nocow`), the volumes' folders and what an interrupted migration left in each (`volume_folders`, `leftovers`), whether docker.service or another dockerd uses them, the flag, attempts and postponed files, SELinux labels, the journal lines and btrfs-notify. `wiring.py`: where Docker keeps its volumes (`/etc/docker/daemon.json`, read when the program runs) and the use cases over the real adapters. `cli.py`: the arguments and `main()`. Its Quint spec and the traces the replay test reads are in `btrfs/tests/quint` (the tool that checks it, `cst-quint`, is in `tests/quint`; [docs/dev-tools.md, "Model checking with Quint"](../docs/dev-tools.md#model-checking-with-quint-optional)). |
 | `btrfs-stall-monitord` | `stall_monitord/` | `domain.py`: thresholds and intervals, the record version and the records it writes, the kernel-stack frame lists and what a stack waits for (`wait_kind`, `mmap_lock_only`, `settle_kinds`), the episode being recorded (`Episode`), and the loop's rules on the values it read: the longest commit of a probe, what opens and closes an episode, when a D-state task is reported and the words of each report, which kernel log lines count, the alert queue text; no I/O. `adapters/`: `proc.py`, reading `/proc`, `/sys` and cgroupfs to the end of each file (`read_bytes`), a read that may wait for another program (a task's command line) in a helper thread with a time limit (`TimedReader`), the btrfs/disk/container `Topology`, D-state tasks, the journal lines, the log folder and the `Writer` thread of the log files; `monitor.py`, the daemon (`Monitor`: its state across samples and the sampling loop, the PSI trigger, `/dev/kmsg`, the alert hand-off and the helper thread that starts `btrfs-stall-alert.service` (`AlertStarter`), and its READY=1 and WATCHDOG=1 to systemd through cst_core's `ServiceNotifier`, which it closes when it stops). `cli.py`: the arguments and `main()`. |
 | `btrfs-stall-report` | `stall_report/` | `domain/`, no I/O: `records.py`, the record formats and what the analysis returns; `categories.py`, the wait categories and hints and classifying a stack (with the daemon's frame lists, imported from `stall_monitord/domain.py`, so the two never drift); `window.py`, `summarise()`: one window's coverage, totals, categories, episodes and events, and the open episode; `verdict.py`, the verdict lines and number formats; `report.py`, the text report's lines. `adapters.py`: the log folder, `date -d` for `--since`/`--until`, reading the daily log files, `analyse()` (the records by kind, `summarise()` with the clock, then below when asked), below and the container names. `cli.py`: printing the text report (with the container names), the arguments and `main()`. |
 

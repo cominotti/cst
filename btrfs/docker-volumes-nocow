@@ -13,8 +13,13 @@ RAID1 episode such volumes should be recreated, not trusted.
 
   docker-volumes-nocow status    volumes dir flag, volumes still with CoW files
   docker-volumes-nocow mark      set +C on the volumes dir (new volumes inherit
-                                 it at creation); exit 1 if existing volumes
-                                 still need migrating
+                                 it at creation); if existing volumes still need
+                                 migrating, first write the request the next
+                                 boot reads (the attempt count reset, then
+                                 /etc/btrfs-setup/docker-nocow-pending, each
+                                 flushed), and exit 1; exit 2 when it cannot
+                                 (no +C then) or when /etc/docker/daemon.json
+                                 cannot be read (only the request written)
   docker-volumes-nocow migrate   (docker-volumes-nocow.service, every boot, before
                                  docker.service) marks the dir; if flagged, rewrites each volume that has
                                  CoW files into a NOCOW copy: +C only applies to
