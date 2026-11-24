@@ -159,6 +159,21 @@ def _write_qos_line(qos_path: str, payload: str) -> OSError | None:
     return None
 
 
+def _with_udev_fields(disk: BlockDisk, *, hwdb_solution: str, udev_ready: bool, udev_error: str) -> BlockDisk:
+    """disk with its three udev fields given: what dataclasses.replace would build (Sonar types replace's
+    result as DataclassInstance, python:S5886)."""
+    return BlockDisk(
+        name=disk.name,
+        devno=disk.devno,
+        rotational=disk.rotational,
+        scheduler=disk.scheduler,
+        model=disk.model,
+        hwdb_solution=hwdb_solution,
+        udev_ready=udev_ready,
+        udev_error=udev_error,
+    )
+
+
 def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDisk:
     """disk with what udev knows of it: its hwdb solution, whether udev has processed it, or why
     `udevadm info` could not tell (missing, failed: the disk is judged as before)."""
@@ -170,23 +185,15 @@ def _with_udev_properties(runner: CommandRunnerPort, disk: BlockDisk) -> BlockDi
         output=OutputMode.CAPTURE,
     )
     if res.fault is not None or res.returncode != 0:
-        return BlockDisk(
-            name=disk.name,
-            devno=disk.devno,
-            rotational=disk.rotational,
-            scheduler=disk.scheduler,
-            model=disk.model,
+        return _with_udev_fields(
+            disk,
             hwdb_solution=disk.hwdb_solution,
             udev_ready=disk.udev_ready,
             udev_error=first_line(res.stderr) or f"exit {res.returncode}",
         )
     props = {key: value for key, sep, value in (line.partition("=") for line in res.stdout.splitlines()) if sep}
-    return BlockDisk(
-        name=disk.name,
-        devno=disk.devno,
-        rotational=disk.rotational,
-        scheduler=disk.scheduler,
-        model=disk.model,
+    return _with_udev_fields(
+        disk,
         hwdb_solution=props.get(IOCOST_SOLUTIONS_PROP, "").strip(),
         udev_ready=USEC_INITIALIZED_PROP in props,
         udev_error=disk.udev_error,
