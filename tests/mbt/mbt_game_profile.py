@@ -7,9 +7,10 @@ run it, on the unit tests' scratch (cpu/tests/test_game_profile.py game_scratch)
 each property has a base (the unit file's value); a daemon-reload sets every shown value from the
 zz-cst-game.conf drop-in for the system manager's MemoryLow when there is one (it wins over a
 runtime override: zz- sorts last; tier 1 test_07 proves that order on the real systemd), else from
-the runtime override file when there is one, else the base. Settings: TARGET_USER with an account, P-cores 0-1 with EPP files and two cpuidle states each
-(one at or above the 50 us limit), builds.slice active or not, cpuset delegated to the user manager or
-not, and maybe a runtime override of machine.slice's CPUWeight from before the game ('existed').
+the runtime override file when there is one, else the base. Settings: TARGET_USER with an account,
+P-cores 0-1 with EPP files and two cpuidle states each (one at or above the 50 us limit),
+builds.slice active or not, cpuset delegated to the user manager or not, and maybe a runtime
+override of machine.slice's CPUWeight from before the game ('existed').
 
 Between the profile's calls the machine changes the world: the game starts or ends (a GameMode
 client in /proc), the by-hand mark comes and goes, Docker containers and Steam scopes start, boxes
