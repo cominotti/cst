@@ -495,14 +495,18 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
 
 
 def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
-    """The repository .py files these lines run with python3, directly or through an invowk task, and the
-    problems (an invowk task that is not in the invowkfile)."""
+    """The repository files these lines run with python3, directly or through an invowk task, and the
+    problems (an invowk task that is not in the invowkfile, a program the gate cannot name)."""
     files: list[str] = []
     problems: list[str] = []
+
+    def scan(text: str, at: str) -> None:
+        found_files, unnamed = _python_runs(repo, text)
+        files.extend(found_files)
+        problems.extend(_unnamed_problem(at, word) for word in unnamed)
+
     for n, line in lines:
-        found_files, unnamed = _python_runs(repo, line)
-        files += found_files
-        problems += [_unnamed_problem(f"{where}:{n}", word) for word in unnamed]
+        scan(line, f"{where}:{n}")
         for found in _INVOWK_RUN.finditer(line):
             task = group(found, 1).strip()
             script = task_script(cue, task)
@@ -511,9 +515,7 @@ def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> 
                 continue
             for script_line in script.splitlines():
                 if not script_line.lstrip().startswith("#"):
-                    found_files, unnamed = _python_runs(repo, script_line)
-                    files += found_files
-                    problems += [_unnamed_problem(f"{where}:{n} (task {task})", word) for word in unnamed]
+                    scan(script_line, f"{where}:{n} (task {task})")
     return files, problems
 
 
