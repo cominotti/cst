@@ -294,8 +294,10 @@ class Verdict:
 
 
 def verdict(ran: Ran) -> Verdict:
-    states = re.search(r"(\d+) distinct states found", ran.output)
-    depth = re.search(r"depth of the complete state graph search is (\d+)", ran.output)
+    # TLC prints its progress as it goes ("Progress(N) at ...: X states generated, Y distinct states found"):
+    # the last such line is the total.
+    states = (re.findall(r"(\d+) distinct states found", ran.output) or [None])[-1]
+    depth = (re.findall(r"depth of the complete state graph search is (\d+)", ran.output) or [None])[-1]
     if ran.returncode == TIMED_OUT:
         result = "timed out"
     elif ran.returncode == 0 and "[ok] No violation found" in ran.output:
@@ -304,11 +306,7 @@ def verdict(ran: Ran) -> Verdict:
         result = "violated"
     else:
         result = "failed"
-    return Verdict(
-        result,
-        int(states.group(1)) if states is not None else None,
-        int(depth.group(1)) if depth is not None else None,
-    )
+    return Verdict(result, int(states) if states is not None else None, int(depth) if depth is not None else None)
 
 
 def normalize(text: str, description: str) -> str:

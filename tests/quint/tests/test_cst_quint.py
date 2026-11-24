@@ -304,6 +304,14 @@ class VerdictTest(unittest.TestCase):
             (124, "[TLC] Running TLC model checker...\n"): ("timed out", None, None),
             (1, "error: could not connect\n"): ("failed", None, None),
             (0, "nothing said\n"): ("failed", None, None),
+            (
+                0,
+                "Progress(25) at 2026-11-24: 4821 states generated, 861 distinct states found, 77 states left\n" + OK,
+            ): (
+                "ok",
+                63344,
+                68,
+            ),
         }
         for (code, out), want in cases.items():
             with self.subTest(code=code, out=out):
