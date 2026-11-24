@@ -53,6 +53,7 @@ from cst_core.domain.values import (
     format_bytes_gib_mib,
     format_bytes_human,
     format_cpulist,
+    parse_whole_number,
 )
 from cst_core.domain.units import ActiveState
 from cst_core.ports import CommandFailed, CommandFault, CommandResult, OutputMode, SystemctlHost, UnitName
@@ -114,6 +115,25 @@ class ValueObjectsTest(unittest.TestCase):
             ByteSize(-1)
         with self.assertRaises(DomainValidationError):
             ByteSize.parse_iec("150")
+
+    def test_a_whole_number_is_ascii_digits_only(self) -> None:
+        for text, want in (("0", 0), ("060", 60), ("300", 300)):
+            with self.subTest(text=text):
+                self.assertEqual(parse_whole_number(text), want)
+        for bad in (
+            "",
+            "\N{SUPERSCRIPT TWO}",
+            "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}",
+            " 5",
+            "5 ",
+            "+5",
+            "-1",
+            "1_0",
+            "5\n",
+            "0" * 5000 + "5",
+        ):
+            with self.subTest(bad=bad[:12]):
+                self.assertIsNone(parse_whole_number(bad))
 
     def test_duration_parse(self) -> None:
         self.assertEqual(Duration.parse("30s"), Duration(30))

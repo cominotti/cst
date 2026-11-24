@@ -404,13 +404,20 @@ cst btrfs scrub-limit off
   gets an answer), and `status` says
   `systemd: has not loaded btrfs-scrub-weekly.service as it is on disk`
   when systemd answers yes.
-  Writing the drop-in sets `btrfs:core` pending in the install record; when
-  `btrfs:core` was done before, `set` marks it done again once the drop-in is
-  written and `daemon-reload` worked, so `cst doctor` does not ask for an
-  install that nothing needs. A rollback after a failed `daemon-reload`
-  writes the old drop-in back, which sets `btrfs:core` pending again; it
-  marks it done again too (a mark that fails is a `ROLLBACK INCOMPLETE`).
-  A `btrfs:core` that was never installed stays pending.
+  The drop-in is written through the installer with `--keep-state`
+  (`installer.py text ... --component btrfs:core --keep-state`): its line in
+  the install record is written or dropped, and `btrfs:core` keeps the state
+  it had, done or pending, whatever the run's end: a run that was stopped
+  (killed after the installer, before its `daemon-reload`), failed or rolled
+  back leaves it as it was, and so does the run again. So `cst doctor` does
+  not ask for an install that nothing needs. A `btrfs:core` that was never
+  installed becomes pending at the first drop-in, as before (`cst doctor`
+  then asks for `cst btrfs install`, which installs the rest of it). A run
+  stopped before its `daemon-reload` is shown by `status`, `plan` and `cst doctor`
+  (systemd has not loaded the drop-in, above), not by the install record.
+  A record that an older CST left pending this way (a `set` killed after its
+  installer, then run again) stays pending until `cst btrfs install`: the
+  record cannot tell it from an install that did not finish.
 - `status` shows the setting, the limit the service sets and the value in
   sysfs now; `cst doctor` shows the same as `info` and warns when the
   setting and the service differ.
@@ -1450,6 +1457,9 @@ cst btrfs compress-force apply         # root on host; asks confirmation unless 
 cst btrfs compress-force revert        # root on host; back to compress=zstd:N
 ```
 
+N is a zstd level 1..15 in ASCII digits; anything else is a usage error
+(exit 2).
+
 **Why:** with plain `compress=zstd:1`, btrfs runs a fast pre-compression estimator
 before invoking zstd and skips compression altogether when the sample looks only
 borderline compressible. With `compress-force=zstd:1`, btrfs hands every extent
@@ -1613,10 +1623,19 @@ cst btrfs commit-interval revert        # root on host; back to kernel default (
   `commit=` is treated as `30 s` default everywhere (`revert` removes `commit=`
   from `fstab`/`kargs`/`top-mount` and remounts with `commit=30`). `cst doctor`
   flags any cross-layer drift.
-- A `commit=` that is not a positive number of seconds (`commit=abc`,
-  `commit=0`, an empty `commit=`), which a mount refuses, is replaced in
-  every layer, the top-mount unit included, by `apply` and `revert`, even
-  when the valid `commit=` next to it already has the target.
+- SECONDS is written in ASCII digits (`plan 90`); anything else (`plan ²`,
+  digits of another script) is a usage error (exit 2).
+- A `commit=` is read as the kernel reads it (`kstrtouint` with base 0,
+  C's number forms): decimal, `0` then octal (`commit=060` is 48 s),
+  `0x` then hex (`commit=0x3c` is 60 s), an optional `+`, ASCII only, at
+  most 4294967295.
+- A `commit=` that is not a positive number of seconds that way, one a
+  mount refuses (`commit=abc`, an empty `commit=`, `commit=08`, digits
+  other than ASCII 0-9, more than 4294967295) or `commit=0` (which the
+  kernel takes as its 30 s default), is replaced in every layer, the
+  top-mount unit included, by `apply` and `revert`, even when the valid
+  `commit=` next to it already has the target. `status` and `cst doctor` read such a layer as the 30 s
+  default, unless a valid `commit=` sits next to it.
 
 ### 9.4 Dedicated NVMe cache drive (`cache`)
 
@@ -2703,7 +2722,7 @@ the logic lives once, in a sub-package of `btrfs/`, where the tests import it:
 | `btrfs-commit-interval` | `commit/` | Checkout-only entry behind `cst btrfs commit-interval`: aligns root btrfs `commit=N` interval (`60` s default, range `15..300`) across `/etc/fstab`, `rpm-ostree kargs`, live remount, and `btrfs:top-mount` while keeping `flushoncommit`, reusing `LinuxCompressHostAdapter` (`CST_BTRFS_COMMIT_PROC` / `CST_BTRFS_COMMIT_ROOT`). |
 | `btrfs-cache` | `cache/` | Checkout-only entry behind `cst btrfs cache`: manages per-user `/var/mnt/cache/<user>` -> `~/.cache` and `/var/mnt/scratchpad/<user>` -> `~/Scratchpad` bind mounts, `CACHEDIR.TAG`, managed `/etc/fstab` tags, and health diagnostics (`CST_BTRFS_CACHE_ROOT`: a test root for every path it reads and writes). |
 | `btrfs-iocost` | `iocost/` | `/usr/local/sbin/btrfs-iocost`: enables kernel `blk-iocost` (`enable=1 ctrl=auto`) on non-rotational SSDs without hwdb solutions, respecting pre-existing/vendor `enable=1` rows and managing `cst-btrfs-iocost.service` + `91-cst-iocost.rules` (`btrfs:iocost`); `cst btrfs iocost status\|plan` also work in a toolbox. |
-| `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the check that systemd loaded them (`NeedDaemonReload`, which `status` and `plan` also ask, on the host from a toolbox), the rollback of both files on a failure, and `btrfs:core` kept done in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
+| `btrfs-scrub-limit` | `scrub_limit/` | Checkout-only entry behind `cst btrfs scrub-limit` (section 4.3): `domain.py` (the command line, the size check, reading and rewriting `SCRUB_LIMIT` in `snapshots.conf` with the other keys and comments kept, the drop-in's text, the status and plan lines; no I/O); `adapters.py` (the files as the host sees them, `/run/host` from a toolbox for `status` and `plan`; `set`/`off`: `snapshots.conf`, the drop-in through the installer, `daemon-reload`, the check that systemd loaded them (`NeedDaemonReload`, which `status` and `plan` also ask, on the host from a toolbox), the rollback of both files on a failure, and the drop-in written without changing `btrfs:core`'s state in the install record); `cli.py` (container refusal, sudo escalation through `run_managed_cli`, dispatch). |
 | `chrome-cache` | `chrome_cache/` | `domain.py`: the command line (`parse_chrome_args`), the flag lines and markers, reading the text of `chrome-flags.conf` and deciding what to write (`decide`, `turn_off`); no I/O. `adapters.py`: the flags file reached from the home without following a symlink (`open_dir_chain`, `read_flags`, `write_flags`), whether the Flatpak is installed, the cache sizes, the user and home checks, the one line of `plan` (`plan_line`) and the two changes (`apply`, `off`: read, decide, write, the folder descriptor closed on every path). `cli.py`: `status` and `main()`, no I/O of its own. |
 | `btrfs-health-check` | `health_check/` | `domain.py`: the thresholds (scrub age, NVMe wear, the unallocated levels doctor also uses), and how the check reads what btrfs, findmnt, lsblk, nvme-cli, the kernel log and its state files print, as the bash version read them (awk's fields and numbers, bash's `read -r` and arithmetic, `$(...)`); no I/O. `adapters.py`: the machine it reads (`Probe`: files under the root, commands with their stderr passed on, dropped or merged as in bash, `date -d` for the scrub's start), each check in the bash version's order with its problem texts, the state files (reclaim counts, the kernel cursor, the degraded-boot markers) and btrfs-notify. `cli.py`: the run (every check, then the OK line or the alert) and `main()`; it takes no arguments. |
 | `cst-pending-alerts` | `pending_alerts/` | `domain.py`: where the alerts and the record are (`PendingPaths`, from the environment), the pending alert format and its checks (`parse_alert`, the version from cst_core's state table), the record of what this user saw (`parse_delivered`, `seen_as`, `record_text`: the same lines as the bash version, the mtime as find's `%T@`), the texts of a login (`login_text`, `list_line`, the times in the caller's locale) and which alerts come one by one (`plan_login`); no I/O. `adapters.py`: the trusted pending files (owner, mode, no links, the newest 50 of 7 days) and those this user has not seen (`unseen_alerts`), the record and the move of the f44-tools one, `/proc/stat`'s boot time, `busctl` and `notify-send`. `cli.py`: `--list`, the login and `main()`. |

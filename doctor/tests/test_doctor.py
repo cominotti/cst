@@ -1507,6 +1507,43 @@ class BtrfsCompressionDoctorTest(Scratch):
         self.assertIn("WARN   root btrfs commit interval: drift across layers:", btrfs_text)
         self.assertIn("fix: cst btrfs commit-interval apply", btrfs_text)
 
+        # A commit= in /etc/fstab in digits the kernel does not read (U+00B2, which int() refuses; U+0663...,
+        # which int() reads as 300) is no number: fstab reads as the 30 s default, a drift from the others.
+        etc_fstab = os.path.join(self.root, "etc", "fstab")
+        arabic_300 = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
+        for value in ("\N{SUPERSCRIPT TWO}", arabic_300):
+            with self.subTest(value=value):
+                self._setup_compression(
+                    fstab_opt="compress-force=zstd:1,commit=60",
+                    kargs_opt="compress-force=zstd:1,commit=60",
+                    live_opt="compress-force=zstd:1,commit=60",
+                    top_opt="compress-force=zstd:1,commit=60",
+                )
+                with open(etc_fstab, "w", encoding="utf-8") as f:
+                    f.write(
+                        f"UUID={UUID} /var btrfs subvol=var,degraded,compress-force=zstd:1,commit={value},noatime 0 0\n"
+                    )
+                bad_r = self.run_tool()
+                self.assertEqual(bad_r.returncode, 1, bad_r.stdout + bad_r.stderr)
+                bad_text = "\n".join(area_lines(bad_r.stdout, "btrfs"))
+                self.assertIn("WARN   root btrfs commit interval: drift across layers:", bad_text)
+                self.assertIn("fstab /var=commit=30 (default)", bad_text)
+
+        # The kernel reads a commit= with a leading 0 as octal: commit=060 is 48 s, a drift from the others' 60.
+        self._setup_compression(
+            fstab_opt="compress-force=zstd:1,commit=60",
+            kargs_opt="compress-force=zstd:1,commit=60",
+            live_opt="compress-force=zstd:1,commit=60",
+            top_opt="compress-force=zstd:1,commit=60",
+        )
+        with open(etc_fstab, "w", encoding="utf-8") as f:
+            f.write(f"UUID={UUID} /var btrfs subvol=var,degraded,compress-force=zstd:1,commit=060,noatime 0 0\n")
+        octal_r = self.run_tool()
+        self.assertEqual(octal_r.returncode, 1, octal_r.stdout + octal_r.stderr)
+        octal_text = "\n".join(area_lines(octal_r.stdout, "btrfs"))
+        self.assertIn("WARN   root btrfs commit interval: drift across layers:", octal_text)
+        self.assertIn("fstab /var=commit=48", octal_text)
+
         self._setup_compression(fstab_opt="", kargs_opt="", live_opt="", top_opt="")
         r2 = self.run_tool()
         self.assertEqual(r2.returncode, 0, r2.stdout)
@@ -3768,7 +3805,14 @@ class InstallAreaTest(Scratch):
         self.install("btrfs:docker-gc")
         warns = self.warns()
         self.assertEqual(len(warns), 1, warns)
-        self.assertIn("btrfs:docker-gc: installed only in part", warns[0].message)
+        # The cause it names holds for every way a component stays pending: an interrupted setup command, a
+        # file of it written by another command before the setup command ever ran (cst btrfs scrub-limit), or
+        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause).
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
+            "`cst btrfs docker-gc enable` has not finished since)",
+        )
         self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
         self.mark("btrfs:docker-gc")
         with open(os.path.join(self.root, "etc/systemd/system/docker-gc.timer"), "a") as f:
@@ -3779,6 +3823,21 @@ class InstallAreaTest(Scratch):
         self.assertIn("/etc/systemd/system/docker-gc.service: missing (CST installed it, btrfs:docker-gc)", msgs[0])
         self.assertIn("/etc/systemd/system/docker-gc.timer: differs from its install record", msgs[1])
         self.assertTrue(all(r.fix == "cst btrfs docker-gc enable" for r in self.warns()))
+
+    def test_a_pending_adopted_file_names_the_same_cause(self) -> None:
+        # An install from before the record: the files on disk as this checkout installs them, no record.
+        # The install writes none of them (each is unchanged) and adopts them, so the component is pending
+        # although no file of it was written.
+        self.install("btrfs:docker-gc")
+        os.unlink(self.record)
+        self.install("btrfs:docker-gc")
+        warns = self.warns()
+        self.assertEqual(len(warns), 1, warns)
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
+            "`cst btrfs docker-gc enable` has not finished since)",
+        )
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
         # What an older CST installed: other bytes, recorded as such.
@@ -4354,6 +4413,16 @@ class DoctorDomainTest(unittest.TestCase):
             ("critical", "Disk error", 123),
         )
         self.assertIsNone(doc_domain.parse_alert_text("unknown 1\nurgency=critical\ntitle=x\n"))
+        # A last= in digits CST does not write (a hand-edited or damaged file) reads as 0: int() refuses the
+        # first and past its digit limit, and reads the Arabic-Indic three as 3.
+        for last in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "1" * 5000):
+            with self.subTest(last=last[:12]):
+                self.assertEqual(
+                    doc_domain.parse_alert_text(
+                        f"cst-alert 1\nurgency=critical\ntitle=Disk error\nlast={last}\n\nbody"
+                    ),
+                    ("critical", "Disk error", 0),
+                )
         self.assertTrue(doc_domain.mtime_matches_ns("1000.000000042", 1000 * 1_000_000_000 + 42))
         self.assertFalse(doc_domain.mtime_matches_ns("1001.0", 1000 * 1_000_000_000))
 

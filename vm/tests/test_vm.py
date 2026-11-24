@@ -2275,6 +2275,20 @@ class PackageTest(unittest.TestCase):
             )
             self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [8, 3, 12])
 
+    def test_vm_conf_numbers_in_other_digits_use_the_default(self) -> None:
+        # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
+        # Arabic-Indic eight as 8, a number bash does not read.
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "vm.conf")
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write(
+                    "VM_NAS_KEEP_WEEKLY=\N{SUPERSCRIPT TWO}\n"
+                    "VM_NAS_KEEP_MONTHLY=\N{ARABIC-INDIC DIGIT EIGHT}\n"
+                    f"VM_NAS_TIMEOUT_HOURS={'1' * 5000}\n"
+                )
+            numbers = ("VM_NAS_KEEP_WEEKLY", "VM_NAS_KEEP_MONTHLY", "VM_NAS_TIMEOUT_HOURS")
+            self.assertEqual([vm_adapters.conf_number(replace(PATHS, vm_conf=conf), k) for k in numbers], [4, 3, 6])
+
     def test_every_no_word_turns_a_knob_off_and_anything_else_leaves_it_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conf = os.path.join(tmp, "vm.conf")

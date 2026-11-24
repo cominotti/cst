@@ -114,7 +114,12 @@ def _record_results(
         if state == ComponentState.PENDING:
             fix = refresh(host, component)
             out.results.append(
-                Result(WARN, f"{component}: installed only in part (its last `{fix or component}` did not finish)", fix)
+                Result(
+                    WARN,
+                    f"{component}: installed only in part (a file of it was recorded and `{fix or component}` "
+                    "has not finished since)",
+                    fix,
+                )
             )
     for dest, f in sorted(rec.files.items()):
         _file_findings(host, files, dest, f, home, out)

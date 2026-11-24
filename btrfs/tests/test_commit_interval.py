@@ -26,7 +26,9 @@ from btrfs.commit.domain import (
     booted_commit_diff,
     build_commit_plan,
     effective_commit_seconds,
+    extract_commit_seconds,
     has_explicit_commit,
+    has_malformed_commit,
     parse_commit_args,
     rewrite_commit_options,
 )
@@ -35,6 +37,10 @@ from cst_core.domain.errors import Refused
 from tests.repo_files import REPO
 
 SAMPLE_UUID = "afed93e2-f4ac-43de-8a48-751b552435c7"
+
+# Digits str.isdigit() takes but the kernel does not read: int() refuses the first and reads the second as 300.
+_SUPERSCRIPT_TWO = "\N{SUPERSCRIPT TWO}"
+_ARABIC_300 = "\N{ARABIC-INDIC DIGIT THREE}\N{ARABIC-INDIC DIGIT ZERO}\N{ARABIC-INDIC DIGIT ZERO}"
 
 SAMPLE_FSTAB = (
     f"UUID={SAMPLE_UUID} /home btrfs subvol=home,degraded,compress-force=zstd:1,noatime,flushoncommit 0 0\n"
@@ -206,6 +212,16 @@ class CommitDomainTests(unittest.TestCase):
                     self.assertEqual(parsed.code, 2)
                     self.assertIn("out of range", parsed.error or "")
 
+    def test_seconds_in_other_digits_are_a_usage_error(self) -> None:
+        # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
+        # Arabic-Indic one as 300, a number the kernel's commit= parser does not read.
+        for action in (CommitAction.APPLY, CommitAction.PLAN):
+            for seconds in (_SUPERSCRIPT_TWO, _ARABIC_300, "1" * 5000):
+                with self.subTest(action=action, seconds=seconds[:12]):
+                    parsed = parse_commit_args([str(action), seconds])
+                    self.assertEqual(parsed.code, 2)
+                    self.assertTrue((parsed.error or "").startswith("invalid commit interval"), parsed.error)
+
     def test_option_parsing_and_rewriting_keeps_flushoncommit(self) -> None:
         base = "subvol=var,compress-force=zstd:1,noatime,flushoncommit"
         self.assertEqual(effective_commit_seconds(base), 30)
@@ -228,6 +244,55 @@ class CommitDomainTests(unittest.TestCase):
         ):
             with self.subTest(opts=opts, target=target):
                 self.assertEqual(rewrite_commit_options(opts, target), want)
+
+    def test_a_commit_in_other_digits_is_malformed(self) -> None:
+        # int() refuses the first and the digit limit, and reads the Arabic-Indic digits as 300: none is a
+        # number the kernel's commit= parser reads, so each is a malformed token that apply and revert replace.
+        for opts in (f"commit={_SUPERSCRIPT_TWO},noatime", f"commit={_ARABIC_300}", "commit=" + "1" * 5000):
+            with self.subTest(opts=opts[:16]):
+                self.assertEqual(extract_commit_seconds(opts), ())
+                self.assertFalse(has_explicit_commit(opts))
+                self.assertTrue(has_malformed_commit(opts))
+                self.assertEqual(effective_commit_seconds(opts), 30)
+        both = f"commit={_ARABIC_300},commit=60"
+        self.assertEqual(effective_commit_seconds(both), 60)
+        self.assertTrue(has_malformed_commit(both))
+        self.assertEqual(rewrite_commit_options(both, 60), "commit=60")
+
+    def test_a_commit_is_read_as_the_kernel_reads_it(self) -> None:
+        # btrfs reads commit= with kstrtouint(value, 0): C's number forms, ASCII only, at most 2**32 - 1.
+        for opts, want in (
+            ("commit=060", 48),  # a leading 0 is octal
+            ("commit=0x3c", 60),
+            ("commit=0X3C", 60),
+            ("commit=+60", 60),
+            ("commit=+0x3c", 60),
+            ("commit=4294967295", 4294967295),
+            ("commit=0x" + "0" * 5000 + "1e", 30),  # no digit limit in base 16
+        ):
+            with self.subTest(opts=opts[:20]):
+                self.assertEqual(extract_commit_seconds(opts), (want,))
+                self.assertFalse(has_malformed_commit(opts))
+        for opts in (
+            "commit=08",
+            "commit=09",
+            "commit=0x",
+            "commit=0xg",
+            "commit=00",
+            "commit=0x0",
+            "commit=4294967296",
+            "commit=0x100000000",
+            "commit=++60",
+            "commit=-60",
+            "commit=1_0",
+            "commit=0x1_0",
+            "commit= 60",
+        ):
+            with self.subTest(opts=opts):
+                self.assertEqual(extract_commit_seconds(opts), ())
+                self.assertTrue(has_malformed_commit(opts))
+                self.assertEqual(effective_commit_seconds(opts), 30)
+        self.assertEqual(rewrite_commit_options("commit=060,noatime", 60), "commit=60,noatime")
 
     def test_the_booted_diff_reads_the_last_rootflags(self) -> None:
         head = f"ostree=/ostree/boot.1/fedora/abc/0 root=UUID={SAMPLE_UUID} rw "
@@ -414,6 +479,8 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             (unit_opts + ",commit=abc", revert, unit_opts),
             (unit_opts + ",commit=0", revert, unit_opts),
             ("commit=abc," + unit_opts + ",commit=60", apply60, "commit=60," + unit_opts),
+            (f"commit={_ARABIC_300}," + unit_opts + ",commit=60", apply60, "commit=60," + unit_opts),
+            (unit_opts + f",commit={_SUPERSCRIPT_TWO}", revert, unit_opts),
         ):
             with self.subTest(opts=opts, action=args.action):
                 host = _FakeHost()
@@ -426,6 +493,49 @@ class CommitAdapterAndCliTests(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
                 self.assertEqual([c.split(":", 1)[0] for c in host.calls], ["update_top_mount"])
                 self.assertEqual(host.s.top_mount.options if host.s.top_mount else "", want)
+
+    def test_an_fstab_commit_in_other_digits_is_replaced(self) -> None:
+        # A commit= a person wrote into /etc/fstab in digits the kernel does not read: status and plan read
+        # the line as the default, and apply and revert replace the token.
+        for value in (_SUPERSCRIPT_TWO, _ARABIC_300):
+            with self.subTest(value=value):
+                fstab = SAMPLE_FSTAB.replace("noatime,flushoncommit 0 0", f"noatime,flushoncommit,commit={value} 0 0")
+                host = _FakeHost(_FakeState(fstab=fstab))
+                snap = read_commit_snapshot(host)[0]
+                status = "\n".join(format_commit_status(snap, kargs_ok=True, kargs_error="", proc_cmdline=None))
+                self.assertIn("commit=30 (default)", status)
+                plan = build_commit_plan(snap, target_seconds=60)
+                self.assertIn(
+                    "fstab      [CHANGE] commit=30 (default) -> commit=60",
+                    "\n".join(format_commit_plan_lines(plan, "c", dry_run=True)),
+                )
+                self.assertNotIn(f"commit={value}", plan.new_fstab_text or "")
+                rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+                self.assertEqual(rc, 0, out)
+                self.assertNotIn(f"commit={value}", host.s.fstab or "")
+                self.assertEqual((host.s.fstab or "").count("flushoncommit,commit=60 0 0"), 2, host.s.fstab)
+                host.s.fstab = fstab
+                rc_r, out_r = execute_commit_change(
+                    host, CommitParsedArgs(CommitAction.REVERT, seconds=30, revert=True, yes=True)
+                )
+                self.assertEqual(rc_r, 0, out_r)
+                self.assertEqual(host.s.fstab, SAMPLE_FSTAB)
+
+    def test_an_fstab_commit_with_a_leading_zero_is_octal(self) -> None:
+        # commit=060 is 48 s for the kernel: status and plan read 48, and apply writes commit=60 in its place.
+        fstab = SAMPLE_FSTAB.replace("noatime,flushoncommit 0 0", "noatime,flushoncommit,commit=060 0 0")
+        host = _FakeHost(_FakeState(fstab=fstab))
+        snap = read_commit_snapshot(host)[0]
+        status = "\n".join(format_commit_status(snap, kargs_ok=True, kargs_error="", proc_cmdline=None))
+        self.assertIn("commit=48", status)
+        plan = build_commit_plan(snap, target_seconds=60)
+        self.assertIn(
+            "fstab      [CHANGE] commit=48 -> commit=60", "\n".join(format_commit_plan_lines(plan, "c", dry_run=True))
+        )
+        rc, out = execute_commit_change(host, CommitParsedArgs(CommitAction.APPLY, seconds=60, yes=True))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("commit=060", host.s.fstab or "")
+        self.assertEqual((host.s.fstab or "").count("flushoncommit,commit=60 0 0"), 2, host.s.fstab)
 
     def test_cli_seam_and_container_refusal(self) -> None:
         tmp = tempfile.mkdtemp(prefix="cst-commit-test-")
@@ -469,3 +579,11 @@ class CommitAdapterAndCliTests(unittest.TestCase):
             )
         self.assertEqual(rc_r, 1)
         self.assertIn("toolbox/container", err_r.getvalue())
+
+        out_u, err_u = io.StringIO(), io.StringIO()
+        rc_u = run_commit_cli(
+            ["plan", _SUPERSCRIPT_TWO],
+            deps=CommitCliDeps(entry_file=deps.entry_file, env=deps.env, out=out_u, err=err_u, ctx=deps.ctx),
+        )
+        self.assertEqual(rc_u, 2)
+        self.assertIn("invalid commit interval", err_u.getvalue())

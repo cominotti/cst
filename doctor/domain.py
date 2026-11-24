@@ -21,7 +21,7 @@ from cst_core.domain.contracts import CPU_SETTINGS, SNAPSHOTS_CONF, StateFormatK
 from cst_core.domain.errors import Usage
 from cst_core.domain.install import manifest_by_src
 from cst_core.domain.text import SettingsProblem, ShellAssignments, group
-from cst_core.domain.values import HOUR, Json
+from cst_core.domain.values import HOUR, Json, parse_whole_number
 from swap.domain import SETTINGS_REL
 
 NAME = "cst-doctor"
@@ -486,7 +486,8 @@ def unit_results(scope: UnitScope, units: list[str]) -> Iterator[Result]:
 
 
 def parse_alert_text(data: str) -> tuple[str, str, int] | None:
-    """Parse decoded alert file text into (urgency, title, last), or None."""
+    """Parse decoded alert file text into (urgency, title, last), or None; last is 0 when it is not
+    ASCII digits."""
     lines = data.split("\n")
     if not lines or lines[0] not in ("cst-alert 1", "f44-alert 1"):
         return None
@@ -498,8 +499,7 @@ def parse_alert_text(data: str) -> tuple[str, str, int] | None:
         head[k] = v
     if head.get("urgency") not in (Urgency.CRITICAL, Urgency.NORMAL) or head.get("title", "") == "":
         return None
-    last = int(head["last"]) if head.get("last", "").isdigit() else 0
-    return head["urgency"], head["title"][:200], last
+    return head["urgency"], head["title"][:200], parse_whole_number(head.get("last", "")) or 0
 
 
 def mtime_matches_ns(recorded: str, mtime_ns: int) -> bool:
