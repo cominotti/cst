@@ -1594,8 +1594,10 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   leaves the component pending (or with no state, once its last file and line
   are gone), never done, and `cst doctor` shows it until a `revert` or an
   `apply` finishes. A disable that fails removes nothing, and it puts `done`
-  back when the service is still as it was (enabled and running); when the
-  disable changed it, or `systemctl` cannot say, the component stays pending.
+  back when a second probe of the service finds the same `ActiveState` and
+  `UnitFileState` as the one before the disable (whatever they were:
+  enabled and running, or enabled and failed, ...); when the disable changed
+  either, or `systemctl` cannot say, the component stays pending.
   A record it cannot write, or one of a newer CST, stops `revert` with an
   `ERROR:` line before anything changes. A full `apply` and a full
   `revert` hold `/run/btrfs-setup/iocost-component.lock` from their first
