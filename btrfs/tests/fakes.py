@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """Fakes that several of btrfs's test modules share, one section per module they stand in for.
 
+- any module: read and write, a text file of a test's folder (read: None for one that is not there);
 - docker-volumes-nocow (test_docker_volumes_nocow and its fault tests): FakeSystem, the inode-flag
   ioctls, getxattr, the commands, os.sync and the fake cp; Crash, which its copy_into raises; the
   flag bits NOCOW and OTHER; entries, carries_flags and tree, to walk and compare a folder;
@@ -34,6 +35,23 @@ from cst_core.adapters.install import JsonInstallRecord, LocalInstallTarget
 from cst_core.application.install import InstallService, Placement
 from cst_core.domain.install import Component, GeneratedKind, InstallReportWord, Owner
 from cst_core.ports import CommandFault, CommandResult
+
+# ---- files ---------------------------------------------------------------
+
+
+def read(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
 
 # ---- docker-volumes-nocow ------------------------------------------------
 
@@ -417,15 +435,8 @@ class SystemdModel(RecordingInstallerRunner):
         if "installer.py" in " ".join(cmd) and r.stdout.startswith(("written:", "removed:")):
             self.dirty = True
         if cmd == ["systemctl", "daemon-reload"] and r.returncode == 0:
-            self.loaded, self.dirty = self._dropin_on_disk(), False
+            self.loaded, self.dirty = read(self.dropin), False
         return r
-
-    def _dropin_on_disk(self) -> str | None:
-        try:
-            with open(self.dropin, encoding="utf-8") as fh:
-                return fh.read()
-        except FileNotFoundError:
-            return None
 
 
 # ---- cache ---------------------------------------------------------------

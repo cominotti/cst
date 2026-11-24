@@ -41,7 +41,7 @@ from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, ru
 
 from btrfs.scrub_limit.adapters import ScrubPaths, scrub_limit_apply
 from btrfs.scrub_limit.domain import parse_scrub_dropin_limit, read_scrub_conf_limit, render_scrub_dropin
-from btrfs.tests.fakes import SystemdModel, core_text
+from btrfs.tests.fakes import SystemdModel, core_text, read, write
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.install import Component
 from cst_core.domain.record import ComponentState
@@ -66,19 +66,6 @@ class ScrubStepFault(StrEnum):
 
 
 type Files = tuple[str | None, str | None, bool, bool]
-
-
-def _read(path: str) -> str | None:
-    if not os.path.isfile(path):
-        return None
-    with open(path, encoding="utf-8") as fh:
-        return fh.read()
-
-
-def _write(path: str, text: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
 
 
 class ScrubMachine(RuleBasedStateMachine):
@@ -106,8 +93,8 @@ class ScrubMachine(RuleBasedStateMachine):
     # ---- helpers -----------------------------------------------------------------------------
     def _files(self) -> Files:
         return (
-            _read(self.conf),
-            _read(self.dropin),
+            read(self.conf),
+            read(self.dropin),
             os.path.isdir(os.path.dirname(self.conf)),
             os.path.isdir(os.path.dirname(self.dropin)),
         )
@@ -126,7 +113,7 @@ class ScrubMachine(RuleBasedStateMachine):
             fault.value in " ".join(c) for c in self.model.calls[calls_before:]
         )
         if rc == 0:
-            assert self.model.loaded == _read(self.dropin), f"{what}: exit 0, systemd has not loaded the drop-in"
+            assert self.model.loaded == read(self.dropin), f"{what}: exit 0, systemd has not loaded the drop-in"
             assert not self.model.dirty, f"{what}: exit 0, systemd is behind the files: {lines}"
             assert not fired, f"{what}: {fault} fired and the run exited 0: {lines}"
             return
@@ -141,11 +128,11 @@ class ScrubMachine(RuleBasedStateMachine):
     def start(self, conf: str | None, core: ComponentState | None) -> None:
         dropin = None
         if conf is not None:
-            _write(self.conf, conf)
+            write(self.conf, conf)
             limit, _ = read_scrub_conf_limit(conf)
             if limit:  # as a set left it: the drop-in of that limit, loaded
                 dropin = render_scrub_dropin(limit)
-                _write(self.dropin, dropin)
+                write(self.dropin, dropin)
                 self.model.loaded = dropin
         self.core = core
         if core is not None:
@@ -167,8 +154,8 @@ class ScrubMachine(RuleBasedStateMachine):
     # ---- invariants --------------------------------------------------------------------------
     @invariant()
     def the_conf_and_the_drop_in_agree(self) -> None:
-        conf_limit, _ = read_scrub_conf_limit(_read(self.conf))
-        dropin_limit = parse_scrub_dropin_limit(_read(self.dropin))
+        conf_limit, _ = read_scrub_conf_limit(read(self.conf))
+        dropin_limit = parse_scrub_dropin_limit(read(self.dropin))
         assert conf_limit == dropin_limit, f"snapshots.conf says {conf_limit!r}, the drop-in {dropin_limit!r}"
 
     @invariant()

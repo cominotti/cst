@@ -52,7 +52,7 @@ from unittest import mock
 from btrfs.scrub_limit import adapters as scrub_adapters
 from btrfs.scrub_limit.adapters import ScrubPaths, scrub_limit_apply
 from btrfs.scrub_limit.domain import render_scrub_dropin, update_snapshots_conf_scrub_limit
-from btrfs.tests.fakes import SystemdModel, core_text
+from btrfs.tests.fakes import SystemdModel, core_text, read, write
 from cst_core.adapters.install import JsonInstallRecord
 from cst_core.domain.record import ComponentState
 from tests.fault_injection import Fault, FaultMode, FaultPlan, FaultyRunner, Killed, cut_points, every_fault, stub_fsync
@@ -94,20 +94,6 @@ SET_BEHIND = Start(as_asked(None, "500M"), DROPIN_500M, "500M", points=2, fail_t
 OFF_BEHIND = Start(
     as_asked("SCRUB_LIMIT='500M'\n", None), None, None, points=3, fail_then_kill=1, loaded=DROPIN_500M, behind=True
 )
-
-
-def read(path: str) -> str | None:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
-    except FileNotFoundError:
-        return None
-
-
-def write(path: str, text: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
 
 
 def reads(argv: Sequence[str]) -> bool:
