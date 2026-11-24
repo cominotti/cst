@@ -284,6 +284,21 @@ class DomainTests(unittest.TestCase):
         ):
             self.assertIsInstance(parse_compress_args(bad), ArgsError, bad)
 
+    def test_a_level_in_other_digits_is_a_usage_error(self) -> None:
+        # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
+        # Arabic-Indic three as level 3.
+        for argv in (
+            ["plan", "--level", "\N{SUPERSCRIPT TWO}"],
+            ["apply", "--level=\N{ARABIC-INDIC DIGIT THREE}"],
+            ["plan", "--level", "1" * 5000],
+        ):
+            with self.subTest(argv=[a[:16] for a in argv]):
+                parsed = parse_compress_args(argv)
+                self.assertIsInstance(parsed, ArgsError)
+                if isinstance(parsed, ArgsError):
+                    self.assertEqual(parsed.code, 2)
+                    self.assertTrue(parsed.message.startswith("invalid --level value"), parsed.message)
+
     def test_spec_and_rewrite_mount_options(self) -> None:
         self.assertEqual(
             parse_compress_spec("compress-force=zstd:3"),

@@ -800,6 +800,16 @@ class ParseArgsAndJobsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(SystemExit):
                 parse_args(bad)
 
+    def test_jobs_in_other_digits_are_a_usage_error(self) -> None:
+        # str.isdigit() takes them all; int() refuses the first and past its digit limit, and reads the
+        # Arabic-Indic three as 3 workers.
+        for value in ("\N{SUPERSCRIPT TWO}", "\N{ARABIC-INDIC DIGIT THREE}", "1" * 5000):
+            for argv in (["--jobs", value], ["-j", value], [f"--jobs={value}"]):
+                with self.subTest(argv=[a[:16] for a in argv]):
+                    with self.assertRaises(SystemExit) as cm:
+                        parse_args(argv)
+                    self.assertTrue(str(cm.exception.code).startswith("run_unit: invalid --jobs value"), cm.exception)
+
     def test_list_affected_mbt_takes_a_base_and_refuses_gates_or_names(self) -> None:
         opts = parse_args(["--list-affected-mbt", "--base", "main"])
         self.assertTrue(opts.affected)

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import types
 from typing import Self, override
 import unittest
 from unittest import mock
@@ -185,6 +186,25 @@ class ShardingTest(unittest.TestCase):
         ):
             rc, _, _ = self._run_cli(*argv)
             self.assertEqual(rc, 2, argv)
+
+    def test_default_jobs_count_the_cpu_affinity(self) -> None:
+        # A process pinned to 4 of 24 CPUs (a toolbox's cpuset) gets 2 containers, not 4.
+        with (
+            mock.patch.object(e2e_selection.os, "cpu_count", return_value=24),
+            mock.patch.object(e2e_selection.os, "sched_getaffinity", return_value=set(range(4))),
+        ):
+            self.assertEqual(default_tier1_jobs(75), 2)
+            self.assertEqual(default_tier1_jobs(75, cpu_count=24), 4)  # an explicit count still wins
+            self.assertEqual(default_tier1_jobs(4), 1)
+        # When the affinity cannot be read, every CPU of the machine counts.
+        with (
+            mock.patch.object(e2e_selection.os, "cpu_count", return_value=24),
+            mock.patch.object(e2e_selection.os, "sched_getaffinity", side_effect=OSError("no affinity")),
+        ):
+            self.assertEqual(default_tier1_jobs(75), 4)
+        # Where Python has no os.sched_getaffinity (macOS), every CPU of the machine counts too.
+        with mock.patch.object(e2e_selection, "os", types.SimpleNamespace(cpu_count=lambda: 24)):
+            self.assertEqual(default_tier1_jobs(75), 4)
 
     def test_assign_shards_partitions_all_tier1_tests(self) -> None:
         cases = iter_cases(self.mod.load_suite("suite_tier1_systemd.py"))

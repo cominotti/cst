@@ -866,6 +866,9 @@ In `/etc/cst/vm.conf` (all optional):
 | `VM_NAS_KEEP_MONTHLY` | 3 | monthly restic snapshots kept |
 | `VM_NAS_TIMEOUT_HOURS` | 6 | restic is stopped after this long (the overlay is merged back) |
 
+A value that is not a whole number in ASCII digits (`bad`, `²`, digits of
+another script) uses the default.
+
 `cst-vm` reads these files with CST's one settings reader
 (`cst_core.domain.text.parse_shell_assignments`); the last line of a key wins,
 and a byte that is not UTF-8 (in a comment, say) no longer stops the program.
