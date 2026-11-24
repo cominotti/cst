@@ -1083,6 +1083,23 @@ real restic over SFTP to its NAS container (restic's own `snapshots --json`,
 a short recorded ID, the record and its lock as root). No E2E test runs a
 whole NAS backup: neither tier has libvirt with a running guest.
 
+A model of the NAS backup's protocol, `vm/tests/quint/nas.qnt` (a Quint spec
+that TLC checks over every state of its instances: `invowk cmd test quint`),
+adds the runs nobody wrote a test for: a stop, a kill, the guest shutting
+down or pausing, or libvirt answering late, between any two steps. Its
+properties: each disk is merged back or the alert names its overlay
+(`mergedOrAlerted`); an overlay file is never removed while in use or
+holding writes (`noOverlayLost`); a stale definition is never named for
+`qemu-img commit` (`staleNamed`); an unreachable NAS leaves no overlay
+(`unreachableNoOverlay`); a leftover overlay is refused, never stacked
+(`noStacking`); a torn snapshot is recorded or named (`tornHandled`, with
+its known gaps); the index holds no torn snapshot and loses an entry only
+on a listing it read (`indexClean`, `indexInRepo`); the retention never
+lets a torn snapshot take a good one's place and keeps the kept ones
+(`goodKept`, `keepKept`); only a consistent read is indexed
+(`consistentRead`). What it models, its gaps and its numbers:
+[docs/dev-tools.md, "Model checking with Quint"](../docs/dev-tools.md#model-checking-with-quint-optional).
+
 For `tune`: the transform of a copy of the real `win11-devbox` definition
 (no diff), of the same VM before its migration (SATA, plain driver,
 e1000e), with an existing non-virtio SCSI controller, several disks (units,

@@ -62,13 +62,14 @@ jobs:
             exit 0
           fi
 
-          # The paths whose change the quint job checks with TLC: the module the
-          # Quint spec models, the spec and its traces, the replay, the tool, and
-          # what runs it (this workflow, the invowk task, the action that
+          # The paths whose change the quint job checks with TLC: the code each
+          # Quint spec models, the specs and their traces, the replays, the tool,
+          # and what runs it (this workflow, the invowk task, the action that
           # installs invowk).
           quint_path() {
             case "$1" in
               btrfs/docker_volumes_nocow/*|btrfs/tests/quint/*|tests/quint/*|btrfs/tests/test_docker_volumes_nocow_replay.py) return 0 ;;
+              vm/application/nas.py|vm/adapters/restic.py|vm/adapters/backup.py|vm/domain/backup.py|vm/tests/quint/*|vm/tests/test_vm_nas_replay.py) return 0 ;;
               .github/workflows/ci.yml|cst.invowkmod/invowkfile.cue|.github/actions/setup-invowk/*) return 0 ;;
               *) return 1 ;;
             esac
@@ -309,16 +310,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # TLC on the Quint spec of docker-volumes-nocow (invowk cmd test quint: every
-  # instance, every property), only when a change touches what it checks. The
-  # replay of its traces is in the unit suite and runs in fast-gates always; this
-  # job is what tells that a changed spec still holds its properties (a spec
-  # and its traces changed together pass the replay whatever the spec says).
+  # TLC on the Quint specs of docker-volumes-nocow and vm's NAS backup (invowk
+  # cmd test quint: every instance, every property), only when a change touches
+  # what they check. The replays of their traces are in the unit suite and run in
+  # fast-gates always; this job is what tells that a changed spec still holds its
+  # properties (a spec and its traces changed together pass the replay whatever
+  # the spec says).
   # On the runner host, as its own non-root user, with the runner's JDK 21 and
   # node; the task fetches its pinned tools, each checked by its SHA-256 (no
   # GitHub cache). docs/dev-tools.md, "Model checking with Quint (optional)".
   quint:
-    name: Quint Spec, TLC (docker-volumes-nocow)
+    name: Quint Specs, TLC
     needs: [changes]
     if: needs.changes.outputs.quint == 'true'
     runs-on: ubuntu-24.04

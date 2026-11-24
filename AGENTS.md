@@ -152,7 +152,7 @@ invowk cmd test coverage                      # unit suite under coverage.py + C
 invowk cmd test mbt [--profile dev|ci|nightly] [--examples N] [--seed N] [--jobs N] [--affected [--base REF]] # Hypothesis tests of tests/mbt (through uv; CI: ci profile)
 invowk cmd test e2e tier1 [--tag T] [--match P] [--shard I/N] [--jobs N] [--list_tests] # Docker, Fedora 45 + systemd; auto-parallel locally when >4 tests selected
 invowk cmd test mutation swap/domain.py swap.tests.test_swap --functions share  # optional (see below)
-invowk cmd test quint [--instance NAME] [--traces] # optional: TLC on the Quint specs (pinned tools in ~/.cache/cst-quint; CI runs it when the nocow module or the spec changes)
+invowk cmd test quint [--instance NAME] [--traces] # optional: TLC on the Quint specs (pinned tools in ~/.cache/cst-quint; CI runs it when a module a spec models, or a spec, changes)
 ```
 
 - Before a pull request, run `invowk cmd check` and `invowk cmd test mbt`
@@ -174,7 +174,8 @@ invowk cmd test quint [--instance NAME] [--traces] # optional: TLC on the Quint 
 - `test mutation` is optional and slow; neither `test all` nor CI runs it
   ([docs/dev-tools.md, "Mutation testing"](docs/dev-tools.md#mutation-testing-optional)).
   `test quint` is optional too and not part of `check`; CI's `quint` job runs
-  it when a change touches docker-volumes-nocow or its spec, and the nightly on main
+  it when a change touches a module a spec models (docker-volumes-nocow, vm's
+  NAS backup) or a spec, and the nightly on main
   ([docs/dev-tools.md, "Model checking with Quint"](docs/dev-tools.md#model-checking-with-quint-optional)).
 - The unit tests need no uv: they run on `/usr/bin/python3 -I` with the
   standard library. `test pylint`, `test types`, `test mbt` and `test mutation` use uv,

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MPL-2.0
 """cst-quint: model checking of CST's Quint specs with TLC, and the traces their replays read.
 
-A Quint spec (btrfs/tests/quint/*.qnt) models a protocol of a module step by step, with a crash or
-a fault after any step. TLC, through quint, explores every state the spec's instances can reach and
+A Quint spec (btrfs/tests/quint/*.qnt, vm/tests/quint/*.qnt) models a protocol of a module step by
+step, with a crash or a fault after any step. TLC, through quint, explores every state the spec's instances can reach and
 checks that each property holds in all of them. A replay test in the unit suite then runs traces of
 the spec (checked in, written by --traces) against the real code. See docs/dev-tools.md, "Model
 checking with Quint (optional)".
@@ -17,7 +17,7 @@ or by hand, from the checkout:
     nice -n 10 /usr/bin/python3 -I -B tests/quint/cst-quint [options]
 
 Options:
-    --instance NAME   only this instance (a module of the spec, such as nocow_ab)
+    --instance NAME   only this instance (a module of a spec, such as nocow_ab or nas_live1)
     --spec FILE       check FILE instead of the checked-in spec (a planted copy, say); with checks of
                       several specs, only with --instance
     --traces          write the checked-in traces again (simulator and Apalache), then run the replay
@@ -136,7 +136,25 @@ class TraceJob:
 NOCOW_SPEC: Final = "btrfs/tests/quint/docker_volumes_nocow.qnt"
 NOCOW_PROPERTIES: Final = ("noDataLoss", "requestKept", "attemptsMatch", "boundedTries", "cleanRunConverges")
 NOCOW_INSTANCES: Final = ("nocow_ab", "nocow_a", "nocow_ab_boots", "nocow_ab_wide", "nocow_abc")
-CHECKS: Final[tuple[Check, ...]] = tuple(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES)
+NAS_SPEC: Final = "vm/tests/quint/nas.qnt"
+NAS_PROPERTIES: Final = (
+    "mergedOrAlerted",
+    "noOverlayLost",
+    "staleNamed",
+    "unreachableNoOverlay",
+    "noStacking",
+    "tornHandled",
+    "indexClean",
+    "goodKept",
+    "keepKept",
+    "consistentRead",
+    "indexInRepo",
+)
+NAS_INSTANCES: Final = ("nas_live1", "nas_live2", "nas_shutoff", "nas_mixed")
+CHECKS: Final[tuple[Check, ...]] = (
+    *(Check(NOCOW_SPEC, main, NOCOW_PROPERTIES) for main in NOCOW_INSTANCES),
+    *(Check(NAS_SPEC, main, NAS_PROPERTIES) for main in NAS_INSTANCES),
+)
 # The checked-in traces of the nocow spec: two random walks, and the first trace the simulator finds
 # to each witness a random walk rarely reaches (the seed and the bounds fix which one): a "never..."
 # value of the spec, or the negation of a step's label for a call with no witness of its own.

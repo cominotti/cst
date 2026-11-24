@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -419,6 +420,27 @@ class NormalizeTest(unittest.TestCase):
     def test_not_a_trace(self) -> None:
         with self.assertRaises(M.StepError):
             M.normalize("[]", "x")
+
+
+class ChecksTest(unittest.TestCase):
+    """The checks cst-quint runs name real files and modules: a typo fails here, not only in CI's quint job."""
+
+    def test_every_check_is_a_module_of_its_spec(self) -> None:
+        self.assertEqual({c.spec for c in M.CHECKS}, {M.NOCOW_SPEC, M.NAS_SPEC})
+        for check in M.CHECKS:
+            with self.subTest(check=check.main):
+                with open(os.path.join(_CHECKOUT, check.spec), encoding="utf-8") as f:
+                    modules = re.findall(r"^module (\w+) \{", f.read(), re.MULTILINE)
+                self.assertIn(check.main, modules)
+                self.assertTrue(check.invariants)
+
+    def test_a_check_of_a_missing_module_is_found(self) -> None:
+        # The test above reads the spec's modules with this pattern: it finds a module that is there, and
+        # no other.
+        modules = re.findall(
+            r"^module (\w+) \{", "module nas {\n}\nmodule nas_a {\n  // module nas_b {\n}\n", re.MULTILINE
+        )
+        self.assertEqual(modules, ["nas", "nas_a"])
 
 
 class MainTest(Base):
