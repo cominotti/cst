@@ -190,33 +190,42 @@ def parse_power_args(argv: Sequence[str]) -> PowerParsedArgs:
     return PowerParsedArgs(action, gpu_only=gpu_only, error=error, code=2 if error is not None else 0)
 
 
+def _gpu_card_plan(snapshot: PowerSnapshot, card: GpuPowerCard) -> tuple[SysfsChange | None, bool]:
+    """One card's power/control change (or None) and whether CST manages it after the plan."""
+    key = card.pci_slot or card.card
+    was_managed = key in snapshot.gpu_managed
+    want_on = snapshot.gpu_mode == GpuPmMode.ALWAYS and bool(card.connected_outputs)
+    if want_on:
+        if card.power_control == PM_AUTO:
+            outputs = ", ".join(card.connected_outputs)
+            change = SysfsChange(
+                key, card.control_path, PM_AUTO, PM_ON, f"{card.card} connected ({outputs})", _KIND_GPU
+            )
+            return change, True
+        return None, was_managed
+    if not was_managed:
+        return None, False
+    if card.control_path in snapshot.game_held_paths:
+        return None, True
+    if card.power_control != PM_ON:
+        return None, False
+    if snapshot.gpu_mode == GpuPmMode.ALWAYS:
+        reason = f"{card.card} disconnected"
+    else:
+        reason = f"GPU_PM_MODE={snapshot.gpu_mode.value}"
+    return SysfsChange(key, card.control_path, PM_ON, PM_AUTO, reason, _KIND_GPU), False
+
+
 def plan_gpu_pm(snapshot: PowerSnapshot) -> tuple[tuple[SysfsChange, ...], tuple[str, ...]]:
     """Compute GPU `power/control` changes and updated managed PCI slot keys."""
     changes: list[SysfsChange] = []
     next_managed: list[str] = []
     for card in snapshot.gpu_cards:
-        key = card.pci_slot or card.card
-        was_managed = key in snapshot.gpu_managed
-        want_on = snapshot.gpu_mode == GpuPmMode.ALWAYS and bool(card.connected_outputs)
-        if want_on:
-            if card.power_control == PM_AUTO:
-                outputs = ", ".join(card.connected_outputs)
-                changes.append(
-                    SysfsChange(key, card.control_path, PM_AUTO, PM_ON, f"{card.card} connected ({outputs})", _KIND_GPU)
-                )
-                next_managed.append(key)
-            elif was_managed:
-                next_managed.append(key)
-        elif was_managed:
-            if card.control_path in snapshot.game_held_paths:
-                next_managed.append(key)
-            elif card.power_control == PM_ON:
-                reason = (
-                    f"{card.card} disconnected"
-                    if snapshot.gpu_mode == GpuPmMode.ALWAYS
-                    else f"GPU_PM_MODE={snapshot.gpu_mode.value}"
-                )
-                changes.append(SysfsChange(key, card.control_path, PM_ON, PM_AUTO, reason, _KIND_GPU))
+        change, keep = _gpu_card_plan(snapshot, card)
+        if change is not None:
+            changes.append(change)
+        if keep:
+            next_managed.append(card.pci_slot or card.card)
     return tuple(changes), tuple(next_managed)
 
 
@@ -320,6 +329,37 @@ def _limit_label(limit_us: int | None) -> str:
     return f"{limit_us} us" if limit_us is not None else "off"
 
 
+def _gpu_status_lines(snapshot: PowerSnapshot) -> list[str]:
+    if not snapshot.gpu_cards:
+        return ["GPU runtime PM: none found"]
+    lines = ["GPU runtime PM:"]
+    for card in snapshot.gpu_cards:
+        key = card.pci_slot or card.card
+        out_txt = ",".join(card.connected_outputs) if card.connected_outputs else "none"
+        tag = " [managed]" if key in snapshot.gpu_managed else ""
+        slot = card.pci_slot or "-"
+        lines.append(
+            f"  {card.card} ({card.driver or '?'}, {slot}): outputs={out_txt}, "
+            f"power/control={card.power_control} ({card.runtime_status or '?'}){tag}"
+        )
+    return lines
+
+
+def _cstate_status_lines(snapshot: PowerSnapshot) -> list[str]:
+    if not snapshot.idle_entries:
+        return ["CPU cpuidle: none found"]
+    lines = ["CPU cpuidle:"]
+    grouped: dict[tuple[str, str, int], list[CpuIdleEntry]] = defaultdict(list)
+    for entry in snapshot.idle_entries:
+        grouped[entry.state, entry.name, entry.latency_us].append(entry)
+    for (state, name, latency), entries in grouped.items():
+        dis = sum(1 for e in entries if e.disabled)
+        managed = sum(1 for e in entries if f"cpu{e.cpu}/{e.state}" in snapshot.cstate_managed)
+        mg_txt = f" [managed: {managed}]" if managed else ""
+        lines.append(f"  {state} {name} ({latency} us): disabled on {dis}/{len(entries)} CPUs{mg_txt}")
+    return lines
+
+
 def format_power_status(snapshot: PowerSnapshot) -> list[str]:
     """Format readable `cpu-power status` lines."""
     lines = [
@@ -330,31 +370,8 @@ def format_power_status(snapshot: PowerSnapshot) -> list[str]:
         )
     ]
     lines.extend(f"WARN: {w}" for w in snapshot.config_warnings)
-    if not snapshot.gpu_cards:
-        lines.append("GPU runtime PM: none found")
-    else:
-        lines.append("GPU runtime PM:")
-        for card in snapshot.gpu_cards:
-            key = card.pci_slot or card.card
-            out_txt = ",".join(card.connected_outputs) if card.connected_outputs else "none"
-            tag = " [managed]" if key in snapshot.gpu_managed else ""
-            slot = card.pci_slot or "-"
-            lines.append(
-                f"  {card.card} ({card.driver or '?'}, {slot}): outputs={out_txt}, "
-                f"power/control={card.power_control} ({card.runtime_status or '?'}){tag}"
-            )
-    if not snapshot.idle_entries:
-        lines.append("CPU cpuidle: none found")
-    else:
-        lines.append("CPU cpuidle:")
-        grouped: dict[tuple[str, str, int], list[CpuIdleEntry]] = defaultdict(list)
-        for entry in snapshot.idle_entries:
-            grouped[entry.state, entry.name, entry.latency_us].append(entry)
-        for (state, name, latency), entries in grouped.items():
-            dis = sum(1 for e in entries if e.disabled)
-            managed = sum(1 for e in entries if f"cpu{e.cpu}/{e.state}" in snapshot.cstate_managed)
-            mg_txt = f" [managed: {managed}]" if managed else ""
-            lines.append(f"  {state} {name} ({latency} us): disabled on {dis}/{len(entries)} CPUs{mg_txt}")
+    lines.extend(_gpu_status_lines(snapshot))
+    lines.extend(_cstate_status_lines(snapshot))
     return lines
 
 

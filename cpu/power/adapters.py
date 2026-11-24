@@ -245,41 +245,37 @@ def _apply_change_group(changes: tuple[SysfsChange, ...], managed: set[str], *, 
     return lines
 
 
+def _apply_gpu_plan(paths: PowerPaths, plan: PowerPlan, verb: str) -> list[str]:
+    """Write the GPU changes, each with its own direction (on or auto, in card order), then the managed set."""
+    gpu_next = set(plan.next_gpu_managed)
+    gpu_lines: list[str] = []
+    for c in plan.gpu_changes:
+        adding = not plan.revert_mode and c.new == PM_ON
+        gpu_lines.extend(_apply_change_group((c,), gpu_next, adding=adding, verb=verb))
+    _write_managed_set(paths.gpu_managed_file, list(gpu_next))
+    return gpu_lines or ["unchanged: GPU runtime PM"]
+
+
+def _apply_cstate_plan(paths: PowerPaths, plan: PowerPlan, verb: str) -> list[str]:
+    """Write the C-state caps, then their reverts, then the managed set."""
+    cs_next = set(plan.next_cstate_managed)
+    add_changes = tuple(c for c in plan.cstate_changes if c.new == CSTATE_OFF)
+    rev_changes = tuple(c for c in plan.cstate_changes if c.new == CSTATE_ON)
+    cs_lines = _apply_change_group(add_changes, cs_next, adding=True, verb=verb)
+    cs_lines.extend(_apply_change_group(rev_changes, cs_next, adding=False, verb="reverted:"))
+    _write_managed_set(paths.cstate_managed_file, list(cs_next))
+    return cs_lines or ["unchanged: CPU cpuidle"]
+
+
 def apply_power_plan(
     paths: PowerPaths, snapshot: PowerSnapshot, plan: PowerPlan, *, gpu_only: bool = False
 ) -> tuple[int, list[str]]:
     """Execute planned sysfs writes and persist CST managed marker sets in `paths.run`."""
     lines = [f"WARN: {w}" for w in snapshot.config_warnings]
-    gpu_next = set(plan.next_gpu_managed)
     verb = "reverted:" if plan.revert_mode else "set:"
-    gpu_lines: list[str] = []
-    for c in plan.gpu_changes:
-        adding = not plan.revert_mode and c.new == PM_ON
-        if write_sysfs_line(c.path, c.new):
-            gpu_lines.append(f"{verb:<10} {c.path} {c.old} -> {c.new} ({c.reason})")
-        else:
-            gpu_lines.append(f"skipped:   {c.path} (not writable)")
-            if adding:
-                gpu_next.discard(c.key)
-            else:
-                gpu_next.add(c.key)
-    if gpu_lines:
-        lines.extend(gpu_lines)
-    else:
-        lines.append("unchanged: GPU runtime PM")
-    _write_managed_set(paths.gpu_managed_file, list(gpu_next))
-
+    lines.extend(_apply_gpu_plan(paths, plan, verb))
     if not gpu_only:
-        cs_next = set(plan.next_cstate_managed)
-        add_changes = tuple(c for c in plan.cstate_changes if c.new == CSTATE_OFF)
-        rev_changes = tuple(c for c in plan.cstate_changes if c.new == CSTATE_ON)
-        cs_lines = _apply_change_group(add_changes, cs_next, adding=True, verb=verb)
-        cs_lines.extend(_apply_change_group(rev_changes, cs_next, adding=False, verb="reverted:"))
-        if cs_lines:
-            lines.extend(cs_lines)
-        else:
-            lines.append("unchanged: CPU cpuidle")
-        _write_managed_set(paths.cstate_managed_file, list(cs_next))
+        lines.extend(_apply_cstate_plan(paths, plan, verb))
     return 0, lines
 
 
