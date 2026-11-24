@@ -269,6 +269,8 @@ typing-extensions = false
 "cpu/domain.py" = ["DTZ006"]
 "btrfs/snapshot/domain.py" = ["DTZ007"]
 "btrfs/tests/test_btrfs_snapshot_core.py" = ["DTZ001", "DTZ007"]
+# The property tests' bounds of generated snapshot names (naive local wall clock, as above).
+"tests/mbt/mbt_snapshot_domain.py" = ["DTZ001"]
 # SIM905 (above): docker-gc's Docker name lists are a triple-quoted word list
 # split at run time on purpose (about 200 words; a list literal would be
 # about 200 lines).
