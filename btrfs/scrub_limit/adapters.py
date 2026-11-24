@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 import contextlib
 from dataclasses import dataclass
 import glob
@@ -34,6 +35,10 @@ from cst_core.ports import CommandRunnerPort, ExecutionContextPort
 
 _SYSFS_DEVINFO_DEPTH: Final = 4
 _SHORT_UUID_LEN: Final = 8
+_BTRFS_SYSFS: Final = "/sys/fs/btrfs"
+# The installer's words for a file it wrote or removed (and this module's for a new snapshots.conf).
+_WRITTEN: Final = "written:"
+_REMOVED: Final = "removed:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +47,7 @@ class ScrubPaths:
 
     conf_path: str = SCRUB_CONF_PATH
     dropin_path: str = SCRUB_DROPIN_PATH
-    btrfs_sysfs: str = "/sys/fs/btrfs"
+    btrfs_sysfs: str = _BTRFS_SYSFS
     installer_script: str = ""
     record_path: str = ROOT_RECORD  # where the installer records btrfs:core (and the drop-in)
 
@@ -66,13 +71,13 @@ def scrub_paths_for(
         return ScrubPaths(
             conf_path=host_view_path(exec_ctx, SCRUB_CONF_PATH),
             dropin_path=host_view_path(exec_ctx, SCRUB_DROPIN_PATH),
-            btrfs_sysfs=host_view_path(exec_ctx, "/sys/fs/btrfs"),
+            btrfs_sysfs=host_view_path(exec_ctx, _BTRFS_SYSFS),
             installer_script=installer,
         )
     return ScrubPaths(
         conf_path=SCRUB_CONF_PATH,
         dropin_path=SCRUB_DROPIN_PATH,
-        btrfs_sysfs="/sys/fs/btrfs",
+        btrfs_sysfs=_BTRFS_SYSFS,
         installer_script=installer,
     )
 
@@ -205,6 +210,65 @@ def _mark_core_done(runner: CommandRunnerPort, paths: ScrubPaths) -> tuple[int, 
     return rc, (err or f"exit {rc}") if rc != 0 else ""
 
 
+def _read_conf_and_dropin(paths: ScrubPaths) -> tuple[str | None, str | None, str | None]:
+    """snapshots.conf's and the drop-in's text as they are now, or the ERROR line of the first that
+    cannot be read: (conf text, drop-in text, error)."""
+    conf_text, conf_unreadable = _read_optional_strict(paths.conf_path)
+    if conf_unreadable:
+        return None, None, f"ERROR: cannot read {paths.conf_path}"
+    dropin_before, dropin_unreadable = _read_optional_strict(paths.dropin_path)
+    if dropin_unreadable:
+        return None, None, f"ERROR: cannot read {paths.dropin_path}"
+    return conf_text, dropin_before, None
+
+
+def _apply_conf(paths: ScrubPaths, conf_text: str | None, target_limit: str | None) -> tuple[bool, bool, str]:
+    """Write SCRUB_LIMIT into snapshots.conf when it changes: (changed, its folder was absent, the line)."""
+    new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
+    conf_changed = new_conf is not None and new_conf != conf_text
+    made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
+    if new_conf is not None and conf_changed:
+        _write_conf(paths.conf_path, new_conf)
+        verb = _WRITTEN if conf_text is None else "updated:"
+        note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
+        return conf_changed, made_dir, f"{verb:<10} {paths.conf_path} ({note})"
+    suffix = " (absent)" if conf_text is None else ""
+    return conf_changed, made_dir, f"unchanged: {paths.conf_path}{suffix}"
+
+
+def _reload_or_roll_back(
+    cmd_runner: CommandRunnerPort,
+    paths: ScrubPaths,
+    restore_conf: Callable[[], str | None],
+    dropin_before: str | None,
+    *,
+    core_done: bool,
+) -> str | None:
+    """systemctl daemon-reload; when it fails, snapshots.conf and the drop-in go back (and btrfs:core is
+    marked done again) and the ERROR line comes back."""
+    dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
+    if dr.returncode == 0:
+        return None
+    failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
+    if core_done and failures[-1] is None:
+        # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
+        rc_m, err_m = _mark_core_done(cmd_runner, paths)
+        failures.append(f"btrfs:core not marked done again: {err_m}" if rc_m != 0 else None)
+    return _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)
+
+
+def _mark_core_after_write(
+    cmd_runner: CommandRunnerPort, paths: ScrubPaths, inst_lines: Sequence[str], *, core_done: bool
+) -> tuple[int, str | None]:
+    """btrfs:core done again after the installer wrote the drop-in: (exit status, the ERROR line or None)."""
+    if not (core_done and any(line.startswith(_WRITTEN) for line in inst_lines)):
+        return 0, None
+    rc_m, err_m = _mark_core_done(cmd_runner, paths)
+    if rc_m != 0:
+        return rc_m, f"ERROR: the installer could not mark btrfs:core done: {err_m}"
+    return 0, None
+
+
 def scrub_limit_apply(
     paths: ScrubPaths,
     target_limit: str | None,
@@ -215,26 +279,13 @@ def scrub_limit_apply(
 
     When the installer or daemon-reload fails, snapshots.conf and the drop-in go back to what they were."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    conf_text, conf_unreadable = _read_optional_strict(paths.conf_path)
-    if conf_unreadable:
-        return 1, [f"ERROR: cannot read {paths.conf_path}"]
-    dropin_before, dropin_unreadable = _read_optional_strict(paths.dropin_path)
-    if dropin_unreadable:
-        return 1, [f"ERROR: cannot read {paths.dropin_path}"]
+    conf_text, dropin_before, read_error = _read_conf_and_dropin(paths)
+    if read_error is not None:
+        return 1, [read_error]
     # Writing the drop-in sets btrfs:core pending; a component install had finished stays done.
     core_done = _core_done(paths.record_path)
-    out: list[str] = []
-    new_conf = update_snapshots_conf_scrub_limit(conf_text, target_limit)
-    conf_changed = new_conf is not None and new_conf != conf_text
-    made_dir = not os.path.isdir(os.path.dirname(paths.conf_path))
-    if new_conf is not None and conf_changed:
-        _write_conf(paths.conf_path, new_conf)
-        verb = "written:" if conf_text is None else "updated:"
-        note = f"SCRUB_LIMIT='{target_limit}'" if target_limit is not None else "removed SCRUB_LIMIT"
-        out.append(f"{verb:<10} {paths.conf_path} ({note})")
-    else:
-        suffix = " (absent)" if conf_text is None else ""
-        out.append(f"unchanged: {paths.conf_path}{suffix}")
+    conf_changed, made_dir, conf_line = _apply_conf(paths, conf_text, target_limit)
+    out: list[str] = [conf_line]
 
     def restore_conf() -> str | None:
         return _restore_conf(paths, conf_text, made_dir=made_dir) if conf_changed else None
@@ -250,17 +301,11 @@ def scrub_limit_apply(
     if target_limit is None:
         with contextlib.suppress(OSError):
             os.rmdir(os.path.dirname(paths.dropin_path))
-    if any(line.startswith(("written:", "removed:")) for line in inst_lines):
-        dr = SystemctlAdapter(cmd_runner, on_host=SystemctlHost.LOCAL).daemon_reload_result()
-        if dr.returncode != 0:
-            failures = [restore_conf(), _restore_dropin(cmd_runner, paths, dropin_before)]
-            if core_done and failures[-1] is None:
-                # Both writes of the drop-in (this run's and the rollback's) set btrfs:core pending.
-                rc_m, err_m = _mark_core_done(cmd_runner, paths)
-                failures.append(f"btrfs:core not marked done again: {err_m}" if rc_m != 0 else None)
-            return 1, [*out, _rolled_back(dr.failure("systemctl daemon-reload"), failures, reload_hint=True)]
-    if core_done and any(line.startswith("written:") for line in inst_lines):
-        rc_m, err_m = _mark_core_done(cmd_runner, paths)
-        if rc_m != 0:
-            return rc_m, [*out, f"ERROR: the installer could not mark btrfs:core done: {err_m}"]
+    if any(line.startswith((_WRITTEN, _REMOVED)) for line in inst_lines):
+        error = _reload_or_roll_back(cmd_runner, paths, restore_conf, dropin_before, core_done=core_done)
+        if error is not None:
+            return 1, [*out, error]
+    rc_m, mark_error = _mark_core_after_write(cmd_runner, paths, inst_lines, core_done=core_done)
+    if mark_error is not None:
+        return rc_m, [*out, mark_error]
     return 0, out
