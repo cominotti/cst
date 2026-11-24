@@ -286,7 +286,7 @@ def default_tier1_jobs(selected_count: int, cpu_count: int | None = None) -> int
     this process may run on (`cpu_count` when given), at most 4."""
     if selected_count <= 4:
         return 1
-    cpus = max(1, _usable_cpus()) if cpu_count is None else max(1, cpu_count)
+    cpus = _usable_cpus() if cpu_count is None else cpu_count
     return min(4, max(1, cpus // 2), selected_count)
 
 
