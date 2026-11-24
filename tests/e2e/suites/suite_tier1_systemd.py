@@ -8442,6 +8442,60 @@ EOF
         self.assertIn("E2E-OK", out)
 
     @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
+    def test_166_installer_mark_drops_a_component_state_no_recorded_file_names(self) -> None:
+        """Root's real install record as an older CST could leave it: btrfs:core with a file of it recorded
+        (a seed text), and a state `pending` for e2e:gone, with no file of e2e:gone recorded. `cst doctor`
+        warns that e2e:gone is installed only in part; one `installer.py mark --component btrfs:core done`
+        writes the record with btrfs:core done and without the state of e2e:gone, after which doctor no
+        longer warns about it, and the same mark again changes no byte of the record. Before, a mark kept
+        the orphan state, and so did doctor's warning."""
+        c = self.SYSTEMD_CONTAINER
+        rec = "/var/lib/cst/installed.json"
+        seed = "/etc/e2e-166-core-seed"
+        installer = "/usr/bin/python3 -I -B /opt/cst-rw/cst_core/installer.py"
+        gone = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} e2e:gone"
+        core = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:core"
+        if exec_bash(c, f"[[ ! -e {seed} ]] || echo {seed}; {gone}").stdout.split() != ["-", "-"]:
+            self.skipTest("the seed exists, or root's record already lists e2e:gone (another test's)")
+        exec_bash(c, f"rm -f /var/tmp/e2e-166-rec; if [[ -e {rec} ]]; then cp -p {rec} /var/tmp/e2e-166-rec; fi")
+        self.addCleanup(
+            exec_bash,
+            c,
+            # exec_bash runs bash -e: every step must run, also after one that fails.
+            f"set +e; rm -f {seed} /var/tmp/e2e-166-doc; "
+            f"if [[ -e /var/tmp/e2e-166-rec ]]; then mv /var/tmp/e2e-166-rec {rec}; else rm -f {rec}; fi",
+            check=False,
+        )
+        orphan = (
+            "import json, sys\n"
+            "p = sys.argv[1]\n"
+            "d = json.load(open(p))\n"
+            'd["components"]["e2e:gone"] = "pending"\n'
+            'open(p, "w").write(json.dumps(d, indent=1, sort_keys=True) + "\\n")\n'
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -e
+            trap 'echo "e2e: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+            warned() {{ /opt/cst-rw/cst doctor >/var/tmp/e2e-166-doc 2>&1 || true; grep -qE "WARN +e2e:gone: installed only in part" /var/tmp/e2e-166-doc; }}
+            printf 'seed\\n' | {installer} text {seed} 0644 --component btrfs:core >/dev/null
+            /usr/bin/python3 -I -c {shlex.quote(orphan)} {rec}
+            [[ "$({gone})" == "- pending" ]]
+            warned || {{ echo "the test cannot bite: doctor does not warn about the orphan state" >&2; cat /var/tmp/e2e-166-doc >&2; exit 1; }}
+            {installer} mark --component btrfs:core done
+            [[ "$({core})" == *"{seed}"*" done" ]] || {{ echo "btrfs:core: $({core})" >&2; exit 1; }}
+            [[ "$({gone})" == "- -" ]] || {{ echo "the orphan state stayed: $({gone})" >&2; exit 1; }}
+            if warned; then echo "doctor still warns about e2e:gone" >&2; cat /var/tmp/e2e-166-doc >&2; exit 1; fi
+            before="$(sha256sum <{rec})"
+            {installer} mark --component btrfs:core done
+            [[ "$(sha256sum <{rec})" == "$before" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
+    @e2e_tags(E2ETag.INSTALL, E2ETag.DOCTOR)
     def test_164_installer_text_keep_state_keeps_a_done_component_done(self) -> None:
         """`installer.py text DEST 0644 --component btrfs:core --keep-state` as root on root's real install
         record, with btrfs:core done (a seed text of it, marked done): a new text is `written:`, its record
