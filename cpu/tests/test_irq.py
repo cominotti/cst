@@ -348,6 +348,25 @@ class CpuIrqLifecycleTest(unittest.TestCase):
                 self.assertTrue(any(line.startswith("ERROR:") and why in line for line in plan), plan)
                 self.assertFalse(any(line.startswith("would ") for line in plan), plan)
 
+    def test_a_drifted_drop_in_with_a_matching_env_is_a_change(self) -> None:
+        # An older or hand-edited drop-in, the env file as apply writes it, irqbalance running:
+        # apply rewrites the drop-in and must restart irqbalance so systemd reads it.
+        env_path, dropin_path = self.paths.env_path, self.paths.dropin_path
+        self._write(env_path, render_irq_env("12-23"))
+        self.runner.load_state, self.runner.active_state, self.runner.enabled_state = "loaded", "active", "enabled"
+        service_unchanged = "unchanged:   irqbalance.service (enabled, active)"
+
+        self._write(dropin_path, render_irq_dropin())
+        plan = format_irq_plan(collect_irq_snapshot(self.paths, runner=self.runner, has_rpm_ostree=True))
+        self.assertIn(service_unchanged, plan)  # control: nothing drifted
+
+        self._write(dropin_path, render_irq_dropin().replace("EnvironmentFile=-", "EnvironmentFile="))
+        plan = format_irq_plan(collect_irq_snapshot(self.paths, runner=self.runner, has_rpm_ostree=True))
+        self.assertIn(f"unchanged:   {env_path}", plan)
+        self.assertIn(f"would write: {dropin_path}", plan)
+        self.assertIn("would enable & start/restart: irqbalance.service", plan)
+        self.assertNotIn(service_unchanged, plan)
+
     def test_no_overlap_removes_stale_files_and_container_paths(self) -> None:
         self._write(self.paths.env_path, render_irq_env("12-23"))
         self._write(self.paths.dropin_path, render_irq_dropin())
