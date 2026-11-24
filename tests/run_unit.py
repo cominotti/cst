@@ -110,15 +110,15 @@ agent's worktree under .claude/worktrees, left out), and fails the run on
 each one that is new or rewritten after them, with a hint (BYTECODE_HINT).
 
 A parallel run queues its work units longest first. A parallel run of the
-whole suite (no NAME, no --gates) writes how long each test took to
-${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json, one file per
+whole suite (no NAME, no --gates) that passes writes how long each test
+took to ${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json, one file per
 checkout (`durations_path`), and the next parallel run, whole or named, puts
 the units with the most recorded seconds first (`order_units`: a test with
 no time yet counts as the average one), so a long unit does not start last.
 With no file, or one it cannot read, the order is the old one: most tests
 first. A run in one process (--jobs 1, CST_TEST_JOBS=1, a load error, a
-single unit) neither reads nor writes the file. CI neither reads nor writes
-the file. Only the order changes: the same tests and gates run, with the
+single unit) neither reads nor writes the file; a run that fails leaves it
+as it was. CI neither reads nor writes the file. Only the order changes: the same tests and gates run, with the
 same results.
 """
 
@@ -1490,7 +1490,7 @@ def _run_in_process(repo: str, opts: RunOptions) -> int:
 def _run_parallel(
     repo: str, opts: RunOptions, units: Sequence[tuple[str, ...]], jobs: int, *, record: str | None = None
 ) -> int:
-    """Run units across jobs workers; with record, save each test's seconds there (`save_durations`)."""
+    """Run units across jobs workers; with record, save each test's seconds there when the run passed (`save_durations`)."""
     effective_jobs = min(jobs, len(units))
     bytecode_before = bytecode_files(repo)
     started = time.monotonic()
@@ -1505,10 +1505,11 @@ def _run_parallel(
         extra_errors=[*totals.hook_problems, *totals.signal_problems, *totals.worker_errors],
     )
     errors = _emit_gate_checks(repo, bytecode_before, findings)
-    if record is not None:
-        save_durations(record, units, totals.unit_seconds, read_durations(record))
     has_test_fail = bool(totals.failures or totals.errors or totals.unexpected_successes)
-    return 0 if not has_test_fail and not errors else 1
+    passed = not has_test_fail and not errors
+    if record is not None and passed:  # a broken run (tests that error at once, a lost worker) keeps the old times
+        save_durations(record, units, totals.unit_seconds, read_durations(record))
+    return 0 if passed else 1
 
 
 def _print_affected_plan(repo: str, base: str | None, *, mbt_only: bool = False) -> int:

@@ -100,7 +100,7 @@ other work at the same time (another test run, a build, an agent).
   other's spread). How much it helps the machine's other users was not
   measured.
 - **The longest work first.** A parallel run of the whole suite (no NAME,
-  no `--gates`) writes how long each test took to
+  no `--gates`) that passes writes how long each test took to
   `${XDG_CACHE_HOME:-~/.cache}/cst-unit-durations/<key>.json`, one file per
   checkout or worktree (the key as `tests/uv-dev` makes it; a relative
   `XDG_CACHE_HOME` is ignored, so the file never lands in the checkout). The
@@ -110,7 +110,9 @@ other work at the same time (another test run, a build, an agent).
   average one. With no file, or one it cannot read, the order is the old one:
   most tests first. A run in one process (`--jobs 1`, `CST_TEST_JOBS=1`, a
   load error, a single unit) neither reads nor writes the file, so it cannot
-  seed the times. CI neither reads nor writes the file. Only the order
+  seed the times. A run that fails (a test, a gate, a lost worker) leaves
+  the file as it was: tests that error at once would otherwise record a
+  slow unit as a quick one. CI neither reads nor writes the file. Only the order
   changes: the same tests and gates run, and a failure is the same failure.
   Deleting the file costs one run in the old order. Measured on 2026-11-24 on
   `main` (3,692 tests), under `nice -n 10` with TMPDIR on tmpfs, 5 runs each,

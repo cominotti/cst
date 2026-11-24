@@ -1567,12 +1567,22 @@ class LongestFirstTest(unittest.TestCase):
         return tmp
 
     def _run_tree(self, tmp: str, *names: str, ci: bool = False) -> subprocess.CompletedProcess[str]:
+        done = self._start_tree(tmp, *names, ci=ci)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Ran 3 tests in ", done.stderr)
+        self.assertIn("(2 workers)", done.stderr)
+        self.assertEqual(done.stderr.splitlines()[-1], "OK", done.stderr)
+        self.assertNotIn("error:", done.stderr)
+        return done
+
+    def _start_tree(self, tmp: str, *names: str, ci: bool = False) -> subprocess.CompletedProcess[str]:
+        """The runner of the probe tree, at 2 workers, outside CI unless ci (its result unchecked)."""
         env = _child_env(tmp)
         for name in ("CI", "GITHUB_ACTIONS", "CST_TEST_JOBS"):
             env.pop(name, None)
         if ci:
             env["CI"] = "true"
-        done = subprocess.run(
+        return subprocess.run(
             [sys.executable, "-I", "-B", os.path.join(tmp, "tests", "run_unit.py"), "--jobs", "2", *names],
             capture_output=True,
             text=True,
@@ -1581,12 +1591,6 @@ class LongestFirstTest(unittest.TestCase):
             timeout=120,
             env=env,
         )
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn("Ran 3 tests in ", done.stderr)
-        self.assertIn("(2 workers)", done.stderr)
-        self.assertEqual(done.stderr.splitlines()[-1], "OK", done.stderr)
-        self.assertNotIn("error:", done.stderr)
-        return done
 
     def _recorded(self, path: str) -> dict[str, object]:
         with open(path, encoding="utf-8") as f:
@@ -1616,6 +1620,26 @@ class LongestFirstTest(unittest.TestCase):
             with open(path, "rb") as f:
                 before = f.read()
             self._run_tree(tmp, "test_probe_a", "test_probe_b")
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), before)
+            self.assertEqual(os.listdir(os.path.dirname(path)), [os.path.basename(path)])
+
+    def test_a_whole_run_that_fails_keeps_the_times_it_had(self) -> None:
+        tmp = self._probe_tree()
+        path = _durations_file(os.path.join(tmp, "cache"), tmp)
+        with open(os.path.join(tmp, "test_probe_c.py"), "w", encoding="utf-8") as f:
+            f.write("import unittest\nclass C(unittest.TestCase):\n    def test_errors(self):\n        raise OSError\n")
+        with self.subTest("no file: none is written"):
+            done = self._start_tree(tmp)
+            self.assertEqual(done.returncode, 1, done.stderr)
+            self.assertEqual(done.stderr.splitlines()[-1], "FAILED (errors=1)", done.stderr)
+            self.assertFalse(os.path.exists(os.path.dirname(path)))
+        with self.subTest("a file: it is left as it was"):
+            _write_durations(path, dict.fromkeys(_PROBE_IDS, 9.0))
+            with open(path, "rb") as f:
+                before = f.read()
+            done = self._start_tree(tmp)
+            self.assertEqual(done.returncode, 1, done.stderr)
             with open(path, "rb") as f:
                 self.assertEqual(f.read(), before)
             self.assertEqual(os.listdir(os.path.dirname(path)), [os.path.basename(path)])
