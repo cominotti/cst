@@ -974,8 +974,11 @@ the flag and the counter must be the spec's state. A second test checks
 that the traces, together, replay every recorded call and outcome of the
 spec. `CST_NOCOW_TRACES` names a folder of more traces to replay.
 
-The traces are two random walks of the simulator and the first trace it
-finds to each witness a random walk rarely reaches (a restore, a failed
+The traces are two random walks of the simulator, the shortest trace
+Apalache finds to two install witnesses (its bounded check answers in
+seconds for a few steps, but took more than 7 minutes for a 32-step one),
+and the first trace the simulator finds to each other witness a random walk
+rarely reaches (a restore, a failed
 recovery, a kept flag after a give-up, a power loss with a partial copy, a
 failed install request, a new round, ...). The new round's trace comes from
 the spec's `step_round_end`, the steps of `step_` with a crash only where a

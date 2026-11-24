@@ -323,6 +323,21 @@ class ExecuteTest(unittest.TestCase):
             self.assertEqual(os.listdir(cwd), [], "the log file is gone")
 
 
+class TraceJobsTest(unittest.TestCase):
+    def test_the_checked_in_traces_are_the_jobs_and_come_from_both_backends(self) -> None:
+        # Each checked-in trace is one job's, written by that job's backend (its description says
+        # which), and both backends the help names write some.
+        self.assertEqual({job.backend for job in M.TRACE_JOBS}, {"simulator", "apalache"})
+        for spec, folder in M.TRACES_DIR.items():
+            jobs = {job.name: job for job in M.TRACE_JOBS if job.spec == spec}
+            files = sorted(f for f in os.listdir(os.path.join(_CHECKOUT, folder)) if f.endswith(".itf.json"))
+            self.assertEqual(files, sorted(f"{name}.itf.json" for name in jobs))
+            for name, job in jobs.items():
+                with open(os.path.join(_CHECKOUT, folder, f"{name}.itf.json"), encoding="utf-8") as f:
+                    meta = json.load(f)["#meta"]
+                self.assertEqual(meta["description"], f"{job.backend} trace {name} of {spec} ({job.main})")
+
+
 class VerdictTest(unittest.TestCase):
     def test_each_answer(self) -> None:
         cases = {
