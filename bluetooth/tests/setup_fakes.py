@@ -13,8 +13,9 @@ scratch folders, and the unit tests never gain privileges
 (tests/run_unit.py).
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import difflib
 import json
 import os
 import shutil
@@ -22,12 +23,15 @@ import subprocess
 import tempfile
 import unittest
 
+from cst_core.ports import CommandResult
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SETUP = os.path.join(REPO, "bluetooth-setup.sh")
 MAC = "0A:1B:2C:3D:4E:5F"
 DEV = "0A_1B_2C_3D_4E_5F"
 ISO = "6fbaf188-05e0-496a-9885-d6ddfdb4e03e"
+type Answer = tuple[int, str, str]  # a command's exit, stdout and stderr
 STUBS = (
     "flatpak-spawn",
     "sudo",
@@ -405,3 +409,256 @@ class Machine:
             return ""
         with open(path, encoding="utf-8") as f:
             return f.read()
+
+
+# ---- an in-process twin of FAKE ----------------------------------------------------------
+
+BLUETOOTH_SERVICE = "bluetooth.service"
+WIREPLUMBER_SERVICE = "wireplumber.service"
+
+
+def _unified_diff(old: str, new: str) -> Answer:
+    """diff -u OLD NEW as the real diff answers it: 0 for the same text, 1 and the hunks otherwise."""
+    with open(old, encoding="utf-8") as f:
+        a = f.read().splitlines(keepends=True)
+    with open(new, encoding="utf-8") as f:
+        b = f.read().splitlines(keepends=True)
+    hunks = "".join(difflib.unified_diff(a, b, old, new))
+    return (1 if hunks else 0), hunks, ""
+
+
+def _text_or_none(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+class SetupModel:
+    """FAKE in process, for the commands apply and revert run (a CommandRunnerPort over the same
+    state files of a Machine), with what each service read at its last (re)start: bluetoothd
+    main.conf, WirePlumber the *.conf files of the user's wireplumber.conf.d. The fault tests run many
+    applies; FAKE costs a fork of bash per command. A command it does not know raises
+    AssertionError, so a new one shows up; test_setup_units' parity test keeps it in step with FAKE.
+
+    restarts lists each restart that worked: (unit, whether it was needed then: the unit read other
+    files than are on disk, or, for WirePlumber, bluetoothd restarted after it)."""
+
+    def __init__(self, m: Machine) -> None:
+        self.m = m
+        self.calls: list[list[str]] = []
+        self.restarts: list[tuple[str, bool]] = []
+        self.loaded: dict[str, object] = {
+            BLUETOOTH_SERVICE: self.disk(BLUETOOTH_SERVICE),
+            WIREPLUMBER_SERVICE: self.disk(WIREPLUMBER_SERVICE),
+        }
+        self.started = {BLUETOOTH_SERVICE: 0, WIREPLUMBER_SERVICE: 0}  # the order of the last starts
+        self.clock = 0
+
+    # ---- what the services read -----------------------------------------------------------
+    def disk(self, unit: str) -> object:
+        """What the unit would read if it started now."""
+        if unit == BLUETOOTH_SERVICE:
+            return _text_or_none(self.m.main_conf)
+        names = (
+            sorted(n for n in os.listdir(self.m.wp_dir) if n.endswith(".conf")) if os.path.isdir(self.m.wp_dir) else []
+        )
+        return tuple((n, _text_or_none(os.path.join(self.m.wp_dir, n))) for n in names)
+
+    def in_step(self, unit: str) -> bool:
+        """The unit runs with what it would read now (WirePlumber: and started after bluetoothd)."""
+        if self.loaded[unit] != self.disk(unit):
+            return False
+        return unit != WIREPLUMBER_SERVICE or self.started[WIREPLUMBER_SERVICE] >= self.started[BLUETOOTH_SERVICE]
+
+    def inv(self, unit: str) -> str:
+        scope = "system" if unit == BLUETOOTH_SERVICE else "user"
+        return (_text_or_none(self.prefix(scope, unit) + ".inv") or "").strip()
+
+    # ---- the state files, as FAKE keeps them --------------------------------------------------
+    def state(self, name: str) -> str:
+        return os.path.join(self.m.state, name)
+
+    def has(self, name: str) -> bool:
+        return os.path.exists(self.state(name))
+
+    def cat(self, name: str) -> tuple[int, str]:
+        text = _text_or_none(self.state(name))
+        return (1, "") if text is None else (0, text)
+
+    def prefix(self, scope: str, name: str) -> str:
+        return self.state(os.path.join("units", f"{scope}-{name.removesuffix('.service')}"))
+
+    def active_state(self, prefix: str) -> str:
+        text = _text_or_none(prefix + ".state")
+        if text is not None:
+            return text.strip()
+        return "active" if os.path.exists(prefix + ".active") else "inactive"
+
+    def new_id(self, prefix: str) -> None:
+        n = int((_text_or_none(self.state("counter")) or "0").strip()) + 1
+        with open(self.state("counter"), "w", encoding="utf-8") as f:
+            f.write(f"{n}\n")
+        with open(prefix + ".inv", "w", encoding="utf-8") as f:
+            f.write(f"inv-{os.path.basename(prefix)}-{n}\n")
+
+    # ---- the commands -----------------------------------------------------------------------
+    def run(self, argv: Sequence[str], **_kw: object) -> CommandResult:
+        """CommandRunnerPort.run: each command FAKE answers that apply and revert run."""
+        args = list(argv)
+        self.calls.append(args)
+        rc, out, err = self.answer(args)
+        return CommandResult(rc, out, err, argv=tuple(args))
+
+    def answer(self, args: list[str]) -> Answer:
+        if args[:1] == ["timeout"]:
+            args = args[2:]
+        handler = self.handlers().get(args[0] if args else "")
+        found = None if handler is None else handler(args)
+        if found is None:
+            raise AssertionError(f"SetupModel: no such command: {args}")
+        return found
+
+    def handlers(self) -> dict[str, Callable[[list[str]], Answer | None]]:
+        """Each command by its first word; a handler answers None for a form FAKE does not know."""
+        return {
+            "mktemp": lambda _a: self.mktemp(),
+            "sudo": lambda a: self.sudo(a[1:]),
+            "systemctl": lambda a: self.systemctl(a[1:]),
+            "busctl": lambda a: self.busctl(a[1:]),
+            "bluetoothctl": lambda a: self.bluetoothctl(a[1:]),
+            "journalctl": self.journalctl,
+            "pw-dump": lambda _a: (*self.cat("pw-dump.json"), ""),
+            "selinuxenabled": lambda _a: ((0 if self.has("selinux") else 1), "", ""),
+            "diff": lambda a: _unified_diff(a[-2], a[-1]),
+            "env": lambda a: self.wp_roles() if a[-1:] == ["wp-roles"] else None,
+            "/usr/bin/python3": lambda a: (
+                ((0 if self.has("iso-socket") else 1), "", "") if "socket" in " ".join(a) else None
+            ),
+        }
+
+    def mktemp(self) -> Answer:
+        fd, path = tempfile.mkstemp(prefix="tmp.", dir=self.m.tmp)
+        os.close(fd)
+        return 0, path + "\n", ""
+
+    def journalctl(self, args: list[str]) -> Answer | None:
+        if any(a.startswith("_SYSTEMD_INVOCATION_ID=") for a in args):
+            return 0, self.cat("bt-journal")[1], ""
+        if "--user" in args:
+            return 0, self.cat("lw-journal")[1], ""
+        return None
+
+    def wp_roles(self) -> Answer:
+        rc, text = self.cat("wp-roles")
+        return (0, text, "") if rc == 0 else (5, "", "")
+
+    def sudo(self, args: list[str]) -> Answer:
+        how = _text_or_none(self.state(f"fail-sudo-{args[0]}"))
+        if how is not None:
+            if not how.strip().isdigit():
+                raise AssertionError(f"SetupModel: fail-sudo-{args[0]} {how.strip()} is FAKE's alone")
+            return int(how), "", ""
+        kept: list[str] = []
+        skip = False
+        for a in args[1:]:
+            if skip:
+                skip = False
+                continue
+            if args[0] == "install" and a in ("-o", "-g"):
+                skip = True
+                continue
+            if (args[0], a) in (("install", "-Z"), ("cp", "--preserve=context")):
+                continue
+            kept.append(a)
+        match args[0], kept:
+            case "cp", ["-p", src, dst]:
+                shutil.copy2(src, dst)
+            case "install", ["-m", mode, src, dst]:
+                shutil.copyfile(src, dst)
+                os.chmod(dst, int(mode, 8))
+            case "mv", ["-f", src, dst]:
+                os.replace(src, dst)
+            case "systemctl", ["restart", "bluetooth"]:
+                return self.systemctl(["restart", "bluetooth"])
+            case _:
+                raise AssertionError(f"SetupModel: no such sudo command: {args}")
+        return 0, "", ""
+
+    def systemctl(self, args: list[str]) -> Answer:
+        scope = "system"
+        if args[:1] == ["--user"]:
+            scope, args = "user", args[1:]
+        os.makedirs(self.state("units"), exist_ok=True)
+        match args[0]:
+            case "is-active":
+                return self.is_active(scope, args)
+            case "is-enabled":
+                enabled = os.path.exists(self.prefix(scope, args[1]) + ".enabled")
+                return (0, "enabled\n", "") if enabled else (1, "disabled\n", "")
+            case "show":
+                return self.show(scope, args)
+            case "show-environment":
+                return (1 if self.has("no-session") else 0), "", ""
+            case "daemon-reload":
+                return 0, "", ""
+            case "restart" | "start":
+                return self.start_unit(scope, args)
+            case _:
+                raise AssertionError(f"SetupModel: no such systemctl command: {args}")
+
+    def is_active(self, scope: str, args: list[str]) -> Answer:
+        if args[1] == "--quiet":
+            running = self.active_state(self.prefix(scope, args[2])) in ("active", "reloading", "refreshing")
+            return (0 if running else 3), "", ""
+        active = os.path.exists(self.prefix(scope, args[1]) + ".active")
+        return (0, "active\n", "") if active else (3, "inactive\n", "")
+
+    def show(self, scope: str, args: list[str]) -> Answer:
+        u = self.prefix(scope, args[-1])
+        joined = " ".join(args)
+        if "ActiveState" in joined:
+            inv = (_text_or_none(u + ".inv") or "").strip()
+            return 0, f"ActiveState={self.active_state(u)}\nInvocationID={inv}\n", ""
+        if "InvocationID" in joined:
+            return 0, _text_or_none(u + ".inv") or "", ""
+        if "MainPID" in joined:
+            return 0, _text_or_none(u + ".pid") or "0\n", ""
+        return 1, "", ""
+
+    def start_unit(self, scope: str, args: list[str]) -> Answer:
+        u = self.prefix(scope, args[1])
+        if os.path.exists(u + ".fail"):
+            return 1, "", f"Job for {args[1]} failed.\n"
+        if args[0] == "restart" or not os.path.exists(u + ".active"):
+            self.new_id(u)
+        with open(u + ".active", "w", encoding="utf-8"):
+            pass
+        self.started_now(f"{args[1].removesuffix('.service')}.service")
+        return 0, "", ""
+
+    def started_now(self, unit: str) -> None:
+        if unit not in self.loaded:
+            return
+        self.restarts.append((unit, not self.in_step(unit)))
+        self.clock += 1
+        self.loaded[unit] = self.disk(unit)
+        self.started[unit] = self.clock
+
+    def busctl(self, args: list[str]) -> Answer:
+        joined = " ".join(args)
+        if "GetManagedObjects" in joined:
+            rc, text = self.cat("objects.json")
+            return (1 if rc == 0 and self.has("fail-objects") else rc), text, ""
+        if joined == "--system list --no-legend --unique":
+            return 0, self.cat("bus-names")[1], ""
+        if args[:1] == ["get-property"]:
+            return (*self.cat(f"prop-{args[3]}-{args[4]}"), "")
+        raise AssertionError(f"SetupModel: no such busctl command: {args}")
+
+    def bluetoothctl(self, args: list[str]) -> Answer:
+        if args[:1] == ["info"]:
+            rc, text = self.cat("bt-info")
+            return (0, text, "") if rc == 0 else (1, f"Device {args[1]} not available\n", "")
+        raise AssertionError(f"SetupModel: no such bluetoothctl command: {args}")

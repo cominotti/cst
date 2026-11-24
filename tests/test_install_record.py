@@ -184,6 +184,46 @@ class RecordDomainTest(unittest.TestCase):
         self.assertEqual(with_files(rec, {"/etc/a": (_f("bb"), False)}).components, {"m:t": "pending"})
         self.assertEqual(with_files(EMPTY_RECORD, {"/etc/a": (_f(), False)}).components, {"m:t": "pending"})
 
+    def test_a_component_whose_last_file_is_recorded_under_another_loses_its_state(self) -> None:
+        # A destination recorded under m:t, done, recorded again under m:u (a manifest move, or the same
+        # generated text written with another --component): m:t has no file left, so no state either.
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.DONE})
+        moved = with_files(rec, {"/etc/a": (_f(component="m:u"), False)})
+        self.assertEqual(moved.components, {"m:u": "pending"})
+        # With another file of m:t still recorded, m:t keeps its state.
+        rec = InstallRecord({"/etc/a": _f(), "/etc/b": _f("bb")}, {"m:t": ComponentState.DONE})
+        moved = with_files(rec, {"/etc/a": (_f(component="m:u"), False)})
+        self.assertEqual(moved.components, {"m:t": "done", "m:u": "pending"})
+
+    def test_a_state_an_older_cst_left_without_a_file_goes_at_the_next_write(self) -> None:
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.DONE, "m:gone": ComponentState.PENDING})
+        self.assertEqual(with_files(rec, {"/etc/a": (_f(), False)}).components, {"m:t": "done"})
+
+    def test_a_kept_component_keeps_the_state_the_record_has_for_it(self) -> None:
+        keep = frozenset({"m:t"})
+        for state in ComponentState:
+            rec = InstallRecord({"/etc/a": _f()}, {"m:t": state})
+            with self.subTest(state=state):
+                # Written, changed bytes, a new file of it: the state stays as the record has it.
+                self.assertEqual(with_files(rec, {"/etc/a": (_f("bb"), True)}, keep=keep).components, {"m:t": state})
+                self.assertEqual(with_files(rec, {"/etc/b": (_f(), False)}, keep=keep).components, {"m:t": state})
+                # Only the components in keep: another one written becomes pending.
+                other = with_files(rec, {"/etc/b": (_f(component="m:u"), True)}, keep=keep)
+                self.assertEqual(other.components, {"m:t": state, "m:u": "pending"})
+        # No state yet: pending, as without keep.
+        self.assertEqual(with_files(EMPTY_RECORD, {"/etc/a": (_f(), True)}, keep=keep).components, {"m:t": "pending"})
+        # A destination moved to the kept component still drops the state of the one it left.
+        rec = InstallRecord(
+            {"/etc/a": _f(component="m:u"), "/etc/b": _f()}, {"m:u": ComponentState.DONE, "m:t": ComponentState.DONE}
+        )
+        self.assertEqual(with_files(rec, {"/etc/a": (_f(), True)}, keep=keep).components, {"m:t": "done"})
+
+    def test_a_mark_drops_a_state_an_older_cst_left_without_a_file(self) -> None:
+        rec = InstallRecord({"/etc/a": _f()}, {"m:t": ComponentState.PENDING, "m:gone": ComponentState.PENDING})
+        self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done"})
+        # A mark of a component with no file changes nothing (the installer then writes no record).
+        self.assertEqual(with_state(rec, "m:none", ComponentState.DONE), rec)
+
     def test_marked_and_without_files(self) -> None:
         rec = with_files(EMPTY_RECORD, {"/etc/a": (_f(), True), "/etc/b": (_f(component="m:u"), True)})
         self.assertEqual(with_state(rec, "m:t", ComponentState.DONE).components, {"m:t": "done", "m:u": "pending"})
@@ -926,6 +966,107 @@ class InstallerRecordCliTest(unittest.TestCase):
         self.assertEqual({d: doc.files[d].sha256 for d in main_lines}, {d: f["sha256"] for d, f in main_lines.items()})
         self.assertEqual(self.cli("check", timer).returncode, 0)
 
+    def test_upgrade_a_record_an_older_cst_left_with_a_state_no_file_names(self) -> None:
+        # An older CST's with_files() kept the state of a component whose last file moved to another
+        # component. Such a record still reads as it is; the next text --component writes it without the
+        # orphan state, and a second identical call changes no byte of it.
+        dest, data = "/etc/x.conf", b"x\n"
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        f = RecordedFile(None, "btrfs:core", GeneratedKind.TEXT, hashlib.sha256(data).hexdigest(), 0o644, Owner.USER)
+        old = InstallRecord({dest: f}, {"btrfs:core": ComponentState.DONE, "m:gone": ComponentState.PENDING})
+        user_record.parent.mkdir(parents=True)
+        user_record.write_text(render_record(old))
+        Path(self.stage + "/etc").mkdir()
+        Path(self.stage + dest).write_bytes(data)
+        os.chmod(self.stage + dest, 0o644)
+        self.assertEqual(parse_record(user_record.read_text()), old)
+        # The file is current and recorded so: btrfs:core keeps done, and only the orphan goes.
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        self.assertEqual(parse_record(user_record.read_text()).components, {"btrfs:core": "done"})
+        before = user_record.read_bytes()
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=data)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        self.assertEqual(user_record.read_bytes(), before)
+
+    def _seed_user_record(self, dest: str, data: bytes, state: ComponentState | None) -> Path:
+        """The user's record under the stage (text writes it, run as a user here), with btrfs:core in state
+        (None: no file of btrfs:core recorded) and dest recorded with the sha256 of data."""
+        user_record = Path(self.stage + pwd.getpwuid(os.getuid()).pw_dir + "/.local/state/cst/installed.json")
+        user_record.parent.mkdir(parents=True, exist_ok=True)
+        files: dict[str, RecordedFile] = {}
+        states: dict[str, ComponentState] = {}
+        if state is not None:
+            sha = hashlib.sha256(data).hexdigest()
+            files[dest] = RecordedFile(None, "btrfs:core", GeneratedKind.TEXT, sha, 0o644, Owner.USER)
+            states["btrfs:core"] = state
+        user_record.write_text(render_record(InstallRecord(files, states)))
+        return user_record
+
+    def test_text_keep_state_writes_the_file_and_its_line_and_keeps_the_component_s_state(self) -> None:
+        dest, old, new = "/etc/x.conf", b"old\n", b"new\n"
+        keep = (dest, "0644", "--component", "btrfs:core", "--keep-state")
+        for state in ComponentState:
+            with self.subTest(state=state):
+                user_record = self._seed_user_record(dest, old, state)
+                Path(self.stage + "/etc").mkdir(exist_ok=True)
+                Path(self.stage + dest).write_bytes(old)
+                os.chmod(self.stage + dest, 0o644)
+                r = self.cli("text", *keep, stdin=new)
+                self.assertEqual((r.returncode, r.stdout), (0, f"written:   {self.stage}{dest}\n".encode()), r.stderr)
+                self.assertEqual(Path(self.stage + dest).read_bytes(), new)
+                rec = parse_record(user_record.read_text())
+                self.assertEqual(rec.files[dest].sha256, hashlib.sha256(new).hexdigest())
+                self.assertEqual(rec.components, {"btrfs:core": state})
+                # The same again: unchanged, and no byte of the record changes.
+                before = user_record.read_bytes()
+                r = self.cli("text", *keep, stdin=new)
+                self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+                self.assertEqual(user_record.read_bytes(), before)
+
+    def test_text_keep_state_of_a_component_the_record_has_no_state_for_makes_it_pending(self) -> None:
+        dest = "/etc/x.conf"
+        user_record = self._seed_user_record(dest, b"", None)
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", "--keep-state", stdin=b"x\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(parse_record(user_record.read_text()).components, {"btrfs:core": "pending"})
+
+    def test_text_keep_state_records_again_a_current_file_whose_line_was_lost_and_keeps_done(self) -> None:
+        # An earlier text wrote the file and died before its record update: the line has the old sha256.
+        dest, old, new = "/etc/x.conf", b"old\n", b"new\n"
+        user_record = self._seed_user_record(dest, old, ComponentState.DONE)
+        Path(self.stage + "/etc").mkdir()
+        Path(self.stage + dest).write_bytes(new)
+        os.chmod(self.stage + dest, 0o644)
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", "--keep-state", stdin=new)
+        self.assertEqual((r.returncode, r.stdout), (0, f"unchanged: {self.stage}{dest}\n".encode()), r.stderr)
+        rec = parse_record(user_record.read_text())
+        self.assertEqual(rec.files[dest].sha256, hashlib.sha256(new).hexdigest())
+        self.assertEqual(rec.components, {"btrfs:core": "done"})
+        # Without the option, the same lost line makes btrfs:core pending (a setup command's write).
+        self._seed_user_record(dest, old, ComponentState.DONE)
+        r = self.cli("text", dest, "0644", "--component", "btrfs:core", stdin=new)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(parse_record(user_record.read_text()).components, {"btrfs:core": "pending"})
+
+    def test_keep_state_is_a_usage_error_outside_text_with_a_component(self) -> None:
+        dest = "/etc/x.conf"
+        user_record = self._seed_user_record(dest, b"x\n", ComponentState.DONE)
+        before = user_record.read_bytes()
+        for args in (
+            ("text", dest, "0644", "--keep-state"),
+            ("text-plan", dest, "0644", "--component", "btrfs:core", "--keep-state"),
+            ("install", "--component", "btrfs:docker-gc", "--keep-state"),
+            ("remove-text", dest, "--keep-state"),
+            ("mark", "--component", "btrfs:core", "done", "--keep-state"),
+        ):
+            with self.subTest(args=args):
+                r = self.cli(*args, stdin=b"y\n")
+                self.assertEqual((r.returncode, r.stdout), (2, b""), r.stderr)
+                self.assertIn(b"--keep-state: only with text DEST MODE --component C", r.stderr)
+                self.assertFalse(os.path.lexists(self.stage + dest), "a usage error wrote the file")
+                self.assertEqual(user_record.read_bytes(), before)
+
     def test_text_plan_with_a_component_names_a_current_file_its_record_does_not_list_so(self) -> None:
         # text-plan --component says what text --component would do to the record too: "would record:" for
         # a current file with no line or a stale one, "unchanged:" once text recorded it; without
@@ -1143,6 +1284,21 @@ class InstallerRecordCliTest(unittest.TestCase):
         os.makedirs(os.path.dirname(self.record))
         Path(self.record).write_text(render_record(with_files(EMPTY_RECORD, {dest: (f, True)})))
         self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "pending"})
+        r = self.cli("mark", "--component", "btrfs:degraded-boot", "done")
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+        self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "done"})
+
+    def test_mark_of_a_record_an_older_cst_left_with_a_state_no_file_names(self) -> None:
+        # An older CST's with_files() kept the state of a component whose last file moved to another
+        # component; the next mark writes the record without it.
+        dest = "/etc/systemd/system/btrfs-degraded-boot-record.service"
+        f = RecordedFile(None, "btrfs:degraded-boot", GeneratedKind.TEXT, "aa", 0o644, Owner.ROOT, None, "c1", "aa")
+        old = InstallRecord(
+            {dest: f}, {"btrfs:degraded-boot": ComponentState.PENDING, "m:gone": ComponentState.PENDING}
+        )
+        os.makedirs(os.path.dirname(self.record))
+        Path(self.record).write_text(render_record(old))
+        self.assertEqual(self.doc(), old)
         r = self.cli("mark", "--component", "btrfs:degraded-boot", "done")
         self.assertEqual((r.returncode, r.stderr), (0, b""))
         self.assertEqual(self.doc().components, {"btrfs:degraded-boot": "done"})

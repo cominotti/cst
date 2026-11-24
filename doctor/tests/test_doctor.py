@@ -3831,7 +3831,14 @@ class InstallAreaTest(Scratch):
         self.install("btrfs:docker-gc")
         warns = self.warns()
         self.assertEqual(len(warns), 1, warns)
-        self.assertIn("btrfs:docker-gc: installed only in part", warns[0].message)
+        # The cause it names holds for every way a component stays pending: an interrupted setup command, a
+        # file of it written by another command before the setup command ever ran (cst btrfs scrub-limit), or
+        # a file adopted, recorded without being written (test_a_pending_adopted_file_names_the_same_cause).
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
+            "`cst btrfs docker-gc enable` has not finished since)",
+        )
         self.assertEqual(warns[0].fix, "cst btrfs docker-gc enable")
         self.mark("btrfs:docker-gc")
         with open(os.path.join(self.root, "etc/systemd/system/docker-gc.timer"), "a") as f:
@@ -3842,6 +3849,21 @@ class InstallAreaTest(Scratch):
         self.assertIn("/etc/systemd/system/docker-gc.service: missing (CST installed it, btrfs:docker-gc)", msgs[0])
         self.assertIn("/etc/systemd/system/docker-gc.timer: differs from its install record", msgs[1])
         self.assertTrue(all(r.fix == "cst btrfs docker-gc enable" for r in self.warns()))
+
+    def test_a_pending_adopted_file_names_the_same_cause(self) -> None:
+        # An install from before the record: the files on disk as this checkout installs them, no record.
+        # The install writes none of them (each is unchanged) and adopts them, so the component is pending
+        # although no file of it was written.
+        self.install("btrfs:docker-gc")
+        os.unlink(self.record)
+        self.install("btrfs:docker-gc")
+        warns = self.warns()
+        self.assertEqual(len(warns), 1, warns)
+        self.assertEqual(
+            warns[0].message,
+            "btrfs:docker-gc: installed only in part (a file of it was recorded and "
+            "`cst btrfs docker-gc enable` has not finished since)",
+        )
 
     def test_an_install_older_than_this_checkout_is_info_only(self) -> None:
         # What an older CST installed: other bytes, recorded as such.

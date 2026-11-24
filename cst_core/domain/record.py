@@ -18,7 +18,8 @@ staging folder). src is null for generated text; values are a template's
 --set values. A component is "pending" from the first write of one of its
 files until its setup command finishes and marks it "done" (`installer.py
 mark`): a crash in between leaves it pending, which cst doctor reports as a
-partial install. "tree" identifies the payloads of the component's files in
+partial install. A component no recorded file names has no state: every
+write and every removal drops the state of one left with no file. "tree" identifies the payloads of the component's files in
 that install (sha256 of their sorted `SRC SHA256` lines), "commit" the
 checkout's commit when it could be read.
 """
@@ -173,7 +174,9 @@ def render_record(rec: InstallRecord) -> str:
     return json.dumps(doc, indent=1, sort_keys=True) + "\n"
 
 
-def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]]) -> InstallRecord:
+def with_files(
+    rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]], *, keep: frozenset[str] = frozenset()
+) -> InstallRecord:
     """rec with each {dest: (file, written)} recorded.
 
     A component becomes "pending" when one of its files was written, or is
@@ -181,29 +184,47 @@ def with_files(rec: InstallRecord, files: Mapping[str, tuple[RecordedFile, bool]
     record, adopted): its setup command marks it done when it finishes. A
     file found as recorded leaves its component's state alone, so a second
     run that changes nothing changes nothing in the record either.
+
+    A component in keep that rec has a state for keeps that state, done or
+    pending, whatever its files (`installer.py text --keep-state`: a command
+    that rewrites one file of a component outside its setup command); one
+    rec has no state for becomes pending as above.
+
+    A component no recorded file names any more (its last file is now
+    recorded under another component) loses its state, as in
+    without_files(); so does one an older CST left with no file.
     """
     out = dict(rec.files)
     states = dict(rec.components)
     for dest, (f, written) in files.items():
         old = out.get(dest)
-        if written or old is None or not old.same_install(f):
+        kept = f.component in keep and f.component in rec.components
+        if not kept and (written or old is None or not old.same_install(f)):
             states[f.component] = ComponentState.PENDING
         out[dest] = f
-    return InstallRecord(out, states)
+    return InstallRecord(out, _named_states(out, states))
 
 
 def without_files(rec: InstallRecord, dests: list[str]) -> InstallRecord:
     """rec without these destinations; a component with no file left loses its state too."""
     out = {d: f for d, f in rec.files.items() if d not in dests}
-    left = {f.component for f in out.values()}
-    return InstallRecord(out, {c: s for c, s in rec.components.items() if c in left})
+    return InstallRecord(out, _named_states(out, rec.components))
+
+
+def _named_states(files: Mapping[str, RecordedFile], states: Mapping[str, ComponentState]) -> dict[str, ComponentState]:
+    """The states of the components some file in files names (no state without a file)."""
+    left = {f.component for f in files.values()}
+    return {c: s for c, s in states.items() if c in left}
 
 
 def with_state(rec: InstallRecord, component: str, state: ComponentState) -> InstallRecord:
-    """rec with component in state; unchanged when the record has none of its files."""
+    """rec with component in state; unchanged when the record has none of its files.
+
+    As every write of the record, it drops the state of a component no recorded file names (one an older
+    CST left so), as with_files() and without_files() do."""
     if not any(f.component == component for f in rec.files.values()):
         return rec
-    return InstallRecord(rec.files, {**rec.components, component: state})
+    return InstallRecord(rec.files, _named_states(rec.files, {**rec.components, component: state}))
 
 
 def tree_lines(files: Mapping[str, str]) -> str:

@@ -30,10 +30,11 @@ target.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import errno
+import functools
 import os
 from typing import Protocol
 import unittest
@@ -124,6 +125,32 @@ def _no_fsync(fd: int) -> None:
 def stub_fsync(test: unittest.TestCase) -> None:
     """os.fsync flushes nothing until test's cleanups run (call it in setUp)."""
     test.enterContext(mock.patch.object(os, "fsync", _no_fsync))
+
+
+class FaultyOs:
+    """The os module as an adapter module sees it, with the functions named in names through plan
+    (the point is "os.NAME"); every other attribute is os's own.
+
+    Patch it over the module's name (`mock.patch.object(module, "os", FaultyOs(plan, ("rename",)))`):
+    only that module's calls become points, not the ones the standard library makes for it."""
+
+    def __init__(self, plan: FaultPlan, names: Collection[str]) -> None:
+        for name in names:
+            if not callable(getattr(os, name, None)):
+                raise AttributeError(f"os has no function {name!r}")
+        self.plan = plan
+        self.names = frozenset(names)
+        self.path = os.path
+
+    def __getattr__(self, name: str) -> object:
+        real = getattr(os, name)
+        if name not in self.names:
+            return real
+
+        def faulty(*args: object, **kw: object) -> object:
+            return self.plan.step(f"os.{name}", functools.partial(real, *args, **kw))
+
+        return faulty
 
 
 def _joined(argv: Sequence[str]) -> str:

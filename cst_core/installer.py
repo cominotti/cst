@@ -18,9 +18,14 @@ Usage:
                                           lists it as install would (plan's unchanged: for each),
                                           else 1 (also a file only the record lacks or lists
                                           otherwise: install adopts it); prints nothing
-  installer.py text DEST MODE [--root DIR] [--component C]
+  installer.py text DEST MODE [--root DIR] [--component C [--keep-state]]
                                           generated content (stdin) to DEST, same rules; with
                                           --component, listed in the install record under C
+                                          (C pending, as for install); with --keep-state, C keeps
+                                          the state the record has for it (pending when it has
+                                          none): only for a command that rewrites one file of C
+                                          outside C's setup command, never a setup command (it
+                                          would hide its own partial install)
   installer.py remove [OPTIONS] SRC...    removes the files (a link itself) and their record lines:
                                           removed: per file that was there; a record of a newer
                                           CST refuses before anything is removed (exit 1)
@@ -164,6 +169,7 @@ def _parser() -> _Parser:
     p.add_argument("--kind", choices=[k.value for k in ArtifactKind])
     p.add_argument("--owner", choices=[o.value for o in Owner])
     p.add_argument("--component")
+    p.add_argument("--keep-state", action="store_true")
     return p
 
 
@@ -253,7 +259,7 @@ def _text(service: InstallService, a: argparse.Namespace) -> str:
     as_root = place.owner == Owner.ROOT
     data = sys.stdin.buffer.read()
     if a.command == InstallerCommand.TEXT:
-        written = service.put(place, data, as_root=as_root)
+        written = service.put(place, data, as_root=as_root, keep_state=a.keep_state)
         return (InstallReportWord.WRITTEN if written else InstallReportWord.UNCHANGED).line(place.path)
     return service.plan_put(place, data, as_root=as_root)
 
@@ -354,6 +360,8 @@ def _refuse_generated(a: argparse.Namespace) -> None:
 
 def _command(service: InstallService, a: argparse.Namespace) -> int:
     """One command of the parsed command line; its exit status."""
+    if a.keep_state and (a.command != InstallerCommand.TEXT or a.component is None):
+        raise _UsageError("--keep-state: only with text DEST MODE --component C")
     if a.command in (InstallerCommand.TEXT, InstallerCommand.TEXT_PLAN):
         print(_text(service, a))
         return 0
