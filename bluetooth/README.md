@@ -328,7 +328,10 @@ closed` on stderr (for `apply` and `revert` also the backup of `main.conf`
 and the undo command) and exit status 1. After any stop, a change already
 made leaves its restart owed (above): `plan` shows it and the next `apply`
 makes it. A stop between recording a restart and making its change leaves
-that restart owed too, and the next run makes it once. Only when the record
+that restart owed too (a change that fails stops the run as well: a
+`sudo mv` of `main.conf` that is refused, say), and the next `apply`,
+or `revert` even with nothing left to revert, makes it once, for no
+change. Only when the record
 cannot be written (the run then warns: `could not record the restarts still
 owed`) can a stop after a change lose its restart: restart the service by
 hand (`sudo systemctl restart bluetooth`, `systemctl --user restart
