@@ -358,16 +358,26 @@ def _fstab_behind(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> bool | No
 
 def _catch_up_reload(snap: CacheMountSnapshot, rt: _CacheMountRuntime) -> tuple[str | None, list[str]]:
     """For a run that writes no /etc/fstab: daemon-reload when systemd has not loaded /etc/fstab as it is
-    on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say
-    (exit 0 must mean systemd loaded what is on disk): (why the reload failed, or None; the lines to
-    add). A run with nothing pending reloads nothing."""
+    on disk (an earlier run stopped between its write and its reload), or when systemctl cannot say:
+    (why the reload failed, or None; the lines to add). A run with nothing pending reloads nothing. When
+    systemctl cannot say and the reload fails too, no systemd answers (a rescue shell, a PID 1 that does
+    not answer on D-Bus): nothing points to it being behind, so a warning line, and the run goes on (a
+    detach still unmounts)."""
     behind = _fstab_behind(snap, rt)
     if behind is False:
         return None, []
     why = _reload_systemd(rt)
+    if why is not None and behind is None:
+        warning = (
+            f"warning: {why}; systemctl could not say whether systemd had loaded {FSTAB_PATH} as it is on disk "
+            "either (run systemctl daemon-reload once it works)"
+        )
+        return None, [warning]
     if why is not None:
-        loaded = "systemd has not loaded it" if behind else "systemctl cannot say whether systemd has loaded it"
-        return f"{why}; {FSTAB_PATH} is as asked, {loaded} (run systemctl daemon-reload once it works)", []
+        return (
+            f"{why}; {FSTAB_PATH} is as asked, systemd has not loaded it (run systemctl daemon-reload once it works)",
+            [],
+        )
     said = (
         f"systemd had not loaded {FSTAB_PATH} as it is on disk (an earlier run stopped)"
         if behind

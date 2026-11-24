@@ -8670,7 +8670,9 @@ EOF
         "reloaded:", runs one real daemon-reload, and systemd then has /etc/fstab loaded as it is on disk
         (NeedDaemonReload=no, the mount unit of ~/.cache made); a third run has nothing to do and reloads
         nothing. After the killed detach, the run again reloads once, unmounts the binds and leaves no mount
-        unit of them; a third has nothing to do. Before, the run again said "nothing to do" (attach) or
+        unit of them; a third has nothing to do. With no systemd that answers (systemctl show and
+        daemon-reload both fail), a detach after a killed one warns, exits 0 and still unmounts; the next one
+        reloads. Before, the run again said "nothing to do" (attach) or
         only unmounted (detach), and systemd kept the old /etc/fstab until some later reload."""
         c = self.SYSTEMD_CONTAINER
         w = "/var/tmp/e2e-177"
@@ -8742,7 +8744,10 @@ EOF
             # fail/: a daemon-reload that fails (nothing copied, systemd keeps what it loaded).
             mkdir -p {w}/fail
             printf '#!/bin/bash\nif [[ "$1" == daemon-reload ]]; then echo "Failed to reload daemon" >&2; exit 1; fi\nexec /usr/bin/systemctl "$@"\n' >{w}/fail/systemctl
-            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl
+            # nobus/: no systemd that answers (a rescue shell): every systemctl call fails.
+            mkdir -p {w}/nobus
+            printf '#!/bin/bash\necho "Failed to connect to bus: No such file or directory" >&2\nexit 1\n' >{w}/nobus/systemctl
+            chmod +x {w}/kill/systemctl {w}/sync/systemctl {w}/fail/systemctl {w}/nobus/systemctl
             touch {w}/reloads
             export PATH="{w}/bin:$PATH" CST_BTRFS_CACHE_ROOT="{w}"
             cst=/opt/cst-rw/cst
@@ -8806,6 +8811,18 @@ EOF
             again detach
             if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the detach" >&2; exit 1; fi
             [[ ! -e "$cache_unit" ]] || {{ echo "a mount unit of ~/.cache after the detach's reload" >&2; exit 1; }}
+
+            # No systemd that answers (systemctl show and daemon-reload both fail): a detach after a killed
+            # one warns, exits 0 and still unmounts; the next detach, with systemd back, reloads.
+            PATH="{w}/sync:$PATH" $cst btrfs cache attach --user u1 >/dev/null
+            killed detach
+            rc=0; PATH="{w}/nobus:$PATH" $cst btrfs cache detach --user u1 >{w}/out 2>&1 || rc=$?
+            [[ $rc == 0 ]] || {{ echo "detach with no systemd that answers: exit $rc" >&2; cat {w}/out >&2; exit 1; }}
+            grep -qF "systemctl could not say whether systemd had loaded /etc/fstab as it is on disk either" {w}/out \
+                && grep -qF "warning: systemctl daemon-reload failed: " {w}/out || {{ cat {w}/out >&2; exit 1; }}
+            if grep -qF "/var/home/u1/" {w}/mounts; then echo "a bind of u1 after the detach" >&2; exit 1; fi
+            [[ "$(behind)" == yes ]]
+            again detach
             echo E2E-CACHE-177-OK
             """,
         ).stdout

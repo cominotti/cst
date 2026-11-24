@@ -1747,7 +1747,11 @@ backup: nothing on the cache drive is in a snapshot or a backup.
   took from the mount table (`/proc/self/mountinfo`, not `/etc/fstab`).
   Then it runs the daemon-reload and says `reloaded: systemd had not
   loaded /etc/fstab as it is on disk (an earlier run stopped)`; when
-  systemctl gives no answer it reloads too, and says so. `detach` reloads
+  systemctl gives no answer it reloads too, and says so. When it gives no
+  answer and that reload fails too, no systemd answers (a rescue shell, a
+  PID 1 that does not answer on D-Bus) and nothing points to it being
+  behind: a `warning:` line, exit 0, and `detach` still unmounts. A reload
+  that fails when systemd did say it is behind is an `ERROR:` (below). `detach` reloads
   before it unmounts; `attach` asks after the mounts it makes, and when
   that reload fails it unmounts them again and says `ERROR:` with
   `/etc/fstab is as asked` (its text is right; run `systemctl

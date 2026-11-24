@@ -1007,6 +1007,33 @@ class CacheMountAdapterAndCliTests(unittest.TestCase):
         self.assertIn("reloaded: systemctl could not say whether systemd had loaded /etc/fstab as it is on disk", out)
         self.assertEqual(self._reloads(), 1)
 
+    def test_no_answer_from_systemctl_and_a_failing_reload_warn_and_go_on(self) -> None:
+        # A rescue shell, a PID 1 that does not answer on D-Bus: systemctl show and daemon-reload both
+        # fail. Nothing points to systemd being behind: a warning, exit 0, and detach still unmounts.
+        warning = (
+            "warning: systemctl daemon-reload failed: Failed to reload daemon; systemctl could not say whether "
+            "systemd had loaded /etc/fstab as it is on disk either (run systemctl daemon-reload once it works)"
+        )
+        self.assertEqual(self._run(["attach"])[0], 0)
+        self.runner.show_fails = True
+        self.runner.reload_fails = True
+        rc, out, err = self._run(["attach"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn(warning, out)
+        self.assertEqual(sorted(self._mounted()), ["/var/home/danilo/.cache", "/var/home/danilo/Scratchpad"])
+        # A detach killed after it took the lines out: the binds are still mounted, with no line.
+        self.runner.show_fails = self.runner.reload_fails = False
+        self._killed_at_reload(["detach"])
+        self.runner.show_fails = True
+        self.runner.reload_fails = True
+        rc, out, err = self._run(["detach"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn(warning, out)
+        self.assertIn("Unmounted /var/home/danilo/.cache.", out)
+        self.assertEqual(self._mounted(), [])
+        # A positive answer that systemd is behind with a reload that fails stays an error
+        # (test_a_failed_catch_up_reload_of_detach_unmounts_nothing).
+
     def test_an_answer_that_lists_no_unit_reloads_nothing(self) -> None:
         # The systemd of test_160's test root sees neither its /etc/fstab nor its mounts.
         self._killed_at_reload(["attach"])
