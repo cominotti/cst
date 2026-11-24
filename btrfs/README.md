@@ -1597,7 +1597,13 @@ What `cst btrfs iocost apply` does (component `btrfs:iocost`):
   back when the service is still as it was (enabled and running); when the
   disable changed it, or `systemctl` cannot say, the component stays pending.
   A record it cannot write, or one of a newer CST, stops `revert` with an
-  `ERROR:` line before anything changes. After the disable, `revert` removes `btrfs:iocost`, reloads systemd and the
+  `ERROR:` line before anything changes. A full `apply` and a full
+  `revert` hold `/run/btrfs-setup/iocost-component.lock` from their first
+  step to their last, so one cannot mark `btrfs:iocost` done between the
+  other's steps; a run that finds it held waits up to 30 s, then stops with
+  `ERROR: another btrfs-iocost run holds
+  /run/btrfs-setup/iocost-component.lock` and changes nothing (the boot
+  service's and the udev rule's `--live-only` runs do not take it). After the disable, `revert` removes `btrfs:iocost`, reloads systemd and the
   udev rules (a failure is an error), and only then resets the `MAJ:MIN`
   devices tracked in `/run/btrfs-setup/iocost-managed` (`enable=0 ctrl=auto`),
   so no udev event enables a disk again after its reset. The tracking file is

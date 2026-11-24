@@ -29,6 +29,7 @@ from cst_core.domain.units import ActiveState, EnablementState
 from cst_core.ports import CommandResult, CommandRunnerPort, ExecutionContextPort, OutputMode, WriteFailed
 from btrfs.iocost.domain import (
     CGROUP_CONTROLLERS_PATH,
+    IOCOST_COMPONENT_LOCK_NAME,
     IOCOST_LOCK,
     IOCOST_LOCK_TIMEOUT_S,
     IOCOST_MANAGED_FILE,
@@ -84,6 +85,14 @@ class IocostPaths:
     def record_path(self) -> str:
         """The install record that lists btrfs:iocost's files: root's, under install_root."""
         return record_file(Owner.ROOT, None, self.install_root)
+
+    @property
+    def component_lock_path(self) -> str:
+        """The lock a full apply and a full revert hold from their first step to their last, so that one
+        cannot mark btrfs:iocost done between the other's steps (lock_path, the io.cost.qos lock, is the
+        boot service's and the udev rule's too: a full apply cannot hold it while enable --now starts the
+        service)."""
+        return os.path.join(os.path.dirname(self.lock_path), IOCOST_COMPONENT_LOCK_NAME)
 
 
 def iocost_paths_for(
@@ -278,15 +287,19 @@ def _apply_qos_writes(paths: IocostPaths, snap: IocostSnapshot, plan: IocostPlan
     return (1 if err else rc), [*out, *err]
 
 
-def _locked(paths: IocostPaths, work: Callable[[], tuple[int, list[str]]]) -> tuple[int, list[str]]:
-    """work() while this run holds the iocost lock; an error, with nothing done, when it cannot take it."""
+def _locked(
+    paths: IocostPaths, work: Callable[[], tuple[int, list[str]]], *, lock_path: str = ""
+) -> tuple[int, list[str]]:
+    """work() while this run holds the iocost lock (or lock_path); an error, with nothing done, when it
+    cannot take it."""
+    lock = lock_path or paths.lock_path
     try:
-        ensure_dir(os.path.dirname(paths.lock_path), 0o755)
-        fd = take_lock(paths.lock_path, wait=True, mode=0o644, timeout=paths.lock_timeout)
+        ensure_dir(os.path.dirname(lock), 0o755)
+        fd = take_lock(lock, wait=True, mode=0o644, timeout=paths.lock_timeout)
     except OSError as exc:
-        return 1, [f"ERROR: cannot take {paths.lock_path}: {exc.strerror or exc}"]
+        return 1, [f"ERROR: cannot take {lock}: {exc.strerror or exc}"]
     if fd is None:
-        return 1, [f"ERROR: another btrfs-iocost run holds {paths.lock_path}"]
+        return 1, [f"ERROR: another btrfs-iocost run holds {lock}"]
     try:
         return work()
     finally:
@@ -355,24 +368,35 @@ def apply_iocost(
     """Enable `blk-iocost` in `io.cost.qos` and optionally install unit + udev persistence.
 
     Not live-only: install btrfs:iocost, write, daemon-reload, enable --now, reload the udev rules, and
-    only then mark the component done; the first step that fails stops there (rc != 0, still pending)."""
+    only then mark the component done; the first step that fails stops there (rc != 0, still pending).
+    It holds the component lock from the first step to the mark, as a full revert does."""
     if not live_only and not paths.installer_script:
         # The installed zipapp has no installer.py, unit verifier or payload to install from.
         return 1, ["ERROR: apply installs btrfs:iocost from a CST checkout: run it from one (cst btrfs iocost apply)"]
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    rc_w, out = _locked(
-        paths, lambda: _install_and_write(paths, cmd_runner, live_only=live_only, target_device=target_device)
-    )
-    if rc_w != 0 or live_only:
-        return rc_w, out
-    # The lock is free again: enable --now starts the service, which takes it.
-    rc_s, lines_s = _enable_iocost_service(cmd_runner, paths)
-    out.extend(lines_s)
-    if rc_s != 0:
-        return rc_s, out
-    mark = ["mark", "--component", Component.BTRFS_IOCOST.value, "done"]
-    rc_m, lines_m = _installer_step(cmd_runner, paths.installer_script, mark)
-    return rc_m, [*out, *lines_m]
+
+    def install_and_write() -> tuple[int, list[str]]:
+        return _locked(
+            paths, lambda: _install_and_write(paths, cmd_runner, live_only=live_only, target_device=target_device)
+        )
+
+    if live_only:
+        return install_and_write()
+
+    def full() -> tuple[int, list[str]]:
+        rc_w, out = install_and_write()
+        if rc_w != 0:
+            return rc_w, out
+        # The iocost lock is free again: enable --now starts the service, which takes it.
+        rc_s, lines_s = _enable_iocost_service(cmd_runner, paths)
+        out.extend(lines_s)
+        if rc_s != 0:
+            return rc_s, out
+        mark = ["mark", "--component", Component.BTRFS_IOCOST.value, "done"]
+        rc_m, lines_m = _installer_step(cmd_runner, paths.installer_script, mark)
+        return rc_m, [*out, *lines_m]
+
+    return _locked(paths, full, lock_path=paths.component_lock_path)
 
 
 def _remove_iocost_files(svc: InstallService, paths: IocostPaths) -> tuple[int, list[str]]:
@@ -454,21 +478,25 @@ def revert_iocost(
     """Disable CST-managed `blk-iocost` entries in `io.cost.qos` and optionally uninstall unit/rule.
 
     Not live-only, the service and the rule go first (so no udev event enables a disk again after its
-    reset), then the managed devices are reset."""
+    reset), then the managed devices are reset, all under the component lock (as a full apply)."""
     cmd_runner = SubprocessCommandRunner() if runner is None else runner
-    out: list[str] = []
-    if not live_only:
-        svc = program_installer(paths.entry_file, paths.fallback_root) if installer is None else installer
-        rc_c, out = _remove_iocost_component(cmd_runner, svc, paths)
-        if rc_c != 0:
-            return rc_c, out
 
     def reset() -> tuple[int, list[str]]:
         snap = collect_iocost_snapshot(paths, runner=cmd_runner, udev=False)
         return _apply_qos_writes(paths, snap, plan_iocost_revert(snap))
 
-    rc_w, lines_w = _locked(paths, reset)
-    return rc_w, [*out, *lines_w]
+    if live_only:
+        return _locked(paths, reset)
+    svc = program_installer(paths.entry_file, paths.fallback_root) if installer is None else installer
+
+    def full() -> tuple[int, list[str]]:
+        rc_c, out = _remove_iocost_component(cmd_runner, svc, paths)
+        if rc_c != 0:
+            return rc_c, out
+        rc_w, lines_w = _locked(paths, reset)
+        return rc_w, [*out, *lines_w]
+
+    return _locked(paths, full, lock_path=paths.component_lock_path)
 
 
 def component_changes(paths: IocostPaths, runner: CommandRunnerPort) -> tuple[str, ...] | None:

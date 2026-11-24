@@ -921,6 +921,44 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
             self.assertEqual(fh.read(), "259:1 enable=1 ctrl=auto\n")
         self.assertEqual(os.stat(self.paths.lock_path).st_mode & 0o777, 0o644)
 
+    def test_a_full_apply_or_revert_waits_for_the_other_and_gives_up_with_nothing_changed(self) -> None:
+        # A full apply and a full revert hold the component lock from their first step to their last: one
+        # cannot mark btrfs:iocost done between the other's mark pending, disable and removal.
+        paths = dataclasses.replace(self.paths, lock_timeout=0.1)
+        self.assertEqual(
+            paths.component_lock_path, os.path.join(os.path.dirname(self.paths.lock_path), "iocost-component.lock")
+        )
+        self._seed_component()
+        self.runner.load_state = "loaded"
+        self._write(self.paths.managed_file, "259:1\n")
+        record_before = self._recorded_components()
+        os.makedirs(os.path.dirname(paths.component_lock_path), exist_ok=True)
+        fd = take_lock(paths.component_lock_path, wait=False, mode=0o644)
+        assert fd is not None
+        try:
+            for name, run in (
+                ("apply", lambda: apply_iocost(paths, runner=self.runner)),
+                ("revert", lambda: revert_iocost(paths, runner=self.runner)),
+            ):
+                with self.subTest(run=name):
+                    self.runner.calls.clear()
+                    rc, out = run()
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(out, [f"ERROR: another btrfs-iocost run holds {paths.component_lock_path}"])
+                    self.assertEqual(self.runner.calls, [])
+                    self.assertEqual(self._recorded_components(), record_before)
+                    self.assertTrue(all(os.path.lexists(p) for p in self._component_files()))
+                    with open(self.paths.managed_file, encoding="utf-8") as fh:
+                        self.assertEqual(fh.read(), "259:1\n")
+            # The boot service's and the udev rule's live-only runs do not take it.
+            rc, out = apply_iocost(paths, live_only=True, runner=self.runner)
+            self.assertEqual(rc, 0, out)
+        finally:
+            os.close(fd)
+        rc, out = revert_iocost(paths, runner=self.runner)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._recorded_components(), {})
+
     def test_the_lock_is_free_when_enable_starts_the_service(self) -> None:
         free_at_enable: list[bool] = []
 
@@ -974,9 +1012,10 @@ class BtrfsIocostLifecycleTest(unittest.TestCase):
         seen: list[str] = []
 
         def ensure_dir_refusing(path: str, mode: int) -> None:
-            # The lock lives in the same folder: its ensure_dir comes first and works (a folder there).
+            # The two locks live in the same folder: their ensure_dir calls come first and work (a folder
+            # there).
             seen.append(path)
-            if seen.count(managed_dir) > 1:
+            if seen.count(managed_dir) > 2:
                 raise OSError(errno.EROFS, os.strerror(errno.EROFS))
             real_ensure_dir(path, mode)
 

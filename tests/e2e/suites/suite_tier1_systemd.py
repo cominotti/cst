@@ -74,6 +74,14 @@ p, comp = sys.argv[1:3]
 d = json.load(open(p)) if os.path.exists(p) else {"files": {}, "components": {}}
 files = sorted(k for k, v in d["files"].items() if v["component"] == comp)
 print(" ".join(files) or "-", d["components"].get(comp, "-"))"""
+# HOLD_FLOCK LOCK READY: hold an exclusive flock on LOCK (as cst_core's take_lock takes it), touch READY,
+# and keep it until killed.
+HOLD_FLOCK = r"""import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)"""
+IOCOST_LOCK_WAIT_S = 30  # btrfs/iocost/domain.py IOCOST_LOCK_TIMEOUT_S: how long a run waits for a lock
 RECORD_STRIP = r"""import json, sys
 p, comp = sys.argv[1:3]
 d = json.load(open(p))
@@ -4613,11 +4621,15 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         that it is installed only in part. With the folder writable again, the next revert converges (no
         file, no state, no warning), and so does the next apply (enabled, done). An older CST's revert left
         such a record done: apply and revert from that state converge too. Before, the failed revert left
-        btrfs:iocost done with the service disabled. The record is copied aside first and put back after."""
+        btrfs:iocost done with the service disabled. While another process holds the component lock, a full
+        revert waits, gives up (exit 1, "another btrfs-iocost run holds ...") and changes nothing: a full
+        apply and a full revert cannot interleave (before, an apply could mark done between a revert's
+        disable and its failed removal). The record is copied aside first and put back after."""
         c = self.SYSTEMD_CONTAINER
         rec = "/var/lib/cst/installed.json"
         rules = "/etc/udev/rules.d"
         unit = "cst-btrfs-iocost.service"
+        component_lock = "/run/btrfs-setup/iocost-component.lock"
         record = f"/usr/bin/python3 -I -c {shlex.quote(RECORD_COMPONENT)} {rec} btrfs:iocost"
         if exec_bash(c, f"[[ ! -e /etc/systemd/system/{unit} ]] || echo busy").stdout.strip():
             self.skipTest("btrfs:iocost files already present on container")
@@ -4627,6 +4639,8 @@ assert c["last_sample"] is None and d["samples"] == 0, c
             c,
             # exec_bash runs bash -e: every step must run, also after one that fails.
             f"set +e; if [[ -e /var/tmp/e2e-175-bound ]]; then umount {rules}; rm -f /var/tmp/e2e-175-bound; fi; "
+            "if [[ -s /var/tmp/e2e-175-holder ]]; then kill $(cat /var/tmp/e2e-175-holder); fi; "
+            "rm -f /var/tmp/e2e-175-holder /var/tmp/e2e-175-held; "
             "/opt/cst-rw/cst btrfs iocost revert >/dev/null 2>&1; "
             "rm -f /var/tmp/e2e-175-out /var/tmp/e2e-175-doc; "
             f"if [[ -e /var/tmp/e2e-175-rec ]]; then mv /var/tmp/e2e-175-rec {rec}; else rm -f {rec}; fi; "
@@ -4689,6 +4703,23 @@ assert c["last_sample"] is None and d["samples"] == 0, c
                 /opt/cst-rw/cst btrfs iocost "$next" >/dev/null
                 if [[ $next == apply ]]; then applied; [[ -e {rules}/91-cst-iocost.rules ]]; else reverted; fi
             done
+            # A full apply and a full revert hold the component lock from their first step to their last:
+            # while another process holds it, revert waits ({IOCOST_LOCK_WAIT_S} s), gives up and changes nothing.
+            /opt/cst-rw/cst btrfs iocost apply >/dev/null
+            applied
+            /usr/bin/python3 -I -c {shlex.quote(HOLD_FLOCK)} {component_lock} /var/tmp/e2e-175-held &
+            echo $! >/var/tmp/e2e-175-holder
+            for _ in $(seq 100); do [[ -e /var/tmp/e2e-175-held ]] && break; sleep 0.1; done
+            [[ -e /var/tmp/e2e-175-held ]] || {{ echo "the lock holder did not start" >&2; exit 1; }}
+            rc=0; /opt/cst-rw/cst btrfs iocost revert >/var/tmp/e2e-175-out 2>&1 || rc=$?
+            kill "$(cat /var/tmp/e2e-175-holder)"; rm -f /var/tmp/e2e-175-holder
+            [[ $rc == 1 ]] || {{ echo "revert while the lock is held: exit $rc" >&2; cat /var/tmp/e2e-175-out >&2; exit 1; }}
+            grep -qxF "ERROR: another btrfs-iocost run holds {component_lock}" /var/tmp/e2e-175-out \
+                || {{ cat /var/tmp/e2e-175-out >&2; exit 1; }}
+            applied
+            [[ -e {rules}/91-cst-iocost.rules ]]
+            /opt/cst-rw/cst btrfs iocost revert >/dev/null
+            reverted
             echo E2E-OK
             """,
         ).stdout
