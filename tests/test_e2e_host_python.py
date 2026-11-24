@@ -369,6 +369,46 @@ class PlantedTest(unittest.TestCase):
         )
         self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name", "$tool")
 
+    def test_python3_in_a_message_is_no_program_named_at_run_time(self) -> None:
+        # Any python3 word followed by a word with a "$" was a program the gate cannot name: in a message, a
+        # step's name: and a ${{ github.workspace }} path, which names the checkout, failed the unit suite.
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for extra in (
+            '; echo "install python3 $VERSION"',
+            "; echo install python3 $VERSION",
+            "; printf '%s\\n' python3 \"$v\"",
+            "\n- name: Set up python3 ${{ matrix.python }}",
+        ):
+            with self.subTest(extra=extra):
+                self.setUp()
+                self.replace(action, old, old + extra)
+                self.assertEqual(gate.problems(self.repo), [])
+
+    def test_a_program_under_the_checkout_s_folder_is_named(self) -> None:
+        self.append("tests/e2e/new.py", "")
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for path in ("${{ github.workspace }}/tests/e2e/new.py", '"$GITHUB_WORKSPACE/tests/e2e/new.py"'):
+            with self.subTest(path=path):
+                self.setUp()
+                self.replace(action, old, f"{old}; python3 -I {path}")
+                self.assert_one_problem("prep-e2e-runner/action.yml", "runs tests/e2e/new.py", "HOST_ENTRIES")
+
+    def test_a_program_named_at_run_time_by_a_command_is_still_reported(self) -> None:
+        action = ".github/actions/prep-e2e-runner/action.yml"
+        old = 'want="$(python3 -I -B tests/e2e/image_digest.py "${name}")"'
+        for extra in (
+            '; if true; then X=1 python3 "$tool"; fi',
+            "; echo x | python3 $tool",
+            '; echo "$(python3 $tool)"',
+            "; python3 ${{ inputs.tool }}",
+        ):
+            with self.subTest(extra=extra):
+                self.setUp()
+                self.replace(action, old, old + extra)
+                self.assert_one_problem("prep-e2e-runner/action.yml", "a program the gate cannot name")
+
     def test_a_new_python_file_an_action_runs_is_reported(self) -> None:
         self.replace(
             ".github/actions/prep-e2e-runner/action.yml",

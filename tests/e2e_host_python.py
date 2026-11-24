@@ -26,7 +26,7 @@ problems() checks:
   job runs, names a file of HOST_ENTRIES: the program it runs, read as python3
   reads its own options (python_program: `python3 -I -B PROGRAM`, with or
   without .py, or `python3 -m NAME` of a repository module; a program named
-  by a variable is a problem);
+  by a variable is a problem where python3 runs as a command, _is_command);
 - the runner of each job that runs one of them is in HOST_PYTHON_BY_RUNNER
   (the oldest python3 found is the target);
 - each file of the set parses with the target's grammar
@@ -118,6 +118,25 @@ _SHELL_TOKEN: Final = re.compile(
 _QUOTES: Final = "\"'"
 _UNQUOTE: Final = str.maketrans("", "", _QUOTES)
 _STDIN: Final = "-"
+# The checkout's folder in a step, read as the top of the repository: ${{ github.workspace }}/ (GitHub's expression,
+# put in before the shell runs) or $GITHUB_WORKSPACE/.
+_WORKSPACE: Final = re.compile(r"^(?:\$\{\{\s*github\.workspace\s*\}\}|\$\{?GITHUB_WORKSPACE\}?)/")
+# The commands whose words are a message: a python3 among them is text, not a program run.
+_TEXT_COMMANDS: Final = frozenset({"echo", "printf"})
+# The words before a command on its line that are not the command: shell keywords, exec and time.
+_BEFORE_COMMAND: Final = frozenset({"!", "{", "if", "then", "elif", "else", "while", "until", "do", "exec", "time"})
+_ASSIGNMENT: Final = re.compile(r"^\w+=")
+# A YAML key at the start of a line (- name: ..., run: ...): only run:'s value is shell.
+_YAML_KEY: Final = re.compile(r"^\s*(?:-\s+)?([\w-]+):(?:\s|$)")
+_RUN_KEY: Final = "run"
+# What opens a context of a shell line (_is_command): a quote, a command substitution, a subshell.
+_SINGLE_QUOTE: Final = "'"
+_DOUBLE_QUOTE: Final = '"'
+_BACKQUOTE: Final = "`"
+_SUBSTITUTION: Final = "$("
+_SUBSHELL: Final = "("
+_SUBSHELL_END: Final = ")"
+_COMMAND_END: Final = ";|&"
 _END_OF_OPTIONS: Final = "--"
 # The words of an invowk task a step runs, up to the first flag, quote or variable: `invowk cmd` where a
 # command starts (a line, a run: key, after ; & | or an opening parenthesis), not in a message's text.
@@ -501,9 +520,13 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
 
     A script inside the repository counts when it ends in .py or is a file there without .py
     (tests/quint/cst-quint); python3 -m NAME's module counts when it is one (NAME.py, or its __main__.py for a package; pip or
-    venv are none). A script word with a "$" or a backquote is a path given at run time: it is
-    returned in the second list, so the caller reports it. Any other word (a system program, an
-    absolute path, python3 in a message or a package list) is left out."""
+    venv are none). A script that starts with the checkout's folder (${{ github.workspace }}/,
+    $GITHUB_WORKSPACE/) is that path from the top of the repository. Another script word with a "$"
+    or a backquote is a path given at run time: it is returned in the second list, so the caller
+    reports it, when python3 runs there as a command (_is_command: not in quoted text, an echo or a
+    YAML name:; a python3 in bash -c "..." is quoted text too, so its $ word is not reported, while
+    a file it names still is). Any other word (a system program, an absolute path, python3 in a
+    message or a package list) is left out."""
     files: list[str] = []
     unnamed: list[str] = []
     for found in _PYTHON_WORD.finditer(line):
@@ -517,16 +540,64 @@ def _python_runs(repo: str, line: str) -> tuple[list[str], list[str]]:
                     if os.path.isfile(os.path.join(repo, candidate)):
                         files.append(candidate)
                         break
-            case (ProgramKind.SCRIPT, word) if "$" in word or "`" in word:
-                unnamed.append(word)
             case (ProgramKind.SCRIPT, word):
-                rel = posixpath.normpath(word)
+                path = _WORKSPACE.sub("", word, count=1)
+                rel = posixpath.normpath(path)
                 inside = not rel.startswith(("/", "../")) and rel != ".."
-                if inside and (rel.endswith(".py") or os.path.isfile(os.path.join(repo, rel))):
+                if "$" in path or "`" in path:
+                    if _is_command(line[: found.start()]):
+                        unnamed.append(word)
+                elif inside and (rel.endswith(".py") or os.path.isfile(os.path.join(repo, rel))):
                     files.append(rel)
             case _:
                 pass
     return files, unnamed
+
+
+def _is_command(before: str) -> bool:
+    """Whether a python3 word after this text of its line is a command the shell runs: not text inside
+    quotes (a $(...) or a backquote there is a command again), not a word of an echo or printf, and
+    not in the value of a YAML key other than run:."""
+    key = _YAML_KEY.match(before)
+    if key is not None and group(key, 1) != _RUN_KEY:
+        return False
+    opener, start = _innermost_context(before, 0 if key is None else key.end())
+    if opener in {_SINGLE_QUOTE, _DOUBLE_QUOTE}:
+        return False
+    words = [w for w in before[start:].split() if w not in _BEFORE_COMMAND and _ASSIGNMENT.match(w) is None]
+    return not (words and words[0] in _TEXT_COMMANDS)
+
+
+def _innermost_context(text: str, start: int) -> tuple[str, int]:
+    """The context of the shell line text that is still open at its end, read from start: what opened it
+    ("" the line, a quote, "$(", "(" or a backquote) and where its current command starts."""
+    contexts: list[tuple[str, int]] = [("", start)]  # innermost last
+    i = start
+    while i < len(text):
+        c, opener = text[i], contexts[-1][0]
+        if opener == _SINGLE_QUOTE:
+            if c == _SINGLE_QUOTE:
+                contexts.pop()
+        elif c == "\\":
+            i += 1  # the next character is escaped
+        elif text.startswith(_SUBSTITUTION, i):
+            contexts.append((_SUBSTITUTION, i + len(_SUBSTITUTION)))
+            i += 1
+        elif c in {_BACKQUOTE, _DOUBLE_QUOTE}:
+            if opener == c:
+                contexts.pop()
+            else:
+                contexts.append((c, i + 1))
+        elif opener == _DOUBLE_QUOTE:
+            pass
+        elif c in {_SINGLE_QUOTE, _SUBSHELL}:
+            contexts.append((c, i + 1))
+        elif c == _SUBSHELL_END and opener in {_SUBSTITUTION, _SUBSHELL}:
+            contexts.pop()
+        elif c in _COMMAND_END:
+            contexts[-1] = (opener, i + 1)
+        i += 1
+    return contexts[-1]
 
 
 def _runs(repo: str, lines: Iterable[tuple[int, str]], cue: str, where: str) -> tuple[list[str], list[str]]:
