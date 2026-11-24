@@ -62,7 +62,16 @@ from btrfs.docker_volumes_nocow import adapters as nocow_adapters
 from btrfs.docker_volumes_nocow import cli as nocow_cli
 from btrfs.docker_volumes_nocow import wiring as nocow_wiring
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import NocowCommand, NocowPaths, VolumeLeftovers, postponed_line, recovery
+from btrfs.docker_volumes_nocow.domain import (
+    NocowCommand,
+    NocowPaths,
+    VolumeLeftovers,
+    old_copy_name,
+    old_copy_stamp,
+    oldest_first,
+    postponed_line,
+    recovery,
+)
 from btrfs.tests.fakes import NOCOW, OTHER, Crash, FakeSystem, carries_flags, entries, tree
 from cst_core.adapters import nocow as core_nocow
 from cst_core.adapters.runner import SubprocessCommandRunner
@@ -1896,6 +1905,36 @@ class RecoverTest(Base):
         self.assertEqual(self.call(self.cli.recover), (None, ""))
         self.assertEqual(sorted(os.listdir(self.vol)), ["_data.nocow-new"])
 
+    def test_recover_puts_back_the_newest_old_copy_by_its_number(self) -> None:
+        # The clock went past 10 digits' worth of seconds between two migrations (or had fewer
+        # digits once): 1000000000 is newer than 999999999, although its text sorts first.
+        os.rename(self.top, os.path.join(self.vol, "_data.cow-old-1000000000"))
+        os.makedirs(os.path.join(self.vol, "_data.cow-old-999999999", "stale"))
+        _rc, out = self.call(self.cli.recover)
+        self.assertEqual(out, f"<4>{TAG}: cow: restored the original after an interrupted migration\n")
+        self.assertEqual(ino(self.top), self.ino)
+        self.assertEqual(tree(self.top), self.before)
+        self.assert_no_leftovers("cow")
+
+    def test_a_clock_behind_an_old_copy_left_over_still_restores_the_original(self) -> None:
+        # An earlier migration's old copy could not be deleted (a file in it is immutable, say) and
+        # is named after a time ahead of the clock now (the clock went back): this migration names
+        # its own old copy above it, so after a kill between the renames the original comes back.
+        stale = os.path.join(self.vol, "_data.cow-old-9999999999")
+        os.makedirs(os.path.join(stale, "stale"))
+        real_rmtree = shutil.rmtree
+
+        def rmtree(path: str, *, ignore_errors: bool = False) -> None:
+            if path != stale:
+                real_rmtree(path, ignore_errors=ignore_errors)
+
+        with mock.patch.object(shutil, "rmtree", rmtree), self.second_rename_raises(Crash("power loss")):
+            self.crash()
+        names = sorted(os.listdir(self.vol))
+        self.assertEqual(names, ["_data.cow-old-10000000000", "_data.cow-old-9999999999", "_data.nocow-new"])
+        self.assertEqual(ino(os.path.join(self.vol, "_data.cow-old-10000000000")), self.ino)
+        self.next_boot_finishes(restored=True)  # the original's content, migrated; the stale copy gone
+
     def test_recover_leaves_a_data_that_is_not_a_folder(self) -> None:
         # Something named _data that is not a folder (here a dangling link):
         # recover() neither puts the old copy over it nor deletes the copies.
@@ -1997,6 +2036,35 @@ class RecoverEachVolumeTest(Base):
             return mock.patch.object(os, "listdir", listdir)
 
         self.boot_with(failing)
+
+
+class OldCopyNameTest(unittest.TestCase):
+    """The old copies' order and the name of a new one (no I/O)."""
+
+    def test_old_copies_are_ordered_by_their_number(self) -> None:
+        names = ["_data.cow-old-1000000000", "_data.cow-old-999999999", "_data.cow-old-x", "_data.cow-old-1700000000"]
+        self.assertEqual(
+            oldest_first(names),
+            ("_data.cow-old-x", "_data.cow-old-999999999", "_data.cow-old-1000000000", "_data.cow-old-1700000000"),
+        )
+        self.assertEqual(old_copy_stamp("_data.cow-old-1700000000"), 1700000000)
+        for name in (
+            "_data.cow-old-",
+            "_data.cow-old-17x",
+            "_data.cow-old-\N{ARABIC-INDIC DIGIT THREE}",
+            "_data.cow-old--1",
+            "_data",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(old_copy_stamp(name))
+
+    def test_a_new_old_copy_is_named_above_every_one_still_there(self) -> None:
+        self.assertEqual(old_copy_name((), 1700000000), "_data.cow-old-1700000000")
+        self.assertEqual(old_copy_name(("_data.cow-old-1600000000",), 1700000000), "_data.cow-old-1700000000")
+        self.assertEqual(old_copy_name(("_data.cow-old-1700000000",), 1700000000), "_data.cow-old-1700000001")
+        self.assertEqual(
+            old_copy_name(("_data.cow-old-1800000000", "_data.cow-old-junk"), 1700000000), "_data.cow-old-1800000001"
+        )
 
 
 class RecoveryTest(unittest.TestCase):

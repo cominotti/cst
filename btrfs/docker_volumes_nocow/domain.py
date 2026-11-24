@@ -4,7 +4,7 @@ matches its original, how a dockerd names its data root, and the record of postp
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 import time
@@ -43,12 +43,40 @@ OLD_MARK = ".cow-old-"
 @dataclass(frozen=True, slots=True)
 class VolumeLeftovers:
     """What an interrupted migration may have left in one volume's folder: whether _data is there
-    (a dangling link counts), its old copies (the _data.cow-old-* names, oldest first) and whether
-    its twin (_data.nocow-new) is."""
+    (a dangling link counts), its old copies (the _data.cow-old-* names, oldest first: oldest_first)
+    and whether its twin (_data.nocow-new) is."""
 
     has_data: bool
     olds: tuple[str, ...]
     twin: bool
+
+
+def old_copy_stamp(name: str) -> int | None:
+    """The number in an old copy's name (_data.cow-old-N, N in ASCII digits); None for any other name."""
+    stamp = name.removeprefix(DATA_DIR + OLD_MARK)
+    if stamp == name or not (stamp.isascii() and stamp.isdigit()):
+        return None
+    return int(stamp)
+
+
+def _age(name: str) -> tuple[bool, int, str]:
+    stamp = old_copy_stamp(name)
+    return stamp is not None, stamp or 0, name
+
+
+def oldest_first(olds: Iterable[str]) -> tuple[str, ...]:
+    """Old copies, oldest first: by the number in their names (old_copy_name), not by their text
+    (_data.cow-old-999999999 is older than _data.cow-old-1000000000); a name without a number
+    (not one this helper made) comes before them."""
+    return tuple(sorted(olds, key=_age))
+
+
+def old_copy_name(olds: Iterable[str], now: int) -> str:
+    """The name a migration moves _data aside to: _data.cow-old-NOW, or a number above the newest old
+    copy still there (one a removal could not delete), so the original is always the newest, even
+    after the clock went back (a reset real-time clock before NTP)."""
+    stamps = [s + 1 for s in map(old_copy_stamp, olds) if s is not None]
+    return f"{DATA_DIR}{OLD_MARK}{max([now, *stamps])}"
 
 
 @dataclass(frozen=True, slots=True)

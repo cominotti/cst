@@ -894,7 +894,11 @@ docker volume rm <name>         # or one volume by name
   count cannot be reset, the request is not made (no flag, no `+C`, a
   journal line), and the next boot tries again.
 - An interrupted copy (power loss) is cleaned up at the next boot; the original
-  is kept. A volume whose recovery fails (an I/O error, say) is a journal line
+  is kept. A migration moves the original aside as `_data.cow-old-TIME`, or
+  with a number above every old copy still there (one that could not be
+  deleted), so a clock that went back cannot make an older leftover look
+  newer; the next boot puts back the old copy with the highest number (by its
+  value, not its text). A volume whose recovery fails (an I/O error, say) is a journal line
   and does not stop the recovery of the others; that boot then migrates
   nothing, and the next boot tries again.
 - This service runs at every boot. So if Docker is installed after `install`,

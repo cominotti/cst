@@ -11,7 +11,6 @@ from btrfs.docker_volumes_nocow.domain import (
     GIVE_UP_AFTER,
     MARGIN,
     NEW_SUFFIX,
-    OLD_MARK,
     NocowCommand,
     NocowPaths,
     PendingVolume,
@@ -20,6 +19,7 @@ from btrfs.docker_volumes_nocow.domain import (
     copy_matches,
     label_mismatch,
     next_postponed,
+    old_copy_name,
     postponed_line,
     recovery,
 )
@@ -108,7 +108,9 @@ class DockerVolumesNocow:
     # ---- one volume ------------------------------------------------------
     def migrate_one(self, data: str) -> None:
         """Copy _data into a NOCOW twin, check it, swap the names, drop the old copy."""
-        new, old = data + NEW_SUFFIX, data + f"{OLD_MARK}{int(self.clock.now())}"
+        folder = os.path.dirname(data)
+        new = data + NEW_SUFFIX
+        old = os.path.join(folder, old_copy_name(self.tree.leftovers(folder).olds, int(self.clock.now())))
         self.tree.make_twin(data, new)
         self.tree.reference_label(data, new)
         self.tree.set_nocow(new, on=True)

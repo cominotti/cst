@@ -5023,6 +5023,52 @@ assert c["last_sample"] is None and d["samples"] == 0, c
         ).stdout
         self.assertIn("E2E-OK", out)
 
+    @e2e_tags(E2ETag.BTRFS)
+    def test_163_docker_volumes_nocow_puts_back_the_newest_old_copy_by_its_number(self) -> None:
+        """docker-volumes-nocow (the checkout's program, as root in the container) at the boot after a
+        migration killed between its two renames, in a volume holding two old copies and no _data:
+        migrate puts back the newest by the number in its name (_data.cow-old-1000000000), not the one
+        whose text sorts last (_data.cow-old-999999999), and removes the other. The volumes are in a
+        data root of the test's own, which /etc/docker/daemon.json names; the recovery comes before any
+        NOCOW flag is read, so the container's file system is enough."""
+        c = self.SYSTEMD_CONTAINER
+        root = "/var/tmp/e2e-163-docker"
+        self.addCleanup(
+            exec_bash,
+            c,
+            f"rm -rf {root} /var/lib/docker-volumes-nocow /etc/btrfs-setup/docker-nocow-pending /etc/docker/daemon.json; "
+            "[ -e /var/tmp/e2e-163-made-docker ] && rm -rf /etc/docker || true; "
+            "[ -e /var/tmp/e2e-163-made-setup ] && rmdir /etc/btrfs-setup 2>/dev/null || true; "
+            "rm -f /var/tmp/e2e-163-made-docker /var/tmp/e2e-163-made-setup",
+            check=False,
+        )
+        out = exec_bash(
+            c,
+            f"""
+            set -E
+            trap 'echo "test_163 FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
+            export LC_ALL=C
+            prog="/usr/bin/python3 -I /opt/cst-rw/btrfs/docker-volumes-nocow"
+            vol={root}/volumes/v
+            [ -e /etc/docker ] || {{ mkdir -p /etc/docker && touch /var/tmp/e2e-163-made-docker; }}
+            [ -d /etc/btrfs-setup ] || touch /var/tmp/e2e-163-made-setup
+            [ ! -e /etc/docker/daemon.json ] || {{ echo "a daemon.json is there already" >&2; exit 1; }}
+            [ ! -e /etc/btrfs-setup/docker-nocow-pending ] || {{ echo "a migration is requested already" >&2; exit 1; }}
+            printf '{{"data-root": "{root}"}}' >/etc/docker/daemon.json
+            mkdir -p "$vol/_data.cow-old-999999999" "$vol/_data.cow-old-1000000000"
+            printf 'stale\n' >"$vol/_data.cow-old-999999999/file"
+            printf 'original\n' >"$vol/_data.cow-old-1000000000/file"
+            rc=0; out="$($prog migrate 2>&1)" || rc=$?
+            echo "test_163 migrate: rc=$rc $out" >&2
+            [[ "$rc" == 0 ]]
+            grep -qF "v: restored the original after an interrupted migration" <<<"$out"
+            [[ "$(cat "$vol/_data/file")" == original ]]
+            [[ ! -e "$vol/_data.cow-old-999999999" ]]
+            echo E2E-OK
+            """,
+        ).stdout
+        self.assertIn("E2E-OK", out)
+
     @e2e_tags(E2ETag.BTRFS, E2ETag.TOOLCHAINS)
     def test_81_snapshots_setup_turns_on_the_toolchains_timer_as_the_user(self) -> None:
         """setup's user steps (snap_user_configs of btrfs/setup-snapshots.bash), run as root

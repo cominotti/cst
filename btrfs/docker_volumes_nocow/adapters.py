@@ -24,6 +24,7 @@ from btrfs.docker_volumes_nocow.domain import (
     VolumeLeftovers,
     daemon_args,
     is_stored_postponed,
+    oldest_first,
     service_wait_reason,
 )
 from cst_core.adapters.files import CounterFile, write_atomic
@@ -203,7 +204,7 @@ class LocalVolumeTree:
         names = os.listdir(folder)
         return VolumeLeftovers(
             has_data=os.path.lexists(os.path.join(folder, DATA_DIR)),
-            olds=tuple(sorted(x for x in names if x.startswith(DATA_DIR + OLD_MARK))),
+            olds=oldest_first(x for x in names if x.startswith(DATA_DIR + OLD_MARK)),
             twin=DATA_DIR + NEW_SUFFIX in names,
         )
 

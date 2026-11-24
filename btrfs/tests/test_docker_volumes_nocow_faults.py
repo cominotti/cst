@@ -42,7 +42,14 @@ from typing import override
 
 from btrfs.docker_volumes_nocow.adapters import DockerDaemons, LocalVolumeTree, NocowOutput, NocowStateFiles
 from btrfs.docker_volumes_nocow.application import DockerVolumesNocow
-from btrfs.docker_volumes_nocow.domain import OLD_MARK, NocowCommand, NocowPaths, PostponedRecord, TreeScan
+from btrfs.docker_volumes_nocow.domain import (
+    OLD_MARK,
+    NocowCommand,
+    NocowPaths,
+    PostponedRecord,
+    TreeScan,
+    oldest_first,
+)
 from btrfs.tests.fakes import entries, tree
 from btrfs.tests.test_docker_volumes_nocow import Base, fresh
 from cst_core.adapters import SystemClockAdapter
@@ -209,7 +216,7 @@ class NocowFaultBase(Base):
         for name in VOLUMES:
             vol = os.path.join(self.vols, name)
             data = os.path.join(vol, "_data")
-            olds = sorted(x for x in os.listdir(vol) if x.startswith("_data" + OLD_MARK))
+            olds = oldest_first(x for x in os.listdir(vol) if x.startswith("_data" + OLD_MARK))
             if os.path.lexists(data):
                 self.assertEqual(tree(data), self.before[name], f"{when}: {name}/_data is not the original")
             else:
